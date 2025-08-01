@@ -1,0 +1,342 @@
+# Полная конфигурация AI системы
+# Провайдеры -> Модели -> Инструменты -> Агенты
+
+# Глобальные настройки
+settings:
+  default_agent: "coordinator"
+  max_history: 15
+  debug: true
+  mcp_enabled: true
+  # Настройки путей
+  working_directory: "C:/Users/daniil/Documents/openai-agents-python/"  # Рабочая директория по умолчанию
+  config_directory: "."   # Директория конфигурации
+  allow_path_override: true  # Разрешить переопределение пути при запуске
+
+# Провайдеры API
+providers:
+  openrouter:
+    name: "OpenRouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout: 60
+    max_retries: 3
+  
+  openai:
+    name: "OpenAI"
+    base_url: "https://api.openai.com/v1"
+    api_key_env: "OPENAI_API_KEY"
+    timeout: 30
+    max_retries: 2
+  
+  anthropic:
+    name: "Anthropic"
+    base_url: "https://api.anthropic.com"
+    api_key_env: "ANTHROPIC_API_KEY"
+    timeout: 45
+    max_retries: 2
+
+# Модели
+models:
+  qwen-thinking:
+    name: "qwen/qwen3-235b-a22b-thinking-2507"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Qwen thinking модель для размышлений"
+  
+  flash-lite:
+    name: "google/gemini-2.5-flash-lite"
+    provider: "openrouter"
+    temperature: 0.3
+    max_tokens: 4000
+    description: "Claude Sonnet для программирования и анализа"
+  
+  claude-haiku:
+    name: "anthropic/claude-3-haiku"
+    provider: "openrouter"
+    temperature: 0.2
+    max_tokens: 2000
+    description: "Claude Haiku для быстрых ответов"
+  
+  gpt-4o:
+    name: "gpt-4o"
+    provider: "openrouter"
+    temperature: 0.5
+    max_tokens: 4000
+    description: "GPT-4 Omni универсальная модель"
+  
+  horizon-alpha:
+    name: "openrouter/horizon-alpha"
+    provider: "openrouter"
+    temperature: 0.5
+    max_tokens: 4000
+    description: "Horizon Alpha для быстрых ответов"
+
+# Инструменты
+tools:
+  # Файловые операции
+  file_read:
+    type: "function"
+    name: "read_file"
+    description: "Читает содержимое файла"
+    prompt_addition: "Используй read_file(filepath) для чтения файлов."
+  
+  file_write:
+    type: "function"
+    name: "write_file"
+    description: "Записывает данные в файл"
+    prompt_addition: "Используй write_file(filepath, content) для записи файлов."
+  
+  file_list:
+    type: "function"
+    name: "list_files"
+    description: "Показывает список файлов в директории"
+    prompt_addition: "Используй list_files(directory) для просмотра содержимого папок."
+  
+  file_info:
+    type: "function"
+    name: "get_file_info"
+    description: "Получает информацию о файле"
+    prompt_addition: "Используй get_file_info(filepath) для получения информации о файле."
+  
+  file_search:
+    type: "function"
+    name: "search_files"
+    description: "Поиск файлов по имени и содержимому"
+    prompt_addition: "Используй search_files(search_pattern, directory, use_regex, search_in_content) для поиска файлов."
+  
+  file_edit_patch:
+    type: "function"
+    name: "edit_file_patch"
+    description: "Редактирует файл с помощью патча в формате unified diff"
+    prompt_addition: "Используй edit_file_patch(filepath, patch_content) для применения патчей к файлам. Патч должен быть в формате unified diff. Проверять содержимое файла перед изменениями."
+  
+  # Git операции
+  git_status:
+    type: "function"
+    name: "git_status"
+    description: "Показывает статус git репозитория"
+    prompt_addition: "Используй git_status(directory) для проверки изменений в git."
+  
+  git_log:
+    type: "function"
+    name: "git_log"
+    description: "Показывает историю коммитов"
+    prompt_addition: "Используй git_log(directory, max_commits) для просмотра истории коммитов."
+  
+  git_diff:
+    type: "function"
+    name: "git_diff"
+    description: "Показывает различия в файлах"
+    prompt_addition: "Используй git_diff(directory, filename) для просмотра изменений в файлах."
+  
+  git_branch_list:
+    type: "function"
+    name: "git_branch_list"
+    description: "Показывает список веток"
+    prompt_addition: "Используй git_branch_list(directory) для просмотра веток."
+  
+  git_add_file:
+    type: "function"
+    name: "git_add_file"
+    description: "Добавляет файл в индекс"
+    prompt_addition: "Используй git_add_file(directory, filename) для добавления файлов в git."
+  
+  git_commit:
+    type: "function"
+    name: "git_commit"
+    description: "Создает git коммит"
+    prompt_addition: "Используй git_commit(directory, message, author_name, author_email) для создания коммитов."
+  
+  git_checkout_branch:
+    type: "function"
+    name: "git_checkout_branch"
+    description: "Переключается на ветку"
+    prompt_addition: "Используй git_checkout_branch(directory, branch_name, create_new) для переключения веток."
+  
+  git_pull:
+    type: "function"
+    name: "git_pull"
+    description: "Получает изменения из удаленного репозитория"
+    prompt_addition: "Используй git_pull(directory) для получения изменений."
+  
+  git_remote_info:
+    type: "function"
+    name: "git_remote_info"
+    description: "Показывает информацию об удаленных репозиториях"
+    prompt_addition: "Используй git_remote_info(directory) для просмотра удаленных репозиториев."
+  
+  # Web поиск
+  web_search:
+    type: "function"
+    name: "web_search"
+    description: "Поиск информации в интернете"
+    prompt_addition: "Используй web_search(query) для поиска актуальной информации."
+  
+  # MCP серверы
+  filesystem_mcp:
+    type: "mcp"
+    server_command: ["npx", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    description: "MCP сервер для работы с файловой системой"
+    prompt_addition: "У тебя есть доступ к файловой системе через MCP."
+  
+  git_mcp:
+    type: "mcp" 
+    server_command: ["npx", "@modelcontextprotocol/server-git", "--repository", "."]
+    description: "MCP сервер для Git операций"
+    prompt_addition: "У тебя есть доступ к Git операциям через MCP."
+  
+  brave_search_mcp:
+    type: "mcp"
+    server_command: ["npx", "@modelcontextprotocol/server-brave-search"]
+    env_vars:
+      BRAVE_API_KEY: "BRAVE_API_KEY"
+    description: "MCP сервер для поиска в интернете"
+    prompt_addition: "У тебя есть доступ к поиску в интернете через Brave Search MCP."
+  
+  # Агенты как инструменты
+  file_agent:
+    type: "agent"
+    name: "call_file_agent"
+    description: "Вызывает файлового агента для работы с файлами"
+    prompt_addition: "Используй call_file_agent(task) для задач по работе с файлами. Используй unified diff для редактирования файлов."
+   
+  git_agent:
+    type: "agent"
+    name: "call_git_agent"
+    description: "Вызывает Git агента для работы с репозиторием"
+    prompt_addition: "Используй call_git_agent(task) для Git операций."
+  
+  researcher:
+    type: "agent"
+    name: "call_researcher"
+    description: "Вызывает исследователя для поиска информации"
+    prompt_addition: "Используй call_researcher(query) для поиска информации в интернете."
+  
+  thinker:
+    type: "agent"
+    name: "call_thinker"
+    description: "Вызывает мыслящего агента для глубокого анализа"
+    prompt_addition: "Используй call_thinker(problem) для сложного анализа и размышлений."
+
+# Базовые промпты для инструментов
+prompt_templates:
+  base: |
+    Ты умный и дружелюбный AI помощник. Отвечай на русском языке кратко и по делу.
+    Будь полезным и точным в своих ответах.
+  
+  with_files: |
+    Ты помощник с доступом к файловой системе. Можешь читать, редактировать и анализировать файлы.
+    Всегда проверяй существование файлов перед операциями. Проверяй содержимое файлов перед изменениями.
+
+  with_git: |
+    Ты помощник разработчика с доступом к Git. Можешь проверять статус, создавать коммиты и управлять репозиторием.
+    Всегда проверяй статус перед изменениями.
+  
+  with_web: |
+    Ты помощник с доступом к интернету. Можешь искать актуальную информацию и новости.
+    Всегда указывай источники информации.
+  
+  with_mcp: |
+    Ты помощник с расширенными возможностями через MCP (Model Context Protocol).
+    Используй доступные MCP серверы для выполнения сложных задач.
+
+# Агенты - полная конфигурация
+agents:
+  # Базовый помощник
+  assistant:
+    name: "Помощник"
+    model: "flash-lite"
+    tools: []
+    base_prompt: "base"
+    description: "Базовый помощник для общения"
+  
+  # Файловый агент
+  file_agent:
+    name: "Файловый агент"
+    model: "flash-lite"
+    tools: ["file_read", "file_write", "file_list", "file_info", "file_search", "file_edit_patch"]
+    base_prompt: "with_files"
+    description: "Специалист по работе с файлами"
+  
+  # Git агент
+  git_agent:
+    name: "Git агент"
+    model: "flash-lite"
+    tools: ["git_status", "git_log", "git_diff", "git_branch_list", "git_add_file", "git_commit", "git_checkout_branch", "git_pull", "git_remote_info", "file_read", "file_list"]
+    base_prompt: "with_git"
+    description: "Помощник разработчика для Git"
+  
+  # Исследователь с веб-поиском
+  researcher:
+    name: "Исследователь"
+    model: "qwen-thinking"
+    tools: ["web_search", "file_write"]
+    base_prompt: "with_web"
+    description: "Исследователь для поиска информации"
+  
+  # Полнофункциональный агент
+  full_agent:
+    name: "Универсальный агент"
+    model: "flash-lite"
+    tools: ["file_read", "file_write", "file_list", "file_info", "file_search", "file_edit_patch", "git_status", "git_log", "git_diff", "git_branch_list", "git_add_file", "git_commit", "git_checkout_branch", "git_pull", "git_remote_info", "web_search"]
+    base_prompt: "with_files"
+    description: "Универсальный помощник со всеми инструментами"
+  
+  # MCP агент
+  mcp_agent:
+    name: "MCP агент"
+    model: "gpt-4o"
+    tools: ["filesystem_mcp", "git_mcp"]
+    base_prompt: "with_mcp"
+    description: "Агент с MCP серверами"
+    mcp_enabled: true
+  
+  # Мыслящий агент
+  thinker:
+    name: "Мыслитель"
+    model: "qwen-thinking"
+    tools: ["web_search", "file_read", "file_write"]
+    base_prompt: "base"
+    custom_prompt: |
+      Ты глубоко мыслящий помощник. Анализируй проблемы со всех сторон.
+      Рассуждай пошагово и предоставляй развернутые обоснования своих выводов.
+      Используй доступные инструменты для получения дополнительной информации.
+    description: "Агент для глубокого анализа и размышлений"
+  
+  # Координатор агентов
+  coordinator:
+    name: "Координатор"
+    model: "qwen-thinking"
+    tools: ["file_agent", "git_agent", "researcher", "thinker"]
+    base_prompt: "base"
+    custom_prompt: |
+      Ты координатор команды специализированных агентов. Твоя задача - анализировать запросы пользователей и делегировать работу соответствующим агентам.
+      Всегда вызывай соответствующий инструмент и передавай ему четкую задачу на русском языке.
+    description: "Координатор команды агентов"
+
+# Сценарии использования
+scenarios:
+  development:
+    agent: "git_agent"
+    description: "Разработка и управление кодом"
+  
+  research:
+    agent: "researcher"
+    description: "Исследование и сбор информации"
+  
+  file_management:
+    agent: "file_agent"
+    description: "Управление файлами и документами"
+  
+  general:
+    agent: "full_agent"
+    description: "Универсальные задачи"
+  
+  thinking:
+    agent: "thinker"
+    description: "Глубокий анализ и размышления"
+  
+  coordination:
+    agent: "coordinator"
+    description: "Координация команды агентов"

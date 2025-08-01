@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""
+Простой скрипт для запуска агента с поддержкой путей.
+"""
+
+import asyncio
+import argparse
+import os
+import sys
+from pathlib import Path
+
+# Добавляем src в путь для импортов
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from agent_factory import AgentFactory
+from config_loader import config
+from agents import Runner
+
+async def main():
+    """Главная функция."""
+    parser = argparse.ArgumentParser(description="Запуск агента с поддержкой путей")
+    parser.add_argument(
+        "--agent", "-a",
+        type=str,
+        default=None,
+        help="Имя агента (по умолчанию из конфигурации)"
+    )
+    parser.add_argument(
+        "--path", "-p",
+        type=str,
+        default=None,
+        help="Рабочая директория"
+    )
+    parser.add_argument(
+        "--context-path",
+        type=str,
+        default=None,
+        help="Контекстный путь для агента"
+    )
+    parser.add_argument(
+        "--message", "-m",
+        type=str,
+        default=None,
+        help="Сообщение для отправки агенту (если не указано, запускается интерактивный режим)"
+    )
+    
+    args = parser.parse_args()
+    
+    try:
+        # Создаем фабрику агентов
+        factory = AgentFactory(working_directory=args.path)
+        
+        # Определяем агента
+        agent_key = args.agent or config.get_default_agent()
+        print(f"🤖 Используется агент: {agent_key}")
+        
+        # Логгируем информацию об агенте
+        try:
+            from utils.logger import log_custom
+            agent_config = config.get_agent(agent_key)
+            log_custom('info', 'agent_creation', f"Creating agent '{agent_key}' ({agent_config.name})")
+            log_custom('debug', 'agent_creation', f"Model: {agent_config.model}")
+            log_custom('debug', 'agent_creation', f"Tools: {agent_config.tools}")
+            log_custom('debug', 'agent_creation', f"Base prompt: {agent_config.base_prompt}")
+            log_custom('debug', 'agent_creation', f"Has custom prompt: {bool(agent_config.custom_prompt)}")
+        except Exception as e:
+            print(f"⚠️ Ошибка логирования: {e}")
+        
+        # Создаем агента
+        agent = await factory.create_agent(agent_key, context_path=args.context_path)
+        
+        # Показываем информацию о путях
+        print("\n📁 Информация о путях:")
+        print(f"   Рабочая директория: {config.get_working_directory()}")
+        print(f"   Директория конфигурации: {config.get_config_directory()}")
+        if args.context_path:
+            print(f"   Контекстный путь: {args.context_path}")
+            print(f"   Абсолютный контекстный путь: {config.get_absolute_path(args.context_path)}")
+        print()
+        
+        if args.message:
+            # Одноразовое сообщение
+            print(f"💬 Отправка сообщения: {args.message}")
+            
+            # Логгируем запуск агента
+            try:
+                from utils.logger import log_agent_start
+                log_agent_start(agent.name, args.message)
+            except Exception as e:
+                print(f"⚠️ Ошибка логирования: {e}")
+            
+            result = await Runner.run(agent, args.message)
+            
+            # Логгируем завершение агента
+            try:
+                from utils.logger import log_agent_end
+                log_agent_end(agent.name, result.final_output, 0.0)  # duration будет 0, так как мы не измеряем время
+            except Exception as e:
+                print(f"⚠️ Ошибка логирования: {e}")
+            
+            print(f"\n🤖 Ответ агента:\n{result.final_output}")
+        else:
+            # Интерактивный режим
+            print("=== Интерактивный режим ===")
+            print("Введите 'exit' для выхода")
+            print("Введите 'clear' для очистки истории")
+            print("Введите 'paths' для показа информации о путях")
+            print("==========================")
+            
+            while True:
+                try:
+                    user_input = input("\nВы: ").strip()
+                    
+                    if user_input.lower() == 'exit':
+                        break
+                    elif user_input.lower() == 'clear':
+                        # Создаем нового агента для очистки истории
+                        agent = await factory.create_agent(agent_key, context_path=args.context_path)
+                        print("История очищена")
+                        continue
+                    elif user_input.lower() == 'paths':
+                        print("\n📁 Информация о путях:")
+                        print(f"   Рабочая директория: {config.get_working_directory()}")
+                        print(f"   Директория конфигурации: {config.get_config_directory()}")
+                        if args.context_path:
+                            print(f"   Контекстный путь: {args.context_path}")
+                            print(f"   Абсолютный контекстный путь: {config.get_absolute_path(args.context_path)}")
+                        continue
+                    elif not user_input:
+                        continue
+                    
+                    print("\nАгент думает...")
+                    
+                    # Логгируем запуск агента
+                    try:
+                        from utils.logger import log_agent_start
+                        log_agent_start(agent.name, user_input)
+                    except Exception as e:
+                        print(f"⚠️ Ошибка логирования: {e}")
+                    
+                    result = await Runner.run(agent, user_input)
+                    
+                    # Логгируем завершение агента
+                    try:
+                        from utils.logger import log_agent_end
+                        log_agent_end(agent.name, result.final_output, 0.0)
+                    except Exception as e:
+                        print(f"⚠️ Ошибка логирования: {e}")
+                    
+                    print(f"\nАгент: {result.final_output}")
+                    
+                except KeyboardInterrupt:
+                    print("\nПрерывание работы...")
+                    break
+                except Exception as e:
+                    print(f"\nОшибка: {e}")
+                    continue
+        
+        # Очищаем ресурсы
+        await factory.cleanup()
+        
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    asyncio.run(main())

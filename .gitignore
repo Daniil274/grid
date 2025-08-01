@@ -1,0 +1,19 @@
+# Environment variables
+.env
+
+# Demo files (created during execution)
+*demo*
+*_demo
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+logs/*
+openai_agents_python/*
+# venv
+.venv/*
+.vscode/*
+*.png
+*.yaml
+vis/*
