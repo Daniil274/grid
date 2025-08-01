@@ -1,0 +1,493 @@
+"""
+Файловые инструменты для агентов.
+
+Поддерживает:
+- Чтение и запись файлов
+- Получение информации о файлах
+- Список файлов в директории
+- Поиск файлов по имени и содержимому
+"""
+
+import os
+import re
+import time
+from pathlib import Path
+from typing import List, Any
+from agents import function_tool
+from utils.logger import log_tool_start, log_tool_end, log_tool_error
+
+@function_tool
+def read_file(filepath: str) -> str:
+    """
+    Читает содержимое файла.
+    
+    Args:
+        filepath: Путь к файлу
+        
+    Returns:
+        str: Содержимое файла
+    """
+    start_time = time.time()
+    args = {"filepath": filepath}
+    log_tool_start("read_file", args)
+    
+    try:
+        path = Path(filepath)
+        if not path.exists():
+            result = f"ОШИБКА: Файл {filepath} не найден"
+            log_tool_end("read_file", result, time.time() - start_time)
+            return result
+        
+        if not path.is_file():
+            result = f"ОШИБКА: {filepath} не является файлом"
+            log_tool_end("read_file", result, time.time() - start_time)
+            return result
+        
+        content = path.read_text(encoding='utf-8')
+        result = f"Содержимое файла {filepath}:\n\n{content}"
+        log_tool_end("read_file", result, time.time() - start_time)
+        return result
+        
+    except Exception as e:
+        log_tool_error("read_file", e)
+        error_type = type(e).__name__
+        result = f"ОШИБКА при чтении {filepath}: {error_type} - {str(e)}"
+        log_tool_end("read_file", result, time.time() - start_time)
+        return result
+
+@function_tool 
+def get_file_info(filepath: str) -> str:
+    """
+    Получает информацию о файле.
+    
+    Args:
+        filepath: Путь к файлу
+        
+    Returns:
+        str: Информация о файле
+    """
+    start_time = time.time()
+    args = {"filepath": filepath}
+    log_tool_start("get_file_info", args)
+    
+    try:
+        path = Path(filepath)
+        if not path.exists():
+            result = f"ОШИБКА: Файл {filepath} не найден"
+            log_tool_end("get_file_info", result, time.time() - start_time)
+            return result
+        
+        if not path.is_file():
+            result = f"ОШИБКА: {filepath} не является файлом"
+            log_tool_end("get_file_info", result, time.time() - start_time)
+            return result
+        
+        stat = path.stat()
+        content = path.read_text(encoding='utf-8')
+        lines_count = len(content.split('\n'))
+        
+        # Определяем тип файла
+        extension = path.suffix.lower()
+
+        info = {
+            "filename": str(path.name),
+            "size": stat.st_size,
+            "lines": lines_count,
+        }
+        
+        result = f"""Информация о файле {filepath}:
+- Имя: {info["filename"]}
+- Размер: {info["size"]} байт
+- Строк: {info["lines"]}
+- Расширение: {extension if extension else 'без расширения'}"""
+        
+        log_tool_end("get_file_info", result, time.time() - start_time)
+        return result
+        
+    except Exception as e:
+        log_tool_error("get_file_info", e)
+        result = f"ОШИБКА при получении информации о {filepath}: {str(e)}"
+        log_tool_end("get_file_info", result, time.time() - start_time)
+        return result
+
+@function_tool
+def list_files(directory: str = ".") -> str:
+    """
+    Показывает список файлов в директории.
+    
+    Args:
+        directory: Путь к директории
+        
+    Returns:
+        str: Список файлов
+    """
+    start_time = time.time()
+    args = {"directory": directory}
+    log_tool_start("list_files", args)
+    
+    try:
+        path = Path(directory)
+        if not path.exists():
+            result = f"ОШИБКА: Директория {directory} не найдена"
+            log_tool_end("list_files", result, time.time() - start_time)
+            return result
+        
+        if not path.is_dir():
+            result = f"ОШИБКА: {directory} не является директорией"
+            log_tool_end("list_files", result, time.time() - start_time)
+            return result
+        
+        files = []
+        for item in sorted(path.iterdir()):
+            if item.is_file():
+                size = item.stat().st_size
+                files.append(f"📄 {item.name} ({size} байт)")
+            elif item.is_dir():
+                files.append(f"📁 {item.name}/")
+        
+        if not files:
+            result = f"Директория {directory} пуста"
+            log_tool_end("list_files", result, time.time() - start_time)
+            return result
+        
+        result = f"Содержимое директории {directory}:\n\n" + "\n".join(files)
+        log_tool_end("list_files", result, time.time() - start_time)
+        return result
+        
+    except Exception as e:
+        log_tool_error("list_files", e)
+        result = f"ОШИБКА при чтении директории {directory}: {str(e)}"
+        log_tool_end("list_files", result, time.time() - start_time)
+        return result
+
+@function_tool
+def write_file(filepath: str, content: str) -> str:
+    """
+    Записывает содержимое в файл.
+    
+    Args:
+        filepath: Путь к файлу
+        content: Содержимое для записи
+        
+    Returns:
+        str: Результат операции
+    """
+    start_time = time.time()
+    args = {"filepath": filepath, "content_length": len(content)}
+    log_tool_start("write_file", args)
+    
+    try:
+        path = Path(filepath)
+        
+        # Создаем родительские директории если нужно
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Записываем файл
+        path.write_text(content, encoding='utf-8')
+        
+        size = path.stat().st_size
+        result = f"✅ Файл {filepath} успешно записан ({size} байт)"
+        log_tool_end("write_file", result, time.time() - start_time)
+        return result
+        
+    except Exception as e:
+        log_tool_error("write_file", e)
+        result = f"ОШИБКА при записи файла {filepath}: {str(e)}"
+        log_tool_end("write_file", result, time.time() - start_time)
+        return result
+
+@function_tool
+def search_files(
+    search_pattern: str, 
+    directory: str = ".", 
+    use_regex: bool = False,
+    search_in_content: bool = False,
+    file_extensions: str = "",
+    max_results: int = 50
+) -> str:
+    """
+    Поиск файлов и директорий по имени или содержимому с поддержкой регулярных выражений.
+    
+    Args:
+        search_pattern: Паттерн для поиска (строка или regex)
+        directory: Директория для поиска (по умолчанию текущая)
+        use_regex: Использовать регулярные выражения (по умолчанию False)
+        search_in_content: Искать в содержимом файлов (по умолчанию False)
+        file_extensions: Фильтр по расширениям файлов, разделенных запятой (например: "py,js,txt")
+        max_results: Максимальное количество результатов (по умолчанию 50)
+        
+    Returns:
+        str: Результаты поиска
+    """
+    start_time = time.time()
+    args = {
+        "search_pattern": search_pattern,
+        "directory": directory,
+        "use_regex": use_regex,
+        "search_in_content": search_in_content,
+        "file_extensions": file_extensions,
+        "max_results": max_results
+    }
+    log_tool_start("search_files", args)
+    
+    try:
+        base_path = Path(directory)
+        if not base_path.exists():
+            result = f"ОШИБКА: Директория {directory} не найдена"
+            log_tool_end("search_files", result, time.time() - start_time)
+            return result
+        
+        if not base_path.is_dir():
+            result = f"ОШИБКА: {directory} не является директорией"
+            log_tool_end("search_files", result, time.time() - start_time)
+            return result
+        
+        # Подготавливаем паттерн для поиска
+        if use_regex:
+            try:
+                pattern = re.compile(search_pattern, re.IGNORECASE)
+            except re.error as e:
+                result = f"ОШИБКА: Некорректное регулярное выражение '{search_pattern}': {str(e)}"
+                log_tool_end("search_files", result, time.time() - start_time)
+                return result
+        else:
+            # Простой поиск - конвертируем в regex для единообразия
+            escaped_pattern = re.escape(search_pattern)
+            pattern = re.compile(escaped_pattern, re.IGNORECASE)
+        
+        # Подготавливаем фильтр расширений
+        extensions = []
+        if file_extensions:
+            extensions = [ext.strip().lower() for ext in file_extensions.split(',')]
+            extensions = [ext if ext.startswith('.') else f'.{ext}' for ext in extensions]
+        
+        results = []
+        
+        # Рекурсивно обходим директории
+        for root, dirs, files in os.walk(base_path):
+            root_path = Path(root)
+            
+            # Поиск в именах директорий
+            for dir_name in dirs:
+                if len(results) >= max_results:
+                    break
+                    
+                if pattern.search(dir_name):
+                    dir_path = root_path / dir_name
+                    relative_path = dir_path.relative_to(base_path)
+                    results.append(f"📁 {relative_path}/ (директория)")
+            
+            # Поиск в именах файлов
+            for file_name in files:
+                if len(results) >= max_results:
+                    break
+                
+                file_path = root_path / file_name
+                file_extension = file_path.suffix.lower()
+                
+                # Фильтрация по расширениям
+                if extensions and file_extension not in extensions:
+                    continue
+                
+                match_found = False
+                match_info = ""
+                
+                # Поиск по имени файла
+                if pattern.search(file_name):
+                    match_found = True
+                    match_info = "имя файла"
+                
+                # Поиск в содержимом файла (только для текстовых файлов)
+                if search_in_content and not match_found:
+                    try:
+                        # Проверяем, что файл текстовый
+                        if file_extension in ['.py', '.js', '.json', '.md', '.txt', '.yml', '.yaml', '.html', '.css', '.xml', '.csv']:
+                            content = file_path.read_text(encoding='utf-8', errors='ignore')
+                            if pattern.search(content):
+                                match_found = True
+                                match_info = "содержимое файла"
+                    except Exception:
+                        # Игнорируем ошибки чтения файлов
+                        pass
+                
+                if match_found:
+                    relative_path = file_path.relative_to(base_path)
+                    file_size = file_path.stat().st_size
+                    results.append(f"📄 {relative_path} ({file_size} байт) - найдено в: {match_info}")
+            
+            if len(results) >= max_results:
+                break
+        
+        # Формируем результат
+        if not results:
+            result = f"Поиск по паттерну '{search_pattern}' в {directory} не дал результатов"
+        else:
+            result_header = f"Результаты поиска по паттерну '{search_pattern}' в {directory}:\n"
+            result_header += f"Найдено {len(results)} результат(ов)"
+            if len(results) >= max_results:
+                result_header += f" (показаны первые {max_results})"
+            result_header += "\n\n"
+            
+            result = result_header + "\n".join(results)
+        
+        log_tool_end("search_files", result, time.time() - start_time)
+        return result
+        
+    except Exception as e:
+        log_tool_error("search_files", e)
+        result = f"ОШИБКА при поиске: {str(e)}"
+        log_tool_end("search_files", result, time.time() - start_time)
+        return result
+
+@function_tool
+def edit_file_patch(filepath: str, patch_content: str) -> str:
+    """
+    Редактирует файл с помощью патча в формате unified diff.
+    
+    Args:
+        filepath: Путь к файлу для редактирования
+        patch_content: Содержимое патча в формате unified diff
+        
+    Returns:
+        str: Результат операции
+    """
+    start_time = time.time()
+    args = {"filepath": filepath, "patch_content_length": patch_content}
+    log_tool_start("edit_file_patch", args)
+    
+    try:
+        path = Path(filepath)
+        if not path.exists():
+            result = f"ОШИБКА: Файл {filepath} не найден"
+            log_tool_end("edit_file_patch", result, time.time() - start_time)
+            return result
+        
+        if not path.is_file():
+            result = f"ОШИБКА: {filepath} не является файлом"
+            log_tool_end("edit_file_patch", result, time.time() - start_time)
+            return result
+        
+        # Читаем оригинальное содержимое файла
+        original_content = path.read_text(encoding='utf-8')
+        original_lines = original_content.splitlines(keepends=True)
+        
+        # Парсим патч
+        patch_lines = patch_content.splitlines()
+        new_lines = original_lines.copy()
+        
+        i = 0
+        while i < len(patch_lines):
+            line = patch_lines[i]
+            
+            # Ищем заголовок патча (начинается с --- или +++)
+            if line.startswith('---') or line.startswith('+++'):
+                i += 1
+                continue
+            
+            # Ищем блок изменений (начинается с @@)
+            if line.startswith('@@'):
+                # Парсим номера строк
+                try:
+                    # Формат: @@ -old_start,old_count +new_start,new_count @@
+                    parts = line.split(' ')
+                    old_info = parts[1]  # -old_start,old_count
+                    new_info = parts[2]  # +new_start,new_count
+                    
+                    old_start = int(old_info.split(',')[0][1:]) - 1  # Убираем минус и вычитаем 1
+                    new_start = int(new_info.split(',')[0][1:]) - 1  # Убираем плюс и вычитаем 1
+                    
+                    i += 1
+                    
+                    # Обрабатываем строки блока
+                    old_line_num = old_start
+                    new_line_num = new_start
+                    
+                    while i < len(patch_lines):
+                        patch_line = patch_lines[i]
+                        
+                        if patch_line.startswith('@@'):
+                            # Новый блок изменений
+                            break
+                        elif patch_line.startswith('---') or patch_line.startswith('+++'):
+                            # Конец патча
+                            break
+                        elif patch_line.startswith(' '):
+                            # Контекстная строка - оставляем как есть
+                            if old_line_num < len(new_lines):
+                                new_lines[old_line_num] = patch_line[1:]  # Убираем пробел
+                            old_line_num += 1
+                            new_line_num += 1
+                        elif patch_line.startswith('-'):
+                            # Удаляемая строка
+                            if old_line_num < len(new_lines):
+                                del new_lines[old_line_num]
+                            # new_line_num не увеличиваем
+                        elif patch_line.startswith('+'):
+                            # Добавляемая строка
+                            if old_line_num < len(new_lines):
+                                new_lines.insert(old_line_num, patch_line[1:] + '\n')  # Убираем плюс и добавляем перенос
+                            else:
+                                new_lines.append(patch_line[1:] + '\n')
+                            old_line_num += 1
+                            new_line_num += 1
+                        else:
+                            # Пустая строка или комментарий
+                            pass
+                        
+                        i += 1
+                    
+                except (ValueError, IndexError) as e:
+                    result = f"ОШИБКА: Некорректный формат патча в строке '{line}': {str(e)}"
+                    log_tool_end("edit_file_patch", result, time.time() - start_time)
+                    return result
+            else:
+                i += 1
+        
+        # Записываем обновленное содержимое
+        new_content = ''.join(new_lines)
+        path.write_text(new_content, encoding='utf-8')
+        
+        # Подсчитываем изменения
+        original_line_count = len(original_lines)
+        new_line_count = len(new_lines)
+        changes = new_line_count - original_line_count
+        
+        result = f"✅ Файл {filepath} успешно обновлен патчем"
+        if changes != 0:
+            result += f" (изменено строк: {changes:+d})"
+        
+        log_tool_end("edit_file_patch", result, time.time() - start_time)
+        return result
+        
+    except Exception as e:
+        log_tool_error("edit_file_patch", e)
+        result = f"ОШИБКА при применении патча к файлу {filepath}: {str(e)}"
+        log_tool_end("edit_file_patch", result, time.time() - start_time)
+        return result
+
+# ============================================================================
+# СЛОВАРЬ ФАЙЛОВЫХ ИНСТРУМЕНТОВ
+# ============================================================================
+
+FILE_TOOLS = {
+    "file_read": read_file,
+    "file_write": write_file,
+    "file_list": list_files,
+    "file_info": get_file_info,
+    "file_search": search_files,
+    "file_edit_patch": edit_file_patch,
+}
+
+def get_file_tools() -> List[Any]:
+    """Возвращает список всех файловых инструментов."""
+    return list(FILE_TOOLS.values())
+
+def get_file_tools_by_names(tool_names: List[str]) -> List[Any]:
+    """Возвращает список файловых инструментов по их именам."""
+    tools = []
+    for name in tool_names:
+        if name in FILE_TOOLS:
+            tools.append(FILE_TOOLS[name])
+        else:
+            print(f"⚠️  Файловый инструмент '{name}' не найден")
+    return tools 
