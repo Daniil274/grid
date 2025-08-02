@@ -213,7 +213,12 @@ class AgentFactory:
     def _wrap_agent_tool_for_logging(self, agent_tool, agent_name: str, agent_key: str):
         """Оборачивает агент-инструмент для правильного логирования как агента."""
         import time
-        from utils.logger import log_agent_start, log_agent_end, log_agent_error
+        from utils.logger import log_agent_tool_start, log_agent_tool_end, log_agent_tool_error
+        
+        # Получаем конфигурацию инструмента для более описательного имени
+        tool_config = config._config.get('tools', {}).get(agent_key, {})
+        tool_name = tool_config.get('name', f"call_{agent_key}")
+        display_name = f"{agent_name} ({tool_name})"
         
         # Сохраняем оригинальную функцию
         # FunctionTool использует on_invoke_tool для вызова функции
@@ -221,15 +226,15 @@ class AgentFactory:
             original_invoke = agent_tool.on_invoke_tool
         else:
             # Если не можем найти функцию, возвращаем инструмент как есть
-            print(f"⚠️ Не удалось найти функцию для агента {agent_name}")
+            print(f"⚠️ Не удалось найти функцию для агента {display_name}")
             return agent_tool
         
         async def wrapped_invoke_tool(tool_context, tool_call_arguments):
             start_time = time.time()
             input_data = str(tool_call_arguments)
             
-            # Логируем как агента
-            log_agent_start(agent_name, input_data)
+            # Логируем как агента-инструмент
+            log_agent_tool_start(agent_name, tool_name, input_data)
             
             try:
                 # Вызываем оригинальную функцию
@@ -241,14 +246,14 @@ class AgentFactory:
                 
                 duration = time.time() - start_time
                 
-                # Логируем завершение как агента
-                log_agent_end(agent_name, str(result), duration)
+                # Логируем завершение как агента-инструмент
+                log_agent_tool_end(agent_name, tool_name, str(result), duration)
                 
                 return result
                 
             except Exception as e:
                 duration = time.time() - start_time
-                log_agent_error(agent_name, e)
+                log_agent_tool_error(agent_name, tool_name, e)
                 raise
         
         # Заменяем функцию в инструменте

@@ -63,6 +63,15 @@ async def main():
             log_custom('debug', 'agent_creation', f"Tools: {agent_config.tools}")
             log_custom('debug', 'agent_creation', f"Base prompt: {agent_config.base_prompt}")
             log_custom('debug', 'agent_creation', f"Has custom prompt: {bool(agent_config.custom_prompt)}")
+            
+            # Логгируем информацию об агентах-инструментах
+            agent_tools = [tool for tool in agent_config.tools if config._config.get('tools', {}).get(tool, {}).get('type') == 'agent']
+            if agent_tools:
+                log_custom('info', 'agent_creation', f"Agent tools available: {agent_tools}")
+                for tool in agent_tools:
+                    tool_config = config._config.get('tools', {}).get(tool, {})
+                    agent_name = tool_config.get('name', f"call_{tool}")
+                    log_custom('debug', 'agent_creation', f"  - {tool} -> {agent_name}")
         except Exception as e:
             print(f"⚠️ Ошибка логирования: {e}")
         

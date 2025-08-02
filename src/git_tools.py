@@ -39,11 +39,12 @@ def _run_git_command(command: List[str], cwd: Optional[str] = None) -> Dict[str,
         dangerous_commands = ["rm", "clean", "reset --hard", "push --force", "rebase -i"]
         cmd_str = " ".join(command)
         for dangerous in dangerous_commands:
-            if dangerous in cmd_str:
+            # Ищем точные слова, а не подстроки
+            if f" {dangerous} " in f" {cmd_str} " or cmd_str.endswith(f" {dangerous}") or cmd_str.startswith(f"{dangerous} "):
                 return {"success": False, "output": "", "error": f"Опасная команда заблокирована: {dangerous}"}
         
         # Логгируем выполнение команды
-        from utils.logger import log_custom
+        from .utils.logger import log_custom
         log_custom('debug', 'git_command', f"Выполнение: {' '.join(command)}", cwd=cwd)
         
         # Выполняем команду
@@ -69,11 +70,11 @@ def _run_git_command(command: List[str], cwd: Optional[str] = None) -> Dict[str,
         }
         
     except subprocess.TimeoutExpired:
-        from utils.logger import log_custom
+        from .utils.logger import log_custom
         log_custom('error', 'git_command', f"Таймаут команды: {' '.join(command)}")
         return {"success": False, "output": "", "error": "Команда превысила лимит времени выполнения"}
     except Exception as e:
-        from utils.logger import log_custom
+        from .utils.logger import log_custom
         log_custom('error', 'git_command', f"Ошибка выполнения: {' '.join(command)}", error=str(e))
         return {"success": False, "output": "", "error": f"Ошибка выполнения команды: {str(e)}"}
 
