@@ -104,10 +104,8 @@ class ContextManager:
             for i, msg in enumerate(messages, 1):
                 role_emoji = self._get_role_emoji(msg.role)
                 
-                # Truncate long messages
+                # Use full message content
                 content = msg.content
-                if len(content) > 200:
-                    content = content[:200] + "..."
                 
                 context_parts.append(f"{i}. {role_emoji} {msg.role.title()}: {content}")
             

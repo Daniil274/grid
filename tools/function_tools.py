@@ -26,16 +26,37 @@ TOOL_ALIASES = {
     "search_files": "file_search",
     "edit_file_patch": "file_edit_patch",
     
-    # Git operations
+    # Git operations - основные
     "git_status": "git_status",
     "git_log": "git_log",
     "git_diff": "git_diff",
     "git_branch_list": "git_branch_list",
     "git_add_file": "git_add_file",
+    "git_add_all": "git_add_all",
     "git_commit": "git_commit",
     "git_checkout_branch": "git_checkout_branch",
-    "git_pull": "git_pull",
+    
+    # Git operations - инициализация и настройка
+    "git_init": "git_init",
+    "git_config": "git_config",
+    "git_clone": "git_clone",
+    
+    # Git operations - удаленные репозитории
     "git_remote_info": "git_remote_info",
+    "git_remote_add": "git_remote_add",
+    "git_remote_remove": "git_remote_remove",
+    "git_fetch": "git_fetch",
+    "git_pull": "git_pull",
+    "git_push": "git_push",
+    
+    # Git operations - управление ветками и слияние
+    "git_merge": "git_merge",
+    "git_reset": "git_reset",
+    "git_stash": "git_stash",
+    
+    # Git operations - теги
+    "git_tag": "git_tag",
+    "git_tag_list": "git_tag_list",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:
@@ -135,7 +156,19 @@ from .file_tools import read_file, write_file, list_files, get_file_info, search
 
 # Если git_tools.py экспортирует функции напрямую, добавим их
 try:
-    from .git_tools import git_status, git_log, git_diff, git_branch_list, git_add_file, git_commit, git_checkout_branch, git_pull, git_remote_info
+    from .git_tools import (
+        # Основные операции
+        git_status, git_log, git_diff, git_branch_list, git_add_file, git_add_all,
+        git_commit, git_checkout_branch,
+        # Инициализация и настройка
+        git_init, git_config, git_clone,
+        # Удаленные репозитории
+        git_remote_info, git_remote_add, git_remote_remove, git_fetch, git_pull, git_push,
+        # Управление ветками и слияние
+        git_merge, git_reset, git_stash,
+        # Теги
+        git_tag, git_tag_list
+    )
 except ImportError:
     # Git инструменты могут быть не готовы
     pass

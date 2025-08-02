@@ -119,7 +119,7 @@ class ThreatDetectionService:
                     description=indicator.description,
                     details={
                         "indicator_id": indicator.indicator_id,
-                        "matched_content": content[:200],
+                        "matched_content": content,
                         "context": context or {}
                     }
                 )

@@ -18,6 +18,10 @@ from tools import get_tools_by_names, MCPClient
 from utils.exceptions import AgentError, ConfigError
 from utils.logger import Logger
 from utils.pretty_logger import set_current_agent, clear_current_agent
+from utils.agent_logger import (
+    log_agent_start, log_agent_end, log_agent_error, 
+    log_agent_prompt, log_tool_call, get_agent_logger
+)
 
 load_dotenv()
 logger = Logger(__name__)
@@ -136,6 +140,7 @@ class AgentFactory:
             # Cache agent
             self._agent_cache[cache_key] = agent
             
+            logger.log_agent_creation(agent_key, agent_config.name)
             logger.info(
                 f"Created agent '{agent_key}'",
                 agent_name=agent_config.name,
@@ -173,8 +178,8 @@ class AgentFactory:
         start_time = time.time()
         execution = AgentExecution(
             agent_name=agent_key,
-            input_message=message,
-            start_time=start_time
+            start_time=str(start_time),
+            input_message=message
         )
         
         try:
@@ -187,15 +192,39 @@ class AgentFactory:
             # Add user message to context
             self.context_manager.add_message("user", message)
             
-            # Log start
+            # Начинаем детальное логирование
+            execution_id = log_agent_start(agent.name, message, context_path)
+            
+            # Логируем промпт агента
+            agent_instructions = self._build_agent_instructions(agent_key, context_path)
+            log_agent_prompt(agent.name, "full", agent_instructions, context_path)
+            
+            # Log start (legacy)
             logger.log_agent_start(agent.name, message)
             
-            # Run agent
-            if stream:
-                # Handle streaming (simplified for now)
-                result = await Runner.run(agent, message)
-            else:
-                result = await Runner.run(agent, message)
+            # Run agent with max_turns configuration and timeout
+            max_turns = self.config.get_max_turns()
+            timeout_seconds = self.config.get_agent_timeout()
+            
+            logger.info(f"Starting agent execution with max_turns={max_turns}, timeout={timeout_seconds}s")
+            
+            try:
+                if stream:
+                    # Handle streaming (simplified for now)
+                    result = await asyncio.wait_for(
+                        Runner.run(agent, message, max_turns=max_turns),
+                        timeout=timeout_seconds
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        Runner.run(agent, message, max_turns=max_turns),
+                        timeout=timeout_seconds
+                    )
+            except asyncio.TimeoutError:
+                logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
+                raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
+            except Exception as e:
+                raise AgentError(f"Agent execution failed: {e}") from e
             
             # Process result
             output = result.final_output if hasattr(result, 'final_output') else str(result)
@@ -208,8 +237,11 @@ class AgentFactory:
             execution.output = output
             execution.tools_used = self._extract_tools_used(result)
             
-            # Log completion
+            # Завершаем детальное логирование
             duration = execution.end_time - execution.start_time
+            log_agent_end(output, duration, execution.tools_used)
+            
+            # Log completion (legacy)
             logger.log_agent_end(agent.name, output, duration)
             
             # Add to execution history
@@ -224,6 +256,10 @@ class AgentFactory:
             execution.end_time = time.time()
             execution.error = str(e)
             
+            # Логируем ошибку в детальном логгере
+            log_agent_error(e)
+            
+            # Log error (legacy)
             logger.log_agent_error(agent_key, e)
             self.context_manager.add_execution(execution)
             
@@ -380,14 +416,21 @@ class AgentFactory:
             
             execution = AgentExecution(
                 agent_name=agent_name,
-                input_message=input_data,
-                start_time=start_time
+                start_time=str(start_time),
+                input_message=input_data
             )
             
             try:
                 # Set current agent for tool logging
                 set_current_agent(agent_name)
                 
+                # Начинаем детальное логирование
+                execution_id = log_agent_start(agent_name, input_data)
+                
+                # Логируем вызов инструмента
+                log_tool_call("call_agent", {"input": input_data})
+                
+                logger.log_agent_tool_start(agent_name, "call_agent", input_data)
                 logger.log_agent_start(agent_name, input_data)
                 
                 # Call original function
@@ -399,6 +442,10 @@ class AgentFactory:
                 execution.output = str(result)
                 
                 duration = execution.end_time - execution.start_time
+                
+                # Завершаем детальное логирование
+                log_agent_end(str(result), duration, ["call_agent"])
+                
                 logger.log_agent_end(agent_name, str(result), duration)
                 
                 self.context_manager.add_execution(execution)
@@ -411,6 +458,9 @@ class AgentFactory:
             except Exception as e:
                 execution.end_time = time.time()
                 execution.error = str(e)
+                
+                # Логируем ошибку в детальном логгере
+                log_agent_error(e)
                 
                 logger.log_agent_error(agent_name, e)
                 self.context_manager.add_execution(execution)

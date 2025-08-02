@@ -16,6 +16,7 @@ from core.config import Config
 from core.agent_factory import AgentFactory
 from utils.logger import Logger
 from utils.pretty_logger import PrettyLogger, update_todos
+from utils.agent_logger import configure_agent_logger, AgentLogLevel
 from utils.exceptions import GridError
 import logging
 import time
@@ -23,8 +24,8 @@ import time
 # Configure logging to suppress technical messages
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
-logging.getLogger("grid").setLevel(logging.WARNING)
-Logger.configure(level="WARNING", enable_console=False)
+logging.getLogger("grid").setLevel(logging.INFO)
+Logger.configure(level="INFO", enable_console=False, log_dir="logs", enable_legacy_logs=True, force_reconfigure=True)
 
 # Initialize beautiful logger
 pretty_logger = PrettyLogger("agent_chat")
@@ -78,6 +79,20 @@ async def main():
         operation = pretty_logger.tool_start("AgentFactory")
         factory = AgentFactory(config, args.path)
         pretty_logger.tool_result(operation, result="Фабрика агентов инициализирована")
+        
+        # Настройка детального логирования агентов
+        agent_logging_config = config.config.settings.agent_logging
+        if agent_logging_config.enabled:
+            log_level = AgentLogLevel.FULL
+            if agent_logging_config.level == "basic":
+                log_level = AgentLogLevel.BASIC
+            elif agent_logging_config.level == "detailed":
+                log_level = AgentLogLevel.DETAILED
+            
+            configure_agent_logger("logs", log_level)
+            pretty_logger.info("Детальное логирование агентов включено")
+        else:
+            pretty_logger.info("Детальное логирование агентов отключено")
         
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
@@ -171,8 +186,8 @@ async def main():
                         print(f"   История выполнения: {context_info.get('execution_history', 0)}")
                         print(f"   Использование памяти: {context_info.get('memory_usage_mb', 0):.2f} МБ")
                         if context_info.get('last_user_message'):
-                            last_msg = context_info['last_user_message'][:100]
-                            print(f"   Последнее сообщение: {last_msg}...")
+                            last_msg = context_info['last_user_message']
+                            print(f"   Последнее сообщение: {last_msg}")
                         continue
                     elif user_input.lower() == 'help':
                         print("\nAvailable commands:")

@@ -538,8 +538,8 @@ def _extract_required_tools(task_description: str) -> List[str]:
     tool_mappings = {
         "file": ["file_read", "file_write", "file_list"],
         "git": ["git_status", "git_commit", "git_log"],
-        "search": ["web_search", "file_search"],
-        "network": ["web_search"],
+        "search": ["file_search"],
+        "network": ["file_search"],
         "database": ["database_query"],
         "code": ["file_edit_patch", "file_read"]
     }
