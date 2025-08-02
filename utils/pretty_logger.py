@@ -5,6 +5,7 @@ Beautiful console logger for Grid system with tool tracking and rich formatting.
 import sys
 import time
 import json
+import threading
 from typing import Any, Dict, List, Optional, Union
 from enum import Enum
 from dataclasses import dataclass, asdict
@@ -62,6 +63,7 @@ class ToolOperation:
     duration: Optional[float] = None
     lines_changed: Optional[int] = None
     expand_hint: str = "ctrl+r to expand"
+    agent_name: Optional[str] = None
 
 
 class PrettyLogger:
@@ -73,6 +75,16 @@ class PrettyLogger:
         self.tools_used: List[ToolOperation] = []
         self.colors_enabled = True
         self.reset_color = "\033[0m"
+        # Thread-local storage for current agent
+        self._thread_local = threading.local()
+        
+    def set_current_agent(self, agent_name: str) -> None:
+        """Set current agent name for this thread."""
+        self._thread_local.current_agent = agent_name
+        
+    def get_current_agent(self) -> Optional[str]:
+        """Get current agent name for this thread."""
+        return getattr(self._thread_local, 'current_agent', None)
         
     def _colorize(self, text: str, color: str) -> str:
         """Apply color to text if colors are enabled."""
@@ -126,13 +138,16 @@ class PrettyLogger:
     
     def tool_start(self, tool_name: str, **kwargs) -> ToolOperation:
         """Start tracking a tool operation."""
+        current_agent = self.get_current_agent()
+        
         operation = ToolOperation(
             name=tool_name,
-            args=kwargs
+            args=kwargs,
+            agent_name=current_agent
         )
         self.tools_used.append(operation)
         
-        # Format tool call
+        # Format tool call with agent name if available
         symbol = self._format_symbol(LogLevel.TOOL)
         args_str = ""
         if kwargs:
@@ -146,7 +161,12 @@ class PrettyLogger:
             if args_parts:
                 args_str = f"({', '.join(args_parts)})"
         
-        print(f"{symbol} {tool_name}{args_str}")
+        # Show agent name if available
+        if current_agent:
+            print(f"{symbol} [{current_agent}] {tool_name}{args_str}")
+        else:
+            print(f"{symbol} {tool_name}{args_str}")
+            
         return operation
     
     def tool_result(self, operation: ToolOperation, result: str = None, 
@@ -363,3 +383,15 @@ def update_todos(todos: List[Dict[str, str]]) -> None:
 def section_start(title: str) -> None:
     """Start new section."""
     pretty_logger.section_start(title)
+
+def set_current_agent(agent_name: str) -> None:
+    """Set current agent name for this thread."""
+    pretty_logger.set_current_agent(agent_name)
+
+def get_current_agent() -> Optional[str]:
+    """Get current agent name for this thread."""
+    return pretty_logger.get_current_agent()
+
+def clear_current_agent() -> None:
+    """Clear current agent name for this thread."""
+    pretty_logger.set_current_agent("")
