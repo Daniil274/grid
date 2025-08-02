@@ -38,6 +38,7 @@ venv.bak/
 *.swp
 *.swo
 *~
+agents.code-workspace
 
 # OS
 .DS_Store

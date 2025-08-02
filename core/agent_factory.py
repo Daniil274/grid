@@ -17,6 +17,7 @@ from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names, MCPClient
 from utils.exceptions import AgentError, ConfigError
 from utils.logger import Logger
+from utils.pretty_logger import set_current_agent, clear_current_agent
 
 load_dotenv()
 logger = Logger(__name__)
@@ -177,6 +178,9 @@ class AgentFactory:
         )
         
         try:
+            # Set current agent for tool logging
+            set_current_agent(agent_key)
+            
             # Create agent
             agent = await self.create_agent(agent_key, context_path)
             
@@ -211,6 +215,9 @@ class AgentFactory:
             # Add to execution history
             self.context_manager.add_execution(execution)
             
+            # Clear current agent
+            clear_current_agent()
+            
             return output
             
         except Exception as e:
@@ -219,6 +226,9 @@ class AgentFactory:
             
             logger.log_agent_error(agent_key, e)
             self.context_manager.add_execution(execution)
+            
+            # Clear current agent on error too
+            clear_current_agent()
             
             raise AgentError(f"Agent execution failed: {e}") from e
     
@@ -375,6 +385,9 @@ class AgentFactory:
             )
             
             try:
+                # Set current agent for tool logging
+                set_current_agent(agent_name)
+                
                 logger.log_agent_start(agent_name, input_data)
                 
                 # Call original function
@@ -390,6 +403,9 @@ class AgentFactory:
                 
                 self.context_manager.add_execution(execution)
                 
+                # Clear current agent
+                clear_current_agent()
+                
                 return result
                 
             except Exception as e:
@@ -398,6 +414,9 @@ class AgentFactory:
                 
                 logger.log_agent_error(agent_name, e)
                 self.context_manager.add_execution(execution)
+                
+                # Clear current agent on error too
+                clear_current_agent()
                 
                 raise
         
