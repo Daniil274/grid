@@ -32,8 +32,10 @@ class AgentLogger:
         # Загружаем .env файл
         load_dotenv()
         
-        # Читаем настройки из .env
-        self.debug_enabled = os.getenv('DEBUG_LOGGING', 'false').lower() == 'true'
+        # Читаем настройки из .env и конфигурации
+        debug_env = os.getenv('DEBUG_LOGGING', 'false').lower() == 'true'
+        debug_config = os.getenv('DEBUG', 'false').lower() == 'true'
+        self.debug_enabled = debug_env or debug_config
         self.log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
         self.log_agents = os.getenv('LOG_AGENTS', 'true').lower() == 'true'
         self.log_tools = os.getenv('LOG_TOOLS', 'true').lower() == 'true'
@@ -43,7 +45,8 @@ class AgentLogger:
         
         # Создаем основной логгер
         self.logger = logging.getLogger('AgentSystem')
-        self.logger.setLevel(getattr(logging, self.log_level, logging.INFO))
+        # Устанавливаем уровень DEBUG для основного логгера, чтобы все сообщения проходили
+        self.logger.setLevel(logging.DEBUG)
         
         # Очищаем существующие обработчики
         self.logger.handlers.clear()
@@ -54,12 +57,13 @@ class AgentLogger:
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         
-        # Консольный вывод
+        # Консольный вывод (только INFO и выше)
         console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
         self.logger.addHandler(console_handler)
         
-        # Файловый вывод с датой и временем в названии
+        # Файловый вывод с датой и временем в названии (INFO и выше)
         if not self.log_file:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             self.log_file = f"logs/agents_{timestamp}.log"
@@ -68,8 +72,18 @@ class AgentLogger:
             log_path = Path(self.log_file)
             log_path.parent.mkdir(parents=True, exist_ok=True)
             file_handler = logging.FileHandler(log_path, encoding='utf-8')
+            file_handler.setLevel(logging.INFO)  # INFO и выше в основной файл
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
+        
+        # Отдельный файл для DEBUG логов (полные промпты)
+        debug_log_file = f"logs/debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        debug_log_path = Path(debug_log_file)
+        debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+        debug_file_handler = logging.FileHandler(debug_log_path, encoding='utf-8')
+        debug_file_handler.setLevel(logging.DEBUG)  # Все уровни в debug файл
+        debug_file_handler.setFormatter(formatter)
+        self.logger.addHandler(debug_file_handler)
     
     def _should_log(self, category: str) -> bool:
         """Проверяет, нужно ли логгировать для данной категории."""
@@ -80,7 +94,13 @@ class AgentLogger:
             'agents': self.log_agents,
             'tools': self.log_tools,
             'communications': self.log_communications,
-            'errors': self.log_errors
+            'errors': self.log_errors,
+            'git_command': self.log_tools,  # Git команды как часть инструментов
+            'file_operation': self.log_tools,  # Файловые операции как часть инструментов
+            'prompt_building': self.log_agents,  # Построение промптов как часть агентов
+            'agent_creation': self.log_agents,  # Создание агентов
+            'test': True,  # Тестовые сообщения
+            'coordinator_prompt': True,  # Промпты координатора
         }
         
         return category_map.get(category, True)
@@ -95,8 +115,13 @@ class AgentLogger:
                 for handler in self.logger.handlers:
                     agent_logger.addHandler(handler)
             
-            agent_logger.info(f"🤖 START")
-            agent_logger.debug(f"   📝 Input: {input_data[:200]}{'...' if len(input_data) > 200 else ''}")
+            # Показываем краткую информацию о входных данных
+            input_summary = input_data[:100].replace('\n', ' ').strip()
+            if len(input_data) > 100:
+                input_summary += "..."
+            
+            agent_logger.info(f"🤖 START | 📝 {input_summary}")
+            agent_logger.debug(f"   📝 Full Input: {input_data}")
     
     def log_agent_end(self, agent_name: str, output_data: str, duration: float):
         """Логгирование завершения работы агента."""
@@ -106,9 +131,14 @@ class AgentLogger:
             if not agent_logger.handlers:
                 for handler in self.logger.handlers:
                     agent_logger.addHandler(handler)
+            
+            # Показываем краткую информацию о выходных данных
+            output_summary = output_data[:100].replace('\n', ' ').strip()
+            if len(output_data) > 100:
+                output_summary += "..."
                     
-            agent_logger.info(f"✅ END (took {duration:.2f}s)")
-            agent_logger.debug(f"   📤 Output: {output_data[:200]}{'...' if len(output_data) > 200 else ''}")
+            agent_logger.info(f"✅ END (took {duration:.2f}s) | 📤 {output_summary}")
+            agent_logger.debug(f"   📤 Full Output: {output_data}")
     
     def log_agent_error(self, agent_name: str, error: Exception):
         """Логгирование ошибки агента."""
@@ -130,9 +160,14 @@ class AgentLogger:
             if not tool_logger.handlers:
                 for handler in self.logger.handlers:
                     tool_logger.addHandler(handler)
+            
+            # Показываем краткую информацию о аргументах
+            args_summary = str(args)[:100].replace('\n', ' ').strip()
+            if len(str(args)) > 100:
+                args_summary += "..."
                     
-            tool_logger.info(f"🔧 START")
-            tool_logger.debug(f"   📋 Args: {json.dumps(args, ensure_ascii=False, indent=2)}")
+            tool_logger.info(f"🔧 START | 📋 {args_summary}")
+            tool_logger.debug(f"   📋 Full Args: {json.dumps(args, ensure_ascii=False, indent=2)}")
     
     def log_tool_end(self, tool_name: str, result: str, duration: float):
         """Логгирование завершения работы инструмента."""
@@ -142,9 +177,14 @@ class AgentLogger:
             if not tool_logger.handlers:
                 for handler in self.logger.handlers:
                     tool_logger.addHandler(handler)
+            
+            # Показываем краткую информацию о результате
+            result_summary = result[:100].replace('\n', ' ').strip()
+            if len(result) > 100:
+                result_summary += "..."
                     
-            tool_logger.info(f"✅ END (took {duration:.2f}s)")
-            tool_logger.debug(f"   📤 Result: {result[:200]}{'...' if len(result) > 200 else ''}")
+            tool_logger.info(f"✅ END (took {duration:.2f}s) | 📤 {result_summary}")
+            tool_logger.debug(f"   📤 Full Result: {result}")
     
     def log_tool_error(self, tool_name: str, error: Exception):
         """Логгирование ошибки инструмента."""
@@ -179,6 +219,14 @@ class AgentLogger:
             
             for key, value in kwargs.items():
                 self.logger.debug(f"   {key}: {value}")
+        else:
+            # Для DEBUG сообщений всегда логируем, если DEBUG включен
+            if level.lower() == 'debug' and self.debug_enabled:
+                log_method = getattr(self.logger, level.lower(), self.logger.debug)
+                log_method(f"🔹 {category.upper()}: {message}")
+                
+                for key, value in kwargs.items():
+                    self.logger.debug(f"   {key}: {value}")
     
     def log_agent_prompt(self, agent_name: str, prompt: str):
         """Логгирование промпта агента."""
@@ -189,16 +237,26 @@ class AgentLogger:
                 for handler in self.logger.handlers:
                     agent_logger.addHandler(handler)
             
-            agent_logger.info(f"📝 PROMPT")
-            agent_logger.debug(f"   📄 Instructions:")
+            # Краткая информация в консоль (INFO уровень)
+            prompt_summary = prompt[:200].replace('\n', ' ').strip()
+            if len(prompt) > 200:
+                prompt_summary += "..."
+            agent_logger.info(f"📝 PROMPT ({len(prompt)} chars): {prompt_summary}")
+            
+            # Полный промпт в файл (DEBUG уровень)
+            agent_logger.debug(f"📄 FULL PROMPT FOR {agent_name}:")
+            agent_logger.debug(f"   {'='*80}")
             
             # Разбиваем промпт на строки для лучшего отображения
             lines = prompt.split('\n')
             for i, line in enumerate(lines, 1):
                 if line.strip():  # Пропускаем пустые строки
-                    agent_logger.debug(f"   {i:2d}: {line}")
+                    agent_logger.debug(f"   {i:3d}: {line}")
                 else:
-                    agent_logger.debug(f"   {i:2d}: <empty>")
+                    agent_logger.debug(f"   {i:3d}: <empty>")
+            
+            agent_logger.debug(f"   {'='*80}")
+            agent_logger.debug(f"📄 END OF PROMPT FOR {agent_name}")
 
 # Глобальный экземпляр логгера
 logger = AgentLogger()
@@ -243,3 +301,31 @@ def log_custom(level: str, category: str, message: str, **kwargs):
 def log_agent_prompt(agent_name: str, prompt: str):
     """Логгирование промпта агента."""
     logger.log_agent_prompt(agent_name, prompt)
+
+def log_tool_performance(tool_name: str, operation: str, duration: float, **kwargs):
+    """Логгирование производительности инструментов."""
+    if logger._should_log('tools'):
+        tool_logger = logging.getLogger(f'Tool.{tool_name}')
+        tool_logger.setLevel(logger.logger.level)
+        # Проверяем, что хендлеры еще не добавлены
+        if not tool_logger.handlers:
+            for handler in logger.logger.handlers:
+                tool_logger.addHandler(handler)
+        
+        tool_logger.debug(f"⚡ PERFORMANCE: {operation} took {duration:.3f}s")
+        for key, value in kwargs.items():
+            tool_logger.debug(f"   {key}: {value}")
+
+def log_tool_usage(tool_name: str, args: Dict[str, Any], success: bool, duration: float):
+    """Логгирование использования инструментов для статистики."""
+    if logger._should_log('tools'):
+        tool_logger = logging.getLogger(f'Tool.{tool_name}')
+        tool_logger.setLevel(logger.logger.level)
+        # Проверяем, что хендлеры еще не добавлены
+        if not tool_logger.handlers:
+            for handler in logger.logger.handlers:
+                tool_logger.addHandler(handler)
+        
+        status = "✅ SUCCESS" if success else "❌ FAILED"
+        tool_logger.info(f"📊 USAGE: {tool_name} - {status} ({duration:.3f}s)")
+        tool_logger.debug(f"   📋 Args: {json.dumps(args, ensure_ascii=False, indent=2)}")

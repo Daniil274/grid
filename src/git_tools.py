@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from agents import function_tool
-from utils.logger import log_tool_start, log_tool_end, log_tool_error
+from utils.logger import log_tool_start, log_tool_end, log_tool_error, log_tool_usage
 
 def _run_git_command(command: List[str], cwd: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -42,6 +42,10 @@ def _run_git_command(command: List[str], cwd: Optional[str] = None) -> Dict[str,
             if dangerous in cmd_str:
                 return {"success": False, "output": "", "error": f"Опасная команда заблокирована: {dangerous}"}
         
+        # Логгируем выполнение команды
+        from utils.logger import log_custom
+        log_custom('debug', 'git_command', f"Выполнение: {' '.join(command)}", cwd=cwd)
+        
         # Выполняем команду
         result = subprocess.run(
             command,
@@ -52,6 +56,12 @@ def _run_git_command(command: List[str], cwd: Optional[str] = None) -> Dict[str,
             timeout=30
         )
         
+        # Логгируем результат
+        if result.returncode == 0:
+            log_custom('debug', 'git_command', f"Успешно выполнено: {' '.join(command)}")
+        else:
+            log_custom('debug', 'git_command', f"Ошибка выполнения: {' '.join(command)}", error=result.stderr)
+        
         return {
             "success": result.returncode == 0,
             "output": result.stdout.strip(),
@@ -59,8 +69,12 @@ def _run_git_command(command: List[str], cwd: Optional[str] = None) -> Dict[str,
         }
         
     except subprocess.TimeoutExpired:
+        from utils.logger import log_custom
+        log_custom('error', 'git_command', f"Таймаут команды: {' '.join(command)}")
         return {"success": False, "output": "", "error": "Команда превысила лимит времени выполнения"}
     except Exception as e:
+        from utils.logger import log_custom
+        log_custom('error', 'git_command', f"Ошибка выполнения: {' '.join(command)}", error=str(e))
         return {"success": False, "output": "", "error": f"Ошибка выполнения команды: {str(e)}"}
 
 @function_tool
@@ -129,13 +143,17 @@ def git_status(directory: str = ".") -> str:
             
             result = f"Статус Git репозитория в {directory}:\n\n" + "\n".join(formatted_lines)
         
-        log_tool_end("git_status", result, time.time() - start_time)
+        duration = time.time() - start_time
+        log_tool_end("git_status", result, duration)
+        log_tool_usage("git_status", args, True, duration)
         return result
         
     except Exception as e:
         log_tool_error("git_status", e)
         result = f"ОШИБКА при получении статуса: {str(e)}"
-        log_tool_end("git_status", result, time.time() - start_time)
+        duration = time.time() - start_time
+        log_tool_end("git_status", result, duration)
+        log_tool_usage("git_status", args, False, duration)
         return result
 
 @function_tool
@@ -190,13 +208,17 @@ def git_log(directory: str = ".", max_commits: int = 10) -> str:
             
             result = "\n".join(formatted_lines)
         
-        log_tool_end("git_log", result, time.time() - start_time)
+        duration = time.time() - start_time
+        log_tool_end("git_log", result, duration)
+        log_tool_usage("git_log", args, True, duration)
         return result
         
     except Exception as e:
         log_tool_error("git_log", e)
         result = f"ОШИБКА при получении истории: {str(e)}"
-        log_tool_end("git_log", result, time.time() - start_time)
+        duration = time.time() - start_time
+        log_tool_end("git_log", result, duration)
+        log_tool_usage("git_log", args, False, duration)
         return result
 
 @function_tool

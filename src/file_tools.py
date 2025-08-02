@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import List, Any
 from agents import function_tool
-from utils.logger import log_tool_start, log_tool_end, log_tool_error
+from utils.logger import log_tool_start, log_tool_end, log_tool_error, log_tool_usage
 
 @function_tool
 def read_file(filepath: str) -> str:
@@ -43,16 +43,25 @@ def read_file(filepath: str) -> str:
             log_tool_end("read_file", result, time.time() - start_time)
             return result
         
+        # Логгируем информацию о файле перед чтением
+        from utils.logger import log_custom
+        file_size = path.stat().st_size
+        log_custom('debug', 'file_operation', f"Чтение файла: {filepath}", size=file_size)
+        
         content = path.read_text(encoding='utf-8')
         result = f"Содержимое файла {filepath}:\n\n{content}"
-        log_tool_end("read_file", result, time.time() - start_time)
+        duration = time.time() - start_time
+        log_tool_end("read_file", result, duration)
+        log_tool_usage("read_file", args, True, duration)
         return result
         
     except Exception as e:
         log_tool_error("read_file", e)
         error_type = type(e).__name__
         result = f"ОШИБКА при чтении {filepath}: {error_type} - {str(e)}"
-        log_tool_end("read_file", result, time.time() - start_time)
+        duration = time.time() - start_time
+        log_tool_end("read_file", result, duration)
+        log_tool_usage("read_file", args, False, duration)
         return result
 
 @function_tool 
@@ -179,6 +188,10 @@ def write_file(filepath: str, content: str) -> str:
     try:
         path = Path(filepath)
         
+        # Логгируем информацию о записи
+        from utils.logger import log_custom
+        log_custom('debug', 'file_operation', f"Запись файла: {filepath}", content_length=len(content))
+        
         # Создаем родительские директории если нужно
         path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -187,13 +200,17 @@ def write_file(filepath: str, content: str) -> str:
         
         size = path.stat().st_size
         result = f"✅ Файл {filepath} успешно записан ({size} байт)"
-        log_tool_end("write_file", result, time.time() - start_time)
+        duration = time.time() - start_time
+        log_tool_end("write_file", result, duration)
+        log_tool_usage("write_file", args, True, duration)
         return result
         
     except Exception as e:
         log_tool_error("write_file", e)
         result = f"ОШИБКА при записи файла {filepath}: {str(e)}"
-        log_tool_end("write_file", result, time.time() - start_time)
+        duration = time.time() - start_time
+        log_tool_end("write_file", result, duration)
+        log_tool_usage("write_file", args, False, duration)
         return result
 
 @function_tool
@@ -263,6 +280,10 @@ def search_files(
         
         results = []
         
+        # Логгируем начало поиска
+        from utils.logger import log_custom
+        log_custom('debug', 'file_operation', f"Начало поиска в: {directory}", pattern=search_pattern, use_regex=use_regex)
+        
         # Рекурсивно обходим директории
         for root, dirs, files in os.walk(base_path):
             root_path = Path(root)
@@ -318,6 +339,9 @@ def search_files(
             if len(results) >= max_results:
                 break
         
+        # Логгируем результаты поиска
+        log_custom('debug', 'file_operation', f"Поиск завершен", found_count=len(results))
+        
         # Формируем результат
         if not results:
             result = f"Поиск по паттерну '{search_pattern}' в {directory} не дал результатов"
@@ -367,9 +391,12 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
             log_tool_end("edit_file_patch", result, time.time() - start_time)
             return result
         
-        # Читаем оригинальное содержимое файла
+        # Логгируем информацию о редактировании
+        from utils.logger import log_custom
         original_content = path.read_text(encoding='utf-8')
         original_lines = original_content.splitlines(keepends=True)
+        log_custom('debug', 'file_operation', f"Редактирование файла: {filepath}", 
+                  original_lines=len(original_lines), patch_lines=len(patch_content.splitlines()))
         
         # Парсим патч
         patch_lines = patch_content.splitlines()
@@ -451,6 +478,10 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
         original_line_count = len(original_lines)
         new_line_count = len(new_lines)
         changes = new_line_count - original_line_count
+        
+        # Логгируем результат редактирования
+        log_custom('debug', 'file_operation', f"Файл обновлен: {filepath}", 
+                  changes=changes, new_lines=new_line_count)
         
         result = f"✅ Файл {filepath} успешно обновлен патчем"
         if changes != 0:

@@ -12,6 +12,7 @@ from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled
 from config_loader import config, AgentConfig
 from tools import get_tools_by_names
 from mcp_client import MCPClient
+from context_manager import ContextManager
 
 load_dotenv()
 
@@ -24,6 +25,7 @@ class AgentFactory:
         self.mcp_clients = {}
         self.agent_cache = {}
         self.agent_tools_cache = {}
+        self.context_manager = ContextManager()
         
         # Устанавливаем рабочую директорию если передана
         if working_directory:
@@ -59,8 +61,15 @@ class AgentFactory:
         instructions = self._build_agent_prompt_with_paths(agent_key, context_path)
         
         # Логгируем промпт агента
-        from utils.logger import log_agent_prompt
+        from utils.logger import log_agent_prompt, log_custom
         log_agent_prompt(agent_config.name, instructions)
+        
+        # Дополнительное логирование для координатора (только в файл)
+        if agent_key == "coordinator":
+            log_custom('debug', 'coordinator_prompt', f"Coordinator prompt length: {len(instructions)}")
+            log_custom('debug', 'coordinator_prompt', f"Contains 'call_thinker': {'call_thinker' in instructions}")
+            log_custom('debug', 'coordinator_prompt', f"Contains 'ПРАВИЛО': {'ПРАВИЛО' in instructions}")
+            log_custom('debug', 'coordinator_prompt', f"Contains 'ПРИМЕР': {'ПРИМЕР' in instructions}")
         
         # Получаем инструменты
         tools = await self._get_agent_tools(agent_config)
@@ -75,6 +84,21 @@ class AgentFactory:
         
         return agent
     
+    def add_to_context(self, role: str, content: str):
+        """Добавляет сообщение в контекст разговора."""
+        self.context_manager.add_message(role, content)
+    
+    def clear_context(self):
+        """Очищает контекст разговора."""
+        self.context_manager.clear_history()
+    
+    def get_context_info(self) -> dict:
+        """Возвращает информацию о контексте."""
+        return {
+            "history_count": self.context_manager.get_history_count(),
+            "last_user_message": self.context_manager.get_last_user_message()
+        }
+    
     def _build_agent_prompt_with_paths(self, agent_key: str, context_path: Optional[str] = None) -> str:
         """Строит промпт агента с информацией о путях."""
         base_instructions = config.build_agent_prompt(agent_key)
@@ -82,10 +106,19 @@ class AgentFactory:
         # Добавляем информацию о путях
         path_info = self._get_path_context(context_path)
         
+        # Добавляем контекст разговора
+        conversation_context = self.context_manager.get_context_message()
+        
+        # Собираем полный промпт
+        parts = [base_instructions]
+        
         if path_info:
-            full_instructions = f"{base_instructions}\n\n{path_info}"
-        else:
-            full_instructions = base_instructions
+            parts.append(path_info)
+        
+        if conversation_context:
+            parts.append(conversation_context)
+        
+        full_instructions = "\n\n".join(parts)
         
         return full_instructions
     
@@ -168,11 +201,60 @@ class AgentFactory:
                     tool_description=tool_description
                 )
                 
+                # Модифицируем инструмент для правильного логирования как агента
+                agent_tool = self._wrap_agent_tool_for_logging(agent_tool, agent.name, agent_key)
+                
                 self.agent_tools_cache[agent_key] = agent_tool
             
             tools.append(self.agent_tools_cache[agent_key])
         
         return tools
+    
+    def _wrap_agent_tool_for_logging(self, agent_tool, agent_name: str, agent_key: str):
+        """Оборачивает агент-инструмент для правильного логирования как агента."""
+        import time
+        from utils.logger import log_agent_start, log_agent_end, log_agent_error
+        
+        # Сохраняем оригинальную функцию
+        # FunctionTool использует on_invoke_tool для вызова функции
+        if hasattr(agent_tool, 'on_invoke_tool'):
+            original_invoke = agent_tool.on_invoke_tool
+        else:
+            # Если не можем найти функцию, возвращаем инструмент как есть
+            print(f"⚠️ Не удалось найти функцию для агента {agent_name}")
+            return agent_tool
+        
+        async def wrapped_invoke_tool(tool_context, tool_call_arguments):
+            start_time = time.time()
+            input_data = str(tool_call_arguments)
+            
+            # Логируем как агента
+            log_agent_start(agent_name, input_data)
+            
+            try:
+                # Вызываем оригинальную функцию
+                result = original_invoke(tool_context, tool_call_arguments)
+                
+                # Проверяем, является ли результат корутиной
+                if hasattr(result, '__await__'):
+                    result = await result
+                
+                duration = time.time() - start_time
+                
+                # Логируем завершение как агента
+                log_agent_end(agent_name, str(result), duration)
+                
+                return result
+                
+            except Exception as e:
+                duration = time.time() - start_time
+                log_agent_error(agent_name, e)
+                raise
+        
+        # Заменяем функцию в инструменте
+        agent_tool.on_invoke_tool = wrapped_invoke_tool
+        
+        return agent_tool
     
     async def _get_mcp_client(self, tool_name: str) -> MCPClient:
         """Получает или создает MCP клиента для инструмента."""
@@ -205,6 +287,13 @@ class AgentFactory:
         self.mcp_clients.clear()
         self.agent_cache.clear()
         self.agent_tools_cache.clear()
+    
+    def clear_agent_cache(self):
+        """Очищает кэш агентов для принудительной перезагрузки."""
+        self.agent_cache.clear()
+        self.agent_tools_cache.clear()
+        from utils.logger import log_custom
+        log_custom('info', 'cache_clear', "Agent cache cleared")
 
 # Глобальная фабрика
 agent_factory = AgentFactory()

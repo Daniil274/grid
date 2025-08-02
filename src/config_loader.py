@@ -23,7 +23,8 @@ class ProviderConfig:
     """Конфигурация провайдера."""
     name: str
     base_url: str
-    api_key_env: str
+    api_key_env: Optional[str] = None
+    api_key: Optional[str] = None
     timeout: int = 30
     max_retries: int = 2
 
@@ -108,7 +109,8 @@ class ConfigLoader:
         return ProviderConfig(
             name=p['name'],
             base_url=p['base_url'],
-            api_key_env=p['api_key_env'],
+            api_key_env=p.get('api_key_env'),
+            api_key=p.get('api_key'),
             timeout=p.get('timeout', 30),
             max_retries=p.get('max_retries', 2)
         )
@@ -146,9 +148,18 @@ class ConfigLoader:
         return {key: config['description'] for key, config in providers.items()}
     
     def get_api_key(self, provider_key: str) -> Optional[str]:
-        """Получает API ключ для провайдера из переменных окружения."""
+        """Получает API ключ для провайдера из переменных окружения или YAML."""
         provider = self.get_provider(provider_key)
-        return os.getenv(provider.api_key_env)
+        
+        # Сначала проверяем прямой API ключ в YAML
+        if provider.api_key:
+            return provider.api_key
+        
+        # Затем проверяем переменную окружения
+        if provider.api_key_env:
+            return os.getenv(provider.api_key_env)
+        
+        return None
     
     def get_agent(self, agent_key: str) -> AgentConfig:
         """Получает конфигурацию агента."""
@@ -220,6 +231,12 @@ class ConfigLoader:
     def is_mcp_enabled(self) -> bool:
         """Проверяет включен ли MCP глобально."""
         return self._config.get('settings', {}).get('mcp_enabled', False)
+    
+    def reload_config(self):
+        """Перезагружает конфигурацию из файла."""
+        self._load_config()
+        from utils.logger import log_custom
+        log_custom('info', 'config_reload', f"Configuration reloaded from {self.config_path}")
 
 # Глобальный экземпляр
 config = ConfigLoader()

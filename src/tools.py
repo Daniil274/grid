@@ -31,7 +31,26 @@ from git_tools import (
 @function_tool
 def web_search(query: str) -> str:
     """Поиск информации в интернете."""
-    return f"Поиск '{query}' временно недоступен. Нужен API ключ для поисковой системы."
+    import time
+    from utils.logger import log_tool_start, log_tool_end, log_tool_error, log_tool_usage
+    
+    start_time = time.time()
+    args = {"query": query}
+    log_tool_start("web_search", args)
+    
+    try:
+        result = f"Поиск '{query}' временно недоступен. Нужен API ключ для поисковой системы."
+        duration = time.time() - start_time
+        log_tool_end("web_search", result, duration)
+        log_tool_usage("web_search", args, True, duration)
+        return result
+    except Exception as e:
+        log_tool_error("web_search", e)
+        result = f"ОШИБКА при поиске: {str(e)}"
+        duration = time.time() - start_time
+        log_tool_end("web_search", result, duration)
+        log_tool_usage("web_search", args, False, duration)
+        return result
 
 # ============================================================================
 # СЛОВАРЬ ВСЕХ ДОСТУПНЫХ ИНСТРУМЕНТОВ

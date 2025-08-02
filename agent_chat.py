@@ -82,7 +82,12 @@ async def main():
             # Одноразовое сообщение
             print(f"💬 Отправка сообщения: {args.message}")
             
+            # Добавляем сообщение пользователя в контекст
+            factory.add_to_context("user", args.message)
+            
             # Логгируем запуск агента
+            import time
+            start_time = time.time()
             try:
                 from utils.logger import log_agent_start
                 log_agent_start(agent.name, args.message)
@@ -91,10 +96,14 @@ async def main():
             
             result = await Runner.run(agent, args.message)
             
+            # Добавляем ответ агента в контекст
+            factory.add_to_context("assistant", result.final_output)
+            
             # Логгируем завершение агента
+            duration = time.time() - start_time
             try:
                 from utils.logger import log_agent_end
-                log_agent_end(agent.name, result.final_output, 0.0)  # duration будет 0, так как мы не измеряем время
+                log_agent_end(agent.name, result.final_output, duration)
             except Exception as e:
                 print(f"⚠️ Ошибка логирования: {e}")
             
@@ -105,6 +114,7 @@ async def main():
             print("Введите 'exit' для выхода")
             print("Введите 'clear' для очистки истории")
             print("Введите 'paths' для показа информации о путях")
+            print("Введите 'context' для показа контекста")
             print("==========================")
             
             while True:
@@ -114,9 +124,9 @@ async def main():
                     if user_input.lower() == 'exit':
                         break
                     elif user_input.lower() == 'clear':
-                        # Создаем нового агента для очистки истории
-                        agent = await factory.create_agent(agent_key, context_path=args.context_path)
-                        print("История очищена")
+                        # Очищаем контекст
+                        factory.clear_context()
+                        print("✅ История очищена")
                         continue
                     elif user_input.lower() == 'paths':
                         print("\n📁 Информация о путях:")
@@ -126,12 +136,26 @@ async def main():
                             print(f"   Контекстный путь: {args.context_path}")
                             print(f"   Абсолютный контекстный путь: {config.get_absolute_path(args.context_path)}")
                         continue
+                    elif user_input.lower() == 'context':
+                        context_info = factory.get_context_info()
+                        print(f"\n📋 Информация о контексте:")
+                        print(f"   Сообщений в истории: {context_info['history_count']}")
+                        if context_info['last_user_message']:
+                            print(f"   Последнее сообщение пользователя: {context_info['last_user_message'][:100]}...")
+                        else:
+                            print(f"   Последнее сообщение пользователя: нет")
+                        continue
                     elif not user_input:
                         continue
                     
                     print("\nАгент думает...")
                     
+                    # Добавляем сообщение пользователя в контекст
+                    factory.add_to_context("user", user_input)
+                    
                     # Логгируем запуск агента
+                    import time
+                    start_time = time.time()
                     try:
                         from utils.logger import log_agent_start
                         log_agent_start(agent.name, user_input)
@@ -140,10 +164,14 @@ async def main():
                     
                     result = await Runner.run(agent, user_input)
                     
+                    # Добавляем ответ агента в контекст
+                    factory.add_to_context("assistant", result.final_output)
+                    
                     # Логгируем завершение агента
+                    duration = time.time() - start_time
                     try:
                         from utils.logger import log_agent_end
-                        log_agent_end(agent.name, result.final_output, 0.0)
+                        log_agent_end(agent.name, result.final_output, duration)
                     except Exception as e:
                         print(f"⚠️ Ошибка логирования: {e}")
                     
