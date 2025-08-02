@@ -5,6 +5,7 @@
 settings:
   default_agent: "coordinator"
   max_history: 15
+  max_turns: 50  # Лимит ходов для агентов
   debug: false
   mcp_enabled: true
   working_directory: "."

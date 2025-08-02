@@ -37,6 +37,47 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_data, ensure_ascii=False)
 
 
+class LegacyFormatter(logging.Formatter):
+    """Legacy formatter for agent logs in old format."""
+    
+    def format(self, record: logging.LogRecord) -> str:
+        """Format log record in legacy format."""
+        timestamp = datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S')
+        level = record.levelname.ljust(8)
+        logger_name = record.name.ljust(20)
+        message = record.getMessage()
+        
+        return f"{timestamp} | {level} | {logger_name} | {message}"
+
+
+class TimestampedFileHandler(logging.FileHandler):
+    """File handler that creates files with timestamps."""
+    
+    def __init__(self, log_dir: str, filename_prefix: str, mode: str = 'a', encoding: str = 'utf-8'):
+        """
+        Initialize timestamped file handler.
+        
+        Args:
+            log_dir: Directory for log files
+            filename_prefix: Prefix for log filename
+            mode: File mode
+            encoding: File encoding
+        """
+        self.log_dir = Path(log_dir)
+        self.filename_prefix = filename_prefix
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create filename with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"{filename_prefix}_{timestamp}.log"
+        filepath = self.log_dir / filename
+        
+        # Store filepath for reference
+        self.filepath = filepath
+        
+        super().__init__(filepath, mode, encoding)
+
+
 class Logger:
     """Centralized logger with support for structured logging."""
     
@@ -54,11 +95,20 @@ class Logger:
         level: str = "INFO",
         log_dir: Optional[str] = None,
         enable_console: bool = True,
-        enable_json: bool = False
+        enable_json: bool = False,
+        enable_legacy_logs: bool = True,
+        force_reconfigure: bool = False
     ) -> None:
         """Configure global logging settings."""
-        if cls._configured:
+        if cls._configured and not force_reconfigure:
             return
+        
+        # Clear existing handlers if reconfiguring
+        if force_reconfigure:
+            root_logger = logging.getLogger()
+            for handler in root_logger.handlers[:]:
+                root_logger.removeHandler(handler)
+            cls._configured = False
         
         # Set global level
         log_level = getattr(logging, level.upper(), logging.INFO)
@@ -83,15 +133,21 @@ class Logger:
             log_path.mkdir(parents=True, exist_ok=True)
             
             # General log file
-            file_handler = logging.FileHandler(log_path / "grid.log")
+            file_handler = logging.FileHandler(log_path / "grid.log", encoding='utf-8')
             file_handler.setFormatter(JSONFormatter())
             logging.getLogger().addHandler(file_handler)
             
             # Error log file
-            error_handler = logging.FileHandler(log_path / "grid_errors.log")
+            error_handler = logging.FileHandler(log_path / "grid_errors.log", encoding='utf-8')
             error_handler.setLevel(logging.ERROR)
             error_handler.setFormatter(JSONFormatter())
             logging.getLogger().addHandler(error_handler)
+            
+            # Legacy agent logs (timestamped)
+            if enable_legacy_logs:
+                legacy_handler = TimestampedFileHandler(log_dir, "agents")
+                legacy_handler.setFormatter(LegacyFormatter())
+                logging.getLogger().addHandler(legacy_handler)
         
         cls._configured = True
     
@@ -132,6 +188,10 @@ class Logger:
     # Specialized logging methods for Grid components
     def log_agent_start(self, agent_name: str, input_message: str) -> None:
         """Log agent execution start."""
+        # Legacy format logging (without emojis for compatibility)
+        self.info(f"START | {input_message}")
+        
+        # JSON format logging
         self.info(
             f"Agent '{agent_name}' starting execution",
             agent_name=agent_name,
@@ -141,6 +201,10 @@ class Logger:
     
     def log_agent_end(self, agent_name: str, output: str, duration: float) -> None:
         """Log agent execution completion."""
+        # Legacy format logging (without emojis for compatibility)
+        self.info(f"END | {output} | {duration:.2f}s")
+        
+        # JSON format logging
         self.info(
             f"Agent '{agent_name}' completed execution",
             agent_name=agent_name,
@@ -151,6 +215,10 @@ class Logger:
     
     def log_agent_error(self, agent_name: str, error: Exception) -> None:
         """Log agent execution error."""
+        # Legacy format logging (without emojis for compatibility)
+        self.error(f"ERROR | {str(error)}")
+        
+        # JSON format logging
         self.error(
             f"Agent '{agent_name}' execution failed",
             agent_name=agent_name,
@@ -161,11 +229,44 @@ class Logger:
     
     def log_tool_call(self, tool_name: str, args: Dict[str, Any]) -> None:
         """Log tool call."""
+        # Legacy format logging (without emojis for compatibility)
+        args_str = str(args)
+        self.info(f"TOOL | {tool_name} | {args_str}")
+        
+        # JSON format logging
         self.debug(
             f"Tool '{tool_name}' called",
             tool_name=tool_name,
             args_count=len(args),
             event_type="tool_call"
+        )
+    
+    def log_agent_creation(self, agent_name: str, agent_display_name: str = None) -> None:
+        """Log agent creation."""
+        display_name = agent_display_name or agent_name
+        # Legacy format logging (without emojis for compatibility)
+        self.info(f"AGENT_CREATION: Creating agent '{agent_name}' ({display_name})")
+        
+        # JSON format logging
+        self.info(
+            f"Agent '{agent_name}' created",
+            agent_name=agent_name,
+            display_name=display_name,
+            event_type="agent_creation"
+        )
+    
+    def log_agent_tool_start(self, agent_name: str, tool_name: str, input_data: str) -> None:
+        """Log agent tool execution start."""
+        # Legacy format logging (without emojis for compatibility)
+        self.info(f"AGENT_TOOL START | {tool_name} | {input_data}")
+        
+        # JSON format logging
+        self.info(
+            f"Agent '{agent_name}' tool '{tool_name}' starting",
+            agent_name=agent_name,
+            tool_name=tool_name,
+            input_length=len(input_data),
+            event_type="agent_tool_start"
         )
     
     def log_mcp_connection(self, server_name: str, status: str) -> None:

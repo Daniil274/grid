@@ -199,3 +199,11 @@ class Config:
     def get_max_history(self) -> int:
         """Get maximum history size."""
         return self.config.settings.max_history
+    
+    def get_max_turns(self) -> int:
+        """Get maximum turns limit for agents."""
+        return self.config.settings.max_turns
+    
+    def get_agent_timeout(self) -> int:
+        """Get agent execution timeout in seconds."""
+        return self.config.settings.agent_timeout

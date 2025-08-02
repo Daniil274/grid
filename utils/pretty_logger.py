@@ -199,10 +199,8 @@ class PrettyLogger:
                 summary_parts.append("Command completed")
         
         if not summary_parts and result:
-            # Fallback - show truncated result
-            result_preview = result[:100].replace('\n', ' ')
-            if len(result) > 100:
-                result_preview += "..."
+            # Fallback - show full result
+            result_preview = result.replace('\n', ' ')
             summary_parts.append(result_preview)
         
         summary = " ".join(summary_parts) if summary_parts else "Completed"
@@ -236,9 +234,8 @@ class PrettyLogger:
                 # Show some context
                 diff_lines.append(f"    {line_num:>4}    {old.rstrip()}")
         
-        # Limit diff output
-        if len(diff_lines) > 15:
-            diff_lines = diff_lines[:15] + ["         ..."]
+        # Show full diff output
+        # No limit on diff lines
         
         operation._diff_lines = diff_lines
     
@@ -266,11 +263,12 @@ class PrettyLogger:
             symbol = self._colorize(todo.symbol, status_color)
             content = todo.content
             
-            # Truncate long content
-            if len(content) > 60:
-                content = content[:57] + "..."
-                
+            # Show full content
             self._print_line(f"⎿  {symbol} {content}", 1)
+        
+        # Add a small delay to make updates visible
+        import time
+        time.sleep(0.1)
     
     def section_start(self, title: str) -> None:
         """Start a new section."""

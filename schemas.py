@@ -59,15 +59,27 @@ class AgentConfig(BaseModel):
     mcp_enabled: bool = False
 
 
+class AgentLoggingConfig(BaseModel):
+    """Configuration for agent logging."""
+    enabled: bool = True
+    level: str = "full"  # basic, detailed, full
+    save_prompts: bool = True
+    save_conversations: bool = True
+    save_executions: bool = True
+
+
 class Settings(BaseModel):
     """Global system settings."""
     default_agent: str = "assistant"
     max_history: int = Field(default=15, ge=1, le=100)
+    max_turns: int = Field(default=10, ge=1, le=100)  # Лимит ходов для агентов
+    agent_timeout: int = Field(default=300, ge=30, le=1800)  # Таймаут агента в секундах
     debug: bool = False
     mcp_enabled: bool = False
     working_directory: str = "."
     config_directory: str = "."
     allow_path_override: bool = True
+    agent_logging: AgentLoggingConfig = Field(default_factory=AgentLoggingConfig)
 
 
 class GridConfig(BaseModel):
