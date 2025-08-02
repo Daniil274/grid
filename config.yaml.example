@@ -1,88 +1,142 @@
-# Пример конфигурации AI системы
-# Показывает как использовать API ключи
+# Grid Agent System Configuration Example
+# Copy this file to config.yaml and customize for your needs
 
-# Глобальные настройки
+# Global system settings
 settings:
   default_agent: "coordinator"
   max_history: 15
-  debug: true
+  debug: false
   mcp_enabled: true
   working_directory: "."
   config_directory: "."
   allow_path_override: true
 
-# Провайдеры API
+# AI Provider configurations
 providers:
-  # LM Studio (локальный сервер)
-  lm-studio:
-    name: "lm-studio"
-    base_url: "http://localhost:1234/v1"
-    api_key: "lm-studio"  # Прямой API ключ
-    timeout: 10000
-    max_retries: 3
-  
-  # OpenAI
   openai:
     name: "OpenAI"
     base_url: "https://api.openai.com/v1"
-    # Вариант 1: Переменная окружения (рекомендуется)
     api_key_env: "OPENAI_API_KEY"
-    # Вариант 2: Прямой API ключ (не рекомендуется для безопасности)
-    # api_key: "sk-your-api-key-here"
     timeout: 30
     max_retries: 2
   
-  # Anthropic
   anthropic:
     name: "Anthropic"
     base_url: "https://api.anthropic.com"
-    # Вариант 1: Переменная окружения (рекомендуется)
     api_key_env: "ANTHROPIC_API_KEY"
-    # Вариант 2: Прямой API ключ (не рекомендуется для безопасности)
-    # api_key: "sk-ant-your-api-key-here"
     timeout: 45
     max_retries: 2
 
-# Модели
+# AI Model configurations
 models:
-  qwen3-8b:
-    name: "qwen/qwen3-8b"
-    provider: "lm-studio"
-    temperature: 0.7
-    max_tokens: 8000
-    description: "Qwen 3 8b модель"
-
-  gpt-4o:
-    name: "gpt-4o"
+  gpt-4:
+    name: "gpt-4"
     provider: "openai"
-    temperature: 0.5
+    temperature: 0.7
     max_tokens: 4000
-    description: "GPT-4 Omni универсальная модель"
+    description: "GPT-4 for general tasks"
+  
+  claude-3:
+    name: "claude-3-sonnet"
+    provider: "anthropic"
+    temperature: 0.3
+    max_tokens: 4000
+    description: "Claude 3 for coding and analysis"
 
-# Инструменты
+# Tool configurations
 tools:
+  # File operations
   file_read:
     type: "function"
     name: "read_file"
-    description: "Читает содержимое файла"
-    prompt_addition: "Используй read_file(filepath) для чтения файлов."
+    description: "Read file contents"
+    prompt_addition: "Use read_file(filepath) to read files."
+  
+  file_write:
+    type: "function"
+    name: "write_file"
+    description: "Write file contents"
+    prompt_addition: "Use write_file(filepath, content) to write files."
+  
+  file_list:
+    type: "function"
+    name: "list_files"
+    description: "List directory contents"
+    prompt_addition: "Use list_files(directory) to list files."
+  
+  # Git operations
+  git_status:
+    type: "function"
+    name: "git_status"
+    description: "Show Git repository status"
+    prompt_addition: "Use git_status(directory) to check Git status."
+  
+  git_commit:
+    type: "function"
+    name: "git_commit"
+    description: "Create Git commit"
+    prompt_addition: "Use git_commit(directory, message) to create commits."
 
-# Промпты
+# Agent configurations
+agents:
+  # Basic assistant
+  assistant:
+    name: "Assistant"
+    model: "gpt-4"
+    tools: []
+    base_prompt: "base"
+    description: "Basic conversational assistant"
+  
+  # File operations specialist
+  file_agent:
+    name: "File Agent"
+    model: "gpt-4"
+    tools: ["file_read", "file_write", "file_list"]
+    base_prompt: "with_files"
+    description: "Specialized in file operations"
+  
+  # Git operations specialist
+  git_agent:
+    name: "Git Agent"
+    model: "gpt-4"
+    tools: ["git_status", "git_commit", "file_read"]
+    base_prompt: "with_git"
+    description: "Git repository management specialist"
+  
+  # Coordinator agent
+  coordinator:
+    name: "Coordinator"
+    model: "gpt-4"
+    tools: ["file_agent", "git_agent"]
+    base_prompt: "base"
+    custom_prompt: |
+      You are a coordinator that delegates tasks to specialized agents.
+      Analyze user requests and route them to the appropriate agents.
+    description: "Agent coordination and task delegation"
+
+# Prompt templates
 prompt_templates:
   base: |
-    Ты умный и дружелюбный AI помощник. Отвечай на русском языке кратко и по делу.
+    You are a helpful AI assistant. Provide clear, accurate responses.
+  
+  with_files: |
+    You are a file operations specialist. You can read, write, and analyze files.
+    Always check file existence before operations.
+  
+  with_git: |
+    You are a Git operations specialist. You can manage repositories and version control.
+    Always check repository status before making changes.
 
-# Агенты
-agents:
-  assistant:
-    name: "Помощник"
-    model: "qwen3-8b"
-    tools: ["file_read"]
-    base_prompt: "base"
-    description: "Базовый помощник для общения"
-
-# Сценарии
+# Usage scenarios
 scenarios:
+  development:
+    agent: "git_agent"
+    description: "Software development and version control"
+  
+  file_management:
+    agent: "file_agent"
+    description: "File and document management"
+  
   general:
-    agent: "assistant"
-    description: "Универсальные задачи"
+    agent: "coordinator"
+    description: "General task coordination"

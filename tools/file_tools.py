@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import List, Any
 from agents import function_tool
-from utils.logger import log_tool_start, log_tool_end, log_tool_error, log_tool_usage
+from utils.pretty_logger import pretty_logger, update_todos
 
 @function_tool
 def read_file(filepath: str) -> str:
@@ -27,42 +27,55 @@ def read_file(filepath: str) -> str:
     Returns:
         str: Содержимое файла
     """
-    start_time = time.time()
-    args = {"filepath": filepath}
-    log_tool_start("read_file", args)
+    # Beautiful todo tracking
+    update_todos([
+        {"id": "1", "content": f"Открыть файл {Path(filepath).name}", "status": "in_progress", "priority": "high"},
+        {"id": "2", "content": "Прочитать содержимое", "status": "pending", "priority": "high"},
+        {"id": "3", "content": "Вернуть результат", "status": "pending", "priority": "medium"}
+    ])
+    
+    operation = pretty_logger.tool_start("Read", file_path=filepath)
     
     try:
         path = Path(filepath)
         if not path.exists():
-            result = f"ОШИБКА: Файл {filepath} не найден"
-            log_tool_end("read_file", result, time.time() - start_time)
-            return result
+            update_todos([
+                {"id": "1", "content": f"Открыть файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Прочитать содержимое", "status": "pending", "priority": "high"},
+                {"id": "3", "content": f"Обработать ошибку: файл не найден", "status": "in_progress", "priority": "high"}
+            ])
+            pretty_logger.tool_result(operation, error=f"Файл {filepath} не найден")
+            return f"❌ Файл {filepath} не найден"
         
         if not path.is_file():
-            result = f"ОШИБКА: {filepath} не является файлом"
-            log_tool_end("read_file", result, time.time() - start_time)
-            return result
-        
-        # Логгируем информацию о файле перед чтением
-        from utils.logger import log_custom
-        file_size = path.stat().st_size
-        log_custom('debug', 'file_operation', f"Чтение файла: {filepath}", size=file_size)
+            update_todos([
+                {"id": "1", "content": f"Открыть файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Прочитать содержимое", "status": "pending", "priority": "high"},
+                {"id": "3", "content": f"Обработать ошибку: не файл", "status": "in_progress", "priority": "high"}
+            ])
+            pretty_logger.tool_result(operation, error=f"{filepath} не является файлом")
+            return f"❌ {filepath} не является файлом"
         
         content = path.read_text(encoding='utf-8')
-        result = f"Содержимое файла {filepath}:\n\n{content}"
-        duration = time.time() - start_time
-        log_tool_end("read_file", result, duration)
-        log_tool_usage("read_file", args, True, duration)
-        return result
+        lines_count = len(content.splitlines())
+        
+        update_todos([
+            {"id": "1", "content": f"Открыть файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Прочитать содержимое", "status": "completed", "priority": "high"},
+            {"id": "3", "content": "Вернуть результат", "status": "completed", "priority": "medium"}
+        ])
+        
+        pretty_logger.tool_result(operation, lines_read=lines_count)
+        return f"📄 Содержимое файла {filepath}:\n\n{content}"
         
     except Exception as e:
-        log_tool_error("read_file", e)
-        error_type = type(e).__name__
-        result = f"ОШИБКА при чтении {filepath}: {error_type} - {str(e)}"
-        duration = time.time() - start_time
-        log_tool_end("read_file", result, duration)
-        log_tool_usage("read_file", args, False, duration)
-        return result
+        update_todos([
+            {"id": "1", "content": f"Открыть файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Прочитать содержимое", "status": "pending", "priority": "high"},
+            {"id": "3", "content": f"Обработать ошибку: {str(e)}", "status": "in_progress", "priority": "high"}
+        ])
+        pretty_logger.tool_result(operation, error=str(e))
+        return f"❌ Ошибка при чтении {filepath}: {str(e)}"
 
 @function_tool 
 def get_file_info(filepath: str) -> str:
@@ -75,49 +88,70 @@ def get_file_info(filepath: str) -> str:
     Returns:
         str: Информация о файле
     """
-    start_time = time.time()
-    args = {"filepath": filepath}
-    log_tool_start("get_file_info", args)
+    # Beautiful todo tracking
+    update_todos([
+        {"id": "1", "content": f"Анализировать файл {Path(filepath).name}", "status": "in_progress", "priority": "high"},
+        {"id": "2", "content": "Получить метаданные", "status": "pending", "priority": "high"},
+        {"id": "3", "content": "Форматировать информацию", "status": "pending", "priority": "medium"}
+    ])
+    
+    operation = pretty_logger.tool_start("FileInfo", file_path=filepath)
     
     try:
         path = Path(filepath)
         if not path.exists():
-            result = f"ОШИБКА: Файл {filepath} не найден"
-            log_tool_end("get_file_info", result, time.time() - start_time)
-            return result
+            update_todos([
+                {"id": "1", "content": f"Анализировать файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Получить метаданные", "status": "pending", "priority": "high"},
+                {"id": "3", "content": f"Обработать ошибку: файл не найден", "status": "in_progress", "priority": "high"}
+            ])
+            pretty_logger.tool_result(operation, error=f"Файл {filepath} не найден")
+            return f"❌ Файл {filepath} не найден"
         
         if not path.is_file():
-            result = f"ОШИБКА: {filepath} не является файлом"
-            log_tool_end("get_file_info", result, time.time() - start_time)
-            return result
+            update_todos([
+                {"id": "1", "content": f"Анализировать файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Получить метаданные", "status": "pending", "priority": "high"},
+                {"id": "3", "content": f"Обработать ошибку: не файл", "status": "in_progress", "priority": "high"}
+            ])
+            pretty_logger.tool_result(operation, error=f"{filepath} не является файлом")
+            return f"❌ {filepath} не является файлом"
+        
+        update_todos([
+            {"id": "1", "content": f"Анализировать файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Получить метаданные", "status": "in_progress", "priority": "high"},
+            {"id": "3", "content": "Форматировать информацию", "status": "pending", "priority": "medium"}
+        ])
         
         stat = path.stat()
         content = path.read_text(encoding='utf-8')
-        lines_count = len(content.split('\n'))
-        
-        # Определяем тип файла
+        lines_count = len(content.splitlines())
         extension = path.suffix.lower()
-
-        info = {
-            "filename": str(path.name),
-            "size": stat.st_size,
-            "lines": lines_count,
-        }
         
-        result = f"""Информация о файле {filepath}:
-- Имя: {info["filename"]}
-- Размер: {info["size"]} байт
-- Строк: {info["lines"]}
-- Расширение: {extension if extension else 'без расширения'}"""
+        update_todos([
+            {"id": "1", "content": f"Анализировать файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Получить метаданные", "status": "completed", "priority": "high"},
+            {"id": "3", "content": "Форматировать информацию", "status": "completed", "priority": "medium"}
+        ])
         
-        log_tool_end("get_file_info", result, time.time() - start_time)
+        pretty_logger.tool_result(operation, result=f"Файл {stat.st_size} байт, {lines_count} строк")
+        
+        result = f"""📄 Информация о файле {filepath}:
+• Имя: {path.name}
+• Размер: {stat.st_size} байт
+• Строк: {lines_count}
+• Расширение: {extension if extension else 'без расширения'}"""
+        
         return result
         
     except Exception as e:
-        log_tool_error("get_file_info", e)
-        result = f"ОШИБКА при получении информации о {filepath}: {str(e)}"
-        log_tool_end("get_file_info", result, time.time() - start_time)
-        return result
+        update_todos([
+            {"id": "1", "content": f"Анализировать файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Получить метаданные", "status": "pending", "priority": "high"},
+            {"id": "3", "content": f"Обработать ошибку: {str(e)}", "status": "in_progress", "priority": "high"}
+        ])
+        pretty_logger.tool_result(operation, error=str(e))
+        return f"❌ Ошибка при получении информации о {filepath}: {str(e)}"
 
 @function_tool
 def list_files(directory: str = ".") -> str:
@@ -130,44 +164,74 @@ def list_files(directory: str = ".") -> str:
     Returns:
         str: Список файлов
     """
-    start_time = time.time()
-    args = {"directory": directory}
-    log_tool_start("list_files", args)
+    # Beautiful todo tracking
+    update_todos([
+        {"id": "1", "content": f"Открыть директорию {directory}", "status": "in_progress", "priority": "high"},
+        {"id": "2", "content": "Сканировать содержимое", "status": "pending", "priority": "high"},
+        {"id": "3", "content": "Форматировать список", "status": "pending", "priority": "medium"}
+    ])
+    
+    operation = pretty_logger.tool_start("List", directory=directory)
     
     try:
         path = Path(directory)
         if not path.exists():
-            result = f"ОШИБКА: Директория {directory} не найдена"
-            log_tool_end("list_files", result, time.time() - start_time)
-            return result
+            update_todos([
+                {"id": "1", "content": f"Открыть директорию {directory}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Сканировать содержимое", "status": "pending", "priority": "high"},
+                {"id": "3", "content": f"Обработать ошибку: не найдена", "status": "in_progress", "priority": "high"}
+            ])
+            pretty_logger.tool_result(operation, error=f"Директория {directory} не найдена")
+            return f"❌ Директория {directory} не найдена"
         
         if not path.is_dir():
-            result = f"ОШИБКА: {directory} не является директорией"
-            log_tool_end("list_files", result, time.time() - start_time)
-            return result
+            update_todos([
+                {"id": "1", "content": f"Открыть директорию {directory}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Сканировать содержимое", "status": "pending", "priority": "high"},
+                {"id": "3", "content": f"Обработать ошибку: не директория", "status": "in_progress", "priority": "high"}
+            ])
+            pretty_logger.tool_result(operation, error=f"{directory} не является директорией")
+            return f"❌ {directory} не является директорией"
+        
+        update_todos([
+            {"id": "1", "content": f"Открыть директорию {directory}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Сканировать содержимое", "status": "in_progress", "priority": "high"},
+            {"id": "3", "content": "Форматировать список", "status": "pending", "priority": "medium"}
+        ])
         
         files = []
+        dirs = []
         for item in sorted(path.iterdir()):
             if item.is_file():
                 size = item.stat().st_size
                 files.append(f"📄 {item.name} ({size} байт)")
             elif item.is_dir():
-                files.append(f"📁 {item.name}/")
+                dirs.append(f"📁 {item.name}/")
         
-        if not files:
-            result = f"Директория {directory} пуста"
-            log_tool_end("list_files", result, time.time() - start_time)
-            return result
+        update_todos([
+            {"id": "1", "content": f"Открыть директорию {directory}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Сканировать содержимое", "status": "completed", "priority": "high"},
+            {"id": "3", "content": "Форматировать список", "status": "completed", "priority": "medium"}
+        ])
         
-        result = f"Содержимое директории {directory}:\n\n" + "\n".join(files)
-        log_tool_end("list_files", result, time.time() - start_time)
+        total_items = len(files) + len(dirs)
+        pretty_logger.tool_result(operation, paths_count=total_items)
+        
+        if total_items == 0:
+            return f"📂 Директория {directory} пуста"
+        
+        all_items = dirs + files  # Директории сначала
+        result = f"📂 Содержимое директории {directory} ({total_items} элементов):\n\n" + "\n".join(all_items)
         return result
         
     except Exception as e:
-        log_tool_error("list_files", e)
-        result = f"ОШИБКА при чтении директории {directory}: {str(e)}"
-        log_tool_end("list_files", result, time.time() - start_time)
-        return result
+        update_todos([
+            {"id": "1", "content": f"Открыть директорию {directory}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Сканировать содержимое", "status": "pending", "priority": "high"},
+            {"id": "3", "content": f"Обработать ошибку: {str(e)}", "status": "in_progress", "priority": "high"}
+        ])
+        pretty_logger.tool_result(operation, error=str(e))
+        return f"❌ Ошибка при чтении директории {directory}: {str(e)}"
 
 @function_tool
 def write_file(filepath: str, content: str) -> str:
@@ -181,37 +245,50 @@ def write_file(filepath: str, content: str) -> str:
     Returns:
         str: Результат операции
     """
-    start_time = time.time()
-    args = {"filepath": filepath, "content_length": len(content)}
-    log_tool_start("write_file", args)
+    # Beautiful todo tracking
+    update_todos([
+        {"id": "1", "content": f"Подготовить файл {Path(filepath).name}", "status": "in_progress", "priority": "high"},
+        {"id": "2", "content": "Записать содержимое", "status": "pending", "priority": "high"},
+        {"id": "3", "content": "Подтвердить запись", "status": "pending", "priority": "medium"}
+    ])
+    
+    operation = pretty_logger.tool_start("Write", file_path=filepath, content_length=len(content))
     
     try:
         path = Path(filepath)
         
-        # Логгируем информацию о записи
-        from utils.logger import log_custom
-        log_custom('debug', 'file_operation', f"Запись файла: {filepath}", content_length=len(content))
-        
         # Создаем родительские директории если нужно
         path.parent.mkdir(parents=True, exist_ok=True)
+        
+        update_todos([
+            {"id": "1", "content": f"Подготовить файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Записать содержимое", "status": "in_progress", "priority": "high"},
+            {"id": "3", "content": "Подтвердить запись", "status": "pending", "priority": "medium"}
+        ])
         
         # Записываем файл
         path.write_text(content, encoding='utf-8')
         
         size = path.stat().st_size
-        result = f"✅ Файл {filepath} успешно записан ({size} байт)"
-        duration = time.time() - start_time
-        log_tool_end("write_file", result, duration)
-        log_tool_usage("write_file", args, True, duration)
-        return result
+        lines_count = len(content.splitlines())
+        
+        update_todos([
+            {"id": "1", "content": f"Подготовить файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Записать содержимое", "status": "completed", "priority": "high"},
+            {"id": "3", "content": "Подтвердить запись", "status": "completed", "priority": "medium"}
+        ])
+        
+        pretty_logger.tool_result(operation, result=f"Записано {lines_count} строк, {size} байт")
+        return f"✅ Файл {filepath} успешно записан ({size} байт)"
         
     except Exception as e:
-        log_tool_error("write_file", e)
-        result = f"ОШИБКА при записи файла {filepath}: {str(e)}"
-        duration = time.time() - start_time
-        log_tool_end("write_file", result, duration)
-        log_tool_usage("write_file", args, False, duration)
-        return result
+        update_todos([
+            {"id": "1", "content": f"Подготовить файл {Path(filepath).name}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Записать содержимое", "status": "pending", "priority": "high"},
+            {"id": "3", "content": f"Обработать ошибку: {str(e)}", "status": "in_progress", "priority": "high"}
+        ])
+        pretty_logger.tool_result(operation, error=str(e))
+        return f"❌ Ошибка при записи файла {filepath}: {str(e)}"
 
 @function_tool
 def search_files(
