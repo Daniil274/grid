@@ -1,19 +1,88 @@
-# Environment variables
-.env
+# Grid Agent System .gitignore
 
-# Demo files (created during execution)
-*demo*
-*_demo
-
-# Python cache
+# Python
 __pycache__/
-*.pyc
-*.pyo
-logs/*
-openai_agents_python/*
-# venv
-.venv/*
-.vscode/*
-*.png
-*.yaml
-vis/*
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Grid specific
+config.yaml
+.env
+logs/
+*.log
+temp/
+tmp/
+test_*.txt
+demo_*.py
+*_demo.*
+
+# Dependencies
+node_modules/
+
+# Development
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Documentation builds
+docs/_build/
+
+# Enterprise specific
+secrets/
+credentials/
+private/
+*.key
+*.pem
+*.crt

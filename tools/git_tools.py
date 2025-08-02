@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from agents import function_tool
-from utils.logger import log_tool_start, log_tool_end, log_tool_error, log_tool_usage
+from utils.pretty_logger import pretty_logger, update_todos
 
 def _run_git_command(command: List[str], cwd: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -88,39 +88,74 @@ def git_status(directory: str = ".") -> str:
     Returns:
         str: Статус репозитория
     """
-    start_time = time.time()
-    args = {"directory": directory}
-    log_tool_start("git_status", args)
+    # Beautiful todo tracking
+    update_todos([
+        {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "in_progress", "priority": "high"},
+        {"id": "2", "content": "Получить статус Git", "status": "pending", "priority": "high"},
+        {"id": "3", "content": "Форматировать результат", "status": "pending", "priority": "medium"}
+    ])
+    
+    operation = pretty_logger.tool_start("GitStatus", directory=directory)
     
     try:
         path = Path(directory)
         if not path.exists():
-            result = f"ОШИБКА: Директория {directory} не найдена"
-            log_tool_end("git_status", result, time.time() - start_time)
-            return result
+            update_todos([
+                {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Получить статус Git", "status": "pending", "priority": "high"},
+                {"id": "3", "content": f"Обработать ошибку: директория не найдена", "status": "in_progress", "priority": "high"}
+            ])
+            pretty_logger.tool_result(operation, error=f"Директория {directory} не найдена")
+            return f"❌ Директория {directory} не найдена"
         
         # Проверяем, что это Git репозиторий
         git_dir = path / ".git"
         if not git_dir.exists():
-            result = f"ОШИБКА: {directory} не является Git репозиторием"
-            log_tool_end("git_status", result, time.time() - start_time)
-            return result
+            update_todos([
+                {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Получить статус Git", "status": "pending", "priority": "high"},
+                {"id": "3", "content": f"Обработать ошибку: не Git репозиторий", "status": "in_progress", "priority": "high"}
+            ])
+            pretty_logger.tool_result(operation, error=f"{directory} не является Git репозиторием")
+            return f"❌ {directory} не является Git репозиторием"
+        
+        update_todos([
+            {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Получить статус Git", "status": "in_progress", "priority": "high"},
+            {"id": "3", "content": "Форматировать результат", "status": "pending", "priority": "medium"}
+        ])
         
         cmd_result = _run_git_command(["git", "status", "--porcelain"], cwd=str(path))
         
         if not cmd_result["success"]:
-            result = f"ОШИБКА: {cmd_result['error']}"
-            log_tool_end("git_status", result, time.time() - start_time)
-            return result
+            update_todos([
+                {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Получить статус Git", "status": "pending", "priority": "high"},
+                {"id": "3", "content": f"Обработать ошибку: {cmd_result['error']}", "status": "in_progress", "priority": "high"}
+            ])
+            pretty_logger.tool_result(operation, error=cmd_result['error'])
+            return f"❌ Ошибка Git: {cmd_result['error']}"
+        
+        update_todos([
+            {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Получить статус Git", "status": "completed", "priority": "high"},
+            {"id": "3", "content": "Форматировать результат", "status": "in_progress", "priority": "medium"}
+        ])
         
         # Форматируем вывод
         if not cmd_result["output"]:
-            result = "Рабочая директория чистая - нет изменений"
+            update_todos([
+                {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Получить статус Git", "status": "completed", "priority": "high"},
+                {"id": "3", "content": "Форматировать результат", "status": "completed", "priority": "medium"}
+            ])
+            pretty_logger.tool_result(operation, result="Репозиторий чистый")
+            return "✅ Рабочая директория чистая - нет изменений"
         else:
             lines = cmd_result["output"].split('\n')
             status_map = {
                 'M': 'изменен',
-                'A': 'добавлен',
+                'A': 'добавлен', 
                 'D': 'удален',
                 'R': 'переименован',
                 'C': 'скопирован',
@@ -131,21 +166,34 @@ def git_status(directory: str = ".") -> str:
             for line in lines:
                 if len(line) < 3:
                     continue
-                # Более надежный парсинг - ищем первый пробел после статуса
                 status_code = line[:2].strip()
-                # Находим начало имени файла после статуса и пробелов
                 filename_start = 2
                 while filename_start < len(line) and line[filename_start] == ' ':
                     filename_start += 1
                 filename = line[filename_start:].strip()
                 status_text = status_map.get(status_code, status_code)
-                formatted_lines.append(f"  {status_text}: {filename}")
+                formatted_lines.append(f"  📝 {status_text}: {filename}")
             
-            result = f"Статус Git репозитория в {directory}:\n\n" + "\n".join(formatted_lines)
+            update_todos([
+                {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
+                {"id": "2", "content": "Получить статус Git", "status": "completed", "priority": "high"},
+                {"id": "3", "content": "Форматировать результат", "status": "completed", "priority": "medium"}
+            ])
+            
+            changes_count = len(formatted_lines)
+            pretty_logger.tool_result(operation, result=f"Найдено {changes_count} изменений")
+            result = f"📋 Статус Git репозитория в {directory} ({changes_count} изменений):\n\n" + "\n".join(formatted_lines)
         
-        duration = time.time() - start_time
-        log_tool_end("git_status", result, duration)
-        log_tool_usage("git_status", args, True, duration)
+        return result
+        
+    except Exception as e:
+        update_todos([
+            {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
+            {"id": "2", "content": "Получить статус Git", "status": "pending", "priority": "high"},
+            {"id": "3", "content": f"Обработать ошибку: {str(e)}", "status": "in_progress", "priority": "high"}
+        ])
+        pretty_logger.tool_result(operation, error=str(e))
+        return f"❌ Ошибка при получении статуса Git: {str(e)}"
         return result
         
     except Exception as e:
