@@ -9,7 +9,8 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 # OpenAI Agents SDK imports
-from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled, Runner
+from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled, Runner, function_tool, RunContextWrapper
+from agents.items import ItemHelpers
 
 from .config import Config
 from .context import ContextManager
@@ -375,7 +376,7 @@ class AgentFactory:
         return tools
     
     async def _create_agent_tools(self, agent_keys: List[str]) -> List[Any]:
-        """Create agent tools with proper logging."""
+        """Create agent tools with proper logging and context sharing."""
         tools = []
         
         for agent_key in agent_keys:
@@ -388,10 +389,19 @@ class AgentFactory:
                 tool_name = tool_config.name or f"call_{agent_key}"
                 tool_description = tool_config.description or f"Calls {sub_agent.name}"
                 
-                # Create tool
-                agent_tool = sub_agent.as_tool(
+                # Get context sharing parameters from tool config
+                context_strategy = getattr(tool_config, 'context_strategy', 'minimal')
+                context_depth = getattr(tool_config, 'context_depth', 5)
+                include_tool_history = getattr(tool_config, 'include_tool_history', False)
+                
+                # Create context-aware tool
+                agent_tool = self._create_context_aware_agent_tool(
+                    sub_agent=sub_agent,
                     tool_name=tool_name,
-                    tool_description=tool_description
+                    tool_description=tool_description,
+                    context_strategy=context_strategy,
+                    context_depth=context_depth,
+                    include_tool_history=include_tool_history
                 )
                 
                 # Wrap for logging
@@ -473,6 +483,43 @@ class AgentFactory:
         agent_tool.on_invoke_tool = wrapped_invoke_tool
         return agent_tool
     
+    def _create_context_aware_agent_tool(
+        self,
+        sub_agent: Agent,
+        tool_name: str,
+        tool_description: str,
+        context_strategy: str = "minimal",
+        context_depth: int = 5,
+        include_tool_history: bool = False
+    ) -> Any:
+        """Create an agent tool that can share context with the sub-agent."""
+        
+        @function_tool(
+            name_override=tool_name,
+            description_override=tool_description,
+        )
+        async def run_agent_with_context(context: RunContextWrapper, input: str) -> str:
+            from agents import Runner
+            
+            # Get context based on strategy
+            enhanced_input = self.context_manager.get_context_for_agent_tool(
+                strategy=context_strategy,
+                depth=context_depth,
+                include_tools=include_tool_history,
+                task_input=input
+            )
+            
+            # Run the sub-agent with enhanced input
+            output = await Runner.run(
+                starting_agent=sub_agent,
+                input=enhanced_input,
+                context=context.context,
+            )
+            
+            return ItemHelpers.text_message_outputs(output.new_items)
+        
+        return run_agent_with_context
+    
     async def _get_mcp_tools(self, mcp_tool_names: List[str]) -> List[Any]:
         """Get MCP tools with connection management."""
         tools = []
@@ -537,6 +584,10 @@ class AgentFactory:
     def get_context_info(self) -> Dict[str, Any]:
         """Get context information."""
         return self.context_manager.get_context_stats()
+    
+    def get_recent_executions(self, limit: int = 3) -> List[Any]:
+        """Get recent executions from context manager."""
+        return self.context_manager.get_recent_executions(limit=limit)
     
     # Cache management
     def clear_cache(self) -> None:
