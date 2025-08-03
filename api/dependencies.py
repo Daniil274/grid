@@ -131,3 +131,13 @@ async def get_client_info(request: Request) -> Dict[str, Any]:
         "forwarded_for": request.headers.get("X-Forwarded-For"),
         "real_ip": request.headers.get("X-Real-IP")
     }
+
+async def get_websocket_user() -> Dict[str, Any]:
+    """Get user for WebSocket connections."""
+    # In production, extract from WebSocket headers or query params
+    return {
+        "user_id": "ws-user",
+        "username": "websocket-user",
+        "roles": ["user"],
+        "permissions": ["agent:run", "session:create"]
+    }

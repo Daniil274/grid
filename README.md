@@ -1,10 +1,13 @@
-# Grid Agent System 🎯
+# GRID Agent System
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Code Style: Black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+> **Modern Web Stack for AI Agent Management and Interaction**
 
-**AI agent orchestration system with beautiful logging and comprehensive tooling.**
+[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://docker.com)
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/react-%2320232a.svg?style=for-the-badge&logo=react&logoColor=%2361DAFB)](https://reactjs.org/)
+[![TypeScript](https://img.shields.io/badge/typescript-%23007ACC.svg?style=for-the-badge&logo=typescript&logoColor=white)](https://typescriptlang.org/)
+
+GRID Agent System is a production-ready web platform for managing and interacting with AI agents. Built with modern technologies and best practices, it provides a seamless experience for deploying, monitoring, and communicating with AI agents through both web interface and OpenAI-compatible API.
 
 ## ✨ Features
 

@@ -1,0 +1,109 @@
+version: '3.8'
+
+# Development override for docker-compose
+services:
+  # Backend in development mode
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      target: builder  # Use builder stage for development
+    ports:
+      - "8000:8000"
+      - "8001:8001"  # Additional port for debugging
+    environment:
+      - PYTHONPATH=/app
+      - DEBUG_LOGGING=true
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - .:/app
+      - /app/__pycache__
+      - /app/.pytest_cache
+    command: >
+      sh -c "pip install -e . &&
+             python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload --log-level debug"
+    restart: "no"
+    stdin_open: true
+    tty: true
+
+  # Frontend in development mode  
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      target: builder
+    ports:
+      - "3002:3000"
+      - "3001:3001"  # For HMR
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_WS_URL=ws://localhost:8000
+      - NODE_ENV=development
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/dist
+    command: npm run dev
+    restart: "no"
+    stdin_open: true
+    tty: true
+
+  # Redis for development
+  redis:
+    ports:
+      - "6379:6379"
+    command: redis-server --save "" --appendonly no --maxmemory 128mb
+
+  # Development database (SQLite alternative)
+  db:
+    image: postgres:15-alpine
+    container_name: grid-db-dev
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=grid_dev
+      - POSTGRES_USER=grid
+      - POSTGRES_PASSWORD=grid_dev_password
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    networks:
+      - grid-network
+
+  # MailHog for email testing
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: grid-mailhog
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+    restart: unless-stopped
+    networks:
+      - grid-network
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: grid-jaeger
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # Jaeger collector
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
+    networks:
+      - grid-network
+
+volumes:
+  postgres_dev_data:
+    driver: local
+
+# Additional development networks
+networks:
+  grid-network:
+    driver: bridge

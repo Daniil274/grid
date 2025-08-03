@@ -1,5 +1,5 @@
 # GRID Agent System API Requirements
-
+agents
 # Core FastAPI dependencies
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
@@ -8,6 +8,7 @@ pydantic[email]==2.5.0
 
 # Authentication and security
 python-jose[cryptography]==3.3.0
+PyJWT==2.8.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
 
@@ -21,8 +22,10 @@ psutil==5.9.6
 # JSON handling
 orjson==3.9.10
 
-# Async support
-asyncio-mqtt==0.13.0
+
+# WebSocket and real-time support
+websockets==12.0
+python-socketio==5.10.0
 
 # CORS and middleware
 # CORS is supported via starlette, which is a dependency of fastapi
@@ -37,3 +40,9 @@ httpx==0.25.2  # For testing
 redis==5.0.1
 uvloop==0.19.0  # For better async performance on Linux
 gunicorn==21.2.0  # For production deployment
+
+# Core AI framework (required for AgentsSDK)
+agents
+
+# Exclude TensorFlow dependencies
+# tensorflow  # Not needed - using API-based models only

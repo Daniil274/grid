@@ -24,7 +24,7 @@ from core.security_agent_factory import SecurityAwareAgentFactory
 from utils.logger import Logger
 from utils.exceptions import GridError
 
-from api.routers import openai_compatible, agents, system, auth
+from api.routers import openai_compatible, agents, system, auth, websocket
 from api.middleware.authentication import AuthenticationMiddleware
 from api.middleware.security import SecurityMiddleware
 from api.middleware.logging import LoggingMiddleware
@@ -46,7 +46,6 @@ async def lifespan(app: FastAPI):
         
         # Initialize agent factory
         app.state.agent_factory = SecurityAwareAgentFactory(app.state.config)
-        await app.state.agent_factory.initialize()
         
         # Initialize logger
         Logger.configure(
@@ -161,6 +160,12 @@ app.include_router(
     auth.router,
     prefix="/v1/auth",
     tags=["Authentication"]
+)
+
+app.include_router(
+    websocket.router,
+    prefix="/ws",
+    tags=["WebSocket"]
 )
 
 # Root endpoints

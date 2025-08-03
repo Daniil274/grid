@@ -4,13 +4,36 @@ Enterprise Agent Factory with caching, tracing, and error handling.
 
 import asyncio
 import time
+import sys
+import os
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-# OpenAI Agents SDK imports
-from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled, Runner, function_tool, RunContextWrapper, SQLiteSession
-from agents.items import ItemHelpers
+# Set environment variables to avoid TensorFlow issues
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
+# Simple import blocking approach
+import builtins
+original_import = builtins.__import__
+
+def patched_import(name, *args, **kwargs):
+    if 'tensorflow' in name and 'contrib' in name:
+        raise ImportError(f"Blocked TensorFlow contrib import: {name}")
+    if name == 'gym':  # Also block gym which causes issues
+        raise ImportError(f"Blocked gym import: {name}")
+    return original_import(name, *args, **kwargs)
+
+# Apply the patch temporarily
+builtins.__import__ = patched_import
+
+try:
+    from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled, Runner, function_tool, RunContextWrapper, SQLiteSession
+    from agents.items import ItemHelpers
+finally:
+    # Restore original import
+    builtins.__import__ = original_import
 
 from .config import Config
 from .context import ContextManager
@@ -18,6 +41,7 @@ from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names, MCPClient
 from utils.exceptions import AgentError, ConfigError
 from utils.logger import Logger
+
 from utils.unified_logger import (
     log_agent_start, log_agent_end, log_agent_error, 
     log_prompt, log_tool_call, set_current_agent, clear_current_agent,

@@ -1,7 +1,7 @@
 # Grid Agent System Dependencies
 
 # Core AI framework
-agents>=1.0.0
+agents
 
 # HTTP and API clients
 httpx>=0.25.0
