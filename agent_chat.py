@@ -16,8 +16,8 @@ from core.config import Config
 from core.agent_factory import AgentFactory
 from core.security_agent_factory import SecurityAwareAgentFactory
 from utils.logger import Logger
-from utils.pretty_logger import PrettyLogger, update_todos
-from utils.agent_logger import configure_agent_logger, AgentLogLevel
+from utils.pretty_logger import PrettyLogger
+from utils.unified_logger import configure_unified_logger, LogLevel
 from utils.exceptions import GridError
 import logging
 import time
@@ -81,19 +81,26 @@ async def main():
         factory = SecurityAwareAgentFactory(config, args.path)
         pretty_logger.tool_result(operation, result="Фабрика агентов инициализирована")
         
-        # Настройка детального логирования агентов
+        # Настройка универсального логирования
         agent_logging_config = config.config.settings.agent_logging
         if agent_logging_config.enabled:
-            log_level = AgentLogLevel.FULL
-            if agent_logging_config.level == "basic":
-                log_level = AgentLogLevel.BASIC
-            elif agent_logging_config.level == "detailed":
-                log_level = AgentLogLevel.DETAILED
+            console_level = LogLevel.INFO
+            file_level = LogLevel.DEBUG
             
-            configure_agent_logger("logs", log_level)
-            pretty_logger.info("Детальное логирование агентов включено")
+            if agent_logging_config.level == "basic":
+                console_level = LogLevel.INFO
+                file_level = LogLevel.INFO
+            elif agent_logging_config.level == "detailed":
+                console_level = LogLevel.INFO
+                file_level = LogLevel.DEBUG
+            elif agent_logging_config.level == "full":
+                console_level = LogLevel.DEBUG
+                file_level = LogLevel.DEBUG
+            
+            configure_unified_logger("logs", console_level, file_level, enable_colors=True)
+            pretty_logger.info("Универсальное логирование включено")
         else:
-            pretty_logger.info("Детальное логирование агентов отключено")
+            pretty_logger.info("Универсальное логирование отключено")
         
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
@@ -113,12 +120,8 @@ async def main():
             # Single message mode
             pretty_logger.info(f"Обработка сообщения: {args.message}")
             
-            # Show todos for processing
-            update_todos([
-                {"id": "1", "content": f"Обработать сообщение агентом {agent_key}", "status": "in_progress", "priority": "high"},
-                {"id": "2", "content": "Сгенерировать ответ", "status": "pending", "priority": "high"},
-                {"id": "3", "content": "Обновить контекст беседы", "status": "pending", "priority": "medium"}
-            ])
+            #logging
+            pretty_logger.info(f"Processing message with agent {agent_key}")
             
             try:
                 # Track agent execution
@@ -130,12 +133,7 @@ async def main():
                 response = await factory.run_agent(agent_key, args.message, args.context_path)
                 duration = time.time() - start_time
                 
-                # Update todos - completed
-                update_todos([
-                    {"id": "1", "content": f"Обработать сообщение агентом {agent_key}", "status": "completed", "priority": "high"},
-                    {"id": "2", "content": "Сгенерировать ответ", "status": "completed", "priority": "high"},
-                    {"id": "3", "content": "Обновить контекст беседы", "status": "completed", "priority": "medium"}
-                ])
+                # logging - completed
                 
                 pretty_logger.tool_result(operation, 
                                         result=f"Ответ сгенерирован ({duration:.2f}с, {len(response)} символов)")
@@ -147,12 +145,7 @@ async def main():
                 pretty_logger.success("Сообщение успешно обработано")
                 
             except Exception as e:
-                # Update todos - error
-                update_todos([
-                    {"id": "1", "content": f"Обработать сообщение агентом {agent_key}", "status": "completed", "priority": "high"},
-                    {"id": "2", "content": "Сгенерировать ответ", "status": "pending", "priority": "high"},
-                    {"id": "3", "content": f"Обработать ошибку: {str(e)}", "status": "in_progress", "priority": "high"}
-                ])
+                # logging - error
                 pretty_logger.error(f"Ошибка выполнения агента: {e}")
                 print(f"❌ Ошибка: {e}")
         else:
@@ -203,12 +196,7 @@ async def main():
                     # Process user message with beautiful logging
                     pretty_logger.info(f"Обработка сообщения агентом {agent_key}...")
                     
-                    # Show processing todos
-                    update_todos([
-                        {"id": "1", "content": f"Передать сообщение агенту {agent_key}", "status": "in_progress", "priority": "high"},
-                        {"id": "2", "content": "Обработать запрос", "status": "pending", "priority": "high"},
-                        {"id": "3", "content": "Сгенерировать ответ", "status": "pending", "priority": "medium"}
-                    ])
+                    # logging
                     
                     try:
                         # Track execution
@@ -220,12 +208,7 @@ async def main():
                         response = await factory.run_agent(agent_key, user_input, args.context_path)
                         duration = time.time() - start_time
                         
-                        # Update todos - success
-                        update_todos([
-                            {"id": "1", "content": f"Передать сообщение агенту {agent_key}", "status": "completed", "priority": "high"},
-                            {"id": "2", "content": "Обработать запрос", "status": "completed", "priority": "high"},
-                            {"id": "3", "content": "Сгенерировать ответ", "status": "completed", "priority": "medium"}
-                        ])
+                        # logging - success
                         
                         pretty_logger.tool_result(operation, 
                                                 result=f"Ответ получен ({duration:.2f}с, {len(response)} символов)")
@@ -233,12 +216,7 @@ async def main():
                         print(f"\n🤖 {agent_key}: {response}")
                         
                     except Exception as e:
-                        # Update todos - error
-                        update_todos([
-                            {"id": "1", "content": f"Передать сообщение агенту {agent_key}", "status": "completed", "priority": "high"},
-                            {"id": "2", "content": "Обработать запрос", "status": "pending", "priority": "high"},
-                            {"id": "3", "content": f"Обработать ошибку: {str(e)}", "status": "in_progress", "priority": "high"}
-                        ])
+                        # logging - error
                         pretty_logger.error(f"Ошибка выполнения: {e}")
                         print(f"❌ Ошибка: {e}")
                     

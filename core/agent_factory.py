@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 # OpenAI Agents SDK imports
-from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled, Runner, function_tool, RunContextWrapper
+from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled, Runner, function_tool, RunContextWrapper, SQLiteSession
 from agents.items import ItemHelpers
 
 from .config import Config
@@ -18,10 +18,10 @@ from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names, MCPClient
 from utils.exceptions import AgentError, ConfigError
 from utils.logger import Logger
-from utils.pretty_logger import set_current_agent, clear_current_agent
-from utils.agent_logger import (
+from utils.unified_logger import (
     log_agent_start, log_agent_end, log_agent_error, 
-    log_agent_prompt, log_tool_call, get_agent_logger
+    log_prompt, log_tool_call, set_current_agent, clear_current_agent,
+    get_unified_logger
 )
 
 load_dotenv()
@@ -36,6 +36,7 @@ class AgentFactory:
     - Context management
     - MCP integration
     - Comprehensive logging and tracing
+    - Session-based memory for agents
     """
     
     def __init__(self, config: Optional[Config] = None, working_directory: Optional[str] = None):
@@ -64,7 +65,20 @@ class AgentFactory:
         self._tool_cache: Dict[str, List[Any]] = {}
         self._mcp_clients: Dict[str, MCPClient] = {}
         
+        # Session management for agent memory
+        self._agent_sessions: Dict[str, SQLiteSession] = {}
+        
         logger.info("Agent Factory initialized")
+    
+    def _get_agent_session(self, agent_key: str) -> SQLiteSession:
+        """Get or create session for an agent to maintain memory."""
+        if agent_key not in self._agent_sessions:
+            # Create a stable session for each agent (without timestamp)
+            session_id = f"agent_{agent_key}"
+            self._agent_sessions[agent_key] = SQLiteSession(session_id, "logs/agent_sessions.db")
+            logger.debug(f"Created new session for agent {agent_key}: {session_id}")
+        
+        return self._agent_sessions[agent_key]
     
     async def create_agent(
         self, 
@@ -87,7 +101,8 @@ class AgentFactory:
             AgentError: If agent creation fails
             ConfigError: If configuration is invalid
         """
-        cache_key = f"{agent_key}:{context_path or 'default'}"
+        # Use agent_key only for caching to ensure consistent sessions
+        cache_key = agent_key
         
         if not force_reload and cache_key in self._agent_cache:
             logger.debug(f"Using cached agent: {agent_key}")
@@ -137,6 +152,11 @@ class AgentFactory:
                 model=model,
                 tools=tools
             )
+            
+            # Create and attach session to agent for memory
+            session = self._get_agent_session(agent_key)
+            agent._session = session  # Attach session to agent
+            logger.debug(f"Attached session {session.session_id} to agent {agent_key}")
             
             # Cache agent
             self._agent_cache[cache_key] = agent
@@ -194,11 +214,11 @@ class AgentFactory:
             self.context_manager.add_message("user", message)
             
             # Начинаем детальное логирование
-            execution_id = log_agent_start(agent.name, message, context_path)
+            log_agent_start(agent.name, message)
             
             # Логируем промпт агента
             agent_instructions = self._build_agent_instructions(agent_key, context_path)
-            log_agent_prompt(agent.name, "full", agent_instructions, context_path)
+            log_prompt(agent.name, "full", agent_instructions)
             
             # Log start (legacy)
             logger.log_agent_start(agent.name, message)
@@ -210,15 +230,21 @@ class AgentFactory:
             logger.info(f"Starting agent execution with max_turns={max_turns}, timeout={timeout_seconds}s")
             
             try:
+                # Get session from the agent (attached during creation)
+                session = getattr(agent, '_session', None)
+                if not session:
+                    # Fallback: create session if not attached
+                    session = self._get_agent_session(agent_key)
+                
                 if stream:
                     # Handle streaming (simplified for now)
                     result = await asyncio.wait_for(
-                        Runner.run(agent, message, max_turns=max_turns),
+                        Runner.run(agent, message, max_turns=max_turns, session=session),
                         timeout=timeout_seconds
                     )
                 else:
                     result = await asyncio.wait_for(
-                        Runner.run(agent, message, max_turns=max_turns),
+                        Runner.run(agent, message, max_turns=max_turns, session=session),
                         timeout=timeout_seconds
                     )
             except asyncio.TimeoutError:
@@ -240,7 +266,7 @@ class AgentFactory:
             
             # Завершаем детальное логирование
             duration = execution.end_time - execution.start_time
-            log_agent_end(output, duration, execution.tools_used)
+            log_agent_end(agent.name, output, duration)
             
             # Log completion (legacy)
             logger.log_agent_end(agent.name, output, duration)
@@ -258,7 +284,7 @@ class AgentFactory:
             execution.error = str(e)
             
             # Логируем ошибку в детальном логгере
-            log_agent_error(e)
+            log_agent_error(agent.name, e)
             
             # Log error (legacy)
             logger.log_agent_error(agent_key, e)
@@ -422,7 +448,13 @@ class AgentFactory:
         
         async def wrapped_invoke_tool(tool_context, tool_call_arguments):
             start_time = time.time()
-            input_data = str(tool_call_arguments)
+            # Безопасно преобразуем аргументы в строку
+            if isinstance(tool_call_arguments, dict):
+                input_data = str(tool_call_arguments)
+            elif isinstance(tool_call_arguments, list):
+                input_data = str(tool_call_arguments)
+            else:
+                input_data = str(tool_call_arguments)
             
             execution = AgentExecution(
                 agent_name=agent_name,
@@ -449,12 +481,16 @@ class AgentFactory:
                     result = await result
                 
                 execution.end_time = time.time()
-                execution.output = str(result)
+                # Безопасно преобразуем результат в строку
+                if isinstance(result, str):
+                    execution.output = result
+                else:
+                    execution.output = str(result)
                 
                 duration = execution.end_time - execution.start_time
                 
                 # Завершаем детальное логирование
-                log_agent_end(str(result), duration, ["call_agent"])
+                log_agent_end(agent_name, str(result), duration)
                 
                 logger.log_agent_end(agent_name, str(result), duration)
                 
@@ -470,7 +506,7 @@ class AgentFactory:
                 execution.error = str(e)
                 
                 # Логируем ошибку в детальном логгере
-                log_agent_error(e)
+                log_agent_error(agent_name, e)
                 
                 logger.log_agent_error(agent_name, e)
                 self.context_manager.add_execution(execution)
@@ -501,7 +537,10 @@ class AgentFactory:
         async def run_agent_with_context(context: RunContextWrapper, input: str) -> str:
             from agents import Runner
             
-            # Get context based on strategy
+            # Add this tool call to context BEFORE getting context
+            self.context_manager.add_message("user", f"Tool call to {tool_name}: {input}")
+            
+            # Get context based on strategy - use the factory's context manager
             enhanced_input = self.context_manager.get_context_for_agent_tool(
                 strategy=context_strategy,
                 depth=context_depth,
@@ -509,14 +548,29 @@ class AgentFactory:
                 task_input=input
             )
             
-            # Run the sub-agent with enhanced input
+            # Get session from the sub-agent (attached during creation)
+            session = getattr(sub_agent, '_session', None)
+            if not session:
+                # Fallback: create session if not attached
+                agent_key = tool_name.replace("call_", "")
+                session = self._get_agent_session(agent_key)
+                logger.warning(f"Session not found on agent {agent_key}, created new session: {session.session_id}")
+            else:
+                logger.debug(f"Using existing session {session.session_id} for agent {sub_agent.name}")
+            
+            # Run the sub-agent with enhanced input and session
             output = await Runner.run(
                 starting_agent=sub_agent,
                 input=enhanced_input,
                 context=context.context,
+                session=session,
             )
             
-            return ItemHelpers.text_message_outputs(output.new_items)
+            # Add tool response to context
+            output_text = ItemHelpers.text_message_outputs(output.new_items)
+            self.context_manager.add_message("assistant", f"Tool response from {tool_name}: {output_text}")
+            
+            return output_text
         
         return run_agent_with_context
     
@@ -605,8 +659,16 @@ class AgentFactory:
             except Exception as e:
                 logger.error(f"Error disconnecting MCP client: {e}")
         
+        # Clear agent sessions
+        for session in self._agent_sessions.values():
+            try:
+                await session.clear_session()
+            except Exception as e:
+                logger.error(f"Error clearing agent session: {e}")
+        
         # Clear caches
         self.clear_cache()
         self._mcp_clients.clear()
+        self._agent_sessions.clear()
         
         logger.info("Agent factory cleanup completed")

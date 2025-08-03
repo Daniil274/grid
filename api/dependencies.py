@@ -51,7 +51,7 @@ async def get_current_user(
     if not credentials:
         return {"user_id": "anonymous", "roles": ["user"]}
     
-    # TODO: Implement actual JWT validation
+    # Implement actual JWT validation
     # For now, accept any token and return mock user
     token = credentials.credentials
     

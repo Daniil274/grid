@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from agents import function_tool
-from utils.pretty_logger import pretty_logger, update_todos, log_tool_start, log_tool_result
+from utils.pretty_logger import pretty_logger, log_tool_start, log_tool_result
 
 def _run_git_command(command: List[str], cwd: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -89,67 +89,34 @@ def git_status(directory: str = ".") -> str:
     Returns:
         str: Статус репозитория
     """
-    # Beautiful todo tracking
-    update_todos([
-        {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "in_progress", "priority": "high"},
-        {"id": "2", "content": "Получить статус Git", "status": "pending", "priority": "high"},
-        {"id": "3", "content": "Форматировать результат", "status": "pending", "priority": "medium"}
-    ])
+
     
     operation = pretty_logger.tool_start("GitStatus", directory=directory)
     
     try:
         path = Path(directory)
         if not path.exists():
-            update_todos([
-                {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
-                {"id": "2", "content": "Получить статус Git", "status": "pending", "priority": "high"},
-                {"id": "3", "content": f"Обработать ошибку: директория не найдена", "status": "in_progress", "priority": "high"}
-            ])
             pretty_logger.tool_result(operation, error=f"Директория {directory} не найдена")
             return f"❌ Директория {directory} не найдена"
         
         # Проверяем, что это Git репозиторий
         git_dir = path / ".git"
         if not git_dir.exists():
-            update_todos([
-                {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
-                {"id": "2", "content": "Получить статус Git", "status": "pending", "priority": "high"},
-                {"id": "3", "content": f"Обработать ошибку: не Git репозиторий", "status": "in_progress", "priority": "high"}
-            ])
             pretty_logger.tool_result(operation, error=f"{directory} не является Git репозиторием")
             return f"❌ {directory} не является Git репозиторием"
         
-        update_todos([
-            {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
-            {"id": "2", "content": "Получить статус Git", "status": "in_progress", "priority": "high"},
-            {"id": "3", "content": "Форматировать результат", "status": "pending", "priority": "medium"}
-        ])
+
         
         cmd_result = _run_git_command(["git", "status", "--porcelain"], cwd=str(path))
         
         if not cmd_result["success"]:
-            update_todos([
-                {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
-                {"id": "2", "content": "Получить статус Git", "status": "pending", "priority": "high"},
-                {"id": "3", "content": f"Обработать ошибку: {cmd_result['error']}", "status": "in_progress", "priority": "high"}
-            ])
             pretty_logger.tool_result(operation, error=cmd_result['error'])
             return f"❌ Ошибка Git: {cmd_result['error']}"
         
-        update_todos([
-            {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
-            {"id": "2", "content": "Получить статус Git", "status": "completed", "priority": "high"},
-            {"id": "3", "content": "Форматировать результат", "status": "in_progress", "priority": "medium"}
-        ])
+
         
         # Форматируем вывод
         if not cmd_result["output"]:
-            update_todos([
-                {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
-                {"id": "2", "content": "Получить статус Git", "status": "completed", "priority": "high"},
-                {"id": "3", "content": "Форматировать результат", "status": "completed", "priority": "medium"}
-            ])
             pretty_logger.tool_result(operation, result="Репозиторий чистый")
             return "✅ Рабочая директория чистая - нет изменений"
         else:
@@ -175,12 +142,6 @@ def git_status(directory: str = ".") -> str:
                 status_text = status_map.get(status_code, status_code)
                 formatted_lines.append(f"  📝 {status_text}: {filename}")
             
-            update_todos([
-                {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
-                {"id": "2", "content": "Получить статус Git", "status": "completed", "priority": "high"},
-                {"id": "3", "content": "Форматировать результат", "status": "completed", "priority": "medium"}
-            ])
-            
             changes_count = len(formatted_lines)
             pretty_logger.tool_result(operation, result=f"Найдено {changes_count} изменений")
             result = f"📋 Статус Git репозитория в {directory} ({changes_count} изменений):\n\n" + "\n".join(formatted_lines)
@@ -188,22 +149,8 @@ def git_status(directory: str = ".") -> str:
         return result
         
     except Exception as e:
-        update_todos([
-            {"id": "1", "content": f"Проверить репозиторий {directory}", "status": "completed", "priority": "high"},
-            {"id": "2", "content": "Получить статус Git", "status": "pending", "priority": "high"},
-            {"id": "3", "content": f"Обработать ошибку: {str(e)}", "status": "in_progress", "priority": "high"}
-        ])
         pretty_logger.tool_result(operation, error=str(e))
         return f"❌ Ошибка при получении статуса Git: {str(e)}"
-        return result
-        
-    except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при получении статуса: {str(e)}"
-        duration = time.time() - start_time
-        log_tool_result(operation, result=result)
-        # log_tool_usage removed
-        return result
 
 @function_tool
 def git_log(directory: str = ".", max_commits: int = 10) -> str:
@@ -316,9 +263,8 @@ def git_diff(directory: str = ".", filename: str = "") -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
         result = f"ОШИБКА при получении различий: {str(e)}"
-        log_tool_result(operation, result=result)
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -370,9 +316,8 @@ def git_branch_list(directory: str = ".") -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
         result = f"ОШИБКА при получении списка веток: {str(e)}"
-        log_tool_result(operation, result=result)
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -422,9 +367,8 @@ def git_add_file(directory: str, filename: str) -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
         result = f"ОШИБКА при добавлении файла: {str(e)}"
-        log_tool_result(operation, result=result)
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -495,9 +439,8 @@ def git_commit(directory: str, message: str, author_name: str = "", author_email
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при создании коммита: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -550,9 +493,8 @@ def git_checkout_branch(directory: str, branch_name: str, create_new: bool = Fal
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при переключении на ветку: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -590,9 +532,8 @@ def git_pull(directory: str = ".") -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при получении изменений: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -633,9 +574,8 @@ def git_remote_info(directory: str = ".") -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при получении информации об удаленных репозиториях: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -686,9 +626,8 @@ def git_init(directory: str = ".", bare: bool = False) -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при инициализации: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -763,9 +702,8 @@ def git_config(directory: str = ".", name: str = "", email: str = "", global_con
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при настройке конфигурации: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -801,9 +739,8 @@ def git_add_all(directory: str = ".") -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при добавлении файлов: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -848,9 +785,8 @@ def git_push(directory: str = ".", remote: str = "origin", branch: str = "") -> 
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при отправке изменений: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -894,9 +830,8 @@ def git_remote_add(directory: str, name: str, url: str) -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при добавлении удаленного репозитория: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -933,9 +868,8 @@ def git_remote_remove(directory: str, name: str) -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при удалении удаленного репозитория: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -981,9 +915,8 @@ def git_merge(directory: str, branch_name: str, message: str = "") -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при слиянии ветки: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -1036,9 +969,8 @@ def git_reset(directory: str, mode: str = "soft", commit_hash: str = "HEAD~1") -
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при сбросе: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -1105,9 +1037,8 @@ def git_stash(directory: str = ".", action: str = "save", message: str = "") -> 
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при выполнении stash: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -1161,9 +1092,8 @@ def git_tag(directory: str, tag_name: str, message: str = "", commit_hash: str =
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при создании тега: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -1209,9 +1139,8 @@ def git_tag_list(directory: str = ".") -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при получении списка тегов: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -1265,9 +1194,8 @@ def git_clone(directory: str, repository_url: str, branch: str = "") -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при клонировании: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 @function_tool
@@ -1306,9 +1234,8 @@ def git_fetch(directory: str = ".", remote: str = "origin") -> str:
         return result
         
     except Exception as e:
-        log_tool_result(operation, error=str(e))
-        result = f"ОШИБКА при получении изменений: {str(e)}"
-        log_tool_result(operation, result=result)
+        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        log_tool_result(operation, error=result)
         return result
 
 # ============================================================================
