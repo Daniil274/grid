@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from core.config import Config
 from core.agent_factory import AgentFactory
+from core.security_agent_factory import SecurityAwareAgentFactory
 from utils.logger import Logger
 from utils.pretty_logger import PrettyLogger, update_todos
 from utils.agent_logger import configure_agent_logger, AgentLogLevel
@@ -76,8 +77,8 @@ async def main():
         pretty_logger.tool_result(operation, result="Конфигурация загружена")
         
         # Create factory
-        operation = pretty_logger.tool_start("AgentFactory")
-        factory = AgentFactory(config, args.path)
+        operation = pretty_logger.tool_start("SecurityAwareAgentFactory")
+        factory = SecurityAwareAgentFactory(config, args.path)
         pretty_logger.tool_result(operation, result="Фабрика агентов инициализирована")
         
         # Настройка детального логирования агентов

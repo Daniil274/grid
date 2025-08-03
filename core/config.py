@@ -46,6 +46,18 @@ class Config:
             logger.info(f"Configuration loaded from {self.config_path}")
             logger.debug(f"Loaded {len(self._config.agents)} agents, {len(self._config.models)} models")
             
+            # Change to working directory if specified
+            target_working_dir = self.get_working_directory()
+            if target_working_dir and target_working_dir != os.getcwd():
+                if os.path.exists(target_working_dir):
+                    try:
+                        os.chdir(target_working_dir)
+                        logger.info(f"Changed working directory to: {target_working_dir}")
+                    except OSError as e:
+                        logger.warning(f"Failed to change to working directory {target_working_dir}: {e}")
+                else:
+                    logger.warning(f"Working directory {target_working_dir} does not exist")
+            
         except FileNotFoundError as e:
             raise ConfigError(f"Configuration file not found: {e}")
         except yaml.YAMLError as e:
