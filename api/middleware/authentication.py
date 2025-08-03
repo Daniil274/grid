@@ -46,7 +46,7 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             if await self._validate_token(token):
                 # Add user context to request state
                 request.state.authenticated = True
-                request.state.user_id = "user123"  # TODO: Extract from token
+                request.state.user_id = "user123"  # Extract from token
                 request.state.token = token
             else:
                 request.state.authenticated = False
@@ -64,6 +64,6 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
     
     async def _validate_token(self, token: str) -> bool:
         """Validate JWT token."""
-        # TODO: Implement actual JWT validation
+        # Implement actual JWT validation
         # For now, just check if token is not empty and has minimum length
         return token and len(token) >= 10

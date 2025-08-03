@@ -21,36 +21,35 @@ class LogLevel(Enum):
     WARNING = ("⚠", "\033[93m")    # Yellow
     ERROR = ("✗", "\033[91m")      # Red
     TOOL = ("◦", "\033[95m")       # Magenta
-    TODO = ("☐", "\033[94m")       # Blue
 
 
-@dataclass
-class TodoItem:
-    """Todo item structure."""
-    id: str
-    content: str
-    status: str  # pending, in_progress, completed
-    priority: str  # high, medium, low
-    
-    @property
-    def symbol(self) -> str:
-        """Get symbol for todo status."""
-        symbols = {
-            "pending": "☐",
-            "in_progress": "◐", 
-            "completed": "☒"
-        }
-        return symbols.get(self.status, "☐")
-    
-    @property
-    def color(self) -> str:
-        """Get color for todo priority."""
-        colors = {
-            "high": "\033[91m",     # Red
-            "medium": "\033[93m",   # Yellow  
-            "low": "\033[90m"       # Gray
-        }
-        return colors.get(self.priority, "\033[90m")
+# @dataclass
+# class TodoItem:
+#     """Todo item structure."""
+#     id: str
+#     content: str
+#     status: str  # pending, in_progress, completed
+#     priority: str  # high, medium, low
+#     
+#     @property
+#     def symbol(self) -> str:
+#         """Get symbol for todo status."""
+#         symbols = {
+#             "pending": "☐",
+#             "in_progress": "◐", 
+#             "completed": "☒"
+#         }
+#         return symbols.get(self.status, "☐")
+#     
+#     @property
+#     def color(self) -> str:
+#         """Get color for todo priority."""
+#         colors = {
+#             "high": "\033[91m",     # Red
+#             "medium": "\033[93m",   # Yellow  
+#             "low": "\033[90m"       # Gray
+#         }
+#         return colors.get(self.priority, "\033[90m")
 
 
 @dataclass 
@@ -71,7 +70,6 @@ class PrettyLogger:
     
     def __init__(self, name: str = "grid"):
         self.name = name
-        self.todos: List[TodoItem] = []
         self.tools_used: List[ToolOperation] = []
         self.colors_enabled = True
         self.reset_color = "\033[0m"
@@ -85,6 +83,11 @@ class PrettyLogger:
     def get_current_agent(self) -> Optional[str]:
         """Get current agent name for this thread."""
         return getattr(self._thread_local, 'current_agent', None)
+        
+    def clear_current_agent(self) -> None:
+        """Clear current agent name for this thread."""
+        if hasattr(self._thread_local, 'current_agent'):
+            delattr(self._thread_local, 'current_agent')
         
     def _colorize(self, text: str, color: str) -> str:
         """Apply color to text if colors are enabled."""
@@ -193,14 +196,16 @@ class PrettyLogger:
             if paths_count:
                 summary_parts.append(f"Listed {paths_count} paths")
         elif operation.name.lower() == "bash":
-            if result and len(result.strip()) > 0:
+            result_str = str(result) if result is not None else ""
+            if result_str and len(result_str.strip()) > 0:
                 summary_parts.append("Command executed")
             else:
                 summary_parts.append("Command completed")
         
         if not summary_parts and result:
             # Fallback - show full result
-            result_preview = result.replace('\n', ' ')
+            result_str = str(result) if result is not None else ""
+            result_preview = result_str.replace('\n', ' ')
             summary_parts.append(result_preview)
         
         summary = " ".join(summary_parts) if summary_parts else "Completed"
@@ -239,32 +244,29 @@ class PrettyLogger:
         
         operation._diff_lines = diff_lines
     
-    def update_todos(self, todos: List[Dict[str, str]]) -> None:
-        """Update todo list and display."""
-        self.todos = [TodoItem(**todo) for todo in todos]
-        self._display_todos()
-    
-    def _display_todos(self) -> None:
-        """Display current todo list."""
-        if not self.todos:
-            return
-            
-        symbol = self._format_symbol(LogLevel.TODO)
-        print(f"{symbol} Update Todos")
-        
-        # Group by status for better display
-        for todo in self.todos:
-            status_color = {
-                "pending": "\033[90m",      # Gray
-                "in_progress": "\033[93m",  # Yellow  
-                "completed": "\033[92m"     # Green
-            }.get(todo.status, "\033[90m")
-            
-            symbol = self._colorize(todo.symbol, status_color)
-            content = todo.content
-            
-            # Show full content
-            self._print_line(f"⎿  {symbol} {content}", 1)
+    # def update_todos(self, todos: List[Dict[str, str]]) -> None:
+    #     """Update todo list and display."""
+    #     self.todos = [TodoItem(**todo) for todo in todos]
+    #     self._display_todos()
+    # 
+    # def _display_todos(self) -> None:
+    #     """Display current todo list."""
+    #     if not self.todos:
+    #         return
+    #         
+    #     symbol = self._format_symbol(LogLevel.TODO)
+    #     print(f"{symbol} Update Todos")
+    #     
+    #     # Group by status for better display
+    #     for todo in self.todos:
+    #         status_color = {
+    #             "pending": "\033[90m",      # Gray
+    #             "in_progress": "\033[93m",  # Yellow  
+    #             "completed": "\033[92m"     # Green
+    #         }.get(todo.status, "\033[90m")
+    #         
+    #         symbol = self._colorize(todo.symbol, status_color)
+    #         print(f"  ⎿  {symbol} {content}")
         
         # Add a small delay to make updates visible
         import time
@@ -284,11 +286,13 @@ class PrettyLogger:
             self.tool_result(operation, error=error)
         else:
             # Determine if output should be shown
-            show_output = result and len(result.strip()) > 0
+            result_str = str(result) if result is not None else ""
+            show_output = result_str and len(result_str.strip()) > 0
             summary = "Command executed successfully"
             
-            if show_output and len(result) > 200:
-                summary += f" ({len(result.splitlines())} lines output)"
+            result_str = str(result) if result is not None else ""
+            if show_output and len(result_str) > 200:
+                summary += f" ({len(result_str.splitlines())} lines output)"
             
             self.tool_result(operation, result=summary)
     
@@ -374,9 +378,6 @@ def log_tool_result(operation: ToolOperation, **kwargs) -> None:
     """Log tool operation result."""
     pretty_logger.tool_result(operation, **kwargs)
 
-def update_todos(todos: List[Dict[str, str]]) -> None:
-    """Update and display todos."""
-    pretty_logger.update_todos(todos)
 
 def section_start(title: str) -> None:
     """Start new section."""

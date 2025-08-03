@@ -1,12 +1,12 @@
 """
-Grid - Enterprise Agent Factory System.
+Grid - Agent Factory System.
 
 Модульная система агентов на базе OpenAI Agents SDK с возможностями:
 - Конфигурируемые агенты из YAML
 - Агенты как инструменты
 - MCP (Model Context Protocol) интеграция  
 - Управление контекстом и памятью
-- Enterprise-grade логирование и трассировка
+- Логирование и трассировка
 """
 
 __version__ = "0.1.0"

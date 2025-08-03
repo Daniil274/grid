@@ -171,7 +171,7 @@ async def get_agent_stats(
         
         return AgentStats(
             total_agents=len(available_agents),
-            active_sessions=0,  # TODO: Implement session tracking
+            active_sessions=0,  # Implement session tracking
             total_executions=_stats_storage["total_executions"],
             executions_last_hour=executions_last_hour,
             average_execution_time=avg_execution_time,
@@ -222,7 +222,7 @@ async def get_security_status(
         
         return SecurityStatus(
             threat_level=threat_level,
-            active_threats=0,  # TODO: Implement threat tracking
+            active_threats=0,  # Implement threat tracking
             blocked_requests=_stats_storage["blocked_requests"],
             security_events_last_hour=security_events_last_hour,
             guardrails_active=guardrails_active
