@@ -242,3 +242,201 @@ class ContextManager:
             self._conversation_history = []
             self._execution_history = []
             self._metadata = {}
+    
+    def _build_smart_context_json(self, task_input: str, depth: int, include_tools: bool) -> str:
+        """Build smart context based on task analysis in JSON format."""
+        # Analyze task to determine relevant context
+        task_lower = task_input.lower()
+        
+        # Keywords that suggest need for conversation context
+        conversation_keywords = [
+            "продолжи", "далее", "следующий", "предыдущий", "раньше", "уже", "было",
+            "continue", "next", "previous", "before", "already", "was", "что сказал",
+            "ответь на", "отвечай на", "который", "этот", "тот", "тот же", "тот самый",
+            "прочитал", "прочитал и", "анализировал", "оценил", "создал", "отредактировал"
+        ]
+        
+        # Keywords that suggest need for tool history
+        tool_keywords = [
+            "файл", "git", "код", "изменения", "результат", "выполнил", "сделал",
+            "file", "git", "code", "changes", "result", "executed", "done", "создал",
+            "отредактировал", "прочитал", "написал", "весит", "размер", "вес", "байт",
+            "проанализировал", "оценил", "проверил", "нашел", "создал файл"
+        ]
+        
+        # Keywords that suggest reference to previous actions
+        reference_keywords = [
+            "который", "этот", "тот", "тот же", "тот самый", "прочитанный", "анализированный",
+            "созданный", "отредактированный", "проверенный", "найденный", "тот файл",
+            "этот файл", "прочитанный файл", "анализированный файл", "созданный файл"
+        ]
+        
+        needs_conversation = any(keyword in task_lower for keyword in conversation_keywords)
+        needs_tools = any(keyword in task_lower for keyword in tool_keywords)
+        needs_reference = any(keyword in task_lower for keyword in reference_keywords)
+        
+        # Если есть ссылки на предыдущие действия - обязательно нужен полный контекст
+        if needs_reference:
+            return self._build_full_context_json(task_input, include_tools)
+        elif needs_conversation and needs_tools:
+            return self._build_full_context_json(task_input, include_tools)
+        elif needs_conversation:
+            return self._build_conversation_context_json(task_input, depth)
+        elif needs_tools and include_tools:
+            return self._build_tool_context_json(task_input)
+        else:
+            return task_input
+    
+    def get_context_for_agent_tool(
+        self, 
+        strategy: str = "minimal", 
+        depth: int = 5, 
+        include_tools: bool = False,
+        task_input: str = ""
+    ) -> str:
+        """
+        Get context for agent tools based on strategy.
+        
+        Args:
+            strategy: Context strategy (minimal, conversation, smart, full)
+            depth: Number of recent messages to include
+            include_tools: Whether to include tool execution history
+            task_input: The task input for smart analysis
+            
+        Returns:
+            Formatted context string
+        """
+        if strategy == "minimal":
+            return task_input
+        elif strategy == "conversation":
+            return self._build_conversation_context_json(task_input, depth)
+        elif strategy == "smart":
+            return self._build_smart_context_json(task_input, depth, include_tools)
+        elif strategy == "full":
+            return self._build_full_context_json(task_input, include_tools)
+        else:
+            return task_input
+    
+    def _build_conversation_context_json(self, task_input: str, depth: int) -> str:
+        """Build conversation context in JSON format."""
+        with self._lock:
+            if not self._conversation_history:
+                return task_input
+            
+            recent_messages = self._conversation_history[-depth:] if depth > 0 else self._conversation_history
+            
+            context_parts = [
+                "📋 Контекст диалога:",
+                f"Текущая задача: {task_input}",
+                "",
+                "История сообщений (JSON формат):"
+            ]
+            
+            messages_json = []
+            for msg in recent_messages:
+                message_obj = {
+                    "role": msg.role,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp
+                }
+                messages_json.append(message_obj)
+            
+            import json
+            context_parts.append(json.dumps(messages_json, ensure_ascii=False, indent=2))
+            
+            context_parts.extend([
+                "",
+                "💡 Используй эту информацию для понимания контекста задачи.",
+                f"Задача: {task_input}"
+            ])
+            
+            return "\n".join(context_parts)
+    
+    def _build_full_context_json(self, task_input: str, include_tools: bool) -> str:
+        """Build full context including conversation and tool history in JSON format."""
+        with self._lock:
+            context_parts = [
+                "📋 ПОЛНЫЙ КОНТЕКСТ:",
+                f"Текущая задача: {task_input}",
+                "",
+                "💬 История диалога:"
+            ]
+            
+            # Add conversation history
+            if self._conversation_history:
+                messages_json = []
+                for msg in self._conversation_history:
+                    message_obj = {
+                        "role": msg.role,
+                        "content": msg.content,
+                        "timestamp": msg.timestamp
+                    }
+                    messages_json.append(message_obj)
+                
+                import json
+                context_parts.append(json.dumps(messages_json, ensure_ascii=False, indent=2))
+            else:
+                context_parts.append("[]")
+            
+            # Add tool execution history if requested
+            if include_tools and self._execution_history:
+                context_parts.extend([
+                    "",
+                    "🔧 История выполнения операций:"
+                ])
+                
+                tools_json = []
+                for ex in self._execution_history[-10:]:  # Last 10 executions
+                    tool_obj = {
+                        "agent": ex.agent_name,
+                        "input": ex.input_message,
+                        "output": ex.output,
+                        "timestamp": ex.start_time,
+                        "duration": ex.end_time - ex.start_time if ex.end_time else 0
+                    }
+                    tools_json.append(tool_obj)
+                
+                import json
+                context_parts.append(json.dumps(tools_json, ensure_ascii=False, indent=2))
+            
+            context_parts.extend([
+                "",
+                "🎯 ВАЖНО: Используй всю эту информацию для выполнения задачи!",
+                f"Задача: {task_input}"
+            ])
+            
+            return "\n".join(context_parts)
+    
+    def _build_tool_context_json(self, task_input: str) -> str:
+        """Build tool execution context in JSON format."""
+        with self._lock:
+            if not self._execution_history:
+                return task_input
+            
+            context_parts = [
+                "🔧 Контекст операций:",
+                f"Текущая задача: {task_input}",
+                "",
+                "История выполнения операций (JSON формат):"
+            ]
+            
+            tools_json = []
+            for ex in self._execution_history[-5:]:  # Last 5 executions
+                tool_obj = {
+                    "agent": ex.agent_name,
+                    "input": ex.input_message,
+                    "output": ex.output,
+                    "timestamp": ex.start_time
+                }
+                tools_json.append(tool_obj)
+            
+            import json
+            context_parts.append(json.dumps(tools_json, ensure_ascii=False, indent=2))
+            
+            context_parts.extend([
+                "",
+                "💡 Используй эту информацию о предыдущих операциях.",
+                f"Задача: {task_input}"
+            ])
+            
+            return "\n".join(context_parts)

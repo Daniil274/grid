@@ -62,7 +62,7 @@ class ToolOperation:
     error: Optional[str] = None
     duration: Optional[float] = None
     lines_changed: Optional[int] = None
-    expand_hint: str = "ctrl+r to expand"
+    expand_hint: str = ""
     agent_name: Optional[str] = None
 
 
