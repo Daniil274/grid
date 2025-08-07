@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 import uvicorn
 
 # Add grid package to path
@@ -47,6 +48,18 @@ async def lifespan(app: FastAPI):
         # Initialize agent factory
         app.state.agent_factory = SecurityAwareAgentFactory(app.state.config)
         await app.state.agent_factory.initialize()
+        
+        # Очищаем контекст при запуске API - агенты не должны помнить предыдущие чаты
+        app.state.agent_factory.clear_context()
+        
+        # Также удаляем файл с сохраненным контекстом, если он существует
+        import os
+        context_file = "logs/context.json"
+        if os.path.exists(context_file):
+            os.remove(context_file)
+            logger.info(f"Removed saved context file: {context_file}")
+        
+        logger.info("Context cleared on API startup")
         
         # Initialize logger
         Logger.configure(
@@ -113,15 +126,16 @@ async def grid_error_handler(request: Request, exc: GridError):
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError):
     """Handle request validation errors."""
+    safe_details = jsonable_encoder(exc.errors())
     return JSONResponse(
         status_code=422,
         content={
             "error": {
                 "message": "Invalid request format",
                 "type": "validation_error",
-                "details": exc.errors()
+                "details": safe_details,
             }
-        }
+        },
     )
 
 @app.exception_handler(Exception)

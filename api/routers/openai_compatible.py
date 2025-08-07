@@ -41,22 +41,13 @@ async def create_chat_completion(
     """
     
     try:
-        # Validate model name
-        if not OpenAIConverter.validate_model_name(request.model):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error": {
-                        "message": f"Unknown model: {request.model}",
-                        "type": "invalid_request_error", 
-                        "param": "model",
-                        "code": "model_not_found"
-                    }
-                }
-            )
-        
-        # Convert model to agent type
-        agent_type = OpenAIConverter.model_to_agent(request.model)
+        # Validate model name (we accept any; further routing below)
+        # Convert model to agent type with preference for direct agent keys
+        available = agent_factory.get_available_agents()
+        if request.model in available:
+            agent_type = request.model
+        else:
+            agent_type = OpenAIConverter.model_to_agent(request.model)
         
         # Extract user message and context
         user_message = OpenAIConverter.extract_user_message(request.messages)
@@ -136,10 +127,18 @@ async def _create_chat_completion(
         
         # Execute request with timeout
         timeout = context.get("timeout", 300)
-        result = await asyncio.wait_for(
-            agent.run(user_message, context),
-            timeout=timeout
-        )
+        if hasattr(agent, 'run') and callable(getattr(agent, 'run')):
+            result = await asyncio.wait_for(
+                agent.run(user_message, context),
+                timeout=timeout
+            )
+        else:
+            # Fallback: use factory to execute agent (real SDK path)
+            output_text = await asyncio.wait_for(
+                agent_factory.run_agent(agent_type, user_message),
+                timeout=timeout
+            )
+            result = output_text
         
         execution_time = time.time() - start_time
         logger.info(f"Agent execution completed in {execution_time:.2f}s")
@@ -187,8 +186,9 @@ async def _stream_chat_completion(
             # Fallback to non-streaming for agents that don't support it
             logger.warning(f"Agent {agent_type} doesn't support streaming, falling back to sync")
             
-            result = await agent.run(user_message, context)
-            content = result.content if hasattr(result, 'content') else str(result)
+            # Use factory execution when no stream capability
+            output_text = await agent_factory.run_agent(agent_type, user_message)
+            content = output_text
             
             # Send content in chunks to simulate streaming
             words = content.split()

@@ -209,18 +209,18 @@ def search_files(
         "file_extensions": file_extensions,
         "max_results": max_results
     }
-    log_tool_start("search_files", args)
+    log_tool_call("search_files", args)
     
     try:
         base_path = Path(directory)
         if not base_path.exists():
             result = f"ОШИБКА: Директория {directory} не найдена"
-            log_tool_end("search_files", result, time.time() - start_time)
+            log_tool_result("search_files", result)
             return result
         
         if not base_path.is_dir():
             result = f"ОШИБКА: {directory} не является директорией"
-            log_tool_end("search_files", result, time.time() - start_time)
+            log_tool_result("search_files", result)
             return result
         
         # Подготавливаем паттерн для поиска
@@ -229,7 +229,7 @@ def search_files(
                 pattern = re.compile(search_pattern, re.IGNORECASE)
             except re.error as e:
                 result = f"ОШИБКА: Некорректное регулярное выражение '{search_pattern}': {str(e)}"
-                log_tool_end("search_files", result, time.time() - start_time)
+                log_tool_result("search_files", result)
                 return result
         else:
             # Простой поиск - конвертируем в regex для единообразия
@@ -318,13 +318,13 @@ def search_files(
             
             result = result_header + "\n".join(results)
         
-        log_tool_end("search_files", result, time.time() - start_time)
+        log_tool_result("search_files", result)
         return result
         
     except Exception as e:
         log_tool_error("search_files", e)
         result = f"ОШИБКА при поиске: {str(e)}"
-        log_tool_end("search_files", result, time.time() - start_time)
+        log_tool_result("search_files", result)
         return result
 
 @function_tool
@@ -341,18 +341,18 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
     """
     start_time = time.time()
     args = {"filepath": filepath, "patch_content_length": patch_content}
-    log_tool_start("edit_file_patch", args)
+    log_tool_call("edit_file_patch", args)
     
     try:
         path = Path(filepath)
         if not path.exists():
             result = f"ОШИБКА: Файл {filepath} не найден"
-            log_tool_end("edit_file_patch", result, time.time() - start_time)
+            log_tool_result("edit_file_patch", result)
             return result
         
         if not path.is_file():
             result = f"ОШИБКА: {filepath} не является файлом"
-            log_tool_end("edit_file_patch", result, time.time() - start_time)
+            log_tool_result("edit_file_patch", result)
             return result
         
         # Логгируем информацию о редактировании
@@ -429,7 +429,7 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
                     
                 except (ValueError, IndexError) as e:
                     result = f"ОШИБКА: Некорректный формат патча в строке '{line}': {str(e)}"
-                    log_tool_end("edit_file_patch", result, time.time() - start_time)
+                    log_tool_result("edit_file_patch", result)
                     return result
             else:
                 i += 1
@@ -451,13 +451,13 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
         if changes != 0:
             result += f" (изменено строк: {changes:+d})"
         
-        log_tool_end("edit_file_patch", result, time.time() - start_time)
+        log_tool_result("edit_file_patch", result)
         return result
         
     except Exception as e:
         log_tool_error("edit_file_patch", e)
         result = f"ОШИБКА при применении патча к файлу {filepath}: {str(e)}"
-        log_tool_end("edit_file_patch", result, time.time() - start_time)
+        log_tool_result("edit_file_patch", result)
         return result
 
 # ============================================================================

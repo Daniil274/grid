@@ -31,6 +31,7 @@ class ModelConfig(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4000, ge=1, le=100000)
     description: str = ""
+    use_responses_api: bool = False
 
 
 class ToolConfig(BaseModel):
@@ -46,6 +47,10 @@ class ToolConfig(BaseModel):
     
     # For agent tools
     target_agent: Optional[str] = None
+    # Context sharing controls for agent tools
+    context_strategy: Optional[str] = None  # minimal | conversation | smart | full
+    context_depth: Optional[int] = None
+    include_tool_history: Optional[bool] = None
 
 
 class AgentConfig(BaseModel):

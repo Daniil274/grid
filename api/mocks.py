@@ -44,6 +44,7 @@ class MockAgent:
         # Generate response based on agent type
         responses = {
             "coordinator": f"Как координатор агентов, я помогу вам с задачей: {message[:50]}...",
+            "assistant": f"Как помощник, я отвечу кратко: {message[:50]}...",
             "code_agent": f"Анализируя ваш запрос о коде: {message[:50]}...\n\n```python\n# Пример кода\nprint('Hello, World!')\n```",
             "file_agent": f"Работаю с файлами по запросу: {message[:50]}...\n\nСписок файлов:\n- example.txt\n- data.json",
             "security_guardian": f"Анализ безопасности: {message[:50]}...\n\n🛡️ Угроз не обнаружено.\nУровень риска: НИЗКИЙ",
@@ -76,6 +77,7 @@ class MockSecurityAwareAgentFactory:
         self.config = config
         self.available_agents = {
             "coordinator": {"name": "Координатор", "model": "mock", "tools": [], "description": "Координатор агентов"},
+            "assistant": {"name": "Помощник", "model": "mock", "tools": [], "description": "Базовый помощник"},
             "code_agent": {"name": "Кодовый агент", "model": "mock", "tools": ["file_read", "code_analysis"], "description": "Специалист по коду"},
             "file_agent": {"name": "Файловый агент", "model": "mock", "tools": ["file_read", "file_write"], "description": "Управление файлами"},
             "git_agent": {"name": "Git агент", "model": "mock", "tools": ["git_status", "git_log"], "description": "Операции с Git"},

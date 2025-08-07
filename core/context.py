@@ -99,18 +99,21 @@ class ContextManager:
             if last_n:
                 messages = messages[-last_n:]
             
-            context_parts = ["📋 Контекст предыдущих сообщений:"]
-            
-            for i, msg in enumerate(messages, 1):
-                role_emoji = self._get_role_emoji(msg.role)
-                
-                # Use full message content
-                content = msg.content
-                
-                context_parts.append(f"{i}. {role_emoji} {msg.role.title()}: {content}")
-            
-            context_parts.append("\\nПожалуйста, учитывай этот контекст при ответе.")
-            return "\\n".join(context_parts)
+            # Natural, concise dialogue transcript without emojis
+            lines = ["Предыдущий диалог (сжатый):"]
+            for msg in messages:
+                role = {
+                    "user": "Пользователь",
+                    "assistant": "Ассистент",
+                    "system": "Система"
+                }.get(msg.role, msg.role)
+                content = msg.content.strip()
+                # Hard trim very long single messages to keep prompt lightweight
+                if len(content) > 2000:
+                    content = content[:2000] + "…"
+                lines.append(f"{role}: {content}")
+            lines.append("Пожалуйста, учитывай этот контекст при ответе.")
+            return "\n".join(lines)
     
     def get_recent_executions(self, agent_name: Optional[str] = None, limit: int = 5) -> List[AgentExecution]:
         """Get recent agent executions, optionally filtered by agent name."""
@@ -145,6 +148,11 @@ class ContextManager:
                 "last_user_message": self.get_last_user_message(),
                 "last_assistant_message": self.get_last_assistant_message(),
             }
+
+    def get_conversation_history(self) -> List[Dict[str, Any]]:
+        """Return raw conversation history as list of dicts for external consumers."""
+        with self._lock:
+            return [msg.model_dump() for msg in self._conversation_history]
     
     def get_last_user_message(self) -> Optional[str]:
         """Get the last user message."""
@@ -304,16 +312,16 @@ class ContextManager:
             task_input: The task input for smart analysis
             
         Returns:
-            Formatted context string
+            Formatted context string (human-readable transcript)
         """
         if strategy == "minimal":
             return task_input
         elif strategy == "conversation":
-            return self._build_conversation_context_json(task_input, depth)
+            return self._build_conversation_context_human(task_input, depth)
         elif strategy == "smart":
-            return self._build_smart_context_json(task_input, depth, include_tools)
+            return self._build_smart_context_human(task_input, depth, include_tools)
         elif strategy == "full":
-            return self._build_full_context_json(task_input, include_tools)
+            return self._build_full_context_human(task_input, include_tools)
         else:
             return task_input
     
@@ -440,3 +448,107 @@ class ContextManager:
             ])
             
             return "\n".join(context_parts)
+
+    def _build_conversation_context_human(self, task_input: str, depth: int) -> str:
+        """Conversation context as a readable dialogue excerpt."""
+        with self._lock:
+            if not self._conversation_history:
+                return task_input
+            recent_messages = self._conversation_history[-depth:] if depth > 0 else self._conversation_history
+            lines = ["Контекст диалога:", f"Текущая задача: {task_input}", ""]
+            for msg in recent_messages:
+                role = {
+                    "user": "Пользователь",
+                    "assistant": "Ассистент",
+                    "system": "Система"
+                }.get(msg.role, msg.role)
+                content = msg.content.strip()
+                if len(content) > 2000:
+                    content = content[:2000] + "…"
+                lines.append(f"{role}: {content}")
+            lines.append("")
+            lines.append("Используй эту информацию для понимания контекста задачи.")
+            return "\n".join(lines)
+
+    def _build_full_context_human(self, task_input: str, include_tools: bool) -> str:
+        """Full human-readable context: dialogue and recent tool results."""
+        with self._lock:
+            lines = ["ПОЛНЫЙ КОНТЕКСТ:", f"Текущая задача: {task_input}", "", "История диалога:"]
+            if self._conversation_history:
+                for msg in self._conversation_history:
+                    role = {
+                        "user": "Пользователь",
+                        "assistant": "Ассистент",
+                        "system": "Система"
+                    }.get(msg.role, msg.role)
+                    content = msg.content.strip()
+                    if len(content) > 2000:
+                        content = content[:2000] + "…"
+                    lines.append(f"{role}: {content}")
+            else:
+                lines.append("(пусто)")
+            if include_tools and self._execution_history:
+                lines.extend(["", "Результаты последних операций:"])
+                for ex in self._execution_history[-10:]:
+                    summary_output = (ex.output or "").strip()
+                    if len(summary_output) > 2000:
+                        summary_output = summary_output[:2000] + "…"
+                    lines.append(f"Инструмент/агент: {ex.agent_name}")
+                    lines.append(f"Ввод: {ex.input_message}")
+                    if summary_output:
+                        lines.append(f"Вывод: {summary_output}")
+                    if ex.error:
+                        lines.append(f"Ошибка: {ex.error}")
+                    lines.append("")
+            lines.append("ВНИМАНИЕ: Используй информацию выше для решения задачи.")
+            return "\n".join(lines)
+
+    def _build_smart_context_human(self, task_input: str, depth: int, include_tools: bool) -> str:
+        """Human-readable smart context selection."""
+        task_lower = task_input.lower()
+        conversation_keywords = [
+            "продолжи", "далее", "следующий", "предыдущий", "раньше", "уже", "было",
+            "continue", "next", "previous", "before", "already", "was", "что сказал",
+            "ответь на", "отвечай на", "который", "этот", "тот", "тот же", "тот самый",
+            "прочитал", "анализировал", "оценил", "создал", "отредактировал"
+        ]
+        tool_keywords = [
+            "файл", "git", "код", "изменения", "результат", "выполнил", "сделал",
+            "file", "git", "code", "changes", "result", "executed", "done", "создал",
+            "отредактировал", "прочитал", "написал", "весит", "размер", "байт",
+            "проанализировал", "оценил", "проверил", "нашел", "создал файл"
+        ]
+        reference_keywords = [
+            "который", "этот", "тот", "тот же", "тот самый", "прочитанный", "анализированный",
+            "созданный", "отредактированный", "проверенный", "найденный", "тот файл",
+            "этот файл", "прочитанный файл", "анализированный файл", "созданный файл"
+        ]
+        needs_conversation = any(k in task_lower for k in conversation_keywords)
+        needs_tools = any(k in task_lower for k in tool_keywords)
+        needs_reference = any(k in task_lower for k in reference_keywords)
+        if needs_reference or (needs_conversation and needs_tools):
+            return self._build_full_context_human(task_input, include_tools)
+        elif needs_conversation:
+            return self._build_conversation_context_human(task_input, depth)
+        elif needs_tools and include_tools:
+            # Light tool-only summary
+            with self._lock:
+                lines = ["Контекст операций:", f"Текущая задача: {task_input}", ""]
+                for ex in self._execution_history[-5:]:
+                    summary_output = (ex.output or "").strip()
+                    if len(summary_output) > 1200:
+                        summary_output = summary_output[:1200] + "…"
+                    lines.append(f"Инструмент/агент: {ex.agent_name}")
+                    if summary_output:
+                        lines.append(f"Вывод: {summary_output}")
+                    lines.append("")
+                lines.append("Используй эту информацию о предыдущих операциях.")
+                return "\n".join(lines)
+        else:
+            return task_input
+
+    def add_tool_result_as_message(self, tool_name: str, output_text: str) -> None:
+        """Record tool result into conversation as assistant message for follow-ups."""
+        if not output_text:
+            return
+        self.add_message("assistant", f"Результат инструмента {tool_name}: {output_text}")

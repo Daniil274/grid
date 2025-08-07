@@ -3,7 +3,7 @@ OpenAI-compatible API models for GRID Agent System.
 Provides Pydantic models that match OpenAI API format.
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any, Union
 from enum import Enum
 
@@ -16,13 +16,21 @@ class MessageRole(str, Enum):
 class ChatMessage(BaseModel):
     """Individual chat message."""
     role: MessageRole = Field(..., description="Message role")
-    content: str = Field(..., description="Message content")
+    # Accept both OpenAI classic (str) and content-parts array
+    content: Union[str, List[Dict[str, Any]]] = Field(..., description="Message content")
     name: Optional[str] = Field(None, description="Name of the message author")
 
-    @validator('content')
-    def content_not_empty(cls, v):
-        if not v.strip():
-            raise ValueError('Content cannot be empty')
+    @field_validator('content')
+    @classmethod
+    def content_not_empty(cls, v: Union[str, List[Dict[str, Any]]]):
+        if isinstance(v, str):
+            if not v.strip():
+                raise ValueError('Content cannot be empty')
+        elif isinstance(v, list):
+            if len(v) == 0:
+                raise ValueError('Content cannot be empty')
+        else:
+            raise ValueError('Unsupported content type')
         return v
 
 class GridContext(BaseModel):
@@ -52,14 +60,16 @@ class ChatCompletionRequest(BaseModel):
     # GRID-specific extensions
     grid_context: Optional[GridContext] = Field(None, description="GRID-specific context")
 
-    @validator('messages')
-    def messages_not_empty(cls, v):
+    @field_validator('messages')
+    @classmethod
+    def messages_not_empty(cls, v: List[ChatMessage]):
         if not v:
             raise ValueError('Messages list cannot be empty')
         return v
 
-    @validator('model')
-    def model_not_empty(cls, v):
+    @field_validator('model')
+    @classmethod
+    def model_not_empty(cls, v: str):
         if not v.strip():
             raise ValueError('Model name cannot be empty')
         return v

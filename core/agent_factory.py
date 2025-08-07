@@ -57,7 +57,7 @@ class AgentFactory:
         # Initialize managers
         self.context_manager = ContextManager(
             max_history=self.config.get_max_history(),
-            persist_path="logs/context.json" if self.config.is_debug() else None
+            persist_path=None  # Контекст сохраняется только в памяти, не в файле
         )
         
         # Caches
@@ -70,6 +70,62 @@ class AgentFactory:
         
         logger.info("Agent Factory initialized")
     
+    async def initialize(self) -> None:
+        """Async init hook for compatibility with API lifespan."""
+        return None
+    
+    # ---------------------------------------------------------------------
+    # Lightweight model resolution helpers for API (e.g., Cline endpoint)
+    # ---------------------------------------------------------------------
+    def resolve_model_key(self, key: Optional[str]) -> str:
+        """
+        Resolve input key into a model key using configuration.
+        - If key is None: use default agent's model
+        - If key is a model key: return it
+        - If key is an agent key: return that agent's model
+        - Otherwise: fallback to default agent's model
+        """
+        try:
+            if not key:
+                default_agent_key = self.config.get_default_agent()
+                return self.config.get_agent(default_agent_key).model
+            # Try as model key
+            try:
+                _ = self.config.get_model(key)
+                return key
+            except Exception:
+                # Try as agent key
+                try:
+                    return self.config.get_agent(key).model
+                except Exception:
+                    # Fallback
+                    default_agent_key = self.config.get_default_agent()
+                    return self.config.get_agent(default_agent_key).model
+        except Exception:
+            # Hard fallback
+            default_agent_key = self.config.get_default_agent()
+            return self.config.get_agent(default_agent_key).model
+
+    def get_openai_client_for_model(self, model_key: str) -> tuple[AsyncOpenAI, str]:
+        """
+        Create OpenAI client and return (client, model_name) using configuration.
+        """
+        model_cfg = self.config.get_model(model_key)
+        provider_cfg = self.config.get_provider(model_cfg.provider)
+        api_key = self.config.get_api_key(model_cfg.provider)
+        if not api_key:
+            raise AgentError(
+                f"API key not found for provider '{model_cfg.provider}'",
+                details={"provider": model_cfg.provider, "env_var": provider_cfg.api_key_env},
+            )
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=provider_cfg.base_url,
+            timeout=provider_cfg.timeout,
+            max_retries=provider_cfg.max_retries,
+        )
+        return client, model_cfg.name
+    
     def _get_agent_session(self, agent_key: str) -> SQLiteSession:
         """Get or create session for an agent to maintain memory."""
         if agent_key not in self._agent_sessions:
@@ -79,6 +135,18 @@ class AgentFactory:
             logger.debug(f"Created new session for agent {agent_key}: {session_id}")
         
         return self._agent_sessions[agent_key]
+    
+    def _is_reasoning_model_name(self, model_name: str) -> bool:
+        """Heuristic check for reasoning-style models requiring Responses API."""
+        name = (model_name or "").lower()
+        reasoning_markers = [
+            "o3",            # OpenAI o3 family
+            "o4-mini-high",  # speculative advanced modes
+            "r1",            # deepseek-r1 / other r1 models
+            "reason",        # contains 'reason' or 'reasoning'
+            "thinking",      # thinking-style models
+        ]
+        return any(marker in name for marker in reasoning_markers)
     
     async def create_agent(
         self, 
@@ -133,11 +201,55 @@ class AgentFactory:
                 max_retries=provider_config.max_retries
             )
             
-            # Create model
-            model = OpenAIChatCompletionsModel(
-                model=model_config.name,
-                openai_client=client
-            )
+            # Create model (auto-switch to Responses API for reasoning models if available)
+            model = None
+            use_responses = False
+            try:
+                use_responses = bool(getattr(model_config, "use_responses_api", False))
+            except Exception:
+                use_responses = False
+            
+            # Разрешаем Responses API только для провайдера OpenAI
+            base_url_lower = (provider_config.base_url or "").lower()
+            provider_supports_responses = "api.openai.com" in base_url_lower
+            if use_responses and not provider_supports_responses:
+                logger.warning(
+                    "Responses API requested by config, but provider does not support it. Falling back to Chat Completions.",
+                    provider=model_config.provider,
+                    base_url=provider_config.base_url,
+                    model=model_config.name,
+                )
+                use_responses = False
+            
+            if use_responses and provider_supports_responses:
+                try:
+                    # Lazy import to not require newer SDK if not installed
+                    from agents import OpenAIResponsesModel  # type: ignore
+                    model = OpenAIResponsesModel(
+                        model=model_config.name,
+                        openai_client=client
+                    )
+                    logger.info(
+                        "Using Responses API model",
+                        model=model_config.name,
+                        provider=model_config.provider,
+                        forced_by_config=use_responses,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        (
+                            "Responses API model not available, falling back to Chat Completions. "
+                            "Tool calls may not work with reasoning models."
+                        ),
+                        error=str(e),
+                        model=model_config.name,
+                    )
+            
+            if model is None:
+                model = OpenAIChatCompletionsModel(
+                    model=model_config.name,
+                    openai_client=client
+                )
             
             # Build instructions with context
             instructions = self._build_agent_instructions(agent_key, context_path)
@@ -207,10 +319,19 @@ class AgentFactory:
             # Set current agent for tool logging
             set_current_agent(agent_key)
             
+            logger.info(f"Creating agent '{agent_key}' with context_path: {context_path}")
+            
             # Create agent
             agent = await self.create_agent(agent_key, context_path)
             
-            # Add user message to context
+            logger.info(f"Agent '{agent.name}' created successfully")
+            
+            # Не добавляем инструкции агента в диалог; сохраняем в metadata для служебного использования
+            if not self.context_manager.get_conversation_context():
+                agent_instructions = self._build_agent_instructions(agent_key, context_path)
+                self.context_manager.set_metadata("agent_instructions", agent_instructions)
+            
+            # Добавляем сообщение в контекст для текущей сессии
             self.context_manager.add_message("user", message)
             
             # Начинаем детальное логирование
@@ -236,27 +357,46 @@ class AgentFactory:
                     # Fallback: create session if not attached
                     session = self._get_agent_session(agent_key)
                 
-                if stream:
-                    # Handle streaming (simplified for now)
-                    result = await asyncio.wait_for(
-                        Runner.run(agent, message, max_turns=max_turns, session=session),
-                        timeout=timeout_seconds
-                    )
-                else:
-                    result = await asyncio.wait_for(
-                        Runner.run(agent, message, max_turns=max_turns, session=session),
-                        timeout=timeout_seconds
-                    )
+                # Запускаем агента и получаем RunResult объект
+                result = await asyncio.wait_for(
+                    Runner.run(agent, message, max_turns=max_turns, session=session),
+                    timeout=timeout_seconds
+                )
             except asyncio.TimeoutError:
                 logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                 raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
             except Exception as e:
                 raise AgentError(f"Agent execution failed: {e}") from e
             
-            # Process result
-            output = result.final_output if hasattr(result, 'final_output') else str(result)
+            # Process result - more robust extraction
+            logger.debug(f"Result type: {type(result)}")
+            logger.debug(f"Result attributes: {dir(result)}")
             
-            # Add assistant response to context
+            # Проверяем, является ли result строкой (уже обработанной)
+            if isinstance(result, str):
+                output = result
+                logger.debug("Using result as string")
+            elif hasattr(result, 'final_output') and result.final_output:
+                output = result.final_output
+                logger.debug("Using result.final_output")
+            elif hasattr(result, 'output') and result.output:
+                output = result.output
+                logger.debug("Using result.output")
+            elif hasattr(result, 'content') and result.content:
+                output = result.content
+                logger.debug("Using result.content")
+            else:
+                output = str(result)
+                logger.debug("Using str(result)")
+            
+            # Ensure we have a non-empty response
+            if not output or output.strip() == "":
+                output = "Агент выполнил задачу, но не предоставил текстовый ответ. Проверьте логи для деталей выполнения."
+                logger.warning("Empty output from agent, using fallback message")
+            
+            logger.debug(f"Final output length: {len(output)}")
+            
+            # Добавляем ответ агента в контекст для текущей сессии
             self.context_manager.add_message("assistant", output)
             
             # Update execution record
@@ -302,7 +442,7 @@ class AgentFactory:
         # Add path context
         path_context = self._build_path_context(context_path)
         
-        # Add conversation context
+        # Добавляем контекст текущей сессии (но не между разными запусками)
         conversation_context = self.context_manager.get_conversation_context()
         
         # Combine all parts
@@ -311,10 +451,11 @@ class AgentFactory:
         if path_context:
             parts.append(path_context)
         
+        # Добавляем контекст текущей сессии
         if conversation_context:
             parts.append(conversation_context)
         
-        return "\\n\\n".join(parts)
+        return "\n\n".join(parts)
     
     def _build_path_context(self, context_path: Optional[str] = None) -> str:
         """Build path context information."""
@@ -322,24 +463,24 @@ class AgentFactory:
         config_dir = self.config.get_config_directory()
         
         context_parts = [
-            "📁 Информация о путях:",
-            f"   Рабочая директория: {working_dir}",
-            f"   Директория конфигурации: {config_dir}"
+            "Информация о путях:",
+            f"Рабочая директория: {working_dir}",
+            f"Директория конфигурации: {config_dir}"
         ]
         
         if context_path:
             absolute_path = self.config.get_absolute_path(context_path)
             context_parts.extend([
-                f"   Контекстный путь: {context_path}",
-                f"   Абсолютный контекстный путь: {absolute_path}"
+                f"Контекстный путь: {context_path}",
+                f"Абсолютный контекстный путь: {absolute_path}"
             ])
         
         context_parts.extend([
             "",
-            "💡 Используй эти пути для работы с файлами и директориями."
+            "Используй эти пути для работы с файлами и директориями."
         ])
         
-        return "\\n".join(context_parts)
+        return "\n".join(context_parts)
     
     async def _get_agent_tools(self, agent_config: AgentConfig) -> List[Any]:
         """Get all tools for agent with caching."""
@@ -416,9 +557,9 @@ class AgentFactory:
                 tool_description = tool_config.description or f"Calls {sub_agent.name}"
                 
                 # Get context sharing parameters from tool config
-                context_strategy = getattr(tool_config, 'context_strategy', 'minimal')
+                context_strategy = getattr(tool_config, 'context_strategy', 'conversation')
                 context_depth = getattr(tool_config, 'context_depth', 5)
-                include_tool_history = getattr(tool_config, 'include_tool_history', False)
+                include_tool_history = getattr(tool_config, 'include_tool_history', True)
                 
                 # Create context-aware tool
                 agent_tool = self._create_context_aware_agent_tool(
@@ -537,10 +678,7 @@ class AgentFactory:
         async def run_agent_with_context(context: RunContextWrapper, input: str) -> str:
             from agents import Runner
             
-            # Add this tool call to context BEFORE getting context
-            self.context_manager.add_message("user", f"Tool call to {tool_name}: {input}")
-            
-            # Get context based on strategy - use the factory's context manager
+            # Подготавливаем человекочитаемый контекст для подагента
             enhanced_input = self.context_manager.get_context_for_agent_tool(
                 strategy=context_strategy,
                 depth=context_depth,
@@ -566,9 +704,11 @@ class AgentFactory:
                 session=session,
             )
             
-            # Add tool response to context
-            output_text = ItemHelpers.text_message_outputs(output.new_items)
-            self.context_manager.add_message("assistant", f"Tool response from {tool_name}: {output_text}")
+            # Запишем результат как сообщение ассистента, чтобы главный агент мог обсуждать и давать правки
+            try:
+                self.context_manager.add_tool_result_as_message(tool_name, output_text)
+            except Exception:
+                pass
             
             return output_text
         
@@ -621,9 +761,16 @@ class AgentFactory:
             return None
     
     def _extract_tools_used(self, result: Any) -> List[str]:
-        """Extract list of tools used from result."""
-        # This would need to be implemented based on the actual result structure
-        # from the agents SDK
+        """
+        Extract the names of tools invoked during the run.
+        
+        The SDK `Runner.run` returns an object that (as of v0.2.x) contains
+        a ``tool_calls`` attribute – a list of ``ToolCall`` objects with a
+        ``name`` field.  If the attribute is missing we fall back to an empty
+        list to keep the system robust.
+        """
+        if hasattr(result, "tool_calls"):
+            return [call.name for call in getattr(result, "tool_calls")]
         return []
     
     # Context management methods
