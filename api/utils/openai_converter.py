@@ -27,7 +27,7 @@ AGENT_MODEL_MAPPING = {
     "grid-researcher": "researcher",
     "grid-thinker": "thinker",
     "grid-assistant": "coordinator",
-    
+
     # Aliases для совместимости
     "gpt-4": "coordinator",
     "gpt-4-turbo": "coordinator",
@@ -35,7 +35,10 @@ AGENT_MODEL_MAPPING = {
     "claude-3": "thinker",
     "claude-3-opus": "thinker",
     "claude-3-sonnet": "coordinator",
-    
+
+    # LM Studio / локальные модели
+    "qwen3-4b-instruct-2507": "assistant",
+
     # Специализированные агенты
     "grid-security": "security_guardian",
     "grid-analysis": "task_analyzer", 
@@ -116,10 +119,34 @@ class OpenAIConverter:
         user_messages = [msg for msg in messages if msg.role == "user"]
         
         if user_messages:
-            return user_messages[-1].content
+            last = user_messages[-1]
+            content = last.content
+            # If content is array of parts (OpenAI format), join text parts
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    # typical shape {"type":"text","text":"..."}
+                    if isinstance(part, dict):
+                        txt = part.get("text") or part.get("content") or ""
+                        if txt:
+                            parts.append(txt)
+                return "\n".join(parts) if parts else ""
+            return content
         
         # Если нет пользовательского сообщения, объединяем все
-        return "\n".join([f"{msg.role}: {msg.content}" for msg in messages])
+        parts = []
+        for msg in messages:
+            c = msg.content
+            if isinstance(c, list):
+                text = []
+                for part in c:
+                    if isinstance(part, dict):
+                        t = part.get("text") or part.get("content") or ""
+                        if t:
+                            text.append(t)
+                c = "\n".join(text)
+            parts.append(f"{msg.role}: {c}")
+        return "\n".join(parts)
     
     @staticmethod
     def build_conversation_context(messages: List[ChatMessage]) -> str:
@@ -272,8 +299,10 @@ class OpenAIConverter:
     
     @staticmethod
     def validate_model_name(model: str) -> bool:
-        """Проверка валидности имени модели."""
-        return model in AGENT_MODEL_MAPPING
+        """Проверка валидности имени модели.
+        Принимаем любые имена, чтобы поддерживать локальные OpenAI-совместимые провайдеры (LM Studio, Ollama).
+        """
+        return True
     
     @staticmethod
     def sanitize_content(content: str) -> str:

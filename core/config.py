@@ -194,10 +194,10 @@ class Config:
         # Combine parts
         parts = [base_prompt]
         if tool_descriptions:
-            parts.append("\\nДоступные инструменты:")
+            parts.append("\nДоступные инструменты:")
             parts.extend(tool_descriptions)
         
-        return "\\n".join(parts)
+        return "\n".join(parts)
     
     # Settings methods
     def is_debug(self) -> bool:

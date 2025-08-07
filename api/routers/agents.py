@@ -162,17 +162,17 @@ async def execute_agent(
         import time
         start_time = time.time()
         
-        agent = await agent_factory.create_agent(agent_type)
-        result = await agent.run(request.message, context)
+        # Используем factory.run_agent() вместо agent.run() для правильной работы с контекстом
+        result = await agent_factory.run_agent(agent_type, request.message)
         
         execution_time = time.time() - start_time
         
         # Prepare response
         response = AgentExecutionResponse(
             agent_type=agent_type,
-            result=result.content if hasattr(result, 'content') else str(result),
+            result=result,  # factory.run_agent() возвращает строку
             execution_time=execution_time,
-            tools_used=getattr(result, 'tools_used', []),
+            tools_used=[],  # Пока не извлекаем использованные инструменты
             session_id=request.session_id,
             metadata={
                 "model": available_agents[agent_type].get("model"),

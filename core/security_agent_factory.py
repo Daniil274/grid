@@ -41,7 +41,25 @@ class SecurityAwareAgentFactory(AgentFactory):
             "file_manager",
             "system_executor"
         }
-        
+    
+    def get_available_agents(self) -> Dict[str, Any]:
+        """Expose available agents from configuration for API layer."""
+        try:
+            agents_cfg = self.config.config.agents  # pydantic model mapping
+            result: Dict[str, Any] = {}
+            for key, agent in agents_cfg.items():
+                # agent is AgentConfig (pydantic), expose essential fields
+                result[key] = {
+                    "name": agent.name or key,
+                    "description": getattr(agent, "description", ""),
+                    "model": agent.model,
+                    "tools": list(agent.tools) if getattr(agent, "tools", None) else [],
+                }
+            return result
+        except Exception:
+            # Fallback: empty dict to avoid hard failures
+            return {}
+    
     async def create_agent(
         self, 
         agent_key: str, 

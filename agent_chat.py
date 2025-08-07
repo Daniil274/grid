@@ -105,6 +105,19 @@ async def main():
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
         
+        # Автоматически очищаем контекст при запуске - агенты не должны помнить предыдущие чаты
+        operation = pretty_logger.tool_start("ClearContext")
+        factory.clear_context()
+        
+        # Также удаляем файл с сохраненным контекстом, если он существует
+        import os
+        context_file = "logs/context.json"
+        if os.path.exists(context_file):
+            os.remove(context_file)
+            pretty_logger.info(f"Удален файл сохраненного контекста: {context_file}")
+        
+        pretty_logger.tool_result(operation, result="Контекст очищен при запуске")
+        
         pretty_logger.success("Grid Agent System готов к работе")
         
         print("\n" + "="*60)
