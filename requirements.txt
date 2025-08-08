@@ -1,4 +1,27 @@
-openai-agents[litellm]
+# Grid Agent System Dependencies
+
+# Core AI framework
+openai-agents>=0.1.0
+
+# HTTP and API clients
+httpx>=0.25.0
 openai>=1.0.0
+
+# Configuration and data handling
+pydantic>=2.0.0
+PyYAML>=6.0
+
+# Environment and utilities  
 python-dotenv>=1.0.0
-pyyaml>=6.0.0
+pathlib>=1.0.0
+
+# Development dependencies (optional)
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+flake8>=6.0.0
+
+# Enterprise features
+structlog>=23.0.0  # Enhanced logging
+click>=8.0.0       # CLI improvements
+rich>=13.0.0       # Terminal formatting
