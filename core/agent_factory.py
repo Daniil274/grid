@@ -24,6 +24,9 @@ from utils.unified_logger import (
     get_unified_logger
 )
 
+import json
+import re
+
 load_dotenv()
 logger = Logger(__name__)
 
@@ -67,6 +70,8 @@ class AgentFactory:
         
         # Session management for agent memory
         self._agent_sessions: Dict[str, SQLiteSession] = {}
+        # Track emitted warnings to avoid log spam (e.g., Responses API fallbacks)
+        self._responses_warning_keys: set[str] = set()
         
         logger.info("Agent Factory initialized")
     
@@ -213,12 +218,22 @@ class AgentFactory:
             base_url_lower = (provider_config.base_url or "").lower()
             provider_supports_responses = "api.openai.com" in base_url_lower
             if use_responses and not provider_supports_responses:
-                logger.warning(
-                    "Responses API requested by config, but provider does not support it. Falling back to Chat Completions.",
-                    provider=model_config.provider,
-                    base_url=provider_config.base_url,
-                    model=model_config.name,
-                )
+                warn_key = f"{model_config.provider}|{provider_config.base_url}|{model_config.name}|no_support"
+                if warn_key not in self._responses_warning_keys:
+                    logger.warning(
+                        "Responses API requested by config, but provider does not support it. Falling back to Chat Completions.",
+                        provider=model_config.provider,
+                        base_url=provider_config.base_url,
+                        model=model_config.name,
+                    )
+                    self._responses_warning_keys.add(warn_key)
+                else:
+                    logger.debug(
+                        "Responses API not supported by provider; using Chat Completions (deduped)",
+                        provider=model_config.provider,
+                        base_url=provider_config.base_url,
+                        model=model_config.name,
+                    )
                 use_responses = False
             
             if use_responses and provider_supports_responses:
@@ -236,14 +251,23 @@ class AgentFactory:
                         forced_by_config=use_responses,
                     )
                 except Exception as e:
-                    logger.warning(
-                        (
-                            "Responses API model not available, falling back to Chat Completions. "
-                            "Tool calls may not work with reasoning models."
-                        ),
-                        error=str(e),
-                        model=model_config.name,
-                    )
+                    warn_key = f"{model_config.provider}|{provider_config.base_url}|{model_config.name}|init_fail"
+                    if warn_key not in self._responses_warning_keys:
+                        logger.warning(
+                            (
+                                "Responses API model not available, falling back to Chat Completions. "
+                                "Tool calls may not work with reasoning models."
+                            ),
+                            error=str(e),
+                            model=model_config.name,
+                        )
+                        self._responses_warning_keys.add(warn_key)
+                    else:
+                        logger.debug(
+                            "Responses API model init failed previously; using Chat Completions (deduped)",
+                            error=str(e),
+                            model=model_config.name,
+                        )
             
             if model is None:
                 model = OpenAIChatCompletionsModel(
@@ -398,6 +422,16 @@ class AgentFactory:
             
             # Добавляем ответ агента в контекст для текущей сессии
             self.context_manager.add_message("assistant", output)
+            
+            # Принудительный разбор и выполнение первого tool call из текстового ответа
+            try:
+                manual_tool_result = await self._execute_first_tool_call_in_text(output)
+                if manual_tool_result is not None:
+                    output = manual_tool_result
+            except Exception as e:
+                logger.warning(
+                    "Manual tool call parsing/execution failed", error=str(e)
+                )
             
             # Update execution record
             execution.end_time = time.time()
@@ -589,13 +623,27 @@ class AgentFactory:
         
         async def wrapped_invoke_tool(tool_context, tool_call_arguments):
             start_time = time.time()
-            # Безопасно преобразуем аргументы в строку
+            # Нормализуем и логируем аргументы инструмента
+            normalized_args = tool_call_arguments
             if isinstance(tool_call_arguments, dict):
-                input_data = str(tool_call_arguments)
-            elif isinstance(tool_call_arguments, list):
-                input_data = str(tool_call_arguments)
+                # Поддержка алиасов для совместимости: task/message/prompt → input
+                if 'input' not in tool_call_arguments:
+                    alias_value = None
+                    for alias in ('task', 'message', 'prompt'):
+                        if alias in tool_call_arguments and isinstance(tool_call_arguments[alias], str):
+                            alias_value = tool_call_arguments[alias]
+                            break
+                    if alias_value is not None:
+                        normalized_args = {'input': alias_value}
+                # Если есть input, передаем только его, чтобы не падать на строгой схеме
+                if isinstance(normalized_args, dict) and 'input' in normalized_args:
+                    normalized_args = {'input': normalized_args['input']}
+
+            # Безопасно преобразуем аргументы в строку для логов
+            if isinstance(normalized_args, dict) or isinstance(normalized_args, list):
+                input_data = str(normalized_args)
             else:
-                input_data = str(tool_call_arguments)
+                input_data = str(normalized_args)
             
             execution = AgentExecution(
                 agent_name=agent_name,
@@ -616,8 +664,8 @@ class AgentFactory:
                 logger.log_agent_tool_start(agent_name, "call_agent", input_data)
                 logger.log_agent_start(agent_name, input_data)
                 
-                # Call original function
-                result = original_invoke(tool_context, tool_call_arguments)
+                # Call original function с нормализованными аргументами
+                result = original_invoke(tool_context, normalized_args)
                 if hasattr(result, '__await__'):
                     result = await result
                 
@@ -675,15 +723,29 @@ class AgentFactory:
             name_override=tool_name,
             description_override=tool_description,
         )
-        async def run_agent_with_context(context: RunContextWrapper, input: str) -> str:
+        async def run_agent_with_context(
+            context: RunContextWrapper,
+            input: Optional[str] = None,
+            task: Optional[str] = None,
+            message: Optional[str] = None,
+            prompt: Optional[str] = None,
+        ) -> str:
             from agents import Runner
             
             # Подготавливаем человекочитаемый контекст для подагента
+            # Нормализуем вход: поддерживаем несколько алиасов для совместимости
+            raw_input = input or task or message or prompt or ""
+            if not raw_input:
+                return (
+                    f"❌ Пустой ввод для инструмента '{tool_name}'. Передайте 'input' или один из алиасов: "
+                    f"'task' | 'message' | 'prompt'."
+                )
+
             enhanced_input = self.context_manager.get_context_for_agent_tool(
                 strategy=context_strategy,
                 depth=context_depth,
                 include_tools=include_tool_history,
-                task_input=input
+                task_input=raw_input
             )
             
             # Get session from the sub-agent (attached during creation)
@@ -702,15 +764,16 @@ class AgentFactory:
                 input=enhanced_input,
                 context=context.context,
                 session=session,
+                max_turns=self.config.get_max_turns(),
             )
             
             # Запишем результат как сообщение ассистента, чтобы главный агент мог обсуждать и давать правки
             try:
-                self.context_manager.add_tool_result_as_message(tool_name, output_text)
+                self.context_manager.add_tool_result_as_message(tool_name, output)
             except Exception:
                 pass
             
-            return output_text
+            return output
         
         return run_agent_with_context
     

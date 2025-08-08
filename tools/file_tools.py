@@ -484,5 +484,6 @@ def get_file_tools_by_names(tool_names: List[str]) -> List[Any]:
         if name in FILE_TOOLS:
             tools.append(FILE_TOOLS[name])
         else:
-            print(f"⚠️  Файловый инструмент '{name}' не найден")
+            from utils.logger import Logger
+            Logger(__name__).warning(f"Файловый инструмент '{name}' не найден")
     return tools 
