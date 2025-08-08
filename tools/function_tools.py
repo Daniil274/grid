@@ -81,7 +81,8 @@ def get_tools_by_names(tool_names: List[str]) -> List[Any]:
             if actual_name in AVAILABLE_TOOLS:
                 tools.append(AVAILABLE_TOOLS[actual_name])
             else:
-                print(f"⚠️  Инструмент '{actual_name}' (алиас для '{name}') не найден")
+                from utils.logger import Logger
+                Logger(__name__).warning(f"Инструмент '{actual_name}' (алиас для '{name}') не найден")
         else:
             # Попробуем найти в отдельных модулях
             if name.startswith('file_') or name in ['read_file', 'write_file', 'list_files', 'get_file_info', 'search_files', 'edit_file_patch']:
@@ -91,7 +92,8 @@ def get_tools_by_names(tool_names: List[str]) -> List[Any]:
                 git_tools = get_git_tools_by_names([name])
                 tools.extend(git_tools)
             else:
-                print(f"⚠️  Инструмент '{name}' не найден")
+                from utils.logger import Logger
+                Logger(__name__).warning(f"Инструмент '{name}' не найден")
     
     return tools
 

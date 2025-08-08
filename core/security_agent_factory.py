@@ -7,6 +7,8 @@ from datetime import datetime
 from agents import Agent
 from core.agent_factory import AgentFactory
 from core.security_guardrails import configure_agent_guardrails, SecurityGuardrails
+from utils.logger import Logger
+logger = Logger(__name__)
 
 
 class SecurityAwareAgentFactory(AgentFactory):
@@ -148,9 +150,9 @@ class SecurityAwareAgentFactory(AgentFactory):
             policies: List of security policy configurations
         """
         # For demo purposes, just log the policies
-        print(f"Configuring {len(policies)} security policies")
+        logger.info(f"Configuring {len(policies)} security policies")
         for policy in policies:
-            print(f"  - {policy.get('name', 'Unknown')}: {policy.get('description', 'No description')}")
+            logger.info(f"  - {policy.get('name', 'Unknown')}: {policy.get('description', 'No description')}")
     
     def enable_audit_logging(self, enable: bool = True) -> None:
         """
@@ -159,7 +161,7 @@ class SecurityAwareAgentFactory(AgentFactory):
         Args:
             enable: Whether to enable audit logging
         """
-        print(f"Audit logging {'enabled' if enable else 'disabled'}")
+        logger.info(f"Audit logging {'enabled' if enable else 'disabled'}")
     
     def add_security_agent_type(self, agent_key: str, full_analysis: bool = False) -> None:
         """

@@ -6,6 +6,8 @@ import asyncio
 import time
 from typing import Any, Dict, List, AsyncIterator
 from dataclasses import dataclass
+from utils.logger import Logger
+logger = Logger(__name__)
 
 # Mock Agent Result
 @dataclass
@@ -90,11 +92,11 @@ class MockSecurityAwareAgentFactory:
     
     async def initialize(self):
         """Mock initialization."""
-        print("📦 Mock agent factory initialized")
+        logger.info("Mock agent factory initialized")
     
     async def cleanup(self):
         """Mock cleanup."""
-        print("🧹 Mock agent factory cleaned up")
+        logger.info("Mock agent factory cleaned up")
     
     async def create_agent(self, agent_type: str) -> MockAgent:
         """Create mock agent."""

@@ -1287,5 +1287,6 @@ def get_git_tools_by_names(tool_names: List[str]) -> List[Any]:
         if name in GIT_TOOLS:
             tools.append(GIT_TOOLS[name])
         else:
-            print(f"⚠️  Git инструмент '{name}' не найден")
+            from utils.logger import Logger
+            Logger(__name__).warning(f"Git инструмент '{name}' не найден")
     return tools 
