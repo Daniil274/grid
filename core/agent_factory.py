@@ -24,8 +24,6 @@ from utils.unified_logger import (
     log_prompt, log_tool_call, set_current_agent, clear_current_agent,
     get_unified_logger, log_tool_result
 )
-# Регистрация обогащателей логов (изолировано от основной логики)
-from utils.log_enricher import register_default_enrichers
 
 import json
 import re
@@ -80,13 +78,6 @@ class AgentFactory:
         self._responses_warning_keys: set[str] = set()
         
         logger.info("Agent Factory initialized")
-        
-        # Регистрация обогащателей логов (идемпотентно, безопасно вызывать многократно)
-        try:
-            register_default_enrichers()
-        except Exception:
-            # Обогащатели не должны влиять на основную работу
-            pass
     
     async def initialize(self) -> None:
         """Async init hook for compatibility with API lifespan."""
@@ -407,6 +398,23 @@ class AgentFactory:
             if not session:
                 session = self._get_agent_session(agent_key)
             
+            # Безопасное отключение streaming для OpenRouter (избегаем ошибки ResponseTextDeltaEvent logprobs)
+            try:
+                _agent_cfg = self.config.get_agent(agent_key)
+                _model_cfg = self.config.get_model(_agent_cfg.model)
+                _provider_cfg = self.config.get_provider(_model_cfg.provider)
+                _base_url_lower = (_provider_cfg.base_url or "").lower()
+                if stream and ("openrouter.ai" in _base_url_lower):
+                    logger.warning(
+                        "Streaming отключен для OpenRouter из-за несовместимости событий (fallback на non-stream)",
+                        provider=_model_cfg.provider,
+                        model=_model_cfg.name,
+                    )
+                    stream = False
+            except Exception:
+                # Если не удалось определить провайдера — продолжаем с исходным значением stream
+                pass
+
             if stream:
                 # Streaming режим: прозрачно показываем tool/MCP вызовы
                 from agents import Runner, RunItemStreamEvent, RawResponsesStreamEvent
@@ -644,7 +652,32 @@ class AgentFactory:
                 logger.debug(f"Added {len(agent_tool_instances)} agent tools")
             except Exception as e:
                 logger.error(f"Failed to create agent tools: {e}")
-        
+ 
+        # Добавим алиасы каналов для всех уже добавленных инструментов (на случай, если модель добавит суффиксы)
+        try:
+            channel_suffixes = ("<|channel|>commentary", "<|channel|>tool", "<|channel|>final")
+            alias_count = 0
+            # Собираем снимок списка, чтобы не итерироваться по растущему
+            base_tools_snapshot = list(tools)
+            for base_tool in base_tools_snapshot:
+                tool_name = getattr(base_tool, 'name', None)
+                on_invoke = getattr(base_tool, 'on_invoke_tool', None)
+                if not tool_name or not callable(on_invoke):
+                    continue
+                for suffix in channel_suffixes:
+                    alias_name = f"{tool_name}{suffix}"
+                    # Создаем лёгкий прокси-инструмент, перенаправляющий вызов на исходный
+                    @function_tool(name_override=alias_name, description_override=getattr(base_tool, 'description', '') or f"Alias of {tool_name}")
+                    async def alias_tool_proxy(tool_context: RunContextWrapper, **kwargs):
+                        # Передаем исходные аргументы как есть
+                        return await on_invoke(tool_context, kwargs if kwargs else {})
+                    tools.append(alias_tool_proxy)
+                    alias_count += 1
+            if alias_count:
+                logger.debug(f"Added {alias_count} channel alias tools for robustness")
+        except Exception as e:
+            logger.warning("Failed to add channel alias tools", error=str(e))
+
         # NOTE: MCP tools are no longer added as function tools. They are exposed to the model
         # via Agent.mcp_servers using the SDK integration. We only record unavailability metadata.
         if mcp_tools:
