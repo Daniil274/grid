@@ -129,7 +129,8 @@ class Logger:
         
         # File handlers
         if log_dir:
-            log_path = Path(log_dir)
+            # Принудительно использовать директорию логов проекта, а не рабочую директорию агента
+            log_path = Path("logs") if not Path(log_dir).is_absolute() else Path(log_dir)
             log_path.mkdir(parents=True, exist_ok=True)
             
             # General log file
@@ -182,8 +183,14 @@ class Logger:
     
     def _log(self, level: int, message: str, **kwargs) -> None:
         """Internal logging method with extra fields."""
+        exc_info = None
+        if "exc_info" in kwargs:
+            try:
+                exc_info = kwargs.pop("exc_info")
+            except Exception:
+                exc_info = True
         extra = {"extra_fields": kwargs} if kwargs else {}
-        self.logger.log(level, message, extra=extra)
+        self.logger.log(level, message, extra=extra, exc_info=exc_info)
     
     # Specialized logging methods for Grid components
     def log_agent_start(self, agent_name: str, input_message: str) -> None:

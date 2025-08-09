@@ -85,6 +85,8 @@ class Settings(BaseModel):
     config_directory: str = "."
     allow_path_override: bool = True
     agent_logging: AgentLoggingConfig = Field(default_factory=AgentLoggingConfig)
+    # Общие правила/подсказки для всех инструментов (будут добавлены один раз в промпт)
+    tools_common_rules: Optional[str] = None
 
 
 class GridConfig(BaseModel):

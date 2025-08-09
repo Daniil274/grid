@@ -46,17 +46,17 @@ class Config:
             logger.info(f"Configuration loaded from {self.config_path}")
             logger.debug(f"Loaded {len(self._config.agents)} agents, {len(self._config.models)} models")
             
-            # Change to working directory if specified
+            # Do NOT change process working directory to preserve project-relative paths (e.g., logs/)
+            # All file resolutions must go through get_absolute_path/working_directory
             target_working_dir = self.get_working_directory()
             if target_working_dir and target_working_dir != os.getcwd():
                 if os.path.exists(target_working_dir):
-                    try:
-                        os.chdir(target_working_dir)
-                        logger.info(f"Changed working directory to: {target_working_dir}")
-                    except OSError as e:
-                        logger.warning(f"Failed to change to working directory {target_working_dir}: {e}")
+                    logger.info(f"Using configured working directory for path resolution only (no chdir): {target_working_dir}")
                 else:
-                    logger.warning(f"Working directory {target_working_dir} does not exist")
+                    logger.warning(
+                        "Configured working directory does not exist (will be ignored for path resolution): %s",
+                        target_working_dir,
+                    )
             
         except FileNotFoundError as e:
             raise ConfigError(f"Configuration file not found: {e}")
@@ -193,6 +193,11 @@ class Config:
         
         # Combine parts
         parts = [base_prompt]
+        # Общие правила для инструментов (если заданы) — добавляем один раз
+        common_rules = getattr(self.config.settings, 'tools_common_rules', None)
+        if common_rules:
+            parts.append("\nПравила использования инструментов (общие):")
+            parts.append(str(common_rules))
         if tool_descriptions:
             parts.append("\nДоступные инструменты:")
             parts.extend(tool_descriptions)

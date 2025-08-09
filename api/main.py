@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
         
         logger.info("Context cleared on API startup")
         
-        # Initialize logger
+        # Initialize logger (всегда логируем в logs/ проекта)
         Logger.configure(
             level="INFO",
             enable_console=True,
