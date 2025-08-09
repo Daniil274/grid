@@ -1,7 +1,7 @@
 # Grid Agent System Dependencies
 
 # Core AI framework
-openai-agents>=0.1.0
+openai-agents>=0.2.5  # AGENTS SDK
 
 # HTTP and API clients
 httpx>=0.25.0
