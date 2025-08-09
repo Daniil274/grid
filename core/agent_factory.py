@@ -11,18 +11,21 @@ from openai import AsyncOpenAI
 # OpenAI Agents SDK imports
 from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled, Runner, function_tool, RunContextWrapper, SQLiteSession
 from agents.items import ItemHelpers
+from agents.mcp import MCPServerStdio
 
 from .config import Config
 from .context import ContextManager
 from schemas import AgentConfig, AgentExecution
-from tools import get_tools_by_names, MCPClient
+from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError
 from utils.logger import Logger
 from utils.unified_logger import (
     log_agent_start, log_agent_end, log_agent_error, 
     log_prompt, log_tool_call, set_current_agent, clear_current_agent,
-    get_unified_logger
+    get_unified_logger, log_tool_result
 )
+# Регистрация обогащателей логов (изолировано от основной логики)
+from utils.log_enricher import register_default_enrichers
 
 import json
 import re
@@ -66,7 +69,10 @@ class AgentFactory:
         # Caches
         self._agent_cache: Dict[str, Agent] = {}
         self._tool_cache: Dict[str, List[Any]] = {}
-        self._mcp_clients: Dict[str, MCPClient] = {}
+        # Deprecated: _mcp_clients kept for backward compatibility (no longer used)
+        self._mcp_clients: Dict[str, Any] = {}
+        # New MCP servers cache (SDK-based)
+        self._mcp_servers: Dict[str, Any] = {}
         
         # Session management for agent memory
         self._agent_sessions: Dict[str, SQLiteSession] = {}
@@ -74,6 +80,13 @@ class AgentFactory:
         self._responses_warning_keys: set[str] = set()
         
         logger.info("Agent Factory initialized")
+        
+        # Регистрация обогащателей логов (идемпотентно, безопасно вызывать многократно)
+        try:
+            register_default_enrichers()
+        except Exception:
+            # Обогащатели не должны влиять на основную работу
+            pass
     
     async def initialize(self) -> None:
         """Async init hook for compatibility with API lifespan."""
@@ -278,15 +291,30 @@ class AgentFactory:
             # Build instructions with context
             instructions = self._build_agent_instructions(agent_key, context_path)
             
-            # Get tools
+            # Get tools (function and agent tools only; MCP tools handled via mcp_servers)
             tools = await self._get_agent_tools(agent_config)
-            
+
+            # Prepare MCP servers for this agent (if enabled)
+            mcp_server_names: list[str] = []
+            for tool_key in agent_config.tools:
+                try:
+                    tool_cfg = self.config.get_tool(tool_key)
+                    if tool_cfg.type == "mcp":
+                        mcp_server_names.append(tool_key)
+                except ConfigError:
+                    continue
+
+            mcp_servers_list: list[Any] = []
+            if mcp_server_names and (agent_config.mcp_enabled or self.config.is_mcp_enabled()):
+                mcp_servers_list = await self._create_mcp_servers(mcp_server_names)
+
             # Create agent
             agent = Agent(
                 name=agent_config.name,
                 instructions=instructions,
                 model=model,
-                tools=tools
+                tools=tools,
+                mcp_servers=mcp_servers_list,
             )
             
             # Create and attach session to agent for memory
@@ -374,23 +402,78 @@ class AgentFactory:
             
             logger.info(f"Starting agent execution with max_turns={max_turns}, timeout={timeout_seconds}s")
             
-            try:
-                # Get session from the agent (attached during creation)
-                session = getattr(agent, '_session', None)
-                if not session:
-                    # Fallback: create session if not attached
-                    session = self._get_agent_session(agent_key)
-                
-                # Запускаем агента и получаем RunResult объект
-                result = await asyncio.wait_for(
-                    Runner.run(agent, message, max_turns=max_turns, session=session),
-                    timeout=timeout_seconds
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
-                raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
-            except Exception as e:
-                raise AgentError(f"Agent execution failed: {e}") from e
+            # Prepare session
+            session = getattr(agent, '_session', None)
+            if not session:
+                session = self._get_agent_session(agent_key)
+            
+            if stream:
+                # Streaming режим: прозрачно показываем tool/MCP вызовы
+                from agents import Runner, RunItemStreamEvent, RawResponsesStreamEvent
+                result_output: Optional[str] = None
+                try:
+                    run_result_streaming = Runner.run_streamed(
+                        agent,
+                        message,
+                        context=self.context_manager.get_conversation_context(),
+                        max_turns=max_turns,
+                        session=session,
+                    )
+                    # Стримим события и подсвечиваем tool calls/outputs
+                    async for event in run_result_streaming.stream_events():
+                        try:
+                            # Отображение инструментов
+                            if isinstance(event, RunItemStreamEvent):
+                                name = getattr(event, 'name', '')
+                                item = getattr(event, 'item', None)
+                                if name == "tool_called" and item is not None:
+                                    raw_item = getattr(item, 'raw_item', None)
+                                    tool_name = getattr(raw_item, 'name', None) or getattr(raw_item, 'type', None) or "tool"
+                                    # Попробуем достать аргументы (для функций/МСР)
+                                    arguments = getattr(raw_item, 'arguments', None)
+                                    # Преобразуем в строку с усечением
+                                    try:
+                                        args_str = arguments if isinstance(arguments, str) else (json.dumps(arguments, ensure_ascii=False) if arguments is not None else "")
+                                    except Exception:
+                                        args_str = str(arguments) if arguments is not None else ""
+                                    # Сервер MCP, если доступно
+                                    server_label = getattr(raw_item, 'server_label', None)
+                                    args_dict = {"args": args_str}
+                                    if server_label:
+                                        args_dict["server_label"] = server_label
+                                    log_tool_call(tool_name, args_dict, agent_name=agent.name)
+                                elif name == "tool_output" and item is not None:
+                                    raw_item = getattr(item, 'raw_item', None)
+                                    tool_name = getattr(raw_item, 'name', None) or getattr(raw_item, 'type', None) or "tool"
+                                    output_val = getattr(item, 'output', '')
+                                    log_tool_result(tool_name, output_val, agent_name=agent.name)
+                            elif isinstance(event, RawResponsesStreamEvent):
+                                # Можно добавить отображение reasoning/дельт при необходимости
+                                pass
+                        except Exception:
+                            # Никогда не роняем выполнение из-за отображения логов
+                            pass
+                    # После завершения стрима забираем финальный вывод
+                    result_output = run_result_streaming.final_output if run_result_streaming.final_output is not None else ""
+                except asyncio.TimeoutError:
+                    logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
+                    raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
+                except Exception as e:
+                    raise AgentError(f"Agent execution failed: {e}") from e
+                result = result_output
+            else:
+                try:
+                    # Запускаем агента и получаем RunResult объект
+                    from agents import Runner
+                    result = await asyncio.wait_for(
+                        Runner.run(agent, message, max_turns=max_turns, session=session),
+                        timeout=timeout_seconds
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
+                    raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
+                except Exception as e:
+                    raise AgentError(f"Agent execution failed: {e}") from e
             
             # Process result - more robust extraction
             logger.debug(f"Result type: {type(result)}")
@@ -436,16 +519,17 @@ class AgentFactory:
             # Update execution record
             execution.end_time = time.time()
             execution.output = output
-            execution.tools_used = self._extract_tools_used(result)
+            # Если у нас был RunResult, попробуем извлечь список инструментов
+            tools_used: List[str] = []
+            if not isinstance(result, str):
+                tools_used = self._extract_tools_used(result)
+            execution.tools_used = tools_used
             
             # Завершаем детальное логирование
-            duration = execution.end_time - execution.start_time
+            duration = execution.end_time - start_time
             log_agent_end(agent.name, output, duration)
-            
-            # Log completion (legacy)
             logger.log_agent_end(agent.name, output, duration)
             
-            # Add to execution history
             self.context_manager.add_execution(execution)
             
             # Clear current agent
@@ -458,16 +542,15 @@ class AgentFactory:
             execution.error = str(e)
             
             # Логируем ошибку в детальном логгере
-            log_agent_error(agent.name, e)
+            log_agent_error(agent_key, e)
             
-            # Log error (legacy)
             logger.log_agent_error(agent_key, e)
             self.context_manager.add_execution(execution)
             
             # Clear current agent on error too
             clear_current_agent()
             
-            raise AgentError(f"Agent execution failed: {e}") from e
+            raise
     
     def _build_agent_instructions(self, agent_key: str, context_path: Optional[str] = None) -> str:
         """Build complete agent instructions with context."""
@@ -562,14 +645,16 @@ class AgentFactory:
             except Exception as e:
                 logger.error(f"Failed to create agent tools: {e}")
         
-        # Add MCP tools
-        if mcp_tools and (agent_config.mcp_enabled or self.config.is_mcp_enabled()):
-            try:
-                mcp_tool_instances = await self._get_mcp_tools(mcp_tools)
-                tools.extend(mcp_tool_instances)
-                logger.debug(f"Added {len(mcp_tool_instances)} MCP tools")
-            except Exception as e:
-                logger.error(f"Failed to get MCP tools: {e}")
+        # NOTE: MCP tools are no longer added as function tools. They are exposed to the model
+        # via Agent.mcp_servers using the SDK integration. We only record unavailability metadata.
+        if mcp_tools:
+            if not (agent_config.mcp_enabled or self.config.is_mcp_enabled()):
+                logger.warning(
+                    "MCP tools configured but MCP is disabled for this agent and globally",
+                    agent_mcp_enabled=agent_config.mcp_enabled,
+                    global_mcp_enabled=self.config.is_mcp_enabled(),
+                    mcp_tools=mcp_tools,
+                )
         
         # Cache tools
         self._tool_cache[cache_key] = tools
@@ -595,8 +680,8 @@ class AgentFactory:
                 context_depth = getattr(tool_config, 'context_depth', 5)
                 include_tool_history = getattr(tool_config, 'include_tool_history', True)
                 
-                # Create context-aware tool
-                agent_tool = self._create_context_aware_agent_tool(
+                # Create context-aware tool (основное имя)
+                main_tool = self._create_context_aware_agent_tool(
                     sub_agent=sub_agent,
                     tool_name=tool_name,
                     tool_description=tool_description,
@@ -606,8 +691,22 @@ class AgentFactory:
                 )
                 
                 # Wrap for logging
-                wrapped_tool = self._wrap_agent_tool(agent_tool, sub_agent.name)
-                tools.append(wrapped_tool)
+                wrapped_main = self._wrap_agent_tool(main_tool, sub_agent.name)
+                tools.append(wrapped_main)
+                
+                # Добавим алиасы каналов, чтобы не падать, если модель приписывает суффиксы каналов
+                channel_suffixes = ("<|channel|>commentary", "<|channel|>tool", "<|channel|>final")
+                for suffix in channel_suffixes:
+                    alias_tool = self._create_context_aware_agent_tool(
+                        sub_agent=sub_agent,
+                        tool_name=f"{tool_name}{suffix}",
+                        tool_description=tool_description,
+                        context_strategy=context_strategy,
+                        context_depth=context_depth,
+                        include_tool_history=include_tool_history
+                    )
+                    wrapped_alias = self._wrap_agent_tool(alias_tool, sub_agent.name)
+                    tools.append(wrapped_alias)
                 
             except Exception as e:
                 logger.error(f"Failed to create agent tool '{agent_key}': {e}")
@@ -625,25 +724,27 @@ class AgentFactory:
             start_time = time.time()
             # Нормализуем и логируем аргументы инструмента
             normalized_args = tool_call_arguments
+            # Приводим к словарю и сводим все алиасы к одному обязательному полю 'input'
+            preferred_text: Optional[str] = None
             if isinstance(tool_call_arguments, dict):
-                # Поддержка алиасов для совместимости: task/message/prompt → input
-                if 'input' not in tool_call_arguments:
-                    alias_value = None
-                    for alias in ('task', 'message', 'prompt'):
-                        if alias in tool_call_arguments and isinstance(tool_call_arguments[alias], str):
-                            alias_value = tool_call_arguments[alias]
-                            break
-                    if alias_value is not None:
-                        normalized_args = {'input': alias_value}
-                # Если есть input, передаем только его, чтобы не падать на строгой схеме
-                if isinstance(normalized_args, dict) and 'input' in normalized_args:
-                    normalized_args = {'input': normalized_args['input']}
+                # Приоритет текстовых алиасов над input, чтобы не терять задачу
+                for alias in ('task', 'message', 'prompt', 'input'):
+                    value = tool_call_arguments.get(alias)
+                    if isinstance(value, str) and value.strip():
+                        preferred_text = value.strip()
+                        break
+                # Если пришёл null/None или пустые строки — заменим на пустую строку
+                if not isinstance(preferred_text, str):
+                    preferred_text = ""
+                normalized_args = { 'input': preferred_text }
+            else:
+                # Если пришла не-структурированная форма, приводим к строке
+                preferred_text = str(tool_call_arguments) if tool_call_arguments is not None else ""
+                normalized_args = { 'input': preferred_text }
 
             # Безопасно преобразуем аргументы в строку для логов
-            if isinstance(normalized_args, dict) or isinstance(normalized_args, list):
-                input_data = str(normalized_args)
-            else:
-                input_data = str(normalized_args)
+            input_data = str(normalized_args)
+            
             
             execution = AgentExecution(
                 agent_name=agent_name,
@@ -658,10 +759,11 @@ class AgentFactory:
                 # Начинаем детальное логирование
                 execution_id = log_agent_start(agent_name, input_data)
                 
-                # Логируем вызов инструмента
-                log_tool_call("call_agent", {"input": input_data})
+                # Логируем вызов инструмента с реальным именем если доступно
+                tool_display_name = getattr(agent_tool, 'name', 'call_agent')
+                log_tool_call(tool_display_name, {"input": input_data})
                 
-                logger.log_agent_tool_start(agent_name, "call_agent", input_data)
+                logger.log_agent_tool_start(agent_name, tool_display_name, input_data)
                 logger.log_agent_start(agent_name, input_data)
                 
                 # Call original function с нормализованными аргументами
@@ -719,28 +821,31 @@ class AgentFactory:
     ) -> Any:
         """Create an agent tool that can share context with the sub-agent."""
         
+        # Усиливаем описание инструмента, но выносим общие правила в общий промпт (см. settings.tools_common_rules)
+        effective_description = (tool_description or "")
+        # Ключевые локальные правила оставим кратко (одна строка), остальное в общем блоке
+        local_rule = "Вызов: передавай одно поле input (string)."
+        if effective_description:
+            effective_description = effective_description + "\n" + local_rule
+        else:
+            effective_description = local_rule
+
         @function_tool(
             name_override=tool_name,
-            description_override=tool_description,
+            description_override=effective_description,
         )
         async def run_agent_with_context(
             context: RunContextWrapper,
-            input: Optional[str] = None,
-            task: Optional[str] = None,
-            message: Optional[str] = None,
-            prompt: Optional[str] = None,
+            input: str,
         ) -> str:
             from agents import Runner
             
             # Подготавливаем человекочитаемый контекст для подагента
-            # Нормализуем вход: поддерживаем несколько алиасов для совместимости
-            raw_input = input or task or message or prompt or ""
+            # Нормализуем вход: на этом уровне ожидаем уже нормализованный `input`
+            raw_input = input or ""
             if not raw_input:
-                return (
-                    f"❌ Пустой ввод для инструмента '{tool_name}'. Передайте 'input' или один из алиасов: "
-                    f"'task' | 'message' | 'prompt'."
-                )
-
+                return f"❌ Пустой ввод для инструмента '{tool_name}'. Передайте непустой 'input' (string)."
+            
             enhanced_input = self.context_manager.get_context_for_agent_tool(
                 strategy=context_strategy,
                 depth=context_depth,
@@ -777,51 +882,74 @@ class AgentFactory:
         
         return run_agent_with_context
     
-    async def _get_mcp_tools(self, mcp_tool_names: List[str]) -> List[Any]:
-        """Get MCP tools with connection management."""
-        tools = []
-        
-        for tool_name in mcp_tool_names:
+    async def _create_mcp_servers(self, mcp_tool_names: List[str]) -> List[Any]:
+        """Create and connect MCP servers using the Agents SDK."""
+        servers: list[Any] = []
+        unavailable: list[str] = []
+        for name in mcp_tool_names:
             try:
-                mcp_client = await self._get_mcp_client(tool_name)
-                if mcp_client:
-                    mcp_tools = await mcp_client.get_tools()
-                    tools.extend(mcp_tools)
-                    
-            except Exception as e:
-                logger.error(f"Failed to get MCP tools for '{tool_name}': {e}")
-        
-        return tools
-    
-    async def _get_mcp_client(self, tool_name: str) -> Optional[MCPClient]:
-        """Get or create MCP client."""
-        if tool_name in self._mcp_clients:
-            return self._mcp_clients[tool_name]
-        
-        try:
-            tool_config = self.config.get_tool(tool_name)
-            
-            if tool_config.type != "mcp":
-                return None
-            
-            # Create MCP client
-            mcp_client = MCPClient(
-                name=tool_name,
-                server_command=tool_config.server_command or [],
-                env_vars=tool_config.env_vars or {}
-            )
-            
-            await mcp_client.connect()
-            self._mcp_clients[tool_name] = mcp_client
-            
-            logger.log_mcp_connection(tool_name, "connected")
-            
-            return mcp_client
-            
-        except Exception as e:
-            logger.log_mcp_connection(tool_name, "failed")
-            logger.error(f"MCP client creation failed for '{tool_name}': {e}")
+                server = await self._get_mcp_server(name)
+                if server is not None:
+                    servers.append(server)
+                else:
+                    unavailable.append(name)
+            except Exception:
+                unavailable.append(name)
+        if unavailable:
+            logger.warning("Some MCP servers are unavailable and will be skipped", unavailable=unavailable)
+            try:
+                self.context_manager.set_metadata("mcp_unavailable", unavailable)
+            except Exception:
+                pass
+        return servers
+
+    async def _get_mcp_server(self, tool_name: str) -> Optional[Any]:
+        """Get or create an SDK-based MCP server (MCPServerStdio)."""
+        if tool_name in self._mcp_servers:
+            return self._mcp_servers[tool_name]
+
+        tool_config = self.config.get_tool(tool_name)
+        if tool_config.type != "mcp":
             return None
+
+        server_command = tool_config.server_command or []
+        if not server_command:
+            logger.error("MCP tool misconfigured: empty server_command", tool=tool_name)
+            return None
+
+        command = server_command[0]
+        args = list(server_command[1:])
+        # Make npx non-interactive
+        if command.lower() in ("npx", "npx.cmd") and "-y" not in args:
+            args.insert(0, "-y")
+
+        env = tool_config.env_vars or {}
+        cwd = self.config.get_working_directory()
+
+        logger.debug(
+            "Initializing MCP server (SDK)",
+            tool_name=tool_name,
+            command=command,
+            args=args,
+            env_keys=list(env.keys()),
+            cwd=cwd,
+        )
+
+        server = MCPServerStdio(
+            params={
+                "command": command,
+                "args": args,
+                "env": env,
+                "cwd": cwd,
+            },
+            cache_tools_list=True,
+            name=tool_name,
+        )
+
+        await server.connect()
+        self._mcp_servers[tool_name] = server
+        logger.log_mcp_connection(tool_name, "connected")
+        return server
     
     def _extract_tools_used(self, result: Any) -> List[str]:
         """
@@ -863,9 +991,15 @@ class AgentFactory:
     async def cleanup(self) -> None:
         """Cleanup resources."""
         # Disconnect MCP clients
-        for mcp_client in self._mcp_clients.values():
+        for mcp_client in self._mcp_servers.values():
             try:
-                await mcp_client.disconnect()
+                # SDK MCP servers expose cleanup()
+                cleanup = getattr(mcp_client, "cleanup", None)
+                if cleanup is not None:
+                    await cleanup()
+                else:
+                    # Back-compat for any legacy clients
+                    await mcp_client.disconnect()
             except Exception as e:
                 logger.error(f"Error disconnecting MCP client: {e}")
         
@@ -878,7 +1012,12 @@ class AgentFactory:
         
         # Clear caches
         self.clear_cache()
-        self._mcp_clients.clear()
+        self._mcp_servers.clear()
         self._agent_sessions.clear()
         
         logger.info("Agent factory cleanup completed")
+    
+    # Fallback: заглушка для ручного парсинга tool call из текста ответа
+    async def _execute_first_tool_call_in_text(self, output: str) -> Optional[str]:
+        """Safely ignore manual tool call parsing until fully implemented."""
+        return None

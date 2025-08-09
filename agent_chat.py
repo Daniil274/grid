@@ -12,6 +12,13 @@ from pathlib import Path
 # Add grid package to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Use Proactor event loop on Windows to support asyncio subprocess APIs (required for MCP)
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
+
 from core.config import Config
 from core.agent_factory import AgentFactory
 from core.security_agent_factory import SecurityAwareAgentFactory
@@ -23,10 +30,10 @@ import logging
 import time
 
 # Configure logging to suppress technical messages
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.INFO)
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("grid").setLevel(logging.INFO)
-Logger.configure(level="INFO", enable_console=False, log_dir="logs", enable_legacy_logs=True, force_reconfigure=True)
+Logger.configure(level="INFO", enable_console=False, log_dir="logs", enable_legacy_logs=True, force_reconfigure=True)  # логируем строго в logs/ проекта
 
 # Initialize beautiful logger
 pretty_logger = PrettyLogger("agent_chat")
@@ -121,7 +128,7 @@ async def main():
         pretty_logger.success("Grid Agent System готов к работе")
         
         print("\n" + "="*60)
-        print("🤖 Grid Agent System - Красивый Интерфейс")
+        print("🤖 Grid Agent System ")
         print("="*60)
         print(f"Агент: {agent_key}")
         print(f"Рабочая директория: {config.get_working_directory()}")
@@ -143,7 +150,7 @@ async def main():
                                                    message_length=len(args.message))
                 
                 start_time = time.time()
-                response = await factory.run_agent(agent_key, args.message, args.context_path)
+                response = await factory.run_agent(agent_key, args.message, args.context_path, stream=True)
                 duration = time.time() - start_time
                 
                 # logging - completed
@@ -218,7 +225,7 @@ async def main():
                                                            message_length=len(user_input))
                         
                         start_time = time.time()
-                        response = await factory.run_agent(agent_key, user_input, args.context_path)
+                        response = await factory.run_agent(agent_key, user_input, args.context_path, stream=True)
                         duration = time.time() - start_time
                         
                         # logging - success

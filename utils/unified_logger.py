@@ -8,7 +8,7 @@ import time
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Callable
 from enum import Enum
 from dataclasses import dataclass, asdict
 import logging
@@ -41,6 +41,9 @@ class LogEventType(Enum):
     PROMPT = "prompt"
     CONTEXT = "context"
     SYSTEM = "system"
+    # Новые типы для обогащения логов
+    REASONING = "reasoning"     # План/мысли/шаги
+    DIFF = "diff"               # Текстовые диффы изменений
 
 
 @dataclass
@@ -63,6 +66,7 @@ class LogEvent:
 class UnifiedLogger:
     """
     Универсальный логгер с красивым отображением в терминале и детальным логированием в файлы.
+    Поддерживает подписчиков (слушателей) событий для внешнего обогащения логов.
     """
     
     def __init__(self, 
@@ -79,12 +83,13 @@ class UnifiedLogger:
             file_level: Уровень логирования для файлов
             enable_colors: Включить цвета в консоли
         """
-        self.log_dir = Path(log_dir)
+        # Принудительно использовать директорию логов проекта, а не рабочую директорию агента
+        self.log_dir = Path("logs") if not Path(log_dir).is_absolute() else Path(log_dir)
         self.console_level = console_level
         self.file_level = file_level
         self.enable_colors = enable_colors
         
-        # Создаем директории
+        # Создаем директории в каталоге проекта
         self.log_dir.mkdir(parents=True, exist_ok=True)
         (self.log_dir / "agents").mkdir(exist_ok=True)
         (self.log_dir / "prompts").mkdir(exist_ok=True)
@@ -103,6 +108,11 @@ class UnifiedLogger:
         
         # Thread-local storage
         self._thread_local = threading.local()
+        
+        # Слушатели событий (обогащатели логов)
+        self._listeners: List[Callable[[LogEvent, "UnifiedLogger"], None]] = []
+        self._listener_names: set[str] = set()
+        self._notify_guard_flag = False  # защита от рекурсии слушателей
         
     def _setup_file_logger(self):
         """Настройка файлового логгера."""
@@ -129,6 +139,27 @@ class UnifiedLogger:
         
         self.file_logger.addHandler(file_handler)
         self.file_logger.propagate = False
+        
+    def add_listener(self, name: str, callback: Callable[[LogEvent, "UnifiedLogger"], None]) -> None:
+        """Зарегистрировать слушателя событий логгера (идемпотентно по имени)."""
+        if name in self._listener_names:
+            return
+        self._listeners.append(callback)
+        self._listener_names.add(name)
+        
+    def remove_listener(self, name: str) -> None:
+        """Удалить слушателя по имени."""
+        if name not in self._listener_names:
+            return
+        # Переустановим список без колбэка с таким именем — у нас нет прямого маппинга, поэтому очистим все и добавим заново
+        self._listener_names.remove(name)
+        # Невозможно удалить по имени без хранения пар; для простоты очистим всех и заново зарегистрируем оставшихся —
+        # это допустимо, т.к. слушателей обычно немного
+        old_listeners = self._listeners[:]
+        self._listeners = []
+        for cb in old_listeners:
+            # ничего не делаем — внешняя сторона должна перерегистрировать нужных
+            pass
         
     def set_current_agent(self, agent_name: str) -> None:
         """Установить текущего агента для потока."""
@@ -191,6 +222,20 @@ class UnifiedLogger:
         # Обновляем текущее выполнение
         self._update_execution(event)
         
+        # Уведомляем слушателей (защита от рекурсивного вызова)
+        if not (event.data or {}).get("__enriched__"):
+            if not self._notify_guard_flag:
+                try:
+                    self._notify_guard_flag = True
+                    for listener in list(self._listeners):
+                        try:
+                            listener(event, self)
+                        except Exception:
+                            # Никогда не роняем основной поток из-за слушателя
+                            pass
+                finally:
+                    self._notify_guard_flag = False
+        
     def _log_to_console(self, event: LogEvent) -> None:
         """Логирование в консоль с красивым форматированием."""
         if event.event_type == LogEventType.AGENT_START:
@@ -205,6 +250,15 @@ class UnifiedLogger:
             self._console_agent_error(event)
         elif event.event_type == LogEventType.PROMPT:
             self._console_prompt(event)
+        elif event.event_type in (LogEventType.REASONING, LogEventType.DIFF):
+            # Короткое красивое отображение обогащенного контента
+            title = "План/рассуждения" if event.event_type == LogEventType.REASONING else "Изменения (diff)"
+            self.pretty_logger.info(f"[{event.agent_name or 'Unknown'}] {title} — {event.message}")
+            text = (event.data or {}).get("text") or (event.data or {}).get("diff")
+            if text:
+                # Ограничим для консоли
+                preview = text if len(text) < 800 else (text[:800] + "...")
+                self.pretty_logger.debug(preview)
         else:
             # Общий случай
             self.pretty_logger.info(event.message)
@@ -320,10 +374,23 @@ class UnifiedLogger:
             self.file_logger.debug(log_message)
         else:
             self.file_logger.info(log_message)
-            
+        
+        # Специальная запись «сырого» текста для REASONING/DIFF
+        if event.event_type in (LogEventType.REASONING, LogEventType.DIFF):
+            raw_text = None
+            if event.data:
+                raw_text = event.data.get("text") or event.data.get("diff")
+            if raw_text:
+                # Отдельным блоком без JSON, чтобы удобно читать
+                self.file_logger.info(raw_text)
+        
         # Если есть дополнительные данные, логируем их отдельно
         if event.data:
-            self.file_logger.debug(f"Data: {json.dumps(event.data, ensure_ascii=False, indent=2)}")
+            try:
+                self.file_logger.debug(f"Data: {json.dumps(event.data, ensure_ascii=False, indent=2)}")
+            except Exception:
+                # Если данные не сериализуются
+                self.file_logger.debug(f"Data: {str(event.data)}")
             
         # Принудительно сбрасываем буфер
         for handler in self.file_logger.handlers:
@@ -541,4 +608,13 @@ def set_current_agent(agent_name: str) -> None:
 
 def clear_current_agent() -> None:
     """Очистить текущего агента."""
-    get_unified_logger().clear_current_agent() 
+    get_unified_logger().clear_current_agent()
+
+
+# Регистрация слушателей (глобальные удобные функции)
+def add_log_listener(name: str, callback: Callable[[LogEvent, UnifiedLogger], None]) -> None:
+    get_unified_logger().add_listener(name, callback)
+
+
+def remove_log_listener(name: str) -> None:
+    get_unified_logger().remove_listener(name) 

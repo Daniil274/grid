@@ -7,6 +7,8 @@ import sys
 import os
 import asyncio
 from pathlib import Path
+from utils.logger import Logger
+logger = Logger(__name__)
 
 # Add current directory to Python path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -17,28 +19,26 @@ def check_dependencies():
         import fastapi
         import uvicorn
         import pydantic
-        print("✅ Core dependencies found")
+        logger.info("Core dependencies found")
         return True
     except ImportError as e:
-        print(f"❌ Missing dependency: {e}")
-        print("Please install dependencies:")
-        print("pip install -r requirements-api.txt")
+        logger.error(f"Missing dependency: {e}")
+        logger.info("Please install dependencies: pip install -r requirements-api.txt")
         return False
 
 def check_config():
     """Check if config file exists."""
     config_path = Path("config.yaml")
     if config_path.exists():
-        print("✅ Configuration file found")
+        logger.info("Configuration file found")
         return True
     else:
-        print("❌ Configuration file not found: config.yaml")
+        logger.warning("Configuration file not found: config.yaml")
         return False
 
 def main():
     """Main startup function."""
-    print("🚀 Starting GRID Agent System API")
-    print("=" * 50)
+    logger.info("Starting GRID Agent System API")
     
     # Check dependencies
     if not check_dependencies():
@@ -46,18 +46,13 @@ def main():
     
     # Check config
     if not check_config():
-        print("Using default configuration...")
+        logger.info("Using default configuration...")
     
     # Set environment variables
-    os.environ.setdefault("PYTHONPATH", str(Path.cwd()))
+    os.environ.setdefault("PYTHONPATH", str(Path.cwd()))  # не меняем cwd, чтобы логи писались в ./logs
     
-    print("\n📡 Starting API server...")
-    print("   Host: 0.0.0.0")
-    print("   Port: 8000")
-    print("   Docs: http://localhost:8000/docs")
-    print("   Health: http://localhost:8000/health")
-    print("\n🔍 Press Ctrl+C to stop")
-    print("=" * 50)
+    logger.info("Starting API server...")
+    logger.info("Host: 0.0.0.0, Port: 8000, Docs: http://localhost:8000/docs, Health: http://localhost:8000/health")
     
     try:
         # Import and run
@@ -70,9 +65,9 @@ def main():
             log_level="info"
         )
     except KeyboardInterrupt:
-        print("\n\n👋 API server stopped")
+        logger.info("API server stopped")
     except Exception as e:
-        print(f"\n❌ Error starting API: {e}")
+        logger.error(f"Error starting API: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
