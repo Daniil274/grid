@@ -473,41 +473,48 @@ class AgentFactory:
                 try:
                     # Запускаем агента и получаем RunResult объект
                     from agents import Runner
+                    logger.info("Starting Runner.run...")
                     result = await asyncio.wait_for(
                         Runner.run(agent, message, max_turns=max_turns, session=session),
                         timeout=timeout_seconds
                     )
+                    logger.info(f"Runner.run completed, result type: {type(result)}")
                 except asyncio.TimeoutError:
                     logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
                 except Exception as e:
+                    logger.error(f"Runner.run failed: {e}")
                     raise AgentError(f"Agent execution failed: {e}") from e
             
             # Process result - more robust extraction
-            logger.debug(f"Result type: {type(result)}")
-            logger.debug(f"Result attributes: {dir(result)}")
-            
-            # Проверяем, является ли result строкой (уже обработанной)
-            if isinstance(result, str):
-                output = result
-                logger.debug("Using result as string")
-            elif hasattr(result, 'final_output') and result.final_output:
-                output = result.final_output
-                logger.debug("Using result.final_output")
-            elif hasattr(result, 'output') and result.output:
-                output = result.output
-                logger.debug("Using result.output")
-            elif hasattr(result, 'content') and result.content:
-                output = result.content
-                logger.debug("Using result.content")
-            else:
-                output = str(result)
-                logger.debug("Using str(result)")
-            
-            # Ensure we have a non-empty response
-            if not output or output.strip() == "":
-                output = "Агент выполнил задачу, но не предоставил текстовый ответ. Проверьте логи для деталей выполнения."
-                logger.warning("Empty output from agent, using fallback message")
+            try:
+                logger.debug(f"Result type: {type(result)}")
+                logger.debug(f"Result attributes: {dir(result)}")
+                
+                # Проверяем, является ли result строкой (уже обработанной)
+                if isinstance(result, str):
+                    output = result
+                    logger.debug("Using result as string")
+                elif hasattr(result, 'final_output') and result.final_output:
+                    output = result.final_output
+                    logger.debug("Using result.final_output")
+                elif hasattr(result, 'output') and result.output:
+                    output = result.output
+                    logger.debug("Using result.output")
+                elif hasattr(result, 'content') and result.content:
+                    output = result.content
+                    logger.debug("Using result.content")
+                else:
+                    output = str(result)
+                    logger.debug("Using str(result)")
+                
+                # Ensure we have a non-empty response
+                if not output or output.strip() == "":
+                    output = "Агент выполнил задачу, но не предоставил текстовый ответ. Проверьте логи для деталей выполнения."
+                    logger.warning("Empty output from agent, using fallback message")
+            except Exception as e:
+                logger.error(f"Error processing result: {e}")
+                output = "Произошла ошибка при обработке результата агента. Проверьте логи."
             
             logger.debug(f"Final output length: {len(output)}")
             
@@ -529,9 +536,15 @@ class AgentFactory:
             execution.output = output
             # Если у нас был RunResult, попробуем извлечь список инструментов
             tools_used: List[str] = []
-            if not isinstance(result, str):
-                tools_used = self._extract_tools_used(result)
-            execution.tools_used = tools_used
+            try:
+                if not isinstance(result, str):
+                    logger.debug(f"Extracting tools from result type: {type(result)}")
+                    tools_used = self._extract_tools_used(result)
+                    logger.debug(f"Extracted tools: {tools_used}")
+                execution.tools_used = tools_used
+            except Exception as e:
+                logger.error(f"Error setting execution.tools_used: {e}")
+                execution.tools_used = []
             
             # Завершаем детальное логирование
             duration = execution.end_time - start_time
@@ -653,30 +666,32 @@ class AgentFactory:
             except Exception as e:
                 logger.error(f"Failed to create agent tools: {e}")
  
-        # Добавим алиасы каналов для всех уже добавленных инструментов (на случай, если модель добавит суффиксы)
-        try:
-            channel_suffixes = ("<|channel|>commentary", "<|channel|>tool", "<|channel|>final")
-            alias_count = 0
-            # Собираем снимок списка, чтобы не итерироваться по растущему
-            base_tools_snapshot = list(tools)
-            for base_tool in base_tools_snapshot:
-                tool_name = getattr(base_tool, 'name', None)
-                on_invoke = getattr(base_tool, 'on_invoke_tool', None)
-                if not tool_name or not callable(on_invoke):
-                    continue
-                for suffix in channel_suffixes:
-                    alias_name = f"{tool_name}{suffix}"
-                    # Создаем лёгкий прокси-инструмент, перенаправляющий вызов на исходный
-                    @function_tool(name_override=alias_name, description_override=getattr(base_tool, 'description', '') or f"Alias of {tool_name}")
-                    async def alias_tool_proxy(tool_context: RunContextWrapper, **kwargs):
-                        # Передаем исходные аргументы как есть
-                        return await on_invoke(tool_context, kwargs if kwargs else {})
-                    tools.append(alias_tool_proxy)
-                    alias_count += 1
-            if alias_count:
-                logger.debug(f"Added {alias_count} channel alias tools for robustness")
-        except Exception as e:
-            logger.warning("Failed to add channel alias tools", error=str(e))
+        # Добавим алиасы каналов только для function tools (не для MCP)
+        # MCP инструменты обрабатываются SDK отдельно и не нуждаются в алиасах
+        if tools and not mcp_tools:  # Только если нет MCP инструментов
+            try:
+                channel_suffixes = ("<|channel|>commentary", "<|channel|>tool", "<|channel|>final")
+                alias_count = 0
+                # Собираем снимок списка, чтобы не итерироваться по растущему
+                base_tools_snapshot = list(tools)
+                for base_tool in base_tools_snapshot:
+                    tool_name = getattr(base_tool, 'name', None)
+                    on_invoke = getattr(base_tool, 'on_invoke_tool', None)
+                    if not tool_name or not callable(on_invoke):
+                        continue
+                    for suffix in channel_suffixes:
+                        alias_name = f"{tool_name}{suffix}"
+                        # Создаем лёгкий прокси-инструмент, перенаправляющий вызов на исходный
+                        @function_tool(name_override=alias_name, description_override=getattr(base_tool, 'description', '') or f"Alias of {tool_name}")
+                        async def alias_tool_proxy(tool_context: RunContextWrapper, **kwargs):
+                            # Передаем исходные аргументы как есть
+                            return await on_invoke(tool_context, kwargs if kwargs else {})
+                        tools.append(alias_tool_proxy)
+                        alias_count += 1
+                if alias_count:
+                    logger.debug(f"Added {alias_count} channel alias tools for robustness")
+            except Exception as e:
+                logger.warning("Failed to add channel alias tools", error=str(e))
 
         # NOTE: MCP tools are no longer added as function tools. They are exposed to the model
         # via Agent.mcp_servers using the SDK integration. We only record unavailability metadata.
@@ -993,8 +1008,20 @@ class AgentFactory:
         ``name`` field.  If the attribute is missing we fall back to an empty
         list to keep the system robust.
         """
-        if hasattr(result, "tool_calls"):
-            return [call.name for call in getattr(result, "tool_calls")]
+        try:
+            if hasattr(result, "tool_calls"):
+                tool_calls = getattr(result, "tool_calls")
+                names = []
+                for call in tool_calls:
+                    try:
+                        name = getattr(call, "name", None)
+                        if name:
+                            names.append(str(name))  # Принудительно приводим к строке
+                    except Exception:
+                        continue  # Пропускаем проблемные вызовы
+                return names
+        except Exception as e:
+            logger.debug(f"Failed to extract tool calls: {e}")
         return []
     
     # Context management methods
@@ -1027,12 +1054,15 @@ class AgentFactory:
         for mcp_client in self._mcp_servers.values():
             try:
                 # SDK MCP servers expose cleanup()
-                cleanup = getattr(mcp_client, "cleanup", None)
-                if cleanup is not None:
-                    await cleanup()
+                cleanup_method = getattr(mcp_client, "cleanup", None)
+                if cleanup_method is not None:
+                    await cleanup_method()
                 else:
                     # Back-compat for any legacy clients
                     await mcp_client.disconnect()
+            except asyncio.CancelledError:
+                # MCP процессы часто завершаются с CancelledError - это нормально
+                logger.debug("MCP client cleanup cancelled (normal during shutdown)")
             except Exception as e:
                 logger.error(f"Error disconnecting MCP client: {e}")
         
@@ -1040,6 +1070,9 @@ class AgentFactory:
         for session in self._agent_sessions.values():
             try:
                 await session.clear_session()
+            except asyncio.CancelledError:
+                # Session cleanup часто завершается с CancelledError - это нормально
+                logger.debug("Agent session cleanup cancelled (normal during shutdown)")
             except Exception as e:
                 logger.error(f"Error clearing agent session: {e}")
         
