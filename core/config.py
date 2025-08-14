@@ -54,8 +54,7 @@ class Config:
                     logger.info(f"Using configured working directory for path resolution only (no chdir): {target_working_dir}")
                 else:
                     logger.warning(
-                        "Configured working directory does not exist (will be ignored for path resolution): %s",
-                        target_working_dir,
+                        f"Configured working directory does not exist (will be ignored for path resolution): {target_working_dir}"
                     )
             
         except FileNotFoundError as e:
