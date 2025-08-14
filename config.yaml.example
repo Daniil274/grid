@@ -1,143 +1,579 @@
-# Grid Agent System Configuration Example
-# Copy this file to config.yaml and customize for your needs
+# Full AI system configuration
+# Providers -> Models -> Tools -> Agents
 
-# Global system settings
+# Global settings
 settings:
-  default_agent: "coordinator"
-  max_history: 15
-  max_turns: 50  # Лимит ходов для агентов
+  default_agent: "code_agent"
+  max_history: 50
+  max_turns: 100  # Increase the turn limit for agents
+  agent_timeout: 300  # Agent execution timeout in seconds (5 minutes)
   debug: false
   mcp_enabled: true
-  working_directory: "."
-  config_directory: "."
-  allow_path_override: true
+  # Path settings
+  working_directory: "C:/Users/daniil/Documents/agents"  # Default working directory
+  config_directory: "."   # Configuration directory
+  allow_path_override: true  # Allow overriding the working directory at startup
+  # Logging settings
+  agent_logging:
+    enabled: true
+    level: "full"  # basic, detailed, full
+    save_prompts: true
+    save_conversations: true
+    save_executions: true
+    # Common tool usage rules (added to each agent once)
+    # tools_common_rules: |
+    #   Always perform file operations via tools and return their results.
+    #   - Creating/writing a new file: use file_write(filepath, content).
+    #   - Editing an existing file: use edit_file_patch(filepath, patch_content) with a valid unified diff.
+    #   It is forbidden to claim a file was created/modified without calling the appropriate tool.
 
-# AI Provider configurations
+# API providers
 providers:
-  openai:
-    name: "OpenAI"
-    base_url: "https://api.openai.com/v1"
-    api_key_env: "OPENAI_API_KEY"
-    timeout: 30
-    max_retries: 2
+  lm-studio:
+    name: "lm-studio"
+    base_url: "http://192.168.3.2:1234/v1"
+    api_key: "lm-studio"
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: false
   
-  anthropic:
-    name: "Anthropic"
-    base_url: "https://api.anthropic.com"
-    api_key_env: "ANTHROPIC_API_KEY"
-    timeout: 45
-    max_retries: 2
+  openrouter:
+    name: "openrouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: false
 
-# AI Model configurations
+
+# Models
 models:
-  gpt-4:
-    name: "gpt-4"
-    provider: "openai"
+  openai-oss-20b:
+    name: "openai/gpt-oss-20b"
+    provider: "openrouter"
     temperature: 0.7
-    max_tokens: 4000
-    description: "GPT-4 for general tasks"
+    max_tokens: 8192
+    description: "OpenAI OSS 20b model"
+    streaming_enabled: false
   
-  claude-3:
-    name: "claude-3-sonnet"
-    provider: "anthropic"
+  openai-oss-20b-local:
+    name: "openai/gpt-oss-20b"
+    provider: "lm-studio"
+    temperature: 0.7
+    max_tokens: 8192
+    description: "OpenAI OSS 20b model"
+    streaming_enabled: true
+
+  openai-oss-120b:
+    name: "openai/gpt-oss-120b"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8192
+    description: "OpenAI OSS 120b model"
+
+  gpt-4.1-mini:
+    name: "openai/gpt-4.1-mini"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Qwen 3 8b model"
+
+  qwen3:
+    name: "qwen3-4b-instruct-2507"
+    provider: "lm-studio"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Qwen3 4B Instruct (LM Studio)"
+
+  qwen3-8b:
+    name: "qwen/qwen3-8b"
+    provider: "lm-studio"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Qwen 3 8b model"
+  
+  flash-lite:
+    name: "google/gemini-2.5-flash-lite"
+    provider: "openrouter"
     temperature: 0.3
     max_tokens: 4000
-    description: "Claude 3 for coding and analysis"
+    description: "Gemini 2.5 Flash Lite"
+  
+  kimi:
+    name: "moonshotai/kimi-k2"
+    provider: "openrouter"
+    temperature: 0.2
+    max_tokens: 10000
+    description: "Kimi K2"
 
-# Tool configurations
+  qwen3-235b:
+    name: "qwen/qwen3-235b-a22b-thinking-2507"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 16000
+    description: "Qwen 3 235b model"
+
+  claude-haiku:
+    name: "anthropic/claude-3-haiku"
+    provider: "openrouter"
+    temperature: 0.2
+    max_tokens: 2000
+    description: "Claude Haiku for quick responses"
+  
+  gpt-4o:
+    name: "gpt-4o"
+    provider: "openrouter"
+    temperature: 0.5
+    max_tokens: 4000
+    description: "GPT-4 Omni general-purpose model"
+
+
+# Tools
 tools:
   # File operations
   file_read:
     type: "function"
     name: "read_file"
-    description: "Read file contents"
+    description: "Reads file contents"
     prompt_addition: "Use read_file(filepath) to read files."
   
   file_write:
     type: "function"
     name: "write_file"
-    description: "Write file contents"
+    description: "Writes data to a file"
     prompt_addition: "Use write_file(filepath, content) to write files."
   
   file_list:
     type: "function"
     name: "list_files"
-    description: "List directory contents"
-    prompt_addition: "Use list_files(directory) to list files."
+    description: "Shows a list of files in a directory"
+    prompt_addition: "Use list_files(directory) to list folder contents."
   
-  # Git operations
+  file_info:
+    type: "function"
+    name: "get_file_info"
+    description: "Retrieves file information"
+    prompt_addition: "Use get_file_info(filepath) to get file information."
+  
+  file_search:
+    type: "function"
+    name: "search_files"
+    description: "Search files by name and content"
+    prompt_addition: "Use search_files(search_pattern, directory, use_regex, search_in_content) to search files."
+  
+  file_edit_patch:
+    type: "function"
+    name: "edit_file_patch"
+    description: "Edits a file using a unified diff patch"
+    prompt_addition: "Use edit_file_patch(filepath, patch_content) to apply patches to files. The patch must be in unified diff format. Verify file contents before making changes."
+  
+  # Git operations - basics
   git_status:
     type: "function"
     name: "git_status"
-    description: "Show Git repository status"
-    prompt_addition: "Use git_status(directory) to check Git status."
+    description: "Shows the git repository status"
+    prompt_addition: "Use git_status(directory) to check changes in git."
+  
+  git_log:
+    type: "function"
+    name: "git_log"
+    description: "Shows the commit history"
+    prompt_addition: "Use git_log(directory, max_commits) to view commit history."
+  
+  git_diff:
+    type: "function"
+    name: "git_diff"
+    description: "Shows file differences"
+    prompt_addition: "Use git_diff(directory, filename) to view file changes."
+  
+  git_branch_list:
+    type: "function"
+    name: "git_branch_list"
+    description: "Shows branch list"
+    prompt_addition: "Use git_branch_list(directory) to view branches."
+  
+  git_add_file:
+    type: "function"
+    name: "git_add_file"
+    description: "Adds a file to the index"
+    prompt_addition: "Use git_add_file(directory, filename) to stage files in git."
+  
+  git_add_all:
+    type: "function"
+    name: "git_add_all"
+    description: "Stages all modified files"
+    prompt_addition: "Use git_add_all(directory) to stage all changes in git."
   
   git_commit:
     type: "function"
     name: "git_commit"
-    description: "Create Git commit"
-    prompt_addition: "Use git_commit(directory, message) to create commits."
+    description: "Creates a git commit"
+    prompt_addition: "Use git_commit(directory, message, author_name, author_email) to create commits."
+  
+  git_checkout_branch:
+    type: "function"
+    name: "git_checkout_branch"
+    description: "Switches to a branch"
+    prompt_addition: "Use git_checkout_branch(directory, branch_name, create_new) to switch branches."
+  
+  # Git operations - initialization and config
+  git_init:
+    type: "function"
+    name: "git_init"
+    description: "Initializes a new git repository"
+    prompt_addition: "Use git_init(directory, bare) to create a new git repository."
+  
+  git_config:
+    type: "function"
+    name: "git_config"
+    description: "Configures git"
+    prompt_addition: "Use git_config(directory, name, email, global_config) to configure git."
+  
+  git_clone:
+    type: "function"
+    name: "git_clone"
+    description: "Clones a remote repository"
+    prompt_addition: "Use git_clone(directory, repository_url, branch) to clone a repository."
+  
+  # Git operations - remotes
+  git_remote_info:
+    type: "function"
+    name: "git_remote_info"
+    description: "Shows information about remote repositories"
+    prompt_addition: "Use git_remote_info(directory) to view remotes."
+  
+  git_remote_add:
+    type: "function"
+    name: "git_remote_add"
+    description: "Adds a remote repository"
+    prompt_addition: "Use git_remote_add(directory, name, url) to add a remote."
+  
+  git_remote_remove:
+    type: "function"
+    name: "git_remote_remove"
+    description: "Removes a remote repository"
+    prompt_addition: "Use git_remote_remove(directory, name) to remove a remote."
+  
+  git_fetch:
+    type: "function"
+    name: "git_fetch"
+    description: "Fetches changes from a remote repository without merging"
+    prompt_addition: "Use git_fetch(directory, remote) to fetch changes without merging."
+  
+  git_pull:
+    type: "function"
+    name: "git_pull"
+    description: "Pulls changes from a remote repository"
+    prompt_addition: "Use git_pull(directory) to pull changes."
+  
+  git_push:
+    type: "function"
+    name: "git_push"
+    description: "Pushes changes to a remote repository"
+    prompt_addition: "Use git_push(directory, remote, branch) to push changes."
+  
+  # Git operations - branching and merging
+  git_merge:
+    type: "function"
+    name: "git_merge"
+    description: "Merges a branch into the current one"
+    prompt_addition: "Use git_merge(directory, branch_name, message) to merge branches."
+  
+  git_reset:
+    type: "function"
+    name: "git_reset"
+    description: "Resets repository state"
+    prompt_addition: "Use git_reset(directory, mode, commit_hash) to reset state."
+  
+  git_stash:
+    type: "function"
+    name: "git_stash"
+    description: "Manages temporary change storage"
+    prompt_addition: "Use git_stash(directory, action, message) for stash operations."
+  
+  # Git operations - tags
+  git_tag:
+    type: "function"
+    name: "git_tag"
+    description: "Creates a tag in the repository"
+    prompt_addition: "Use git_tag(directory, tag_name, message, commit_hash) to create tags."
+  
+  git_tag_list:
+    type: "function"
+    name: "git_tag_list"
+    description: "Shows tag list"
+    prompt_addition: "Use git_tag_list(directory) to view tags."
 
-# Agent configurations
+  
+  
+  # MCP servers
+  filesystem_mcp:
+    type: "mcp"
+    # Launch the official filesystem MCP server via npx (non-interactive)
+    server_command: ["npx", "@modelcontextprotocol/server-filesystem", "C:/Users/daniil/Documents/agents"]
+    description: "MCP server for filesystem access (restricted to working directory)"
+    prompt_addition: "Use filesystem_mcp(task) for filesystem access. task is the operation to perform."
+  
+  git_mcp:
+    type: "mcp"
+    server_command: ["npx", "@cyanheads/git-mcp-server"]
+    env:
+      MCP_LOG_LEVEL: "info"
+      GIT_SIGN_COMMITS: "false"
+    description: "Git management: clone, commit, branch, merge, rebase, stash"
+
+  sequential_thinking_mcp:
+    type: "mcp"
+    server_command: ["npx", "@modelcontextprotocol/server-sequential-thinking"]
+    description: "MCP server for sequential thinking"
+    prompt_addition: "IMPORTANT: ALWAYS use sequential thinking for analysis and task planning. Invoke it before executing any task."
+  
+  
+  # Agents used as tools
+  file_agent:
+    type: "agent"
+    name: "call_file_agent"
+    description: "Invokes the file agent to work with files"
+    prompt_addition: "Use call_file_agent(task) for file-related tasks where task is the job the file agent should perform. Use unified diff for file edits."
+    # Context sharing configuration for agent tools
+    context_strategy: "smart"
+    context_depth: 5
+    include_tool_history: true
+   
+  git_agent:
+    type: "agent"
+    name: "call_git_agent"
+    description: "Invokes the Git agent for repository operations. Call it whenever a Git operation is required."
+    prompt_addition: "Use call_git_agent(task) for Git operations. task is the job the Git agent should perform."
+    # Context sharing configuration for agent tools
+    context_strategy: "conversation"
+    context_depth: 5
+    include_tool_history: false
+  
+  task_analyst:
+    type: "agent"
+    name: "call_task_analyst"
+    description: "Invokes the task analyst to analyze tasks and build an action plan."
+    prompt_addition: "ALWAYS CALL call_code_agent(task) AFTER RECEIVING A USER REQUEST!!! where task is the description of the task and the tools available to you."
+    # Context sharing configuration for agent tools
+    context_strategy: "conversation"
+    
+
+  researcher:
+    type: "agent"
+    name: "call_researcher"
+    description: "Invokes the researcher for information retrieval"
+    prompt_addition: "Use call_researcher(query) to search the internet. query is the research topic."
+    # Context sharing configuration for agent tools
+    context_strategy: "minimal"
+    context_depth: 3
+    include_tool_history: false
+  
+  code_agent:
+    type: "agent"
+    name: "call_code_agent"
+    description: "Invokes the code agent for working with code and programming"
+    prompt_addition: "Always call_code_agent(task) for tasks related to code or code files. task is the job the code agent should solve with a path to the file, directory, or repository and a detailed task description."
+    # Context sharing configuration for agent tools
+    context_strategy: "conversation"
+    context_depth: 10
+    include_tool_history: true
+  
+  coordinator:
+    type: "agent"
+    name: "call_coordinator"
+    description: "Invokes the coordinator for planning and solving a task"
+    prompt_addition: "Call call_coordinator(task) to plan and solve a task. task is the job to be completed."
+    # Context sharing configuration for agent tools
+    context_strategy: "conversation"
+    context_depth: 10
+    include_tool_history: true
+  
+  thinker:
+    type: "agent"
+    name: "call_thinker"
+    description: "Invokes a thinking agent for deep analysis of the task and problem."
+    prompt_addition: "ALWAYS call this agent BEFORE executing any task. Use call_thinker(task), where task is the problem to solve with full context. WITHOUT FULL CONTEXT THE THINKER WILL NOT HELP!!! Do NOT call other tools before calling the thinker."
+
+# Base prompts for tools
+prompt_templates:
+  base: |
+    You are a smart and friendly AI assistant. Answer briefly and to the point.
+    Be helpful and accurate in your responses.
+  
+  with_files: |
+    You are an assistant with access to the filesystem. You can read, edit, and analyze files.
+    IMPORTANT: ALWAYS use tools, without reasoning or summarizing!!! Provide your reasoning in the final work report.
+    Always check that files exist before operations. Verify file contents before making changes.
+
+  with_git: |
+    You are a developer assistant with access to Git. You can check status, create commits, and manage the repository.
+    Always check the status before making changes.
+  
+  with_web: |
+    You are an assistant with access to the internet. You can search for up-to-date information and news.
+    Always cite your sources.
+
+  code_agent_prompt: |
+    You are a code agent specializing in programming.
+    Before each step and tool invocation, use sequential_thinking_mcp for analysis and planning.
+  
+  coordinator_prompt: |
+    You are the coordinator of a team of specialized agents. Your task is to analyze user requests and delegate work to appropriate agents/tools.
+    Rules:
+    - If the task is about files/repository, call file_agent or code_agent first; do not repeat the same operation multiple times.
+    - Do not call similar tools without a new signal (do not loop list_files/read_file without analysis).
+    - Always return the final subagent response to the user without distortion.
+    - If tools are unavailable, ask the user for the required data or explicitly specify the command the user should run.
+
+# Agents - full configuration
 agents:
   # Basic assistant
   assistant:
     name: "Assistant"
-    model: "gpt-4"
+    model: "qwen3"
+    tools: ["coordinator", "sequential_thinking_mcp"]
+    base_prompt: "base"
+    description: "Basic assistant for conversation"
+    mcp_enabled: true
+  
+  # Simple test agent without MCP
+  simple_test:
+    name: "Simple Test Agent"
+    model: "openai-oss-20b"
     tools: []
     base_prompt: "base"
-    description: "Basic conversational assistant"
+    description: "Simple agent without tools for testing"
+    mcp_enabled: false
   
-  # File operations specialist
+  # File agent
   file_agent:
     name: "File Agent"
-    model: "gpt-4"
-    tools: ["file_read", "file_write", "file_list"]
+    model: "openai-oss-20b"
+    tools: ["filesystem_mcp"]
     base_prompt: "with_files"
-    description: "Specialized in file operations"
+    description: "Specialist in working with files."
+    mcp_enabled: true
+    
   
-  # Git operations specialist
+  # Git agent
   git_agent:
     name: "Git Agent"
-    model: "gpt-4"
-    tools: ["git_status", "git_commit", "file_read"]
+    model: "openai-oss-20b"
+    tools: [
+      # Basic operations
+      "git_status", "git_log", "git_diff", "git_branch_list", "git_add_file", "git_add_all",
+      "git_commit", "git_checkout_branch",
+      # Initialization and configuration
+      "git_init", "git_config", "git_clone",
+      # Remotes
+      "git_remote_info", "git_remote_add", "git_remote_remove", "git_fetch", "git_pull", "git_push",
+      # Branching and merging
+      "git_merge", "git_reset", "git_stash",
+      # Tags
+      "git_tag", "git_tag_list",
+      # Supporting file operations
+      "file_read", "file_list"
+    ]
     base_prompt: "with_git"
-    description: "Git repository management specialist"
+    description: "Full-featured developer assistant for Git"
   
-  # Coordinator agent
-  coordinator:
-    name: "Coordinator"
-    model: "gpt-4"
-    tools: ["file_agent", "git_agent"]
+  # Researcher
+  researcher:
+    name: "Researcher"
+    model: "openai-oss-20b"
+    tools: ["file_write", "file_read", "file_search"]
+    base_prompt: "with_files"
+    description: "Researcher for analyzing files and documents"
+  
+  # Full-featured agent
+  full_agent:
+    name: "Universal Agent"
+    model: "openai-oss-20b"
+    tools: [
+      # File operations
+      "file_read", "file_write", "file_list", "file_info", "file_search", "file_edit_patch",
+      # Git operations - basics
+      "git_status", "git_log", "git_diff", "git_branch_list", "git_add_file", "git_add_all",
+      "git_commit", "git_checkout_branch",
+      # Git operations - initialization and configuration
+      "git_init", "git_config", "git_clone",
+      # Git operations - remotes
+      "git_remote_info", "git_remote_add", "git_remote_remove", "git_fetch", "git_pull", "git_push",
+      # Git operations - branching and merging
+      "git_merge", "git_reset", "git_stash",
+      # Git operations - tags
+      "git_tag", "git_tag_list"
+    ]
+    base_prompt: "with_files"
+    description: "Universal assistant with all tools"
+
+  code_agent:
+    name: "Code Agent"
+    model: "flash-lite"
+    tools: [
+      "sequential_thinking_mcp", "filesystem_mcp", "git_mcp"
+    ]
+    base_prompt: "code_agent_prompt"
+    description: "Specialist in programming and code analysis"
+    mcp_enabled: true
+  
+  # Thinking agent
+  thinker:
+    name: "Thinker"
+    model: "openai-oss-20b"
+    tools: []
     base_prompt: "base"
     custom_prompt: |
-      You are a coordinator that delegates tasks to specialized agents.
-      Analyze user requests and route them to the appropriate agents.
-    description: "Agent coordination and task delegation"
+      You are a deeply thoughtful assistant. Analyze problems from all sides.
+      Reason step by step and provide well-justified conclusions.
+      You are given a problem to solve and the operations available to solve it.
+    description: "Agent for deep analysis and reasoning"
+  
+  task_analyst:
+    name: "Task Analyst"
+    model: "openai-oss-20b"
+    tools: []
+    base_prompt: "base"
+    description: "Agent for analyzing tasks and building an action plan"
 
-# Prompt templates
-prompt_templates:
-  base: |
-    You are a helpful AI assistant. Provide clear, accurate responses.
-  
-  with_files: |
-    You are a file operations specialist. You can read, write, and analyze files.
-    Always check file existence before operations.
-  
-  with_git: |
-    You are a Git operations specialist. You can manage repositories and version control.
-    Always check repository status before making changes.
+  # Agent coordinator
+  coordinator:
+    name: "Coordinator"
+    model: "flash-lite"
+    tools: ["file_agent", "git_agent", "researcher", "code_agent", "task_analyst"]
+    base_prompt: "coordinator_prompt"
+    custom_prompt: |
+      You are the coordinator of a team of specialized agents. Your task is to analyze user requests and delegate work to appropriate agents/tools.
+      Rules:
+      - If the task is about files/repository, call file_agent or code_agent first; do not repeat the same operation multiple times.
+      - Do not call similar tools without a new signal (do not loop list_files/read_file without analysis).
+      - Always return the final subagent response to the user without distortion.
+      - If tools are unavailable, ask the user for the required data or explicitly specify the command the user should run.
+    description: "Coordinator of the agent team"
 
 # Usage scenarios
 scenarios:
   development:
     agent: "git_agent"
-    description: "Software development and version control"
+    description: "Development and code management"
+  
+  research:
+    agent: "researcher"
+    description: "Research and information gathering"
   
   file_management:
     agent: "file_agent"
-    description: "File and document management"
+    description: "Managing files and documents"
   
   general:
+    agent: "full_agent"
+    description: "General-purpose tasks"
+  
+  thinking:
+    agent: "thinker"
+    description: "Deep analysis and reasoning"
+  
+  coordination:
     agent: "coordinator"
-    description: "General task coordination"
+    description: "Coordination of the agent team"

@@ -397,24 +397,6 @@ class AgentFactory:
             session = getattr(agent, '_session', None)
             if not session:
                 session = self._get_agent_session(agent_key)
-            
-            # # Безопасное отключение streaming для OpenRouter (избегаем ошибки ResponseTextDeltaEvent logprobs)
-            # try:
-            #     _agent_cfg = self.config.get_agent(agent_key)
-            #     _model_cfg = self.config.get_model(_agent_cfg.model)
-            #     _provider_cfg = self.config.get_provider(_model_cfg.provider)
-            #     _base_url_lower = (_provider_cfg.base_url or "").lower()
-            #     if stream and ("openrouter.ai" in _base_url_lower):
-            #         logger.warning(
-            #             "Streaming отключен для OpenRouter из-за несовместимости событий (fallback на non-stream)",
-            #             provider=_model_cfg.provider,
-            #             model=_model_cfg.name,
-            #         )
-            #         stream = False
-            # except Exception:
-            #     # Если не удалось определить провайдера — продолжаем с исходным значением stream
-            #     pass
-
             if stream:
                 # Streaming режим: прозрачно показываем tool/MCP вызовы
                 from agents import Runner, RunItemStreamEvent, RawResponsesStreamEvent
