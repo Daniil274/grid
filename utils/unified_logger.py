@@ -264,7 +264,31 @@ class UnifiedLogger:
         else:
             args_str = ""
             
-        self.pretty_logger.info(f"[{agent_name}] {tool_name}({args_str})")
+        # Используем tool_start для красивого отображения с иконками
+        self.pretty_logger.set_current_agent(agent_name)
+        
+        # Обрабатываем все типы инструментов с красивыми именами
+        display_name = tool_name
+        if "Agent-Tool:" in tool_name:
+            display_name = f"🤖 {tool_name}"  # Агенты-инструменты
+        elif "MCP:" in tool_name:
+            display_name = tool_name  # Уже красиво отформатировано
+        elif tool_name in ["sequentialthinking", "read_text_file", "write_text_file", "list_directory", "create_directory", "delete_file", "move_file"]:
+            display_name = f"🔧 [MCP:filesystem] {tool_name}"
+        elif tool_name in ["git_status", "git_log", "git_diff", "git_add", "git_commit", "git_push", "git_pull", "git_set_working_dir", "git_show"]:
+            display_name = f"🔧 [MCP:git] {tool_name}"
+        elif tool_name.startswith("git_"):
+            display_name = f"🔧 [Function] {tool_name}"  # Function tools
+        else:
+            display_name = f"⚙️ {tool_name}"  # Другие инструменты
+        
+        # Avoid recursion by using simple console output instead of pretty_logger.tool_start
+        if hasattr(self.pretty_logger, '_format_symbol'):
+            from .pretty_logger import LogLevel
+            symbol = self.pretty_logger._format_symbol(LogLevel.TOOL)
+        else:
+            symbol = "◦"
+        print(f"{symbol} [{agent_name}] {display_name} {args_str}")
         
     def _console_tool_result(self, event: LogEvent) -> None:
         """Красивое отображение результата инструмента."""
@@ -322,9 +346,13 @@ class UnifiedLogger:
         else:
             self.file_logger.info(log_message)
             
-        # Если есть дополнительные данные, логируем их отдельно
+        # Если есть дополнительные данные, логируем их кратко
         if event.data:
-            self.file_logger.debug(f"Data: {json.dumps(event.data, ensure_ascii=False, indent=2)}")
+            # Ограничиваем размер данных для избежания спама в логах
+            data_str = str(event.data)
+            if len(data_str) > 200:
+                data_str = data_str[:200] + "... [truncated]"
+            self.file_logger.debug(f"Data: {data_str}")
             
         # Принудительно сбрасываем буфер
         for handler in self.file_logger.handlers:
@@ -407,7 +435,7 @@ class UnifiedLogger:
         """Логирование вызова инструмента."""
         self.log(
             LogEventType.TOOL_CALL,
-            f"Вызов инструмента {tool_name}",
+            f"Вызов инструмента {tool_name}" + (f" | Agent: {agent_name}" if agent_name else ""),
             tool_name=tool_name,
             agent_name=agent_name,
             data={'args': args},

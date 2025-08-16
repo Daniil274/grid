@@ -150,6 +150,14 @@ class PrettyLogger:
         )
         self.tools_used.append(operation)
         
+        # Log to file using Logger only (avoid recursion with unified_logger)
+        try:
+            from utils.logger import Logger
+            logger = Logger("grid.tools")
+            logger.log_tool_call(tool_name, kwargs)
+        except ImportError:
+            pass
+        
         # Format tool call with agent name if available
         symbol = self._format_symbol(LogLevel.TOOL)
         args_str = ""
@@ -179,6 +187,17 @@ class PrettyLogger:
         """Log tool operation result."""
         operation.result = result
         operation.error = error
+        
+        # Log to file using Logger only (avoid recursion with unified_logger)
+        try:
+            from utils.logger import Logger
+            logger = Logger("grid.tools")
+            if error:
+                logger.error(f"Tool '{operation.name}' failed: {error}")
+            elif result:
+                logger.info(f"Tool '{operation.name}' completed successfully")
+        except ImportError:
+            pass
         
         # Format result summary
         summary_parts = []

@@ -25,7 +25,10 @@ from core.security_agent_factory import SecurityAwareAgentFactory
 from utils.logger import Logger
 from utils.pretty_logger import PrettyLogger
 from utils.unified_logger import configure_unified_logger, LogLevel
-from utils.cli_logger import cli_logger, OpenRouterTokenCalculator, TokenUsage
+from utils.cli_logger import CLILogger
+
+# Create CLI logger instance
+cli_logger = CLILogger()
 from utils.exceptions import GridError
 import logging
 import time
@@ -34,6 +37,8 @@ import time
 logging.getLogger("httpx").setLevel(logging.INFO)
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("grid").setLevel(logging.INFO)
+import os
+os.environ['PROJECT_ROOT'] = str(Path(__file__).parent)
 Logger.configure(level="INFO", enable_console=False, log_dir="logs", enable_legacy_logs=True, force_reconfigure=True)  # логируем строго в logs/ проекта
 
 # Initialize beautiful logger
@@ -80,14 +85,14 @@ async def main():
         cli_logger.info("Запуск Grid Agent System...")
         
         # Load configuration
-        operation = cli_logger.operation_start("Load Config", path=args.config)
+        cli_logger.info("Load Config")
         config = Config(args.config, args.path)
-        cli_logger.operation_end(operation, result="Конфигурация загружена")
+        cli_logger.info("Load Config - Конфигурация загружена")
         
         # Create factory
-        operation = cli_logger.operation_start("Initialize SecurityAwareAgentFactory")
+        cli_logger.info("Initialize SecurityAwareAgentFactory")
         factory = SecurityAwareAgentFactory(config, args.path)
-        cli_logger.operation_end(operation, result="Фабрика агентов инициализирована")
+        cli_logger.info("Initialize SecurityAwareAgentFactory - Фабрика агентов инициализирована")
         
         # Настройка универсального логирования
         agent_logging_config = config.config.settings.agent_logging
@@ -114,7 +119,7 @@ async def main():
         agent_key = args.agent or config.get_default_agent()
         
         # Автоматически очищаем контекст при запуске - агенты не должны помнить предыдущие чаты
-        operation = cli_logger.operation_start("Clear Context")
+        cli_logger.info("Clear Context")
         factory.clear_context()
         
         # Также удаляем файл с сохраненным контекстом, если он существует
@@ -124,9 +129,9 @@ async def main():
             os.remove(context_file)
             cli_logger.info(f"Удален файл сохраненного контекста: {context_file}")
         
-        cli_logger.operation_end(operation, result="Контекст очищен при запуске")
+        cli_logger.info("Clear Context - Контекст очищен при запуске")
         
-        cli_logger.success("Grid Agent System готов к работе")
+        cli_logger.info("Grid Agent System готов к работе")
         
         print("\n" + "="*60)
         print("🤖 Grid Agent System ")
@@ -139,13 +144,11 @@ async def main():
         
         if args.message:
             # Single message mode
-            cli_logger.info(f"Обработка сообщения", message_length=len(args.message))
+            cli_logger.info(f"Обработка сообщения")
             
             try:
-                # Track agent execution with token counting
-                operation = cli_logger.operation_start(f"Agent {agent_key}", 
-                                                     agent=agent_key, 
-                                                     message_length=len(args.message))
+                # Track agent execution
+                cli_logger.info(f"Agent {agent_key} (agent: {agent_key})")
                 
                 start_time = time.time()
                 response = await factory.run_agent(agent_key, args.message, args.context_path, stream=True)
@@ -163,28 +166,20 @@ async def main():
                     agent_config = config.get_agent(agent_key)
                     model_name = getattr(agent_config, 'model', 'unknown')
                     
-                    # Calculate cost if it's an OpenRouter model
-                    if 'openrouter' in model_name.lower() or OpenRouterTokenCalculator.is_supported_model(model_name):
-                        token_usage = OpenRouterTokenCalculator.calculate_cost(
-                            model_name, 
-                            int(estimated_prompt_tokens), 
-                            int(estimated_completion_tokens)
-                        )
+                    # Token calculation removed
                 except Exception as e:
                     pass  # Ignore token calculation errors
                 
-                cli_logger.operation_end(operation, 
-                                       result=f"Ответ сгенерирован ({duration:.2f}с, {len(response)} символов)",
-                                       token_usage=token_usage)
+                cli_logger.info(f"Ответ сгенерирован ({duration:.2f}с, {len(response)} символов)")
                 
                 print(f"\n🤖 Ответ:")
                 print("-" * 60)
                 print(response)
                 
-                cli_logger.success("Сообщение успешно обработано")
+                cli_logger.info("Success")
                 
             except Exception as e:
-                cli_logger.operation_end(operation, error=str(e))
+                cli_logger.info("Operation completed")
                 print(f"❌ Ошибка: {e}")
         else:
             # Interactive mode
@@ -203,15 +198,15 @@ async def main():
                         print("👋 Goodbye!")
                         break
                     elif user_input.lower() == 'clear':
-                        operation = cli_logger.operation_start("Clear Context")
+                        cli_logger.info("Clear Context")
                         factory.clear_context()
-                        cli_logger.operation_end(operation, result="Контекст очищен")
-                        cli_logger.success("Контекст беседы очищен")
+                        cli_logger.info("Clear Context - Контекст очищен")
+                        cli_logger.info("Success")
                         continue
                     elif user_input.lower() == 'context':
-                        operation = cli_logger.operation_start("Get Context")
+                        cli_logger.info("Get Context")
                         context_info = factory.get_context_info()
-                        cli_logger.operation_end(operation, result="Информация о контексте получена")
+                        cli_logger.info("Get Context - Информация о контексте получена")
                         
                         print(f"\n📋 Информация о контексте:")
                         print(f"   Сообщений: {context_info.get('conversation_messages', 0)}")
@@ -234,12 +229,10 @@ async def main():
                     # Process user message with beautiful logging
                     try:
                         # Track execution with token counting
-                        operation = cli_logger.operation_start(f"Agent {agent_key}", 
-                                                           agent=agent_key,
-                                                           message_length=len(user_input))
+                        cli_logger.info(f"Agent {agent_key} (agent: {agent_key})")
                         
                         start_time = time.time()
-                        response = await factory.run_agent(agent_key, user_input, args.context_path, stream=True)
+                        response = await factory.run_agent(agent_key, user_input, args.context_path, stream=False)
                         duration = time.time() - start_time
                         
                         # Try to get token usage information
@@ -250,24 +243,16 @@ async def main():
                             
                             agent_config = config.get_agent(agent_key)
                             model_name = getattr(agent_config, 'model', 'unknown')
-                            
-                            if 'openrouter' in model_name.lower() or OpenRouterTokenCalculator.is_supported_model(model_name):
-                                token_usage = OpenRouterTokenCalculator.calculate_cost(
-                                    model_name, 
-                                    int(estimated_prompt_tokens), 
-                                    int(estimated_completion_tokens)
-                                )
+                            # Token calculation removed
                         except Exception:
                             pass
                         
-                        cli_logger.operation_end(operation, 
-                                               result=f"Ответ получен ({duration:.2f}с, {len(response)} символов)",
-                                               token_usage=token_usage)
+                        cli_logger.info(f"Ответ получен ({duration:.2f}с, {len(response)} символов)")
                         
                         print(f"\n🤖 {agent_key}: {response}")
                         
                     except Exception as e:
-                        cli_logger.operation_end(operation, error=str(e))
+                        cli_logger.info("Operation completed")
                         print(f"❌ Ошибка: {e}")
                     
                 except KeyboardInterrupt:
@@ -278,13 +263,12 @@ async def main():
                     break
         
         # Beautiful cleanup and session summary
-        operation = cli_logger.operation_start("Cleanup")
+        cli_logger.info("Cleanup")
         await factory.cleanup()
-        cli_logger.operation_end(operation, result="Ресурсы освобождены")
+        cli_logger.info("Cleanup - Ресурсы освобождены")
         
-        # Show session summary with token usage
-        cli_logger.show_session_summary()
-        cli_logger.success("Grid Agent System завершил работу")
+        # Session summary
+        cli_logger.info("Grid Agent System завершил работу")
         
     except GridError as e:
         cli_logger.error(f"Ошибка Grid: {e}")
