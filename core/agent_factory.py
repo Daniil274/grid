@@ -55,9 +55,40 @@ class AgentFactory:
         # Disable agents SDK tracing by default
         set_tracing_disabled(True)
         
-        # Enable debug logging for MCP tools in agents SDK
+        # Set up selective logging for agents SDK
         agents_logger = logging.getLogger("openai.agents")
         agents_logger.setLevel(logging.DEBUG)
+        
+        # Create a custom filter to only log tool-related messages and important events
+        class AgentsToolFilter(logging.Filter):
+            def filter(self, record):
+                message = record.getMessage().lower()
+                # Allow tool-related messages and important events, but suppress verbose prompt/schema logs
+                suppress_keywords = ['tools:', '"parameters":', '"function":', '"properties":', '"description":', '"type": "object"', '"role": "system"']
+                tool_keywords = ['invoking mcp tool', 'mcp tool', 'returned', 'error invoking', 'error code', 'tool call', 'executing tool']
+                
+                # Always allow tool-related messages regardless of length
+                if any(keyword in message for keyword in tool_keywords):
+                    return True
+                    
+                # Suppress very long messages that are likely schemas or prompts
+                if len(message) > 1000:
+                    return False
+                    
+                # Suppress if it contains schema/prompt keywords
+                if any(keyword in message for keyword in suppress_keywords):
+                    return False
+                    
+                # Allow short informational messages
+                return len(message) < 150
+        
+        # Apply filter to suppress verbose debug messages but keep tool logs
+        for handler in agents_logger.handlers:
+            handler.addFilter(AgentsToolFilter())
+        
+        # If no handlers exist, ensure we apply the filter when they're created
+        if not agents_logger.handlers:
+            agents_logger.addFilter(AgentsToolFilter())
         
         self.config = config or Config()
         if working_directory:
@@ -372,6 +403,47 @@ class AgentFactory:
             # Create agent
             agent = await self.create_agent(agent_key, context_path)
             
+            # Добавляем хук для логирования инструментов
+            try:
+                from utils.unified_logger import get_unified_logger
+                unified_logger = get_unified_logger()
+                
+                def tool_start_hook(tool_name: str, tool_args: dict):
+                    # Определяем MCP инструменты
+                    mcp_tools = {
+                        "sequentialthinking": "sequential_thinking",
+                        "read_text_file": "filesystem", 
+                        "write_text_file": "filesystem",
+                        "list_directory": "filesystem",
+                        "create_directory": "filesystem",
+                        "delete_file": "filesystem",
+                        "move_file": "filesystem",
+                        "git_status": "git",
+                        "git_log": "git", 
+                        "git_diff": "git",
+                        "git_add": "git",
+                        "git_commit": "git",
+                        "git_push": "git",
+                        "git_pull": "git",
+                        "git_set_working_dir": "git",
+                        "git_show": "git"
+                    }
+                    
+                    if tool_name in mcp_tools:
+                        server_label = mcp_tools[tool_name]
+                        display_name = f"🔧 [MCP:{server_label}] {tool_name}"
+                    else:
+                        display_name = tool_name
+                    
+                    unified_logger.pretty_logger.set_current_agent(agent.name)
+                    unified_logger.pretty_logger.tool_start(display_name, args=str(tool_args))
+                
+                # Устанавливаем хук для агента (если поддерживается)
+                if hasattr(agent, 'add_tool_hook'):
+                    agent.add_tool_hook('start', tool_start_hook)
+            except Exception as e:
+                print(f"[DEBUG] Failed to set tool hook: {e}")
+            
             logger.info(f"Agent '{agent.name}' created successfully")
             
             # Не добавляем инструкции агента в диалог; сохраняем в metadata для служебного использования
@@ -385,9 +457,11 @@ class AgentFactory:
             # Начинаем детальное логирование
             log_agent_start(agent.name, message)
             
-            # Логируем промпт агента
+            # Логируем промпт агента (кратко)
             agent_instructions = self._build_agent_instructions(agent_key, context_path)
-            log_prompt(agent.name, "full", agent_instructions)
+            # Ограничиваем размер логируемого промпта
+            instructions_preview = agent_instructions[:200] + "..." if len(agent_instructions) > 200 else agent_instructions
+            log_prompt(agent.name, "preview", instructions_preview)
             
             # Log start (legacy)
             logger.log_agent_start(agent.name, message)
@@ -466,7 +540,22 @@ class AgentFactory:
                                     
                                     # Логируем как TOOL для консистентности с агентскими инструментами
                                     logger.info(f"TOOL | {tool_display_name} | {args_str}")
+                                    print(f"[DEBUG] Calling log_tool_call: {tool_display_name}")
                                     log_tool_call(tool_display_name, args_dict, agent_name=agent.name)
+                                    
+                                    # Создаем LogEvent для unified_logger
+                                    try:
+                                        from utils.unified_logger import get_unified_logger, LogEventType
+                                        unified_logger = get_unified_logger()
+                                        unified_logger.log(
+                                            event_type=LogEventType.TOOL_CALL,
+                                            message=f"MCP tool call: {tool_display_name}",
+                                            tool_name=tool_display_name,
+                                            agent_name=agent.name,
+                                            data=args_dict
+                                        )
+                                    except Exception:
+                                        pass  # Fallback если unified_logger недоступен
                                 elif name == "tool_output" and item is not None:
                                     raw_item = getattr(item, 'raw_item', None)
                                     tool_name = getattr(raw_item, 'name', None) or getattr(raw_item, 'type', None) or "tool"
@@ -855,9 +944,11 @@ class AgentFactory:
                 # Начинаем детальное логирование
                 execution_id = log_agent_start(agent_name, input_data)
                 
-                # Логируем вызов инструмента с реальным именем если доступно
-                tool_display_name = getattr(agent_tool, 'name', 'call_agent')
-                log_tool_call(tool_display_name, {"input": input_data})
+                # Логируем вызов инструмента с красивым именем
+                tool_display_name = getattr(agent_tool, 'name', agent_name)
+                # Добавляем префикс для агентов-инструментов
+                formatted_tool_name = f"Agent-Tool: {tool_display_name}"
+                log_tool_call(formatted_tool_name, {"input": input_data})
                 
                 logger.log_agent_tool_start(agent_name, tool_display_name, input_data)
                 logger.log_agent_start(agent_name, input_data)
@@ -878,6 +969,9 @@ class AgentFactory:
                 
                 # Завершаем детальное логирование
                 log_agent_end(agent_name, str(result), duration)
+                
+                # Логируем результат инструмента
+                log_tool_result(formatted_tool_name, str(result), agent_name=agent_name)
                 
                 logger.log_agent_end(agent_name, str(result), duration)
                 

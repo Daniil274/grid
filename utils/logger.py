@@ -129,8 +129,15 @@ class Logger:
         
         # File handlers
         if log_dir:
-            # Принудительно использовать директорию логов проекта, а не рабочую директорию агента
-            log_path = Path("logs") if not Path(log_dir).is_absolute() else Path(log_dir)
+            # Ensure we use the project's logs directory, not the agent's working directory
+            if Path(log_dir).is_absolute():
+                log_path = Path(log_dir)
+            else:
+                # Force use of project root logs directory
+                import os
+                project_root = os.environ.get('PROJECT_ROOT', '/workspaces/grid')
+                log_path = Path(project_root) / "logs"
+            
             log_path.mkdir(parents=True, exist_ok=True)
             
             # General log file
@@ -146,7 +153,7 @@ class Logger:
             
             # Legacy agent logs (timestamped)
             if enable_legacy_logs:
-                legacy_handler = TimestampedFileHandler(log_dir, "agents")
+                legacy_handler = TimestampedFileHandler(str(log_path), "agents")
                 legacy_handler.setFormatter(LegacyFormatter())
                 logging.getLogger().addHandler(legacy_handler)
         
