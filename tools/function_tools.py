@@ -10,10 +10,19 @@ from .git_tools import GIT_TOOLS, get_git_tools, get_git_tools_by_names
 # COMBINED TOOLS REGISTRY
 # ============================================================================
 
+# Импортируем мок инструменты для тестов
+try:
+    from tests.mock_tools import MOCK_TOOLS
+    HAS_MOCK_TOOLS = True
+except ImportError:
+    MOCK_TOOLS = {}
+    HAS_MOCK_TOOLS = False
+
 # Объединяем все инструменты
 AVAILABLE_TOOLS = {
     **FILE_TOOLS,
     **GIT_TOOLS,
+    **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
 # Добавляем дополнительные инструменты для совместимости
