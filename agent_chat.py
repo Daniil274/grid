@@ -25,6 +25,7 @@ from core.security_agent_factory import SecurityAwareAgentFactory
 from utils.logger import Logger
 from utils.pretty_logger import PrettyLogger
 from utils.unified_logger import configure_unified_logger, LogLevel
+from utils.cli_logger import cli_logger, OpenRouterTokenCalculator, TokenUsage
 from utils.exceptions import GridError
 import logging
 import time
@@ -76,17 +77,17 @@ async def main():
     
     try:
         # Beautiful initialization
-        pretty_logger.info("Запуск Grid Agent System...")
+        cli_logger.info("Запуск Grid Agent System...")
         
         # Load configuration
-        operation = pretty_logger.tool_start("Config", path=args.config)
+        operation = cli_logger.operation_start("Load Config", path=args.config)
         config = Config(args.config, args.path)
-        pretty_logger.tool_result(operation, result="Конфигурация загружена")
+        cli_logger.operation_end(operation, result="Конфигурация загружена")
         
         # Create factory
-        operation = pretty_logger.tool_start("SecurityAwareAgentFactory")
+        operation = cli_logger.operation_start("Initialize SecurityAwareAgentFactory")
         factory = SecurityAwareAgentFactory(config, args.path)
-        pretty_logger.tool_result(operation, result="Фабрика агентов инициализирована")
+        cli_logger.operation_end(operation, result="Фабрика агентов инициализирована")
         
         # Настройка универсального логирования
         agent_logging_config = config.config.settings.agent_logging
@@ -105,15 +106,15 @@ async def main():
                 file_level = LogLevel.DEBUG
             
             configure_unified_logger("logs", console_level, file_level, enable_colors=True)
-            pretty_logger.info("Универсальное логирование включено")
+            cli_logger.info("Универсальное логирование включено")
         else:
-            pretty_logger.info("Универсальное логирование отключено")
+            cli_logger.info("Универсальное логирование отключено")
         
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
         
         # Автоматически очищаем контекст при запуске - агенты не должны помнить предыдущие чаты
-        operation = pretty_logger.tool_start("ClearContext")
+        operation = cli_logger.operation_start("Clear Context")
         factory.clear_context()
         
         # Также удаляем файл с сохраненным контекстом, если он существует
@@ -121,11 +122,11 @@ async def main():
         context_file = "logs/context.json"
         if os.path.exists(context_file):
             os.remove(context_file)
-            pretty_logger.info(f"Удален файл сохраненного контекста: {context_file}")
+            cli_logger.info(f"Удален файл сохраненного контекста: {context_file}")
         
-        pretty_logger.tool_result(operation, result="Контекст очищен при запуске")
+        cli_logger.operation_end(operation, result="Контекст очищен при запуске")
         
-        pretty_logger.success("Grid Agent System готов к работе")
+        cli_logger.success("Grid Agent System готов к работе")
         
         print("\n" + "="*60)
         print("🤖 Grid Agent System ")
@@ -138,35 +139,52 @@ async def main():
         
         if args.message:
             # Single message mode
-            pretty_logger.info(f"Обработка сообщения: {args.message}")
-            
-            #logging
-            pretty_logger.info(f"Processing message with agent {agent_key}")
+            cli_logger.info(f"Обработка сообщения", message_length=len(args.message))
             
             try:
-                # Track agent execution
-                operation = pretty_logger.tool_start("AgentExecution", 
-                                                   agent=agent_key, 
-                                                   message_length=len(args.message))
+                # Track agent execution with token counting
+                operation = cli_logger.operation_start(f"Agent {agent_key}", 
+                                                     agent=agent_key, 
+                                                     message_length=len(args.message))
                 
                 start_time = time.time()
                 response = await factory.run_agent(agent_key, args.message, args.context_path, stream=True)
                 duration = time.time() - start_time
                 
-                # logging - completed
+                # Try to get token usage information
+                token_usage = None
+                try:
+                    # Estimate token usage (approximation since we don't have direct access)
+                    # This is a rough estimate - in production you'd want to capture real usage
+                    estimated_prompt_tokens = len(args.message.split()) * 1.3  # rough estimate
+                    estimated_completion_tokens = len(response.split()) * 1.3
+                    
+                    # Try to get model from agent config
+                    agent_config = config.get_agent(agent_key)
+                    model_name = getattr(agent_config, 'model', 'unknown')
+                    
+                    # Calculate cost if it's an OpenRouter model
+                    if 'openrouter' in model_name.lower() or OpenRouterTokenCalculator.is_supported_model(model_name):
+                        token_usage = OpenRouterTokenCalculator.calculate_cost(
+                            model_name, 
+                            int(estimated_prompt_tokens), 
+                            int(estimated_completion_tokens)
+                        )
+                except Exception as e:
+                    pass  # Ignore token calculation errors
                 
-                pretty_logger.tool_result(operation, 
-                                        result=f"Ответ сгенерирован ({duration:.2f}с, {len(response)} символов)")
+                cli_logger.operation_end(operation, 
+                                       result=f"Ответ сгенерирован ({duration:.2f}с, {len(response)} символов)",
+                                       token_usage=token_usage)
                 
                 print(f"\n🤖 Ответ:")
                 print("-" * 60)
                 print(response)
                 
-                pretty_logger.success("Сообщение успешно обработано")
+                cli_logger.success("Сообщение успешно обработано")
                 
             except Exception as e:
-                # logging - error
-                pretty_logger.error(f"Ошибка выполнения агента: {e}")
+                cli_logger.operation_end(operation, error=str(e))
                 print(f"❌ Ошибка: {e}")
         else:
             # Interactive mode
@@ -185,15 +203,15 @@ async def main():
                         print("👋 Goodbye!")
                         break
                     elif user_input.lower() == 'clear':
-                        operation = pretty_logger.tool_start("ClearContext")
+                        operation = cli_logger.operation_start("Clear Context")
                         factory.clear_context()
-                        pretty_logger.tool_result(operation, result="Контекст очищен")
-                        pretty_logger.success("Контекст беседы очищен")
+                        cli_logger.operation_end(operation, result="Контекст очищен")
+                        cli_logger.success("Контекст беседы очищен")
                         continue
                     elif user_input.lower() == 'context':
-                        operation = pretty_logger.tool_start("GetContext")
+                        operation = cli_logger.operation_start("Get Context")
                         context_info = factory.get_context_info()
-                        pretty_logger.tool_result(operation, result="Информация о контексте получена")
+                        cli_logger.operation_end(operation, result="Информация о контексте получена")
                         
                         print(f"\n📋 Информация о контексте:")
                         print(f"   Сообщений: {context_info.get('conversation_messages', 0)}")
@@ -214,13 +232,9 @@ async def main():
                         continue
                     
                     # Process user message with beautiful logging
-                    pretty_logger.info(f"Обработка сообщения агентом {agent_key}...")
-                    
-                    # logging
-                    
                     try:
-                        # Track execution
-                        operation = pretty_logger.tool_start("AgentExecution", 
+                        # Track execution with token counting
+                        operation = cli_logger.operation_start(f"Agent {agent_key}", 
                                                            agent=agent_key,
                                                            message_length=len(user_input))
                         
@@ -228,16 +242,32 @@ async def main():
                         response = await factory.run_agent(agent_key, user_input, args.context_path, stream=True)
                         duration = time.time() - start_time
                         
-                        # logging - success
+                        # Try to get token usage information
+                        token_usage = None
+                        try:
+                            estimated_prompt_tokens = len(user_input.split()) * 1.3
+                            estimated_completion_tokens = len(response.split()) * 1.3
+                            
+                            agent_config = config.get_agent(agent_key)
+                            model_name = getattr(agent_config, 'model', 'unknown')
+                            
+                            if 'openrouter' in model_name.lower() or OpenRouterTokenCalculator.is_supported_model(model_name):
+                                token_usage = OpenRouterTokenCalculator.calculate_cost(
+                                    model_name, 
+                                    int(estimated_prompt_tokens), 
+                                    int(estimated_completion_tokens)
+                                )
+                        except Exception:
+                            pass
                         
-                        pretty_logger.tool_result(operation, 
-                                                result=f"Ответ получен ({duration:.2f}с, {len(response)} символов)")
+                        cli_logger.operation_end(operation, 
+                                               result=f"Ответ получен ({duration:.2f}с, {len(response)} символов)",
+                                               token_usage=token_usage)
                         
                         print(f"\n🤖 {agent_key}: {response}")
                         
                     except Exception as e:
-                        # logging - error
-                        pretty_logger.error(f"Ошибка выполнения: {e}")
+                        cli_logger.operation_end(operation, error=str(e))
                         print(f"❌ Ошибка: {e}")
                     
                 except KeyboardInterrupt:
@@ -247,18 +277,21 @@ async def main():
                     print("\n\n👋 EOF. Goodbye!")
                     break
         
-        # Beautiful cleanup
-        operation = pretty_logger.tool_start("Cleanup")
+        # Beautiful cleanup and session summary
+        operation = cli_logger.operation_start("Cleanup")
         await factory.cleanup()
-        pretty_logger.tool_result(operation, result="Ресурсы освобождены")
-        pretty_logger.success("Grid Agent System завершил работу")
+        cli_logger.operation_end(operation, result="Ресурсы освобождены")
+        
+        # Show session summary with token usage
+        cli_logger.show_session_summary()
+        cli_logger.success("Grid Agent System завершил работу")
         
     except GridError as e:
-        pretty_logger.error(f"Ошибка Grid: {e}")
+        cli_logger.error(f"Ошибка Grid: {e}")
         print(f"❌ Grid Error: {e}")
         sys.exit(1)
     except Exception as e:
-        pretty_logger.error(f"Неожиданная ошибка: {e}")
+        cli_logger.error(f"Неожиданная ошибка: {e}")
         print(f"❌ Unexpected Error: {e}")
         import traceback
         traceback.print_exc()

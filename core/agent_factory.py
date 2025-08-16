@@ -4,6 +4,7 @@ Enterprise Agent Factory with caching, tracing, and error handling.
 
 import asyncio
 import time
+import logging
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -53,6 +54,10 @@ class AgentFactory:
         """
         # Disable agents SDK tracing by default
         set_tracing_disabled(True)
+        
+        # Enable debug logging for MCP tools in agents SDK
+        agents_logger = logging.getLogger("openai.agents")
+        agents_logger.setLevel(logging.DEBUG)
         
         self.config = config or Config()
         if working_directory:
@@ -426,17 +431,78 @@ class AgentFactory:
                                         args_str = arguments if isinstance(arguments, str) else (json.dumps(arguments, ensure_ascii=False) if arguments is not None else "")
                                     except Exception:
                                         args_str = str(arguments) if arguments is not None else ""
-                                    # Сервер MCP, если доступно
+                                    
+                                    # Определяем MCP инструменты по именам
+                                    mcp_tools = {
+                                        "sequentialthinking": "sequential_thinking",
+                                        "read_text_file": "filesystem", 
+                                        "write_text_file": "filesystem",
+                                        "list_directory": "filesystem",
+                                        "create_directory": "filesystem",
+                                        "delete_file": "filesystem",
+                                        "move_file": "filesystem",
+                                        "git_status": "git",
+                                        "git_log": "git", 
+                                        "git_diff": "git",
+                                        "git_add": "git",
+                                        "git_commit": "git",
+                                        "git_push": "git",
+                                        "git_pull": "git",
+                                        "git_set_working_dir": "git",
+                                        "git_show": "git"
+                                    }
+                                    
                                     server_label = getattr(raw_item, 'server_label', None)
+                                    if not server_label and tool_name in mcp_tools:
+                                        server_label = mcp_tools[tool_name]
+                                    
                                     args_dict = {"args": args_str}
                                     if server_label:
                                         args_dict["server_label"] = server_label
-                                    log_tool_call(tool_name, args_dict, agent_name=agent.name)
+                                        # Добавляем префикс для MCP инструментов в логах
+                                        tool_display_name = f"MCP:{server_label}.{tool_name}"
+                                    else:
+                                        tool_display_name = tool_name
+                                    
+                                    # Логируем как TOOL для консистентности с агентскими инструментами
+                                    logger.info(f"TOOL | {tool_display_name} | {args_str}")
+                                    log_tool_call(tool_display_name, args_dict, agent_name=agent.name)
                                 elif name == "tool_output" and item is not None:
                                     raw_item = getattr(item, 'raw_item', None)
                                     tool_name = getattr(raw_item, 'name', None) or getattr(raw_item, 'type', None) or "tool"
                                     output_val = getattr(item, 'output', '')
-                                    log_tool_result(tool_name, output_val, agent_name=agent.name)
+                                    
+                                    # Определяем MCP инструменты по именам (используем тот же словарь)
+                                    mcp_tools = {
+                                        "sequentialthinking": "sequential_thinking",
+                                        "read_text_file": "filesystem", 
+                                        "write_text_file": "filesystem",
+                                        "list_directory": "filesystem",
+                                        "create_directory": "filesystem",
+                                        "delete_file": "filesystem",
+                                        "move_file": "filesystem",
+                                        "git_status": "git",
+                                        "git_log": "git", 
+                                        "git_diff": "git",
+                                        "git_add": "git",
+                                        "git_commit": "git",
+                                        "git_push": "git",
+                                        "git_pull": "git",
+                                        "git_set_working_dir": "git",
+                                        "git_show": "git"
+                                    }
+                                    
+                                    server_label = getattr(raw_item, 'server_label', None)
+                                    if not server_label and tool_name in mcp_tools:
+                                        server_label = mcp_tools[tool_name]
+                                    
+                                    # Добавляем префикс для MCP инструментов
+                                    if server_label:
+                                        tool_display_name = f"MCP:{server_label}.{tool_name}"
+                                    else:
+                                        tool_display_name = tool_name
+                                    
+                                    log_tool_result(tool_display_name, output_val, agent_name=agent.name)
                             elif isinstance(event, RawResponsesStreamEvent):
                                 # Можно добавить отображение reasoning/дельт при необходимости
                                 pass
