@@ -151,7 +151,8 @@ async def main():
                 cli_logger.info(f"Agent {agent_key} (agent: {agent_key})")
                 
                 start_time = time.time()
-                response = await factory.run_agent(agent_key, args.message, args.context_path, stream=True)
+                use_streaming = True  # Включаем стриминг для режима одного сообщения
+                response = await factory.run_agent(agent_key, args.message, args.context_path, stream=use_streaming)
                 duration = time.time() - start_time
                 
                 # Try to get token usage information
@@ -174,7 +175,11 @@ async def main():
                 
                 print(f"\n🤖 Ответ:")
                 print("-" * 60)
-                print(response)
+                # При стриминге ответ уже выведен в реальном времени, просто добавляем разделитель
+                if use_streaming:
+                    print()  # Добавляем новую строку после стримингового вывода
+                else:
+                    print(response)
                 
                 cli_logger.info("Success")
                 
@@ -232,7 +237,8 @@ async def main():
                         cli_logger.info(f"Agent {agent_key} (agent: {agent_key})")
                         
                         start_time = time.time()
-                        response = await factory.run_agent(agent_key, user_input, args.context_path, stream=False)
+                        use_streaming = True  # Включаем стриминг для интерактивного режима
+                        response = await factory.run_agent(agent_key, user_input, args.context_path, stream=use_streaming)
                         duration = time.time() - start_time
                         
                         # Try to get token usage information
@@ -249,7 +255,11 @@ async def main():
                         
                         cli_logger.info(f"Ответ получен ({duration:.2f}с, {len(response)} символов)")
                         
-                        print(f"\n🤖 {agent_key}: {response}")
+                        # При стриминге ответ уже выведен в реальном времени, добавляем только новую строку
+                        if use_streaming:
+                            print(f"\n")  # Добавляем новую строку после стримингового вывода
+                        else:
+                            print(f"\n🤖 {agent_key}: {response}")
                         
                     except Exception as e:
                         cli_logger.info("Operation completed")

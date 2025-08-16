@@ -28,6 +28,7 @@ from utils.unified_logger import (
 
 import json
 import re
+import sys
 
 load_dotenv()
 logger = Logger(__name__)
@@ -57,7 +58,7 @@ class AgentFactory:
         
         # Set up selective logging for agents SDK
         agents_logger = logging.getLogger("openai.agents")
-        agents_logger.setLevel(logging.DEBUG)
+        agents_logger.setLevel(logging.WARNING)
         
         # Create a custom filter to only log tool-related messages and important events
         class AgentsToolFilter(logging.Filter):
@@ -593,8 +594,38 @@ class AgentFactory:
                                     
                                     log_tool_result(tool_display_name, output_val, agent_name=agent.name)
                             elif isinstance(event, RawResponsesStreamEvent):
-                                # Можно добавить отображение reasoning/дельт при необходимости
-                                pass
+                                # Отображение текстовых дельт в реальном времени
+                                try:
+                                    # Пробуем извлечь текст из события
+                                    content = None
+                                    if hasattr(event, 'content') and event.content:
+                                        content = event.content
+                                    elif hasattr(event, 'delta') and event.delta:
+                                        content = event.delta
+                                    elif hasattr(event, 'text') and event.text:
+                                        content = event.text
+                                    elif hasattr(event, 'data') and event.data:
+                                        # event.data содержит объекты типа ResponseTextDeltaEvent
+                                        if hasattr(event.data, 'delta'):
+                                            content = event.data.delta
+                                        elif hasattr(event.data, 'content'):
+                                            content = event.data.content
+                                        elif hasattr(event.data, 'text'):
+                                            content = event.data.text
+                                        elif isinstance(event.data, dict):
+                                            content = event.data.get('content') or event.data.get('delta') or event.data.get('text')
+                                        elif hasattr(event.data, 'type') and event.data.type == 'response.output_text.delta':
+                                            # Для ResponseTextDeltaEvent извлекаем delta
+                                            if hasattr(event.data, 'delta'):
+                                                content = event.data.delta
+                                    
+                                    if content and isinstance(content, str) and content.strip():
+                                        # Выводим текст без новой строки для плавного стриминга
+                                        print(content, end='', flush=True)
+                                except Exception as e:
+                                    # Игнорируем ошибки в отображении стриминга, но логируем их
+                                    print(f"[DEBUG] Error in streaming: {e}", file=sys.stderr)
+                                    pass
                         except Exception:
                             # Никогда не роняем выполнение из-за отображения логов
                             pass
@@ -954,7 +985,7 @@ class AgentFactory:
                 logger.log_agent_start(agent_name, input_data)
                 
                 # Call original function с нормализованными аргументами
-                result = original_invoke(tool_context, normalized_args)
+                result = original_invoke(tool_context, **normalized_args)
                 if hasattr(result, '__await__'):
                     result = await result
                 
@@ -1014,7 +1045,7 @@ class AgentFactory:
         # Усиливаем описание инструмента, но выносим общие правила в общий промпт (см. settings.tools_common_rules)
         effective_description = (tool_description or "")
         # Ключевые локальные правила оставим кратко (одна строка), остальное в общем блоке
-        local_rule = "Вызов: передавай одно поле input (string)."
+        local_rule = "Вызов: передавай одно поле input (string). Допустимые алиасы: task, message, prompt."
         if effective_description:
             effective_description = effective_description + "\n" + local_rule
         else:
@@ -1031,10 +1062,11 @@ class AgentFactory:
             from agents import Runner
             
             # Подготавливаем человекочитаемый контекст для подагента
-            # Нормализуем вход: на этом уровне ожидаем уже нормализованный `input`
-            raw_input = input or ""
-            if not raw_input:
+            # На этом уровне input должен быть строкой, т.к. нормализация прошла в `wrapped_invoke_tool`
+            if not isinstance(input, str) or not input.strip():
                 return f"❌ Пустой ввод для инструмента '{tool_name}'. Передайте непустой 'input' (string)."
+            
+            raw_input = input.strip()
             
             enhanced_input = self.context_manager.get_context_for_agent_tool(
                 strategy=context_strategy,
