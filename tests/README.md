@@ -2,18 +2,53 @@
 
 Комплексная система тестирования для платформы агентов Grid, включающая модульные, интеграционные и функциональные тесты.
 
+## 🆕 Новые возможности
+
+### Автоматизированное измерение покрытия
+- Интегрированная поддержка coverage
+- Автоматическая генерация HTML, XML, JSON отчетов
+- Настраиваемые пороги покрытия
+- Визуализация непокрытых участков кода
+
+### Расширенные security тесты
+- Тесты для SecurityGuardian
+- Проверка ContextQualityAgent  
+- Анализ TaskAnalyzer
+- Интеграционные security сценарии
+
+### Комплексные API тесты
+- Полное покрытие OpenAI-compatible endpoints
+- Тесты middleware компонентов
+- Performance и stress тестирование
+- Интеграционные API сценарии
+
 ## 🗂️ Структура тестов
 
 ```
 tests/
-├── config_test.yaml         # Тестовая конфигурация агентов
-├── test_framework.py        # Базовый фреймворк тестирования
-├── test_agents.py          # Тесты агентов
-├── test_tools.py           # Тесты инструментов
-├── test_context.py         # Тесты системы контекста
-├── test_integration.py     # Интеграционные тесты
-├── run_tests.py           # Запускающий скрипт
-└── README.md              # Данная документация
+├── conftest.py                    # Общие фикстуры и настройки pytest
+├── coverage_runner.py             # Автоматизация измерения покрытия
+├── config_test.yaml              # Тестовая конфигурация агентов
+├── config_qa.yaml               # QA конфигурация для реальных тестов
+├── 
+├── test_framework.py             # Базовый фреймворк тестирования
+├── enhanced_test_framework.py    # Расширенный фреймворк с метриками
+├── 
+├── test_agents.py               # Тесты агентов
+├── test_tools.py                # Тесты инструментов
+├── test_context.py              # Тесты системы контекста
+├── test_enhanced_features.py    # Тесты расширенных возможностей
+├── 
+├── test_security.py             # 🆕 Security тесты
+├── test_api_comprehensive.py    # 🆕 Комплексные API тесты
+├── test_integration.py          # Интеграционные тесты
+├── test_integration_lmstudio.py # Интеграция с LMStudio
+├── test_openai_compat.py        # OpenAI совместимость
+├── 
+├── run_tests.py                 # Основной запускающий скрипт
+├── qa_test_runner.py            # QA тестирование на реальных моделях
+├── mock_tools.py                # Моки для тестирования
+└── README.md                    # Данная документация
 ```
 
 ## 🚀 Быстрый старт
@@ -21,358 +56,279 @@ tests/
 ### Установка зависимостей
 
 ```bash
-# Установка тестовых зависимостей
-pip install pytest pytest-asyncio
-
 # Установка основных зависимостей Grid
 pip install -r requirements.txt
+
+# Установка зависимостей для тестирования
+pip install pytest pytest-asyncio coverage fastapi httpx
 ```
 
 ### Запуск всех тестов
 
 ```bash
-# Из корневой директории проекта
-python tests/run_tests.py
+# Основной способ - через coverage runner
+python tests/coverage_runner.py
 
-# Или через pytest
+# Альтернативные способы
+python tests/run_tests.py
 pytest tests/ -v
+
+# С измерением покрытия
+coverage run -m pytest tests/
+coverage report -m
 ```
 
-### Запуск конкретных типов тестов
+### Запуск конкретных категорий тестов
 
 ```bash
-# Только тесты агентов
-python tests/run_tests.py --type agents
+# 🆕 Использование маркеров pytest
+pytest -m "unit"              # Только unit тесты
+pytest -m "integration"       # Интеграционные тесты
+pytest -m "security"          # Security тесты
+pytest -m "api"               # API тесты
+pytest -m "not slow"          # Исключить медленные тесты
 
-# Только тесты инструментов  
-python tests/run_tests.py --type tools
+# Через coverage runner
+python tests/coverage_runner.py --markers "unit"
+python tests/coverage_runner.py --markers "security"
 
-# Только интеграционные тесты
-python tests/run_tests.py --type integration
-
-# Подробный вывод
-python tests/run_tests.py --verbose
+# Конкретные файлы
+python tests/coverage_runner.py --pattern "tests/test_security.py"
 ```
 
 ## 📋 Типы тестов
 
-### 1. Тесты агентов (`test_agents.py`)
+### 1. Unit тесты
+Быстрые изолированные тесты основных компонентов:
+- `test_agents.py` - Тесты агентов
+- `test_tools.py` - Тесты инструментов  
+- `test_context.py` - Тесты контекста
+- `test_enhanced_features.py` - Расширенные возможности
 
-Проверяют функциональность агентов:
-
-- **Базовые тесты**: Создание агентов, кеширование, базовые ответы
-- **Функциональные тесты**: Работа с различными типами агентов
-- **Тесты производительности**: Время ответа, параллельное выполнение
-- **Интеграционные тесты**: End-to-end рабочие процессы
+### 2. 🆕 Security тесты (`test_security.py`)
+Проверяют безопасность системы:
+- **SecurityGuardian**: Валидация входа/выхода
+- **ContextQualityAgent**: Анализ качества контекста
+- **TaskAnalyzer**: Оценка сложности и рисков
+- **SecurityAwareFactory**: Безопасное создание агентов
 
 ```python
-# Пример теста агента
+@pytest.mark.security
 @pytest.mark.asyncio
-async def test_simple_agent_response():
-    async with TestEnvironment() as env:
-        response = await env.agent_factory.run_agent(
-            "test_simple_agent", 
-            "Привет!"
-        )
-        assert response is not None
+async def test_security_guardian_creation():
+    async with AgentTestEnvironment() as env:
+        guardian = SecurityGuardian(env.config)
+        assert guardian is not None
 ```
 
-### 2. Тесты инструментов (`test_tools.py`)
-
-Проверяют работу всех типов инструментов:
-
-- **Файловые операции**: Чтение, запись, поиск, редактирование
-- **Git операции**: Статус, коммиты, ветки
-- **MCP серверы**: Конфигурация и подключение
-- **Агентные инструменты**: Взаимодействие между агентами
+### 3. 🆕 API тесты (`test_api_comprehensive.py`)
+Полное тестирование API функциональности:
+- **OpenAI Compatible**: Chat/Completions endpoints
+- **Streaming**: Потоковые ответы
+- **Agent Management**: CRUD операции с агентами
+- **System API**: Health checks и системная информация
+- **Middleware**: Authentication, Rate limiting, Security
+- **Performance**: Нагрузочное тестирование
 
 ```python
-# Пример теста инструмента
-@pytest.mark.asyncio
-async def test_file_operations():
-    result = await write_file("test.txt", "content")
-    assert "успешно" in result.lower()
+@pytest.mark.api
+def test_chat_completions_endpoint():
+    with patch('core.agent_factory.AgentFactory') as mock_factory:
+        response = client.post("/v1/chat/completions", json={
+            "model": "test_simple_agent",
+            "messages": [{"role": "user", "content": "Привет"}]
+        })
+        assert response.status_code == 200
 ```
 
-### 3. Тесты контекста (`test_context.py`)
-
-Проверяют систему управления контекстом:
-
-- **Управление историей**: Добавление, очистка, ограничения
-- **Передача контекста**: Между агентами и инструментами
-- **Сохранение**: Персистентность данных
-- **Производительность**: Работа с большими объемами
-
-```python
-# Пример теста контекста
-def test_context_retention():
-    context_manager = ContextManager(max_history=10)
-    context_manager.add_message("user", "Тест")
-    assert len(context_manager.history) == 1
-```
-
-### 4. Интеграционные тесты (`test_integration.py`)
-
+### 4. Integration тесты
 Проверяют взаимодействие компонентов:
+- End-to-end рабочие процессы
+- Интеграция с внешними сервисами
+- Реальные сценарии использования
 
-- **Полные рабочие процессы**: End-to-end сценарии
-- **Обработка ошибок**: Восстановление и каскадные ошибки  
-- **Производительность системы**: Нагрузочное тестирование
-- **Реальные сценарии**: Практические случаи использования
+## 🆕 Автоматизированное измерение покрытия
+
+### Coverage Runner
+
+Новый инструмент `coverage_runner.py` автоматизирует анализ покрытия:
+
+```bash
+# Базовое использование
+python tests/coverage_runner.py
+
+# С дополнительными опциями
+python tests/coverage_runner.py \
+    --pattern "tests/test_agents.py" \
+    --markers "unit" \
+    --format "html" \
+    --verbose
+
+# Только генерация отчетов (без запуска тестов)
+python tests/coverage_runner.py --no-tests --format "all"
+
+# Установка зависимостей
+python tests/coverage_runner.py --install-deps
+```
+
+### Форматы отчетов
+- `terminal` - Текстовый отчет в консоли
+- `html` - Интерактивный HTML отчет
+- `xml` - XML для CI/CD интеграции  
+- `json` - JSON для программной обработки
+- `all` - Все форматы одновременно
+
+### Интерпретация результатов
+
+```
+📈 СВОДКА ПОКРЫТИЯ КОДА
+============================================================
+🎉 Общее покрытие: 92% - ОТЛИЧНО
+✅ core/: 95% покрытие
+⚠️ security_agents/: 78% покрытие (НУЖНО УЛУЧШИТЬ)
+```
 
 ## ⚙️ Конфигурация тестов
 
-### Тестовая конфигурация (`config_test.yaml`)
+### 🆕 Улучшенная конфигурация pytest (`pytest.ini`)
 
-Изолированная среда для тестирования:
+```ini
+[pytest]
+addopts = -q --tb=short --strict-markers
+markers =
+    unit: marks tests as unit tests
+    integration: marks tests as integration tests  
+    security: marks tests as security-related
+    api: marks tests as API tests
+    performance: marks tests as performance tests
+    slow: marks tests as slow running
 
-```yaml
-settings:
-  default_agent: "test_simple_agent"
-  max_history: 10
-  max_turns: 5
-  agent_timeout: 30
-  debug: true
-  mcp_enabled: false  # Отключено для базовых тестов
+# Coverage configuration
+[coverage:run]
+source = .
+omit = tests/*, venv/*, .venv/*
 
-# Тестовые агенты с минимальными зависимостями
-agents:
-  test_simple_agent:
-    name: "Тестовый простой агент"
-    model: "test_model"
-    tools: []
-    
-  test_file_agent:
-    name: "Тестовый файловый агент" 
-    model: "test_model"
-    tools: ["test_file_read", "test_file_write"]
+[coverage:report]
+show_missing = true
+precision = 2
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
 ```
 
-### Переменные окружения для тестов
+### 🆕 Общие фикстуры (`conftest.py`)
 
-```bash
-# Настройки тестирования
-export GRID_TEST_ENV=true
-export GRID_LOG_LEVEL=DEBUG
-
-# Для интеграционных тестов с внешними сервисами
-export RUN_INTEGRATION_TESTS=1
-export TEST_LMSTUDIO_HOST=localhost
-export TEST_LMSTUDIO_PORT=1234
-```
-
-## 🧪 Фреймворк тестирования
-
-### TestEnvironment
-
-Изолированная тестовая среда:
+Централизованные фикстуры для всех тестов:
 
 ```python
-async with TestEnvironment() as env:
-    # Автоматическая настройка:
-    # - Временная директория
-    # - Тестовая конфигурация
-    # - Мок провайдеры
-    # - Очистка после завершения
-    
-    env.set_mock_responses(["Тестовый ответ"])
-    response = await env.agent_factory.run_agent("agent", "message")
-```
+@pytest.fixture
+async def test_environment():
+    """Изолированная тестовая среда."""
+    async with AgentTestEnvironment() as env:
+        yield env
 
-### AgentTestCase
-
-Структурированные тестовые сценарии:
-
-```python
-test_case = AgentTestCase("test_name", "agent_key", "description")
-
-test_case.setup(lambda env: setup_test_data(env))
-test_case.test(lambda env: test_basic_response(env, "agent", "message"))
-test_case.teardown(lambda env: cleanup_test_data(env))
-
-result = await test_case.run(env)
-```
-
-### AgentTestSuite
-
-Наборы связанных тестов:
-
-```python
-suite = AgentTestSuite("Suite Name")
-suite.add_test(test_case1)
-suite.add_test(test_case2)
-
-results = await suite.run_all()
-summary = suite.get_summary()
-```
-
-## 📊 Результаты тестирования
-
-### Формат результатов
-
-```python
-{
-    "test_name": "basic_response_test",
-    "success": True,
-    "duration": 0.45,
-    "step_results": [...],
-    "warnings": []
-}
-```
-
-### Сводка по категориям
-
-```
-📊 СВОДКА РЕЗУЛЬТАТОВ ТЕСТИРОВАНИЯ
-============================================================
-✅ AGENTS           | Пройдено:   5 | Ошибок:   0 | Время:   2.34s
-✅ TOOLS            | Пройдено:   8 | Ошибок:   0 | Время:   1.87s
-✅ CONTEXT          | Пройдено:   6 | Ошибок:   0 | Время:   0.92s
-✅ INTEGRATION      | Пройдено:   3 | Ошибок:   0 | Время:   4.12s
-------------------------------------------------------------
-✅ ОБЩИЙ ИТОГ:     | Пройдено:  22 | Ошибок:   0 | Время:   9.25s
-📈 Успешность: 100.0%
+@pytest.fixture  
+def mock_openai_client():
+    """Мок OpenAI клиента."""
+    # Автоматическое мокирование API
 ```
 
 ## 🔧 Создание новых тестов
 
-### 1. Тест агента
+### 1. Security тест
 
 ```python
+@pytest.mark.security
 @pytest.mark.asyncio
-async def test_new_agent_feature():
-    async with TestEnvironment() as env:
-        env.set_mock_responses(["Expected response"])
+async def test_input_validation():
+    async with AgentTestEnvironment() as env:
+        guardian = SecurityGuardian(env.config)
         
-        response = await env.agent_factory.run_agent(
-            "agent_key",
-            "Test message"
-        )
+        # Безопасный ввод
+        safe_input = "Привет, как дела?"
+        assert await guardian.validate_input(safe_input) is True
         
-        assert response is not None
-        assert "expected_content" in response.lower()
+        # Опасный ввод
+        dangerous_input = "rm -rf /"
+        assert await guardian.validate_input(dangerous_input) is False
 ```
 
-### 2. Тест инструмента
+### 2. API тест
 
 ```python
-@pytest.mark.asyncio
-async def test_new_tool():
-    from tools.new_tool import new_function
+@pytest.mark.api
+def test_new_api_endpoint():
+    client = TestClient(app)
+    response = client.get("/new/endpoint")
     
-    result = await new_function("test_input")
-    
-    assert result is not None
-    assert "success" in result.lower()
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
 ```
 
-### 3. Интеграционный тест
+### 3. Performance тест
 
 ```python
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_complex_workflow():
-    async with TestEnvironment() as env:
-        # Подготовка данных
-        env.create_test_file("input.txt", "test data")
-        
-        # Мультиступенчатый процесс
-        responses = [
-            "Step 1 complete",
-            "Step 2 complete", 
-            "Workflow finished"
-        ]
-        env.set_mock_responses(responses)
-        
-        # Выполнение
-        final_result = await env.agent_factory.run_agent(
-            "test_full_agent",
-            "Execute complex workflow"
-        )
-        
-        # Проверки
-        assert "finished" in final_result.lower()
+@pytest.mark.performance
+def test_concurrent_requests():
+    import threading
+    
+    results = []
+    def make_request():
+        response = client.get("/system/health")
+        results.append(response.status_code)
+    
+    threads = [threading.Thread(target=make_request) for _ in range(10)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    
+    assert all(status == 200 for status in results)
 ```
 
 ## 🎯 Лучшие практики
 
-### 1. Изоляция тестов
-- Используйте `TestEnvironment` для изоляции
-- Очищайте временные файлы
-- Не полагайтесь на внешние сервисы в unit-тестах
-
-### 2. Мокирование
-- Мокайте внешние API вызовы
-- Используйте предсказуемые ответы
-- Тестируйте различные сценарии ответов
-
-### 3. Читаемость
-- Используйте описательные имена тестов
-- Добавляйте комментарии к сложным тестам
-- Группируйте связанные тесты в классы
-
-### 4. Производительность
-- Используйте `pytest.mark.asyncio` для асинхронных тестов
-- Кешируйте тяжелые операции setup
-- Запускайте медленные тесты с маркером `@pytest.mark.slow`
-
-## 🚨 Отладка тестов
-
-### Включение детального логирования
-
+### 1. 🆕 Использование маркеров
 ```python
-# В тестовой конфигурации
-settings:
-  debug: true
-  agent_logging:
-    enabled: true
-    level: "full"
+@pytest.mark.unit          # Быстрые unit тесты
+@pytest.mark.integration   # Медленные integration тесты  
+@pytest.mark.security      # Security-related тесты
+@pytest.mark.api           # API тесты
+@pytest.mark.performance   # Performance тесты
+@pytest.mark.slow          # Медленные тесты
 ```
 
-### Проверка состояния тестов
-
+### 2. Фикстуры
 ```python
-# Проверка контекста
-context_info = env.agent_factory.get_context_info()
-print(f"Messages: {context_info['message_count']}")
-
-# Проверка выполнений
-executions = env.agent_factory.get_recent_executions(5)
-for exec in executions:
-    print(f"Agent: {exec.agent_name}, Status: {exec.error or 'OK'}")
-
-# Проверка моков
-mock_calls = env.get_mock_calls()
-print(f"Mock calls: {len(mock_calls)}")
+# Используйте общие фикстуры из conftest.py
+async def test_with_environment(test_environment):
+    # test_environment автоматически создается и очищается
+    response = await test_environment.agent_factory.run_agent(...)
 ```
 
-### Общие проблемы
-
-1. **Тест зависает**: Проверьте таймауты в конфигурации
-2. **Агент не создается**: Проверьте наличие модели в тестовой конфигурации
-3. **Инструмент не найден**: Убедитесь, что инструмент определен в тестовой конфигурации
-4. **Контекст не сохраняется**: Проверьте настройки истории в конфигурации
-
-## 📈 Метрики и покрытие
-
-### Измерение покрытия
-
-```bash
-# Установка coverage
-pip install coverage
-
-# Запуск с измерением покрытия
-coverage run -m pytest tests/
-coverage report -m
-coverage html  # HTML отчет
+### 3. Мокирование
+```python
+# Используйте готовые моки
+def test_with_mock_client(mock_openai_client):
+    # Клиент уже замокан
+    mock_openai_client.chat.completions.create.return_value = {...}
 ```
 
-### Метрики производительности
+## 📊 Анализ покрытия
 
-- **Время создания агента**: < 1 секунды
-- **Время ответа агента**: < 5 секунд (с моками)
-- **Память**: Стабильное использование при множественных запусках
-- **Параллелизм**: Поддержка 10+ одновременных агентов
+### Пороги покрытия
+- **90%+**: Отлично 🎉
+- **80-89%**: Хорошо ✅  
+- **70-79%**: Удовлетворительно ⚠️
+- **<70%**: Нужно улучшить ❌
+
+### Критические компоненты (цель 90%+)
+- `core/` - Основная логика
+- `api/` - API endpoints
+- `security_agents/` - Security компоненты
+
+### Менее критичные (цель 70%+)
+- `utils/` - Вспомогательные утилиты
+- `tools/` - Инструменты
 
 ## 🔄 CI/CD интеграция
 
@@ -387,6 +343,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
@@ -395,10 +352,14 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          pip install pytest pytest-asyncio coverage
       
-      - name: Run tests
-        run: python tests/run_tests.py
+      - name: Run tests with coverage
+        run: |
+          python tests/coverage_runner.py --format xml
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v1
 ```
 
 ### Локальные хуки
@@ -406,9 +367,71 @@ jobs:
 ```bash
 # pre-commit хук
 #!/bin/sh
-python tests/run_tests.py --type unit
+python tests/coverage_runner.py --markers "unit" --format terminal
 if [ $? -ne 0 ]; then
-    echo "Тесты не прошли. Коммит отменен."
+    echo "❌ Unit тесты не прошли. Коммит отменен."
     exit 1
 fi
 ```
+
+## 🚨 Отладка тестов
+
+### Запуск с детальным выводом
+
+```bash
+# Подробный вывод
+python tests/coverage_runner.py --verbose
+
+# Pytest с детальным выводом
+pytest tests/ -v -s
+
+# Конкретный тест с отладкой
+pytest tests/test_security.py::TestSecurityGuardian::test_input_validation -v -s
+```
+
+### Анализ покрытия
+
+```bash
+# Только генерация отчетов
+python tests/coverage_runner.py --no-tests --format html
+
+# Детальный анализ непокрытых строк
+coverage report -m --skip-covered
+```
+
+### Профилирование тестов
+
+```bash
+# Медленные тесты
+pytest --durations=10
+
+# Только быстрые тесты
+pytest -m "not slow"
+```
+
+## 📈 Метрики и мониторинг
+
+### Автоматические метрики
+- Время выполнения тестов
+- Покрытие по компонентам
+- Количество failed/passed тестов
+- Анализ тестовых трендов
+
+### Отчеты
+- HTML dashboard с интерактивными графиками
+- XML для интеграции с CI/CD
+- JSON для программного анализа
+
+## 🎉 Заключение
+
+Система тестирования Grid теперь включает:
+
+✅ **Исправлены предупреждения pytest**  
+✅ **Автоматизированное измерение покрытия**  
+✅ **Security тесты для всех компонентов**  
+✅ **Комплексные API тесты**  
+✅ **Улучшенная структура и организация**  
+✅ **Централизованные фикстуры и конфигурация**  
+✅ **Подробная документация**  
+
+Используйте `python tests/coverage_runner.py` для запуска тестов с автоматическим анализом покрытия!

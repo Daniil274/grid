@@ -43,7 +43,7 @@ class MockProvider:
         }
 
 
-class TestEnvironment:
+class AgentTestEnvironment:
     """Изолированная тестовая среда."""
     
     def __init__(self, config_path: str = None):
@@ -156,9 +156,9 @@ class AgentTestCase:
         self.teardown_steps.append(step)
         return self
     
-    async def run(self, env: TestEnvironment) -> 'TestResult':
+    async def run(self, env: AgentTestEnvironment) -> 'AgentTestResult':
         """Выполняет тестовый сценарий."""
-        result = TestResult(self.name)
+        result = AgentTestResult(self.name)
         
         try:
             # Выполняем шаги подготовки
@@ -189,7 +189,7 @@ class AgentTestCase:
         return result
 
 
-class TestResult:
+class AgentTestResult:
     """Результат выполнения теста."""
     
     def __init__(self, test_name: str):
@@ -235,13 +235,13 @@ class AgentTestSuite:
         self.name = name
         self.config_path = config_path
         self.test_cases: List[AgentTestCase] = []
-        self.results: List[TestResult] = []
+        self.results: List[AgentTestResult] = []
     
     def add_test(self, test_case: AgentTestCase):
         """Добавляет тестовый случай."""
         self.test_cases.append(test_case)
     
-    async def run_all(self) -> List[TestResult]:
+    async def run_all(self) -> List[AgentTestResult]:
         """Выполняет все тесты."""
         self.results = []
         
@@ -272,7 +272,7 @@ class AgentTestSuite:
 
 # Утилиты для создания тестов
 
-async def test_basic_agent_response(env: TestEnvironment, agent_key: str, message: str, expected_keywords: List[str] = None) -> Dict:
+async def test_basic_agent_response(env: AgentTestEnvironment, agent_key: str, message: str, expected_keywords: List[str] = None) -> Dict:
     """Базовый тест ответа агента."""
     start_time = time.time()
     
@@ -299,7 +299,7 @@ async def test_basic_agent_response(env: TestEnvironment, agent_key: str, messag
     }
 
 
-async def test_tool_usage(env: TestEnvironment, agent_key: str, message: str, expected_tools: List[str] = None) -> Dict:
+async def test_tool_usage(env: AgentTestEnvironment, agent_key: str, message: str, expected_tools: List[str] = None) -> Dict:
     """Тест использования инструментов агентом."""
     start_time = time.time()
     
@@ -330,7 +330,7 @@ async def test_tool_usage(env: TestEnvironment, agent_key: str, message: str, ex
     }
 
 
-async def test_context_retention(env: TestEnvironment, agent_key: str, messages: List[str]) -> Dict:
+async def test_context_retention(env: AgentTestEnvironment, agent_key: str, messages: List[str]) -> Dict:
     """Тест сохранения контекста между сообщениями."""
     responses = []
     
@@ -350,3 +350,8 @@ async def test_context_retention(env: TestEnvironment, agent_key: str, messages:
         "responses": responses,
         "final_context_info": env.agent_factory.get_context_info()
     }
+
+
+# Псевдонимы для обратной совместимости
+TestEnvironment = AgentTestEnvironment
+TestResult = AgentTestResult
