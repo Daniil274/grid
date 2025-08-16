@@ -652,7 +652,7 @@ class AgentFactory:
         # MCP инструменты обрабатываются SDK отдельно и не нуждаются в алиасах
         if tools and not mcp_tools:  # Только если нет MCP инструментов
             try:
-                channel_suffixes = ("<|channel|>commentary", "<|channel|>tool", "<|channel|>final")
+                channel_suffixes = ("_commentary", "_tool", "_final")
                 alias_count = 0
                 # Собираем снимок списка, чтобы не итерироваться по растущему
                 base_tools_snapshot = list(tools)
@@ -725,7 +725,7 @@ class AgentFactory:
                 tools.append(wrapped_main)
                 
                 # Добавим алиасы каналов, чтобы не падать, если модель приписывает суффиксы каналов
-                channel_suffixes = ("<|channel|>commentary", "<|channel|>tool", "<|channel|>final")
+                channel_suffixes = ("_commentary", "_tool", "_final")
                 for suffix in channel_suffixes:
                     alias_tool = self._create_context_aware_agent_tool(
                         sub_agent=sub_agent,
