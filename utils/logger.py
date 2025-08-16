@@ -240,6 +240,18 @@ class Logger:
         args_str = str(args)
         self.info(f"TOOL | {tool_name} | {args_str}")
         
+        # Beautiful CLI logging for MCP tools
+        if tool_name.startswith("MCP:"):
+            try:
+                from utils.cli_logger import cli_logger
+                # Extract server and method from tool name like "MCP:filesystem.read_file"
+                parts = tool_name.split(".", 1)
+                server_name = parts[0].replace("MCP:", "")
+                method = parts[1] if len(parts) > 1 else "unknown"
+                cli_logger.mcp_call(server_name, method, args)
+            except ImportError:
+                pass  # Fallback to regular logging if CLI logger not available
+        
         # JSON format logging
         self.debug(
             f"Tool '{tool_name}' called",
@@ -279,12 +291,55 @@ class Logger:
     def log_mcp_connection(self, server_name: str, status: str) -> None:
         """Log MCP server connection status."""
         level = logging.INFO if status == "connected" else logging.ERROR
+        
+        # Beautiful CLI logging
+        try:
+            from utils.cli_logger import cli_logger
+            if status == "connected":
+                cli_logger.success(f"MCP {server_name} connected", server=server_name)
+            else:
+                cli_logger.error(f"MCP {server_name} failed to connect", server=server_name)
+        except ImportError:
+            pass  # Fallback to regular logging if CLI logger not available
+        
+        # Regular structured logging
         self._log(
             level,
             f"MCP server '{server_name}' {status}",
             server_name=server_name,
             status=status,
             event_type="mcp_connection"
+        )
+    
+    def log_mcp_call(self, server_name: str, method: str, params: Dict[str, Any] = None, duration: float = None, success: bool = True, error: str = None) -> None:
+        """Log MCP method call with beautiful CLI formatting."""
+        try:
+            from utils.cli_logger import cli_logger
+            operation_id = cli_logger.mcp_call(server_name, method, params or {})
+            
+            if success and duration is not None:
+                cli_logger.operation_end(operation_id, result="completed")
+            elif error:
+                cli_logger.operation_end(operation_id, error=error)
+        except ImportError:
+            pass  # Fallback to regular logging if CLI logger not available
+        
+        # Regular structured logging
+        level = logging.INFO if success else logging.ERROR
+        message = f"MCP {server_name}.{method}"
+        if error:
+            message += f" failed: {error}"
+        
+        self._log(
+            level,
+            message,
+            server_name=server_name,
+            method=method,
+            params=params,
+            duration=duration,
+            success=success,
+            error=error,
+            event_type="mcp_call"
         )
     
     def log_config_reload(self, config_path: str) -> None:
