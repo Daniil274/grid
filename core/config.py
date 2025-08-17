@@ -102,10 +102,12 @@ class Config:
         logger.info(f"Working directory set to: {self._working_directory}")
     
     def get_absolute_path(self, relative_path: str) -> str:
-        """Convert relative path to absolute based on working directory."""
+        """Convert relative path to absolute based on working directory, returning POSIX-style path separators for consistency across OSes."""
+        # If absolute, return normalized POSIX string
         if os.path.isabs(relative_path):
-            return relative_path
-        return os.path.join(self.get_working_directory(), relative_path)
+            return relative_path.replace('\\', '/')
+        # Join using pathlib and normalize to POSIX string
+        return (Path(self.get_working_directory()) / relative_path).as_posix()
     
     # Provider methods
     def get_provider(self, provider_key: str) -> ProviderConfig:

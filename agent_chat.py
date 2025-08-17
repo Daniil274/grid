@@ -39,7 +39,7 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("grid").setLevel(logging.INFO)
 import os
 os.environ['PROJECT_ROOT'] = str(Path(__file__).parent)
-Logger.configure(level="INFO", enable_console=False, log_dir="logs", enable_legacy_logs=True, force_reconfigure=True)  # логируем строго в logs/ проекта
+Logger.configure(level="DEBUG", enable_console=False, log_dir="logs", enable_legacy_logs=True, force_reconfigure=True)  # логируем строго в logs/ проекта
 
 # Initialize beautiful logger
 pretty_logger = PrettyLogger("agent_chat")

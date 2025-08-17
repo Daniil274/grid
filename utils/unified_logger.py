@@ -95,7 +95,7 @@ class UnifiedLogger:
         self.pretty_logger = PrettyLogger("grid")
         self.pretty_logger.colors_enabled = enable_colors
         
-        # Настройка файлового логгера
+        # Настройка файлового логгера (без постоянных файловых хендлеров)
         self._setup_file_logger()
         
         # Текущее выполнение
@@ -106,30 +106,14 @@ class UnifiedLogger:
         self._thread_local = threading.local()
         
     def _setup_file_logger(self):
-        """Настройка файлового логгера."""
-        # Основной лог файл
+        """Настройка файлового логгера без постоянных файловых хендлеров.
+        Держим только именованный логгер без FileHandler, чтобы избежать блокировок файлов на Windows."""
         self.file_logger = logging.getLogger(f"grid.file.{id(self)}")
         self.file_logger.setLevel(logging.DEBUG)
-        
-        # Очищаем существующие хендлеры
         for handler in self.file_logger.handlers[:]:
             self.file_logger.removeHandler(handler)
-        
-        # Создаем timestamped файл для агентов
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        agent_log_file = self.log_dir / f"agents_{timestamp}.log"
-        
-        file_handler = logging.FileHandler(agent_log_file, encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)
-        
-        # Форматтер для файлов
-        file_formatter = logging.Formatter(
-            '%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s'
-        )
-        file_handler.setFormatter(file_formatter)
-        
-        self.file_logger.addHandler(file_handler)
         self.file_logger.propagate = False
+        # Не добавляем FileHandler: запись в файлы выполняется эпизодически в _log_to_file
         
     def set_current_agent(self, agent_name: str) -> None:
         """Установить текущего агента для потока."""
@@ -284,8 +268,8 @@ class UnifiedLogger:
         
         # Avoid recursion by using simple console output instead of pretty_logger.tool_start
         if hasattr(self.pretty_logger, '_format_symbol'):
-            from .pretty_logger import LogLevel
-            symbol = self.pretty_logger._format_symbol(LogLevel.TOOL)
+            from .pretty_logger import LogLevel as _PLLogLevel
+            symbol = self.pretty_logger._format_symbol(_PLLogLevel.TOOL)
         else:
             symbol = "◦"
         print(f"{symbol} [{agent_name}] {display_name} {args_str}")
@@ -323,41 +307,60 @@ class UnifiedLogger:
             self.pretty_logger.debug(f"[{agent_name}] Промпт ({prompt_type}): {content}")
             
     def _log_to_file(self, event: LogEvent) -> None:
-        """Логирование в файл с детальной информацией."""
-        # Формируем сообщение для файла
+        """Эпизодическое логирование в файлы без удержания открытых дескрипторов.
+        Для SYSTEM/TOOL/ERROR записываем в main log (grid.log).
+        Для PROMPT — дополнительно сохраняем текст промпта в файл в директории prompts."""
+        # Формируем строку для основного лога
         log_message = f"{event.event_type.value.upper()} | {event.message}"
-        
         if event.agent_name:
             log_message += f" | Agent: {event.agent_name}"
-            
         if event.tool_name:
             log_message += f" | Tool: {event.tool_name}"
-            
         if event.duration:
             log_message += f" | Duration: {event.duration:.2f}s"
-            
-        # Логируем в файл
-        if event.level == LogLevel.ERROR:
-            self.file_logger.error(log_message)
-        elif event.level == LogLevel.WARNING:
-            self.file_logger.warning(log_message)
-        elif event.level == LogLevel.DEBUG:
-            self.file_logger.debug(log_message)
-        else:
-            self.file_logger.info(log_message)
-            
-        # Если есть дополнительные данные, логируем их кратко
-        if event.data:
-            # Ограничиваем размер данных для избежания спама в логах
-            data_str = str(event.data)
-            if len(data_str) > 200:
-                data_str = data_str[:200] + "... [truncated]"
-            self.file_logger.debug(f"Data: {data_str}")
-            
-        # Принудительно сбрасываем буфер
-        for handler in self.file_logger.handlers:
-            handler.flush()
-            
+        
+        main_log_path = self.log_dir / "grid.log"
+        try:
+            with open(main_log_path, 'a', encoding='utf-8') as f:
+                if event.level == LogLevel.ERROR:
+                    f.write(f"{datetime.now().isoformat()} | ERROR    | grid | {log_message}\n")
+                elif event.level == LogLevel.WARNING:
+                    f.write(f"{datetime.now().isoformat()} | WARNING  | grid | {log_message}\n")
+                elif event.level == LogLevel.DEBUG:
+                    f.write(f"{datetime.now().isoformat()} | DEBUG    | grid | {log_message}\n")
+                else:
+                    f.write(f"{datetime.now().isoformat()} | INFO     | grid | {log_message}\n")
+                
+                if event.data:
+                    data_str = str(event.data)
+                    if len(data_str) > 200:
+                        data_str = data_str[:200] + "... [truncated]"
+                    f.write(f"{datetime.now().isoformat()} | DEBUG    | grid | Data: {data_str}\n")
+        except Exception:
+            # Не падаем на ошибках записи логов
+            pass
+        
+        # Дополнительно сохраняем промпты в отдельные файлы
+        if event.event_type == LogEventType.PROMPT:
+            agent_name = (event.agent_name or 'unknown').replace(' ', '_')
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            prompt_file = self.log_dir / "prompts" / f"prompt_{agent_name}_{timestamp}.txt"
+            prompt_content = ""
+            if event.data:
+                # Поддержка ключей 'prompt' и 'content'
+                if 'prompt' in event.data:
+                    prompt_content = str(event.data.get('prompt') or '')
+                elif 'content' in event.data:
+                    prompt_content = str(event.data.get('content') or '')
+            if not prompt_content:
+                prompt_content = event.message
+            try:
+                with open(prompt_file, 'w', encoding='utf-8') as pf:
+                    pf.write(prompt_content)
+            except Exception:
+                # Игнорируем ошибки записи промптов
+                pass
+        
     def _update_execution(self, event: LogEvent) -> None:
         """Обновление информации о текущем выполнении."""
         if event.event_type == LogEventType.AGENT_START:
@@ -393,9 +396,12 @@ class UnifiedLogger:
         filepath = self.log_dir / "agents" / filename
         
         # Сохраняем в JSON
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(self.current_execution, f, ensure_ascii=False, indent=2)
-            
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(self.current_execution, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        
         # Очищаем текущее выполнение
         self.current_execution = None
         
@@ -444,7 +450,6 @@ class UnifiedLogger:
         
     def tool_result(self, tool_name: str, result: Any, agent_name: Optional[str] = None, **kwargs) -> None:
         """Логирование результата инструмента."""
-        # Преобразуем результат в строку для безопасного логирования
         result_str = str(result) if result is not None else ""
         
         self.log(

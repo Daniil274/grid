@@ -175,9 +175,10 @@ class AgentFactory:
     def _get_agent_session(self, agent_key: str) -> SQLiteSession:
         """Get or create session for an agent to maintain memory."""
         if agent_key not in self._agent_sessions:
-            # Create a stable session for each agent (without timestamp)
+            # Create an in-memory session per agent to avoid persistence across restarts
             session_id = f"agent_{agent_key}"
-            self._agent_sessions[agent_key] = SQLiteSession(session_id, "logs/agent_sessions.db")
+            # Use default ':memory:' DB path to keep session ephemeral for the current process
+            self._agent_sessions[agent_key] = SQLiteSession(session_id)
             logger.debug(f"Created new session for agent {agent_key}: {session_id}")
         
         return self._agent_sessions[agent_key]
@@ -490,6 +491,8 @@ class AgentFactory:
                         session=session,
                     )
                     # Стримим события и подсвечиваем tool calls/outputs
+                    # Буфер для надёжного накопления текстовых дельт стрима
+                    streaming_text_parts: List[str] = []
                     async for event in run_result_streaming.stream_events():
                         try:
                             # Отображение инструментов
@@ -622,6 +625,12 @@ class AgentFactory:
                                     if content and isinstance(content, str) and content.strip():
                                         # Выводим текст без новой строки для плавного стриминга
                                         print(content, end='', flush=True)
+                                        # Накопление контента в буфер для случая отсутствия final_output
+                                        try:
+                                            streaming_text_parts.append(content)
+                                        except Exception:
+                                            # Никогда не роняем стрим из-за проблем с буферизацией
+                                            pass
                                 except Exception as e:
                                     # Игнорируем ошибки в отображении стриминга, но логируем их
                                     print(f"[DEBUG] Error in streaming: {e}", file=sys.stderr)
@@ -631,6 +640,15 @@ class AgentFactory:
                             pass
                     # После завершения стрима забираем финальный вывод
                     result_output = run_result_streaming.final_output if run_result_streaming.final_output is not None else ""
+                    # Если финального вывода нет, используем накопленный текст стрима
+                    try:
+                        if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
+                            buffered_text = "".join(streaming_text_parts).strip()
+                            if buffered_text:
+                                result_output = buffered_text
+                    except Exception:
+                        # В случае ошибки оставляем result_output как есть — дальнейшая логика подставит фоллбек
+                        pass
                 except asyncio.TimeoutError:
                     logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
