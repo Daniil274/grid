@@ -47,6 +47,14 @@ class LegacyFormatter(logging.Formatter):
         logger_name = record.name.ljust(20)
         message = record.getMessage()
         
+        # Add extra fields to message if present
+        if hasattr(record, 'extra_fields') and record.extra_fields:
+            extra_parts = []
+            for key, value in record.extra_fields.items():
+                extra_parts.append(f"{key}={value}")
+            if extra_parts:
+                message += " [" + ", ".join(extra_parts) + "]"
+        
         return f"{timestamp} | {level} | {logger_name} | {message}"
 
 

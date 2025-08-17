@@ -175,6 +175,24 @@ class UnifiedLogger:
             
         # Обновляем текущее выполнение
         self._update_execution(event)
+    
+    def log_event(self, event: LogEvent) -> None:
+        """
+        Логирование готового события.
+        
+        Args:
+            event: Событие для логирования
+        """
+        # Логируем в консоль
+        if event.level.value >= self.console_level.value:
+            self._log_to_console(event)
+            
+        # Логируем в файл
+        if event.level.value >= self.file_level.value:
+            self._log_to_file(event)
+            
+        # Обновляем текущее выполнение
+        self._update_execution(event)
         
     def _log_to_console(self, event: LogEvent) -> None:
         """Логирование в консоль с красивым форматированием."""
@@ -212,7 +230,7 @@ class UnifiedLogger:
     def _console_agent_end(self, event: LogEvent) -> None:
         """Красивое отображение завершения выполнения агента."""
         agent_name = event.agent_name or "Unknown"
-        duration = event.duration or 0.0
+        duration = float(event.duration) if event.duration else 0.0
         output = event.data.get('output', '') if event.data else ''
         output_length = len(str(output)) if output is not None else 0
         
@@ -508,6 +526,9 @@ class UnifiedLogger:
 # Глобальный экземпляр логгера
 _unified_logger: Optional[UnifiedLogger] = None
 
+# Глобальный текущий агент
+_current_agent: Optional[str] = None
+
 
 def get_unified_logger() -> UnifiedLogger:
     """Получить глобальный экземпляр универсального логгера."""
@@ -535,44 +556,101 @@ def configure_unified_logger(log_dir: str = "logs",
 # Удобные функции для быстрого доступа
 def log_agent_start(agent_name: str, message: str, **kwargs) -> None:
     """Логирование начала агента."""
-    get_unified_logger().agent_start(agent_name, message, **kwargs)
+    event = LogEvent(
+        event_type=LogEventType.AGENT_START,
+        message=message,
+        agent_name=agent_name,
+        **kwargs
+    )
+    get_unified_logger().log_event(event)
 
 
 def log_agent_end(agent_name: str, output: str, duration: float, **kwargs) -> None:
     """Логирование завершения агента."""
-    get_unified_logger().agent_end(agent_name, output, duration, **kwargs)
+    event = LogEvent(
+        event_type=LogEventType.AGENT_END,
+        message=output,
+        agent_name=agent_name,
+        duration=duration,
+        **kwargs
+    )
+    get_unified_logger().log_event(event)
 
 
 def log_agent_error(agent_name: str, error: Exception, **kwargs) -> None:
     """Логирование ошибки агента."""
-    get_unified_logger().agent_error(agent_name, error, **kwargs)
+    event = LogEvent(
+        event_type=LogEventType.AGENT_ERROR,
+        message=str(error),
+        agent_name=agent_name,
+        level=LogLevel.ERROR,
+        **kwargs
+    )
+    get_unified_logger().log_event(event)
 
 
 def log_tool_call(tool_name: str, args: Dict[str, Any], agent_name: Optional[str] = None, **kwargs) -> None:
     """Логирование вызова инструмента."""
-    get_unified_logger().tool_call(tool_name, args, agent_name, **kwargs)
+    event = LogEvent(
+        event_type=LogEventType.TOOL_CALL,
+        message=f"Calling tool: {tool_name}",
+        agent_name=agent_name,
+        tool_name=tool_name,
+        data=args,
+        **kwargs
+    )
+    get_unified_logger().log_event(event)
 
 
 def log_tool_result(tool_name: str, result: Any, agent_name: Optional[str] = None, **kwargs) -> None:
     """Логирование результата инструмента."""
-    get_unified_logger().tool_result(tool_name, result, agent_name, **kwargs)
+    event = LogEvent(
+        event_type=LogEventType.TOOL_RESULT,
+        message=f"Tool result: {tool_name} - {result}",
+        agent_name=agent_name,
+        tool_name=tool_name,
+        level=LogLevel.SUCCESS,
+        data={"result": result},
+        **kwargs
+    )
+    get_unified_logger().log_event(event)
 
 
 def log_tool_error(tool_name: str, error: str, agent_name: Optional[str] = None, **kwargs) -> None:
     """Логирование ошибки инструмента."""
-    get_unified_logger().tool_error(tool_name, error, agent_name, **kwargs)
+    event = LogEvent(
+        event_type=LogEventType.TOOL_RESULT,  # Используем TOOL_RESULT с ERROR level
+        message=f"Tool error: {tool_name} - {error}",
+        agent_name=agent_name,
+        tool_name=tool_name,
+        level=LogLevel.ERROR,
+        data={"error": error},
+        **kwargs
+    )
+    get_unified_logger().log_event(event)
 
 
-def log_prompt(agent_name: str, prompt_type: str, content: str, **kwargs) -> None:
+def log_prompt(agent_name: str, content: str, prompt_type: str = "default", **kwargs) -> None:
     """Логирование промпта."""
-    get_unified_logger().prompt(agent_name, prompt_type, content, **kwargs)
+    event = LogEvent(
+        event_type=LogEventType.PROMPT,
+        message=f"Prompt ({prompt_type}): {content[:100]}...",
+        agent_name=agent_name,
+        data={"prompt_type": prompt_type, "content": content},
+        **kwargs
+    )
+    get_unified_logger().log_event(event)
 
 
 def set_current_agent(agent_name: str) -> None:
     """Установить текущего агента."""
+    global _current_agent
+    _current_agent = agent_name
     get_unified_logger().set_current_agent(agent_name)
 
 
 def clear_current_agent() -> None:
     """Очистить текущего агента."""
+    global _current_agent
+    _current_agent = None
     get_unified_logger().clear_current_agent() 
