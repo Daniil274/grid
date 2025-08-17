@@ -3,10 +3,11 @@
 An orchestration system for AI agents focused on engineering tasks, with clear architecture, strict logging, security, and an OpenAI-compatible API.
 
 ### Purpose
-- **Orchestration**: coordination of specialized agents (files, Git, task analysis, security, etc.).
-- **Tools**: a unified tool layer (filesystem, Git, MCP) proxied to models.
+- **Orchestration**: hierarchical coordination of specialized agents (files, Git, task analysis) with efficient context management.
+- **Tools**: a unified tool layer (filesystem, Git, MCP) with optimization for small open-source models.
 - **API**: OpenAI-compatible endpoints for integration with external clients and tools.
 - **Observability**: a unified logger, tool call tracing, and agent session persistence.
+- **Efficiency**: smart delegation and context optimization for resource-constrained models.
 
 ## Capabilities
 - **Agents**: configurable profiles (model, tools, prompt). Support for subagents as tools (`call_*`).

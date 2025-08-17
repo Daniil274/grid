@@ -97,6 +97,27 @@ class GridConfig(BaseModel):
     agents: Dict[str, AgentConfig] = Field(default_factory=dict)
     prompt_templates: Dict[str, str] = Field(default_factory=dict)
     scenarios: Optional[Dict[str, Any]] = None
+    
+    @field_validator('agents')
+    @classmethod
+    def validate_agent_models(cls, v, info):
+        """Validate that all agent models exist."""
+        models = info.data.get('models', {})
+        for agent_key, agent_config in v.items():
+            if agent_config.model not in models:
+                raise ValueError(f"Model '{agent_config.model}' for agent '{agent_key}' not found")
+        return v
+    
+    @field_validator('agents')
+    @classmethod
+    def validate_agent_tools(cls, v, info):
+        """Validate that all agent tools exist."""
+        tools = info.data.get('tools', {})
+        for agent_key, agent_config in v.items():
+            for tool_name in agent_config.tools:
+                if tool_name not in tools:
+                    raise ValueError(f"Tool '{tool_name}' for agent '{agent_key}' not found")
+        return v
 
 
 class ContextMessage(BaseModel):
