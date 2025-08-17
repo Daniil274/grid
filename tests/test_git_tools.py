@@ -197,7 +197,7 @@ class TestGitTools:
         assert "❌ Директория" in result
         assert "не найдена" in result
     
-    @patch('tools.git_tools._run_git_command')
+    @patch('tests.test_git_tools._run_git_command')
     @patch('tools.git_tools.pretty_logger')
     def test_git_status_not_git_repo(self, mock_logger, mock_run_cmd, temp_dir):
         """Test git status on non-git directory."""

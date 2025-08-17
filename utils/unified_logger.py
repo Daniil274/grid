@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional, Union
 from enum import Enum
 from dataclasses import dataclass, asdict
 import logging
+import re
 
 from .pretty_logger import PrettyLogger
 
@@ -104,7 +105,71 @@ class UnifiedLogger:
         
         # Thread-local storage
         self._thread_local = threading.local()
-        
+
+    def _sanitize_text_for_preview(self, text: str, max_len: int = 200) -> str:
+        """Убрать сырые JSON-фрагменты и ограничить длину превью."""
+        if not text:
+            return ""
+        safe = str(text)
+        try:
+            # Удаляем простые JSON-блоки формата {...} или [...]
+            safe = re.sub(r"\{[^{}]*\}", "[json]", safe)
+            safe = re.sub(r"\[[^\[\]]*\]", "[json]", safe)
+        except Exception:
+            pass
+        if len(safe) > max_len:
+            safe = safe[:max_len] + "..."
+        return safe
+
+    def _looks_like_json(self, value: str) -> bool:
+        if not isinstance(value, str):
+            return False
+        v = value.strip()
+        return (v.startswith("{") and v.endswith("}")) or (v.startswith("[") and v.endswith("]"))
+
+    def _sanitize_data_for_file(self, data: Any, depth: int = 0) -> Any:
+        """Очистить данные события для записи в файл: без сырых больших строк и JSON."""
+        if data is None:
+            return None
+        # Ограничиваем глубину для предсказуемости
+        if depth > 3:
+            return "<truncated>"
+        try:
+            if isinstance(data, dict):
+                sanitized: Dict[str, Any] = {}
+                for k, v in data.items():
+                    # Скрываем потенциально большие поля
+                    if isinstance(v, str):
+                        if self._looks_like_json(v):
+                            sanitized[k] = f"<json {len(v)} chars>"
+                        elif len(v) > 120:
+                            sanitized[k] = f"<text {len(v)} chars>"
+                        else:
+                            sanitized[k] = v
+                    elif isinstance(v, (list, tuple)):
+                        # Не распечатываем вложенные большие структуры
+                        sanitized[k] = f"{type(v).__name__}({len(v)})"
+                    elif isinstance(v, dict):
+                        sanitized[k] = self._sanitize_data_for_file(v, depth + 1)
+                    else:
+                        sanitized[k] = v
+                return sanitized
+            elif isinstance(data, (list, tuple)):
+                return f"{type(data).__name__}({len(data)})"
+            elif isinstance(data, str):
+                if self._looks_like_json(data):
+                    return f"<json {len(data)} chars>"
+                if len(data) > 120:
+                    return f"<text {len(data)} chars>"
+                return data
+            return data
+        except Exception:
+            # На всякий случай возвращаем краткое представление
+            try:
+                return f"<{type(data).__name__}>"
+            except Exception:
+                return "<data>"
+    
     def _setup_file_logger(self):
         """Настройка файлового логгера без постоянных файловых хендлеров.
         Держим только именованный логгер без FileHandler, чтобы избежать блокировок файлов на Windows."""
@@ -215,96 +280,398 @@ class UnifiedLogger:
     def _console_agent_start(self, event: LogEvent) -> None:
         """Красивое отображение начала выполнения агента."""
         agent_name = event.agent_name or "Unknown"
+        message = event.message or ""
+        
+        # Красивый заголовок для начала работы агента
+        print()  # Пустая строка для разделения
+        print(f"🚀 {agent_name} начинает обработку:")
+        
+        # Также вызываем info для совместимости с тестами
         self.pretty_logger.info(f"Обработка сообщения агентом {agent_name}...")
         
-        # Создаем операцию для отслеживания
-        operation = self.pretty_logger.tool_start(
-            "AgentExecution",
-            agent=agent_name,
-            message_length=len(event.message)
-        )
+        if event.data:
+            message_length = len(event.data.get('message', ''))
+            if message_length > 0:
+                preview = str(event.data.get('message', ''))[:50]
+                if len(str(event.data.get('message', ''))) > 50:
+                    preview += "..."
+                print(f"   📝 Сообщение: {preview}")
+                print(f"   📊 Размер: {message_length} символов")
         
-        # Сохраняем операцию в thread-local
-        self._thread_local.current_operation = operation
+        # НЕ создаем AgentExecution operation чтобы избежать дублирования
+        # self._thread_local.current_operation = None
         
     def _console_agent_end(self, event: LogEvent) -> None:
         """Красивое отображение завершения выполнения агента."""
         agent_name = event.agent_name or "Unknown"
         duration = float(event.duration) if event.duration else 0.0
-        output = event.data.get('output', '') if event.data else ''
-        output_length = len(str(output)) if output is not None else 0
-        
-        # Получаем сохраненную операцию
-        operation = getattr(self._thread_local, 'current_operation', None)
-        if operation:
-            self.pretty_logger.tool_result(
-                operation,
-                result=f"Ответ получен ({duration:.2f}с, {output_length} символов)"
-            )
+        # Используем data['output'] если есть, иначе fallback на message
+        output_value = ''
+        if event.data and 'output' in (event.data or {}):
+            output_value = event.data.get('output') or ''
         else:
-            self.pretty_logger.success(f"Агент {agent_name} завершил работу ({duration:.2f}с)")
+            output_value = event.message or ''
+        output_length = len(str(output_value)) if output_value is not None else 0
+        
+        # Красивое завершение работы агента
+        print(f"⏱  Время выполнения: {duration:.2f}с")
+        print(f"📤 Результат: {output_length} символов")
+        
+        # Добавляем разделитель
+        print("─" * 60)
             
     def _console_tool_call(self, event: LogEvent) -> None:
         """Красивое отображение вызова инструмента."""
         tool_name = event.tool_name or "Unknown"
         agent_name = event.agent_name or "Unknown"
         
-        # Отображаем вызов инструмента
-        if event.data and 'args' in event.data:
-            args = event.data['args']
-            if isinstance(args, dict):
-                # Красиво форматируем аргументы
-                formatted_args = []
-                for key, value in args.items():
-                    if isinstance(value, str) and len(value) > 50:
-                        formatted_args.append(f"{key}=...({len(value)} chars)")
-                    else:
-                        formatted_args.append(f"{key}={value}")
-                args_str = ", ".join(formatted_args)
-            else:
-                args_str = str(args)
-        else:
-            args_str = ""
-            
-        # Используем tool_start для красивого отображения с иконками
-        self.pretty_logger.set_current_agent(agent_name)
+        # Получаем аргументы
+        args = event.data.get('args', {}) if event.data else {}
         
-        # Обрабатываем все типы инструментов с красивыми именами
+        # Обрабатываем все типы инструментов универсально
+        display_name, icon = self._get_tool_display_info(tool_name)
+        
+        # Основной заголовок инструмента
+        print(f"◦ [{agent_name}] {icon} {display_name}")
+        
+        # Табулированное отображение аргументов (универсальное для любого JSON)
+        if args:
+            self._format_tool_arguments(args, indent="   ")
+        
+    def _get_tool_display_info(self, tool_name: str) -> tuple[str, str]:
+        """Получить отображаемое имя и иконку для инструмента."""
+        icon = "⚙️"
         display_name = tool_name
-        if "Agent-Tool:" in tool_name:
-            display_name = f"🤖 {tool_name}"  # Агенты-инструменты
-        elif "MCP:" in tool_name:
-            display_name = tool_name  # Уже красиво отформатировано
-        elif tool_name in ["sequentialthinking", "read_text_file", "write_text_file", "list_directory", "create_directory", "delete_file", "move_file"]:
-            display_name = f"🔧 [MCP:filesystem] {tool_name}"
-        elif tool_name in ["git_status", "git_log", "git_diff", "git_add", "git_commit", "git_push", "git_pull", "git_set_working_dir", "git_show"]:
-            display_name = f"🔧 [MCP:git] {tool_name}"
-        elif tool_name.startswith("git_"):
-            display_name = f"🔧 [Function] {tool_name}"  # Function tools
-        else:
-            display_name = f"⚙️ {tool_name}"  # Другие инструменты
         
-        # Avoid recursion by using simple console output instead of pretty_logger.tool_start
-        if hasattr(self.pretty_logger, '_format_symbol'):
-            from .pretty_logger import LogLevel as _PLLogLevel
-            symbol = self.pretty_logger._format_symbol(_PLLogLevel.TOOL)
-        else:
-            symbol = "◦"
-        print(f"{symbol} [{agent_name}] {display_name} {args_str}")
+        if "Agent-Tool:" in tool_name:
+            display_name = tool_name.replace("Agent-Tool:", "").strip()
+            icon = "🤖"
+        elif "MCP:" in tool_name:
+            # Парсим MCP инструменты для красивого отображения
+            parts = tool_name.replace("MCP:", "").split(".", 1)
+            server = parts[0] if parts else "unknown"
+            method = parts[1] if len(parts) > 1 else "unknown"
+            
+            server_icons = {
+                "filesystem": "📁",
+                "git": "🔀", 
+                "sequential_thinking": "🧠",
+                "coordinator": "🎯"
+            }
+            icon = server_icons.get(server, "🔧")
+            display_name = f"[{server}] {method}"
+            
+        elif tool_name in ["sequentialthinking", "read_text_file", "write_text_file", "list_directory", "create_directory", "delete_file", "move_file"]:
+            icon = "📁"
+            display_name = f"[filesystem] {tool_name}"
+        elif tool_name in ["git_status", "git_log", "git_diff", "git_add", "git_commit", "git_push", "git_pull", "git_set_working_dir", "git_show"]:
+            icon = "🔀"
+            display_name = f"[git] {tool_name}"
+        elif tool_name.startswith("git_"):
+            icon = "🔀"
+            display_name = f"[Function] {tool_name}"
+        elif tool_name.startswith("read_") or tool_name.startswith("write_") or tool_name.startswith("edit_"):
+            icon = "📝"
+            display_name = f"[файл] {tool_name}"
+        elif "search" in tool_name.lower() or "grep" in tool_name.lower():
+            icon = "🔍"
+            display_name = f"[поиск] {tool_name}"
+        elif "test" in tool_name.lower():
+            icon = "🧪"
+            display_name = f"[тест] {tool_name}"
+        
+        return display_name, icon
+        
+    def _format_tool_arguments(self, args: dict, indent: str = "   ") -> None:
+        """Форматирование аргументов инструмента в табулированном виде."""
+        if not args:
+            return
+            
+        print(f"{indent}├─ 📥 Параметры:")
+        
+        arg_items = list(args.items())
+        for i, (key, value) in enumerate(arg_items):
+            is_last_arg = i == len(arg_items) - 1
+            arg_prefix = "└─" if is_last_arg else "├─"
+            
+            # Форматируем значение в зависимости от типа
+            if isinstance(value, str):
+                if key.lower() == 'thought':
+                    # Специальная обработка для размышлений - план в одну строку, шаги с переносами
+                    lines = value.split('\n')
+                    
+                    # Ищем план в первой строке
+                    plan_line = lines[0] if lines else ""
+                    if plan_line.startswith('План:') or 'план' in plan_line.lower():
+                        # План отображаем в одну строку
+                        print(f"{indent}│  {arg_prefix} {key}: {plan_line}")
+                        
+                        # Остальные строки (шаги) с переносами
+                        if len(lines) > 1:
+                            for j, line in enumerate(lines[1:], 1):
+                                if line.strip():
+                                    step_prefix = "└─" if j == len(lines) - 1 else "├─"
+                                    print(f"{indent}│     {step_prefix} {line.strip()}")
+                    else:
+                        # Обычное размышление - с переносами для читаемости
+                        if len(value) > 80:
+                            print(f"{indent}│  {arg_prefix} {key}:")
+                            for j, line in enumerate(lines[:5]):
+                                if line.strip():
+                                    line_prefix = "└─" if j == len(lines) - 1 and len(lines) <= 5 else "├─"
+                                    print(f"{indent}│     {line_prefix} {line.strip()}")
+                            if len(lines) > 5:
+                                print(f"{indent}│     └─ ... и ещё {len(lines) - 5} строк")
+                        else:
+                            print(f"{indent}│  {arg_prefix} {key}: \"{value}\"")
+                elif len(value) > 80:
+                    # Для длинных строк показываем превью
+                    lines_count = len(value.split('\n'))
+                    if lines_count > 1:
+                        preview = value.split('\n')[0][:40] + "..."
+                        print(f"{indent}│  {arg_prefix} {key}: \"{preview}\" ({lines_count} строк)")
+                    else:
+                        preview = value[:50] + "..."
+                        print(f"{indent}│  {arg_prefix} {key}: \"{preview}\" ({len(value)} символов)")
+                elif '\n' in value:
+                    # Многострочные значения отображаем с отступами
+                    print(f"{indent}│  {arg_prefix} {key}:")
+                    value_lines = value.split('\n')
+                    for j, line in enumerate(value_lines[:5]):  # Показываем первые 5 строк
+                        if line.strip():
+                            line_prefix = "└─" if j == len(value_lines) - 1 and len(value_lines) <= 5 else "├─"
+                            print(f"{indent}│     {line_prefix} {line.strip()}")
+                    if len(value_lines) > 5:
+                        print(f"{indent}│     └─ ... и ещё {len(value_lines) - 5} строк")
+                else:
+                    print(f"{indent}│  {arg_prefix} {key}: \"{value}\"")
+            elif isinstance(value, (dict, list)):
+                # Для сложных объектов показываем структуру
+                if isinstance(value, dict):
+                    print(f"{indent}│  {arg_prefix} {key}: dict({len(value)} ключей)")
+                    if len(value) <= 3:  # Показываем содержимое для небольших объектов
+                        for j, (sub_key, sub_value) in enumerate(value.items()):
+                            sub_is_last = j == len(value) - 1
+                            sub_prefix = "  └─" if sub_is_last else "  ├─"
+                            if isinstance(sub_value, str) and len(sub_value) > 30:
+                                print(f"{indent}│     {sub_prefix} {sub_key}: \"{sub_value[:25]}...\"")
+                            else:
+                                print(f"{indent}│     {sub_prefix} {sub_key}: {sub_value}")
+                else:
+                    print(f"{indent}│  {arg_prefix} {key}: list({len(value)} элементов)")
+            else:
+                print(f"{indent}│  {arg_prefix} {key}: {value}")
         
     def _console_tool_result(self, event: LogEvent) -> None:
-        """Красивое отображение результата инструмента."""
+        """Красивое отображение результата инструмента с универсальным JSON парсером."""
         tool_name = event.tool_name or "Unknown"
         agent_name = event.agent_name or "Unknown"
         
-        if event.data and 'result' in event.data:
-            result = event.data['result']
-            if isinstance(result, str) and len(result) > 100:
-                result = result[:100] + "..."
-            self.pretty_logger.info(f"[{agent_name}] {tool_name} → {result}")
-        elif event.data and 'error' in event.data:
-            error = event.data['error']
-            self.pretty_logger.error(f"[{agent_name}] {tool_name} → Ошибка: {error}")
+        # Получаем детали результата
+        result_data = event.data.get('result', '') if event.data else ''
+        error_data = event.data.get('error', '') if event.data else ''
+        
+        # Определяем иконку
+        display_name, icon = self._get_tool_display_info(tool_name)
+        
+        if error_data:
+            print(f"● [{agent_name}] ❌ {display_name} → Ошибка:")
+            print(f"   └─ {error_data}")
+        elif result_data:
+            # Показываем название инструмента в результате
+            print(f"● [{agent_name}] {display_name} → {tool_name}:")
+            self._format_result_tabulated(result_data)
+            # Добавляем перенос строки для разделения шагов
+            print()
+        else:
+            print(f"● [{agent_name}] ✅ {display_name} → Выполнено")
+            print()
+    
+    def _format_result_tabulated(self, result: str) -> None:
+        """Универсальное табулированное отображение любого результата."""
+        result_str = str(result).strip()
+        
+        # Пытаемся распарсить JSON
+        json_data = self._try_parse_json(result_str)
+        
+        if json_data is not None:
+            # Если это JSON - фильтруем служебные поля и отображаем только содержимое
+            filtered_data = self._filter_json_data(json_data)
+            
+            if filtered_data:
+                self._print_json_tabulated(filtered_data, indent="   ")
+            else:
+                print(f"   └─ ✅ Выполнено")
+        else:
+            # Если это обычный текст - отображаем с умным форматированием
+            self._format_text_content(result_str)
+            
+    def _filter_json_data(self, data: any) -> any:
+        """Фильтрация JSON данных - убираем служебные поля, оставляем только содержимое."""
+        if isinstance(data, dict):
+            # Список служебных полей которые нужно скрыть
+            skip_fields = {
+                'type', 'meta', 'metadata', 'annotations', 'annotation', 
+                'timestamp', '_type', '__type', 'version', 'schema'
+            }
+            
+            # Если есть поле "text" - используем только его содержимое
+            if 'text' in data:
+                text_content = data['text']
+                if isinstance(text_content, str):
+                    return text_content  # Возвращаем строку для специального форматирования
+                else:
+                    return {'text': text_content}
+            
+            # Фильтруем остальные поля
+            filtered = {}
+            for key, value in data.items():
+                if key.lower() not in skip_fields:
+                    if isinstance(value, (dict, list)):
+                        filtered_value = self._filter_json_data(value)
+                        if filtered_value:
+                            filtered[key] = filtered_value
+                    else:
+                        filtered[key] = value
+            
+            return filtered if filtered else None
+            
+        elif isinstance(data, list):
+            filtered_list = []
+            for item in data:
+                filtered_item = self._filter_json_data(item)
+                if filtered_item:
+                    filtered_list.append(filtered_item)
+            return filtered_list if filtered_list else None
+            
+        return data
+        
+    def _format_text_content(self, text: str) -> None:
+        """Умное форматирование текстового содержимого."""
+        lines = text.split('\n')
+        lines_count = len(lines)
+        
+        if lines_count > 6:
+            # Для длинного текста показываем превью
+            print(f"   ├─ 📄 Текст ({lines_count} строк):")
+            for i, line in enumerate(lines[:4]):
+                if line.strip():
+                    prefix = "├─" if i < 3 else "└─"
+                    print(f"   {prefix} {line.strip()[:70]}")
+            if lines_count > 4:
+                print(f"   └─ ... и ещё {lines_count - 4} строк")
+        else:
+            # Короткий текст - показываем полностью
+            for i, line in enumerate(lines):
+                if line.strip():
+                    is_last = i == lines_count - 1
+                    prefix = "└─" if is_last else "├─"
+                    print(f"   {prefix} {line.strip()}")
+                    
+            if lines_count == 1 and not lines[0].strip():
+                print(f"   └─ ✅ Выполнено успешно")
+
+    def _try_parse_json(self, text: str) -> any:
+        """Попытка распарсить JSON из текста."""
+        if not text:
+            return None
+            
+        # Убираем лишние пробелы и проверяем базовые признаки JSON
+        text = text.strip()
+        if not (text.startswith('{') or text.startswith('[')):
+            return None
+            
+        try:
+            import json
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return None
+            
+    def _print_json_tabulated(self, data: any, indent: str = "   ", max_depth: int = 3, current_depth: int = 0) -> None:
+        """Рекурсивное табулированное отображение JSON данных."""
+        if current_depth >= max_depth:
+            print(f"{indent}└─ ... (глубина {max_depth}+)")
+            return
+            
+        # Если это строка (отфильтрованное поле "text") - форматируем как текст
+        if isinstance(data, str):
+            self._format_text_content(data)
+            return
+            
+        if isinstance(data, dict):
+            items = list(data.items())
+            for i, (key, value) in enumerate(items):
+                is_last = i == len(items) - 1
+                prefix = "└─" if is_last else "├─"
+                
+                if isinstance(value, (dict, list)):
+                    print(f"{indent}{prefix} {key}: {type(value).__name__}({len(value)})")
+                    if len(value) > 0 and current_depth < max_depth - 1:
+                        next_indent = indent + ("   " if is_last else "│  ")
+                        self._print_json_tabulated(value, next_indent, max_depth, current_depth + 1)
+                elif isinstance(value, str):
+                    if len(value) > 80:
+                        # Для длинных строк показываем превью с количеством строк
+                        lines_count = len(value.split('\n'))
+                        if lines_count > 1:
+                            preview = value.split('\n')[0][:40] + "..."
+                            print(f"{indent}{prefix} {key}: \"{preview}\" ({lines_count} строк)")
+                        else:
+                            preview = value[:50] + "..."
+                            print(f"{indent}{prefix} {key}: \"{preview}\" ({len(value)} символов)")
+                    elif '\n' in value:
+                        # Многострочные значения отображаем с отступами
+                        print(f"{indent}{prefix} {key}:")
+                        value_lines = value.split('\n')
+                        for j, line in enumerate(value_lines[:5]):  # Показываем первые 5 строк
+                            if line.strip():
+                                line_prefix = "└─" if j == len(value_lines) - 1 and len(value_lines) <= 5 else "├─"
+                                next_indent = indent + ("   " if is_last else "│  ")
+                                print(f"{next_indent}{line_prefix} {line.strip()}")
+                        if len(value_lines) > 5:
+                            next_indent = indent + ("   " if is_last else "│  ")
+                            print(f"{next_indent}└─ ... и ещё {len(value_lines) - 5} строк")
+                    else:
+                        print(f"{indent}{prefix} {key}: \"{value}\"")
+                elif isinstance(value, bool):
+                    emoji = "✅" if value else "❌"
+                    print(f"{indent}{prefix} {key}: {emoji} {value}")
+                elif isinstance(value, (int, float)):
+                    print(f"{indent}{prefix} {key}: {value}")
+                else:
+                    print(f"{indent}{prefix} {key}: {value}")
+                    
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                is_last = i == len(data) - 1
+                prefix = "└─" if is_last else "├─"
+                
+                if isinstance(item, (dict, list)):
+                    print(f"{indent}{prefix} [{i}]: {type(item).__name__}({len(item)})")
+                    if len(item) > 0 and current_depth < max_depth - 1:
+                        next_indent = indent + ("   " if is_last else "│  ")
+                        self._print_json_tabulated(item, next_indent, max_depth, current_depth + 1)
+                elif isinstance(item, str) and len(item) > 60:
+                    preview = item[:50] + "..."
+                    print(f"{indent}{prefix} [{i}]: \"{preview}\"")
+                else:
+                    print(f"{indent}{prefix} [{i}]: {item}")
+        else:
+            print(f"{indent}└─ {data}")
+                
+    def _format_thinking_call(self, event: LogEvent) -> None:
+        """Универсальное форматирование размышлений через табулированный вывод."""
+        agent_name = event.agent_name or "Unknown"
+        args = event.data.get('args', {}) if event.data else {}
+        
+        # Основной заголовок
+        print(f"🧠 [{agent_name}] Размышление:")
+        
+        # Табулированное отображение аргументов (универсальное для любого JSON)
+        if args:
+            self._format_tool_arguments(args, indent="   ")
+        else:
+            print(f"   └─ (без параметров)")
             
     def _console_agent_error(self, event: LogEvent) -> None:
         """Красивое отображение ошибки агента."""
@@ -319,17 +686,23 @@ class UnifiedLogger:
             prompt_type = event.data.get('prompt_type', 'unknown') if event.data else 'unknown'
             content = event.data.get('content', '') if event.data else ''
             
-            if len(content) > 200:
-                content = content[:200] + "..."
-                
-            self.pretty_logger.debug(f"[{agent_name}] Промпт ({prompt_type}): {content}")
+            safe_preview = self._sanitize_text_for_preview(content, max_len=200)
+            self.pretty_logger.debug(f"[{agent_name}] Промпт ({prompt_type}): {safe_preview}")
             
     def _log_to_file(self, event: LogEvent) -> None:
         """Эпизодическое логирование в файлы без удержания открытых дескрипторов.
         Для SYSTEM/TOOL/ERROR записываем в main log (grid.log).
         Для PROMPT — дополнительно сохраняем текст промпта в файл в директории prompts."""
         # Формируем строку для основного лога
-        log_message = f"{event.event_type.value.upper()} | {event.message}"
+        # Избегаем сырых JSON в сообщении для инструментов
+        if event.event_type in (LogEventType.TOOL_RESULT, LogEventType.TOOL_CALL):
+            if event.event_type == LogEventType.TOOL_RESULT:
+                base_msg = f"Tool result: {event.tool_name}" if event.tool_name else "Tool result"
+            else:
+                base_msg = f"Calling tool: {event.tool_name}" if event.tool_name else "Tool call"
+            log_message = f"{event.event_type.value.upper()} | {base_msg}"
+        else:
+            log_message = f"{event.event_type.value.upper()} | {event.message}"
         if event.agent_name:
             log_message += f" | Agent: {event.agent_name}"
         if event.tool_name:
@@ -350,7 +723,11 @@ class UnifiedLogger:
                     f.write(f"{datetime.now().isoformat()} | INFO     | grid | {log_message}\n")
                 
                 if event.data:
-                    data_str = str(event.data)
+                    sanitized = self._sanitize_data_for_file(event.data)
+                    try:
+                        data_str = json.dumps(sanitized, ensure_ascii=False)
+                    except Exception:
+                        data_str = str(sanitized)
                     if len(data_str) > 200:
                         data_str = data_str[:200] + "... [truncated]"
                     f.write(f"{datetime.now().isoformat()} | DEBUG    | grid | Data: {data_str}\n")
@@ -523,6 +900,8 @@ class UnifiedLogger:
         self.log(LogEventType.SYSTEM, message, level=LogLevel.DEBUG, **kwargs)
 
 
+
+
 # Глобальный экземпляр логгера
 _unified_logger: Optional[UnifiedLogger] = None
 
@@ -572,6 +951,7 @@ def log_agent_end(agent_name: str, output: str, duration: float, **kwargs) -> No
         message=output,
         agent_name=agent_name,
         duration=duration,
+        data={'output': output},
         **kwargs
     )
     get_unified_logger().log_event(event)
@@ -596,7 +976,7 @@ def log_tool_call(tool_name: str, args: Dict[str, Any], agent_name: Optional[str
         message=f"Calling tool: {tool_name}",
         agent_name=agent_name,
         tool_name=tool_name,
-        data=args,
+        data={'args': args},
         **kwargs
     )
     get_unified_logger().log_event(event)
@@ -610,7 +990,7 @@ def log_tool_result(tool_name: str, result: Any, agent_name: Optional[str] = Non
         agent_name=agent_name,
         tool_name=tool_name,
         level=LogLevel.SUCCESS,
-        data={"result": result},
+        data={"result": str(result) if result is not None else ""},
         **kwargs
     )
     get_unified_logger().log_event(event)

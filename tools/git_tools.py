@@ -99,21 +99,17 @@ def git_status(directory: str = ".") -> str:
             pretty_logger.tool_result(operation, error=f"Директория {directory} не найдена")
             return f"❌ Директория {directory} не найдена"
         
-        # Проверяем, что это Git репозиторий
-        git_dir = path / ".git"
-        if not git_dir.exists():
-            pretty_logger.tool_result(operation, error=f"{directory} не является Git репозиторием")
-            return f"❌ {directory} не является Git репозиторием"
-        
-
-        
         cmd_result = _run_git_command(["git", "status", "--porcelain"], cwd=str(path))
         
         if not cmd_result["success"]:
-            pretty_logger.tool_result(operation, error=cmd_result['error'])
-            return f"❌ Ошибка Git: {cmd_result['error']}"
+            error_text = cmd_result.get("error", "")
+            error_text_lower = error_text.lower()
+            if "not a git repository" in error_text_lower:
+                pretty_logger.tool_result(operation, error=error_text)
+                return f"❌ Не Git репозиторий: {error_text}"
+            pretty_logger.tool_result(operation, error=error_text)
+            return f"❌ Ошибка Git: {error_text}"
         
-
         
         # Форматируем вывод
         if not cmd_result["output"]:

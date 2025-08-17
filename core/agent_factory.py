@@ -504,9 +504,22 @@ class AgentFactory:
                                     tool_name = getattr(raw_item, 'name', None) or getattr(raw_item, 'type', None) or "tool"
                                     # Попробуем достать аргументы (для функций/МСР)
                                     arguments = getattr(raw_item, 'arguments', None)
-                                    # Преобразуем в строку с усечением
+                                    # Преобразуем в строку с усечением (табулированно, не JSON)
                                     try:
-                                        args_str = arguments if isinstance(arguments, str) else (json.dumps(arguments, ensure_ascii=False) if arguments is not None else "")
+                                        if isinstance(arguments, str):
+                                            args_str = arguments
+                                        elif isinstance(arguments, dict):
+                                            parts = []
+                                            for key, value in arguments.items():
+                                                if isinstance(value, str) and len(value) > 60:
+                                                    parts.append(f"{key}=...({len(value)} символов)")
+                                                elif isinstance(value, (dict, list)):
+                                                    parts.append(f"{key}={type(value).__name__}({len(value)})")
+                                                else:
+                                                    parts.append(f"{key}={value}")
+                                            args_str = " | ".join(parts)
+                                        else:
+                                            args_str = str(arguments) if arguments is not None else ""
                                     except Exception:
                                         args_str = str(arguments) if arguments is not None else ""
                                     
@@ -542,9 +555,28 @@ class AgentFactory:
                                     else:
                                         tool_display_name = tool_name
                                     
-                                    # Логируем как TOOL для консистентности с агентскими инструментами
-                                    logger.info(f"TOOL | {tool_display_name} | {args_str}")
-                                    print(f"[DEBUG] Calling log_tool_call: {tool_display_name}")
+                                    # Форматируем аргументы для удобного чтения (табулированно, не JSON)
+                                    def format_arguments_readable(arguments):
+                                        if arguments is None:
+                                            return ""
+                                        if isinstance(arguments, str):
+                                            return arguments
+                                        if isinstance(arguments, dict):
+                                            parts = []
+                                            for key, value in arguments.items():
+                                                if isinstance(value, str) and len(value) > 60:
+                                                    parts.append(f"{key}=...({len(value)} символов)")
+                                                elif isinstance(value, (dict, list)):
+                                                    parts.append(f"{key}={type(value).__name__}({len(value)})")
+                                                else:
+                                                    parts.append(f"{key}={value}")
+                                            return " | ".join(parts)
+                                        return str(arguments)
+                                    
+                                    args_str = format_arguments_readable(arguments)
+                                    
+                                    # Убираем дублирование - используем только unified_logger
+                                    # logger.info(f"TOOL | {tool_display_name} | {args_str}")
                                     log_tool_call(tool_display_name, args_dict, agent_name=agent.name)
                                     
                                     # Создаем LogEvent для unified_logger
@@ -999,8 +1031,9 @@ class AgentFactory:
                 formatted_tool_name = f"Agent-Tool: {tool_display_name}"
                 log_tool_call(formatted_tool_name, {"input": input_data})
                 
-                logger.log_agent_tool_start(agent_name, tool_display_name, input_data)
-                logger.log_agent_start(agent_name, input_data)
+                # Убираем дублирование - используем только unified_logger
+                # logger.log_agent_tool_start(agent_name, tool_display_name, input_data)
+                # logger.log_agent_start(agent_name, input_data)
                 
                 # Call original function с нормализованными аргументами
                 result = original_invoke(tool_context, **normalized_args)
@@ -1022,7 +1055,8 @@ class AgentFactory:
                 # Логируем результат инструмента
                 log_tool_result(formatted_tool_name, str(result), agent_name=agent_name)
                 
-                logger.log_agent_end(agent_name, str(result), duration)
+                # Убираем дублирование - используем только unified_logger
+                # logger.log_agent_end(agent_name, str(result), duration)
                 
                 self.context_manager.add_execution(execution)
                 
