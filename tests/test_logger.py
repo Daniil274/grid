@@ -301,7 +301,6 @@ class TestLegacyFormatter:
         assert logger_part.strip() == "short_name"
 
 
-@pytest.mark.skip(reason="Проблемы с cleanup файлов логов - временно отключены")
 class TestLoggerIntegration:
     """Integration tests for logger functionality."""
     
