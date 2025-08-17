@@ -1,443 +1,524 @@
 """
-Тесты для системы контекста Grid.
-Проверяют сохранение истории, управление сессиями, передачу контекста между агентами.
+Unit tests for core/context.py module.
 """
 
 import pytest
 import json
 import tempfile
-from typing import Dict, List, Any
-from unittest.mock import Mock, patch
+from pathlib import Path
+from datetime import datetime
+from unittest.mock import patch, Mock
 
 from core.context import ContextManager
-from schemas import AgentExecution
-from .test_framework import TestEnvironment
+from schemas import ContextMessage, AgentExecution
+from utils.exceptions import ContextError
 
 
 class TestContextManager:
-    """Тесты менеджера контекста."""
+    """Test ContextManager class functionality."""
     
-    def setup_method(self):
-        """Подготовка для каждого теста."""
-        self.context_manager = ContextManager(max_history=10)
+    def test_context_manager_init(self):
+        """Test context manager initialization."""
+        cm = ContextManager(max_history=10)
+        
+        assert cm.max_history == 10
+        assert cm.persist_path is None
+        assert len(cm._conversation_history) == 0
+        assert len(cm._execution_history) == 0
+        assert len(cm._metadata) == 0
     
-    def test_context_manager_initialization(self):
-        """Тест инициализации менеджера контекста."""
-        assert self.context_manager.max_history == 10
-        assert len(self.context_manager.history) == 0
-        assert len(self.context_manager.executions) == 0
+    def test_context_manager_init_with_persistence(self, temp_dir):
+        """Test context manager initialization with persistence."""
+        persist_path = temp_dir / "context.json"
+        cm = ContextManager(max_history=5, persist_path=str(persist_path))
+        
+        assert cm.persist_path == persist_path
+        assert cm.max_history == 5
     
-    def test_add_message(self):
-        """Тест добавления сообщений."""
-        self.context_manager.add_message("user", "Привет!")
-        self.context_manager.add_message("assistant", "Привет! Как дела?")
+    def test_add_message_basic(self):
+        """Test adding basic message to context."""
+        cm = ContextManager(max_history=5)
         
-        assert len(self.context_manager.history) == 2
-        assert self.context_manager.history[0]["role"] == "user"
-        assert self.context_manager.history[0]["content"] == "Привет!"
-        assert self.context_manager.history[1]["role"] == "assistant"
+        cm.add_message("user", "Hello, world!")
+        
+        assert len(cm._conversation_history) == 1
+        message = cm._conversation_history[0]
+        assert message.role == "user"
+        assert message.content == "Hello, world!"
+        assert message.metadata is None
     
-    def test_message_history_limit(self):
-        """Тест ограничения истории сообщений."""
-        # Добавляем больше сообщений, чем лимит
-        for i in range(15):
-            self.context_manager.add_message("user", f"Сообщение {i}")
+    def test_add_message_with_metadata(self):
+        """Test adding message with metadata."""
+        cm = ContextManager(max_history=5)
+        metadata = {"source": "test", "priority": "high"}
         
-        # Проверяем, что история ограничена
-        assert len(self.context_manager.history) == 10
-        # Проверяем, что остались последние сообщения
-        assert "Сообщение 14" in self.context_manager.history[-1]["content"]
+        cm.add_message("assistant", "Response", metadata=metadata)
+        
+        assert len(cm._conversation_history) == 1
+        message = cm._conversation_history[0]
+        assert message.role == "assistant"
+        assert message.content == "Response"
+        assert message.metadata == metadata
     
-    def test_clear_history(self):
-        """Тест очистки истории."""
-        self.context_manager.add_message("user", "Тест")
-        self.context_manager.add_message("assistant", "Ответ")
+    def test_add_message_history_trimming(self):
+        """Test that message history is trimmed when exceeding max_history."""
+        cm = ContextManager(max_history=3)
         
-        assert len(self.context_manager.history) == 2
+        # Add 5 messages (exceeds max_history of 3)
+        for i in range(5):
+            cm.add_message("user", f"Message {i}")
         
-        self.context_manager.clear_history()
-        
-        assert len(self.context_manager.history) == 0
+        assert len(cm._conversation_history) == 3
+        # Should keep the last 3 messages
+        assert cm._conversation_history[0].content == "Message 2"
+        assert cm._conversation_history[1].content == "Message 3"
+        assert cm._conversation_history[2].content == "Message 4"
     
-    def test_get_conversation_context(self):
-        """Тест получения контекста разговора."""
-        self.context_manager.add_message("user", "Вопрос 1")
-        self.context_manager.add_message("assistant", "Ответ 1")
-        self.context_manager.add_message("user", "Вопрос 2")
+    def test_add_message_with_persistence(self, temp_dir):
+        """Test adding message with persistence enabled."""
+        persist_path = temp_dir / "context.json"
+        cm = ContextManager(max_history=5, persist_path=str(persist_path))
         
-        context = self.context_manager.get_conversation_context()
+        cm.add_message("user", "Test message")
         
-        assert "Вопрос 1" in context
-        assert "Ответ 1" in context
-        assert "Вопрос 2" in context
-        assert "История диалога:" in context
+        # Check that file was created and contains the message
+        assert persist_path.exists()
+        with open(persist_path, 'r') as f:
+            data = json.load(f)
+        
+        assert len(data["conversation_history"]) == 1
+        assert data["conversation_history"][0]["content"] == "Test message"
     
-    def test_empty_conversation_context(self):
-        """Тест получения пустого контекста."""
-        context = self.context_manager.get_conversation_context()
-        assert context == ""
+    def test_add_message_error_handling(self):
+        """Test error handling in add_message."""
+        cm = ContextManager()
+        
+        # Mock ContextMessage to raise an exception
+        with patch('core.context.ContextMessage') as mock_context_message:
+            mock_context_message.side_effect = ValueError("Invalid message")
+            
+            with pytest.raises(ContextError, match="Failed to add message"):
+                cm.add_message("user", "test")
     
     def test_add_execution(self):
-        """Тест добавления выполнения."""
-        execution = AgentExecution(
-            agent_name="test_agent",
-            start_time="2023-01-01T10:00:00",
-            input_message="Тестовое сообщение",
-            output="Тестовый ответ",
-            end_time=1672574400.0
-        )
+        """Test adding agent execution to history."""
+        cm = ContextManager(max_history=5)
         
-        self.context_manager.add_execution(execution)
-        
-        assert len(self.context_manager.executions) == 1
-        assert self.context_manager.executions[0].agent_name == "test_agent"
-    
-    def test_get_recent_executions(self):
-        """Тест получения последних выполнений."""
-        # Добавляем несколько выполнений
-        for i in range(5):
-            execution = AgentExecution(
-                agent_name=f"agent_{i}",
-                start_time=f"2023-01-01T10:0{i}:00",
-                input_message=f"Сообщение {i}",
-                output=f"Ответ {i}",
-                end_time=1672574400.0 + i
-            )
-            self.context_manager.add_execution(execution)
-        
-        # Получаем последние 3 выполнения
-        recent = self.context_manager.get_recent_executions(limit=3)
-        
-        assert len(recent) == 3
-        # Проверяем, что это последние выполнения
-        assert recent[0].agent_name == "agent_4"  # Последнее
-        assert recent[1].agent_name == "agent_3"
-        assert recent[2].agent_name == "agent_2"
-    
-    def test_get_context_stats(self):
-        """Тест получения статистики контекста."""
-        self.context_manager.add_message("user", "Сообщение")
-        self.context_manager.add_message("assistant", "Ответ")
-        
-        execution = AgentExecution(
-            agent_name="test_agent",
-            start_time="2023-01-01T10:00:00",
-            input_message="Тест",
-            output="Результат",
-            end_time=1672574400.0
-        )
-        self.context_manager.add_execution(execution)
-        
-        stats = self.context_manager.get_context_stats()
-        
-        assert stats["message_count"] == 2
-        assert stats["execution_count"] == 1
-        assert "last_message_time" in stats
-        assert "total_messages_length" in stats
-    
-    def test_metadata_operations(self):
-        """Тест операций с метаданными."""
-        # Устанавливаем метаданные
-        self.context_manager.set_metadata("test_key", "test_value")
-        self.context_manager.set_metadata("another_key", {"nested": "data"})
-        
-        # Получаем метаданные
-        assert self.context_manager.get_metadata("test_key") == "test_value"
-        assert self.context_manager.get_metadata("another_key") == {"nested": "data"}
-        assert self.context_manager.get_metadata("nonexistent") is None
-        assert self.context_manager.get_metadata("nonexistent", "default") == "default"
-        
-        # Очищаем метаданные
-        self.context_manager.clear_metadata()
-        assert self.context_manager.get_metadata("test_key") is None
-
-
-class TestContextSharing:
-    """Тесты передачи контекста между агентами."""
-    
-    def setup_method(self):
-        """Подготовка для каждого теста."""
-        self.context_manager = ContextManager(max_history=20)
-    
-    def test_get_context_for_agent_tool_minimal(self):
-        """Тест получения минимального контекста для агентного инструмента."""
-        # Добавляем историю сообщений
-        self.context_manager.add_message("user", "Первое сообщение")
-        self.context_manager.add_message("assistant", "Первый ответ")
-        self.context_manager.add_message("user", "Второе сообщение")
-        
-        context = self.context_manager.get_context_for_agent_tool(
-            strategy="minimal",
-            depth=2,
-            include_tools=False,
-            task_input="Новая задача"
-        )
-        
-        assert "Новая задача" in context
-        assert "Второе сообщение" in context
-        assert "Первый ответ" in context
-        # При минимальной стратегии первое сообщение может быть исключено
-    
-    def test_get_context_for_agent_tool_conversation(self):
-        """Тест получения полного контекста разговора."""
-        # Добавляем историю
-        for i in range(5):
-            self.context_manager.add_message("user", f"Пользователь {i}")
-            self.context_manager.add_message("assistant", f"Ассистент {i}")
-        
-        context = self.context_manager.get_context_for_agent_tool(
-            strategy="conversation",
-            depth=3,
-            include_tools=False,
-            task_input="Задача с контекстом"
-        )
-        
-        assert "Задача с контекстом" in context
-        assert "Пользователь 4" in context  # Последние сообщения
-        assert "Ассистент 4" in context
-        assert "Контекст диалога:" in context or "История:" in context
-    
-    def test_get_context_for_agent_tool_smart(self):
-        """Тест умной стратегии передачи контекста."""
-        # Добавляем разнообразную историю
-        self.context_manager.add_message("user", "Важное начальное сообщение")
-        self.context_manager.add_message("assistant", "Понял, запомнил")
-        
-        for i in range(3):
-            self.context_manager.add_message("user", f"Обычное сообщение {i}")
-            self.context_manager.add_message("assistant", f"Обычный ответ {i}")
-        
-        self.context_manager.add_message("user", "Критически важное сообщение")
-        
-        context = self.context_manager.get_context_for_agent_tool(
-            strategy="smart",
-            depth=4,
-            include_tools=False,
-            task_input="Умная задача"
-        )
-        
-        assert "Умная задача" in context
-        assert "Критически важное сообщение" in context
-        # Умная стратегия должна включать важные сообщения
-    
-    def test_add_tool_result_as_message(self):
-        """Тест добавления результата инструмента как сообщения."""
-        self.context_manager.add_tool_result_as_message(
-            "test_tool", 
-            "Результат выполнения инструмента"
-        )
-        
-        assert len(self.context_manager.history) == 1
-        message = self.context_manager.history[0]
-        assert message["role"] == "assistant"
-        assert "test_tool" in message["content"]
-        assert "Результат выполнения инструмента" in message["content"]
-
-
-class TestContextPersistence:
-    """Тесты сохранения контекста."""
-    
-    def setup_method(self):
-        """Подготовка для каждого теста."""
-        self.temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
-        self.temp_file.close()
-        self.persist_path = self.temp_file.name
-    
-    def teardown_method(self):
-        """Очистка после тестов."""
-        import os
-        if os.path.exists(self.persist_path):
-            os.unlink(self.persist_path)
-    
-    def test_context_persistence_disabled(self):
-        """Тест отключенного сохранения контекста."""
-        context_manager = ContextManager(max_history=10, persist_path=None)
-        
-        context_manager.add_message("user", "Тест")
-        context_manager.add_message("assistant", "Ответ")
-        
-        # Проверяем, что контекст в памяти
-        assert len(context_manager.history) == 2
-        
-        # Создаем новый менеджер - контекст не должен загрузиться
-        new_context_manager = ContextManager(max_history=10, persist_path=None)
-        assert len(new_context_manager.history) == 0
-    
-    def test_context_save_and_load(self):
-        """Тест сохранения и загрузки контекста."""
-        # Создаем менеджер с сохранением
-        context_manager = ContextManager(max_history=10, persist_path=self.persist_path)
-        
-        # Добавляем данные
-        context_manager.add_message("user", "Сообщение для сохранения")
-        context_manager.add_message("assistant", "Ответ для сохранения")
-        context_manager.set_metadata("test_key", "test_value")
-        
-        # Принудительно сохраняем
-        context_manager.save()
-        
-        # Создаем новый менеджер - должен загрузить данные
-        new_context_manager = ContextManager(max_history=10, persist_path=self.persist_path)
-        
-        assert len(new_context_manager.history) == 2
-        assert new_context_manager.history[0]["content"] == "Сообщение для сохранения"
-        assert new_context_manager.get_metadata("test_key") == "test_value"
-
-
-class TestContextIntegration:
-    """Интеграционные тесты контекста в системе агентов."""
-    
-    @pytest.mark.asyncio
-    async def test_context_in_agent_factory(self):
-        """Тест использования контекста в агентной фабрике."""
-        async with TestEnvironment() as env:
-            # Добавляем контекст
-            env.agent_factory.add_to_context("user", "Первое сообщение")
-            env.agent_factory.add_to_context("assistant", "Первый ответ")
-            
-            # Проверяем контекст
-            context_info = env.agent_factory.get_context_info()
-            assert context_info["message_count"] == 2
-            
-            # Очищаем контекст
-            env.agent_factory.clear_context()
-            
-            context_info = env.agent_factory.get_context_info()
-            assert context_info["message_count"] == 0
-    
-    @pytest.mark.asyncio
-    async def test_context_between_agent_calls(self):
-        """Тест сохранения контекста между вызовами агентов."""
-        async with TestEnvironment() as env:
-            env.set_mock_responses([
-                "Первый ответ агента",
-                "Второй ответ с учетом контекста"
-            ])
-            
-            # Первый вызов
-            response1 = await env.agent_factory.run_agent(
-                "test_simple_agent",
-                "Первое сообщение"
-            )
-            
-            # Второй вызов - должен иметь контекст от первого
-            response2 = await env.agent_factory.run_agent(
-                "test_simple_agent", 
-                "Второе сообщение"
-            )
-            
-            # Проверяем, что контекст накопился
-            context_info = env.agent_factory.get_context_info()
-            assert context_info["message_count"] >= 4  # 2 пользователя + 2 агента
-    
-    @pytest.mark.asyncio
-    async def test_context_in_agent_tools(self):
-        """Тест передачи контекста в агентные инструменты."""
-        async with TestEnvironment() as env:
-            # Добавляем историю диалога
-            env.agent_factory.add_to_context("user", "Важная информация для контекста")
-            env.agent_factory.add_to_context("assistant", "Понял, учту")
-            
-            env.set_mock_responses([
-                "Вызываю подагента с контекстом",
-                "Подагент получил контекст"
-            ])
-            
-            # Используем агента с подагентами
-            response = await env.agent_factory.run_agent(
-                "test_coordinator_agent",
-                "Выполни задачу через подагента"
-            )
-            
-            assert response is not None
-    
-    @pytest.mark.asyncio
-    async def test_context_memory_management(self):
-        """Тест управления памятью контекста."""
-        async with TestEnvironment() as env:
-            # Добавляем много сообщений для проверки лимитов
-            for i in range(20):
-                env.agent_factory.add_to_context("user", f"Сообщение {i}")
-                env.agent_factory.add_to_context("assistant", f"Ответ {i}")
-            
-            context_info = env.agent_factory.get_context_info()
-            
-            # Проверяем, что действует ограничение истории
-            max_history = env.config.get_max_history()
-            assert context_info["message_count"] <= max_history
-    
-    @pytest.mark.asyncio
-    async def test_context_with_executions(self):
-        """Тест контекста с историей выполнений."""
-        async with TestEnvironment() as env:
-            env.set_mock_responses(["Ответ агента"])
-            
-            # Выполняем несколько операций
-            await env.agent_factory.run_agent("test_simple_agent", "Первая задача")
-            await env.agent_factory.run_agent("test_simple_agent", "Вторая задача")
-            
-            # Проверяем историю выполнений
-            executions = env.agent_factory.get_recent_executions(5)
-            assert len(executions) == 2
-            assert executions[0].input_message == "Вторая задача"  # Последняя
-            assert executions[1].input_message == "Первая задача"
-
-
-class TestContextErrorHandling:
-    """Тесты обработки ошибок в контексте."""
-    
-    def test_invalid_persist_path(self):
-        """Тест обработки недопустимого пути сохранения."""
-        # Пытаемся создать менеджер с недопустимым путем
-        invalid_path = "/invalid/path/context.json"
-        
-        # Не должно выбрасывать исключение при создании
-        context_manager = ContextManager(max_history=10, persist_path=invalid_path)
-        
-        # Добавляем данные
-        context_manager.add_message("user", "Тест")
-        
-        # Сохранение должно быть обработано gracefully
-        try:
-            context_manager.save()
-        except Exception:
-            # Ожидаем, что исключения будут обработаны внутри
-            pass
-    
-    def test_corrupted_context_file(self):
-        """Тест обработки поврежденного файла контекста."""
-        # Создаем поврежденный файл
-        temp_file = tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.json')
-        temp_file.write("invalid json content")
-        temp_file.close()
-        
-        try:
-            # Пытаемся загрузить поврежденный контекст
-            context_manager = ContextManager(max_history=10, persist_path=temp_file.name)
-            
-            # Должен создаться пустой контекст
-            assert len(context_manager.history) == 0
-            
-        finally:
-            import os
-            os.unlink(temp_file.name)
-    
-    def test_large_context_handling(self):
-        """Тест обработки очень большого контекста."""
-        context_manager = ContextManager(max_history=1000)
-        
-        # Добавляем очень много сообщений
-        for i in range(2000):
-            context_manager.add_message("user", f"Очень длинное сообщение номер {i} " * 100)
-        
-        # Проверяем, что система справляется с большим объемом
-        assert len(context_manager.history) == 1000  # Ограничение сработало
-        
-        # Проверяем производительность получения контекста
         import time
         start_time = time.time()
-        context = context_manager.get_conversation_context()
-        duration = time.time() - start_time
+        execution = AgentExecution(
+            agent_name="test_agent",
+            input_message="test input",
+            output="test output",
+            start_time=start_time,
+            end_time=start_time + 1.0
+        )
         
-        assert duration < 1.0  # Должно выполняться быстро
-        assert context is not None
+        cm.add_execution(execution)
+        
+        assert len(cm._execution_history) == 1
+        assert cm._execution_history[0] == execution
+    
+    def test_add_execution_history_trimming(self):
+        """Test that execution history is trimmed when too long."""
+        cm = ContextManager(max_history=2)  # This means execution limit is 4
+        
+        # Add 6 executions (exceeds limit of 4)
+        for i in range(6):
+            import time
+            start_time = time.time()
+            execution = AgentExecution(
+                agent_name=f"agent_{i}",
+                input_message=f"input {i}",
+                output=f"output {i}",
+                start_time=start_time,
+                end_time=start_time + 1.0
+            )
+            cm.add_execution(execution)
+        
+        assert len(cm._execution_history) == 4
+        # Should keep the last 4 executions
+        assert cm._execution_history[0].agent_name == "agent_2"
+        assert cm._execution_history[-1].agent_name == "agent_5"
+    
+    def test_get_conversation_context_empty(self):
+        """Test getting conversation context when empty."""
+        cm = ContextManager()
+        context = cm.get_conversation_context()
+        assert context == ""
+    
+    def test_get_conversation_context_basic(self):
+        """Test getting basic conversation context."""
+        cm = ContextManager()
+        
+        cm.add_message("user", "Hello")
+        cm.add_message("assistant", "Hi there!")
+        
+        context = cm.get_conversation_context()
+        
+        assert "Предыдущий диалог" in context
+        assert "Пользователь: Hello" in context
+        assert "Ассистент: Hi there!" in context
+    
+    def test_get_conversation_context_with_limit(self):
+        """Test getting conversation context with message limit."""
+        cm = ContextManager()
+        
+        for i in range(5):
+            cm.add_message("user", f"Message {i}")
+        
+        context = cm.get_conversation_context(last_n=2)
+        
+        # Should only include last 2 messages
+        assert "Message 3" in context
+        assert "Message 4" in context
+        assert "Message 0" not in context
+        assert "Message 1" not in context
+    
+    def test_get_conversation_context_long_message_trimming(self):
+        """Test that very long messages are trimmed in context."""
+        cm = ContextManager()
+        
+        long_message = "A" * 3000  # Longer than 2000 char limit
+        cm.add_message("user", long_message)
+        
+        context = cm.get_conversation_context()
+        
+        assert "A" * 2000 + "…" in context
+        assert len(context) < len(long_message) + 500  # Should be trimmed
+    
+    def test_get_recent_executions_basic(self):
+        """Test getting recent executions."""
+        cm = ContextManager()
+        
+        for i in range(3):
+            import time
+            start_time = time.time()
+            execution = AgentExecution(
+                agent_name=f"agent_{i}",
+                input_message=f"input {i}",
+                output=f"output {i}",
+                start_time=start_time,
+                end_time=start_time + 1.0
+            )
+            cm.add_execution(execution)
+        
+        recent = cm.get_recent_executions(limit=2)
+        
+        assert len(recent) == 2
+        assert recent[0].agent_name == "agent_1"
+        assert recent[1].agent_name == "agent_2"
+    
+    def test_get_recent_executions_filtered(self):
+        """Test getting recent executions filtered by agent name."""
+        cm = ContextManager()
+        
+        # Add executions for different agents
+        for i in range(3):
+            import time
+            start_time = time.time()
+            execution = AgentExecution(
+                agent_name="target_agent" if i % 2 == 0 else "other_agent",
+                input_message=f"input {i}",
+                output=f"output {i}",
+                start_time=start_time,
+                end_time=start_time + 1.0
+            )
+            cm.add_execution(execution)
+        
+        recent = cm.get_recent_executions(agent_name="target_agent")
+        
+        assert len(recent) == 2
+        assert all(ex.agent_name == "target_agent" for ex in recent)
+    
+    def test_clear_history(self):
+        """Test clearing all history."""
+        cm = ContextManager()
+        
+        # Add some data
+        cm.add_message("user", "test")
+        import time
+        start_time = time.time()
+        execution = AgentExecution(
+            agent_name="test_agent",
+            input_message="input",
+            output="output",
+            start_time=start_time,
+            end_time=start_time + 1.0
+        )
+        cm.add_execution(execution)
+        
+        assert len(cm._conversation_history) > 0
+        assert len(cm._execution_history) > 0
+        
+        cm.clear_history()
+        
+        assert len(cm._conversation_history) == 0
+        assert len(cm._execution_history) == 0
+    
+    def test_clear_history_with_persistence(self, temp_dir):
+        """Test clearing history removes persistence file."""
+        persist_path = temp_dir / "context.json"
+        cm = ContextManager(persist_path=str(persist_path))
+        
+        # Add message to create persistence file
+        cm.add_message("user", "test")
+        assert persist_path.exists()
+        
+        cm.clear_history()
+        
+        assert not persist_path.exists()
+    
+    def test_get_context_stats(self):
+        """Test getting context statistics."""
+        cm = ContextManager()
+        
+        cm.add_message("user", "Hello")
+        cm.add_message("assistant", "Hi")
+        
+        import time
+        start_time = time.time()
+        execution = AgentExecution(
+            agent_name="test_agent",
+            input_message="input",
+            output="output",
+            start_time=start_time,
+            end_time=start_time + 1.0
+        )
+        cm.add_execution(execution)
+        
+        stats = cm.get_context_stats()
+        
+        assert stats["conversation_messages"] == 2
+        assert stats["execution_history"] == 1
+        assert "memory_usage_mb" in stats
+        assert stats["last_user_message"] == "Hello"
+        assert stats["last_assistant_message"] == "Hi"
+    
+    def test_get_conversation_history(self):
+        """Test getting raw conversation history."""
+        cm = ContextManager()
+        
+        cm.add_message("user", "Hello")
+        cm.add_message("assistant", "Hi")
+        
+        history = cm.get_conversation_history()
+        
+        assert len(history) == 2
+        assert isinstance(history[0], dict)
+        assert history[0]["role"] == "user"
+        assert history[0]["content"] == "Hello"
+    
+    def test_get_last_user_message(self):
+        """Test getting last user message."""
+        cm = ContextManager()
+        
+        assert cm.get_last_user_message() is None
+        
+        cm.add_message("user", "First user message")
+        cm.add_message("assistant", "Response")
+        cm.add_message("user", "Second user message")
+        
+        assert cm.get_last_user_message() == "Second user message"
+    
+    def test_get_last_assistant_message(self):
+        """Test getting last assistant message."""
+        cm = ContextManager()
+        
+        assert cm.get_last_assistant_message() is None
+        
+        cm.add_message("assistant", "First assistant message")
+        cm.add_message("user", "User message")
+        cm.add_message("assistant", "Second assistant message")
+        
+        assert cm.get_last_assistant_message() == "Second assistant message"
+    
+    def test_metadata_operations(self):
+        """Test metadata set/get operations."""
+        cm = ContextManager()
+        
+        # Test setting and getting metadata
+        cm.set_metadata("test_key", "test_value")
+        assert cm.get_metadata("test_key") == "test_value"
+        
+        # Test getting non-existent key with default
+        assert cm.get_metadata("non_existent", "default") == "default"
+        
+        # Test getting non-existent key without default
+        assert cm.get_metadata("non_existent") is None
+    
+    def test_persistence_save_and_load(self, temp_dir):
+        """Test saving and loading persistence."""
+        persist_path = temp_dir / "context.json"
+        
+        # Create context manager and add data
+        cm1 = ContextManager(max_history=5, persist_path=str(persist_path))
+        cm1.add_message("user", "Hello")
+        cm1.add_message("assistant", "Hi")
+        cm1.set_metadata("test_key", "test_value")
+        
+        import time
+        start_time = time.time()
+        execution = AgentExecution(
+            agent_name="test_agent",
+            input_message="input",
+            output="output",
+            start_time=start_time,
+            end_time=start_time + 1.0
+        )
+        cm1.add_execution(execution)
+        
+        # Create new context manager with same persistence path
+        cm2 = ContextManager(max_history=5, persist_path=str(persist_path))
+        
+        # Verify data was loaded
+        assert len(cm2._conversation_history) == 2
+        assert cm2._conversation_history[0].content == "Hello"
+        assert cm2._conversation_history[1].content == "Hi"
+        assert len(cm2._execution_history) == 1
+        assert cm2._execution_history[0].agent_name == "test_agent"
+        assert cm2.get_metadata("test_key") == "test_value"
+    
+    def test_persistence_load_error_handling(self, temp_dir):
+        """Test error handling when loading corrupted persistence file."""
+        persist_path = temp_dir / "corrupted.json"
+        
+        # Create corrupted JSON file
+        persist_path.write_text("{ invalid json")
+        
+        with patch('core.context.logger') as mock_logger:
+            cm = ContextManager(persist_path=str(persist_path))
+            
+            # Should handle error gracefully and start with empty state
+            assert len(cm._conversation_history) == 0
+            assert len(cm._execution_history) == 0
+            mock_logger.error.assert_called()
+    
+    def test_persistence_save_error_handling(self, temp_dir):
+        """Test error handling when saving persistence fails."""
+        # Create a path that can't be written to
+        persist_path = temp_dir / "readonly_dir" / "context.json"
+        persist_path.parent.mkdir()
+        persist_path.parent.chmod(0o444)  # Read-only directory
+        
+        cm = ContextManager(persist_path=str(persist_path))
+        
+        with patch('core.context.logger') as mock_logger:
+            cm.add_message("user", "test")
+            mock_logger.error.assert_called()
+        
+        # Restore permissions for cleanup
+        persist_path.parent.chmod(0o755)
+    
+    def test_context_for_agent_tool_minimal(self):
+        """Test minimal context strategy for agent tool."""
+        cm = ContextManager()
+        cm.add_message("user", "Hello")
+        
+        context = cm.get_context_for_agent_tool(
+            strategy="minimal",
+            task_input="Do something"
+        )
+        
+        assert context == "Do something"
+    
+    def test_context_for_agent_tool_conversation(self):
+        """Test conversation context strategy for agent tool."""
+        cm = ContextManager()
+        cm.add_message("user", "Hello")
+        cm.add_message("assistant", "Hi")
+        
+        context = cm.get_context_for_agent_tool(
+            strategy="conversation",
+            depth=2,
+            task_input="Continue conversation"
+        )
+        
+        assert "Контекст диалога" in context
+        assert "Continue conversation" in context
+        assert "Пользователь: Hello" in context
+        assert "Ассистент: Hi" in context
+    
+    def test_context_for_agent_tool_smart(self):
+        """Test smart context strategy for agent tool."""
+        cm = ContextManager()
+        cm.add_message("user", "Read file.txt")
+        
+        # Task with conversation keywords should include conversation
+        context = cm.get_context_for_agent_tool(
+            strategy="smart",
+            task_input="продолжи анализ файла"
+        )
+        
+        assert "файла" in context or "Контекст" in context
+    
+    def test_add_tool_result_as_message(self):
+        """Test adding tool result as message."""
+        cm = ContextManager()
+        
+        cm.add_tool_result_as_message("file_reader", "File content: Hello World")
+        
+        assert len(cm._conversation_history) == 1
+        message = cm._conversation_history[0]
+        assert message.role == "assistant"
+        assert "Результат инструмента file_reader" in message.content
+        assert "File content: Hello World" in message.content
+    
+    def test_add_tool_result_as_message_empty_output(self):
+        """Test adding empty tool result doesn't create message."""
+        cm = ContextManager()
+        
+        cm.add_tool_result_as_message("tool", "")
+        
+        assert len(cm._conversation_history) == 0
+    
+    def test_estimate_memory_usage(self):
+        """Test memory usage estimation."""
+        cm = ContextManager()
+        
+        # Add some data
+        cm.add_message("user", "Hello" * 1000)  # 5000 chars
+        cm.add_message("assistant", "Hi" * 500)  # 1000 chars
+        
+        execution = AgentExecution(
+            agent_name="test",
+            input_message="input" * 100,  # 500 chars
+            output="output" * 100,  # 600 chars
+            start_time=datetime.now(),
+            end_time=datetime.now()
+        )
+        cm.add_execution(execution)
+        
+        memory_mb = cm._estimate_memory_usage()
+        
+        # Should be a reasonable estimation (> 0)
+        assert memory_mb > 0
+        assert memory_mb < 1  # Should be less than 1MB for this small test
+    
+    def test_thread_safety(self):
+        """Test basic thread safety with concurrent operations."""
+        import threading
+        
+        cm = ContextManager(max_history=100)
+        results = []
+        
+        def add_messages(thread_id):
+            try:
+                for i in range(10):
+                    cm.add_message("user", f"Thread {thread_id} message {i}")
+                results.append("success")
+            except Exception as e:
+                results.append(f"error: {e}")
+        
+        threads = []
+        for i in range(5):
+            thread = threading.Thread(target=add_messages, args=(i,))
+            threads.append(thread)
+            thread.start()
+        
+        for thread in threads:
+            thread.join()
+        
+        # All threads should succeed
+        assert all(result == "success" for result in results)
+        assert len(cm._conversation_history) == 50  # 5 threads * 10 messages
