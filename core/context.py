@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime
 from threading import Lock
 import json
+import threading
 from pathlib import Path
 
 from schemas import ContextMessage, AgentExecution
@@ -13,6 +14,27 @@ from utils.exceptions import ContextError
 from utils.logger import Logger
 
 logger = Logger(__name__)
+
+
+def safe_lock(lock, timeout=5.0):
+    """Context manager для безопасного использования lock'а с таймаутом."""
+    class SafeLockContext:
+        def __init__(self, lock, timeout):
+            self.lock = lock
+            self.timeout = timeout
+            self.acquired = False
+            
+        def __enter__(self):
+            self.acquired = self.lock.acquire(timeout=self.timeout)
+            if not self.acquired:
+                raise ContextError(f"Lock timeout after {self.timeout} seconds")
+            return self
+            
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            if self.acquired:
+                self.lock.release()
+    
+    return SafeLockContext(lock, timeout)
 
 
 class ContextManager:
@@ -47,7 +69,11 @@ class ContextManager:
             content: Message content
             metadata: Optional metadata
         """
-        with self._lock:
+        acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
+        if not acquired:
+            logger.warning("Lock timeout in add_message")
+            raise ContextError("Lock timeout in add_message")
+        try:
             try:
                 message = ContextMessage(
                     role=role,
@@ -71,15 +97,27 @@ class ContextManager:
                     
             except Exception as e:
                 raise ContextError(f"Failed to add message: {e}")
+        finally:
+            self._lock.release()
     
     def add_execution(self, execution: AgentExecution) -> None:
         """Add agent execution to history."""
-        with self._lock:
+        acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
+        if not acquired:
+            logger.warning("Lock timeout in add_execution")
+            return
+        try:
             self._execution_history.append(execution)
             
             # Keep execution history reasonable
             if len(self._execution_history) > self.max_history * 2:
                 self._execution_history.pop(0)
+            
+            # Persist if configured
+            if self.persist_path:
+                self._save_to_file()
+        finally:
+            self._lock.release()
     
     def get_conversation_context(self, last_n: Optional[int] = None) -> str:
         """
@@ -91,29 +129,33 @@ class ContextManager:
         Returns:
             Formatted context string
         """
-        with self._lock:
-            if not self._conversation_history:
-                return ""
-            
-            messages = self._conversation_history
-            if last_n:
-                messages = messages[-last_n:]
-            
-            # Natural, concise dialogue transcript without emojis
-            lines = ["Предыдущий диалог (сжатый):"]
-            for msg in messages:
-                role = {
-                    "user": "Пользователь",
-                    "assistant": "Ассистент",
-                    "system": "Система"
-                }.get(msg.role, msg.role)
-                content = msg.content.strip()
-                # Hard trim very long single messages to keep prompt lightweight
-                if len(content) > 2000:
-                    content = content[:2000] + "…"
-                lines.append(f"{role}: {content}")
-            lines.append("Пожалуйста, учитывай этот контекст при ответе.")
-            return "\n".join(lines)
+        try:
+            with safe_lock(self._lock):
+                if not self._conversation_history:
+                    return ""
+                
+                messages = self._conversation_history
+                if last_n:
+                    messages = messages[-last_n:]
+                
+                # Natural, concise dialogue transcript without emojis
+                lines = ["Предыдущий диалог (сжатый):"]
+                for msg in messages:
+                    role = {
+                        "user": "Пользователь",
+                        "assistant": "Ассистент",
+                        "system": "Система"
+                    }.get(msg.role, msg.role)
+                    content = msg.content.strip()
+                    # Hard trim very long single messages to keep prompt lightweight
+                    if len(content) > 2000:
+                        content = content[:2000] + "…"
+                    lines.append(f"{role}: {content}")
+                lines.append("Пожалуйста, учитывай этот контекст при ответе.")
+                return "\n".join(lines)
+        except ContextError:
+            logger.warning("Lock timeout in get_conversation_context")
+            return "Context temporarily unavailable due to lock timeout."
     
     def get_recent_executions(self, agent_name: Optional[str] = None, limit: int = 5) -> List[AgentExecution]:
         """Get recent agent executions, optionally filtered by agent name."""
@@ -140,35 +182,76 @@ class ContextManager:
     
     def get_context_stats(self) -> Dict[str, Any]:
         """Get context statistics."""
-        with self._lock:
+        try:
+            with safe_lock(self._lock):
+                # Прямой доступ к данным внутри lock'а для избежания deadlock'ов
+                last_user = None
+                last_assistant = None
+                
+                for msg in reversed(self._conversation_history):
+                    if msg.role == "user" and last_user is None:
+                        last_user = msg.content
+                    elif msg.role == "assistant" and last_assistant is None:
+                        last_assistant = msg.content
+                    
+                    if last_user and last_assistant:
+                        break
+                
+                return {
+                    "conversation_messages": len(self._conversation_history),
+                    "execution_history": len(self._execution_history),
+                    "memory_usage_mb": self._estimate_memory_usage(),
+                    "last_user_message": last_user,
+                    "last_assistant_message": last_assistant,
+                }
+        except ContextError:
+            logger.warning("Lock timeout in get_context_stats")
             return {
-                "conversation_messages": len(self._conversation_history),
-                "execution_history": len(self._execution_history),
-                "memory_usage_mb": self._estimate_memory_usage(),
-                "last_user_message": self.get_last_user_message(),
-                "last_assistant_message": self.get_last_assistant_message(),
+                "conversation_messages": 0,
+                "execution_history": 0,
+                "memory_usage_mb": 0.0,
+                "last_user_message": None,
+                "last_assistant_message": None,
             }
 
     def get_conversation_history(self) -> List[Dict[str, Any]]:
         """Return raw conversation history as list of dicts for external consumers."""
-        with self._lock:
+        acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
+        if not acquired:
+            logger.warning("Lock timeout in get_conversation_history")
+            return []
+        try:
             return [msg.model_dump() for msg in self._conversation_history]
+        finally:
+            self._lock.release()
     
     def get_last_user_message(self) -> Optional[str]:
         """Get the last user message."""
-        with self._lock:
+        acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
+        if not acquired:
+            logger.warning("Lock timeout in get_last_user_message")
+            return None
+        try:
             for msg in reversed(self._conversation_history):
                 if msg.role == "user":
                     return msg.content
             return None
+        finally:
+            self._lock.release()
     
     def get_last_assistant_message(self) -> Optional[str]:
         """Get the last assistant message."""
-        with self._lock:
+        acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
+        if not acquired:
+            logger.warning("Lock timeout in get_last_assistant_message")
+            return None
+        try:
             for msg in reversed(self._conversation_history):
                 if msg.role == "assistant":
                     return msg.content
             return None
+        finally:
+            self._lock.release()
     
     def set_metadata(self, key: str, value: Any) -> None:
         """Set context metadata."""

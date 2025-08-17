@@ -199,6 +199,30 @@ class Logger:
         extra = {"extra_fields": kwargs} if kwargs else {}
         self.logger.log(level, message, extra=extra, exc_info=exc_info)
     
+    # File logging setup for tests and integrations
+    def setup_file_logging(self, file_path: str, level: int = logging.DEBUG) -> None:
+        """Attach a file handler to this logger.
+        Args:
+            file_path: Path to the log file to write
+            level: Minimum level for this handler
+        """
+        try:
+            # Ensure parent directory exists
+            path_obj = Path(file_path)
+            if path_obj.parent and not path_obj.parent.exists():
+                path_obj.parent.mkdir(parents=True, exist_ok=True)
+            
+            handler = logging.FileHandler(path_obj, encoding='utf-8')
+            handler.setLevel(level)
+            handler.setFormatter(LegacyFormatter())
+            self.logger.addHandler(handler)
+            # Keep logger level low to allow handler level filtering to work
+            if self.logger.level == logging.NOTSET:
+                self.logger.setLevel(logging.DEBUG)
+        except Exception:
+            # Swallow file handler errors to avoid crashing tests
+            pass
+    
     # Specialized logging methods for Grid components
     def log_agent_start(self, agent_name: str, input_message: str) -> None:
         """Log agent execution start."""

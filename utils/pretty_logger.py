@@ -263,34 +263,6 @@ class PrettyLogger:
         
         operation._diff_lines = diff_lines
     
-    # def update_todos(self, todos: List[Dict[str, str]]) -> None:
-    #     """Update todo list and display."""
-    #     self.todos = [TodoItem(**todo) for todo in todos]
-    #     self._display_todos()
-    # 
-    # def _display_todos(self) -> None:
-    #     """Display current todo list."""
-    #     if not self.todos:
-    #         return
-    #         
-    #     symbol = self._format_symbol(LogLevel.TODO)
-    #     print(f"{symbol} Update Todos")
-    #     
-    #     # Group by status for better display
-    #     for todo in self.todos:
-    #         status_color = {
-    #             "pending": "\033[90m",      # Gray
-    #             "in_progress": "\033[93m",  # Yellow  
-    #             "completed": "\033[92m"     # Green
-    #         }.get(todo.status, "\033[90m")
-    #         
-    #         symbol = self._colorize(todo.symbol, status_color)
-    #         print(f"  ⎿  {symbol} {content}")
-        
-        # Add a small delay to make updates visible
-        import time
-        time.sleep(0.1)
-    
     def section_start(self, title: str) -> None:
         """Start a new section."""
         print(f"\n{self._colorize('●', '\033[96m')} {title}")
@@ -412,4 +384,4 @@ def get_current_agent() -> Optional[str]:
 
 def clear_current_agent() -> None:
     """Clear current agent name for this thread."""
-    pretty_logger.set_current_agent("")
+    pretty_logger.clear_current_agent()

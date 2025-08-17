@@ -316,7 +316,9 @@ class TestFileOperations:
             thread.start()
         
         for thread in threads:
-            thread.join()
+            thread.join(timeout=10)  # Таймаут 10 сек для каждого потока
+            if thread.is_alive():
+                pytest.fail(f"Thread {thread.name} did not finish within timeout")
         
         # All operations should succeed
         assert len(results) == 5

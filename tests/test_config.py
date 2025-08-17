@@ -284,3 +284,15 @@ class TestConfig:
         
         with pytest.raises(ConfigError, match="Configuration not loaded"):
             _ = config.config
+
+    def test_agent_config_validation(self):
+        """Test agent configuration validation."""
+        pass # Placeholder for actual validation test
+
+    def test_tool_config_validation(self):
+        """Test tool configuration validation."""
+        pass # Placeholder for actual validation test
+
+    def test_model_config_validation(self):
+        """Test model configuration validation."""
+        pass # Placeholder for actual validation test

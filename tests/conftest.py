@@ -16,7 +16,30 @@ def temp_dir():
     """Create a temporary directory for tests."""
     temp_path = tempfile.mkdtemp()
     yield Path(temp_path)
-    shutil.rmtree(temp_path)
+    
+    # Fix readonly permissions before cleanup on Windows
+    def handle_remove_readonly(func, path, exc):
+        import stat
+        import time
+        if os.path.exists(path):
+            # First try to change permissions
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except PermissionError:
+                # If still permission error, try waiting a bit for file handles to close
+                time.sleep(0.1)
+                try:
+                    os.chmod(path, stat.S_IWRITE)  
+                    func(path)
+                except:
+                    # Last resort - just ignore the file
+                    pass
+    
+    if os.name == 'nt':  # Windows
+        shutil.rmtree(temp_path, onerror=handle_remove_readonly)
+    else:
+        shutil.rmtree(temp_path)
 
 
 @pytest.fixture
