@@ -3,6 +3,9 @@
 # Core AI framework
 openai-agents>=0.2.6  # AGENTS SDK
 
+# MCP Server support
+mcp>=1.0.0  # Model Context Protocol
+
 # HTTP and API clients
 httpx>=0.25.0
 openai>=1.0.0
