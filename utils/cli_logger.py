@@ -29,6 +29,33 @@ class CLILogger:
                 # require graceful handling without raising.
                 pass
 
+    def mcp_call(self, server: str, method: str, args: dict):
+        """Красивое логгирование MCP вызовов."""
+        # Определяем иконки для серверов
+        server_icons = {
+            'filesystem': '📁',
+            'git': '🔀',
+            'sequential_thinking': '🧠',
+            'coordinator': '🎯'
+        }
+        
+        icon = server_icons.get(server, '🔧')
+        
+        # Форматируем аргументы
+        args_summary = ""
+        if args:
+            args_parts = []
+            for key, value in args.items():
+                if isinstance(value, str) and len(value) > 40:
+                    args_parts.append(f"{key}=...({len(value)} chars)")
+                else:
+                    args_parts.append(f"{key}={value}")
+            if args_parts:
+                args_summary = f" ({', '.join(args_parts)})"
+        
+        # Красивое форматирование вызова
+        self.info(f"◦ {icon} [{server}] {method}{args_summary}")
+
     def debug(self, message: str):
         self.log('DEBUG', message)
 
@@ -43,3 +70,6 @@ class CLILogger:
 
     def critical(self, message: str):
         self.log('CRITICAL', message)
+
+# Глобальный экземпляр для использования в других модулях
+cli_logger = CLILogger()

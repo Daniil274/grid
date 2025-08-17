@@ -158,25 +158,54 @@ class PrettyLogger:
         except ImportError:
             pass
         
-        # Format tool call with agent name if available
+        # Format tool call with agent name if available and beautiful icons
         symbol = self._format_symbol(LogLevel.TOOL)
+        
+        # Определяем иконки для разных типов инструментов
+        icon = "⚙️"
+        display_name = tool_name
+        
+        if "Agent" in tool_name:
+            icon = "🤖"
+            display_name = tool_name
+        elif tool_name.lower() in ["read", "notebookread"]:
+            icon = "📖"
+            display_name = f"Чтение файла"
+        elif tool_name.lower() in ["edit", "multiedit", "write"]:
+            icon = "✏️"
+            display_name = f"Редактирование"
+        elif tool_name.lower() in ["list", "ls"]:
+            icon = "📁"
+            display_name = f"Просмотр папки"
+        elif tool_name.lower() == "bash":
+            icon = "💻"
+            display_name = f"Выполнение команды"
+        elif tool_name.lower() in ["grep", "search"]:
+            icon = "🔍"
+            display_name = f"Поиск"
+        elif tool_name.lower() == "glob":
+            icon = "🔍"
+            display_name = f"Поиск по шаблону"
+        
         args_str = ""
         if kwargs:
-            # Format arguments nicely
+            # Format arguments nicely with length limits
             args_parts = []
             for key, value in kwargs.items():
-                if isinstance(value, str) and len(value) > 50:
-                    args_parts.append(f"{key}=...")
+                if isinstance(value, str) and len(value) > 30:
+                    args_parts.append(f"{key}=...({len(value)} chars)")
+                elif isinstance(value, (list, dict)) and len(str(value)) > 30:
+                    args_parts.append(f"{key}=...({len(str(value))} chars)")
                 else:
                     args_parts.append(f"{key}={value}")
             if args_parts:
-                args_str = f"({', '.join(args_parts)})"
+                args_str = f" ({', '.join(args_parts)})"
         
-        # Show agent name if available
+        # Show agent name if available with improved formatting
         if current_agent:
-            print(f"{symbol} [{current_agent}] {tool_name}{args_str}")
+            print(f"{symbol} [{current_agent}] {icon} {display_name}{args_str}")
         else:
-            print(f"{symbol} {tool_name}{args_str}")
+            print(f"{symbol} {icon} {display_name}{args_str}")
             
         return operation
     
@@ -199,43 +228,77 @@ class PrettyLogger:
         except ImportError:
             pass
         
-        # Format result summary
+        # Format result summary with better icons, structure and detailed information
         summary_parts = []
         
         if error:
-            summary_parts.append(self._colorize(f"Error: {error}", "\033[91m"))
+            summary_parts.append(self._colorize(f"❌ Ошибка: {error}", "\033[91m"))
         elif operation.name.lower() in ["read", "notebookread"]:
             if lines_read:
-                summary_parts.append(f"Read {lines_read} lines")
+                summary_parts.append(self._colorize(f"📖 Прочитано {lines_read} строк", "\033[92m"))
+            elif result:
+                # Автоматически определяем количество строк
+                result_lines = len(str(result).split('\n'))
+                summary_parts.append(self._colorize(f"📖 Прочитано {result_lines} строк", "\033[92m"))
         elif operation.name.lower() in ["edit", "multiedit", "write"]:
             if additions is not None or removals is not None:
                 diff_str = self._format_diff_lines(additions or 0, removals or 0)
-                summary_parts.append(f"Updated {operation.args.get('file_path', 'file')} with {diff_str}")
-        elif operation.name.lower() in ["ls", "glob"]:
+                summary_parts.append(self._colorize(f"✏️  Обновлено: {diff_str}", "\033[92m"))
+            elif result:
+                summary_parts.append(self._colorize(f"✏️  Файл обновлён", "\033[92m"))
+        elif operation.name.lower() in ["ls", "glob", "list"]:
             if paths_count:
-                summary_parts.append(f"Listed {paths_count} paths")
+                summary_parts.append(self._colorize(f"📁 Найдено {paths_count} элементов", "\033[92m"))
+            elif result:
+                # Подсчитываем элементы автоматически
+                lines = str(result).split('\n')
+                items_count = len([l for l in lines if l.strip() and ('[FILE]' in l or '[DIR]' in l or '[file]' in l or '[dir]' in l)])
+                if items_count > 0:
+                    summary_parts.append(self._colorize(f"📁 Найдено {items_count} элементов", "\033[92m"))
+                else:
+                    summary_parts.append(self._colorize(f"📁 Список получен", "\033[92m"))
         elif operation.name.lower() == "bash":
             result_str = str(result) if result is not None else ""
             if result_str and len(result_str.strip()) > 0:
-                summary_parts.append("Command executed")
+                lines_count = len(result_str.split('\n'))
+                summary_parts.append(self._colorize(f"💻 Команда выполнена ({lines_count} строк вывода)", "\033[92m"))
             else:
-                summary_parts.append("Command completed")
+                summary_parts.append(self._colorize("💻 Команда выполнена", "\033[92m"))
+        elif operation.name == "AgentExecution":
+            # Специальная обработка для завершения агента
+            summary_parts.append(self._colorize(f"🎯 Агент завершил работу", "\033[92m"))
+        elif "grep" in operation.name.lower() or "search" in operation.name.lower():
+            if result:
+                # Подсчитываем найденные совпадения
+                result_str = str(result)
+                matches = len([l for l in result_str.split('\n') if 'File:' in l])
+                if matches > 0:
+                    summary_parts.append(self._colorize(f"🔍 Найдено {matches} совпадений", "\033[92m"))
+                else:
+                    summary_parts.append(self._colorize(f"🔍 Поиск завершён", "\033[92m"))
         
         if not summary_parts and result:
-            # Fallback - show full result
-            result_str = str(result) if result is not None else ""
-            result_preview = result_str.replace('\n', ' ')
-            summary_parts.append(result_preview)
+            # Fallback - show abbreviated result with automatic analysis
+            result_str = str(result)
+            if len(result_str) > 100:
+                lines_count = len(result_str.split('\n'))
+                summary_parts.append(self._colorize(f"✅ Результат получен ({lines_count} строк)", "\033[92m"))
+            else:
+                result_preview = result_str.replace('\n', ' ')[:80]
+                if len(result_str) > 80:
+                    result_preview += "..."
+                summary_parts.append(self._colorize(f"✅ {result_preview}", "\033[92m"))
         
-        summary = " ".join(summary_parts) if summary_parts else "Completed"
+        summary = " ".join(summary_parts) if summary_parts else self._colorize("✅ Выполнено", "\033[92m")
         
-        # Print with indentation
-        self._print_line(f"⎿  {summary} {operation.expand_hint}", 1)
+        # Print with beautiful indentation and formatting
+        self._print_line(f"  └─ {summary} {operation.expand_hint}", 0)
         
-        # Show code diff for edits
+        # Show code diff for edits with improved formatting
         if operation.name.lower() in ["edit", "multiedit"] and hasattr(operation, '_diff_lines'):
+            print(f"      💾 Изменения в файле:")
             for line in operation._diff_lines:
-                self._print_line(line, 2)
+                self._print_line(line, 1)
     
     def show_diff(self, operation: ToolOperation, old_lines: List[str], 
                   new_lines: List[str], start_line: int = 1) -> None:
