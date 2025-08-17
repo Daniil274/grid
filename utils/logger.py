@@ -340,9 +340,9 @@ class Logger:
         try:
             from utils.cli_logger import cli_logger
             if status == "connected":
-                cli_logger.success(f"MCP {server_name} connected", server=server_name)
+                cli_logger.info(f"✅ MCP {server_name} connected")
             else:
-                cli_logger.error(f"MCP {server_name} failed to connect", server=server_name)
+                cli_logger.error(f"❌ MCP {server_name} failed to connect")
         except ImportError:
             pass  # Fallback to regular logging if CLI logger not available
         

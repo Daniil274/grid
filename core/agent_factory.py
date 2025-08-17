@@ -29,9 +29,33 @@ from utils.unified_logger import (
 import json
 import re
 import sys
+import unicodedata
 
 load_dotenv()
 logger = Logger(__name__)
+
+def _decode_error_message(error_msg: str) -> str:
+    """
+    Декодирует сообщения об ошибках с неправильной кодировкой.
+    Пытается исправить ошибки кодировки от MCP серверов.
+    """
+    try:
+        # Если строка содержит знаки вопроса или другие артефакты кодировки
+        if '�' in error_msg or any(ord(c) > 127 and not unicodedata.category(c).startswith('L') for c in error_msg):
+            # Попробуем разные кодировки
+            for encoding in ['cp1251', 'windows-1251', 'cp866', 'latin1']:
+                try:
+                    # Конвертируем обратно в байты и декодируем правильно
+                    if isinstance(error_msg, str):
+                        bytes_data = error_msg.encode('latin1', errors='ignore')
+                        decoded = bytes_data.decode(encoding, errors='ignore')
+                        if decoded and '�' not in decoded:
+                            return decoded
+                except (UnicodeDecodeError, UnicodeEncodeError):
+                    continue
+        return error_msg
+    except Exception:
+        return error_msg
 
 
 class AgentFactory:
@@ -685,7 +709,8 @@ class AgentFactory:
                     logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
                 except Exception as e:
-                    raise AgentError(f"Agent execution failed: {e}") from e
+                    decoded_error = _decode_error_message(str(e))
+                    raise AgentError(f"Agent execution failed: {decoded_error}") from e
                 result = result_output
             else:
                 try:
@@ -701,8 +726,9 @@ class AgentFactory:
                     logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
                 except Exception as e:
-                    logger.error(f"Runner.run failed: {e}")
-                    raise AgentError(f"Agent execution failed: {e}") from e
+                    decoded_error = _decode_error_message(str(e))
+                    logger.error(f"Runner.run failed: {decoded_error}")
+                    raise AgentError(f"Agent execution failed: {decoded_error}") from e
             
             # Process result - more robust extraction
             try:
@@ -778,18 +804,28 @@ class AgentFactory:
             
         except Exception as e:
             execution.end_time = time.time()
-            execution.error = str(e)
+            # Декодируем сообщение об ошибке для правильной кодировки
+            decoded_error = _decode_error_message(str(e))
+            execution.error = decoded_error
+            
+            # Создаем новое исключение с исправленным сообщением
+            if decoded_error != str(e):
+                logger.info(f"Fixed error message encoding: {str(e)[:100]} -> {decoded_error[:100]}")
+                # Создаем новое исключение с правильным сообщением
+                decoded_exception = type(e)(decoded_error)
+            else:
+                decoded_exception = e
             
             # Логируем ошибку в детальном логгере
-            log_agent_error(agent_key, e)
+            log_agent_error(agent_key, decoded_exception)
             
-            logger.log_agent_error(agent_key, e)
+            logger.log_agent_error(agent_key, decoded_exception)
             self.context_manager.add_execution(execution)
             
             # Clear current agent on error too
             clear_current_agent()
             
-            raise
+            raise decoded_exception
     
     def _build_agent_instructions(self, agent_key: str, context_path: Optional[str] = None) -> str:
         """Build complete agent instructions with context."""
@@ -1162,12 +1198,16 @@ class AgentFactory:
         unavailable: list[str] = []
         for name in mcp_tool_names:
             try:
+                logger.debug(f"Attempting to create MCP server: {name}")
                 server = await self._get_mcp_server(name)
                 if server is not None:
                     servers.append(server)
+                    logger.info(f"Successfully created MCP server: {name}")
                 else:
+                    logger.warning(f"MCP server creation returned None: {name}")
                     unavailable.append(name)
-            except Exception:
+            except Exception as e:
+                logger.error(f"Failed to create MCP server '{name}': {e}", error_type=type(e).__name__, error_details=str(e))
                 unavailable.append(name)
         if unavailable:
             logger.warning("Some MCP servers are unavailable and will be skipped", unavailable=unavailable)
@@ -1180,10 +1220,18 @@ class AgentFactory:
     async def _get_mcp_server(self, tool_name: str) -> Optional[Any]:
         """Get or create an SDK-based MCP server (MCPServerStdio)."""
         if tool_name in self._mcp_servers:
+            logger.debug(f"Using cached MCP server: {tool_name}")
             return self._mcp_servers[tool_name]
 
-        tool_config = self.config.get_tool(tool_name)
+        try:
+            logger.debug(f"Getting tool config for MCP server: {tool_name}")
+            tool_config = self.config.get_tool(tool_name)
+        except Exception as e:
+            logger.error(f"Failed to get tool config for '{tool_name}': {e}")
+            return None
+        
         if tool_config.type != "mcp":
+            logger.warning(f"Tool '{tool_name}' is not an MCP tool (type: {tool_config.type})")
             return None
 
         server_command = tool_config.server_command or []
@@ -1209,18 +1257,34 @@ class AgentFactory:
             cwd=cwd,
         )
 
-        server = MCPServerStdio(
-            params={
-                "command": command,
-                "args": args,
-                "env": env,
-                "cwd": cwd,
-            },
-            cache_tools_list=True,
-            name=tool_name,
-        )
+        try:
+            server = MCPServerStdio(
+                params={
+                    "command": command,
+                    "args": args,
+                    "env": env,
+                    "cwd": cwd,
+                },
+                cache_tools_list=True,
+                name=tool_name,
+            )
+            logger.debug(f"MCPServerStdio instance created for {tool_name}")
+        except Exception as e:
+            logger.error(f"Failed to create MCPServerStdio instance for '{tool_name}': {e}")
+            return None
 
-        await server.connect()
+        try:
+            logger.debug(f"Attempting to connect MCP server: {tool_name}")
+            await server.connect()
+            logger.info(f"MCP server connected successfully: {tool_name}")
+        except Exception as e:
+            logger.error(f"Failed to connect MCP server '{tool_name}': {e}", error_type=type(e).__name__)
+            try:
+                await server.cleanup()
+            except Exception:
+                pass
+            return None
+        
         self._mcp_servers[tool_name] = server
         logger.log_mcp_connection(tool_name, "connected")
         return server
