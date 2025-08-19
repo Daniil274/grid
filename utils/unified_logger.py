@@ -1,76 +1,94 @@
 """
-Универсальная система логирования для Grid Agent System.
-Объединяет красивое отображение в терминале и детальное логирование в файлы.
+Универсальный логгер для агентной системы с красивым отображением в терминале и детальным логированием в файлы.
 """
 
-import json
-import time
 import threading
+import json
+import os
+import re
+import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Union
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Union
 from enum import Enum
-from dataclasses import dataclass, asdict
-import logging
-import re
 
-from .pretty_logger import PrettyLogger
+from utils.pretty_logger import PrettyLogger
+
 
 class LogLevel(Enum):
-    """Уровни логирования с числовыми значениями."""
-    DEBUG = 0
-    INFO = 1
-    SUCCESS = 2
-    WARNING = 3
-    ERROR = 4
-
-
-class LogTarget(Enum):
-    """Цели логирования."""
-    CONSOLE = "console"
-    FILE = "file"
-    BOTH = "both"
+    """Уровни логирования"""
+    DEBUG = 10
+    INFO = 20
+    SUCCESS = 25
+    WARNING = 30
+    ERROR = 40
 
 
 class LogEventType(Enum):
-    """Типы событий для логирования."""
+    """Типы событий логирования"""
+    SYSTEM = "system"
     AGENT_START = "agent_start"
     AGENT_END = "agent_end"
     AGENT_ERROR = "agent_error"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     PROMPT = "prompt"
-    CONTEXT = "context"
-    SYSTEM = "system"
+    ERROR = "error"
+
+
+class LogTarget(Enum):
+    """Цели логирования"""
+    CONSOLE = "console"
+    FILE = "file"
+    BOTH = "both"
 
 
 @dataclass
 class LogEvent:
-    """Структура события логирования."""
+    """Структура события логирования"""
     event_type: LogEventType
     message: str
     agent_name: Optional[str] = None
     tool_name: Optional[str] = None
     duration: Optional[float] = None
     data: Optional[Dict[str, Any]] = None
-    timestamp: Optional[str] = None
     level: LogLevel = LogLevel.INFO
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     
     def __post_init__(self):
-        if self.timestamp is None:
+        if not self.timestamp:
             self.timestamp = datetime.now().isoformat()
+
+
+@dataclass 
+class AgentContext:
+    """Контекст выполнения агента для подробного логирования"""
+    agent_name: str
+    session_id: str = field(default_factory=lambda: datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+    tools_used: List[str] = field(default_factory=list)
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    input_message: Optional[str] = None
+    output_message: Optional[str] = None
 
 
 class UnifiedLogger:
     """
-    Универсальный логгер с красивым отображением в терминале и детальным логированием в файлы.
+    Универсальный логгер с красивым отображением в терминале и двойным детальным логированием в файлы.
+    
+    Поддерживает два типа файловых логов:
+    - Основной лог: сжатый формат без истории контекста, с обрезанием больших выводов
+    - Подробный лог: полный формат с историей контекста агентов
     """
     
     def __init__(self, 
                  log_dir: str = "logs",
                  console_level: LogLevel = LogLevel.INFO,
                  file_level: LogLevel = LogLevel.DEBUG,
-                 enable_colors: bool = True):
+                 enable_colors: bool = True,
+                 max_output_length: int = 5000):
         """
         Инициализация универсального логгера.
         
@@ -79,12 +97,14 @@ class UnifiedLogger:
             console_level: Уровень логирования для консоли
             file_level: Уровень логирования для файлов
             enable_colors: Включить цвета в консоли
+            max_output_length: Максимальная длина вывода в основном логе (для обрезания)
         """
         # Принудительно использовать директорию логов проекта, а не рабочую директорию агента
         self.log_dir = Path("logs") if not Path(log_dir).is_absolute() else Path(log_dir)
         self.console_level = console_level
         self.file_level = file_level
         self.enable_colors = enable_colors
+        self.max_output_length = max_output_length
         
         # Создаем директории в каталоге проекта
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -99,9 +119,15 @@ class UnifiedLogger:
         # Настройка файлового логгера (без постоянных файловых хендлеров)
         self._setup_file_logger()
         
-        # Текущее выполнение
+        # Создаем пути к файлам логов с временными метками
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.basic_log_path = self.log_dir / f"agents_basic_{timestamp}.log"
+        self.detailed_log_path = self.log_dir / f"agents_detailed_{timestamp}.log"
+        
+        # Текущее выполнение и контекст агентов
         self.current_execution: Optional[Dict[str, Any]] = None
         self.conversation_history: List[Dict[str, Any]] = []
+        self.agent_contexts: Dict[str, AgentContext] = {}
         
         # Thread-local storage
         self._thread_local = threading.local()
@@ -689,48 +715,142 @@ class UnifiedLogger:
             safe_preview = self._sanitize_text_for_preview(content, max_len=200)
             self.pretty_logger.debug(f"[{agent_name}] Промпт ({prompt_type}): {safe_preview}")
             
-    def _log_to_file(self, event: LogEvent) -> None:
-        """Эпизодическое логирование в файлы без удержания открытых дескрипторов.
-        Для SYSTEM/TOOL/ERROR записываем в main log (grid.log).
-        Для PROMPT — дополнительно сохраняем текст промпта в файл в директории prompts."""
-        # Формируем строку для основного лога
-        # Избегаем сырых JSON в сообщении для инструментов
-        if event.event_type in (LogEventType.TOOL_RESULT, LogEventType.TOOL_CALL):
-            if event.event_type == LogEventType.TOOL_RESULT:
-                base_msg = f"Tool result: {event.tool_name}" if event.tool_name else "Tool result"
-            else:
-                base_msg = f"Calling tool: {event.tool_name}" if event.tool_name else "Tool call"
-            log_message = f"{event.event_type.value.upper()} | {base_msg}"
-        else:
-            log_message = f"{event.event_type.value.upper()} | {event.message}"
-        if event.agent_name:
-            log_message += f" | Agent: {event.agent_name}"
-        if event.tool_name:
-            log_message += f" | Tool: {event.tool_name}"
-        if event.duration:
-            log_message += f" | Duration: {event.duration:.2f}s"
+    def _format_data_as_text(self, data: Any, indent_level: int = 0) -> str:
+        """Форматирует данные как обычный текст с табуляцией без JSON синтаксиса."""
+        indent = "  " * indent_level
+        result = ""
         
-        main_log_path = self.log_dir / "grid.log"
-        try:
-            with open(main_log_path, 'a', encoding='utf-8') as f:
-                if event.level == LogLevel.ERROR:
-                    f.write(f"{datetime.now().isoformat()} | ERROR    | grid | {log_message}\n")
-                elif event.level == LogLevel.WARNING:
-                    f.write(f"{datetime.now().isoformat()} | WARNING  | grid | {log_message}\n")
-                elif event.level == LogLevel.DEBUG:
-                    f.write(f"{datetime.now().isoformat()} | DEBUG    | grid | {log_message}\n")
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if isinstance(value, (dict, list)):
+                    result += f"\n{indent}{key}:"
+                    result += self._format_data_as_text(value, indent_level + 1)
                 else:
-                    f.write(f"{datetime.now().isoformat()} | INFO     | grid | {log_message}\n")
-                
-                if event.data:
-                    sanitized = self._sanitize_data_for_file(event.data)
-                    try:
-                        data_str = json.dumps(sanitized, ensure_ascii=False)
-                    except Exception:
-                        data_str = str(sanitized)
-                    if len(data_str) > 200:
-                        data_str = data_str[:200] + "... [truncated]"
-                    f.write(f"{datetime.now().isoformat()} | DEBUG    | grid | Data: {data_str}\n")
+                    result += f"\n{indent}{key}: {value}"
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                if isinstance(item, (dict, list)):
+                    result += f"\n{indent}[{i}]:"
+                    result += self._format_data_as_text(item, indent_level + 1)
+                else:
+                    result += f"\n{indent}- {item}"
+        else:
+            result += f"\n{indent}{data}"
+        
+        return result
+    
+    def _truncate_output(self, text: str, max_length: int = None) -> str:
+        """Обрезать большой вывод для основного лога."""
+        if max_length is None:
+            max_length = self.max_output_length
+        
+        if not text or len(text) <= max_length:
+            return text
+        
+        # Обрезаем с сообщением о том, что обрезано
+        truncated = text[:max_length]
+        return f"{truncated}... [обрезано: {len(text) - max_length} символов]"
+    
+    def _format_basic_log_entry(self, event: LogEvent) -> str:
+        """Форматирование записи для основного (сжатого) лога."""
+        timestamp = datetime.fromisoformat(event.timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        level = event.level.name.ljust(8)
+        logger_name = "grid.core.agent_factory".ljust(20)
+        
+        # Формируем сообщение в зависимости от типа события
+        if event.event_type == LogEventType.AGENT_START:
+            message = f"Agent '{event.agent_name}' starting execution [agent_name={event.agent_name}, input_length={len(event.message or '')}, event_type=agent_start]"
+        elif event.event_type == LogEventType.AGENT_END:
+            output = event.data.get('output', '') if event.data else ''
+            truncated_output = self._truncate_output(output)
+            message = f"Agent '{event.agent_name}' completed execution [agent_name={event.agent_name}, output_length={len(output)}"
+            if event.duration:
+                message += f", duration_seconds={event.duration}"
+            message += f", event_type=agent_end]"
+            # Добавляем обрезанный вывод в следующей строке
+            if truncated_output:
+                message += f"\n\nВывод агента:\n{truncated_output}"
+        elif event.event_type == LogEventType.AGENT_ERROR:
+            error_msg = event.data.get('error', '') if event.data else ''
+            truncated_error = self._truncate_output(str(error_msg))
+            message = f"Agent '{event.agent_name}' error [agent_name={event.agent_name}, event_type=agent_error]"
+            if truncated_error:
+                message += f"\nОшибка: {truncated_error}"
+        elif event.event_type == LogEventType.TOOL_CALL:
+            message = f"Tool call: {event.tool_name} [agent_name={event.agent_name}, tool_name={event.tool_name}, event_type=tool_call]"
+        elif event.event_type == LogEventType.TOOL_RESULT:
+            result = event.data.get('result', '') if event.data else ''
+            truncated_result = self._truncate_output(str(result))
+            message = f"Tool result: {event.tool_name} [agent_name={event.agent_name}, tool_name={event.tool_name}, event_type=tool_result]"
+            if truncated_result:
+                message += f"\nРезультат: {truncated_result}"
+        else:
+            message = event.message
+        
+        return f"{timestamp} | {level} | {logger_name} | {message}"
+    
+    def _format_detailed_log_entry(self, event: LogEvent) -> str:
+        """Форматирование записи для подробного лога с полным контекстом."""
+        timestamp = datetime.fromisoformat(event.timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        level = event.level.name.ljust(8)
+        logger_name = "grid.core.agent_factory".ljust(20)
+        
+        # Формируем подробное сообщение
+        message = f"{event.event_type.value.upper()} | {event.message}"
+        
+        if event.agent_name:
+            message += f" | Agent: {event.agent_name}"
+        if event.tool_name:
+            message += f" | Tool: {event.tool_name}"
+        if event.duration:
+            message += f" | Duration: {event.duration:.2f}s"
+        
+        # Добавляем полную информацию из data без JSON синтаксиса
+        if event.data:
+            try:
+                message += f"\nДанные:"
+                message += self._format_data_as_text(event.data, indent_level=1)
+            except Exception:
+                message += f"\nДанные: {str(event.data)}"
+        
+        # Добавляем контекст агента если доступен
+        if event.agent_name and event.agent_name in self.agent_contexts:
+            context = self.agent_contexts[event.agent_name]
+            message += f"\nКонтекст агента:"
+            message += f"\n  - Сессия: {context.session_id}"
+            message += f"\n  - Сообщений в истории: {len(context.messages)}"
+            if context.tools_used:
+                tools_str = ", ".join(context.tools_used)
+                message += f"\n  - Использованные инструменты: {tools_str}"
+            else:
+                message += f"\n  - Использованные инструменты: нет"
+            if context.messages:
+                message += f"\n  - Последние сообщения:"
+                # Показываем последние 3 сообщения
+                recent_messages = context.messages[-3:]
+                for msg in recent_messages:
+                    role_name = {"user": "Пользователь", "assistant": "Агент", "system": "Система"}.get(msg['role'], msg['role'])
+                    content_preview = msg['content'][:50] + "..." if len(msg['content']) > 50 else msg['content']
+                    message += f"\n    {role_name}: {content_preview}"
+        
+        return f"{timestamp} | {level} | {logger_name} | {message}"
+    
+    def _log_to_file(self, event: LogEvent) -> None:
+        """Запись в оба типа логов - основной и подробный."""
+        # Записываем в основной лог (сжатый формат)
+        try:
+            basic_entry = self._format_basic_log_entry(event)
+            with open(self.basic_log_path, 'a', encoding='utf-8') as f:
+                f.write(f"{basic_entry}\n")
+        except Exception:
+            # Не падаем на ошибках записи логов
+            pass
+        
+        # Записываем в подробный лог (полный формат)
+        try:
+            detailed_entry = self._format_detailed_log_entry(event)
+            with open(self.detailed_log_path, 'a', encoding='utf-8') as f:
+                f.write(f"{detailed_entry}\n")
         except Exception:
             # Не падаем на ошибках записи логов
             pass
@@ -756,8 +876,36 @@ class UnifiedLogger:
                 # Игнорируем ошибки записи промптов
                 pass
         
+    def _get_or_create_agent_context(self, agent_name: str, create_new_session: bool = False) -> AgentContext:
+        """Получить или создать контекст агента."""
+        if agent_name not in self.agent_contexts or create_new_session:
+            self.agent_contexts[agent_name] = AgentContext(agent_name=agent_name)
+        return self.agent_contexts[agent_name]
+    
+    def add_agent_message(self, agent_name: str, role: str, content: str) -> None:
+        """Добавить сообщение в контекст агента."""
+        if not agent_name:
+            return
+            
+        context = self._get_or_create_agent_context(agent_name)
+        context.messages.append({
+            'role': role,
+            'content': content,
+            'timestamp': datetime.now().isoformat()
+        })
+    
+    def add_tool_to_context(self, agent_name: str, tool_name: str) -> None:
+        """Добавить инструмент в контекст агента."""
+        if not agent_name or not tool_name:
+            return
+            
+        context = self._get_or_create_agent_context(agent_name)
+        if tool_name not in context.tools_used:
+            context.tools_used.append(tool_name)
+    
     def _update_execution(self, event: LogEvent) -> None:
-        """Обновление информации о текущем выполнении."""
+        """Обновление информации о текущем выполнении и контексте агента."""
+        # Обновляем legacy execution для совместимости
         if event.event_type == LogEventType.AGENT_START:
             self.current_execution = {
                 'agent_name': event.agent_name,
@@ -766,18 +914,49 @@ class UnifiedLogger:
                 'tools_used': [],
                 'conversation_history': []
             }
+            
+            # Обновляем контекст агента (создаем новую сессию для каждого AGENT_START)
+            if event.agent_name:
+                context = self._get_or_create_agent_context(event.agent_name, create_new_session=True)
+                context.start_time = event.timestamp
+                context.input_message = event.message
+                # Добавляем входящее сообщение пользователя в контекст
+                self.add_agent_message(event.agent_name, "user", event.message)
+                
         elif event.event_type == LogEventType.AGENT_END and self.current_execution:
             self.current_execution['end_time'] = event.timestamp
             self.current_execution['duration'] = event.duration
             self.current_execution['output_message'] = event.data.get('output', '') if event.data else ''
             
+            # Обновляем контекст агента
+            if event.agent_name:
+                context = self._get_or_create_agent_context(event.agent_name)
+                context.end_time = event.timestamp
+                context.output_message = event.data.get('output', '') if event.data else ''
+                # Добавляем выходящее сообщение агента в контекст
+                output = event.data.get('output', '') if event.data else event.message
+                self.add_agent_message(event.agent_name, "assistant", output)
+            
             # Сохраняем выполнение
             self._save_execution()
             
-        elif event.event_type == LogEventType.TOOL_CALL and self.current_execution:
-            tool_name = event.tool_name
-            if tool_name and tool_name not in self.current_execution['tools_used']:
-                self.current_execution['tools_used'].append(tool_name)
+        elif event.event_type == LogEventType.TOOL_CALL:
+            # Добавляем в legacy execution
+            if self.current_execution:
+                tool_name = event.tool_name
+                if tool_name and tool_name not in self.current_execution['tools_used']:
+                    self.current_execution['tools_used'].append(tool_name)
+            
+            # Добавляем в контекст агента
+            if event.agent_name and event.tool_name:
+                self.add_tool_to_context(event.agent_name, event.tool_name)
+                
+        elif event.event_type == LogEventType.PROMPT:
+            # Добавляем промпт в контекст как системное сообщение
+            if event.agent_name and event.data:
+                prompt_content = event.data.get('content', '') or event.data.get('prompt', '')
+                if prompt_content:
+                    self.add_agent_message(event.agent_name, "system", str(prompt_content))
                 
     def _save_execution(self) -> None:
         """Сохранить информацию о выполнении."""
@@ -918,16 +1097,30 @@ def get_unified_logger() -> UnifiedLogger:
 
 
 def configure_unified_logger(log_dir: str = "logs",
-                           console_level: LogLevel = LogLevel.INFO,
-                           file_level: LogLevel = LogLevel.DEBUG,
-                           enable_colors: bool = True) -> UnifiedLogger:
-    """Настроить глобальный универсальный логгер."""
+                             console_level: LogLevel = LogLevel.INFO,
+                             file_level: LogLevel = LogLevel.DEBUG,
+                             enable_colors: bool = True,
+                             max_output_length: int = 1000) -> UnifiedLogger:
+    """
+    Настроить глобальный экземпляр unified logger.
+    
+    Args:
+        log_dir: Директория для логов
+        console_level: Уровень логирования для консоли
+        file_level: Уровень логирования для файлов
+        enable_colors: Включить цвета в консоли
+        max_output_length: Максимальная длина вывода в основном логе (для обрезания)
+    
+    Returns:
+        Настроенный экземпляр UnifiedLogger
+    """
     global _unified_logger
     _unified_logger = UnifiedLogger(
         log_dir=log_dir,
         console_level=console_level,
         file_level=file_level,
-        enable_colors=enable_colors
+        enable_colors=enable_colors,
+        max_output_length=max_output_length
     )
     return _unified_logger
 
