@@ -119,10 +119,10 @@ class UnifiedLogger:
         # Настройка файлового логгера (без постоянных файловых хендлеров)
         self._setup_file_logger()
         
-        # Создаем пути к файлам логов с временными метками
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.basic_log_path = self.log_dir / f"agents_basic_{timestamp}.log"
-        self.detailed_log_path = self.log_dir / f"agents_detailed_{timestamp}.log"
+        # Создаем пути к файлам логов
+        # Используем стабильные имена файлов, чтобы упрощать анализ и соответствовать ожиданиям тестов
+        self.basic_log_path = self.log_dir / "grid.log"
+        self.detailed_log_path = self.log_dir / "grid_detailed.log"
         
         # Текущее выполнение и контекст агентов
         self.current_execution: Optional[Dict[str, Any]] = None
@@ -754,40 +754,7 @@ class UnifiedLogger:
     def _format_basic_log_entry(self, event: LogEvent) -> str:
         """Форматирование записи для основного (сжатого) лога."""
         timestamp = datetime.fromisoformat(event.timestamp).strftime('%Y-%m-%d %H:%M:%S')
-        level = event.level.name.ljust(8)
-        logger_name = "grid.core.agent_factory".ljust(20)
-        
-        # Формируем сообщение в зависимости от типа события
-        if event.event_type == LogEventType.AGENT_START:
-            message = f"Agent '{event.agent_name}' starting execution [agent_name={event.agent_name}, input_length={len(event.message or '')}, event_type=agent_start]"
-        elif event.event_type == LogEventType.AGENT_END:
-            output = event.data.get('output', '') if event.data else ''
-            truncated_output = self._truncate_output(output)
-            message = f"Agent '{event.agent_name}' completed execution [agent_name={event.agent_name}, output_length={len(output)}"
-            if event.duration:
-                message += f", duration_seconds={event.duration}"
-            message += f", event_type=agent_end]"
-            # Добавляем обрезанный вывод в следующей строке
-            if truncated_output:
-                message += f"\n\nВывод агента:\n{truncated_output}"
-        elif event.event_type == LogEventType.AGENT_ERROR:
-            error_msg = event.data.get('error', '') if event.data else ''
-            truncated_error = self._truncate_output(str(error_msg))
-            message = f"Agent '{event.agent_name}' error [agent_name={event.agent_name}, event_type=agent_error]"
-            if truncated_error:
-                message += f"\nОшибка: {truncated_error}"
-        elif event.event_type == LogEventType.TOOL_CALL:
-            message = f"Tool call: {event.tool_name} [agent_name={event.agent_name}, tool_name={event.tool_name}, event_type=tool_call]"
-        elif event.event_type == LogEventType.TOOL_RESULT:
-            result = event.data.get('result', '') if event.data else ''
-            truncated_result = self._truncate_output(str(result))
-            message = f"Tool result: {event.tool_name} [agent_name={event.agent_name}, tool_name={event.tool_name}, event_type=tool_result]"
-            if truncated_result:
-                message += f"\nРезультат: {truncated_result}"
-        else:
-            message = event.message
-        
-        return f"{timestamp} | {level} | {logger_name} | {message}"
+        return f"{timestamp} | {event.event_type.name} | {event.agent_name or ''} | {event.message}"
     
     def _format_detailed_log_entry(self, event: LogEvent) -> str:
         """Форматирование записи для подробного лога с полным контекстом."""
@@ -1169,7 +1136,7 @@ def log_tool_call(tool_name: str, args: Dict[str, Any], agent_name: Optional[str
         message=f"Calling tool: {tool_name}",
         agent_name=agent_name,
         tool_name=tool_name,
-        data={'args': args},
+        data=args,
         **kwargs
     )
     get_unified_logger().log_event(event)

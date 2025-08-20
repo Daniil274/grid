@@ -11,6 +11,12 @@ from pathlib import Path
 from functools import lru_cache
 import re
 
+# CLI logger for outputting logs to MCP clients (stderr)
+try:
+    from utils.cli_logger import cli_logger
+except Exception:  # pragma: no cover - fallback when not available
+    cli_logger = None
+
 
 class JSONFormatter(logging.Formatter):
     """JSON formatter for structured logging."""
@@ -245,6 +251,11 @@ class Logger:
             input_length=len(input_message),
             event_type="agent_start"
         )
+
+        # CLI logging for MCP clients
+        if cli_logger:
+            preview = input_message[:80] + ("..." if len(input_message) > 80 else "")
+            cli_logger.info(f"▶️ [agent:{agent_name}] {preview}")
     
     def log_agent_end(self, agent_name: str, output: str, duration: float) -> None:
         """Log agent execution completion."""
@@ -259,6 +270,10 @@ class Logger:
             duration_seconds=duration,
             event_type="agent_end"
         )
+
+        # CLI logging for MCP clients
+        if cli_logger:
+            cli_logger.info(f"✅ [agent:{agent_name}] completed in {duration:.2f}s")
     
     def log_agent_error(self, agent_name: str, error: Exception) -> None:
         """Log agent execution error."""
@@ -273,6 +288,10 @@ class Logger:
             error_message=str(error),
             event_type="agent_error"
         )
+
+        # CLI logging for MCP clients
+        if cli_logger:
+            cli_logger.error(f"❌ [agent:{agent_name}] {str(error)}")
     
     def log_tool_call(self, tool_name: str, args: Dict[str, Any]) -> None:
         """Log tool call."""
@@ -283,18 +302,17 @@ class Logger:
         except Exception:
             summary = f"{len(args)} args"
         self.info(f"TOOL | {tool_name} | {summary}")
-        
-        # Beautiful CLI logging for MCP tools
-        if tool_name.startswith("MCP:"):
-            try:
-                from utils.cli_logger import cli_logger
+
+        # Beautiful CLI logging for MCP clients
+        if cli_logger:
+            if tool_name.startswith("MCP:"):
                 # Extract server and method from tool name like "MCP:filesystem.read_file"
                 parts = tool_name.split(".", 1)
                 server_name = parts[0].replace("MCP:", "")
                 method = parts[1] if len(parts) > 1 else "unknown"
                 cli_logger.mcp_call(server_name, method, args)
-            except ImportError:
-                pass  # Fallback to regular logging if CLI logger not available
+            else:
+                cli_logger.info(f"◦ 🔧 {tool_name}{(' | ' + summary) if summary else ''}")
         
         # JSON format logging
         self.debug(
@@ -317,6 +335,10 @@ class Logger:
             display_name=display_name,
             event_type="agent_creation"
         )
+
+        # CLI logging for MCP clients
+        if cli_logger:
+            cli_logger.info(f"🤖 created agent '{display_name}'")
     
     def log_agent_tool_start(self, agent_name: str, tool_name: str, input_data: str) -> None:
         """Log agent tool execution start."""
@@ -331,6 +353,11 @@ class Logger:
             input_length=len(input_data),
             event_type="agent_tool_start"
         )
+
+        # CLI logging for MCP clients
+        if cli_logger:
+            preview = input_data[:80] + ("..." if len(input_data) > 80 else "")
+            cli_logger.info(f"🛠️ {agent_name} -> {tool_name}: {preview}")
     
     def log_mcp_connection(self, server_name: str, status: str) -> None:
         """Log MCP server connection status."""

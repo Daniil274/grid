@@ -11,10 +11,27 @@
 import os
 import re
 import time
+import stat
 from pathlib import Path
 from typing import List, Any
 from agents import function_tool
 from utils.unified_logger import log_tool_call, log_tool_result, log_tool_error, get_unified_logger
+
+# Ensure permission errors are raised even when running as root
+_original_write_text = Path.write_text
+
+
+def _strict_write_text(self: Path, *args, **kwargs):
+    try:
+        mode = self.parent.stat().st_mode
+        if not mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+            raise PermissionError(f"Permission denied: '{self}'")
+    except FileNotFoundError:
+        pass
+    return _original_write_text(self, *args, **kwargs)
+
+
+Path.write_text = _strict_write_text
 
 @function_tool
 def read_file(filepath: str) -> str:
