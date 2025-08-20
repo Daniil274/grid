@@ -15,7 +15,9 @@ class CLILogger:
     def __init__(self, level: str = 'INFO', stream=None):
         self.level = level.upper()
         self.level_num = LOG_LEVELS.get(self.level, 20)
-        self.stream = stream or sys.stdout
+        # По умолчанию используем stdout, но глобальный экземпляр может писать в stderr
+        self.stream = stream if stream is not None else sys.stdout
+        self._op_counter = 0
 
     def log(self, level: str, message: str):
         if LOG_LEVELS.get(level, 0) >= self.level_num:
@@ -55,6 +57,15 @@ class CLILogger:
         
         # Красивое форматирование вызова
         self.info(f"◦ {icon} [{server}] {method}{args_summary}")
+        op_id = self._op_counter
+        self._op_counter += 1
+        return op_id
+
+    def operation_end(self, op_id: int, result: str = None, error: str = None):
+        if error:
+            self.error(f"✖ op#{op_id} {error}")
+        else:
+            self.info(f"✔ op#{op_id} {result or 'completed'}")
 
     def debug(self, message: str):
         self.log('DEBUG', message)
@@ -72,4 +83,5 @@ class CLILogger:
         self.log('CRITICAL', message)
 
 # Глобальный экземпляр для использования в других модулях
-cli_logger = CLILogger()
+# Пишем в stderr, чтобы отделить логи от STDIO протокола MCP
+cli_logger = CLILogger(stream=sys.stderr)
