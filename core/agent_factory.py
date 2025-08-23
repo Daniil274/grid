@@ -24,9 +24,46 @@ from core.tracing_config import get_tracing_config
 import json
 import re
 import sys
+import unicodedata
 
 load_dotenv()
-tracing_config = get_tracing_config()
+
+# Безопасная инициализация tracing_config
+try:
+    tracing_config = get_tracing_config()
+except Exception as e:
+    # Если не удается получить tracing_config, создаем заглушку
+    import logging
+    logging.warning(f"Failed to get tracing config: {e}")
+    # Создаем простую заглушку
+    class DummyTracingConfig:
+        def configure_console_tracing(self, level): pass
+        def apply(self): pass
+    tracing_config = DummyTracingConfig()
+
+
+def _decode_error_message(error_msg: str) -> str:
+    """
+    Декодирует сообщения об ошибках с неправильной кодировкой.
+    Пытается исправить ошибки кодировки от MCP серверов.
+    """
+    try:
+        # Если строка содержит знаки вопроса или другие артефакты кодировки
+        if '' in error_msg or any(ord(c) > 127 and not unicodedata.category(c).startswith('L') for c in error_msg):
+            # Попробуем разные кодировки
+            for encoding in ['cp1251', 'windows-1251', 'cp866', 'latin1']:
+                try:
+                    # Конвертируем обратно в байты и декодируем правильно
+                    if isinstance(error_msg, str):
+                        bytes_data = error_msg.encode('latin1', errors='ignore')
+                        decoded = bytes_data.decode(encoding, errors='ignore')
+                        if decoded and '' not in decoded:
+                            return decoded
+                except (UnicodeDecodeError, UnicodeEncodeError):
+                    continue
+        return error_msg
+    except Exception:
+        return error_msg
 
 
 class AgentFactory:
@@ -48,13 +85,23 @@ class AgentFactory:
             config: Configuration instance (creates default if None)
             working_directory: Working directory override
         """
-        # Configure tracing instead of logging
-        tracing_config.configure_console_tracing("INFO")
-        tracing_config.apply()
+        # Set up logger for this class first (before any other operations)
+        self.logger = logging.getLogger(__name__)
+        
+        try:
+            # Configure tracing instead of logging
+            tracing_config.configure_console_tracing("INFO")
+            tracing_config.apply()
+        except Exception as e:
+            # If tracing fails, log the error but continue
+            self.logger.warning(f"Failed to configure tracing: {e}")
         
         # Set up minimal logging for agents SDK to avoid spam
-        agents_logger = logging.getLogger("openai.agents")
-        agents_logger.setLevel(logging.WARNING)
+        try:
+            agents_logger = logging.getLogger("openai.agents")
+            agents_logger.setLevel(logging.WARNING)
+        except Exception as e:
+            self.logger.warning(f"Failed to configure agents logging: {e}")
         
         self.config = config or Config()
         if working_directory:
@@ -79,7 +126,7 @@ class AgentFactory:
         # Track emitted warnings to avoid log spam (e.g., Responses API fallbacks)
         self._responses_warning_keys: set[str] = set()
         
-
+        pass
     
     async def initialize(self) -> None:
         """Async init hook for compatibility with API lifespan."""
@@ -536,10 +583,11 @@ class AgentFactory:
                         # В случае ошибки оставляем result_output как есть — дальнейшая логика подставит фоллбек
                         pass
                 except asyncio.TimeoutError:
-                    logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
+                    self.logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
                 except Exception as e:
-                    raise AgentError(f"Agent execution failed: {e}") from e
+                    decoded_error = _decode_error_message(str(e))
+                    raise AgentError(f"Agent execution failed: {decoded_error}") from e
                 result = result_output
             else:
                 try:
@@ -581,7 +629,7 @@ class AgentFactory:
             # Принудительный разбор и выполнение первого tool call из текстового ответа
             try:
                 manual_tool_result = await self._execute_first_tool_call_in_text(output)
-                if manual_tool_result is not None:
+                if manual_tool_result is not None and str(manual_tool_result).strip() != "":
                     output = manual_tool_result
             except Exception as e:
                 pass
@@ -609,7 +657,6 @@ class AgentFactory:
             execution.error = str(e)
             
             self.context_manager.add_execution(execution)
-            
             raise
     
     def _build_agent_instructions(self, agent_key: str, context_path: Optional[str] = None) -> str:
@@ -949,12 +996,16 @@ class AgentFactory:
         unavailable: list[str] = []
         for name in mcp_tool_names:
             try:
+                self.logger.debug(f"Attempting to create MCP server: {name}")
                 server = await self._get_mcp_server(name)
                 if server is not None:
                     servers.append(server)
+                    self.logger.info(f"Successfully created MCP server: {name}")
                 else:
+                    self.logger.warning(f"MCP server creation returned None: {name}")
                     unavailable.append(name)
-            except Exception:
+            except Exception as e:
+                self.logger.error(f"Failed to create MCP server '{name}': {e}", error_type=type(e).__name__, error_details=str(e))
                 unavailable.append(name)
         if unavailable:
             try:
@@ -966,10 +1017,18 @@ class AgentFactory:
     async def _get_mcp_server(self, tool_name: str) -> Optional[Any]:
         """Get or create an SDK-based MCP server (MCPServerStdio)."""
         if tool_name in self._mcp_servers:
+            self.logger.debug(f"Using cached MCP server: {tool_name}")
             return self._mcp_servers[tool_name]
 
-        tool_config = self.config.get_tool(tool_name)
+        try:
+            self.logger.debug(f"Getting tool config for MCP server: {tool_name}")
+            tool_config = self.config.get_tool(tool_name)
+        except Exception as e:
+            self.logger.error(f"Failed to get tool config for '{tool_name}': {e}")
+            return None
+        
         if tool_config.type != "mcp":
+            self.logger.warning(f"Tool '{tool_name}' is not an MCP tool (type: {tool_config.type})")
             return None
 
         server_command = tool_config.server_command or []
@@ -985,6 +1044,15 @@ class AgentFactory:
         env = tool_config.env_vars or {}
         cwd = self.config.get_working_directory()
 
+        self.logger.debug(
+            "Initializing MCP server (SDK)",
+            tool_name=tool_name,
+            command=command,
+            args=args,
+            env_keys=list(env.keys()),
+            cwd=cwd,
+        )
+
         server = MCPServerStdio(
             params={
                 "command": command,
@@ -996,7 +1064,18 @@ class AgentFactory:
             name=tool_name,
         )
 
-        await server.connect()
+        try:
+            self.logger.debug(f"Attempting to connect MCP server: {tool_name}")
+            await server.connect()
+            self.logger.info(f"MCP server connected successfully: {tool_name}")
+        except Exception as e:
+            self.logger.error(f"Failed to connect MCP server '{tool_name}': {e}", error_type=type(e).__name__)
+            try:
+                await server.cleanup()
+            except Exception:
+                pass
+            return None
+        
         self._mcp_servers[tool_name] = server
         return server
     
