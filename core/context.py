@@ -8,12 +8,13 @@ from threading import Lock
 import json
 import threading
 from pathlib import Path
+import logging
 
 from schemas import ContextMessage, AgentExecution
 from utils.exceptions import ContextError
-from utils.logger import Logger
+# Tracing is handled automatically by Agents SDK
 
-logger = Logger(__name__)
+logger = logging.getLogger("core.context")
 
 
 def safe_lock(lock, timeout=5.0):
@@ -71,7 +72,7 @@ class ContextManager:
         """
         acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
         if not acquired:
-            logger.warning("Lock timeout in add_message")
+            # Lock timeout in add_message
             raise ContextError("Lock timeout in add_message")
         try:
             try:
@@ -87,9 +88,9 @@ class ContextManager:
                 # Trim history if needed
                 if len(self._conversation_history) > self.max_history:
                     removed = self._conversation_history.pop(0)
-                    logger.debug(f"Removed old message from context: {removed.role}")
+                    # Removed old message from context
                 
-                logger.debug(f"Added {role} message to context")
+                # Added message to context
                 
                 # Persist if configured
                 if self.persist_path:
@@ -104,7 +105,7 @@ class ContextManager:
         """Add agent execution to history."""
         acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
         if not acquired:
-            logger.warning("Lock timeout in add_execution")
+            # Lock timeout in add_execution
             return
         try:
             self._execution_history.append(execution)
@@ -154,7 +155,7 @@ class ContextManager:
                 lines.append("Пожалуйста, учитывай этот контекст при ответе.")
                 return "\n".join(lines)
         except ContextError:
-            logger.warning("Lock timeout in get_conversation_context")
+            # Lock timeout in get_conversation_context
             return "Context temporarily unavailable due to lock timeout."
     
     def get_recent_executions(self, agent_name: Optional[str] = None, limit: int = 5) -> List[AgentExecution]:
@@ -174,7 +175,7 @@ class ContextManager:
             self._conversation_history.clear()
             self._execution_history.clear()
             
-            logger.info(f"Cleared {cleared_count} messages from context")
+            # Cleared messages from context
             
             # Clear persistence file
             if self.persist_path and self.persist_path.exists():
@@ -205,7 +206,7 @@ class ContextManager:
                     "last_assistant_message": last_assistant,
                 }
         except ContextError:
-            logger.warning("Lock timeout in get_context_stats")
+            # Lock timeout in get_context_stats
             return {
                 "conversation_messages": 0,
                 "execution_history": 0,
@@ -218,7 +219,7 @@ class ContextManager:
         """Return raw conversation history as list of dicts for external consumers."""
         acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
         if not acquired:
-            logger.warning("Lock timeout in get_conversation_history")
+            # Lock timeout in get_conversation_history
             return []
         try:
             return [msg.model_dump() for msg in self._conversation_history]
@@ -229,7 +230,7 @@ class ContextManager:
         """Get the last user message."""
         acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
         if not acquired:
-            logger.warning("Lock timeout in get_last_user_message")
+            # Lock timeout in get_last_user_message
             return None
         try:
             for msg in reversed(self._conversation_history):
@@ -243,7 +244,7 @@ class ContextManager:
         """Get the last assistant message."""
         acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
         if not acquired:
-            logger.warning("Lock timeout in get_last_assistant_message")
+            # Lock timeout in get_last_assistant_message
             return None
         try:
             for msg in reversed(self._conversation_history):
@@ -286,15 +287,11 @@ class ContextManager:
     
     def _save_to_file(self) -> None:
         """Save context to persistence file."""
-        if not self.persist_path:
-            return
-        
         try:
             data = {
-                "conversation_history": [msg.model_dump() for msg in self._conversation_history],
-                "execution_history": [ex.model_dump() for ex in self._execution_history],
-                "metadata": self._metadata,
-                "saved_at": datetime.now().isoformat()
+                "conversation_history": [m.model_dump() for m in self._conversation_history],
+                "execution_history": [e.model_dump() for e in self._execution_history],
+                "metadata": self._metadata
             }
             
             # Ensure directory exists
@@ -304,7 +301,8 @@ class ContextManager:
                 json.dump(data, f, ensure_ascii=False, indent=2)
                 
         except Exception as e:
-            logger.error(f"Failed to save context: {e}")
+            # Failed to save context
+            logger.error(f"Failed to save context to {self.persist_path}: {e}")
     
     def _load_from_file(self) -> None:
         """Load context from persistence file."""
@@ -325,10 +323,11 @@ class ContextManager:
             # Load metadata
             self._metadata = data.get("metadata", {})
             
-            logger.info(f"Loaded context from {self.persist_path}")
+            # Loaded context from file
             
         except Exception as e:
-            logger.error(f"Failed to load context: {e}")
+            # Failed to load context
+            logger.error(f"Failed to load context from {self.persist_path}: {e}")
             # Reset to empty state on failure
             self._conversation_history = []
             self._execution_history = []

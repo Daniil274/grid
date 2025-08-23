@@ -6,8 +6,7 @@ import asyncio
 import time
 from typing import Any, Dict, List, AsyncIterator
 from dataclasses import dataclass
-from utils.logger import Logger
-logger = Logger(__name__)
+# Tracing is handled automatically by Agents SDK
 
 # Mock Agent Result
 @dataclass
@@ -92,11 +91,11 @@ class MockSecurityAwareAgentFactory:
     
     async def initialize(self):
         """Mock initialization."""
-        logger.info("Mock agent factory initialized")
+        # Mock agent factory initialized
     
     async def cleanup(self):
         """Mock cleanup."""
-        logger.info("Mock agent factory cleaned up")
+        # Mock agent factory cleaned up
     
     async def create_agent(self, agent_type: str) -> MockAgent:
         """Create mock agent."""

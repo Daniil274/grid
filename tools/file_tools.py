@@ -14,7 +14,16 @@ import time
 from pathlib import Path
 from typing import List, Any
 from agents import function_tool
-from utils.unified_logger import log_tool_call, log_tool_result, log_tool_error, get_unified_logger
+from utils.logger import Logger
+
+def log_tool_call(tool_name: str, data: dict) -> None:
+    Logger("tool").log_tool_call(tool_name, data)
+
+def log_tool_result(tool_name: str, result: str | Exception = "") -> None:
+    Logger("tool").info(f"TOOL_RESULT | {tool_name} | {result}")
+
+def log_tool_error(tool_name: str, error: str | Exception) -> None:
+    Logger("tool").error(f"TOOL_ERROR | {tool_name} | {error}")
 
 @function_tool
 def read_file(filepath: str) -> str:

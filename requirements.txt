@@ -23,6 +23,9 @@ black>=23.0.0
 flake8>=6.0.0
 
 # Enterprise features
-structlog>=23.0.0  # Enhanced logging
 click>=8.0.0       # CLI improvements
 rich>=13.0.0       # Terminal formatting
+
+# Tracing and monitoring
+fastapi>=0.100.0   # HTTP ingestor
+uvicorn>=0.20.0    # ASGI server for ingestor

@@ -1,5 +1,5 @@
 """
-Enterprise Agent Factory with caching, tracing, and error handling.
+Agent Factory with caching, tracing, and error handling.
 """
 
 import asyncio
@@ -19,19 +19,14 @@ from .context import ContextManager
 from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError
-from utils.logger import Logger
-from utils.unified_logger import (
-    log_agent_start, log_agent_end, log_agent_error, 
-    log_prompt, log_tool_call, set_current_agent, clear_current_agent,
-    get_unified_logger, log_tool_result
-)
+from core.tracing_config import get_tracing_config
 
 import json
 import re
 import sys
 
 load_dotenv()
-logger = Logger(__name__)
+tracing_config = get_tracing_config()
 
 
 class AgentFactory:
@@ -53,43 +48,13 @@ class AgentFactory:
             config: Configuration instance (creates default if None)
             working_directory: Working directory override
         """
-        # Disable agents SDK tracing by default
-        set_tracing_disabled(True)
+        # Configure tracing instead of logging
+        tracing_config.configure_console_tracing("INFO")
+        tracing_config.apply()
         
-        # Set up selective logging for agents SDK
+        # Set up minimal logging for agents SDK to avoid spam
         agents_logger = logging.getLogger("openai.agents")
         agents_logger.setLevel(logging.WARNING)
-        
-        # Create a custom filter to only log tool-related messages and important events
-        class AgentsToolFilter(logging.Filter):
-            def filter(self, record):
-                message = record.getMessage().lower()
-                # Allow tool-related messages and important events, but suppress verbose prompt/schema logs
-                suppress_keywords = ['tools:', '"parameters":', '"function":', '"properties":', '"description":', '"type": "object"', '"role": "system"']
-                tool_keywords = ['invoking mcp tool', 'mcp tool', 'returned', 'error invoking', 'error code', 'tool call', 'executing tool']
-                
-                # Always allow tool-related messages regardless of length
-                if any(keyword in message for keyword in tool_keywords):
-                    return True
-                    
-                # Suppress very long messages that are likely schemas or prompts
-                if len(message) > 1000:
-                    return False
-                    
-                # Suppress if it contains schema/prompt keywords
-                if any(keyword in message for keyword in suppress_keywords):
-                    return False
-                    
-                # Allow short informational messages
-                return len(message) < 150
-        
-        # Apply filter to suppress verbose debug messages but keep tool logs
-        for handler in agents_logger.handlers:
-            handler.addFilter(AgentsToolFilter())
-        
-        # If no handlers exist, ensure we apply the filter when they're created
-        if not agents_logger.handlers:
-            agents_logger.addFilter(AgentsToolFilter())
         
         self.config = config or Config()
         if working_directory:
@@ -114,7 +79,7 @@ class AgentFactory:
         # Track emitted warnings to avoid log spam (e.g., Responses API fallbacks)
         self._responses_warning_keys: set[str] = set()
         
-        logger.info("Agent Factory initialized")
+
     
     async def initialize(self) -> None:
         """Async init hook for compatibility with API lifespan."""
@@ -179,7 +144,7 @@ class AgentFactory:
             session_id = f"agent_{agent_key}"
             # Use default ':memory:' DB path to keep session ephemeral for the current process
             self._agent_sessions[agent_key] = SQLiteSession(session_id)
-            logger.debug(f"Created new session for agent {agent_key}: {session_id}")
+
         
         return self._agent_sessions[agent_key]
     
@@ -220,7 +185,6 @@ class AgentFactory:
         cache_key = agent_key
         
         if not force_reload and cache_key in self._agent_cache:
-            logger.debug(f"Using cached agent: {agent_key}")
             return self._agent_cache[cache_key]
         
         try:
@@ -262,20 +226,9 @@ class AgentFactory:
             if use_responses and not provider_supports_responses:
                 warn_key = f"{model_config.provider}|{provider_config.base_url}|{model_config.name}|no_support"
                 if warn_key not in self._responses_warning_keys:
-                    logger.warning(
-                        "Responses API requested by config, but provider does not support it. Falling back to Chat Completions.",
-                        provider=model_config.provider,
-                        base_url=provider_config.base_url,
-                        model=model_config.name,
-                    )
-                    self._responses_warning_keys.add(warn_key)
-                else:
-                    logger.debug(
-                        "Responses API not supported by provider; using Chat Completions (deduped)",
-                        provider=model_config.provider,
-                        base_url=provider_config.base_url,
-                        model=model_config.name,
-                    )
+                                    self._responses_warning_keys.add(warn_key)
+            else:
+                pass
                 use_responses = False
             
             if use_responses and provider_supports_responses:
@@ -286,30 +239,13 @@ class AgentFactory:
                         model=model_config.name,
                         openai_client=client
                     )
-                    logger.info(
-                        "Using Responses API model",
-                        model=model_config.name,
-                        provider=model_config.provider,
-                        forced_by_config=use_responses,
-                    )
+
                 except Exception as e:
                     warn_key = f"{model_config.provider}|{provider_config.base_url}|{model_config.name}|init_fail"
                     if warn_key not in self._responses_warning_keys:
-                        logger.warning(
-                            (
-                                "Responses API model not available, falling back to Chat Completions. "
-                                "Tool calls may not work with reasoning models."
-                            ),
-                            error=str(e),
-                            model=model_config.name,
-                        )
-                        self._responses_warning_keys.add(warn_key)
-                    else:
-                        logger.debug(
-                            "Responses API model init failed previously; using Chat Completions (deduped)",
-                            error=str(e),
-                            model=model_config.name,
-                        )
+                                        self._responses_warning_keys.add(warn_key)
+            else:
+                pass
             
             if model is None:
                 model = OpenAIChatCompletionsModel(
@@ -349,25 +285,14 @@ class AgentFactory:
             # Create and attach session to agent for memory
             session = self._get_agent_session(agent_key)
             agent._session = session  # Attach session to agent
-            logger.debug(f"Attached session {session.session_id} to agent {agent_key}")
+
             
-            # Cache agent
             self._agent_cache[cache_key] = agent
-            
-            logger.log_agent_creation(agent_key, agent_config.name)
-            logger.info(
-                f"Created agent '{agent_key}'",
-                agent_name=agent_config.name,
-                model=model_config.name,
-                provider=model_config.provider,
-                tools_count=len(tools)
-            )
             
             return agent
             
         except Exception as e:
             error_msg = f"Failed to create agent '{agent_key}': {e}"
-            logger.error(error_msg, agent_key=agent_key, error_type=type(e).__name__)
             raise AgentError(error_msg, details={"agent_key": agent_key}) from e
     
     async def run_agent(
@@ -397,56 +322,12 @@ class AgentFactory:
         )
         
         try:
-            # Set current agent for tool logging
-            set_current_agent(agent_key)
-            
-            logger.info(f"Creating agent '{agent_key}' with context_path: {context_path}")
+
             
             # Create agent
             agent = await self.create_agent(agent_key, context_path)
             
-            # Добавляем хук для логирования инструментов
-            try:
-                from utils.unified_logger import get_unified_logger
-                unified_logger = get_unified_logger()
-                
-                def tool_start_hook(tool_name: str, tool_args: dict):
-                    # Определяем MCP инструменты
-                    mcp_tools = {
-                        "sequentialthinking": "sequential_thinking",
-                        "read_text_file": "filesystem", 
-                        "write_text_file": "filesystem",
-                        "list_directory": "filesystem",
-                        "create_directory": "filesystem",
-                        "delete_file": "filesystem",
-                        "move_file": "filesystem",
-                        "git_status": "git",
-                        "git_log": "git", 
-                        "git_diff": "git",
-                        "git_add": "git",
-                        "git_commit": "git",
-                        "git_push": "git",
-                        "git_pull": "git",
-                        "git_set_working_dir": "git",
-                        "git_show": "git"
-                    }
-                    
-                    if tool_name in mcp_tools:
-                        server_label = mcp_tools[tool_name]
-                        display_name = f"🔧 [MCP:{server_label}] {tool_name}"
-                    else:
-                        display_name = tool_name
-                    
-                    unified_logger.pretty_logger.set_current_agent(agent.name)
-                    unified_logger.pretty_logger.tool_start(display_name, args=str(tool_args))
-                
-                # Устанавливаем хук для агента (если поддерживается)
-                if hasattr(agent, 'add_tool_hook'):
-                    agent.add_tool_hook('start', tool_start_hook)
-            except Exception as e:
-                print(f"[DEBUG] Failed to set tool hook: {e}")
-            
-            logger.info(f"Agent '{agent.name}' created successfully")
+
             
             # Не добавляем инструкции агента в диалог; сохраняем в metadata для служебного использования
             if not self.context_manager.get_conversation_context():
@@ -456,23 +337,12 @@ class AgentFactory:
             # Добавляем сообщение в контекст для текущей сессии
             self.context_manager.add_message("user", message)
             
-            # Начинаем детальное логирование
-            log_agent_start(agent.name, message)
-            
-            # Логируем промпт агента (кратко)
+
             agent_instructions = self._build_agent_instructions(agent_key, context_path)
-            # Ограничиваем размер логируемого промпта
-            instructions_preview = agent_instructions[:200] + "..." if len(agent_instructions) > 200 else agent_instructions
-            log_prompt(agent.name, "preview", instructions_preview)
-            
-            # Log start (legacy)
-            logger.log_agent_start(agent.name, message)
             
             # Run agent with max_turns configuration and timeout
             max_turns = self.config.get_max_turns()
             timeout_seconds = self.config.get_agent_timeout()
-            
-            logger.info(f"Starting agent execution with max_turns={max_turns}, timeout={timeout_seconds}s")
             
             # Prepare session
             session = getattr(agent, '_session', None)
@@ -575,23 +445,7 @@ class AgentFactory:
                                     
                                     args_str = format_arguments_readable(arguments)
                                     
-                                    # Убираем дублирование - используем только unified_logger
-                                    # logger.info(f"TOOL | {tool_display_name} | {args_str}")
-                                    log_tool_call(tool_display_name, args_dict, agent_name=agent.name)
-                                    
-                                    # Создаем LogEvent для unified_logger
-                                    try:
-                                        from utils.unified_logger import get_unified_logger, LogEventType
-                                        unified_logger = get_unified_logger()
-                                        unified_logger.log(
-                                            event_type=LogEventType.TOOL_CALL,
-                                            message=f"MCP tool call: {tool_display_name}",
-                                            tool_name=tool_display_name,
-                                            agent_name=agent.name,
-                                            data=args_dict
-                                        )
-                                    except Exception:
-                                        pass  # Fallback если unified_logger недоступен
+
                                 elif name == "tool_output" and item is not None:
                                     raw_item = getattr(item, 'raw_item', None)
                                     tool_name = getattr(raw_item, 'name', None) or getattr(raw_item, 'type', None) or "tool"
@@ -627,7 +481,7 @@ class AgentFactory:
                                     else:
                                         tool_display_name = tool_name
                                     
-                                    log_tool_result(tool_display_name, output_val, agent_name=agent.name)
+
                             elif isinstance(event, RawResponsesStreamEvent):
                                 # Отображение текстовых дельт в реальном времени
                                 try:
@@ -691,50 +545,35 @@ class AgentFactory:
                 try:
                     # Запускаем агента и получаем RunResult объект
                     from agents import Runner
-                    logger.info("Starting Runner.run...")
                     result = await asyncio.wait_for(
                         Runner.run(agent, message, max_turns=max_turns, session=session),
                         timeout=timeout_seconds
                     )
-                    logger.info(f"Runner.run completed, result type: {type(result)}")
+
                 except asyncio.TimeoutError:
-                    logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
                 except Exception as e:
-                    logger.error(f"Runner.run failed: {e}")
                     raise AgentError(f"Agent execution failed: {e}") from e
             
             # Process result - more robust extraction
             try:
-                logger.debug(f"Result type: {type(result)}")
-                logger.debug(f"Result attributes: {dir(result)}")
-                
-                # Проверяем, является ли result строкой (уже обработанной)
+                            # Проверяем, является ли result строкой (уже обработанной)
                 if isinstance(result, str):
                     output = result
-                    logger.debug("Using result as string")
                 elif hasattr(result, 'final_output') and result.final_output:
                     output = result.final_output
-                    logger.debug("Using result.final_output")
                 elif hasattr(result, 'output') and result.output:
                     output = result.output
-                    logger.debug("Using result.output")
                 elif hasattr(result, 'content') and result.content:
                     output = result.content
-                    logger.debug("Using result.content")
                 else:
                     output = str(result)
-                    logger.debug("Using str(result)")
                 
                 # Ensure we have a non-empty response
                 if not output or output.strip() == "":
                     output = "Агент выполнил задачу, но не предоставил текстовый ответ. Проверьте логи для деталей выполнения."
-                    logger.warning("Empty output from agent, using fallback message")
             except Exception as e:
-                logger.error(f"Error processing result: {e}")
                 output = "Произошла ошибка при обработке результата агента. Проверьте логи."
-            
-            logger.debug(f"Final output length: {len(output)}")
             
             # Добавляем ответ агента в контекст для текущей сессии
             self.context_manager.add_message("assistant", output)
@@ -745,9 +584,7 @@ class AgentFactory:
                 if manual_tool_result is not None:
                     output = manual_tool_result
             except Exception as e:
-                logger.warning(
-                    "Manual tool call parsing/execution failed", error=str(e)
-                )
+                pass
             
             # Update execution record
             execution.end_time = time.time()
@@ -756,23 +593,14 @@ class AgentFactory:
             tools_used: List[str] = []
             try:
                 if not isinstance(result, str):
-                    logger.debug(f"Extracting tools from result type: {type(result)}")
                     tools_used = self._extract_tools_used(result)
-                    logger.debug(f"Extracted tools: {tools_used}")
                 execution.tools_used = tools_used
             except Exception as e:
-                logger.error(f"Error setting execution.tools_used: {e}")
                 execution.tools_used = []
             
-            # Завершаем детальное логирование
             duration = execution.end_time - start_time
-            log_agent_end(agent.name, output, duration)
-            logger.log_agent_end(agent.name, output, duration)
             
             self.context_manager.add_execution(execution)
-            
-            # Clear current agent
-            clear_current_agent()
             
             return output
             
@@ -780,14 +608,7 @@ class AgentFactory:
             execution.end_time = time.time()
             execution.error = str(e)
             
-            # Логируем ошибку в детальном логгере
-            log_agent_error(agent_key, e)
-            
-            logger.log_agent_error(agent_key, e)
             self.context_manager.add_execution(execution)
-            
-            # Clear current agent on error too
-            clear_current_agent()
             
             raise
     
@@ -864,25 +685,25 @@ class AgentFactory:
                     agent_tools.append(tool_name)
                     
             except ConfigError:
-                logger.warning(f"Tool '{tool_name}' not found in configuration")
+                            pass
         
         # Add function tools
         if function_tools:
             try:
                 func_tools = get_tools_by_names(function_tools)
                 tools.extend(func_tools)
-                logger.debug(f"Added {len(func_tools)} function tools")
+
             except Exception as e:
-                logger.error(f"Failed to load function tools: {e}")
+                            pass
         
         # Add agent tools
         if agent_tools:
             try:
                 agent_tool_instances = await self._create_agent_tools(agent_tools)
                 tools.extend(agent_tool_instances)
-                logger.debug(f"Added {len(agent_tool_instances)} agent tools")
+
             except Exception as e:
-                logger.error(f"Failed to create agent tools: {e}")
+                            pass
  
         # Добавим алиасы каналов только для function tools (не для MCP)
         # MCP инструменты обрабатываются SDK отдельно и не нуждаются в алиасах
@@ -907,20 +728,15 @@ class AgentFactory:
                         tools.append(alias_tool_proxy)
                         alias_count += 1
                 if alias_count:
-                    logger.debug(f"Added {alias_count} channel alias tools for robustness")
+                    pass
             except Exception as e:
-                logger.warning("Failed to add channel alias tools", error=str(e))
+                pass
 
         # NOTE: MCP tools are no longer added as function tools. They are exposed to the model
         # via Agent.mcp_servers using the SDK integration. We only record unavailability metadata.
         if mcp_tools:
             if not (agent_config.mcp_enabled or self.config.is_mcp_enabled()):
-                logger.warning(
-                    "MCP tools configured but MCP is disabled for this agent and globally",
-                    agent_mcp_enabled=agent_config.mcp_enabled,
-                    global_mcp_enabled=self.config.is_mcp_enabled(),
-                    mcp_tools=mcp_tools,
-                )
+                        pass
         
         # Cache tools
         self._tool_cache[cache_key] = tools
@@ -975,7 +791,7 @@ class AgentFactory:
                     tools.append(wrapped_alias)
                 
             except Exception as e:
-                logger.error(f"Failed to create agent tool '{agent_key}': {e}")
+                pass
         
         return tools
     
@@ -1019,22 +835,13 @@ class AgentFactory:
             )
             
             try:
-                # Set current agent for tool logging
-                set_current_agent(agent_name)
                 
-                # Начинаем детальное логирование
-                execution_id = log_agent_start(agent_name, input_data)
                 
                 # Логируем вызов инструмента с красивым именем
                 tool_display_name = getattr(agent_tool, 'name', agent_name)
                 # Добавляем префикс для агентов-инструментов
                 formatted_tool_name = f"Agent-Tool: {tool_display_name}"
-                log_tool_call(formatted_tool_name, {"input": input_data})
-                
-                # Убираем дублирование - используем только unified_logger
-                # logger.log_agent_tool_start(agent_name, tool_display_name, input_data)
-                # logger.log_agent_start(agent_name, input_data)
-                
+
                 # Call original function с нормализованными аргументами
                 result = original_invoke(tool_context, **normalized_args)
                 if hasattr(result, '__await__'):
@@ -1049,19 +856,7 @@ class AgentFactory:
                 
                 duration = execution.end_time - execution.start_time
                 
-                # Завершаем детальное логирование
-                log_agent_end(agent_name, str(result), duration)
-                
-                # Логируем результат инструмента
-                log_tool_result(formatted_tool_name, str(result), agent_name=agent_name)
-                
-                # Убираем дублирование - используем только unified_logger
-                # logger.log_agent_end(agent_name, str(result), duration)
-                
                 self.context_manager.add_execution(execution)
-                
-                # Clear current agent
-                clear_current_agent()
                 
                 return result
                 
@@ -1069,14 +864,7 @@ class AgentFactory:
                 execution.end_time = time.time()
                 execution.error = str(e)
                 
-                # Логируем ошибку в детальном логгере
-                log_agent_error(agent_name, e)
-                
-                logger.log_agent_error(agent_name, e)
                 self.context_manager.add_execution(execution)
-                
-                # Clear current agent on error too
-                clear_current_agent()
                 
                 raise
         
@@ -1133,9 +921,8 @@ class AgentFactory:
                 # Fallback: create session if not attached
                 agent_key = tool_name.replace("call_", "")
                 session = self._get_agent_session(agent_key)
-                logger.warning(f"Session not found on agent {agent_key}, created new session: {session.session_id}")
             else:
-                logger.debug(f"Using existing session {session.session_id} for agent {sub_agent.name}")
+                pass
             
             # Run the sub-agent with enhanced input and session
             output = await Runner.run(
@@ -1170,7 +957,6 @@ class AgentFactory:
             except Exception:
                 unavailable.append(name)
         if unavailable:
-            logger.warning("Some MCP servers are unavailable and will be skipped", unavailable=unavailable)
             try:
                 self.context_manager.set_metadata("mcp_unavailable", unavailable)
             except Exception:
@@ -1188,7 +974,6 @@ class AgentFactory:
 
         server_command = tool_config.server_command or []
         if not server_command:
-            logger.error("MCP tool misconfigured: empty server_command", tool=tool_name)
             return None
 
         command = server_command[0]
@@ -1199,15 +984,6 @@ class AgentFactory:
 
         env = tool_config.env_vars or {}
         cwd = self.config.get_working_directory()
-
-        logger.debug(
-            "Initializing MCP server (SDK)",
-            tool_name=tool_name,
-            command=command,
-            args=args,
-            env_keys=list(env.keys()),
-            cwd=cwd,
-        )
 
         server = MCPServerStdio(
             params={
@@ -1222,7 +998,6 @@ class AgentFactory:
 
         await server.connect()
         self._mcp_servers[tool_name] = server
-        logger.log_mcp_connection(tool_name, "connected")
         return server
     
     def _extract_tools_used(self, result: Any) -> List[str]:
@@ -1242,12 +1017,12 @@ class AgentFactory:
                     try:
                         name = getattr(call, "name", None)
                         if name:
-                            names.append(str(name))  # Принудительно приводим к строке
+                            names.append(str(name))
                     except Exception:
-                        continue  # Пропускаем проблемные вызовы
+                        continue
                 return names
         except Exception as e:
-            logger.debug(f"Failed to extract tool calls: {e}")
+            pass
         return []
     
     # Context management methods
@@ -1272,7 +1047,7 @@ class AgentFactory:
         """Clear all caches."""
         self._agent_cache.clear()
         self._tool_cache.clear()
-        logger.info("Agent factory caches cleared")
+
     
     async def cleanup(self) -> None:
         """Cleanup resources."""
@@ -1287,27 +1062,25 @@ class AgentFactory:
                     # Back-compat for any legacy clients
                     await mcp_client.disconnect()
             except asyncio.CancelledError:
-                # MCP процессы часто завершаются с CancelledError - это нормально
-                logger.debug("MCP client cleanup cancelled (normal during shutdown)")
+                pass
             except Exception as e:
-                logger.error(f"Error disconnecting MCP client: {e}")
+                pass
         
         # Clear agent sessions
         for session in self._agent_sessions.values():
             try:
                 await session.clear_session()
             except asyncio.CancelledError:
-                # Session cleanup часто завершается с CancelledError - это нормально
-                logger.debug("Agent session cleanup cancelled (normal during shutdown)")
+                pass
             except Exception as e:
-                logger.error(f"Error clearing agent session: {e}")
+                pass
         
         # Clear caches
         self.clear_cache()
         self._mcp_servers.clear()
         self._agent_sessions.clear()
         
-        logger.info("Agent factory cleanup completed")
+
     
     # Fallback: заглушка для ручного парсинга tool call из текста ответа
     async def _execute_first_tool_call_in_text(self, output: str) -> Optional[str]:

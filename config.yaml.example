@@ -1,33 +1,31 @@
-# Full AI system configuration
-# Providers -> Models -> Tools -> Agents
+# Полная конфигурация AI системы
+# Провайдеры -> Модели -> Инструменты -> Агенты
 
-# Global settings
+# Глобальные настройки
 settings:
-  default_agent: "code_agent"
+  default_agent: "coordinator"
   max_history: 50
-  max_turns: 100  # Increase the turn limit for agents
-  agent_timeout: 300  # Agent execution timeout in seconds (5 minutes)
+  max_turns: 100  # Увеличиваем лимит ходов для агентов
+  agent_timeout: 300  # Таймаут выполнения агента в секундах (5 минут)
   debug: false
   mcp_enabled: true
-  # Path settings
-  working_directory: "C:/Users/daniil/Documents/agents"  # Default working directory
-  config_directory: "."   # Configuration directory
-  allow_path_override: true  # Allow overriding the working directory at startup
-  # Logging settings
+  # Настройки путей
+  working_directory: "C:/Users/daniil/Documents/agents"  # Рабочая директория по умолчанию
+  config_directory: "."   # Директория конфигурации
+  allow_path_override: true  # Разрешить переопределение пути при запуске
+  # Настройки логирования
   agent_logging:
     enabled: true
     level: "full"  # basic, detailed, full
     save_prompts: true
     save_conversations: true
     save_executions: true
-    # Common tool usage rules (added to each agent once)
-    # tools_common_rules: |
-    #   Always perform file operations via tools and return their results.
-    #   - Creating/writing a new file: use file_write(filepath, content).
-    #   - Editing an existing file: use edit_file_patch(filepath, patch_content) with a valid unified diff.
-    #   It is forbidden to claim a file was created/modified without calling the appropriate tool.
+    # Общие правила использования инструментов (добавляются к каждому агенту один раз)
+    tools_common_rules: |
+      Всегда выполняй операции с файлами через инструменты и возвращай их результаты.
+      Запрещено утверждать создание/изменение файла без вызова инструмента.
 
-# API providers
+# Провайдеры API
 providers:
   lm-studio:
     name: "lm-studio"
@@ -35,7 +33,6 @@ providers:
     api_key: "lm-studio"
     timeout: 300
     max_retries: 3
-    streaming_enabled: false
   
   openrouter:
     name: "openrouter"
@@ -43,17 +40,18 @@ providers:
     api_key_env: "OPENROUTER_API_KEY"
     timeout: 300
     max_retries: 3
-    streaming_enabled: false
+    streaming_enabled: True
 
 
-# Models
+
+# Модели
 models:
   openai-oss-20b:
     name: "openai/gpt-oss-20b"
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 8192
-    description: "OpenAI OSS 20b model"
+    description: "OpenAI OSS 20b модель"
     streaming_enabled: false
   
   openai-oss-20b-local:
@@ -61,7 +59,7 @@ models:
     provider: "lm-studio"
     temperature: 0.7
     max_tokens: 8192
-    description: "OpenAI OSS 20b model"
+    description: "OpenAI OSS 20b модель"
     streaming_enabled: true
 
   openai-oss-120b:
@@ -69,14 +67,29 @@ models:
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 8192
-    description: "OpenAI OSS 120b model"
+    description: "OpenAI OSS 120b модель"
+
+  gpt-5-mini:
+    name: "openai/gpt-5-mini"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "GPT-5 Mini модель"
+
+  gpt-5-nano:
+    name: "openai/gpt-5-nano"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 2000
+    description: "GPT-5 nano модель"
+    streaming_enabled: true
 
   gpt-4.1-mini:
     name: "openai/gpt-4.1-mini"
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 8000
-    description: "Qwen 3 8b model"
+    description: "Qwen 3 8b модель"
 
   qwen3:
     name: "qwen3-4b-instruct-2507"
@@ -90,7 +103,7 @@ models:
     provider: "lm-studio"
     temperature: 0.7
     max_tokens: 8000
-    description: "Qwen 3 8b model"
+    description: "Qwen 3 8b модель"
   
   flash-lite:
     name: "google/gemini-2.5-flash-lite"
@@ -111,230 +124,238 @@ models:
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 16000
-    description: "Qwen 3 235b model"
+    description: "Qwen 3 235b модель"
 
   claude-haiku:
     name: "anthropic/claude-3-haiku"
     provider: "openrouter"
     temperature: 0.2
     max_tokens: 2000
-    description: "Claude Haiku for quick responses"
+    description: "Claude Haiku для быстрых ответов"
   
   gpt-4o:
     name: "gpt-4o"
     provider: "openrouter"
     temperature: 0.5
     max_tokens: 4000
-    description: "GPT-4 Omni general-purpose model"
+    description: "GPT-4 Omni универсальная модель"
 
 
-# Tools
+# Инструменты
 tools:
-  # File operations
+  # Файловые операции
   file_read:
     type: "function"
     name: "read_file"
-    description: "Reads file contents"
-    prompt_addition: "Use read_file(filepath) to read files."
+    description: "Читает содержимое файла"
+    prompt_addition: "Используй read_file(filepath) для чтения файлов."
   
   file_write:
     type: "function"
     name: "write_file"
-    description: "Writes data to a file"
-    prompt_addition: "Use write_file(filepath, content) to write files."
+    description: "Записывает данные в файл"
+    prompt_addition: "Используй write_file(filepath, content) для записи файлов."
   
   file_list:
     type: "function"
     name: "list_files"
-    description: "Shows a list of files in a directory"
-    prompt_addition: "Use list_files(directory) to list folder contents."
+    description: "Показывает список файлов в директории"
+    prompt_addition: "Используй list_files(directory) для просмотра содержимого папок."
   
   file_info:
     type: "function"
     name: "get_file_info"
-    description: "Retrieves file information"
-    prompt_addition: "Use get_file_info(filepath) to get file information."
+    description: "Получает информацию о файле"
+    prompt_addition: "Используй get_file_info(filepath) для получения информации о файле."
   
   file_search:
     type: "function"
     name: "search_files"
-    description: "Search files by name and content"
-    prompt_addition: "Use search_files(search_pattern, directory, use_regex, search_in_content) to search files."
+    description: "Поиск файлов по имени и содержимому"
+    prompt_addition: "Используй search_files(search_pattern, directory, use_regex, search_in_content) для поиска файлов."
   
   file_edit_patch:
     type: "function"
     name: "edit_file_patch"
-    description: "Edits a file using a unified diff patch"
-    prompt_addition: "Use edit_file_patch(filepath, patch_content) to apply patches to files. The patch must be in unified diff format. Verify file contents before making changes."
+    description: "Редактирует файл с помощью патча в формате unified diff"
+    prompt_addition: "Используй edit_file_patch(filepath, patch_content) для применения патчей к файлам. Патч должен быть в формате unified diff. Проверять содержимое файла перед изменениями."
   
-  # Git operations - basics
+  # Git операции - основные
   git_status:
     type: "function"
     name: "git_status"
-    description: "Shows the git repository status"
-    prompt_addition: "Use git_status(directory) to check changes in git."
+    description: "Показывает статус git репозитория"
+    prompt_addition: "Используй git_status(directory) для проверки изменений в git."
   
   git_log:
     type: "function"
     name: "git_log"
-    description: "Shows the commit history"
-    prompt_addition: "Use git_log(directory, max_commits) to view commit history."
+    description: "Показывает историю коммитов"
+    prompt_addition: "Используй git_log(directory, max_commits) для просмотра истории коммитов."
   
   git_diff:
     type: "function"
     name: "git_diff"
-    description: "Shows file differences"
-    prompt_addition: "Use git_diff(directory, filename) to view file changes."
+    description: "Показывает различия в файлах"
+    prompt_addition: "Используй git_diff(directory, filename) для просмотра изменений в файлах."
   
   git_branch_list:
     type: "function"
     name: "git_branch_list"
-    description: "Shows branch list"
-    prompt_addition: "Use git_branch_list(directory) to view branches."
+    description: "Показывает список веток"
+    prompt_addition: "Используй git_branch_list(directory) для просмотра веток."
   
   git_add_file:
     type: "function"
     name: "git_add_file"
-    description: "Adds a file to the index"
-    prompt_addition: "Use git_add_file(directory, filename) to stage files in git."
+    description: "Добавляет файл в индекс"
+    prompt_addition: "Используй git_add_file(directory, filename) для добавления файлов в git."
   
   git_add_all:
     type: "function"
     name: "git_add_all"
-    description: "Stages all modified files"
-    prompt_addition: "Use git_add_all(directory) to stage all changes in git."
+    description: "Добавляет все измененные файлы в индекс"
+    prompt_addition: "Используй git_add_all(directory) для добавления всех изменений в git."
   
   git_commit:
     type: "function"
     name: "git_commit"
-    description: "Creates a git commit"
-    prompt_addition: "Use git_commit(directory, message, author_name, author_email) to create commits."
+    description: "Создает git коммит"
+    prompt_addition: "Используй git_commit(directory, message, author_name, author_email) для создания коммитов."
   
   git_checkout_branch:
     type: "function"
     name: "git_checkout_branch"
-    description: "Switches to a branch"
-    prompt_addition: "Use git_checkout_branch(directory, branch_name, create_new) to switch branches."
+    description: "Переключается на ветку"
+    prompt_addition: "Используй git_checkout_branch(directory, branch_name, create_new) для переключения веток."
   
-  # Git operations - initialization and config
+  # Git операции - инициализация и настройка
   git_init:
     type: "function"
     name: "git_init"
-    description: "Initializes a new git repository"
-    prompt_addition: "Use git_init(directory, bare) to create a new git repository."
+    description: "Инициализирует новый git репозиторий"
+    prompt_addition: "Используй git_init(directory, bare) для создания нового git репозитория."
   
   git_config:
     type: "function"
     name: "git_config"
-    description: "Configures git"
-    prompt_addition: "Use git_config(directory, name, email, global_config) to configure git."
+    description: "Настраивает git конфигурацию"
+    prompt_addition: "Используй git_config(directory, name, email, global_config) для настройки git."
   
   git_clone:
     type: "function"
     name: "git_clone"
-    description: "Clones a remote repository"
-    prompt_addition: "Use git_clone(directory, repository_url, branch) to clone a repository."
+    description: "Клонирует удаленный репозиторий"
+    prompt_addition: "Используй git_clone(directory, repository_url, branch) для клонирования репозитория."
   
-  # Git operations - remotes
+  # Git операции - удаленные репозитории
   git_remote_info:
     type: "function"
     name: "git_remote_info"
-    description: "Shows information about remote repositories"
-    prompt_addition: "Use git_remote_info(directory) to view remotes."
+    description: "Показывает информацию об удаленных репозиториях"
+    prompt_addition: "Используй git_remote_info(directory) для просмотра удаленных репозиториев."
   
   git_remote_add:
     type: "function"
     name: "git_remote_add"
-    description: "Adds a remote repository"
-    prompt_addition: "Use git_remote_add(directory, name, url) to add a remote."
+    description: "Добавляет удаленный репозиторий"
+    prompt_addition: "Используй git_remote_add(directory, name, url) для добавления удаленного репозитория."
   
   git_remote_remove:
     type: "function"
     name: "git_remote_remove"
-    description: "Removes a remote repository"
-    prompt_addition: "Use git_remote_remove(directory, name) to remove a remote."
+    description: "Удаляет удаленный репозиторий"
+    prompt_addition: "Используй git_remote_remove(directory, name) для удаления удаленного репозитория."
   
   git_fetch:
     type: "function"
     name: "git_fetch"
-    description: "Fetches changes from a remote repository without merging"
-    prompt_addition: "Use git_fetch(directory, remote) to fetch changes without merging."
+    description: "Получает изменения из удаленного репозитория без слияния"
+    prompt_addition: "Используй git_fetch(directory, remote) для получения изменений без слияния."
   
   git_pull:
     type: "function"
     name: "git_pull"
-    description: "Pulls changes from a remote repository"
-    prompt_addition: "Use git_pull(directory) to pull changes."
+    description: "Получает изменения из удаленного репозитория"
+    prompt_addition: "Используй git_pull(directory) для получения изменений."
   
   git_push:
     type: "function"
     name: "git_push"
-    description: "Pushes changes to a remote repository"
-    prompt_addition: "Use git_push(directory, remote, branch) to push changes."
+    description: "Отправляет изменения в удаленный репозиторий"
+    prompt_addition: "Используй git_push(directory, remote, branch) для отправки изменений."
   
-  # Git operations - branching and merging
+  # Git операции - управление ветками и слияние
   git_merge:
     type: "function"
     name: "git_merge"
-    description: "Merges a branch into the current one"
-    prompt_addition: "Use git_merge(directory, branch_name, message) to merge branches."
+    description: "Сливает ветку в текущую"
+    prompt_addition: "Используй git_merge(directory, branch_name, message) для слияния веток."
   
   git_reset:
     type: "function"
     name: "git_reset"
-    description: "Resets repository state"
-    prompt_addition: "Use git_reset(directory, mode, commit_hash) to reset state."
+    description: "Сбрасывает состояние репозитория"
+    prompt_addition: "Используй git_reset(directory, mode, commit_hash) для сброса состояния."
   
   git_stash:
     type: "function"
     name: "git_stash"
-    description: "Manages temporary change storage"
-    prompt_addition: "Use git_stash(directory, action, message) for stash operations."
+    description: "Управляет временным сохранением изменений"
+    prompt_addition: "Используй git_stash(directory, action, message) для работы с stash."
   
-  # Git operations - tags
+  # Git операции - теги
   git_tag:
     type: "function"
     name: "git_tag"
-    description: "Creates a tag in the repository"
-    prompt_addition: "Use git_tag(directory, tag_name, message, commit_hash) to create tags."
+    description: "Создает тег в репозитории"
+    prompt_addition: "Используй git_tag(directory, tag_name, message, commit_hash) для создания тегов."
   
   git_tag_list:
     type: "function"
     name: "git_tag_list"
-    description: "Shows tag list"
-    prompt_addition: "Use git_tag_list(directory) to view tags."
+    description: "Показывает список тегов"
+    prompt_addition: "Используй git_tag_list(directory) для просмотра тегов."
+  
 
   
-  
-  # MCP servers
-  filesystem_mcp:
+  # MCP серверы
+  # Терминал - используем простой и стабильный MCP сервер  
+  terminal:
     type: "mcp"
-    # Launch the official filesystem MCP server via npx (non-interactive)
+    server_command: ["npx", "@dillip285/mcp-terminal", "--", "C:/Users/daniil/Documents/agents"]
+    description: "MCP сервер для выполнения команд терминала"
+    prompt_addition: "Используй execute_command для выполнения команд в терминале."
+  
+  # Файловая система
+  filesystem:
+    type: "mcp"
     server_command: ["npx", "@modelcontextprotocol/server-filesystem", "C:/Users/daniil/Documents/agents"]
-    description: "MCP server for filesystem access (restricted to working directory)"
-    prompt_addition: "Use filesystem_mcp(task) for filesystem access. task is the operation to perform."
+    description: "MCP сервер для работы с файловой системой (ограничен рабочей директорией)"
+    prompt_addition: "Используй filesystem(task) для доступа к файловой системе. task - это операция, которую нужно выполнить."
   
-  git_mcp:
+  git:
     type: "mcp"
-    server_command: ["npx", "@cyanheads/git-mcp-server"]
+    server_command: ["npx", "@cyanheads/git-mcp-server", "C:/Users/daniil/Documents/agents"]
     env:
       MCP_LOG_LEVEL: "info"
       GIT_SIGN_COMMITS: "false"
-    description: "Git management: clone, commit, branch, merge, rebase, stash"
+    description: "Управление Git: clone, commit, branch, merge, rebase, stash"
 
-  sequential_thinking_mcp:
+
+  sequential_thinking:
     type: "mcp"
     server_command: ["npx", "@modelcontextprotocol/server-sequential-thinking"]
-    description: "MCP server for sequential thinking"
-    prompt_addition: "IMPORTANT: ALWAYS use sequential thinking for analysis and task planning. Invoke it before executing any task."
+    description: "MCP сервер для последовательного мышления"
+    prompt_addition: "ВАЖНО!!! ВСЕГДА Используй sequential thinking для анализа, планирования задачи. Вызывай его перед выполнением любой задачи."
   
   
-  # Agents used as tools
+  # Агенты как инструменты
   file_agent:
     type: "agent"
     name: "call_file_agent"
-    description: "Invokes the file agent to work with files"
-    prompt_addition: "Use call_file_agent(task) for file-related tasks where task is the job the file agent should perform. Use unified diff for file edits."
+    description: "Вызывает файлового агента для работы с файлами"
+    prompt_addition: "Используй call_file_agent(task) для задач по работе с файлами, где task - это задача, которую должен выполнить файловый агент.  Используй unified diff для редактирования файлов."
     # Context sharing configuration for agent tools
     context_strategy: "smart"
     context_depth: 5
@@ -343,8 +364,8 @@ tools:
   git_agent:
     type: "agent"
     name: "call_git_agent"
-    description: "Invokes the Git agent for repository operations. Call it whenever a Git operation is required."
-    prompt_addition: "Use call_git_agent(task) for Git operations. task is the job the Git agent should perform."
+    description: "Вызывает Git агента для работы с репозиторием. Вызывай его, если требуется выполнить Git операцию."
+    prompt_addition: "Используй call_git_agent(task) для Git операций. task - это задача, которую должен выполнить Git агент."
     # Context sharing configuration for agent tools
     context_strategy: "conversation"
     context_depth: 5
@@ -353,17 +374,17 @@ tools:
   task_analyst:
     type: "agent"
     name: "call_task_analyst"
-    description: "Invokes the task analyst to analyze tasks and build an action plan."
-    prompt_addition: "ALWAYS CALL call_code_agent(task) AFTER RECEIVING A USER REQUEST!!! where task is the description of the task and the tools available to you."
+    description: "Вызывает аналитика задач для анализа задач и составления плана действий."
+    prompt_addition: "ВСЕГДА ВЫЗЫВАЙ call_code_agent(task) для помощи в составлении плана действий. task - это задача, которую нужно решить с полным контекстом и списком досткупных тебе инструментов. БЕЗ ПРЕДОСТАВЛЕНИЯ ПОЛНОГО КОНТЕКСТА И СПИСКА ДОСТУПНЫХ ИНСТРУМЕНТОВ АНАЛИТИК НЕ ПОМОЖЕТ!!! НЕ вызывай другие инструменты до вызова аналитика."
     # Context sharing configuration for agent tools
-    context_strategy: "conversation"
+    context_strategy: "full"
     
 
   researcher:
     type: "agent"
     name: "call_researcher"
-    description: "Invokes the researcher for information retrieval"
-    prompt_addition: "Use call_researcher(query) to search the internet. query is the research topic."
+    description: "Вызывает исследователя для поиска информации"
+    prompt_addition: "Используй call_researcher(query) для поиска информации в интернете. query - это тема исследования."
     # Context sharing configuration for agent tools
     context_strategy: "minimal"
     context_depth: 3
@@ -372,8 +393,8 @@ tools:
   code_agent:
     type: "agent"
     name: "call_code_agent"
-    description: "Invokes the code agent for working with code and programming"
-    prompt_addition: "Always call_code_agent(task) for tasks related to code or code files. task is the job the code agent should solve with a path to the file, directory, or repository and a detailed task description."
+    description: "Вызывает кодового агента для работы с кодом и программированием"
+    prompt_addition: "Всегда call_code_agent(task) для задач, связанных с кодом или с файлами кода. task - это задача, которую должен решить кодовый агент с путем к файлу, директории или репозиторию и подробным описанием задачи."
     # Context sharing configuration for agent tools
     context_strategy: "conversation"
     context_depth: 10
@@ -382,198 +403,212 @@ tools:
   coordinator:
     type: "agent"
     name: "call_coordinator"
-    description: "Invokes the coordinator for planning and solving a task"
-    prompt_addition: "Call call_coordinator(task) to plan and solve a task. task is the job to be completed."
+    description: "Вызывает координатора для планирования и решения задачи"
+    prompt_addition: "Вызывай call_coordinator(task) для планирования и решения задачи. task - это задача, которую нужно решить."
     # Context sharing configuration for agent tools
     context_strategy: "conversation"
     context_depth: 10
     include_tool_history: true
   
+  context_wrapper:
+    type: "agent"
+    name: "call_context_wrapper"
+    description: "Вызывает сборщика контекста для управления контекстом и взаимодействия с агентами"
+    prompt_addition: "Используй call_context_wrapper(task) для получения контекста по кодовой базе. task - это задача для которой требуется контекст."
+    context_strategy: "conversation"
+    context_depth: 10
+    include_tool_history: true
+
+  debugger:
+    type: "agent"
+    name: "call_debugger"
+    description: "Вызывает отладчика для отладки кода"
+    prompt_addition: "Используй call_debugger(task) для запуска программ и отладки кода."
+    context_strategy: "conversation"
+    context_depth: 10
+    include_tool_history: true
+
   thinker:
     type: "agent"
     name: "call_thinker"
-    description: "Invokes a thinking agent for deep analysis of the task and problem."
-    prompt_addition: "ALWAYS call this agent BEFORE executing any task. Use call_thinker(task), where task is the problem to solve with full context. WITHOUT FULL CONTEXT THE THINKER WILL NOT HELP!!! Do NOT call other tools before calling the thinker."
+    description: "Вызывает мыслящего агента для глубокого анализа задачи и проблемы. "
+    prompt_addition: "ВСЕГДА вызывай этого агента ПЕРЕД выполнением любой задачи. Используй call_thinker(task), где task - это задача которую нужно решить с полным контекстом. БЕЗ ПРЕДОСТАВЛЕНИЯ ПОЛНОГО КОНТЕКСТА МЫСЛИТЕЛЬ НЕ ПОМОЖЕТ!!! НЕ вызывай другие инструменты до вызова мыслителя."
 
-# Base prompts for tools
+# Базовые промпты для инструментов
 prompt_templates:
+  context_wrapper_prompt: |
+    Ты агент для извлечения контекста из кодовой базы. К тебе обращаются другие агенты для получения контекста по задачам.
+    Твоя задача — собрать контекст из файлов и git.
+    Используй инструменты для извлечения информации.
+
+  task_analyst_prompt: |
+    Ты аналитик задач. Твоя задача — анализировать задачи и составлять план действий.
+    Всегда используй полный контекст задачи, включая файлы и репозитории.
+    Не начинай выполнять задачу до вызова кодового агента или файлового агента.
+    Не используй конкретные команды и не пытайся их выполнять. 
+
   base: |
-    You are a smart and friendly AI assistant. Answer briefly and to the point.
-    Be helpful and accurate in your responses.
+    Ты - AI ассистент. Отвечай на языке пользователя.
+    Будь полезным и точным в своих ответах.
   
   with_files: |
-    You are an assistant with access to the filesystem. You can read, edit, and analyze files.
-    IMPORTANT: ALWAYS use tools, without reasoning or summarizing!!! Provide your reasoning in the final work report.
-    Always check that files exist before operations. Verify file contents before making changes.
+    Ты помощник с доступом к файловой системе. Можешь читать, редактировать и анализировать файлы.
+    ВАЖНО: ВСЕГДА используй инструменты, не рассуждая и не резюмируя!!! Свои рассуждения выскажешь в отчете об окончании работы. 
+    Всегда проверяй существование файлов перед операциями. Проверяй содержимое файлов перед изменениями.
 
   with_git: |
-    You are a developer assistant with access to Git. You can check status, create commits, and manage the repository.
-    Always check the status before making changes.
+    Ты помощник разработчика с доступом к Git. Можешь проверять статус, создавать коммиты и управлять репозиторием.
+    Всегда проверяй статус перед изменениями.
   
   with_web: |
-    You are an assistant with access to the internet. You can search for up-to-date information and news.
-    Always cite your sources.
+    Ты помощник с доступом к интернету. Можешь искать актуальную информацию и новости.
+    Всегда указывай источники информации.
 
   code_agent_prompt: |
-    You are a code agent specializing in programming.
-    Before each step and tool invocation, use sequential_thinking_mcp for analysis and planning.
-  
-  coordinator_prompt: |
-    You are the coordinator of a team of specialized agents. Your task is to analyze user requests and delegate work to appropriate agents/tools.
-    Rules:
-    - If the task is about files/repository, call file_agent or code_agent first; do not repeat the same operation multiple times.
-    - Do not call similar tools without a new signal (do not loop list_files/read_file without analysis).
-    - Always return the final subagent response to the user without distortion.
-    - If tools are unavailable, ask the user for the required data or explicitly specify the command the user should run.
+    Ты кодовый агент, специализирующийся на программировании.
+    Перед каждым шагом и вызовом инструмента используй sequential thinking для анализа и планирования.
+    
+    ВАЖНО: При вызове инструментов используй только их точные имена без суффиксов каналов.
+    Примеры правильных вызовов: git_add, write_file, git_commit
+    НЕ используй: git_add<|channel|>commentary, write_file<|channel|>tool, git_commit<|channel|>final
 
-# Agents - full configuration
+  coordinator_prompt: |
+    Ты координатор команды специализированных агентов. Твоя задача — анализировать запросы пользователей и делегировать работу подходящим агентам.
+
+  debugger_prompt: |
+    Ты отладчик. Твоя задача — отлаживать код и выполнять задачи связанные с запуском программ. 
+    Перед каждым шагом и вызовом инструмента используй sequential thinking для анализа и планирования.
+
+# Агенты - полная конфигурация
 agents:
-  # Basic assistant
+  # Базовый помощник
   assistant:
-    name: "Assistant"
-    model: "qwen3"
-    tools: ["coordinator", "sequential_thinking_mcp"]
+    name: "Помощник"
+    model: "gpt-5-nano"
+    tools: ["coordinator", "sequential_thinking"]
     base_prompt: "base"
-    description: "Basic assistant for conversation"
+    description: "Базовый помощник для общения"
     mcp_enabled: true
   
-  # Simple test agent without MCP
+  # Простой агент для тестирования без MCP
   simple_test:
-    name: "Simple Test Agent"
-    model: "openai-oss-20b"
+    name: "Простой тестовый агент"
+    model: "gpt-5-nano"
     tools: []
     base_prompt: "base"
-    description: "Simple agent without tools for testing"
+    description: "Простой агент без инструментов для тестирования"
     mcp_enabled: false
   
-  # File agent
+  # Файловый агент
   file_agent:
-    name: "File Agent"
-    model: "openai-oss-20b"
-    tools: ["filesystem_mcp"]
+    name: "Файловый агент"
+    model: "gpt-5-nano"
+    tools: ["filesystem"]
     base_prompt: "with_files"
-    description: "Specialist in working with files."
+    description: "Специалист по работе с файлами."
     mcp_enabled: true
     
   
-  # Git agent
+  # Git агент
   git_agent:
-    name: "Git Agent"
-    model: "openai-oss-20b"
+    name: "Git агент"
+    model: "gpt-5-nano"
     tools: [
-      # Basic operations
+      # Основные операции
       "git_status", "git_log", "git_diff", "git_branch_list", "git_add_file", "git_add_all",
       "git_commit", "git_checkout_branch",
-      # Initialization and configuration
+      # Инициализация и настройка
       "git_init", "git_config", "git_clone",
-      # Remotes
+      # Удаленные репозитории
       "git_remote_info", "git_remote_add", "git_remote_remove", "git_fetch", "git_pull", "git_push",
-      # Branching and merging
+      # Управление ветками и слияние
       "git_merge", "git_reset", "git_stash",
-      # Tags
+      # Теги
       "git_tag", "git_tag_list",
-      # Supporting file operations
+      # Файловые операции для поддержки
       "file_read", "file_list"
     ]
     base_prompt: "with_git"
-    description: "Full-featured developer assistant for Git"
+    description: "Полнофункциональный помощник разработчика для Git"
   
-  # Researcher
+  # Исследователь
   researcher:
-    name: "Researcher"
-    model: "openai-oss-20b"
+    name: "Исследователь"
+    model: "gpt-5-nano"
     tools: ["file_write", "file_read", "file_search"]
     base_prompt: "with_files"
-    description: "Researcher for analyzing files and documents"
+    description: "Исследователь для анализа файлов и документов"
   
-  # Full-featured agent
+  # Полнофункциональный агент
   full_agent:
-    name: "Universal Agent"
-    model: "openai-oss-20b"
+    name: "Универсальный агент"
+    model: "gpt-5-nano"
     tools: [
-      # File operations
+      # Файловые операции
       "file_read", "file_write", "file_list", "file_info", "file_search", "file_edit_patch",
-      # Git operations - basics
+      # Git операции - основные
       "git_status", "git_log", "git_diff", "git_branch_list", "git_add_file", "git_add_all",
       "git_commit", "git_checkout_branch",
-      # Git operations - initialization and configuration
+      # Git операции - инициализация и настройка
       "git_init", "git_config", "git_clone",
-      # Git operations - remotes
+      # Git операции - удаленные репозитории
       "git_remote_info", "git_remote_add", "git_remote_remove", "git_fetch", "git_pull", "git_push",
-      # Git operations - branching and merging
+      # Git операции - управление ветками и слияние
       "git_merge", "git_reset", "git_stash",
-      # Git operations - tags
+      # Git операции - теги
       "git_tag", "git_tag_list"
     ]
     base_prompt: "with_files"
-    description: "Universal assistant with all tools"
+    description: "Универсальный помощник со всеми инструментами"
+
+  context_wrapper:
+    name: "Сборщик контекста"
+    model: "gpt-5-nano"
+    tools: [filesystem, git]
+    base_prompt: "context_wrapper_prompt"
+    description: "Обертка для управления контекстом и взаимодействия с агентами"
 
   code_agent:
-    name: "Code Agent"
-    model: "flash-lite"
+    name: "Кодовый агент"
+    model: "gpt-5-nano"
     tools: [
-      "sequential_thinking_mcp", "filesystem_mcp", "git_mcp"
+      "debugger", "sequential_thinking", "filesystem", "git", "terminal"
     ]
     base_prompt: "code_agent_prompt"
-    description: "Specialist in programming and code analysis"
+    description: "Специалист по программированию и анализу кода"
     mcp_enabled: true
   
-  # Thinking agent
+  # Мыслящий агент
   thinker:
-    name: "Thinker"
-    model: "openai-oss-20b"
+    name: "Мыслитель"
+    model: "gpt-5-nano"
     tools: []
     base_prompt: "base"
     custom_prompt: |
-      You are a deeply thoughtful assistant. Analyze problems from all sides.
-      Reason step by step and provide well-justified conclusions.
-      You are given a problem to solve and the operations available to solve it.
-    description: "Agent for deep analysis and reasoning"
+      Ты глубоко мыслящий помощник. Анализируй проблемы со всех сторон.
+      Рассуждай пошагово и предоставляй развернутые обоснования своих выводов.
+      Тебе передается проблема, которую нужно решить и операции, доступные для решения задачи.
+    description: "Агент для глубокого анализа и размышлений"
   
   task_analyst:
-    name: "Task Analyst"
-    model: "openai-oss-20b"
+    name: "Аналитик задач"
+    model: "gpt-5-nano"
     tools: []
-    base_prompt: "base"
-    description: "Agent for analyzing tasks and building an action plan"
+    base_prompt: "task_analyst_prompt"
+    description: "Агент для анализа задач и составления плана действий"
 
-  # Agent coordinator
+  debugger:
+    name: "Отладчик"
+    model: "gpt-5-nano"
+    tools: [terminal, filesystem, git]
+    base_prompt: "debugger_prompt"
+    description: "Агент для отладки кода"
+
+  # Координатор агентов
   coordinator:
-    name: "Coordinator"
-    model: "flash-lite"
-    tools: ["file_agent", "git_agent", "researcher", "code_agent", "task_analyst"]
+    name: "Координатор"
+    model: "gpt-5-nano"
+    tools: ["file_agent", "git_agent", "researcher", "code_agent", "debugger"]
     base_prompt: "coordinator_prompt"
     custom_prompt: |
-      You are the coordinator of a team of specialized agents. Your task is to analyze user requests and delegate work to appropriate agents/tools.
-      Rules:
-      - If the task is about files/repository, call file_agent or code_agent first; do not repeat the same operation multiple times.
-      - Do not call similar tools without a new signal (do not loop list_files/read_file without analysis).
-      - Always return the final subagent response to the user without distortion.
-      - If tools are unavailable, ask the user for the required data or explicitly specify the command the user should run.
-    description: "Coordinator of the agent team"
-
-# Usage scenarios
-scenarios:
-  development:
-    agent: "git_agent"
-    description: "Development and code management"
-  
-  research:
-    agent: "researcher"
-    description: "Research and information gathering"
-  
-  file_management:
-    agent: "file_agent"
-    description: "Managing files and documents"
-  
-  general:
-    agent: "full_agent"
-    description: "General-purpose tasks"
-  
-  thinking:
-    agent: "thinker"
-    description: "Deep analysis and reasoning"
-  
-  coordination:
-    agent: "coordinator"
-    description: "Coordination of the agent team"
+      Ты координатор команды специализированных агентов. Твоя задача — анализировать запросы, составлять план действий и делегировать работу подходящим агентам для решения задачи  .

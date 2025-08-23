@@ -7,6 +7,9 @@ Simplified version of the main.py CLI for backward compatibility.
 import asyncio
 import argparse
 import sys
+import time
+import logging
+import os
 from pathlib import Path
 
 # Add grid package to path
@@ -21,28 +24,16 @@ if sys.platform == "win32":
 
 from core.config import Config
 from core.agent_factory import AgentFactory
-from core.security_agent_factory import SecurityAwareAgentFactory
-from utils.logger import Logger
-from utils.pretty_logger import PrettyLogger
-from utils.unified_logger import configure_unified_logger, LogLevel
-from utils.cli_logger import CLILogger
-
-# Create CLI logger instance
-cli_logger = CLILogger()
+from core.tracing_config import configure_tracing_from_env
 from utils.exceptions import GridError
-import logging
-import time
 
-# Configure logging to suppress technical messages
-logging.getLogger("httpx").setLevel(logging.INFO)
+# Configure tracing instead of logging
+configure_tracing_from_env()
+
+# Configure minimal logging for external libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("grid").setLevel(logging.INFO)
-import os
-os.environ['PROJECT_ROOT'] = str(Path(__file__).parent)
-Logger.configure(level="DEBUG", enable_console=False, log_dir="logs", enable_legacy_logs=True, force_reconfigure=True)  # логируем строго в logs/ проекта
-
-# Initialize beautiful logger
-pretty_logger = PrettyLogger("agent_chat")
 
 async def main():
     """Главная функция."""
@@ -82,56 +73,36 @@ async def main():
     
     try:
         # Beautiful initialization
-        cli_logger.info("Запуск Grid Agent System...")
+        print("Запуск Grid Agent System...")
         
         # Load configuration
-        cli_logger.info("Load Config")
+        print("Load Config")
         config = Config(args.config, args.path)
-        cli_logger.info("Load Config - Конфигурация загружена")
+        print("Load Config - Конфигурация загружена")
         
         # Create factory
-        cli_logger.info("Initialize SecurityAwareAgentFactory")
-        factory = SecurityAwareAgentFactory(config, args.path)
-        cli_logger.info("Initialize SecurityAwareAgentFactory - Фабрика агентов инициализирована")
+        print("Initialize SecurityAwareAgentFactory")
+        factory = AgentFactory(config, args.path)
+        print("Initialize SecurityAwareAgentFactory - Фабрика агентов инициализирована")
         
-        # Настройка универсального логирования
-        agent_logging_config = config.config.settings.agent_logging
-        if agent_logging_config.enabled:
-            console_level = LogLevel.INFO
-            file_level = LogLevel.DEBUG
-            
-            if agent_logging_config.level == "basic":
-                console_level = LogLevel.INFO
-                file_level = LogLevel.INFO
-            elif agent_logging_config.level == "detailed":
-                console_level = LogLevel.INFO
-                file_level = LogLevel.DEBUG
-            elif agent_logging_config.level == "full":
-                console_level = LogLevel.DEBUG
-                file_level = LogLevel.DEBUG
-            
-            configure_unified_logger("logs", console_level, file_level, enable_colors=True)
-            cli_logger.info("Универсальное логирование включено")
-        else:
-            cli_logger.info("Универсальное логирование отключено")
+        # Tracing is configured automatically by Agents SDK
         
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
         
         # Автоматически очищаем контекст при запуске - агенты не должны помнить предыдущие чаты
-        cli_logger.info("Clear Context")
+        print("Clear Context")
         factory.clear_context()
         
         # Также удаляем файл с сохраненным контекстом, если он существует
-        import os
         context_file = "logs/context.json"
         if os.path.exists(context_file):
             os.remove(context_file)
-            cli_logger.info(f"Удален файл сохраненного контекста: {context_file}")
+            print(f"Удален файл сохраненного контекста: {context_file}")
         
-        cli_logger.info("Clear Context - Контекст очищен при запуске")
+        print("Clear Context - Контекст очищен при запуске")
         
-        cli_logger.info("Grid Agent System готов к работе")
+        print("Grid Agent System готов к работе")
         
         print("\n" + "="*60)
         print("🤖 Grid Agent System ")
@@ -144,11 +115,11 @@ async def main():
         
         if args.message:
             # Single message mode
-            cli_logger.info(f"Обработка сообщения")
+            print(f"Обработка сообщения")
             
             try:
                 # Track agent execution
-                cli_logger.info(f"Agent {agent_key} (agent: {agent_key})")
+                print(f"Agent {agent_key} (agent: {agent_key})")
                 
                 start_time = time.time()
                 use_streaming = True  # Включаем стриминг для режима одного сообщения
@@ -171,7 +142,7 @@ async def main():
                 except Exception as e:
                     pass  # Ignore token calculation errors
                 
-                cli_logger.info(f"Ответ сгенерирован ({duration:.2f}с, {len(response)} символов)")
+                print(f"Ответ сгенерирован ({duration:.2f}с, {len(response)} символов)")
                 
                 print(f"\n🤖 Ответ:")
                 print("-" * 60)
@@ -181,10 +152,10 @@ async def main():
                 else:
                     print(response)
                 
-                cli_logger.info("Success")
+                print("Success")
                 
             except Exception as e:
-                cli_logger.info("Operation completed")
+                print("Operation completed")
                 print(f"❌ Ошибка: {e}")
         else:
             # Interactive mode
@@ -203,15 +174,15 @@ async def main():
                         print("👋 Goodbye!")
                         break
                     elif user_input.lower() == 'clear':
-                        cli_logger.info("Clear Context")
+                        print("Clear Context")
                         factory.clear_context()
-                        cli_logger.info("Clear Context - Контекст очищен")
-                        cli_logger.info("Success")
+                        print("Clear Context - Контекст очищен")
+                        print("Success")
                         continue
                     elif user_input.lower() == 'context':
-                        cli_logger.info("Get Context")
+                        print("Get Context")
                         context_info = factory.get_context_info()
-                        cli_logger.info("Get Context - Информация о контексте получена")
+                        print("Get Context - Информация о контексте получена")
                         
                         print(f"\n📋 Информация о контексте:")
                         print(f"   Сообщений: {context_info.get('conversation_messages', 0)}")
@@ -234,7 +205,7 @@ async def main():
                     # Process user message with beautiful logging
                     try:
                         # Track execution with token counting
-                        cli_logger.info(f"Agent {agent_key} (agent: {agent_key})")
+                        print(f"Agent {agent_key} (agent: {agent_key})")
                         
                         start_time = time.time()
                         use_streaming = True  # Включаем стриминг для интерактивного режима
@@ -253,7 +224,7 @@ async def main():
                         except Exception:
                             pass
                         
-                        cli_logger.info(f"Ответ получен ({duration:.2f}с, {len(response)} символов)")
+                        print(f"\nОтвет получен ({duration:.2f}с, {len(response)} символов)")
                         
                         # При стриминге ответ уже выведен в реальном времени, добавляем только новую строку
                         if use_streaming:
@@ -262,7 +233,7 @@ async def main():
                             print(f"\n🤖 {agent_key}: {response}")
                         
                     except Exception as e:
-                        cli_logger.info("Operation completed")
+                        print("Operation completed")
                         print(f"❌ Ошибка: {e}")
                     
                 except KeyboardInterrupt:
@@ -273,19 +244,19 @@ async def main():
                     break
         
         # Beautiful cleanup and session summary
-        cli_logger.info("Cleanup")
+        print("Cleanup")
         await factory.cleanup()
-        cli_logger.info("Cleanup - Ресурсы освобождены")
+        print("Cleanup - Ресурсы освобождены")
         
         # Session summary
-        cli_logger.info("Grid Agent System завершил работу")
+        print("Grid Agent System завершил работу")
         
     except GridError as e:
-        cli_logger.error(f"Ошибка Grid: {e}")
+        print(f"Ошибка Grid: {e}")
         print(f"❌ Grid Error: {e}")
         sys.exit(1)
     except Exception as e:
-        cli_logger.error(f"Неожиданная ошибка: {e}")
+        print(f"Неожиданная ошибка: {e}")
         print(f"❌ Unexpected Error: {e}")
         import traceback
         traceback.print_exc()

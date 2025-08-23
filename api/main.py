@@ -22,7 +22,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config import Config
 from core.security_agent_factory import SecurityAwareAgentFactory
-from utils.logger import Logger
 from utils.exceptions import GridError
 
 from api.routers import openai_compatible, agents, system, auth
@@ -61,13 +60,7 @@ async def lifespan(app: FastAPI):
         
         logger.info("Context cleared on API startup")
         
-        # Initialize logger (всегда логируем в logs/ проекта)
-        Logger.configure(
-            level="INFO",
-            enable_console=True,
-            log_dir="logs",
-            enable_legacy_logs=True
-        )
+        # Tracing is configured automatically by Agents SDK
         
         logger.info("GRID Agent System API started successfully")
         

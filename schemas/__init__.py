@@ -1,6 +1,5 @@
 # Schemas package
-# Import from legacy schemas for backward compatibility
-from .legacy_schemas import (
+from .schemas import (
     ToolType, GridConfig, ProviderConfig, ModelConfig, AgentConfig, ToolConfig,
     Settings, AgentLoggingConfig, ContextMessage, AgentExecution
 )
