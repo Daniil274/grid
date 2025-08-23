@@ -59,6 +59,7 @@ tmp/
 test_*.txt
 demo_*.py
 *_demo.*
+traces/
 
 # Dependencies
 node_modules/

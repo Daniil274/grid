@@ -7,12 +7,14 @@ import yaml
 from typing import Dict, Any, Optional
 from pathlib import Path
 from functools import lru_cache
+import logging
 
 from schemas import GridConfig, ProviderConfig, ModelConfig, AgentConfig, ToolConfig
 from utils.exceptions import ConfigError
-from utils.logger import Logger
+from core.tracing_config import get_tracing_config
 
-logger = Logger(__name__)
+tracing_config = get_tracing_config()
+logger = logging.getLogger("grid.config")
 
 
 class Config:
@@ -43,19 +45,16 @@ class Config:
             # Validate using Pydantic
             self._config = GridConfig(**raw_config)
             
-            logger.info(f"Configuration loaded from {self.config_path}")
-            logger.debug(f"Loaded {len(self._config.agents)} agents, {len(self._config.models)} models")
+            # Configuration loaded successfully - this will be traced automatically by Agents SDK
             
             # Do NOT change process working directory to preserve project-relative paths (e.g., logs/)
             # All file resolutions must go through get_absolute_path/working_directory
             target_working_dir = self.get_working_directory()
             if target_working_dir and target_working_dir != os.getcwd():
                 if os.path.exists(target_working_dir):
-                    logger.info(f"Using configured working directory for path resolution only (no chdir): {target_working_dir}")
+                    pass  # Using configured working directory for path resolution only (no chdir)
                 else:
-                    logger.warning(
-                        f"Configured working directory does not exist (will be ignored for path resolution): {target_working_dir}"
-                    )
+                    pass  # Configured working directory does not exist (will be ignored for path resolution)
             
         except FileNotFoundError as e:
             raise ConfigError(f"Configuration file not found: {e}")
@@ -66,7 +65,7 @@ class Config:
     
     def reload(self) -> None:
         """Reload configuration from file."""
-        logger.info("Reloading configuration...")
+        # Reloading configuration - this will be traced automatically by Agents SDK
         self._load_config()
         # Clear cached properties
         self._clear_cache()
@@ -95,6 +94,7 @@ class Config:
     def set_working_directory(self, path: str) -> None:
         """Set working directory if allowed."""
         if not self.config.settings.allow_path_override:
+            # Path override is disabled in configuration
             logger.warning("Path override is disabled in configuration")
             return
         

@@ -17,7 +17,30 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from agents import function_tool
-from utils.pretty_logger import pretty_logger, log_tool_start, log_tool_result
+from utils.logger import Logger
+
+class _PrettyShim:
+    def __init__(self):
+        self._logger = Logger("git_tool")
+    def tool_start(self, name: str, **kwargs):
+        self._logger.log_tool_call(f"GIT:{name}", kwargs)
+        return {"name": name, "args": kwargs}
+    def tool_result(self, operation, result: str | None = None, error: str | None = None):
+        if error:
+            self._logger.error(f"{operation.get('name')} failed", error=error)
+        else:
+            self._logger.info(f"{operation.get('name')} ok", result=result)
+
+pretty_logger = _PrettyShim()
+
+def log_tool_start(name: str, **kwargs):
+    return pretty_logger.tool_start(name, **kwargs)
+
+def log_tool_result(name_or_operation, *, result: str | None = None, error: str | None = None):
+    if isinstance(name_or_operation, dict):
+        pretty_logger.tool_result(name_or_operation, result=result, error=error)
+    else:
+        pretty_logger.tool_result({"name": name_or_operation, "args": {}}, result=result, error=error)
 
 def _run_git_command(command: List[str], cwd: Optional[str] = None) -> Dict[str, Any]:
     """
