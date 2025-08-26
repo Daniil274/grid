@@ -20,6 +20,7 @@ from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError
 from core.tracing_config import get_tracing_config
+from utils.cost_integration import get_cost_integration
 
 import json
 import re
@@ -248,10 +249,24 @@ class AgentFactory:
                 pass
             
             if model is None:
-                model = OpenAIChatCompletionsModel(
-                    model=model_config.name,
-                    openai_client=client
-                )
+                # Проверяем, нужно ли использовать OpenRouter с отслеживанием стоимости
+                cost_integration = get_cost_integration()
+                base_url = provider_config.base_url or ""
+                
+                if "openrouter.ai" in base_url and cost_integration.is_enabled():
+                    # Используем OpenRouter модель с отслеживанием стоимости
+                    from utils.openrouter_provider import OpenRouterModel
+                    model = OpenRouterModel(
+                        model=model_config.name,
+                        openai_client=client
+                    )
+                    logging.getLogger("grid.agent_factory").info(f"Created OpenRouter model with cost tracking: {model_config.name}")
+                else:
+                    # Обычная OpenAI модель
+                    model = OpenAIChatCompletionsModel(
+                        model=model_config.name,
+                        openai_client=client
+                    )
             
             # Build instructions with context
             instructions = self._build_agent_instructions(agent_key, context_path)

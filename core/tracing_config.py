@@ -79,8 +79,8 @@ class ConsoleSpanExporter(TracingExporter):
             return
         
         if span_type == "generation":
-            # Скрываем детали генерации в компактном режиме
-            if self._compact:
+            # Проверяем OpenRouter стоимость перед скрытием
+            if self._compact and not span_data.get("openrouter_cost"):
                 return
             usage = span_data.get("usage") or {}
             model = span_data.get("model")
@@ -96,6 +96,10 @@ class ConsoleSpanExporter(TracingExporter):
                 line += " " + ", ".join(parts)
             line += dur
             print(line)
+            
+            # Вывод информации о стоимости OpenRouter если есть
+            self._print_openrouter_cost(span_data)
+            
             self._print_generation_io(span_data)
             return
         
@@ -246,6 +250,15 @@ class ConsoleSpanExporter(TracingExporter):
             return ", ".join(items)
         except Exception:
             return str(d)
+    
+    def _print_openrouter_cost(self, span_data: dict) -> None:
+        """Вывод информации о стоимости OpenRouter если доступна"""
+        cost = span_data.get("openrouter_cost")
+        if cost is not None:
+            model = span_data.get("openrouter_model", "unknown")
+            tokens_prompt = span_data.get("openrouter_tokens_prompt", 0)
+            tokens_completion = span_data.get("openrouter_tokens_completion", 0)
+            print(f"   💰 OpenRouter: ${cost:.6f} | {model} | {tokens_prompt}→{tokens_completion} tokens")
 
 
 class FileSpanExporter(TracingExporter):
