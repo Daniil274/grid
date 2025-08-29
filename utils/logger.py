@@ -422,3 +422,8 @@ def log_agent_prompt(agent_name: str, prompt: str) -> None:
 
 # Configure default logging
 Logger.configure(level="INFO", enable_console=True)
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Get logger instance for the given name."""
+    return logging.getLogger(name)

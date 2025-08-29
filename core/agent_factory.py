@@ -20,6 +20,10 @@ from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError
 from core.tracing_config import get_tracing_config
+from core.verification_agents import hallucination_guardrail
+
+# Создаем logger для модуля
+logger = logging.getLogger(__name__)
 
 import json
 import re
@@ -273,6 +277,15 @@ class AgentFactory:
             if mcp_server_names and (agent_config.mcp_enabled or self.config.is_mcp_enabled()):
                 mcp_servers_list = await self._create_mcp_servers(mcp_server_names)
 
+            # Подготавливаем guardrails для проверки галлюцинаций
+            output_guardrails = []
+            
+            # Проверяем, нужно ли включить проверку галлюцинаций
+            if (self.config.config.settings.verify_hallucinations and 
+                getattr(agent_config, 'verify_output', False)):
+                output_guardrails.append(hallucination_guardrail)
+                logger.info(f"Включена проверка галлюцинаций для агента {agent_key}")
+            
             # Create agent
             agent = Agent(
                 name=agent_config.name,
@@ -280,7 +293,13 @@ class AgentFactory:
                 model=model,
                 tools=tools,
                 mcp_servers=mcp_servers_list,
+                output_guardrails=output_guardrails
             )
+            
+            # Сохраняем конфигурацию агента для доступа в guardrails
+            agent._agent_config = agent_config
+            # Сохраняем общую конфигурацию для доступа в guardrails
+            agent._config = self.config
             
             # Create and attach session to agent for memory
             session = self._get_agent_session(agent_key)
@@ -539,7 +558,13 @@ class AgentFactory:
                     logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
                 except Exception as e:
-                    raise AgentError(f"Agent execution failed: {e}") from e
+                    # Проверяем, не является ли это исключением guardrail
+                    if "OutputGuardrailTripwireTriggered" in str(type(e).__name__):
+                        logger.warning(f"Ответ агента {agent_key} заблокирован guardrail (streaming): {e}")
+                        # Возвращаем сообщение об ошибке вместо исключения
+                        result_output = "❌ Ответ отклонён: обнаружены признаки галлюцинации или недостоверной информации. Пожалуйста, попробуйте переформулировать запрос."
+                    else:
+                        raise AgentError(f"Agent execution failed: {e}") from e
                 result = result_output
             else:
                 try:
@@ -553,7 +578,13 @@ class AgentFactory:
                 except asyncio.TimeoutError:
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
                 except Exception as e:
-                    raise AgentError(f"Agent execution failed: {e}") from e
+                    # Проверяем, не является ли это исключением guardrail
+                    if "OutputGuardrailTripwireTriggered" in str(type(e).__name__):
+                        logger.warning(f"Ответ агента {agent_key} заблокирован guardrail: {e}")
+                        # Возвращаем сообщение об ошибке вместо исключения
+                        return "❌ Ответ отклонён: обнаружены признаки галлюцинации или недостоверной информации. Пожалуйста, попробуйте переформулировать запрос."
+                    else:
+                        raise AgentError(f"Agent execution failed: {e}") from e
             
             # Process result - more robust extraction
             try:

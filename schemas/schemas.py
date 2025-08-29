@@ -62,6 +62,10 @@ class AgentConfig(BaseModel):
     custom_prompt: Optional[str] = None
     description: str = ""
     mcp_enabled: bool = False
+    # Новые поля для проверяющих агентов
+    verify_output: bool = Field(default=False, description="Включить проверку ответа через guardrails")
+    verification_context: str = Field(default="full", description="Глубина контекста для проверки: full, last_turn")
+    verification_settings: Optional[Dict[str, Any]] = Field(default=None, description="Дополнительные настройки проверки")
 
 
 class AgentLoggingConfig(BaseModel):
@@ -86,6 +90,16 @@ class Settings(BaseModel):
     allow_path_override: bool = True
     agent_logging: AgentLoggingConfig = Field(default_factory=AgentLoggingConfig)
     tools_common_rules: Optional[str] = None
+    # Новые настройки для проверяющих агентов
+    verify_hallucinations: bool = Field(default=True, description="Глобально включить проверку галлюцинаций")
+    verification_agent: str = Field(default="hallucination_checker", description="Агент для проверки галлюцинаций")
+    verification_defaults: Dict[str, Any] = Field(default_factory=lambda: {
+        "temperature": 0.1,
+        "max_tokens": 1000,
+        "context_strategy": "full",
+        "confidence_threshold": 0.7,
+        "strict_mode": True
+    }, description="Настройки по умолчанию для проверяющих агентов")
 
 
 class GridConfig(BaseModel):
@@ -138,3 +152,20 @@ class AgentExecution(BaseModel):
     error: Optional[str] = None
     tools_used: List[str] = Field(default_factory=list)
     token_usage: Optional[Dict[str, int]] = None
+
+
+# Новые схемы для проверяющих агентов
+class HallucinationCheckOutput(BaseModel):
+    """Результат проверки галлюцинаций."""
+    has_hallucination: bool = Field(description="Обнаружена ли галлюцинация")
+    analysis: str = Field(description="Обоснование решения и примеры неподтверждённых утверждений")
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Уверенность в решении (0-1)")
+    flagged_statements: List[str] = Field(default_factory=list, description="Список неподтверждённых утверждений")
+
+
+class VerificationResult(BaseModel):
+    """Результат проверки ответа агента."""
+    passed: bool = Field(description="Прошла ли проверка")
+    agent_name: str = Field(description="Имя проверяющего агента")
+    details: Optional[HallucinationCheckOutput] = Field(default=None, description="Детали проверки")
+    timestamp: float = Field(description="Время проверки")
