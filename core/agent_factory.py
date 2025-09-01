@@ -20,7 +20,7 @@ from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError
 from core.tracing_config import get_tracing_config
-from core.verification_agents import hallucination_guardrail
+from core.guardrails import hallucination_guardrail
 
 # Создаем logger для модуля
 logger = logging.getLogger(__name__)
