@@ -26,13 +26,25 @@ from core.config import Config
 from core.agent_factory import AgentFactory
 from core.tracing_config import configure_tracing_from_env
 from utils.exceptions import GridError
+from utils.logger import Logger
 
 # Configure tracing instead of logging
 configure_tracing_from_env()
 
+# Configure logging: console + files
+Logger.configure(
+    level="INFO",
+    log_dir=str(Path(__file__).parent / "logs"),
+    enable_console=True,
+    enable_json=True,
+    enable_legacy_logs=True,
+    force_reconfigure=True,
+)
+
 # Configure minimal logging for external libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("openai.agents").setLevel(logging.CRITICAL)
 logging.getLogger("grid").setLevel(logging.INFO)
 
 async def main():
@@ -142,16 +154,8 @@ async def main():
                 except Exception as e:
                     pass  # Ignore token calculation errors
                 
-                print(f"Ответ сгенерирован ({duration:.2f}с, {len(response)} символов)")
-                
-                print(f"\n🤖 Ответ:")
-                print("-" * 60)
-                # При стриминге ответ уже выведен в реальном времени, просто добавляем разделитель
-                if use_streaming:
-                    print()  # Добавляем новую строку после стримингового вывода
-                else:
-                    print(response)
-                
+                print(f"\nОтвет сгенерирован ({duration:.2f}с, {len(response)} символов)")
+
                 print("Success")
                 
             except Exception as e:

@@ -7,7 +7,7 @@ import os
 from typing import List, Optional, Any
 from agents.tracing import set_trace_processors
 from agents.tracing.processors import BatchTraceProcessor
-from agents.tracing.processor_interface import TracingExporter
+from agents.tracing.processor_interface import TracingExporter, TracingProcessor
 from agents.tracing.traces import Trace
 from agents.tracing.spans import Span
 import json
@@ -258,6 +258,11 @@ class FileSpanExporter(TracingExporter):
     def export(self, items: List[Trace | Span]) -> None:
         """Экспортирует спаны в файл."""
         try:
+            # ensure directory exists
+            import os as _os
+            _dir = _os.path.dirname(self.path)
+            if _dir and not os.path.exists(_dir):
+                os.makedirs(_dir, exist_ok=True)
             with open(self.path, "a", encoding="utf-8") as f:
                 for item in items:
                     data = item.export()
@@ -271,7 +276,7 @@ class FileSpanExporter(TracingExporter):
 class HttpSpanExporter(TracingExporter):
     """Экспортер спанов по HTTP в локальный или self-hosted сервис."""
     
-    def __init__(self, endpoint: str, timeout: float = 10.0):
+    def __init__(self, endpoint: str, timeout: float = 0.1):
         self.endpoint = endpoint
         self.timeout = timeout
         self.logger = logging.getLogger("grid.tracing")
@@ -304,6 +309,38 @@ class HttpSpanExporter(TracingExporter):
             self.logger.error(f"Failed to export traces to {self.endpoint}: {e}")
 
 
+class ImmediateTraceProcessor(TracingProcessor):
+    """Синхронный процессор, немедленно экспортирующий трейсы/спаны без фоновой очереди."""
+    def __init__(self, exporter: TracingExporter):
+        self._exporter = exporter
+    
+    def on_trace_start(self, trace: Trace) -> None:
+        try:
+            self._exporter.export([trace])
+        except Exception:
+            pass
+    
+    def on_trace_end(self, trace: Trace) -> None:
+        # Ничего не делаем — уже экспортировано на старте
+        pass
+    
+    def on_span_start(self, span: Span[Any]) -> None:
+        # Начало спана не печатаем — ждём завершения для длительности
+        pass
+    
+    def on_span_end(self, span: Span[Any]) -> None:
+        try:
+            self._exporter.export([span])
+        except Exception:
+            pass
+    
+    def shutdown(self, timeout: float | None = None):
+        pass
+    
+    def force_flush(self):
+        pass
+
+
 class TracingConfig:
     """Конфигурация трассировки для Grid системы."""
     
@@ -317,7 +354,8 @@ class TracingConfig:
             return
             
         exporter = ConsoleSpanExporter(level)
-        processor = BatchTraceProcessor(exporter)
+        # Немедленный экспорт в консоль
+        processor = ImmediateTraceProcessor(exporter)
         self._processors = [processor]
         self._configured = True
         
@@ -327,17 +365,19 @@ class TracingConfig:
             return
             
         exporter = FileSpanExporter(path)
-        processor = BatchTraceProcessor(exporter)
+        # Для файла также используем немедленный экспорт
+        processor = ImmediateTraceProcessor(exporter)
         self._processors = [processor]
         self._configured = True
         
-    def configure_http_tracing(self, endpoint: str, timeout: float = 10.0) -> None:
+    def configure_http_tracing(self, endpoint: str, timeout: float = 0.1) -> None:
         """Настраивает трассировку по HTTP."""
         if self._configured:
             return
             
         exporter = HttpSpanExporter(endpoint, timeout)
-        processor = BatchTraceProcessor(exporter)
+        # Немедленный экспорт, чтобы события не задерживались
+        processor = ImmediateTraceProcessor(exporter)
         self._processors = [processor]
         self._configured = True
         
@@ -346,7 +386,7 @@ class TracingConfig:
         if self._configured:
             return
             
-        processors = [BatchTraceProcessor(exporter) for exporter in exporters]
+        processors = [ImmediateTraceProcessor(exporter) for exporter in exporters]
         self._processors = processors
         self._configured = True
         
@@ -372,24 +412,30 @@ tracing_config = TracingConfig()
 
 def configure_tracing_from_env() -> None:
     """Настраивает трассировку на основе переменных окружения."""
-    tracing_type = os.getenv("GRID_TRACING_TYPE", "console")
+    tracing_type = os.getenv("GRID_TRACING_TYPE", "console").lower()
     tracing_level = os.getenv("GRID_TRACING_LEVEL", "INFO")
+    file_path = os.getenv("GRID_TRACING_FILE", "traces/traces.jsonl")
     
     if tracing_type == "file":
-        path = os.getenv("GRID_TRACING_FILE", "traces.jsonl")
-        tracing_config.configure_file_tracing(path)
+        tracing_config.configure_file_tracing(file_path)
     elif tracing_type == "http":
         endpoint = os.getenv("GRID_TRACING_ENDPOINT", "http://localhost:8080/ingest")
-        timeout = float(os.getenv("GRID_TRACING_TIMEOUT", "10.0"))
+        timeout = float(os.getenv("GRID_TRACING_TIMEOUT", "0.1"))
         tracing_config.configure_http_tracing(endpoint, timeout)
-    elif tracing_type == "console":
-        tracing_config.configure_console_tracing(tracing_level)
+    elif tracing_type in ("console", "both", "multi"):
+        # По умолчанию: и консоль, и файл — чтобы в CLI было видно сразу и сохранялось на диск
+        exporters: List[TracingExporter] = [
+            ConsoleSpanExporter(tracing_level),
+            FileSpanExporter(file_path),
+        ]
+        tracing_config.configure_custom_tracing(exporters)
     elif tracing_type == "disabled":
         tracing_config.disable()
         return
     else:
-        # По умолчанию консольная трассировка
-        tracing_config.configure_console_tracing(tracing_level)
+        # По умолчанию консоль + файл
+        exporters = [ConsoleSpanExporter(tracing_level), FileSpanExporter(file_path)]
+        tracing_config.configure_custom_tracing(exporters)
     
     # Применяем конфигурацию
     tracing_config.apply()
