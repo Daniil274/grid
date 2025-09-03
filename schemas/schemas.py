@@ -62,6 +62,9 @@ class AgentConfig(BaseModel):
     custom_prompt: Optional[str] = None
     description: str = ""
     mcp_enabled: bool = False
+    
+    # Связь с проверяющим агентом (минимально, для Output guardrail аудита)
+    verifier: Optional[str] = None
 
 
 class AgentLoggingConfig(BaseModel):
@@ -86,6 +89,8 @@ class Settings(BaseModel):
     allow_path_override: bool = True
     agent_logging: AgentLoggingConfig = Field(default_factory=AgentLoggingConfig)
     tools_common_rules: Optional[str] = None
+    # Новый параметр: директория логов (абсолютный путь или относительный от working_directory)
+    logs_directory: Optional[str] = None
 
 
 class GridConfig(BaseModel):
@@ -97,6 +102,9 @@ class GridConfig(BaseModel):
     agents: Dict[str, AgentConfig] = Field(default_factory=dict)
     prompt_templates: Dict[str, str] = Field(default_factory=dict)
     scenarios: Optional[Dict[str, Any]] = None
+    
+    # Секция проверяющих конфигураций (минимально для включения)
+    checkers: Optional[Dict[str, Dict[str, Any]]] = None
     
     @field_validator('agents')
     @classmethod
@@ -138,3 +146,6 @@ class AgentExecution(BaseModel):
     error: Optional[str] = None
     tools_used: List[str] = Field(default_factory=list)
     token_usage: Optional[Dict[str, int]] = None
+    
+    # Аудит-метаданные (опционально заполняются Output guardrail)
+    audit_report: Optional[Dict[str, Any]] = None

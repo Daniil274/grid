@@ -286,6 +286,15 @@ class AgentFactory:
             session = self._get_agent_session(agent_key)
             agent._session = session  # Attach session to agent
 
+            # Attach simple tool-usage hooks and output guardrail (audit) по конфигу
+            try:
+                from core.audit import ToolUsageHooks, create_output_audit_guardrail
+                agent.hooks = ToolUsageHooks()
+                if getattr(agent_config, 'verifier', None):
+                    agent.output_guardrails.append(create_output_audit_guardrail())
+            except Exception:
+                pass
+            
             
             self._agent_cache[cache_key] = agent
             
@@ -353,10 +362,19 @@ class AgentFactory:
                 from agents import Runner, RunItemStreamEvent, RawResponsesStreamEvent
                 result_output: Optional[str] = None
                 try:
+                    # Сформируем TaskAuditContext для верхнеуровневого запуска
+                    try:
+                        from core.audit import TaskAuditContext
+                        audit_ctx = TaskAuditContext(
+                            task_text=message,
+                            verifier_key=getattr(self.config.get_agent(agent_key), 'verifier', None),
+                        )
+                    except Exception:
+                        audit_ctx = None
                     run_result_streaming = Runner.run_streamed(
                         agent,
                         message,
-                        context=self.context_manager.get_conversation_context(),
+                        context=audit_ctx if audit_ctx is not None else self.context_manager.get_conversation_context(),
                         max_turns=max_turns,
                         session=session,
                     )
@@ -519,11 +537,30 @@ class AgentFactory:
                 try:
                     # Запускаем агента и получаем RunResult объект
                     from agents import Runner
+                    from agents.exceptions import OutputGuardrailTripwireTriggered
+                    # Сформируем TaskAuditContext для верхнеуровневого запуска
+                    try:
+                        from core.audit import TaskAuditContext
+                        audit_ctx = TaskAuditContext(
+                            task_text=message,
+                            verifier_key=getattr(self.config.get_agent(agent_key), 'verifier', None),
+                        )
+                    except Exception:
+                        audit_ctx = None
                     result = await asyncio.wait_for(
-                        Runner.run(agent, message, max_turns=max_turns, session=session),
+                        Runner.run(agent, message, max_turns=max_turns, session=session, context=audit_ctx if audit_ctx is not None else self.context_manager.get_conversation_context()),
                         timeout=timeout_seconds
                     )
-
+                except OutputGuardrailTripwireTriggered as ogt:
+                    # Конвертируем трипваер в стабильный JSON-ответ верхнего уровня
+                    try:
+                        data = getattr(ogt, 'guardrail_result', None)
+                        output_info = getattr(data, 'output', None)
+                        info = getattr(output_info, 'output_info', None) if output_info else None
+                        import json
+                        result = json.dumps(info or {"status": "failed", "type": "verification_failed"}, ensure_ascii=False)
+                    except Exception:
+                        result = '{"status":"failed","type":"verification_failed"}'
                 except asyncio.TimeoutError:
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
                 except Exception as e:
@@ -531,7 +568,7 @@ class AgentFactory:
             
             # Process result - more robust extraction
             try:
-                            # Проверяем, является ли result строкой (уже обработанной)
+                # Проверяем, является ли result строкой (уже обработанной)
                 if isinstance(result, str):
                     output = result
                 elif hasattr(result, 'final_output') and result.final_output:
@@ -784,6 +821,46 @@ class AgentFactory:
                 # Добавляем префикс для агентов-инструментов
                 formatted_tool_name = f"Agent-Tool: {tool_display_name}"
 
+                # ДО выполнения инструмента — LLM-проверка корректности вызова
+                try:
+                    from core.audit import verify_tool_call, TaskAuditContext
+                    # Извлекаем текущую задачу и уже использованные инструменты, если доступны
+                    task_text = ""
+                    tools_used_so_far: list[str] = []
+                    try:
+                        if hasattr(tool_context, 'context') and isinstance(tool_context.context, TaskAuditContext):
+                            task_text = tool_context.context.task_text or ""
+                            tools_used_so_far = list(tool_context.context.tools_used)
+                        elif hasattr(tool_context, 'context') and tool_context.context is not None:
+                            task_text = str(tool_context.context)
+                    except Exception:
+                        pass
+                    verifier_key = None
+                    try:
+                        sub_agent_key_guess = tool_display_name.replace("call_", "")
+                        verifier_key = getattr(self.config.get_agent(sub_agent_key_guess), 'verifier', None)
+                    except Exception:
+                        verifier_key = None
+
+                    verdict = await verify_tool_call(
+                        verifier_key=verifier_key,
+                        task_text=task_text,
+                        tools_used=tools_used_so_far,
+                        tool_name=tool_display_name,
+                        tool_arguments=normalized_args,
+                    )
+                    if isinstance(verdict, dict) and str(verdict.get('status', '')).lower() == 'failed':
+                        import json
+                        return json.dumps({
+                            "status": "failed",
+                            "type": "tool_verification_failed",
+                            "reason": verdict.get('reason'),
+                            "details": verdict.get('details'),
+                        }, ensure_ascii=False)
+                except Exception:
+                    # Никогда не роняем выполнение из-за верификации инструмента
+                    pass
+
                 # Call original function с нормализованными аргументами
                 result = original_invoke(tool_context, **normalized_args)
                 if hasattr(result, '__await__'):
@@ -842,9 +919,9 @@ class AgentFactory:
             input: str,
         ) -> str:
             from agents import Runner
+            from agents.exceptions import OutputGuardrailTripwireTriggered
             
             # Подготавливаем человекочитаемый контекст для подагента
-            # На этом уровне input должен быть строкой, т.к. нормализация прошла в `wrapped_invoke_tool`
             if not isinstance(input, str) or not input.strip():
                 return f"❌ Пустой ввод для инструмента '{tool_name}'. Передайте непустой 'input' (string)."
             
@@ -860,20 +937,46 @@ class AgentFactory:
             # Get session from the sub-agent (attached during creation)
             session = getattr(sub_agent, '_session', None)
             if not session:
-                # Fallback: create session if not attached
                 agent_key = tool_name.replace("call_", "")
                 session = self._get_agent_session(agent_key)
             else:
                 pass
             
-            # Run the sub-agent with enhanced input and session
-            output = await Runner.run(
-                starting_agent=sub_agent,
-                input=enhanced_input,
-                context=context.context,
-                session=session,
-                max_turns=self.config.get_max_turns(),
-            )
+            # Сформируем локальный TaskAuditContext для проверяющего output guardrail
+            local_context = None
+            try:
+                from core.audit import TaskAuditContext
+                # Попытаемся достать verifier_key из конфигурации целевого саб-агента
+                verifier_key = None
+                try:
+                    sub_agent_key_guess = tool_name.replace("call_", "")
+                    verifier_key = getattr(self.config.get_agent(sub_agent_key_guess), 'verifier', None)
+                except Exception:
+                    verifier_key = None
+                local_context = TaskAuditContext(task_text=raw_input, verifier_key=verifier_key)
+            except Exception:
+                local_context = None
+            
+            try:
+                # Run the sub-agent with enhanced input and session
+                output = await Runner.run(
+                    starting_agent=sub_agent,
+                    input=enhanced_input,
+                    context=local_context if local_context is not None else context.context,
+                    session=session,
+                    max_turns=self.config.get_max_turns(),
+                )
+            except OutputGuardrailTripwireTriggered as ogt:
+                # Конвертируем трипваер в стабильный JSON-ответ инструмента для мастера
+                try:
+                    data = getattr(ogt, 'guardrail_result', None)
+                    # Извлекаем наш output_info
+                    output_info = getattr(data, 'output', None)
+                    info = getattr(output_info, 'output_info', None) if output_info else None
+                    import json
+                    return json.dumps(info or {"status": "failed", "type": "verification_failed"}, ensure_ascii=False)
+                except Exception:
+                    return '{"status":"failed","type":"verification_failed"}'
             
             # Запишем результат как сообщение ассистента, чтобы главный агент мог обсуждать и давать правки
             try:

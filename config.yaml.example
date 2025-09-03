@@ -12,6 +12,7 @@ settings:
   # Настройки путей
   working_directory: "C:/Users/daniil/Documents/agents"  # Рабочая директория по умолчанию
   config_directory: "."   # Директория конфигурации
+  logs_directory: "C:/Users/daniil/Documents/agents/logs"
   allow_path_override: true  # Разрешить переопределение пути при запуске
   # Настройки логирования
   agent_logging:
@@ -40,12 +41,20 @@ providers:
     api_key_env: "OPENROUTER_API_KEY"
     timeout: 300
     max_retries: 3
-    streaming_enabled: True
+    streaming_enabled: true
 
 
 
 # Модели
 models:
+  rwkv7.2:
+    name: "rwkv7.2"
+    provider: "lm-studio"
+    temperature: 0.7
+    max_tokens: 16000
+    description: "RWKV7 7.2 модель"
+    streaming_enabled: true
+
   openai-oss-20b:
     name: "openai/gpt-oss-20b"
     provider: "openrouter"
@@ -140,6 +149,21 @@ models:
     max_tokens: 4000
     description: "GPT-4 Omni универсальная модель"
 
+
+# Минимальная секция проверяющих (для аудита в Output guardrail)
+checkers:
+  default_audit:
+    model: "qwen3"   # опционально для будущего расширения; сейчас не вызывается
+    purpose: "output_audit"
+    prompt: |
+      Ты проверяющий агент. Тебе предоставляется контекст задачи агента, вывод агента и список использованных инструментов.
+      Проверь что агент использует инструменты и его действия соответствуют контексту и цели задачи.
+      Вход: одна строка JSON с полями task_text, tools_used, agent_output.
+      Верни строго JSON: {"status":"ok|failed","reason":"...", "details":"..."}.
+    tool_prompt: |
+      Ты проверяющий агент вызовов инструментов. Оцени, корректен ли вызов инструмента с учётом цели задачи.
+      Вход: JSON {task_text, tools_used, tool_name, tool_arguments}.
+      Верни строго JSON: {"status":"ok|failed","reason":"...","details":"..."}.
 
 # Инструменты
 tools:
@@ -316,7 +340,7 @@ tools:
     name: "git_tag_list"
     description: "Показывает список тегов"
     prompt_addition: "Используй git_tag_list(directory) для просмотра тегов."
-  
+
 
   
   # MCP серверы
@@ -337,13 +361,13 @@ tools:
   git:
     type: "mcp"
     server_command: ["npx", "@cyanheads/git-mcp-server", "C:/Users/daniil/Documents/agents"]
-    env:
+    env_vars:
       MCP_LOG_LEVEL: "info"
       GIT_SIGN_COMMITS: "false"
     description: "Управление Git: clone, commit, branch, merge, rebase, stash"
 
 
-  sequential_thinking:
+  sequentialthinking:
     type: "mcp"
     server_command: ["npx", "@modelcontextprotocol/server-sequential-thinking"]
     description: "MCP сервер для последовательного мышления"
@@ -409,6 +433,7 @@ tools:
     context_strategy: "conversation"
     context_depth: 10
     include_tool_history: true
+    verifier: "default_audit"
   
   context_wrapper:
     type: "agent"
@@ -418,6 +443,7 @@ tools:
     context_strategy: "conversation"
     context_depth: 10
     include_tool_history: true
+    verifier: "default_audit"
 
   debugger:
     type: "agent"
@@ -457,8 +483,8 @@ prompt_templates:
     Всегда проверяй существование файлов перед операциями. Проверяй содержимое файлов перед изменениями.
 
   with_git: |
-    Ты помощник разработчика с доступом к Git. Можешь проверять статус, создавать коммиты и управлять репозиторием.
-    Всегда проверяй статус перед изменениями.
+    Ты агент с инструментами Git. Можешь проверять статус, создавать коммиты и управлять репозиторием.
+    Всегда проверяй статус перед изменениями. Анализируй задачу, составляй план действий и двигайся по нему, корректируя по необходимости.
   
   with_web: |
     Ты помощник с доступом к интернету. Можешь искать актуальную информацию и новости.
@@ -484,8 +510,8 @@ agents:
   # Базовый помощник
   assistant:
     name: "Помощник"
-    model: "gpt-5-nano"
-    tools: ["coordinator", "sequential_thinking"]
+    model: "qwen3"
+    tools: ["coordinator", "sequentialthinking"]
     base_prompt: "base"
     description: "Базовый помощник для общения"
     mcp_enabled: true
@@ -493,7 +519,7 @@ agents:
   # Простой агент для тестирования без MCP
   simple_test:
     name: "Простой тестовый агент"
-    model: "gpt-5-nano"
+    model: "qwen3"
     tools: []
     base_prompt: "base"
     description: "Простой агент без инструментов для тестирования"
@@ -502,47 +528,36 @@ agents:
   # Файловый агент
   file_agent:
     name: "Файловый агент"
-    model: "gpt-5-nano"
+    model: "qwen3"
     tools: ["filesystem"]
     base_prompt: "with_files"
     description: "Специалист по работе с файлами."
     mcp_enabled: true
+    verifier: "default_audit"
     
   
   # Git агент
   git_agent:
     name: "Git агент"
-    model: "gpt-5-nano"
-    tools: [
-      # Основные операции
-      "git_status", "git_log", "git_diff", "git_branch_list", "git_add_file", "git_add_all",
-      "git_commit", "git_checkout_branch",
-      # Инициализация и настройка
-      "git_init", "git_config", "git_clone",
-      # Удаленные репозитории
-      "git_remote_info", "git_remote_add", "git_remote_remove", "git_fetch", "git_pull", "git_push",
-      # Управление ветками и слияние
-      "git_merge", "git_reset", "git_stash",
-      # Теги
-      "git_tag", "git_tag_list",
-      # Файловые операции для поддержки
-      "file_read", "file_list"
-    ]
+    model: "qwen3"
+    tools: ["git"]
     base_prompt: "with_git"
     description: "Полнофункциональный помощник разработчика для Git"
+    verifier: "default_audit"
   
   # Исследователь
   researcher:
     name: "Исследователь"
-    model: "gpt-5-nano"
+    model: "qwen3"
     tools: ["file_write", "file_read", "file_search"]
     base_prompt: "with_files"
     description: "Исследователь для анализа файлов и документов"
+    verifier: "default_audit"
   
   # Полнофункциональный агент
   full_agent:
     name: "Универсальный агент"
-    model: "gpt-5-nano"
+    model: "qwen3"
     tools: [
       # Файловые операции
       "file_read", "file_write", "file_list", "file_info", "file_search", "file_edit_patch",
@@ -560,28 +575,31 @@ agents:
     ]
     base_prompt: "with_files"
     description: "Универсальный помощник со всеми инструментами"
+    verifier: "default_audit"
 
   context_wrapper:
     name: "Сборщик контекста"
-    model: "gpt-5-nano"
-    tools: [filesystem, git]
+    model: "qwen3"
+    tools: ["filesystem", "git"]
     base_prompt: "context_wrapper_prompt"
     description: "Обертка для управления контекстом и взаимодействия с агентами"
+    verifier: "default_audit"
 
   code_agent:
     name: "Кодовый агент"
-    model: "gpt-5-nano"
+    model: "qwen3"
     tools: [
-      "debugger", "sequential_thinking", "filesystem", "git", "terminal"
+      "debugger", "sequentialthinking", "filesystem", "git", "terminal"
     ]
     base_prompt: "code_agent_prompt"
     description: "Специалист по программированию и анализу кода"
     mcp_enabled: true
+    verifier: "default_audit"
   
   # Мыслящий агент
   thinker:
     name: "Мыслитель"
-    model: "gpt-5-nano"
+    model: "qwen3"
     tools: []
     base_prompt: "base"
     custom_prompt: |
@@ -592,23 +610,24 @@ agents:
   
   task_analyst:
     name: "Аналитик задач"
-    model: "gpt-5-nano"
+    model: "qwen3"
     tools: []
     base_prompt: "task_analyst_prompt"
     description: "Агент для анализа задач и составления плана действий"
 
   debugger:
     name: "Отладчик"
-    model: "gpt-5-nano"
-    tools: [terminal, filesystem, git]
+    model: "qwen3"
+    tools: ["terminal", "filesystem", "git"]
     base_prompt: "debugger_prompt"
     description: "Агент для отладки кода"
 
   # Координатор агентов
   coordinator:
     name: "Координатор"
-    model: "gpt-5-nano"
-    tools: ["file_agent", "git_agent", "researcher", "code_agent", "debugger"]
+    model: "qwen3"
+    tools: ["filesystem", "git_agent", "context_wrapper", "code_agent", "debugger"]
     base_prompt: "coordinator_prompt"
+    verifier: "default_audit"
     custom_prompt: |
       Ты координатор команды специализированных агентов. Твоя задача — анализировать запросы, составлять план действий и делегировать работу подходящим агентам для решения задачи  .

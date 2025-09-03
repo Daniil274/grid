@@ -108,6 +108,19 @@ class Config:
             return relative_path.replace('\\', '/')
         # Join using pathlib and normalize to POSIX string
         return (Path(self.get_working_directory()) / relative_path).as_posix()
+
+    def get_logs_directory(self) -> Optional[str]:
+        """Return absolute logs directory from settings.logs_directory, if set."""
+        try:
+            logs_dir = self.config.settings.logs_directory
+            if not logs_dir:
+                return None
+            # If absolute, return as-is; else resolve against working_directory
+            if os.path.isabs(logs_dir):
+                return logs_dir.replace('\\', '/')
+            return (Path(self.get_working_directory()) / logs_dir).as_posix()
+        except Exception:
+            return None
     
     # Provider methods
     def get_provider(self, provider_key: str) -> ProviderConfig:

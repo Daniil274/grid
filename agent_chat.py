@@ -31,22 +31,6 @@ from utils.logger import Logger
 # Configure tracing instead of logging
 configure_tracing_from_env()
 
-# Configure logging: console + files
-Logger.configure(
-    level="INFO",
-    log_dir=str(Path(__file__).parent / "logs"),
-    enable_console=True,
-    enable_json=True,
-    enable_legacy_logs=True,
-    force_reconfigure=True,
-)
-
-# Configure minimal logging for external libraries
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
-logging.getLogger("openai.agents").setLevel(logging.CRITICAL)
-logging.getLogger("grid").setLevel(logging.INFO)
-
 async def main():
     """Главная функция."""
     parser = argparse.ArgumentParser(description="Legacy Grid agent chat interface")
@@ -91,6 +75,23 @@ async def main():
         print("Load Config")
         config = Config(args.config, args.path)
         print("Load Config - Конфигурация загружена")
+
+        # Configure logging: console + files (dir from config)
+        logs_dir = config.get_logs_directory() or str(Path(__file__).parent / "logs")
+        Logger.configure(
+            level="INFO",
+            log_dir=logs_dir,
+            enable_console=True,
+            enable_json=True,
+            enable_legacy_logs=True,
+            force_reconfigure=True,
+        )
+        
+        # Configure minimal logging for external libraries
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("openai").setLevel(logging.WARNING)
+        logging.getLogger("openai.agents").setLevel(logging.CRITICAL)
+        logging.getLogger("grid").setLevel(logging.INFO)
         
         # Create factory
         print("Initialize SecurityAwareAgentFactory")
