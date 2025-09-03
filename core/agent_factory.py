@@ -393,95 +393,69 @@ class AgentFactory:
                                     except Exception:
                                         args_str = str(arguments) if arguments is not None else ""
                                     
-                                    # Определяем MCP инструменты по именам
-                                    mcp_tools = {
-                                        "sequentialthinking": "sequential_thinking",
-                                        "read_text_file": "filesystem", 
-                                        "write_text_file": "filesystem",
-                                        "list_directory": "filesystem",
-                                        "create_directory": "filesystem",
-                                        "delete_file": "filesystem",
-                                        "move_file": "filesystem",
-                                        "git_status": "git",
-                                        "git_log": "git", 
-                                        "git_diff": "git",
-                                        "git_add": "git",
-                                        "git_commit": "git",
-                                        "git_push": "git",
-                                        "git_pull": "git",
-                                        "git_set_working_dir": "git",
-                                        "git_show": "git"
-                                    }
-                                    
                                     server_label = getattr(raw_item, 'server_label', None)
-                                    if not server_label and tool_name in mcp_tools:
-                                        server_label = mcp_tools[tool_name]
                                     
                                     args_dict = {"args": args_str}
                                     if server_label:
                                         args_dict["server_label"] = server_label
-                                        # Добавляем префикс для MCP инструментов в логах
-                                        tool_display_name = f"MCP:{server_label}.{tool_name}"
+                                        tool_display_name = f"{server_label}.{tool_name}"
                                     else:
                                         tool_display_name = tool_name
                                     
-                                    # Форматируем аргументы для удобного чтения (табулированно, не JSON)
-                                    def format_arguments_readable(arguments):
-                                        if arguments is None:
-                                            return ""
-                                        if isinstance(arguments, str):
-                                            return arguments
-                                        if isinstance(arguments, dict):
-                                            parts = []
-                                            for key, value in arguments.items():
-                                                if isinstance(value, str) and len(value) > 60:
-                                                    parts.append(f"{key}=...({len(value)} символов)")
-                                                elif isinstance(value, (dict, list)):
-                                                    parts.append(f"{key}={type(value).__name__}({len(value)})")
-                                                else:
-                                                    parts.append(f"{key}={value}")
-                                            return " | ".join(parts)
-                                        return str(arguments)
-                                    
-                                    args_str = format_arguments_readable(arguments)
-                                    
-
+                                    # Формат: "🔧 <tool> <args>"
+                                    if args_str:
+                                        print(f"\n🔧 {tool_display_name} · {args_str}")
+                                    else:
+                                        print(f"\n🔧 {tool_display_name}")
                                 elif name == "tool_output" and item is not None:
                                     raw_item = getattr(item, 'raw_item', None)
                                     tool_name = getattr(raw_item, 'name', None) or getattr(raw_item, 'type', None) or "tool"
                                     output_val = getattr(item, 'output', '')
                                     
-                                    # Определяем MCP инструменты по именам (используем тот же словарь)
-                                    mcp_tools = {
-                                        "sequentialthinking": "sequential_thinking",
-                                        "read_text_file": "filesystem", 
-                                        "write_text_file": "filesystem",
-                                        "list_directory": "filesystem",
-                                        "create_directory": "filesystem",
-                                        "delete_file": "filesystem",
-                                        "move_file": "filesystem",
-                                        "git_status": "git",
-                                        "git_log": "git", 
-                                        "git_diff": "git",
-                                        "git_add": "git",
-                                        "git_commit": "git",
-                                        "git_push": "git",
-                                        "git_pull": "git",
-                                        "git_set_working_dir": "git",
-                                        "git_show": "git"
-                                    }
-                                    
                                     server_label = getattr(raw_item, 'server_label', None)
-                                    if not server_label and tool_name in mcp_tools:
-                                        server_label = mcp_tools[tool_name]
                                     
-                                    # Добавляем префикс для MCP инструментов
                                     if server_label:
-                                        tool_display_name = f"MCP:{server_label}.{tool_name}"
+                                        tool_display_name = f"{server_label}.{tool_name}"
                                     else:
                                         tool_display_name = tool_name
                                     
-
+                                    # Укороченный вывод результата
+                                    try:
+                                        output_str = str(output_val)
+                                        if len(output_str) > 200:
+                                            output_str = output_str[:200] + "…"
+                                    except Exception:
+                                        output_str = "<output>"
+                                    print(f"✅ {tool_display_name} → {output_str}")
+                                elif name == "handoff_requested" and item is not None:
+                                    # Передача задачи между агентами
+                                    try:
+                                        src = getattr(item, 'agent', None)
+                                        src_name = getattr(src, 'name', None) or agent_key
+                                        # Назначение по данным raw_item (может содержать tool name целевого агента)
+                                        raw_item = getattr(item, 'raw_item', None)
+                                        target = getattr(raw_item, 'name', None) or "agent"
+                                        print(f"\n🔀 {src_name} → {target}")
+                                    except Exception:
+                                        print("\n🔀 handoff")
+                                elif name == "handoff_occured" and item is not None:
+                                    try:
+                                        src_agent = getattr(item, 'source_agent', None)
+                                        dst_agent = getattr(item, 'target_agent', None)
+                                        src_name = getattr(src_agent, 'name', None) or "agent"
+                                        dst_name = getattr(dst_agent, 'name', None) or "agent"
+                                        print(f"🔁 {src_name} ⇒ {dst_name}")
+                                    except Exception:
+                                        print("🔁 handoff done")
+                                elif name == "mcp_list_tools" and item is not None:
+                                    try:
+                                        raw_item = getattr(item, 'raw_item', None)
+                                        server_label = getattr(raw_item, 'server_label', None) or "mcp"
+                                        tools = getattr(raw_item, 'tools', None)
+                                        count = len(tools) if tools is not None else "?"
+                                        print(f"🧩 MCP {server_label}: {count} tool(s)")
+                                    except Exception:
+                                        print("🧩 MCP tools")
                             elif isinstance(event, RawResponsesStreamEvent):
                                 # Отображение текстовых дельт в реальном времени
                                 try:
@@ -705,39 +679,7 @@ class AgentFactory:
             except Exception as e:
                             pass
  
-        # Добавим алиасы каналов только для function tools (не для MCP)
-        # MCP инструменты обрабатываются SDK отдельно и не нуждаются в алиасах
-        if tools and not mcp_tools:  # Только если нет MCP инструментов
-            try:
-                channel_suffixes = ("_commentary", "_tool", "_final")
-                alias_count = 0
-                # Собираем снимок списка, чтобы не итерироваться по растущему
-                base_tools_snapshot = list(tools)
-                for base_tool in base_tools_snapshot:
-                    tool_name = getattr(base_tool, 'name', None)
-                    on_invoke = getattr(base_tool, 'on_invoke_tool', None)
-                    if not tool_name or not callable(on_invoke):
-                        continue
-                    for suffix in channel_suffixes:
-                        alias_name = f"{tool_name}{suffix}"
-                        # Создаем лёгкий прокси-инструмент, перенаправляющий вызов на исходный
-                        @function_tool(name_override=alias_name, description_override=getattr(base_tool, 'description', '') or f"Alias of {tool_name}")
-                        async def alias_tool_proxy(tool_context: RunContextWrapper, **kwargs):
-                            # Передаем исходные аргументы как есть
-                            return await on_invoke(tool_context, kwargs if kwargs else {})
-                        tools.append(alias_tool_proxy)
-                        alias_count += 1
-                if alias_count:
-                    pass
-            except Exception as e:
-                pass
 
-        # NOTE: MCP tools are no longer added as function tools. They are exposed to the model
-        # via Agent.mcp_servers using the SDK integration. We only record unavailability metadata.
-        if mcp_tools:
-            if not (agent_config.mcp_enabled or self.config.is_mcp_enabled()):
-                        pass
-        
         # Cache tools
         self._tool_cache[cache_key] = tools
         
