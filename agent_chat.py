@@ -10,7 +10,9 @@ import sys
 import time
 import logging
 import os
+import re
 from pathlib import Path
+from typing import Optional
 
 # Add grid package to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -96,6 +98,14 @@ async def main():
         print("Initialize SecurityAwareAgentFactory")
         factory = AgentFactory(config, args.path)
         print("Initialize SecurityAwareAgentFactory - Фабрика агентов инициализирована")
+        selected_context_id: Optional[str] = None
+        last_context_id: Optional[str] = None
+
+        def extract_context_id_from_text(text: Optional[str]) -> Optional[str]:
+            if not text:
+                return None
+            match = re.search(r"ctx-[0-9a-f]{8}", text)
+            return match.group(0) if match else None
         
         # Tracing is configured automatically by Agents SDK
         
@@ -135,7 +145,16 @@ async def main():
                 
                 start_time = time.time()
                 use_streaming = True  # Включаем стриминг для режима одного сообщения
-                response = await factory.run_agent(agent_key, args.message, args.context_path, stream=use_streaming)
+                inline_context_id = extract_context_id_from_text(args.message)
+                request_context_id = inline_context_id or selected_context_id
+                response = await factory.run_agent(
+                    agent_key,
+                    args.message,
+                    args.context_path,
+                    context_id=request_context_id,
+                    stream=use_streaming,
+                )
+                last_context_id = factory.get_active_context_id()
                 duration = time.time() - start_time
                 
                 # Try to get token usage information
@@ -179,9 +198,11 @@ async def main():
                         break
                     elif user_input.lower() == 'clear':
                         print("Clear Context")
-                        factory.clear_context()
+                        cleared_id = factory.clear_context()
+                        selected_context_id = None
+                        last_context_id = cleared_id
                         print("Clear Context - Контекст очищен")
-                        print("Success")
+                        print(f"New context ID: {cleared_id}")
                         continue
                     elif user_input.lower() == 'context':
                         print("Get Context")
@@ -192,15 +213,49 @@ async def main():
                         print(f"   Сообщений: {context_info.get('conversation_messages', 0)}")
                         print(f"   История выполнения: {context_info.get('execution_history', 0)}")
                         print(f"   Использование памяти: {context_info.get('memory_usage_mb', 0):.2f} МБ")
+                        active_id = context_info.get('current_context_id')
+                        if active_id:
+                            print(f"   Active context ID: {active_id}")
+                        if selected_context_id:
+                            print(f"   Selected for next runs: {selected_context_id}")
+                        if last_context_id and last_context_id != selected_context_id:
+                            print(f"   Last response context ID: {last_context_id}")
+                        available_ids = [cid for cid in context_info.get('available_contexts', []) if cid != active_id]
+                        if available_ids:
+                            print(f"   Known contexts: {', '.join(available_ids)}")
                         if context_info.get('last_user_message'):
                             last_msg = context_info['last_user_message']
                             print(f"   Последнее сообщение: {last_msg}")
+                        continue
+                    elif user_input.lower() == 'contexts':
+                        ids = factory.list_context_ids()
+                        if not ids:
+                            print('No saved contexts yet.')
+                        else:
+                            print('Known contexts:')
+                            for ctx_id in ids:
+                                marker = ' (selected)' if ctx_id == selected_context_id else ''
+                                print(f'  - {ctx_id}{marker}')
+                        continue
+                    elif user_input.lower().startswith('use '):
+                        target_id = user_input[4:].strip()
+                        if not target_id:
+                            print('Provide context id after "use".')
+                            continue
+                        try:
+                            selected_context_id = factory.activate_context(target_id)
+                            last_context_id = selected_context_id
+                            print(f'Switched to context {selected_context_id}')
+                        except Exception as exc:
+                            print(f'Failed to switch context: {exc}')
                         continue
                     elif user_input.lower() == 'help':
                         print("\nAvailable commands:")
                         print("  exit, quit - Exit the chat")
                         print("  clear - Clear conversation history")
                         print("  context - Show context information")
+                        print("  contexts - List known context IDs")
+                        print("  use <context_id> - Switch to a saved context")
                         print("  help - Show this help message")
                         continue
                     elif not user_input:
@@ -213,7 +268,16 @@ async def main():
                         
                         start_time = time.time()
                         use_streaming = True  # Включаем стриминг для интерактивного режима
-                        response = await factory.run_agent(agent_key, user_input, args.context_path, stream=use_streaming)
+                        inline_context_id = extract_context_id_from_text(user_input)
+                        request_context_id = inline_context_id or selected_context_id
+                        response = await factory.run_agent(
+                            agent_key,
+                            user_input,
+                            args.context_path,
+                            context_id=request_context_id,
+                            stream=use_streaming,
+                        )
+                        last_context_id = factory.get_active_context_id()
                         duration = time.time() - start_time
                         
                         # Try to get token usage information
@@ -235,6 +299,8 @@ async def main():
                             print(f"\n")  # Добавляем новую строку после стримингового вывода
                         else:
                             print(f"\n🤖 {agent_key}: {response}")
+                        if last_context_id:
+                            print(f"Context ID: {last_context_id}")
                         
                     except Exception as e:
                         print("Operation completed")

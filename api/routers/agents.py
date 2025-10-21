@@ -30,6 +30,7 @@ class AgentExecutionRequest(BaseModel):
     message: str = Field(..., description="Message to send to agent")
     context: Optional[Dict[str, Any]] = Field(None, description="Execution context")
     session_id: Optional[str] = Field(None, description="Session identifier")
+    context_id: Optional[str] = Field(None, description="Context identifier")
     timeout: Optional[int] = Field(300, description="Execution timeout")
 
 class AgentExecutionResponse(BaseModel):
@@ -39,6 +40,7 @@ class AgentExecutionResponse(BaseModel):
     execution_time: float = Field(..., description="Execution time in seconds")
     tools_used: List[str] = Field(..., description="Tools used during execution")
     session_id: Optional[str] = Field(None, description="Session identifier")
+    context_id: Optional[str] = Field(None, description="Context identifier")
     metadata: Dict[str, Any] = Field(..., description="Additional metadata")
 
 class AgentCapabilitiesResponse(BaseModel):
@@ -155,6 +157,7 @@ async def execute_agent(
         context = {
             "user_id": user.get("user_id"),
             "session_id": request.session_id,
+            "context_id": request.context_id,
             **(request.context or {})
         }
         
@@ -163,21 +166,28 @@ async def execute_agent(
         start_time = time.time()
         
         # Используем factory.run_agent() вместо agent.run() для правильной работы с контекстом
-        result = await agent_factory.run_agent(agent_type, request.message)
+        result = await agent_factory.run_agent(
+            agent_type,
+            request.message,
+            context_id=request.context_id
+        )
         
         execution_time = time.time() - start_time
+        active_context_id = agent_factory.get_active_context_id()
         
         # Prepare response
         response = AgentExecutionResponse(
             agent_type=agent_type,
-            result=result,  # factory.run_agent() возвращает строку
+            result=result,
             execution_time=execution_time,
-            tools_used=[],  # Пока не извлекаем использованные инструменты
+            tools_used=[],
             session_id=request.session_id,
+            context_id=active_context_id,
             metadata={
                 "model": available_agents[agent_type].get("model"),
                 "timestamp": time.time(),
-                "context_size": len(str(context))
+                "context_size": len(str(context)),
+                "context_id": active_context_id,
             }
         )
         

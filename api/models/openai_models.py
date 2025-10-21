@@ -37,6 +37,7 @@ class GridContext(BaseModel):
     """GRID-specific context extensions."""
     working_directory: Optional[str] = Field(None, description="Working directory for agent")
     session_id: Optional[str] = Field(None, description="Session identifier")
+    context_id: Optional[str] = Field(None, description="Context identifier")
     tools_enabled: Optional[bool] = Field(True, description="Enable agent tools")
     security_level: Optional[str] = Field("standard", description="Security analysis level")
     timeout: Optional[int] = Field(300, description="Execution timeout in seconds")
@@ -93,6 +94,7 @@ class GridMetadata(BaseModel):
     tools_called: List[str] = Field(default_factory=list, description="Tools used by agent")
     security_analysis: Optional[Dict[str, Any]] = Field(None, description="Security analysis results")
     session_id: Optional[str] = Field(None, description="Session identifier")
+    context_id: Optional[str] = Field(None, description="Context identifier")
     trace_id: Optional[str] = Field(None, description="Trace identifier")
     working_directory: Optional[str] = Field(None, description="Working directory used")
 

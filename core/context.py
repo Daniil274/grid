@@ -5,10 +5,11 @@ Advanced context management for Grid agents with memory and persistence.
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 from threading import Lock
+from contextlib import contextmanager
 import json
-import threading
 from pathlib import Path
 import logging
+import uuid
 
 from schemas import ContextMessage, AgentExecution
 from utils.exceptions import ContextError
@@ -17,25 +18,16 @@ from utils.exceptions import ContextError
 logger = logging.getLogger("core.context")
 
 
+@contextmanager
 def safe_lock(lock, timeout=5.0):
     """Context manager для безопасного использования lock'а с таймаутом."""
-    class SafeLockContext:
-        def __init__(self, lock, timeout):
-            self.lock = lock
-            self.timeout = timeout
-            self.acquired = False
-            
-        def __enter__(self):
-            self.acquired = self.lock.acquire(timeout=self.timeout)
-            if not self.acquired:
-                raise ContextError(f"Lock timeout after {self.timeout} seconds")
-            return self
-            
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            if self.acquired:
-                self.lock.release()
-    
-    return SafeLockContext(lock, timeout)
+    acquired = lock.acquire(timeout=timeout)
+    if not acquired:
+        raise ContextError(f"Lock timeout after {timeout} seconds")
+    try:
+        yield lock
+    finally:
+        lock.release()
 
 
 class ContextManager:
@@ -51,15 +43,82 @@ class ContextManager:
         """
         self.max_history = max_history
         self.persist_path = Path(persist_path) if persist_path else None
-        
+
+        self._lock = Lock()
+        self._contexts: Dict[str, Dict[str, Any]] = {}
+        self._current_context_id: Optional[str] = None
+
+        # Active buffers are assigned via _activate_context
         self._conversation_history: List[ContextMessage] = []
         self._execution_history: List[AgentExecution] = []
         self._metadata: Dict[str, Any] = {}
-        self._lock = Lock()
-        
+
         # Load from persistence if available
         if self.persist_path and self.persist_path.exists():
             self._load_from_file()
+        else:
+            default_context = self._create_context()
+            self._activate_context(default_context)
+
+    def _generate_context_id(self) -> str:
+        """Generate a short identifier for a context session."""
+        return f"ctx-{uuid.uuid4().hex[:8]}"
+
+    def _create_context(self, context_id: Optional[str] = None) -> str:
+        """Create a context bucket if it does not exist and return its ID."""
+        context_key = context_id or self._generate_context_id()
+        if context_key not in self._contexts:
+            self._contexts[context_key] = {
+                "conversation": [],
+                "executions": [],
+                "metadata": {},
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+            }
+        return context_key
+
+    def _activate_context(self, context_id: str) -> str:
+        """Activate an existing context bucket and expose its buffers."""
+        context_key = self._create_context(context_id)
+        context_bucket = self._contexts[context_key]
+        self._current_context_id = context_key
+        self._conversation_history = context_bucket["conversation"]
+        self._execution_history = context_bucket["executions"]
+        self._metadata = context_bucket["metadata"]
+        context_bucket["updated_at"] = datetime.now().isoformat()
+        return context_key
+
+    def activate_context(self, context_id: str) -> str:
+        """Public helper to switch to a specific context ID, creating it if needed."""
+        with safe_lock(self._lock, timeout=5.0):
+            active_id = self._activate_context(context_id)
+            if self.persist_path:
+                self._save_to_file()
+            return active_id
+
+    def start_new_context(self, context_id: Optional[str] = None) -> str:
+        """Create and switch to a brand new, empty context."""
+        with safe_lock(self._lock, timeout=5.0):
+            new_id = self._create_context(context_id)
+            bucket = self._contexts[new_id]
+            bucket["conversation"] = []
+            bucket["executions"] = []
+            bucket["metadata"] = {}
+            now_iso = datetime.now().isoformat()
+            bucket["created_at"] = now_iso
+            bucket["updated_at"] = now_iso
+            self._activate_context(new_id)
+            if self.persist_path:
+                self._save_to_file()
+            return new_id
+
+    def get_current_context_id(self) -> Optional[str]:
+        """Return the identifier of the active context."""
+        return self._current_context_id
+
+    def list_context_ids(self) -> List[str]:
+        """Return the list of known context identifiers."""
+        return list(self._contexts.keys())
     
     def add_message(self, role: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """
@@ -70,55 +129,59 @@ class ContextManager:
             content: Message content
             metadata: Optional metadata
         """
-        acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
-        if not acquired:
-            # Lock timeout in add_message
-            raise ContextError("Lock timeout in add_message")
         try:
-            try:
-                message = ContextMessage(
-                    role=role,
-                    content=content,
-                    timestamp=datetime.now().isoformat(),
-                    metadata=metadata
-                )
-                
-                self._conversation_history.append(message)
-                
-                # Trim history if needed
-                if len(self._conversation_history) > self.max_history:
-                    removed = self._conversation_history.pop(0)
-                    # Removed old message from context
-                
-                # Added message to context
-                
-                # Persist if configured
-                if self.persist_path:
-                    self._save_to_file()
-                    
-            except Exception as e:
-                raise ContextError(f"Failed to add message: {e}")
-        finally:
-            self._lock.release()
+            with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
+                try:
+                    message = ContextMessage(
+                        role=role,
+                        content=content,
+                        timestamp=datetime.now().isoformat(),
+                        metadata=metadata
+                    )
+
+                    self._conversation_history.append(message)
+
+                    # Trim history if needed
+                    if len(self._conversation_history) > self.max_history:
+                        self._conversation_history.pop(0)
+
+                    # Update bookkeeping for active context
+                    active_bucket = self._contexts.get(self._current_context_id)
+                    if active_bucket is not None:
+                        active_bucket["updated_at"] = datetime.now().isoformat()
+
+                    # Persist if configured
+                    if self.persist_path:
+                        self._save_to_file()
+
+                except Exception as e:
+                    raise ContextError(f"Failed to add message: {e}")
+        except ContextError as exc:
+            logger.error("Lock timeout in add_message", exc_info=exc)
+            raise
     
     def add_execution(self, execution: AgentExecution) -> None:
         """Add agent execution to history."""
-        acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
-        if not acquired:
-            # Lock timeout in add_execution
-            return
         try:
-            self._execution_history.append(execution)
-            
-            # Keep execution history reasonable
-            if len(self._execution_history) > self.max_history * 2:
-                self._execution_history.pop(0)
-            
-            # Persist if configured
-            if self.persist_path:
-                self._save_to_file()
-        finally:
-            self._lock.release()
+            with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
+                self._execution_history.append(execution)
+
+                # Keep execution history reasonable
+                if len(self._execution_history) > self.max_history * 2:
+                    self._execution_history.pop(0)
+
+                active_bucket = self._contexts.get(self._current_context_id)
+                if active_bucket is not None:
+                    active_bucket["updated_at"] = datetime.now().isoformat()
+
+                # Persist if configured
+                if self.persist_path:
+                    self._save_to_file()
+        except ContextError:
+            logger.warning(
+                "Execution history record dropped due to lock timeout",
+                extra={"agent_execution": getattr(execution, "agent_name", None)},
+            )
     
     def get_conversation_context(self, last_n: Optional[int] = None) -> str:
         """
@@ -168,18 +231,9 @@ class ContextManager:
             
             return executions[-limit:]
     
-    def clear_history(self) -> None:
-        """Clear all conversation history."""
-        with self._lock:
-            cleared_count = len(self._conversation_history)
-            self._conversation_history.clear()
-            self._execution_history.clear()
-            
-            # Cleared messages from context
-            
-            # Clear persistence file
-            if self.persist_path and self.persist_path.exists():
-                self.persist_path.unlink()
+    def clear_history(self) -> str:
+        """Clear all conversation history by starting a new context session."""
+        return self.start_new_context()
     
     def get_context_stats(self) -> Dict[str, Any]:
         """Get context statistics."""
@@ -204,6 +258,8 @@ class ContextManager:
                     "memory_usage_mb": self._estimate_memory_usage(),
                     "last_user_message": last_user,
                     "last_assistant_message": last_assistant,
+                    "current_context_id": self._current_context_id,
+                    "available_contexts": list(self._contexts.keys()),
                 }
         except ContextError:
             # Lock timeout in get_context_stats
@@ -213,55 +269,56 @@ class ContextManager:
                 "memory_usage_mb": 0.0,
                 "last_user_message": None,
                 "last_assistant_message": None,
+                "current_context_id": None,
+                "available_contexts": [],
             }
 
     def get_conversation_history(self) -> List[Dict[str, Any]]:
         """Return raw conversation history as list of dicts for external consumers."""
-        acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
-        if not acquired:
-            # Lock timeout in get_conversation_history
-            return []
         try:
-            return [msg.model_dump() for msg in self._conversation_history]
-        finally:
-            self._lock.release()
+            with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
+                return [msg.model_dump() for msg in self._conversation_history]
+        except ContextError:
+            logger.warning("Lock timeout in get_conversation_history")
+            return []
     
     def get_last_user_message(self) -> Optional[str]:
         """Get the last user message."""
-        acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
-        if not acquired:
-            # Lock timeout in get_last_user_message
-            return None
         try:
-            for msg in reversed(self._conversation_history):
-                if msg.role == "user":
-                    return msg.content
+            with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
+                for msg in reversed(self._conversation_history):
+                    if msg.role == "user":
+                        return msg.content
             return None
-        finally:
-            self._lock.release()
+        except ContextError:
+            logger.warning("Lock timeout in get_last_user_message")
+            return None
     
     def get_last_assistant_message(self) -> Optional[str]:
         """Get the last assistant message."""
-        acquired = self._lock.acquire(timeout=5.0)  # 5 сек таймаут
-        if not acquired:
-            # Lock timeout in get_last_assistant_message
-            return None
         try:
-            for msg in reversed(self._conversation_history):
-                if msg.role == "assistant":
-                    return msg.content
+            with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
+                for msg in reversed(self._conversation_history):
+                    if msg.role == "assistant":
+                        return msg.content
             return None
-        finally:
-            self._lock.release()
+        except ContextError:
+            logger.warning("Lock timeout in get_last_assistant_message")
+            return None
     
     def set_metadata(self, key: str, value: Any) -> None:
         """Set context metadata."""
-        with self._lock:
+        with safe_lock(self._lock, timeout=5.0):
             self._metadata[key] = value
+            bucket = self._contexts.get(self._current_context_id)
+            if bucket is not None:
+                bucket["updated_at"] = datetime.now().isoformat()
+            if self.persist_path:
+                self._save_to_file()
     
     def get_metadata(self, key: str, default: Any = None) -> Any:
         """Get context metadata."""
-        with self._lock:
+        with safe_lock(self._lock, timeout=5.0):
             return self._metadata.get(key, default)
     
     def _get_role_emoji(self, role: str) -> str:
@@ -289,10 +346,32 @@ class ContextManager:
         """Save context to persistence file."""
         try:
             data = {
-                "conversation_history": [m.model_dump() for m in self._conversation_history],
-                "execution_history": [e.model_dump() for e in self._execution_history],
-                "metadata": self._metadata
+                "active_context_id": self._current_context_id,
+                "contexts": {}
             }
+
+            for context_id, bucket in self._contexts.items():
+                conversation_dump = []
+                for msg in bucket.get("conversation", []):
+                    if hasattr(msg, "model_dump"):
+                        conversation_dump.append(msg.model_dump())
+                    else:
+                        conversation_dump.append(msg)
+
+                execution_dump = []
+                for ex in bucket.get("executions", []):
+                    if hasattr(ex, "model_dump"):
+                        execution_dump.append(ex.model_dump())
+                    else:
+                        execution_dump.append(ex)
+
+                data["contexts"][context_id] = {
+                    "conversation_history": conversation_dump,
+                    "execution_history": execution_dump,
+                    "metadata": bucket.get("metadata", {}),
+                    "created_at": bucket.get("created_at"),
+                    "updated_at": bucket.get("updated_at"),
+                }
             
             # Ensure directory exists
             self.persist_path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,21 +388,59 @@ class ContextManager:
         try:
             with open(self.persist_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
-            # Load conversation history
-            self._conversation_history = [
-                ContextMessage(**msg) for msg in data.get("conversation_history", [])
-            ]
-            
-            # Load execution history
-            self._execution_history = [
-                AgentExecution(**ex) for ex in data.get("execution_history", [])
-            ]
-            
-            # Load metadata
-            self._metadata = data.get("metadata", {})
-            
-            # Loaded context from file
+
+            contexts_data = data.get("contexts")
+            if contexts_data:
+                self._contexts = {}
+                for context_id, bucket in contexts_data.items():
+                    conversation = [
+                        ContextMessage(**msg) if isinstance(msg, dict) else msg
+                        for msg in bucket.get("conversation_history", [])
+                    ]
+                    executions = [
+                        AgentExecution(**ex) if isinstance(ex, dict) else ex
+                        for ex in bucket.get("execution_history", [])
+                    ]
+                    metadata = bucket.get("metadata", {})
+                    self._contexts[context_id] = {
+                        "conversation": conversation,
+                        "executions": executions,
+                        "metadata": metadata,
+                        "created_at": bucket.get("created_at"),
+                        "updated_at": bucket.get("updated_at"),
+                    }
+
+                active_id = data.get("active_context_id")
+                if active_id and active_id in self._contexts:
+                    self._activate_context(active_id)
+                elif self._contexts:
+                    # Pick the most recently updated context
+                    sorted_contexts = sorted(
+                        self._contexts.items(),
+                        key=lambda item: item[1].get("updated_at", ""),
+                        reverse=True,
+                    )
+                    self._activate_context(sorted_contexts[0][0])
+                else:
+                    default_context = self._create_context()
+                    self._activate_context(default_context)
+            else:
+                # Backwards compatibility with legacy single-context format
+                default_context = self._create_context(data.get("context_id"))
+                conversation = [
+                    ContextMessage(**msg) if isinstance(msg, dict) else msg
+                    for msg in data.get("conversation_history", [])
+                ]
+                executions = [
+                    AgentExecution(**ex) if isinstance(ex, dict) else ex
+                    for ex in data.get("execution_history", [])
+                ]
+                bucket = self._contexts[default_context]
+                bucket["conversation"] = conversation
+                bucket["executions"] = executions
+                bucket["metadata"] = data.get("metadata", {})
+                bucket["updated_at"] = datetime.now().isoformat()
+                self._activate_context(default_context)
             
         except Exception as e:
             # Failed to load context
@@ -332,170 +449,12 @@ class ContextManager:
             self._conversation_history = []
             self._execution_history = []
             self._metadata = {}
+            self._contexts = {}
+            self._current_context_id = None
+            fallback_context = self._create_context()
+            self._activate_context(fallback_context)
     
-    def _build_smart_context_json(self, task_input: str, depth: int, include_tools: bool) -> str:
-        """Build smart context based on task analysis in JSON format."""
-        # Analyze task to determine relevant context
-        task_lower = task_input.lower()
-        
-        # Keywords that suggest need for conversation context
-        conversation_keywords = [
-            "продолжи", "далее", "следующий", "предыдущий", "раньше", "уже", "было",
-            "continue", "next", "previous", "before", "already", "was", "что сказал",
-            "ответь на", "отвечай на", "который", "этот", "тот", "тот же", "тот самый",
-            "прочитал", "прочитал и", "анализировал", "оценил", "создал", "отредактировал"
-        ]
-        
-        # Keywords that suggest need for tool history
-        tool_keywords = [
-            "файл", "git", "код", "изменения", "результат", "выполнил", "сделал",
-            "file", "git", "code", "changes", "result", "executed", "done", "создал",
-            "отредактировал", "прочитал", "написал", "весит", "размер", "вес", "байт",
-            "проанализировал", "оценил", "проверил", "нашел", "создал файл"
-        ]
-        
-        # Keywords that suggest reference to previous actions
-        reference_keywords = [
-            "который", "этот", "тот", "тот же", "тот самый", "прочитанный", "анализированный",
-            "созданный", "отредактированный", "проверенный", "найденный", "тот файл",
-            "этот файл", "прочитанный файл", "анализированный файл", "созданный файл"
-        ]
-        
-        needs_conversation = any(keyword in task_lower for keyword in conversation_keywords)
-        needs_tools = any(keyword in task_lower for keyword in tool_keywords)
-        needs_reference = any(keyword in task_lower for keyword in reference_keywords)
-        
-        # Если есть ссылки на предыдущие действия - обязательно нужен полный контекст
-        if needs_reference:
-            return self._build_full_context_json(task_input, include_tools)
-        elif needs_conversation and needs_tools:
-            return self._build_full_context_json(task_input, include_tools)
-        elif needs_conversation:
-            return self._build_conversation_context_json(task_input, depth)
-        elif needs_tools and include_tools:
-            return self._build_tool_context_json(task_input)
-        else:
-            return task_input
-    
-    def get_context_for_agent_tool(
-        self, 
-        strategy: str = "minimal", 
-        depth: int = 5, 
-        include_tools: bool = False,
-        task_input: str = ""
-    ) -> str:
-        """
-        Get context for agent tools based on strategy.
-        
-        Args:
-            strategy: Context strategy (minimal, conversation, smart, full)
-            depth: Number of recent messages to include
-            include_tools: Whether to include tool execution history
-            task_input: The task input for smart analysis
-            
-        Returns:
-            Formatted context string (human-readable transcript)
-        """
-        if strategy == "minimal":
-            return task_input
-        elif strategy == "conversation":
-            return self._build_conversation_context_human(task_input, depth)
-        elif strategy == "smart":
-            return self._build_smart_context_human(task_input, depth, include_tools)
-        elif strategy == "full":
-            return self._build_full_context_human(task_input, include_tools)
-        else:
-            return task_input
-    
-    def _build_conversation_context_json(self, task_input: str, depth: int) -> str:
-        """Build conversation context in JSON format."""
-        with self._lock:
-            if not self._conversation_history:
-                return task_input
-            
-            recent_messages = self._conversation_history[-depth:] if depth > 0 else self._conversation_history
-            
-            context_parts = [
-                "📋 Контекст диалога:",
-                f"Текущая задача: {task_input}",
-                "",
-                "История сообщений (JSON формат):"
-            ]
-            
-            messages_json = []
-            for msg in recent_messages:
-                message_obj = {
-                    "role": msg.role,
-                    "content": msg.content,
-                    "timestamp": msg.timestamp
-                }
-                messages_json.append(message_obj)
-            
-            import json
-            context_parts.append(json.dumps(messages_json, ensure_ascii=False, indent=2))
-            
-            context_parts.extend([
-                "",
-                "💡 Используй эту информацию для понимания контекста задачи.",
-                f"Задача: {task_input}"
-            ])
-            
-            return "\n".join(context_parts)
-    
-    def _build_full_context_json(self, task_input: str, include_tools: bool) -> str:
-        """Build full context including conversation and tool history in JSON format."""
-        with self._lock:
-            context_parts = [
-                "📋 ПОЛНЫЙ КОНТЕКСТ:",
-                f"Текущая задача: {task_input}",
-                "",
-                "💬 История диалога:"
-            ]
-            
-            # Add conversation history
-            if self._conversation_history:
-                messages_json = []
-                for msg in self._conversation_history:
-                    message_obj = {
-                        "role": msg.role,
-                        "content": msg.content,
-                        "timestamp": msg.timestamp
-                    }
-                    messages_json.append(message_obj)
-                
-                import json
-                context_parts.append(json.dumps(messages_json, ensure_ascii=False, indent=2))
-            else:
-                context_parts.append("[]")
-            
-            # Add tool execution history if requested
-            if include_tools and self._execution_history:
-                context_parts.extend([
-                    "",
-                    "🔧 История выполнения операций:"
-                ])
-                
-                tools_json = []
-                for ex in self._execution_history[-10:]:  # Last 10 executions
-                    tool_obj = {
-                        "agent": ex.agent_name,
-                        "input": ex.input_message,
-                        "output": ex.output,
-                        "timestamp": ex.start_time,
-                        "duration": ex.end_time - ex.start_time if ex.end_time else 0
-                    }
-                    tools_json.append(tool_obj)
-                
-                import json
-                context_parts.append(json.dumps(tools_json, ensure_ascii=False, indent=2))
-            
-            context_parts.extend([
-                "",
-                "🎯 ВАЖНО: Используй всю эту информацию для выполнения задачи!",
-                f"Задача: {task_input}"
-            ])
-            
-            return "\n".join(context_parts)
+  
     
     def _build_tool_context_json(self, task_input: str) -> str:
         """Build tool execution context in JSON format."""

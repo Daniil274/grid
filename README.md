@@ -164,6 +164,27 @@ Format and context converter is located at `api/utils/openai_converter.py` (rout
 - Deduplication of Responses API warnings (reduces log noise).
 - On API startup, the context is cleared and saved context files are removed.
 
+## Conversation Context IDs
+The system assigns a lightweight context identifier to every agent turn. This allows
+humans, tools, and downstream agents to resume a previous conversation explicitly.
+
+- **Automatic creation** – Every call to `AgentFactory.run_agent` without an override
+  starts a fresh context session and appends a line `Контекст ID: ctx-xxxxxx` to the
+  final answer.
+- **Manual reuse** – Pass `context_id=...` when invoking `run_agent` (or include the
+  same string in API/CLI requests) to continue the exact conversation state.
+- **Storage** – Conversation history, executions, and metadata are kept per-context
+  inside `core/context.py` and persisted (when enabled) with the ID as the key.
+- **CLI helpers** – `agent_chat.py` shows the current ID after each response, starts
+  a fresh context for every prompt by default, lists known contexts via the `contexts`
+  command, and lets you reuse a session with `use <id>` (or by embedding `ctx-…`
+  in the message).
+- **API surface** – OpenAI-compatible responses expose the active ID in
+  `grid_metadata.context_id`, and custom API routes return the same field.
+
+This mechanism prevents accidental cross-talk between independent requests while
+keeping it trivial to stitch conversations back together when needed.
+
 ## Security
 - Security-aware factory (`core/security_agent_factory.py`) applies guardrails to specified agents.
 - Middleware: authentication, request security, rate limiting.

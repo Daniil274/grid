@@ -89,7 +89,8 @@ agents:
 
         with patch.object(agents, "Runner", DummyRunner):
             result = await factory.run_agent("test_agent", "hi", stream=True)
-            assert result == "Hello World"
+            assert result.startswith("Hello World")
+            assert "ctx-" in result
 
 
 @pytest.mark.asyncio
@@ -145,4 +146,5 @@ agents:
 
         with patch.object(agents, "Runner", DummyRunner):
             result = await factory.run_agent("test_agent", "hi", stream=True)
-            assert result == "FINAL" 
+            assert result.startswith("FINAL")
+            assert "ctx-" in result

@@ -88,8 +88,13 @@ class TestContextManager:
         with open(persist_path, 'r') as f:
             data = json.load(f)
         
-        assert len(data["conversation_history"]) == 1
-        assert data["conversation_history"][0]["content"] == "Test message"
+        contexts = data["contexts"]
+        assert len(contexts) == 1
+        active_id = data.get("active_context_id")
+        assert active_id in contexts
+        conversation_history = contexts[active_id]["conversation_history"]
+        assert len(conversation_history) == 1
+        assert conversation_history[0]["content"] == "Test message"
     
     def test_add_message_error_handling(self):
         """Test error handling in add_message."""
@@ -267,9 +272,15 @@ class TestContextManager:
         cm.add_message("user", "test")
         assert persist_path.exists()
         
-        cm.clear_history()
+        new_context_id = cm.clear_history()
         
-        assert not persist_path.exists()
+        assert persist_path.exists()
+        with open(persist_path, 'r') as f:
+            data = json.load(f)
+        assert data.get("active_context_id") == new_context_id
+        contexts = data.get("contexts", {})
+        assert new_context_id in contexts
+        assert contexts[new_context_id]["conversation_history"] == []
     
     def test_get_context_stats(self):
         """Test getting context statistics."""
@@ -296,6 +307,8 @@ class TestContextManager:
         assert "memory_usage_mb" in stats
         assert stats["last_user_message"] == "Hello"
         assert stats["last_assistant_message"] == "Hi"
+        assert stats["current_context_id"]
+        assert stats["current_context_id"] in stats["available_contexts"]
     
     def test_get_conversation_history(self):
         """Test getting raw conversation history."""

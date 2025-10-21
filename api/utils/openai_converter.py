@@ -182,7 +182,8 @@ class OpenAIConverter:
         agent_type: str,
         execution_time: float,
         request_id: str,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        context_id: Optional[str] = None
     ) -> ChatCompletionResponse:
         """Конвертация результата агента в OpenAI chat completion."""
         
@@ -224,6 +225,7 @@ class OpenAIConverter:
                 tools_called=getattr(result, 'tools_used', []),
                 security_analysis=getattr(result, 'security_info', {}),
                 session_id=session_id,
+                context_id=context_id,
                 trace_id=getattr(result, 'trace_id', None),
                 working_directory=getattr(result, 'working_directory', None)
             )
