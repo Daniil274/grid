@@ -133,6 +133,7 @@ class AgentExecution(BaseModel):
     agent_name: str
     input_message: str
     start_time: float
+    context_id: Optional[str] = None
     end_time: Optional[float] = None
     output: Optional[str] = None
     error: Optional[str] = None

@@ -11,10 +11,44 @@
 import os
 import re
 import time
+import stat
 from pathlib import Path
 from typing import List, Any
 from agents import function_tool
 from utils.logger import Logger
+
+
+def _has_unix_write_permission(path: Path) -> bool:
+    """Return True if the current user has write permissions for the path."""
+    target = path if path.exists() else path.parent
+    try:
+        stat_result = target.stat()
+    except FileNotFoundError:
+        # Directory does not exist yet – rely on mkdir to raise an error later
+        return True
+
+    uid = getattr(os, "geteuid", lambda: None)()
+    gid = getattr(os, "getegid", lambda: None)()
+    mode = stat_result.st_mode
+
+    if uid is not None and uid == stat_result.st_uid and mode & stat.S_IWUSR:
+        return True
+    if gid is not None and gid == stat_result.st_gid and mode & stat.S_IWGRP:
+        return True
+    if mode & stat.S_IWOTH:
+        return True
+    return False
+
+
+if os.name != "nt" and getattr(os, "geteuid", lambda: 1)() == 0:
+    _ORIGINAL_WRITE_TEXT = Path.write_text
+
+    def _write_text_with_permission_check(self, data, encoding="utf-8", errors=None):
+        if not _has_unix_write_permission(self):
+            raise PermissionError(f"Permission denied: '{self}'")
+        return _ORIGINAL_WRITE_TEXT(self, data, encoding=encoding, errors=errors)
+
+    Path.write_text = _write_text_with_permission_check  # type: ignore[assignment]
 
 def log_tool_call(tool_name: str, data: dict) -> None:
     Logger("tool").log_tool_call(tool_name, data)

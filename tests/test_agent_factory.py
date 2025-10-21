@@ -281,7 +281,9 @@ class TestAgentFactory:
             
             response = await factory.run_agent("test_agent", "test message")
             
-            assert response == "Test response"
+            assert response.startswith("Test response")
+            assert "ID:" in response
+            assert "ctx-" in response
             mock_create.assert_called_once_with("test_agent", None)
             mock_wait_for.assert_called_once()
     
@@ -360,6 +362,8 @@ class TestAgentFactory:
             response = await factory.run_agent("test_agent", "test message")
             
             # Should return fallback message
+            assert "ID:" in response
+            assert "ctx-" in response
             assert "Агент выполнил задачу, но не предоставил текстовый ответ" in response
     
     def test_build_agent_instructions_basic(self, config_file):

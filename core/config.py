@@ -71,9 +71,18 @@ class Config:
         self._clear_cache()
     
     def _clear_cache(self) -> None:
-        """Clear LRU cache for property methods."""
-        # Clear any cached methods if needed
-        pass
+        """Clear cached method results if any callables expose ``cache_clear``."""
+        cleared = 0
+        for attr_name in dir(self):
+            if attr_name.startswith("_"):
+                continue
+            attr = getattr(self, attr_name)
+            cache_clear = getattr(attr, "cache_clear", None)
+            if callable(cache_clear):
+                cache_clear()
+                cleared += 1
+        if cleared:
+            logger.debug("Cleared %s cached accessor(s) after config reload", cleared)
     
     @property
     def config(self) -> GridConfig:

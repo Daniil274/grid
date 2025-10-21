@@ -57,6 +57,7 @@ async def create_chat_completion(
         context = {
             "user_id": user.get("user_id"),
             "session_id": request.grid_context.session_id if request.grid_context else None,
+            "context_id": request.grid_context.context_id if request.grid_context else None,
             "working_directory": request.grid_context.working_directory if request.grid_context else None,
             "tools_enabled": request.grid_context.tools_enabled if request.grid_context else True,
             "security_level": request.grid_context.security_level if request.grid_context else "standard",
@@ -125,21 +126,19 @@ async def _create_chat_completion(
         logger.debug(f"Creating agent: {agent_type}")
         agent = await agent_factory.create_agent(agent_type)
         
-        # Execute request with timeout
+        # Execute request with timeout through AgentFactory to keep context aligned
         timeout = context.get("timeout", 300)
-        if hasattr(agent, 'run') and callable(getattr(agent, 'run')):
-            result = await asyncio.wait_for(
-                agent.run(user_message, context),
-                timeout=timeout
-            )
-        else:
-            # Fallback: use factory to execute agent (real SDK path)
-            output_text = await asyncio.wait_for(
-                agent_factory.run_agent(agent_type, user_message),
-                timeout=timeout
-            )
-            result = output_text
-        
+        requested_context_id = context.get("context_id")
+        output_text = await asyncio.wait_for(
+            agent_factory.run_agent(
+                agent_type,
+                user_message,
+                context_id=requested_context_id,
+            ),
+            timeout=timeout,
+        )
+        result = output_text
+
         execution_time = time.time() - start_time
         logger.info(f"Agent execution completed in {execution_time:.2f}s")
         
@@ -150,7 +149,8 @@ async def _create_chat_completion(
             agent_type=agent_type,
             execution_time=execution_time,
             request_id=request_id,
-            session_id=context.get("session_id")
+            session_id=context.get("session_id"),
+            context_id=agent_factory.get_active_context_id(),
         )
         
         return response
@@ -187,7 +187,7 @@ async def _stream_chat_completion(
             logger.warning(f"Agent {agent_type} doesn't support streaming, falling back to sync")
             
             # Use factory execution when no stream capability
-            output_text = await agent_factory.run_agent(agent_type, user_message)
+            output_text = await agent_factory.run_agent(agent_type, user_message, context_id=context.get("context_id"))
             content = output_text
             
             # Send content in chunks to simulate streaming
