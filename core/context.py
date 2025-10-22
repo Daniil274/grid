@@ -588,6 +588,35 @@ class ContextManager:
         else:
             return task_input
 
+    def get_context_for_agent_tool(
+        self, 
+        strategy: str = "smart", 
+        depth: int = 5, 
+        include_tools: bool = True, 
+        task_input: str = ""
+    ) -> str:
+        """
+        Get context for agent tool based on strategy.
+        
+        Args:
+            strategy: Context strategy (minimal, conversation, smart)
+            depth: Context depth for conversation strategy
+            include_tools: Whether to include tool history
+            task_input: Input task text
+            
+        Returns:
+            Formatted context string
+        """
+        if strategy == "minimal":
+            return task_input
+        elif strategy == "conversation":
+            return self._build_conversation_context_human(task_input, depth)
+        elif strategy == "smart":
+            return self._build_smart_context_human(task_input, depth, include_tools)
+        else:
+            # Default to smart strategy
+            return self._build_smart_context_human(task_input, depth, include_tools)
+
     def add_tool_result_as_message(self, tool_name: str, output_text: str) -> None:
         """Record tool result into conversation as assistant message for follow-ups."""
         if not output_text:

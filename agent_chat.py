@@ -112,22 +112,22 @@ async def main():
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
         
-        # Автоматически очищаем контекст при запуске - агенты не должны помнить предыдущие чаты
-        print("Clear Context")
-        factory.clear_context()
-        
-        # Также удаляем файл с сохраненным контекстом, если он существует
+        # В интерактивном режиме сохраняем контекст между сессиями
+        # Проверяем, есть ли сохраненный контекст
         context_file = "logs/context.json"
         if os.path.exists(context_file):
-            os.remove(context_file)
-            print(f"Удален файл сохраненного контекста: {context_file}")
+            print("Load Context - Загружаем сохраненный контекст")
+            # Контекст будет автоматически загружен при первом вызове run_agent с use_active_context=True
+        else:
+            print("Clear Context - Создаем новый контекст")
+            factory.clear_context()
         
-        print("Clear Context - Контекст очищен при запуске")
+        print("Context - Контекст готов к работе")
         
         print("Grid Agent System готов к работе")
         
         print("\n" + "="*60)
-        print("🤖 Grid Agent System ")
+        print("Grid Agent System")
         print("="*60)
         print(f"Агент: {agent_key}")
         print(f"Рабочая директория: {config.get_working_directory()}")
@@ -147,12 +147,23 @@ async def main():
                 use_streaming = True  # Включаем стриминг для режима одного сообщения
                 inline_context_id = extract_context_id_from_text(args.message)
                 request_context_id = inline_context_id or selected_context_id
+                
+                # Если пользователь явно указал context_id, не используем use_active_context
+                use_active_context = request_context_id is None
+                
+                # Отладочная информация
+                if request_context_id:
+                    print(f"Используем контекст: {request_context_id}")
+                else:
+                    print("Используем активный контекст")
+                
                 response = await factory.run_agent(
                     agent_key,
                     args.message,
                     args.context_path,
                     context_id=request_context_id,
                     stream=use_streaming,
+                    use_active_context=use_active_context,
                 )
                 last_context_id = factory.get_active_context_id()
                 duration = time.time() - start_time
@@ -179,7 +190,7 @@ async def main():
                 
             except Exception as e:
                 print("Operation completed")
-                print(f"❌ Ошибка: {e}")
+                print(f"Ошибка: {e}")
         else:
             # Interactive mode
             print("\nCommands:")
@@ -191,10 +202,10 @@ async def main():
             
             while True:
                 try:
-                    user_input = input("\n👤 You: ").strip()
+                    user_input = input("\nYou: ").strip()
                     
                     if user_input.lower() in ['exit', 'quit']:
-                        print("👋 Goodbye!")
+                        print("Goodbye!")
                         break
                     elif user_input.lower() == 'clear':
                         print("Clear Context")
@@ -203,6 +214,11 @@ async def main():
                         last_context_id = cleared_id
                         print("Clear Context - Контекст очищен")
                         print(f"New context ID: {cleared_id}")
+                        # Также удаляем файл с сохраненным контекстом
+                        context_file = "logs/context.json"
+                        if os.path.exists(context_file):
+                            os.remove(context_file)
+                            print(f"Удален файл сохраненного контекста: {context_file}")
                         continue
                     elif user_input.lower() == 'context':
                         print("Get Context")
@@ -270,12 +286,23 @@ async def main():
                         use_streaming = True  # Включаем стриминг для интерактивного режима
                         inline_context_id = extract_context_id_from_text(user_input)
                         request_context_id = inline_context_id or selected_context_id
+                        
+                        # Если пользователь явно указал context_id, не используем use_active_context
+                        use_active_context = request_context_id is None
+                        
+                        # Отладочная информация
+                        if request_context_id:
+                            print(f"Используем контекст: {request_context_id}")
+                        else:
+                            print("Используем активный контекст")
+                        
                         response = await factory.run_agent(
                             agent_key,
                             user_input,
                             args.context_path,
                             context_id=request_context_id,
                             stream=use_streaming,
+                            use_active_context=use_active_context,
                         )
                         last_context_id = factory.get_active_context_id()
                         duration = time.time() - start_time
@@ -298,19 +325,21 @@ async def main():
                         if use_streaming:
                             print(f"\n")  # Добавляем новую строку после стримингового вывода
                         else:
-                            print(f"\n🤖 {agent_key}: {response}")
+                            print(f"\n{agent_key}: {response}")
                         if last_context_id:
                             print(f"Context ID: {last_context_id}")
+                            # Обновляем selected_context_id для следующего вызова
+                            selected_context_id = last_context_id
                         
                     except Exception as e:
                         print("Operation completed")
-                        print(f"❌ Ошибка: {e}")
+                        print(f"Ошибка: {e}")
                     
                 except KeyboardInterrupt:
-                    print("\n\n👋 Interrupted. Goodbye!")
+                    print("\n\nInterrupted. Goodbye!")
                     break
                 except EOFError:
-                    print("\n\n👋 EOF. Goodbye!")
+                    print("\n\nEOF. Goodbye!")
                     break
         
         # Beautiful cleanup and session summary
@@ -323,11 +352,11 @@ async def main():
         
     except GridError as e:
         print(f"Ошибка Grid: {e}")
-        print(f"❌ Grid Error: {e}")
+        print(f"Grid Error: {e}")
         sys.exit(1)
     except Exception as e:
         print(f"Неожиданная ошибка: {e}")
-        print(f"❌ Unexpected Error: {e}")
+        print(f"Unexpected Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

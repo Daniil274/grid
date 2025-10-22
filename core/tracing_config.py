@@ -45,12 +45,12 @@ class ConsoleSpanExporter(TracingExporter):
     
     def _print_trace(self, data: dict):
         """Красивый вывод трейса."""
-        trace_id = data.get("id", "unknown")
-        workflow = data.get("workflow_name", "Unknown")
-        print(f"\n🚀 TRACE START: {workflow}")
-        print(f"   ID: {trace_id}")
-        if not self._compact and data.get("metadata"):
-            print(f"   Metadata: {self._format_kv_table(data['metadata'])}")
+        # trace_id = data.get("id", "unknown")
+        # workflow = data.get("workflow_name", "Unknown")
+        # print(f"\n🚀 TRACE START: {workflow}")
+        # print(f"   ID: {trace_id}")
+        # if not self._compact and data.get("metadata"):
+        #     print(f"   Metadata: {self._format_kv_table(data['metadata'])}")
     
     def _print_span(self, data: dict):
         """Красивый вывод спана."""
