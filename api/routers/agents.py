@@ -169,7 +169,8 @@ async def execute_agent(
         result = await agent_factory.run_agent(
             agent_type,
             request.message,
-            context_id=request.context_id
+            context_id=request.context_id,
+            use_active_context=True  # Используем активный контекст для API
         )
         
         execution_time = time.time() - start_time

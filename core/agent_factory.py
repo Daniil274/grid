@@ -460,6 +460,7 @@ class AgentFactory:
         *,
         stream: bool = False,
         streaming: Optional[bool] = None,
+        use_active_context: bool = False,
     ) -> str:
         """
         Run agent with message and context management.
@@ -470,6 +471,7 @@ class AgentFactory:
             context_path: Optional context path
             context_id: Optional identifier of a saved conversation context
             stream: Whether to stream response (alias: streaming)
+            use_active_context: If True, use the currently active context instead of creating new one
             
         Returns:
             Agent response
@@ -491,6 +493,13 @@ class AgentFactory:
             try:
                 if context_id:
                     active_context_id = self.context_manager.activate_context(context_id)
+                elif use_active_context:
+                    # Используем активный контекст, если он есть, иначе создаем новый
+                    current_id = self.context_manager.get_current_context_id()
+                    if current_id:
+                        active_context_id = current_id
+                    else:
+                        active_context_id = self.context_manager.start_new_context()
                 else:
                     active_context_id = self.context_manager.start_new_context()
             except ContextError as exc:
@@ -513,10 +522,12 @@ class AgentFactory:
 
             
             # Определяем, нужно ли включать контекст диалога
-            # Контекст включается ТОЛЬКО если:
+            # Контекст включается если:
             # 1. Указан явный context_id (пользователь хочет продолжить диалог)
+            # 2. Используется активный контекст (интерактивный режим)
             include_conversation_context = (
-                context_id is not None  # Явно указан context_id
+                context_id is not None or  # Явно указан context_id
+                use_active_context  # Используем активный контекст
             )
             
             # Не добавляем инструкции агента в диалог; сохраняем в metadata для служебного использования

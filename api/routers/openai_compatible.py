@@ -134,6 +134,7 @@ async def _create_chat_completion(
                 agent_type,
                 user_message,
                 context_id=requested_context_id,
+                use_active_context=True,  # Используем активный контекст для OpenAI API
             ),
             timeout=timeout,
         )
@@ -187,7 +188,7 @@ async def _stream_chat_completion(
             logger.warning(f"Agent {agent_type} doesn't support streaming, falling back to sync")
             
             # Use factory execution when no stream capability
-            output_text = await agent_factory.run_agent(agent_type, user_message, context_id=context.get("context_id"))
+            output_text = await agent_factory.run_agent(agent_type, user_message, context_id=context.get("context_id"), use_active_context=True)
             content = output_text
             
             # Send content in chunks to simulate streaming
