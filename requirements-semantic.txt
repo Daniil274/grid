@@ -1,0 +1,22 @@
+# Semantic search and embeddings dependencies
+# Install with: pip install -r requirements-semantic.txt
+
+# Sentence Transformers for embeddings
+sentence-transformers>=2.2.0
+
+# ChromaDB for vector storage
+chromadb>=0.4.0
+
+# PyTorch (CPU version) - required by sentence-transformers
+# For GPU support, install torch with CUDA support separately
+torch>=2.0.0
+
+# Additional dependencies for sentence-transformers
+transformers>=4.30.0
+tokenizers>=0.13.0
+
+# Numpy for embeddings operations
+numpy>=1.24.0
+
+# Optional: for faster inference
+# onnxruntime>=1.15.0

@@ -6,6 +6,14 @@ from typing import List, Any, Dict
 from .file_tools import FILE_TOOLS, get_file_tools, get_file_tools_by_names
 from .git_tools import GIT_TOOLS, get_git_tools, get_git_tools_by_names
 
+# Import semantic tools if available
+try:
+    from .semantic_tools import SEMANTIC_TOOLS, get_semantic_tools, get_semantic_tools_by_names
+    HAS_SEMANTIC_TOOLS = True
+except ImportError:
+    SEMANTIC_TOOLS = {}
+    HAS_SEMANTIC_TOOLS = False
+
 # ============================================================================
 # COMBINED TOOLS REGISTRY
 # ============================================================================
@@ -22,6 +30,7 @@ except ImportError:
 AVAILABLE_TOOLS = {
     **FILE_TOOLS,
     **GIT_TOOLS,
+    **SEMANTIC_TOOLS,  # Добавляем семантические инструменты
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -66,6 +75,11 @@ TOOL_ALIASES = {
     # Git operations - теги
     "git_tag": "git_tag",
     "git_tag_list": "git_tag_list",
+
+    # Semantic operations
+    "semantic_search_code": "semantic_search",
+    "semantic_search": "semantic_search",
+    "index_codebase": "index_codebase",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:
@@ -100,6 +114,9 @@ def get_tools_by_names(tool_names: List[str]) -> List[Any]:
             elif name.startswith('git_') or name in ['git_status', 'git_log', 'git_diff', 'git_branch_list', 'git_add_file', 'git_commit', 'git_checkout_branch', 'git_pull', 'git_remote_info']:
                 git_tools = get_git_tools_by_names([name])
                 tools.extend(git_tools)
+            elif HAS_SEMANTIC_TOOLS and (name.startswith('semantic_') or name in ['index_codebase']):
+                semantic_tools = get_semantic_tools_by_names([name])
+                tools.extend(semantic_tools)
             else:
                 from utils.logger import Logger
                 Logger(__name__).warning(f"Инструмент '{name}' не найден")
@@ -191,17 +208,20 @@ except ImportError:
 def get_tool_stats() -> Dict[str, Any]:
     """
     Возвращает статистику по инструментам.
-    
+
     Returns:
         Dict[str, Any]: Статистика инструментов
     """
     file_tools_count = len([name for name in AVAILABLE_TOOLS.keys() if name.startswith('file_')])
     git_tools_count = len([name for name in AVAILABLE_TOOLS.keys() if name.startswith('git_')])
-    
+    semantic_tools_count = len([name for name in AVAILABLE_TOOLS.keys() if name.startswith('semantic_') or name == 'index_codebase'])
+
     return {
         "total_tools": len(AVAILABLE_TOOLS),
         "file_tools": file_tools_count,
         "git_tools": git_tools_count,
+        "semantic_tools": semantic_tools_count,
+        "semantic_enabled": HAS_SEMANTIC_TOOLS,
         "aliases": len(TOOL_ALIASES),
         "available_names": get_available_tool_names()
     }

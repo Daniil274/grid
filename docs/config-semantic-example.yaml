@@ -1,0 +1,138 @@
+# Example configuration with semantic search enabled
+
+settings:
+  default_agent: "code_agent"
+  max_history: 50
+  max_turns: 100
+  agent_timeout: 300
+  debug: false
+  mcp_enabled: true
+  working_directory: "."
+  config_directory: "."
+  allow_path_override: true
+
+providers:
+  openrouter:
+    name: "openrouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout: 300
+    max_retries: 3
+
+models:
+  gpt4:
+    name: "openai/gpt-4"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "GPT-4 model"
+
+# Инструменты
+tools:
+  # Семантический поиск по кодовой базе
+  semantic_search:
+    type: "function"
+    name: "semantic_search"
+    description: "Семантический поиск по кодовой базе - находит код по смыслу, а не по точным словам"
+    prompt_addition: |
+      Инструмент: semantic_search(query, directory=".", file_extensions="", n_results=5, reindex=False)
+
+      Используй для поиска кода по смыслу запроса, а не по точному совпадению слов.
+
+      Примеры:
+      - "error handling" → найдёт try/except блоки, error handlers, exception classes
+      - "database queries" → найдёт SQL запросы, ORM код, database connections
+      - "API endpoints" → найдёт route handlers, API decorators, HTTP endpoints
+      - "authentication logic" → найдёт login, JWT, auth middleware
+
+      Параметры:
+      - query: Поисковый запрос (естественный язык или техническое описание)
+      - directory: Директория для поиска (по умолчанию текущая)
+      - file_extensions: Фильтр по расширениям, через запятую (например: "py,js,ts")
+      - n_results: Количество результатов (по умолчанию 5)
+      - reindex: Переиндексировать файлы перед поиском (используй только если код изменился)
+
+      ВАЖНО: Перед первым использованием проиндексируй кодовую базу с помощью index_codebase()
+
+  # Индексация кодовой базы
+  index_codebase:
+    type: "function"
+    name: "index_codebase"
+    description: "Индексация кодовой базы для семантического поиска"
+    prompt_addition: |
+      Инструмент: index_codebase(directory=".", file_extensions="py,js,ts,jsx,tsx", force_reindex=False)
+
+      Создаёт индекс кода для быстрого семантического поиска.
+
+      Параметры:
+      - directory: Директория для индексации
+      - file_extensions: Расширения файлов для индексации (по умолчанию: py,js,ts,jsx,tsx)
+      - force_reindex: Принудительная переиндексация даже если уже проиндексировано
+
+      Используй:
+      1. Один раз в начале работы для создания индекса
+      2. После значительных изменений в коде (с force_reindex=True)
+
+      Пример:
+      1. index_codebase(directory="src", file_extensions="py")  # Проиндексировать Python код
+      2. semantic_search("authentication logic")  # Теперь можно искать
+
+  # Файловые инструменты
+  file_read:
+    type: "function"
+    name: "file_read"
+    description: "Чтение файла"
+
+  file_write:
+    type: "function"
+    name: "file_write"
+    description: "Запись файла"
+
+  file_list:
+    type: "function"
+    name: "file_list"
+    description: "Список файлов в директории"
+
+  file_search:
+    type: "function"
+    name: "file_search"
+    description: "Текстовый/regex поиск по файлам"
+
+# Промпт-шаблоны
+prompt_templates:
+  code_expert:
+    template: |
+      Ты - эксперт по коду с доступом к семантическому поиску.
+
+      У тебя есть доступ к следующим возможностям:
+      1. Семантический поиск по кодовой базе - находи код по смыслу, не по точным словам
+      2. Традиционные файловые операции - для чтения, записи, редактирования
+
+      Рабочий процесс для задач с кодом:
+      1. Если задача требует понимания существующего кода:
+         - Сначала проиндексируй: index_codebase()
+         - Затем ищи: semantic_search("описание того, что ищешь")
+
+      2. Если нужно найти конкретный паттерн:
+         - Используй семантический поиск для понимания контекста
+         - Используй file_search для точного поиска если нужно
+
+      3. Всегда объясняй найденный код и его релевантность
+
+# Агенты
+agents:
+  # Агент для работы с кодом с семантическим поиском
+  code_agent:
+    name: "Code Expert"
+    description: "Эксперт по коду с семантическим поиском"
+    model: "gpt4"
+    base_prompt: "code_expert"
+    tools:
+      - "semantic_search"
+      - "index_codebase"
+      - "file_read"
+      - "file_write"
+      - "file_list"
+      - "file_search"
+    mcp_enabled: false
+    context_strategy: "smart"  # Используй smart для оптимального контекста

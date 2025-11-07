@@ -16,6 +16,14 @@ from utils.exceptions import ContextError
 
 logger = logging.getLogger("core.context")
 
+# Optional embeddings support
+try:
+    from core.embeddings import EmbeddingsManager, create_embeddings_manager
+    EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    EMBEDDINGS_AVAILABLE = False
+    logger.info("Embeddings features not available. Install: pip install sentence-transformers chromadb")
+
 
 def safe_lock(lock, timeout=5.0):
     """Context manager для безопасного использования lock'а с таймаутом."""
@@ -41,22 +49,44 @@ def safe_lock(lock, timeout=5.0):
 class ContextManager:
     """Thread-safe context manager with persistence and memory optimization."""
     
-    def __init__(self, max_history: int = 15, persist_path: Optional[str] = None):
+    def __init__(
+        self,
+        max_history: int = 15,
+        persist_path: Optional[str] = None,
+        enable_embeddings: bool = True,
+        embeddings_persist_path: Optional[str] = None
+    ):
         """
         Initialize context manager.
-        
+
         Args:
             max_history: Maximum number of messages to keep in memory
             persist_path: Optional path for persistence (JSON file)
+            enable_embeddings: Enable semantic search features
+            embeddings_persist_path: Path for embeddings persistence
         """
         self.max_history = max_history
         self.persist_path = Path(persist_path) if persist_path else None
-        
+
         self._conversation_history: List[ContextMessage] = []
         self._execution_history: List[AgentExecution] = []
         self._metadata: Dict[str, Any] = {}
         self._lock = Lock()
-        
+
+        # Initialize embeddings manager if available and enabled
+        self._embeddings_manager: Optional[Any] = None
+        if enable_embeddings and EMBEDDINGS_AVAILABLE:
+            try:
+                enable_persist = embeddings_persist_path is not None
+                self._embeddings_manager = create_embeddings_manager(
+                    enable_persistence=enable_persist,
+                    persist_directory=embeddings_persist_path
+                )
+                if self._embeddings_manager:
+                    logger.info("Embeddings manager initialized for semantic search")
+            except Exception as e:
+                logger.warning(f"Failed to initialize embeddings manager: {e}")
+
         # Load from persistence if available
         if self.persist_path and self.persist_path.exists():
             self._load_from_file()
@@ -84,14 +114,34 @@ class ContextManager:
                 )
                 
                 self._conversation_history.append(message)
-                
+
+                # Add to embeddings if available
+                if self._embeddings_manager:
+                    try:
+                        msg_id = f"msg_{message.timestamp}_{role}"
+                        msg_metadata = {
+                            "role": role,
+                            "timestamp": message.timestamp,
+                            "source": "conversation"
+                        }
+                        if metadata:
+                            msg_metadata.update(metadata)
+
+                        self._embeddings_manager.add_texts(
+                            texts=[content],
+                            metadatas=[msg_metadata],
+                            ids=[msg_id]
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to add message to embeddings: {e}")
+
                 # Trim history if needed
                 if len(self._conversation_history) > self.max_history:
                     removed = self._conversation_history.pop(0)
                     # Removed old message from context
-                
+
                 # Added message to context
-                
+
                 # Persist if configured
                 if self.persist_path:
                     self._save_to_file()
@@ -628,6 +678,131 @@ class ContextManager:
                 return "\n".join(lines)
         else:
             return task_input
+
+    def semantic_search_history(
+        self,
+        query: str,
+        n_results: int = 5,
+        role_filter: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Semantic search through conversation history.
+
+        Args:
+            query: Search query
+            n_results: Number of results to return
+            role_filter: Filter by message role (user, assistant, system)
+
+        Returns:
+            List of relevant messages with similarity scores
+        """
+        if not self._embeddings_manager:
+            logger.warning("Embeddings not available for semantic search")
+            return []
+
+        where = {"source": "conversation"}
+        if role_filter:
+            where["role"] = role_filter
+
+        try:
+            results = self._embeddings_manager.search(
+                query=query,
+                n_results=n_results,
+                where=where
+            )
+            return results
+        except Exception as e:
+            logger.error(f"Semantic search failed: {e}")
+            return []
+
+    def get_relevant_context_semantic(
+        self,
+        query: str,
+        max_results: int = 5,
+        include_tools: bool = False
+    ) -> str:
+        """
+        Get semantically relevant context for a query (RAG pattern).
+
+        Args:
+            query: Query to find relevant context for
+            max_results: Maximum number of relevant messages
+            include_tools: Whether to include tool execution context
+
+        Returns:
+            Formatted context string with relevant messages
+        """
+        if not self._embeddings_manager:
+            # Fallback to regular context
+            return self.get_conversation_context(last_n=max_results)
+
+        # Search for relevant messages
+        results = self.semantic_search_history(query, n_results=max_results)
+
+        if not results:
+            return query
+
+        # Build context
+        lines = [
+            "Релевантный контекст (семантический поиск):",
+            f"Запрос: {query}",
+            ""
+        ]
+
+        for result in results:
+            metadata = result.get('metadata', {})
+            role = metadata.get('role', 'unknown')
+            timestamp = metadata.get('timestamp', '')
+            similarity = result.get('similarity', 0.0)
+            text = result.get('text', '')
+
+            role_label = {
+                "user": "Пользователь",
+                "assistant": "Ассистент",
+                "system": "Система"
+            }.get(role, role)
+
+            # Show only highly relevant results (similarity > 0.3)
+            if similarity > 0.3:
+                lines.append(f"{role_label} (релевантность: {similarity:.2f}):")
+                lines.append(text[:500] + ("..." if len(text) > 500 else ""))
+                lines.append("")
+
+        # Add tool context if requested
+        if include_tools and self._execution_history:
+            lines.append("Недавние операции:")
+            for ex in self._execution_history[-3:]:
+                lines.append(f"- {ex.agent_name}: {ex.input_message[:100]}")
+            lines.append("")
+
+        lines.append("Используй этот контекст для ответа на запрос.")
+
+        return "\n".join(lines)
+
+    def is_embeddings_enabled(self) -> bool:
+        """Check if embeddings/semantic search is enabled."""
+        return self._embeddings_manager is not None
+
+    def get_embeddings_stats(self) -> Dict[str, Any]:
+        """Get embeddings statistics."""
+        if not self._embeddings_manager:
+            return {
+                "enabled": False,
+                "indexed_messages": 0
+            }
+
+        try:
+            return {
+                "enabled": True,
+                "indexed_messages": self._embeddings_manager.get_collection_count()
+            }
+        except Exception as e:
+            logger.error(f"Failed to get embeddings stats: {e}")
+            return {
+                "enabled": True,
+                "indexed_messages": 0,
+                "error": str(e)
+            }
 
     def add_tool_result_as_message(self, tool_name: str, output_text: str) -> None:
         """Record tool result into conversation as assistant message for follow-ups."""

@@ -6,9 +6,16 @@ from .function_tools import get_tools_by_names, get_all_tools, AVAILABLE_TOOLS
 from .file_tools import *
 from .git_tools import *
 
+# Import semantic tools if available
+try:
+    from .semantic_tools import get_semantic_tools, get_semantic_tools_by_names, semantic_search_code, index_codebase
+    SEMANTIC_TOOLS_AVAILABLE = True
+except ImportError:
+    SEMANTIC_TOOLS_AVAILABLE = False
+
 __all__ = [
     "get_tools_by_names",
-    "get_all_tools", 
+    "get_all_tools",
     "AVAILABLE_TOOLS",
     # File tools
     "read_file", "write_file", "list_files", "get_file_info", "search_files", "edit_file_patch",
@@ -24,3 +31,12 @@ __all__ = [
     # Git tools - теги
     "git_tag", "git_tag_list",
 ]
+
+# Add semantic tools to exports if available
+if SEMANTIC_TOOLS_AVAILABLE:
+    __all__.extend([
+        "get_semantic_tools",
+        "get_semantic_tools_by_names",
+        "semantic_search_code",
+        "index_codebase",
+    ])
