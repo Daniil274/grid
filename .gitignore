@@ -90,3 +90,5 @@ private/
 *.crt
 
 workspace/*
+.claude/*
+nul

@@ -27,7 +27,7 @@ from agents.items import ItemHelpers
 from agents.mcp import MCPServerStdio
 
 from .config import Config
-from .context import ContextManager
+from .context import ContextManager, safe_lock
 from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError, ContextError
@@ -196,7 +196,12 @@ class AgentFactory:
         self.config = config or Config()
         if working_directory:
             self.config.set_working_directory(working_directory)
-        
+
+        # Initialize image processing config
+        from utils.image_utils import ImageUtils
+        if hasattr(self.config.config, 'settings'):
+            ImageUtils.set_config(self.config.config.settings.image_processing)
+
         # Initialize managers
         self.context_manager = ContextManager(
             max_history=self.config.get_max_history(),
@@ -519,7 +524,40 @@ class AgentFactory:
             # Create agent
             agent = await self.create_agent(agent_key, context_path)
             
-
+            # Parse message if it's a JSON string (for multimodal messages with images)
+            # According to Agents SDK, Runner.run accepts: str | list[TResponseInputItem]
+            # If message is JSON string, parse it to dict/list before passing to Runner
+            # IMPORTANT: When using session, we can only pass string, not list
+            # So for multimodal messages, we need to disable session or use session_input_callback
+            parsed_message = message
+            is_multimodal = False
+            try:
+                if isinstance(message, str) and message.strip().startswith('{'):
+                    # Try to parse as JSON - might be a multimodal message
+                    parsed_message = json.loads(message)
+                    # If it's a single message dict, wrap in list (as per SDK examples)
+                    if isinstance(parsed_message, dict) and "role" in parsed_message:
+                        # Check if it contains images
+                        content = parsed_message.get("content", [])
+                        if isinstance(content, list):
+                            for part in content:
+                                if isinstance(part, dict) and part.get("type") in ("input_image", "image_url"):
+                                    is_multimodal = True
+                                    break
+                        parsed_message = [parsed_message]
+                    elif isinstance(parsed_message, list):
+                        # Check if list contains multimodal content
+                        for msg in parsed_message:
+                            if isinstance(msg, dict):
+                                content = msg.get("content", [])
+                                if isinstance(content, list):
+                                    for part in content:
+                                        if isinstance(part, dict) and part.get("type") in ("input_image", "image_url"):
+                                            is_multimodal = True
+                                            break
+            except (json.JSONDecodeError, ValueError):
+                # Not JSON, keep as string
+                parsed_message = message
             
             # Определяем, нужно ли включать контекст диалога
             # Контекст включается если:
@@ -530,21 +568,129 @@ class AgentFactory:
                 use_active_context  # Используем активный контекст
             )
             
+            # Check if conversation history contains images
+            # If yes, we need to use list format instead of session for ALL messages
+            # (because session doesn't preserve images from previous messages)
+            history_has_images = False
+            try:
+                # Get raw conversation history (ContextMessage objects)
+                with safe_lock(self.context_manager._lock, timeout=5.0):
+                    history = self.context_manager._conversation_history
+                    for msg in history:
+                        # Check if message has images using ContextMessage.has_images() method
+                        if hasattr(msg, "has_images"):
+                            if msg.has_images():
+                                history_has_images = True
+                                break
+                        # Fallback: check content directly
+                        elif hasattr(msg, "content"):
+                            if isinstance(msg.content, list):
+                                for part in msg.content:
+                                    if isinstance(part, dict):
+                                        if part.get("type") in ("input_image", "image_url", "image_file"):
+                                            history_has_images = True
+                                            break
+                                    elif hasattr(part, "type") and part.type in ("input_image", "image_url", "image_file"):
+                                        history_has_images = True
+                                        break
+                        if history_has_images:
+                            break
+            except Exception as e:
+                logger.debug(f"Failed to check history for images: {e}")
+            
+            # If current message is multimodal OR history has images, use list format
+            needs_list_format = is_multimodal or history_has_images
+            
             # Не добавляем инструкции агента в диалог; сохраняем в metadata для служебного использования
             if not self.context_manager.get_conversation_context():
                 agent_instructions = self._build_agent_instructions(agent_key, context_path, include_conversation_context=False)
                 self.context_manager.set_metadata("agent_instructions", agent_instructions)
             
+            # For messages that need list format, get history BEFORE adding current message
+            # (so we can prepend it to the input list)
+            history_messages = []
+            if needs_list_format:
+                history_messages = self.context_manager.get_conversation_history_as_sdk_messages()
+            
             # Добавляем сообщение в контекст для текущей сессии
-            self.context_manager.add_message(
-                "user",
-                message,
-                metadata={
-                    "context_id": active_context_id,
-                    "agent": agent_key,
-                    "type": "user_input",
-                },
-            )
+            # For multimodal messages, we need to parse JSON and create proper ContextMessage
+            if is_multimodal and isinstance(parsed_message, list) and len(parsed_message) > 0:
+                # Extract content from parsed message
+                msg_dict = parsed_message[0] if isinstance(parsed_message[0], dict) else {}
+                msg_content = msg_dict.get("content", [])
+                
+                # Convert SDK format content parts to ContextMessage format
+                # SDK uses: [{"type": "input_text", "text": "..."}, {"type": "input_image", "image_url": "..."}]
+                # ContextMessage needs: [TextContent(...), ImageContent(...)]
+                from schemas import ContextMessage, TextContent, ImageContent, ImageUrl
+                from datetime import datetime
+                
+                content_parts = []
+                for part in msg_content:
+                    if isinstance(part, dict):
+                        part_type = part.get("type")
+                        if part_type == "input_text":
+                            content_parts.append(TextContent(type="text", text=part.get("text", "")))
+                        elif part_type == "input_image":
+                            image_url = part.get("image_url", "")
+                            detail = part.get("detail", "auto")
+                            # image_url should already be base64 data URL from prepare_agent_message
+                            # Store it as ImageContent so it can be converted back to SDK format
+                            content_parts.append(ImageContent(
+                                type="image_url",
+                                image_url=ImageUrl(url=image_url, detail=detail)
+                            ))
+                            logger.debug(f"Storing image in context: {len(image_url)} chars (base64 URL)")
+                        # Pass through other types as dict
+                        else:
+                            content_parts.append(part)
+                    else:
+                        content_parts.append(part)
+                
+                # Create ContextMessage with multimodal content
+                multimodal_msg = ContextMessage(
+                    role="user",
+                    content=content_parts,
+                    timestamp=datetime.now().isoformat(),
+                    metadata={
+                        "context_id": active_context_id,
+                        "agent": agent_key,
+                        "type": "user_input",
+                    },
+                )
+                # Add directly to context history using safe_lock
+                try:
+                    with safe_lock(self.context_manager._lock, timeout=5.0):
+                        self.context_manager._conversation_history.append(multimodal_msg)
+                        # Trim history if needed
+                        if len(self.context_manager._conversation_history) > self.context_manager.max_history:
+                            self.context_manager._conversation_history.pop(0)
+                        # Update context bucket
+                        active_bucket = self.context_manager._contexts.get(self.context_manager._current_context_id)
+                        if active_bucket is not None:
+                            active_bucket["updated_at"] = datetime.now().isoformat()
+                except Exception as e:
+                    logger.warning(f"Failed to add multimodal message to context: {e}, falling back to string")
+                    self.context_manager.add_message(
+                        "user",
+                        message,
+                        metadata={
+                            "context_id": active_context_id,
+                            "agent": agent_key,
+                            "type": "user_input",
+                        },
+                    )
+            else:
+                # Simple text message - use standard add_message
+                self.context_manager.add_message(
+                    "user",
+                    message,  # Store original message string for context
+                    metadata={
+                        "context_id": active_context_id,
+                        "agent": agent_key,
+                        "type": "user_input",
+                    },
+                )
             
 
             agent_instructions = self._build_agent_instructions(agent_key, context_path, include_conversation_context)
@@ -554,18 +700,41 @@ class AgentFactory:
             timeout_seconds = self.config.get_agent_timeout()
             
             # Prepare session scoped to the active context
+            # IMPORTANT: Session cannot be used with list input (multimodal messages)
+            # For multimodal messages, we disable session and manage history manually via context
             if not active_context_id:
                 raise AgentError("Failed to prepare conversation context")
-            session = self._get_agent_session(agent_key, active_context_id)
-            agent._session = session
+            
+            # For multimodal messages OR if history has images, don't use session (SDK limitation)
+            # We'll manage history by prepending it to the input message list
+            if needs_list_format:
+                session = None
+                if is_multimodal:
+                    logger.debug("Multimodal message detected - disabling session, prepending history to input")
+                elif history_has_images:
+                    logger.debug("History contains images - disabling session, prepending history to input")
+                
+                # Convert current message to list format if it's a string
+                if isinstance(parsed_message, str):
+                    # Simple text message - convert to SDK format
+                    parsed_message = [{"role": "user", "content": parsed_message}]
+                elif isinstance(parsed_message, dict):
+                    parsed_message = [parsed_message]
+                # If already a list, keep it as is
+                
+                # Prepend history to current message (history was fetched before adding current message)
+                parsed_message = history_messages + parsed_message
+            else:
+                session = self._get_agent_session(agent_key, active_context_id)
+                agent._session = session
             if stream:
                 # Streaming режим: прозрачная подсветка tool/MCP вызовов через наблюдателя
                 result_output: Optional[str] = None
                 try:
                     run_result_streaming = _get_runner().run_streamed(
                         agent,
-                        message,
-                        context=self.context_manager.get_conversation_context(),
+                        parsed_message,  # Use parsed message (dict/list or string) with history prepended
+                        context=self.context_manager.get_conversation_context() if not needs_list_format else None,
                         max_turns=max_turns,
                         session=session,
                     )
@@ -601,7 +770,13 @@ class AgentFactory:
                 try:
                     # Запускаем агента и получаем RunResult объект
                     result = await asyncio.wait_for(
-                        _get_runner().run(agent, message, max_turns=max_turns, session=session),
+                        _get_runner().run(
+                            agent, 
+                            parsed_message,  # Use parsed message (dict/list or string) with history prepended
+                            context=self.context_manager.get_conversation_context() if not needs_list_format else None,
+                            max_turns=max_turns, 
+                            session=session
+                        ),
                         timeout=timeout_seconds
                     )
 

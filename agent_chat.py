@@ -29,6 +29,8 @@ from core.agent_factory import AgentFactory
 from core.tracing_config import configure_tracing_from_env
 from utils.exceptions import GridError
 from utils.logger import Logger
+from utils.multimodal_converter import MultimodalConverter
+from utils.image_utils import ImageUtils
 
 # Configure tracing instead of logging
 configure_tracing_from_env()
@@ -48,6 +50,91 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("openai.agents").setLevel(logging.CRITICAL)
 logging.getLogger("grid").setLevel(logging.INFO)
+
+
+def parse_message_with_images(user_input: str) -> tuple[str, list[str]]:
+    """
+    Parse user input to extract text and image paths.
+
+    Syntax: "text & 'path/to/image.png'" or "text & path/to/image.png"
+    Multiple images: "text & image1.png & image2.jpg"
+
+    Returns:
+        Tuple of (text_message, list_of_image_paths)
+    """
+    if '&' not in user_input:
+        return user_input, []
+
+    # Split by & to get text and image parts
+    parts = user_input.split('&')
+    text = parts[0].strip()
+    image_paths = []
+
+    for part in parts[1:]:
+        part = part.strip()
+
+        # Remove quotes if present
+        if part.startswith("'") and part.endswith("'"):
+            part = part[1:-1]
+        elif part.startswith('"') and part.endswith('"'):
+            part = part[1:-1]
+
+        # Validate image source
+        if part:
+            source_type, error = ImageUtils.validate_image_source(part)
+            if source_type != 'invalid':
+                image_paths.append(part)
+            else:
+                print(f"Warning: Invalid image source: {part} - {error}")
+
+    return text, image_paths
+
+
+def prepare_agent_message(text: str, image_paths: list[str]) -> str:
+    """
+    Prepare message for agent with optional images.
+
+    According to Agents SDK examples, images should be sent as a list of messages
+    where each message has "role" and "content" fields. Content can be a list
+    of content parts with "type": "input_image" or "type": "input_text".
+
+    Args:
+        text: Text message
+        image_paths: List of image paths
+
+    Returns:
+        Formatted message for agent (text string or JSON string with proper message format)
+    """
+    if not image_paths:
+        return text
+
+    # Create multimodal message
+    from datetime import datetime
+    message = MultimodalConverter.create_multimodal_message(
+        role="user",
+        text=text,
+        image_sources=image_paths,
+        timestamp=datetime.now().isoformat()
+    )
+
+    # Convert to Agents SDK format - get content parts
+    content = MultimodalConverter.context_message_to_agents_sdk(message)
+
+    # According to Agents SDK examples, we need to format as a message with role and content
+    # Format: {"role": "user", "content": [...]}
+    import json
+    if isinstance(content, str):
+        # Simple text - return as is
+        return content
+    else:
+        # Multimodal - wrap in proper message format
+        # Agents SDK expects: [{"role": "user", "content": [...]}]
+        message_dict = {
+            "role": "user",
+            "content": content
+        }
+        return json.dumps(message_dict)
+
 
 async def main():
     """Главная функция."""
@@ -138,28 +225,45 @@ async def main():
         if args.message:
             # Single message mode
             print(f"Обработка сообщения")
-            
+
             try:
+                # Parse message for images
+                text, image_paths = parse_message_with_images(args.message)
+
+                # Show image info if any
+                if image_paths:
+                    print(f"Images found: {len(image_paths)}")
+                    for img_path in image_paths:
+                        info = ImageUtils.get_image_info(img_path)
+                        if info['valid']:
+                            size_mb = info['size_bytes'] / (1024 * 1024) if info['size_bytes'] else 0
+                            print(f"   - {img_path} ({size_mb:.2f} MB, {info['mime_type']})")
+                        else:
+                            print(f"   - {img_path} (ошибка: {info['error']})")
+
+                # Prepare message for agent
+                agent_message = prepare_agent_message(text, image_paths)
+
                 # Track agent execution
                 print(f"Agent {agent_key} (agent: {agent_key})")
-                
+
                 start_time = time.time()
                 use_streaming = True  # Включаем стриминг для режима одного сообщения
-                inline_context_id = extract_context_id_from_text(args.message)
+                inline_context_id = extract_context_id_from_text(text)
                 request_context_id = inline_context_id or selected_context_id
-                
+
                 # Если пользователь явно указал context_id, не используем use_active_context
                 use_active_context = request_context_id is None
-                
+
                 # Отладочная информация
                 if request_context_id:
                     print(f"Используем контекст: {request_context_id}")
                 else:
                     print("Используем активный контекст")
-                
+
                 response = await factory.run_agent(
                     agent_key,
-                    args.message,
+                    agent_message,
                     args.context_path,
                     context_id=request_context_id,
                     stream=use_streaming,
@@ -198,6 +302,9 @@ async def main():
             print("  'clear' - Clear conversation history")
             print("  'context' - Show context info")
             print("  'help' - Show this help")
+            print("\nImages:")
+            print("  Use '&' to attach images: 'Your message & path/to/image.png'")
+            print("  Multiple images: 'Message & image1.jpg & image2.png'")
             print("-" * 60)
             
             while True:
@@ -273,32 +380,52 @@ async def main():
                         print("  contexts - List known context IDs")
                         print("  use <context_id> - Switch to a saved context")
                         print("  help - Show this help message")
+                        print("\nImages:")
+                        print("  Attach images using '&': 'Your message & path/to/image.png'")
+                        print("  Multiple images: 'Message & img1.jpg & img2.png'")
                         continue
                     elif not user_input:
                         continue
-                    
+
+                    # Parse message for images
+                    text, image_paths = parse_message_with_images(user_input)
+
+                    # Show image info if any
+                    if image_paths:
+                        print(f"Images found: {len(image_paths)}")
+                        for img_path in image_paths:
+                            info = ImageUtils.get_image_info(img_path)
+                            if info['valid']:
+                                size_mb = info['size_bytes'] / (1024 * 1024) if info['size_bytes'] else 0
+                                print(f"   - {img_path} ({size_mb:.2f} MB, {info['mime_type']})")
+                            else:
+                                print(f"   - {img_path} (ошибка: {info['error']})")
+
+                    # Prepare message for agent
+                    agent_message = prepare_agent_message(text, image_paths)
+
                     # Process user message with beautiful logging
                     try:
                         # Track execution with token counting
                         print(f"Agent {agent_key} (agent: {agent_key})")
-                        
+
                         start_time = time.time()
                         use_streaming = True  # Включаем стриминг для интерактивного режима
-                        inline_context_id = extract_context_id_from_text(user_input)
+                        inline_context_id = extract_context_id_from_text(text)
                         request_context_id = inline_context_id or selected_context_id
-                        
+
                         # Если пользователь явно указал context_id, не используем use_active_context
                         use_active_context = request_context_id is None
-                        
+
                         # Отладочная информация
                         if request_context_id:
                             print(f"Используем контекст: {request_context_id}")
                         else:
                             print("Используем активный контекст")
-                        
+
                         response = await factory.run_agent(
                             agent_key,
-                            user_input,
+                            agent_message,
                             args.context_path,
                             context_id=request_context_id,
                             stream=use_streaming,
