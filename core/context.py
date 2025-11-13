@@ -204,13 +204,25 @@ class ContextManager:
                 
                 # Natural, concise dialogue transcript without emojis
                 lines = ["Предыдущий диалог (сжатый):"]
+                from utils.multimodal_converter import MultimodalConverter
+
                 for msg in messages:
                     role = {
                         "user": "Пользователь",
                         "assistant": "Ассистент",
                         "system": "Система"
                     }.get(msg.role, msg.role)
-                    content = msg.content.strip()
+
+                    raw_content = msg.content
+                    if isinstance(raw_content, str):
+                        content = raw_content.strip()
+                    else:
+                        # Extract textual summary from multimodal content to keep context readable
+                        try:
+                            content = MultimodalConverter.extract_text_from_multimodal(raw_content).strip()
+                        except Exception:
+                            content = "[мультимодальный контент]"
+
                     # Hard trim very long single messages to keep prompt lightweight
                     if len(content) > 2000:
                         content = content[:2000] + "…"
@@ -280,6 +292,75 @@ class ContextManager:
                 return [msg.model_dump() for msg in self._conversation_history]
         except ContextError:
             logger.warning("Lock timeout in get_conversation_history")
+            return []
+    
+    def get_conversation_history_as_sdk_messages(self, last_n: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Get conversation history as list of messages in Agents SDK format.
+        
+        Converts ContextMessage objects to SDK format with support for multimodal content.
+        This is used when session is disabled (e.g., for multimodal messages with images).
+        
+        Args:
+            last_n: Number of last messages to include (default: all)
+            
+        Returns:
+            List of messages in SDK format: [{"role": "user", "content": ...}, ...]
+        """
+        try:
+            with safe_lock(self._lock, timeout=5.0):
+                if not self._conversation_history:
+                    return []
+                
+                messages = self._conversation_history
+                if last_n:
+                    messages = messages[-last_n:]
+                
+                # Convert ContextMessage to SDK format
+                from utils.multimodal_converter import MultimodalConverter
+                sdk_messages = []
+                
+                for msg in messages:
+                    # Convert to SDK format
+                    if isinstance(msg.content, str):
+                        # Simple text message
+                        sdk_messages.append({
+                            "role": msg.role,
+                            "content": msg.content
+                        })
+                    else:
+                        # Multimodal message - convert content parts
+                        # Check if message has images for logging
+                        has_imgs = msg.has_images() if hasattr(msg, "has_images") else False
+                        if has_imgs:
+                            logger.debug(f"Converting multimodal message with images to SDK format (role: {msg.role})")
+                        
+                        content = MultimodalConverter.context_message_to_agents_sdk(msg)
+                        if isinstance(content, str):
+                            sdk_messages.append({
+                                "role": msg.role,
+                                "content": content
+                            })
+                        else:
+                            # List of content parts
+                            # Verify images are present in converted content
+                            img_count = sum(1 for part in content if isinstance(part, dict) and part.get("type") == "input_image")
+                            if has_imgs and img_count == 0:
+                                logger.warning(f"Image lost during conversion! Original had images but converted content doesn't")
+                            elif img_count > 0:
+                                logger.debug(f"Converted message has {img_count} image(s) in SDK format")
+                            
+                            sdk_messages.append({
+                                "role": msg.role,
+                                "content": content
+                            })
+                
+                return sdk_messages
+        except ContextError:
+            logger.warning("Lock timeout in get_conversation_history_as_sdk_messages")
+            return []
+        except Exception as e:
+            logger.error(f"Failed to convert conversation history to SDK format: {e}")
             return []
     
     def get_last_user_message(self) -> Optional[str]:

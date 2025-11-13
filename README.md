@@ -1,6 +1,6 @@
 ## Grid Agent System
 
-An orchestration system for AI agents focused on engineering tasks, with clear architecture, strict logging, security, and an OpenAI-compatible API.
+An orchestration system for AI agents focused on engineering tasks.
 
 ### Purpose
 - **Orchestration**: hierarchical coordination of specialized agents (files, Git, task analysis) with efficient context management.
@@ -12,6 +12,7 @@ An orchestration system for AI agents focused on engineering tasks, with clear a
 ## Capabilities
 - **Agents**: configurable profiles (model, tools, prompt). Support for subagents as tools (`call_*`).
 - **Tools**: file read/write/search, Git operations, MCP integration.
+- **Multimodal**: full support for images in messages (base64, URLs, file paths) via OpenAI Vision API format.
 - **Context**: context propagation between agents and tools, memory sessions (`SQLiteSession`).
 - **Security**: security-aware factory, middleware for authentication, rate limiting, and basic guardrails.
 - **API**: Chat Completions/Completions (OpenAI-compatible), agents, and system routes.
@@ -80,6 +81,15 @@ python agent_chat.py --message "List files in current directory"
 ```
 python agent_chat.py --agent file_agent --message "Read config.yaml"
 ```
+- **With images** (vision agents):
+```
+python agent_chat.py --agent vision_analyzer --message "Describe & image.jpg"
+```
+Multiple images:
+```
+python agent_chat.py -a vision_analyzer -m "Compare & img1.png & img2.jpg"
+```
+See [docs/CLI_IMAGES.md](docs/CLI_IMAGES.md) for full CLI image support guide.
 
 ### API (FastAPI)
 - Helper launcher:
@@ -189,6 +199,51 @@ keeping it trivial to stitch conversations back together when needed.
 - Security-aware factory (`core/security_agent_factory.py`) applies guardrails to specified agents.
 - Middleware: authentication, request security, rate limiting.
 - Git commands run with parameter validation and timeouts; filesystem operations verify path existence/type.
+
+## Multimodal Support (Images)
+
+The system supports sending images to vision-capable agents from multiple sources:
+- **Base64-encoded data** - Embedded in messages
+- **URLs** - HTTP/HTTPS image links
+- **Local files** - File paths on local filesystem
+- **MCP tools** - Images from MCP server responses
+
+### Quick Example
+
+```python
+from utils.multimodal_converter import MultimodalConverter
+
+# Create message with image
+message = MultimodalConverter.create_multimodal_message(
+    role="user",
+    text="Опиши это изображение",
+    image_sources=["path/to/image.jpg"]
+)
+
+# Run vision agent
+result = await factory.run_agent("vision_analyzer", str(message))
+```
+
+### API Example
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "vision_analyzer",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Что на изображении?"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+      ]
+    }]
+  }'
+```
+
+**Full Documentation**: See [docs/MULTIMODAL_GUIDE.md](docs/MULTIMODAL_GUIDE.md) for complete guide, examples, and API reference.
+
+**Examples**: Run `python examples/vision_example.py` for working examples.
 
 ## Testing
 ```

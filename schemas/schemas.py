@@ -3,7 +3,7 @@ Legacy schemas for backward compatibility.
 These are copies of the main schemas to avoid circular imports.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union, Literal
 from pydantic import BaseModel, Field, field_validator
 from enum import Enum
 
@@ -73,6 +73,16 @@ class AgentLoggingConfig(BaseModel):
     save_executions: bool = True
 
 
+class ImageProcessingConfig(BaseModel):
+    """Configuration for image processing."""
+    enabled: bool = True
+    auto_resize: bool = True
+    max_width: int = Field(default=512, ge=64, le=4096)
+    max_height: int = Field(default=512, ge=64, le=4096)
+    max_file_size_mb: int = Field(default=10, ge=1, le=100)
+    jpeg_quality: int = Field(default=70, ge=1, le=100)
+
+
 class Settings(BaseModel):
     """Global system settings."""
     default_agent: str = "assistant"
@@ -85,6 +95,7 @@ class Settings(BaseModel):
     config_directory: str = "."
     allow_path_override: bool = True
     agent_logging: AgentLoggingConfig = Field(default_factory=AgentLoggingConfig)
+    image_processing: ImageProcessingConfig = Field(default_factory=ImageProcessingConfig)
     tools_common_rules: Optional[str] = None
 
 
@@ -120,12 +131,78 @@ class GridConfig(BaseModel):
         return v
 
 
+class ImageUrl(BaseModel):
+    """Image URL or base64 data."""
+    url: str = Field(..., description="URL or base64-encoded image data (data:image/...;base64,...)")
+    detail: Optional[Literal["auto", "low", "high"]] = Field(default="auto", description="Image detail level")
+
+
+class ImageContent(BaseModel):
+    """Image content part."""
+    type: Literal["image_url"] = "image_url"
+    image_url: ImageUrl
+
+
+class TextContent(BaseModel):
+    """Text content part."""
+    type: Literal["text"] = "text"
+    text: str
+
+
+class FileImageContent(BaseModel):
+    """File path image content (internal use)."""
+    type: Literal["image_file"] = "image_file"
+    file_path: str = Field(..., description="Local file path to image")
+    detail: Optional[Literal["auto", "low", "high"]] = Field(default="auto", description="Image detail level")
+
+
+ContentPart = Union[TextContent, ImageContent, FileImageContent]
+
+
 class ContextMessage(BaseModel):
-    """Message in conversation context."""
+    """Message in conversation context with multimodal support."""
     role: str = Field(..., pattern=r'^(user|assistant|system)$')
-    content: str
+    content: Union[str, List[ContentPart]] = Field(
+        ...,
+        description="Message content: string for text-only or list of content parts for multimodal"
+    )
     timestamp: str
     metadata: Optional[Dict[str, Any]] = None
+
+    def get_text_content(self) -> str:
+        """Extract text content from message."""
+        if isinstance(self.content, str):
+            return self.content
+
+        text_parts = []
+        for part in self.content:
+            if isinstance(part, TextContent):
+                text_parts.append(part.text)
+            elif isinstance(part, dict) and part.get("type") == "text":
+                text_parts.append(part.get("text", ""))
+
+        return " ".join(text_parts) if text_parts else "[multimodal content]"
+
+    def get_images(self) -> List[Union[ImageContent, FileImageContent]]:
+        """Extract image content from message."""
+        if isinstance(self.content, str):
+            return []
+
+        images = []
+        for part in self.content:
+            if isinstance(part, (ImageContent, FileImageContent)):
+                images.append(part)
+            elif isinstance(part, dict) and part.get("type") in ["image_url", "image_file"]:
+                if part.get("type") == "image_url":
+                    images.append(ImageContent(**part))
+                else:
+                    images.append(FileImageContent(**part))
+
+        return images
+
+    def has_images(self) -> bool:
+        """Check if message contains images."""
+        return len(self.get_images()) > 0
 
 
 class AgentExecution(BaseModel):

@@ -4,7 +4,7 @@ Provides Pydantic models that match OpenAI API format.
 """
 
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, Literal
 from enum import Enum
 
 class MessageRole(str, Enum):
@@ -13,16 +13,46 @@ class MessageRole(str, Enum):
     USER = "user"
     ASSISTANT = "assistant"
 
+
+# Multimodal content models (OpenAI Vision API compatible)
+class ImageUrlDetail(BaseModel):
+    """Image URL with detail level."""
+    url: str = Field(..., description="Image URL or base64 data (data:image/jpeg;base64,...)")
+    detail: Optional[Literal["auto", "low", "high"]] = Field(default="auto", description="Image detail level")
+
+
+class TextContentPart(BaseModel):
+    """Text content part."""
+    type: Literal["text"] = "text"
+    text: str = Field(..., description="Text content")
+
+
+class ImageUrlContentPart(BaseModel):
+    """Image URL content part."""
+    type: Literal["image_url"] = "image_url"
+    image_url: Union[str, ImageUrlDetail] = Field(..., description="Image URL or URL with detail")
+
+
+class ImageFileContentPart(BaseModel):
+    """Image file path content part (internal)."""
+    type: Literal["image_file"] = "image_file"
+    file_path: str = Field(..., description="Local file path to image")
+    detail: Optional[Literal["auto", "low", "high"]] = Field(default="auto", description="Image detail level")
+
+
+MessageContentPart = Union[TextContentPart, ImageUrlContentPart, ImageFileContentPart, Dict[str, Any]]
+
+
 class ChatMessage(BaseModel):
-    """Individual chat message."""
+    """Individual chat message with multimodal support."""
     role: MessageRole = Field(..., description="Message role")
-    # Accept both OpenAI classic (str) and content-parts array
-    content: Union[str, List[Dict[str, Any]]] = Field(..., description="Message content")
+    # Accept both OpenAI classic (str) and content-parts array for multimodal
+    content: Union[str, List[MessageContentPart]] = Field(..., description="Message content (text or multimodal)")
     name: Optional[str] = Field(None, description="Name of the message author")
 
     @field_validator('content')
     @classmethod
-    def content_not_empty(cls, v: Union[str, List[Dict[str, Any]]]):
+    def content_not_empty(cls, v: Union[str, List[MessageContentPart]]):
         if isinstance(v, str):
             if not v.strip():
                 raise ValueError('Content cannot be empty')
@@ -32,6 +62,33 @@ class ChatMessage(BaseModel):
         else:
             raise ValueError('Unsupported content type')
         return v
+
+    def get_text_content(self) -> str:
+        """Extract text content from message."""
+        if isinstance(self.content, str):
+            return self.content
+
+        text_parts = []
+        for part in self.content:
+            if isinstance(part, TextContentPart):
+                text_parts.append(part.text)
+            elif isinstance(part, dict) and part.get("type") == "text":
+                text_parts.append(part.get("text", ""))
+
+        return " ".join(text_parts) if text_parts else "[multimodal content]"
+
+    def has_images(self) -> bool:
+        """Check if message contains images."""
+        if isinstance(self.content, str):
+            return False
+
+        for part in self.content:
+            if isinstance(part, (ImageUrlContentPart, ImageFileContentPart)):
+                return True
+            elif isinstance(part, dict) and part.get("type") in ["image_url", "image_file"]:
+                return True
+
+        return False
 
 class GridContext(BaseModel):
     """GRID-specific context extensions."""
