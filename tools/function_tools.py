@@ -5,6 +5,8 @@ Function tools for Grid agents - integration layer for file and git tools.
 from typing import List, Any, Dict
 from .file_tools import FILE_TOOLS, get_file_tools, get_file_tools_by_names
 from .git_tools import GIT_TOOLS, get_git_tools, get_git_tools_by_names
+from .orchestrator_tools import ORCHESTRATOR_TOOLS
+from .ape_tools import APE_TOOLS
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -22,6 +24,8 @@ except ImportError:
 AVAILABLE_TOOLS = {
     **FILE_TOOLS,
     **GIT_TOOLS,
+    **ORCHESTRATOR_TOOLS,
+    **APE_TOOLS,
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -66,6 +70,12 @@ TOOL_ALIASES = {
     # Git operations - теги
     "git_tag": "git_tag",
     "git_tag_list": "git_tag_list",
+
+    # Orchestration
+    "orchestrate": "orchestrate",
+    
+    # APE
+    "ape": "automatic_prompt_engineer",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:
@@ -155,7 +165,7 @@ def get_tool_info(tool_name: str) -> Dict[str, Any]:
         "alias": tool_name if tool_name != actual_name else None,
         "description": tool_func.__doc__ or "Описание не доступно",
         "module": tool_func.__module__,
-        "type": "file" if actual_name.startswith("file_") else "git" if actual_name.startswith("git_") else "other"
+        "type": "file" if actual_name.startswith("file_") else "git" if actual_name.startswith("git_") else "ape" if actual_name == "automatic_prompt_engineer" else "other"
     }
 
 # ============================================================================

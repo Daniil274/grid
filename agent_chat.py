@@ -198,18 +198,11 @@ async def main():
         
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
-        
-        # В интерактивном режиме сохраняем контекст между сессиями
-        # Проверяем, есть ли сохраненный контекст
-        context_file = "logs/context.json"
-        if os.path.exists(context_file):
-            print("Load Context - Загружаем сохраненный контекст")
-            # Контекст будет автоматически загружен при первом вызове run_agent с use_active_context=True
-        else:
-            print("Clear Context - Создаем новый контекст")
-            factory.clear_context()
-        
-        print("Context - Контекст готов к работе")
+
+        # Context is automatically managed by ContextManager
+        # - New clean context is created on each startup
+        # - Old contexts are preserved and accessible via Context ID
+        print("Context - Новая сессия создана, старые контексты доступны по ID")
         
         print("Grid Agent System готов к работе")
         
@@ -299,9 +292,14 @@ async def main():
             # Interactive mode
             print("\nCommands:")
             print("  'exit' or 'quit' - Exit")
-            print("  'clear' - Clear conversation history")
-            print("  'context' - Show context info")
+            print("  'clear' - Start new context (old contexts saved)")
+            print("  'context' - Show current context info")
+            print("  'contexts' - List all saved context IDs")
+            print("  'use <context_id>' - Switch to a saved context")
             print("  'help' - Show this help")
+            print("\nContext IDs:")
+            print("  Use context ID in message: 'ctx-abc12345 your message'")
+            print("  Old contexts are automatically saved and accessible")
             print("\nImages:")
             print("  Use '&' to attach images: 'Your message & path/to/image.png'")
             print("  Multiple images: 'Message & image1.jpg & image2.png'")
@@ -319,13 +317,9 @@ async def main():
                         cleared_id = factory.clear_context()
                         selected_context_id = None
                         last_context_id = cleared_id
-                        print("Clear Context - Контекст очищен")
+                        print("Clear Context - Создан новый контекст")
                         print(f"New context ID: {cleared_id}")
-                        # Также удаляем файл с сохраненным контекстом
-                        context_file = "logs/context.json"
-                        if os.path.exists(context_file):
-                            os.remove(context_file)
-                            print(f"Удален файл сохраненного контекста: {context_file}")
+                        print("Старые контексты сохранены и доступны по ID")
                         continue
                     elif user_input.lower() == 'context':
                         print("Get Context")
@@ -375,14 +369,18 @@ async def main():
                     elif user_input.lower() == 'help':
                         print("\nAvailable commands:")
                         print("  exit, quit - Exit the chat")
-                        print("  clear - Clear conversation history")
-                        print("  context - Show context information")
-                        print("  contexts - List known context IDs")
+                        print("  clear - Start new context (old contexts saved)")
+                        print("  context - Show current context information")
+                        print("  contexts - List all saved context IDs")
                         print("  use <context_id> - Switch to a saved context")
                         print("  help - Show this help message")
+                        print("\nContext IDs:")
+                        print("  Use in message: 'ctx-abc12345 your message'")
+                        print("  Each session starts fresh, old contexts auto-saved")
                         print("\nImages:")
                         print("  Attach images using '&': 'Your message & path/to/image.png'")
                         print("  Multiple images: 'Message & img1.jpg & img2.png'")
+                        print("  Images are saved in context and accessible after restart")
                         continue
                     elif not user_input:
                         continue

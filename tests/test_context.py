@@ -383,8 +383,14 @@ class TestContextManager:
         )
         cm1.add_execution(execution)
         
+        # Get the context ID from the first manager
+        context_id = cm1._current_context_id
+        
         # Create new context manager with same persistence path
         cm2 = ContextManager(max_history=5, persist_path=str(persist_path))
+        
+        # Activate the saved context to access its data
+        cm2.activate_context(context_id)
         
         # Verify data was loaded
         assert len(cm2._conversation_history) == 2
