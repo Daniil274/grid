@@ -1,5 +1,37 @@
 ## Grid Agent System
 
+## Оркестратор (динамический мета-агент)
+
+В проект добавлен базовый механизм “динамических агентов” и мета‑инструмент `orchestrate`, который умеет:
+- создавать **временных под‑агентов** на лету (без записи в `config.yaml`);
+- “раздавать” им набор инструментов (по ключам `tools:` из конфигурации);
+- строить пайплайн **исполнение → ревью → комиссия (голосование)**.
+
+### Как включить
+
+1) Добавьте инструмент `orchestrate` в `tools:` конфигурации (тип `function`):
+
+```yaml
+tools:
+  orchestrate:
+    type: "function"
+    name: "orchestrate"
+    description: "Запускает динамический пайплайн: executor → reviewer → committee"
+```
+
+2) Дайте этот tool агенту (например, вашему `orchestrator`/`coordinator`):
+
+```yaml
+agents:
+  orchestrator:
+    # ...
+    tools: ["orchestrate", "...другие..."]
+```
+
+3) Вызовите агента и попросите его использовать `orchestrate(goal=...)`.
+
+Возвращаемый результат — JSON, в котором есть `final` (итог) и при включённой комиссии — блок `committee`.
+
 An orchestration system for AI agents focused on engineering tasks.
 
 ### Purpose

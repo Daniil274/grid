@@ -117,11 +117,11 @@ class TestAgentFactory:
             mock_session = Mock()
             mock_session_class.return_value = mock_session
             
-            session = factory._get_agent_session("test_agent")
+            session = factory._get_agent_session("test_agent", "test_context")
             
             assert session is mock_session
-            assert "test_agent" in factory._agent_sessions
-            mock_session_class.assert_called_once_with("agent_test_agent")
+            assert ("test_agent", "test_context") in factory._agent_sessions
+            mock_session_class.assert_called_once_with("agent_test_agent_test_context")
     
     def test_get_agent_session_reuses_existing(self, config_file):
         """Test that _get_agent_session reuses existing session."""
@@ -133,8 +133,8 @@ class TestAgentFactory:
             mock_session = Mock()
             mock_session_class.return_value = mock_session
             
-            session1 = factory._get_agent_session("test_agent")
-            session2 = factory._get_agent_session("test_agent")
+            session1 = factory._get_agent_session("test_agent", "test_context")
+            session2 = factory._get_agent_session("test_agent", "test_context")
             
             assert session1 is session2
             mock_session_class.assert_called_once()  # Only called once

@@ -2,7 +2,7 @@
 Advanced context management for Grid agents with memory and persistence.
 """
 
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Union
 from datetime import datetime
 from threading import Lock
 from contextlib import contextmanager
@@ -13,6 +13,7 @@ import uuid
 
 from schemas import ContextMessage, AgentExecution
 from utils.exceptions import ContextError
+from utils.image_utils import ImageUtils
 # Tracing is handled automatically by Agents SDK
 
 logger = logging.getLogger("core.context")
@@ -53,12 +54,15 @@ class ContextManager:
         self._execution_history: List[AgentExecution] = []
         self._metadata: Dict[str, Any] = {}
 
-        # Load from persistence if available
+        # Load from persistence if available (but don't auto-activate old contexts)
         if self.persist_path and self.persist_path.exists():
-            self._load_from_file()
-        else:
-            default_context = self._create_context()
-            self._activate_context(default_context)
+            self._load_from_file(auto_activate=False)
+
+        # Always start with a fresh context
+        # Old contexts are preserved and accessible by Context ID
+        new_context = self._create_context()
+        self._activate_context(new_context)
+        logger.info(f"Started new context session: {new_context}")
 
     def _generate_context_id(self) -> str:
         """Generate a short identifier for a context session."""
@@ -120,21 +124,25 @@ class ContextManager:
         """Return the list of known context identifiers."""
         return list(self._contexts.keys())
     
-    def add_message(self, role: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    def add_message(self, role: str, content: Union[str, List[Any]], metadata: Optional[Dict[str, Any]] = None) -> None:
         """
         Add message to conversation history.
-        
+
         Args:
             role: Message role (user, assistant, system)
-            content: Message content
+            content: Message content (string or list of content parts)
             metadata: Optional metadata
         """
         try:
             with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
                 try:
+                    # Normalize content to convert file images to base64
+                    # This ensures images remain accessible after restart
+                    normalized_content = self._normalize_message_content(content)
+
                     message = ContextMessage(
                         role=role,
-                        content=content,
+                        content=normalized_content,
                         timestamp=datetime.now().isoformat(),
                         metadata=metadata
                     )
@@ -401,7 +409,92 @@ class ContextManager:
         """Get context metadata."""
         with safe_lock(self._lock, timeout=5.0):
             return self._metadata.get(key, default)
-    
+
+    def _normalize_message_content(self, content: Union[str, List[Any]]) -> Union[str, List[Any]]:
+        """
+        Normalize message content by converting file images to base64.
+
+        This ensures that images remain accessible even after file system changes
+        or when context is restored in a new session.
+
+        Args:
+            content: Message content (string or list of content parts)
+
+        Returns:
+            Normalized content with file images converted to base64
+        """
+        if isinstance(content, str):
+            return content
+
+        # Import here to avoid circular dependency
+        from schemas import FileImageContent, ImageContent, ImageUrl, TextContent
+
+        normalized_parts = []
+        for part in content:
+            if isinstance(part, FileImageContent):
+                # Convert file to base64
+                base64_url = ImageUtils.file_to_base64(part.file_path)
+                if base64_url:
+                    # Replace FileImageContent with ImageContent containing base64
+                    normalized_parts.append(ImageContent(
+                        type="image_url",
+                        image_url=ImageUrl(url=base64_url, detail=part.detail or "auto")
+                    ))
+                    logger.debug(f"Converted file image to base64: {part.file_path}")
+                else:
+                    logger.warning(f"Failed to convert image file to base64: {part.file_path}")
+                    # Keep original part even if conversion failed
+                    normalized_parts.append(part)
+            elif isinstance(part, dict) and part.get("type") == "image_file":
+                # Handle dict-based file image content
+                file_path = part.get("file_path")
+                if file_path:
+                    base64_url = ImageUtils.file_to_base64(file_path)
+                    if base64_url:
+                        normalized_parts.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": base64_url,
+                                "detail": part.get("detail", "auto")
+                            }
+                        })
+                        logger.debug(f"Converted file image dict to base64: {file_path}")
+                    else:
+                        logger.warning(f"Failed to convert image file dict to base64: {file_path}")
+                        normalized_parts.append(part)
+                else:
+                    normalized_parts.append(part)
+            else:
+                # Keep other parts as-is
+                normalized_parts.append(part)
+
+        return normalized_parts if normalized_parts else content
+
+    def _normalize_loaded_message(self, msg: ContextMessage) -> ContextMessage:
+        """
+        Normalize a loaded message by converting file images to base64.
+
+        This is used when loading messages from persistence to ensure
+        file images are converted to base64.
+
+        Args:
+            msg: ContextMessage to normalize
+
+        Returns:
+            Normalized ContextMessage
+        """
+        normalized_content = self._normalize_message_content(msg.content)
+
+        # Only create new message if content changed
+        if normalized_content is not msg.content:
+            return ContextMessage(
+                role=msg.role,
+                content=normalized_content,
+                timestamp=msg.timestamp,
+                metadata=msg.metadata
+            )
+        return msg
+
     def _get_role_emoji(self, role: str) -> str:
         """Get emoji for message role."""
         return {
@@ -464,8 +557,14 @@ class ContextManager:
             # Failed to save context
             logger.error(f"Failed to save context to {self.persist_path}: {e}")
     
-    def _load_from_file(self) -> None:
-        """Load context from persistence file."""
+    def _load_from_file(self, auto_activate: bool = True) -> None:
+        """
+        Load context from persistence file.
+
+        Args:
+            auto_activate: If True, automatically activate the last used context.
+                          If False, just load contexts without activating any.
+        """
         try:
             with open(self.persist_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -474,10 +573,12 @@ class ContextManager:
             if contexts_data:
                 self._contexts = {}
                 for context_id, bucket in contexts_data.items():
-                    conversation = [
-                        ContextMessage(**msg) if isinstance(msg, dict) else msg
-                        for msg in bucket.get("conversation_history", [])
-                    ]
+                    # Load and normalize messages to convert file images to base64
+                    conversation = []
+                    for msg in bucket.get("conversation_history", []):
+                        loaded_msg = ContextMessage(**msg) if isinstance(msg, dict) else msg
+                        normalized_msg = self._normalize_loaded_message(loaded_msg)
+                        conversation.append(normalized_msg)
                     executions = [
                         AgentExecution(**ex) if isinstance(ex, dict) else ex
                         for ex in bucket.get("execution_history", [])
@@ -491,27 +592,33 @@ class ContextManager:
                         "updated_at": bucket.get("updated_at"),
                     }
 
-                active_id = data.get("active_context_id")
-                if active_id and active_id in self._contexts:
-                    self._activate_context(active_id)
-                elif self._contexts:
-                    # Pick the most recently updated context
-                    sorted_contexts = sorted(
-                        self._contexts.items(),
-                        key=lambda item: item[1].get("updated_at", ""),
-                        reverse=True,
-                    )
-                    self._activate_context(sorted_contexts[0][0])
-                else:
-                    default_context = self._create_context()
-                    self._activate_context(default_context)
+                # Only activate context if auto_activate is True
+                if auto_activate:
+                    active_id = data.get("active_context_id")
+                    if active_id and active_id in self._contexts:
+                        self._activate_context(active_id)
+                    elif self._contexts:
+                        # Pick the most recently updated context
+                        sorted_contexts = sorted(
+                            self._contexts.items(),
+                            key=lambda item: item[1].get("updated_at", ""),
+                            reverse=True,
+                        )
+                        self._activate_context(sorted_contexts[0][0])
+                    else:
+                        default_context = self._create_context()
+                        self._activate_context(default_context)
+
+                logger.info(f"Loaded {len(self._contexts)} context(s) from persistence")
             else:
                 # Backwards compatibility with legacy single-context format
                 default_context = self._create_context(data.get("context_id"))
-                conversation = [
-                    ContextMessage(**msg) if isinstance(msg, dict) else msg
-                    for msg in data.get("conversation_history", [])
-                ]
+                # Load and normalize messages to convert file images to base64
+                conversation = []
+                for msg in data.get("conversation_history", []):
+                    loaded_msg = ContextMessage(**msg) if isinstance(msg, dict) else msg
+                    normalized_msg = self._normalize_loaded_message(loaded_msg)
+                    conversation.append(normalized_msg)
                 executions = [
                     AgentExecution(**ex) if isinstance(ex, dict) else ex
                     for ex in data.get("execution_history", [])
@@ -521,8 +628,17 @@ class ContextManager:
                 bucket["executions"] = executions
                 bucket["metadata"] = data.get("metadata", {})
                 bucket["updated_at"] = datetime.now().isoformat()
-                self._activate_context(default_context)
-            
+
+                # Only activate if auto_activate is True
+                if auto_activate:
+                    self._activate_context(default_context)
+
+            # Save normalized context back to file if we normalized any images
+            # This ensures file images are converted to base64 in persistence
+            if self.persist_path and auto_activate:
+                self._save_to_file()
+                logger.info("Context loaded and normalized, saved back to persistence")
+
         except Exception as e:
             # Failed to load context
             logger.error(f"Failed to load context from {self.persist_path}: {e}")

@@ -25,6 +25,7 @@ from agents import (
 )
 from agents.items import ItemHelpers
 from agents.mcp import MCPServerStdio
+from core.managers.mcp_manager import ResilientMCPServerStdio
 
 from .config import Config
 from .context import ContextManager, safe_lock
@@ -36,6 +37,7 @@ from core.tracing_config import get_tracing_config
 import json
 import re
 import uuid
+from dataclasses import dataclass
 
 load_dotenv()
 tracing_config = get_tracing_config()
@@ -160,6 +162,19 @@ class ConsoleStreamObserver:
         return None
 
 
+@dataclass
+class GridRunContext:
+    """
+    Runtime context object passed into Agents SDK Runner.
+
+    It enables `function_tool` implementations to access the live AgentFactory instance
+    via `context.context.factory`.
+    """
+
+    factory: "AgentFactory"
+    context_id: Optional[str] = None
+
+
 class AgentFactory:
     """
     Enterprise Agent Factory with advanced features:
@@ -205,7 +220,7 @@ class AgentFactory:
         # Initialize managers
         self.context_manager = ContextManager(
             max_history=self.config.get_max_history(),
-            persist_path=None  # Контекст сохраняется только в памяти, не в файле
+            persist_path="logs/context.json"  # Сохраняем контекст в файл для persistence
         )
         
         # Caches
@@ -455,6 +470,205 @@ class AgentFactory:
         except Exception as e:
             error_msg = f"Failed to create agent '{agent_key}': {e}"
             raise AgentError(error_msg, details={"agent_key": agent_key}) from e
+
+    # ---------------------------------------------------------------------
+    # Dynamic agents (not declared in config.yaml)
+    # ---------------------------------------------------------------------
+    async def create_dynamic_agent(
+        self,
+        *,
+        name: str,
+        instructions: str,
+        model_key: Optional[str] = None,
+        tool_names: Optional[List[str]] = None,
+        mcp_tool_names: Optional[List[str]] = None,
+    ) -> Agent:
+        """
+        Create an ad-hoc Agent instance not backed by config.yaml.
+
+        This is the core building block for orchestration/meta-agent patterns.
+        """
+        resolved_model_key = self.resolve_model_key(model_key)
+        client, model_name = self.get_openai_client_for_model(resolved_model_key)
+        model_cfg = self.config.get_model(resolved_model_key)
+        provider_cfg = self.config.get_provider(model_cfg.provider)
+
+        model = None
+        use_responses = bool(getattr(model_cfg, "use_responses_api", False))
+        base_url_lower = (provider_cfg.base_url or "").lower()
+        provider_supports_responses = "api.openai.com" in base_url_lower
+        if use_responses and not provider_supports_responses:
+            use_responses = False
+
+        if use_responses and provider_supports_responses:
+            try:
+                from agents import OpenAIResponsesModel  # type: ignore
+
+                model = OpenAIResponsesModel(model=model_name, openai_client=client)
+            except Exception:
+                model = None
+
+        if model is None:
+            model = OpenAIChatCompletionsModel(model=model_name, openai_client=client)
+
+        tools: List[Any] = []
+        mcp_servers_list: List[Any] = []
+        effective_tool_names = tool_names or []
+        
+        # Собираем все имена инструментов (включая MCP)
+        all_tool_names = list(effective_tool_names)
+        if mcp_tool_names:
+            all_tool_names.extend(mcp_tool_names)
+
+        if effective_tool_names:
+            tools, inferred_mcp = await self._resolve_tools_for_names(effective_tool_names)
+            if inferred_mcp:
+                mcp_tool_names = list(dict.fromkeys([*(mcp_tool_names or []), *inferred_mcp]))
+                # Добавляем inferred_mcp к all_tool_names, убирая дубликаты
+                for mcp_name in inferred_mcp:
+                    if mcp_name not in all_tool_names:
+                        all_tool_names.append(mcp_name)
+
+        if mcp_tool_names:
+            # Only if enabled (globally or per caller)
+            if self.config.is_mcp_enabled():
+                mcp_servers_list = await self._create_mcp_servers(mcp_tool_names)
+
+        # Добавляем prompt_addition из конфигурации инструментов к инструкциям
+        enhanced_instructions = self._build_dynamic_agent_instructions(instructions, all_tool_names)
+
+        return Agent(
+            name=name,
+            instructions=enhanced_instructions,
+            model=model,
+            tools=tools,
+            mcp_servers=mcp_servers_list,
+        )
+
+    async def _resolve_tools_for_names(self, tool_names: List[str]) -> tuple[List[Any], List[str]]:
+        """
+        Resolve a mixed list of tool keys (function/agent/mcp from config) into:
+        - tools: SDK tool instances (function tools + agent tools)
+        - mcp_server_names: MCP tool keys (servers) to attach to agent
+        """
+        function_tools: List[str] = []
+        agent_tools: List[str] = []
+        mcp_tools: List[str] = []
+
+        for tool_key in tool_names:
+            try:
+                tool_cfg = self.config.get_tool(tool_key)
+                if tool_cfg.type == "function":
+                    function_tools.append(tool_key)
+                elif tool_cfg.type == "agent":
+                    agent_tools.append(tool_key)
+                elif tool_cfg.type == "mcp":
+                    mcp_tools.append(tool_key)
+            except Exception:
+                # Unknown tool key – ignore (keep robust for LLM-produced tool lists)
+                continue
+
+        resolved: List[Any] = []
+        if function_tools:
+            try:
+                resolved.extend(get_tools_by_names(function_tools))
+            except Exception as exc:
+                logger.debug("Failed to resolve function tools: %s", exc, exc_info=exc)
+
+        if agent_tools:
+            try:
+                resolved.extend(await self._create_agent_tools(agent_tools))
+            except Exception as exc:
+                logger.debug("Failed to resolve agent tools: %s", exc, exc_info=exc)
+
+        return resolved, mcp_tools
+
+    def _build_dynamic_agent_instructions(self, base_instructions: str, tool_names: List[str]) -> str:
+        """
+        Build complete instructions for dynamic agent including tool prompt_additions.
+        
+        This mirrors the logic from Config.build_agent_prompt but for dynamic agents.
+        """
+        if not tool_names:
+            return base_instructions
+        
+        # Собираем prompt_addition из конфигурации инструментов
+        tool_descriptions = []
+        for tool_name in tool_names:
+            try:
+                tool_config = self.config.get_tool(tool_name)
+                if tool_config.prompt_addition:
+                    tool_descriptions.append(tool_config.prompt_addition)
+            except Exception:
+                # Игнорируем неизвестные инструменты (для совместимости)
+                logger.debug(f"Tool '{tool_name}' not found in config, skipping prompt_addition")
+                continue
+        
+        # Если нет описаний инструментов, возвращаем базовые инструкции
+        if not tool_descriptions:
+            return base_instructions
+        
+        # Комбинируем части
+        parts = [base_instructions]
+        
+        # Общие правила для инструментов (если заданы)
+        common_rules = getattr(self.config.config.settings, 'tools_common_rules', None)
+        if common_rules:
+            parts.append("\nПравила использования инструментов (общие):")
+            parts.append(str(common_rules))
+        
+        # Добавляем описания инструментов
+        parts.append("\nДоступные инструменты:")
+        parts.extend(tool_descriptions)
+        
+        return "\n".join(parts)
+
+    async def run_agent_object_simple(
+        self,
+        agent: Agent,
+        message: str,
+        *,
+        context_id: Optional[str] = None,
+        max_turns: Optional[int] = None,
+        session: Optional[SQLiteSession] = None,
+    ) -> str:
+        """
+        Run an Agent instance directly (useful for dynamic agents).
+
+        This method is intentionally lightweight: it does not persist full dialogue,
+        but it *does* pass a `GridRunContext` so tools can access the AgentFactory.
+        """
+        if max_turns is None:
+            max_turns = self.config.get_max_turns()
+
+        active_context_id = context_id or self.context_manager.get_current_context_id() or self.context_manager.start_new_context()
+        run_ctx = GridRunContext(factory=self, context_id=active_context_id)
+
+        # Provide a session by default to enable memory for dynamic agents
+        if session is None:
+            session = self._get_agent_session(f"dyn:{agent.name}", active_context_id)
+        agent._session = session
+
+        result = await _get_runner().run(
+            agent,
+            message,
+            context=run_ctx,
+            max_turns=max_turns,
+            session=session,
+        )
+        # Extract output robustly (similar to run_agent)
+        try:
+            if isinstance(result, str):
+                return result
+            if hasattr(result, "final_output") and result.final_output:
+                return result.final_output
+            if hasattr(result, "output") and result.output:
+                return result.output
+            if hasattr(result, "content") and result.content:
+                return result.content
+        except Exception:
+            pass
+        return str(result)
     
     async def run_agent(
         self,
@@ -727,6 +941,8 @@ class AgentFactory:
             else:
                 session = self._get_agent_session(agent_key, active_context_id)
                 agent._session = session
+            run_ctx = GridRunContext(factory=self, context_id=active_context_id)
+
             if stream:
                 # Streaming режим: прозрачная подсветка tool/MCP вызовов через наблюдателя
                 result_output: Optional[str] = None
@@ -734,7 +950,7 @@ class AgentFactory:
                     run_result_streaming = _get_runner().run_streamed(
                         agent,
                         parsed_message,  # Use parsed message (dict/list or string) with history prepended
-                        context=self.context_manager.get_conversation_context() if not needs_list_format else None,
+                        context=run_ctx,
                         max_turns=max_turns,
                         session=session,
                     )
@@ -773,7 +989,7 @@ class AgentFactory:
                         _get_runner().run(
                             agent, 
                             parsed_message,  # Use parsed message (dict/list or string) with history prepended
-                            context=self.context_manager.get_conversation_context() if not needs_list_format else None,
+                            context=run_ctx,
                             max_turns=max_turns, 
                             session=session
                         ),
@@ -1245,7 +1461,7 @@ class AgentFactory:
         env = tool_config.env_vars or {}
         cwd = self.config.get_working_directory()
 
-        server = MCPServerStdio(
+        server = ResilientMCPServerStdio(
             params={
                 "command": command,
                 "args": args,
@@ -1254,6 +1470,7 @@ class AgentFactory:
             },
             cache_tools_list=True,
             name=tool_name,
+            client_session_timeout_seconds=300,  # 5 minutes timeout (increased from default 5s)
         )
 
         await server.connect()
