@@ -92,3 +92,5 @@ private/
 workspace/*
 .claude/*
 nul
+tools/DeepSeek-OCR/
+ocr_cache/

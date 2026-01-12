@@ -179,6 +179,20 @@ class Logger:
             error_handler.setLevel(logging.ERROR)
             error_handler.setFormatter(JSONFormatter())
             logging.getLogger().addHandler(error_handler)
+
+            # Verbose log file (full prompts, results, tools) - NO CONSOLE
+            verbose_logger = logging.getLogger("grid.verbose")
+            verbose_logger.propagate = False  # Don't send to root logger (console)
+            verbose_logger.setLevel(logging.DEBUG)
+            # Remove old handlers to prevent duplicates on reconfigure
+            for h in verbose_logger.handlers[:]:
+                verbose_logger.removeHandler(h)
+                
+            verbose_handler = logging.FileHandler(log_path / "verbose.log", encoding='utf-8')
+            verbose_handler.setFormatter(logging.Formatter(
+                '%(asctime)s | %(message)s'
+            ))
+            verbose_logger.addHandler(verbose_handler)
             
             # Legacy agent logs (timestamped)
             if enable_legacy_logs:
@@ -385,6 +399,29 @@ class Logger:
             config_path=config_path,
             event_type="config_reload"
         )
+
+    def log_verbose(self, title: str, content: Any) -> None:
+        """
+        Log detailed data to verbose log file only (never console).
+        
+        Args:
+            title: Section title
+            content: Content to log (will be stringified)
+        """
+        logger = logging.getLogger("grid.verbose")
+        border = "=" * 80
+        
+        # Format content safely
+        try:
+            if isinstance(content, (dict, list)):
+                formatted_content = json.dumps(content, ensure_ascii=False, indent=2)
+            else:
+                formatted_content = str(content)
+        except Exception:
+            formatted_content = str(content)
+            
+        message = f"\n{border}\n{title}\n{border}\n{formatted_content}\n{border}\n"
+        logger.debug(message)
 
 
 # Legacy compatibility functions

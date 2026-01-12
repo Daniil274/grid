@@ -45,6 +45,7 @@ class ToolConfig(BaseModel):
     # For MCP tools
     server_command: Optional[List[str]] = None
     env_vars: Optional[Dict[str, str]] = None
+    add_working_directory: Optional[bool] = None
     
     # For agent tools
     target_agent: Optional[str] = None
