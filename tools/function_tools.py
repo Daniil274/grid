@@ -6,7 +6,7 @@ from typing import List, Any, Dict
 from .file_tools import FILE_TOOLS, get_file_tools, get_file_tools_by_names
 from .git_tools import GIT_TOOLS, get_git_tools, get_git_tools_by_names
 from .orchestrator_tools import ORCHESTRATOR_TOOLS
-from .ape_tools import APE_TOOLS
+from .ocr_tools import OCR_TOOLS
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -25,7 +25,7 @@ AVAILABLE_TOOLS = {
     **FILE_TOOLS,
     **GIT_TOOLS,
     **ORCHESTRATOR_TOOLS,
-    **APE_TOOLS,
+    **OCR_TOOLS,
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -73,9 +73,6 @@ TOOL_ALIASES = {
 
     # Orchestration
     "orchestrate": "orchestrate",
-    
-    # APE
-    "ape": "automatic_prompt_engineer",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:

@@ -31,7 +31,7 @@ from .config import Config
 from .context import ContextManager, safe_lock
 from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names
-from utils.exceptions import AgentError, ConfigError, ContextError
+from utils.exceptions import AgentError, ConfigError, ContextError, MultimodalContentInjected
 from core.tracing_config import get_tracing_config
 
 import json
@@ -173,6 +173,7 @@ class GridRunContext:
 
     factory: "AgentFactory"
     context_id: Optional[str] = None
+    should_restart: bool = False
 
 
 class AgentFactory:
@@ -680,6 +681,7 @@ class AgentFactory:
         stream: bool = False,
         streaming: Optional[bool] = None,
         use_active_context: bool = False,
+        skip_input_add: bool = False,
     ) -> str:
         """
         Run agent with message and context management.
@@ -691,6 +693,7 @@ class AgentFactory:
             context_id: Optional identifier of a saved conversation context
             stream: Whether to stream response (alias: streaming)
             use_active_context: If True, use the currently active context instead of creating new one
+            skip_input_add: If True, do not add the input message to history (used for recursive calls)
             
         Returns:
             Agent response
@@ -828,83 +831,88 @@ class AgentFactory:
             
             # Добавляем сообщение в контекст для текущей сессии
             # For multimodal messages, we need to parse JSON and create proper ContextMessage
-            if is_multimodal and isinstance(parsed_message, list) and len(parsed_message) > 0:
-                # Extract content from parsed message
-                msg_dict = parsed_message[0] if isinstance(parsed_message[0], dict) else {}
-                msg_content = msg_dict.get("content", [])
-                
-                # Convert SDK format content parts to ContextMessage format
-                # SDK uses: [{"type": "input_text", "text": "..."}, {"type": "input_image", "image_url": "..."}]
-                # ContextMessage needs: [TextContent(...), ImageContent(...)]
-                from schemas import ContextMessage, TextContent, ImageContent, ImageUrl
-                from datetime import datetime
-                
-                content_parts = []
-                for part in msg_content:
-                    if isinstance(part, dict):
-                        part_type = part.get("type")
-                        if part_type == "input_text":
-                            content_parts.append(TextContent(type="text", text=part.get("text", "")))
-                        elif part_type == "input_image":
-                            image_url = part.get("image_url", "")
-                            detail = part.get("detail", "auto")
-                            # image_url should already be base64 data URL from prepare_agent_message
-                            # Store it as ImageContent so it can be converted back to SDK format
-                            content_parts.append(ImageContent(
-                                type="image_url",
-                                image_url=ImageUrl(url=image_url, detail=detail)
-                            ))
-                            logger.debug(f"Storing image in context: {len(image_url)} chars (base64 URL)")
-                        # Pass through other types as dict
+            if not skip_input_add:
+                if is_multimodal and isinstance(parsed_message, list) and len(parsed_message) > 0:
+                    # Extract content from parsed message
+                    msg_dict = parsed_message[0] if isinstance(parsed_message[0], dict) else {}
+                    msg_content = msg_dict.get("content", [])
+                    
+                    # Convert SDK format content parts to ContextMessage format
+                    # SDK uses: [{"type": "input_text", "text": "..."}, {"type": "input_image", "image_url": "..."}]
+                    # ContextMessage needs: [TextContent(...), ImageContent(...)]
+                    from schemas import ContextMessage, TextContent, ImageContent, ImageUrl
+                    from datetime import datetime
+                    
+                    content_parts = []
+                    for part in msg_content:
+                        if isinstance(part, dict):
+                            part_type = part.get("type")
+                            if part_type == "input_text":
+                                content_parts.append(TextContent(type="text", text=part.get("text", "")))
+                            elif part_type == "input_image":
+                                image_url = part.get("image_url", "")
+                                detail = part.get("detail", "auto")
+                                # image_url should already be base64 data URL from prepare_agent_message
+                                # Store it as ImageContent so it can be converted back to SDK format
+                                content_parts.append(ImageContent(
+                                    type="image_url",
+                                    image_url=ImageUrl(url=image_url, detail=detail)
+                                ))
+                                logger.debug(f"Storing image in context: {len(image_url)} chars (base64 URL)")
+                            # Pass through other types as dict
+                            else:
+                                content_parts.append(part)
                         else:
                             content_parts.append(part)
-                    else:
-                        content_parts.append(part)
-                
-                # Create ContextMessage with multimodal content
-                multimodal_msg = ContextMessage(
-                    role="user",
-                    content=content_parts,
-                    timestamp=datetime.now().isoformat(),
-                    metadata={
-                        "context_id": active_context_id,
-                        "agent": agent_key,
-                        "type": "user_input",
-                    },
-                )
-                # Add directly to context history using safe_lock
-                try:
-                    with safe_lock(self.context_manager._lock, timeout=5.0):
-                        self.context_manager._conversation_history.append(multimodal_msg)
-                        # Trim history if needed
-                        if len(self.context_manager._conversation_history) > self.context_manager.max_history:
-                            self.context_manager._conversation_history.pop(0)
-                        # Update context bucket
-                        active_bucket = self.context_manager._contexts.get(self.context_manager._current_context_id)
-                        if active_bucket is not None:
-                            active_bucket["updated_at"] = datetime.now().isoformat()
-                except Exception as e:
-                    logger.warning(f"Failed to add multimodal message to context: {e}, falling back to string")
-                    self.context_manager.add_message(
-                        "user",
-                        message,
+                    
+                    # Create ContextMessage with multimodal content
+                    multimodal_msg = ContextMessage(
+                        role="user",
+                        content=content_parts,
+                        timestamp=datetime.now().isoformat(),
                         metadata={
                             "context_id": active_context_id,
                             "agent": agent_key,
                             "type": "user_input",
                         },
                     )
-            else:
-                # Simple text message - use standard add_message
-                self.context_manager.add_message(
-                    "user",
-                    message,  # Store original message string for context
-                    metadata={
-                        "context_id": active_context_id,
-                        "agent": agent_key,
-                        "type": "user_input",
-                    },
-                )
+                    # Add directly to context history using safe_lock
+                    try:
+                        with safe_lock(self.context_manager._lock, timeout=5.0):
+                            self.context_manager._conversation_history.append(multimodal_msg)
+                            # Trim history if needed
+                            if len(self.context_manager._conversation_history) > self.context_manager.max_history:
+                                self.context_manager._conversation_history.pop(0)
+                            # Update context bucket
+                            active_bucket = self.context_manager._contexts.get(self.context_manager._current_context_id)
+                            if active_bucket is not None:
+                                active_bucket["updated_at"] = datetime.now().isoformat()
+                    except Exception as e:
+                        logger.warning(f"Failed to add multimodal message to context: {e}, falling back to string")
+                        self.context_manager.add_message(
+                            "user",
+                            message,
+                            metadata={
+                                "context_id": active_context_id,
+                                "agent": agent_key,
+                                "type": "user_input",
+                            },
+                        )
+                else:
+                    # Simple text message - use standard add_message
+                    self.context_manager.add_message(
+                        "user",
+                        message,  # Store original message string for context
+                        metadata={
+                            "context_id": active_context_id,
+                            "agent": agent_key,
+                            "type": "user_input",
+                        },
+                    )
+            elif skip_input_add and not message:
+                 # If we are skipping input add (recursive call) and message is empty,
+                 # we ensure parsed_message is empty list so we only send history
+                 parsed_message = []
             
 
             agent_instructions = self._build_agent_instructions(agent_key, context_path, include_conversation_context)
@@ -956,6 +964,11 @@ class AgentFactory:
                     )
                     streaming_text_parts: List[str] = []
                     async for event in run_result_streaming.stream_events():
+                        # Check for restart signal from tools
+                        if run_ctx.should_restart:
+                            logger.info("Restart signal detected during streaming. Breaking loop.")
+                            break
+                            
                         try:
                             fragment = self._stream_observer.handle_event(event, agent_key=agent_key)
                             if fragment:
@@ -964,11 +977,26 @@ class AgentFactory:
                             logger.exception(
                                 "Stream observer failed for %s", type(event).__name__
                             )
+                    
+                    # Check restart signal again after loop
+                    if run_ctx.should_restart:
+                        logger.info("Restart signal active. Triggering recursive run.")
+                        return await self.run_agent(
+                            agent_key,
+                            message="",
+                            context_path=context_path,
+                            context_id=active_context_id,
+                            stream=stream,
+                            use_active_context=True,
+                            skip_input_add=True
+                        )
+
                     result_output = (
                         run_result_streaming.final_output
                         if run_result_streaming.final_output is not None
                         else ""
                     )
+                    
                     if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
                         try:
                             buffered_text = "".join(streaming_text_parts).strip()
@@ -979,6 +1007,30 @@ class AgentFactory:
                 except asyncio.TimeoutError:
                     logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
+                except MultimodalContentInjected:
+                     logger.info("Multimodal content injected. Triggering recursive run.")
+                     return await self.run_agent(
+                        agent_key,
+                        message="",
+                        context_path=context_path,
+                        context_id=active_context_id,
+                        stream=stream,
+                        use_active_context=True,
+                        skip_input_add=True
+                    )
+                except BaseException as e:
+                    if type(e).__name__ == 'MultimodalContentInjected':
+                         logger.info("Multimodal content injected. Triggering recursive run.")
+                         return await self.run_agent(
+                            agent_key,
+                            message="",
+                            context_path=context_path,
+                            context_id=active_context_id,
+                            stream=stream,
+                            use_active_context=True,
+                            skip_input_add=True
+                        )
+                    raise e
                 except Exception as e:
                     raise AgentError(f"Agent execution failed: {e}") from e
                 result = result_output
@@ -995,10 +1047,45 @@ class AgentFactory:
                         ),
                         timeout=timeout_seconds
                     )
+                    
+                    if run_ctx.should_restart:
+                        logger.info("Restart signal active (non-streaming). Triggering recursive run.")
+                        return await self.run_agent(
+                            agent_key,
+                            message="",
+                            context_path=context_path,
+                            context_id=active_context_id,
+                            stream=stream,
+                            use_active_context=True,
+                            skip_input_add=True
+                        )
 
                 except asyncio.TimeoutError:
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
+                except MultimodalContentInjected:
+                    logger.info("Multimodal content injected. Triggering recursive run.")
+                    # Recursively call run_agent with empty message and skip_input_add=True
+                    return await self.run_agent(
+                        agent_key,
+                        message="",  # Empty message
+                        context_path=context_path,
+                        context_id=active_context_id,
+                        stream=stream,
+                        use_active_context=True,
+                        skip_input_add=True
+                    )
                 except Exception as e:
+                    if type(e).__name__ == 'MultimodalContentInjected':
+                         logger.info("Multimodal content injected. Triggering recursive run.")
+                         return await self.run_agent(
+                            agent_key,
+                            message="", 
+                            context_path=context_path,
+                            context_id=active_context_id,
+                            stream=stream,
+                            use_active_context=True,
+                            skip_input_add=True
+                         )
                     raise AgentError(f"Agent execution failed: {e}") from e
             
             # Process result - more robust extraction
@@ -1304,24 +1391,108 @@ class AgentFactory:
                 if hasattr(result, '__await__'):
                     result = await result
                 
+                # --- Multimodal Handling ---
+                # Если результат содержит мультимодальные данные (изображения), сохраняем их в контекст
+                try:
+                    if isinstance(result, list):
+                        has_images = False
+                        # Check for ToolOutputImage or dict with image info
+                        for item in result:
+                            # Check by class name or duck typing to avoid imports
+                            if type(item).__name__ == 'ToolOutputImage':
+                                 has_images = True
+                                 break
+                            if isinstance(item, dict) and item.get("type") in ("image_url", "input_image"):
+                                 has_images = True
+                                 break
+                        
+                        if has_images:
+                            # Import schemas locally
+                            from schemas import TextContent, ImageContent, ImageUrl
+                            
+                            content_parts = []
+                            for item in result:
+                                item_type = type(item).__name__
+                                if item_type == 'ToolOutputText':
+                                    text_val = getattr(item, 'text', '')
+                                    content_parts.append(TextContent(type="text", text=text_val))
+                                elif item_type == 'ToolOutputImage':
+                                    # ToolOutputImage has .image_url (or .url) and .detail
+                                    url = getattr(item, 'image_url', getattr(item, 'url', None))
+                                    detail = getattr(item, 'detail', 'auto')
+                                    if url:
+                                        content_parts.append(ImageContent(
+                                            type="image_url",
+                                            image_url=ImageUrl(url=url, detail=detail)
+                                        ))
+                                elif isinstance(item, dict):
+                                    # Handle dicts
+                                    part_type = item.get("type")
+                                    if part_type == "text":
+                                        content_parts.append(TextContent(type="text", text=item.get("text", "")))
+                                    elif part_type in ("image_url", "input_image"):
+                                        url_data = item.get("image_url", "")
+                                        detail = item.get("detail", "auto")
+                                        
+                                        url = ""
+                                        if isinstance(url_data, dict):
+                                            url = url_data.get("url", "")
+                                            detail = url_data.get("detail", detail)
+                                        else:
+                                            url = url_data
+                                        
+                                        if url:
+                                            content_parts.append(ImageContent(
+                                                type="image_url",
+                                                image_url=ImageUrl(url=url, detail=detail)
+                                            ))
+
+                            if content_parts:
+                                # Add as User message to ensure visibility by Vision models
+                                # (Many models ignore images in assistant/tool roles)
+                                self.context_manager.add_message(
+                                    "user",
+                                    content_parts,
+                                    metadata={
+                                        "context_id": sub_context_id,
+                                        "agent": agent_name,
+                                        "type": "tool_multimodal_output",
+                                        "tool": tool_display_name,
+                                        "generated_by_tool": True,
+                                        "note": "Automatically injected tool output images"
+                                    }
+                                )
+                                logger.info(f"Stored multimodal tool output in context as USER message ({len(content_parts)} parts)")
+                except Exception as e:
+                    logger.warning(f"Failed to store multimodal tool output: {e}")
+
                 execution.end_time = time.time()
-                # Безопасно преобразуем результат в строку
+                
+                # Подготовка текстового представления для логов/истории
                 if isinstance(result, str):
                     result_text = result
+                elif isinstance(result, list) and result:
+                    # Для списка объектов (мультимодальный вывод) делаем summary
+                    result_text = f"[Multimodal Tool Output: {len(result)} items]"
+                    # Если элементы имеют текстовое представление, можно добавить
+                    if all(isinstance(x, str) for x in result):
+                        result_text = str(result)
                 else:
                     result_text = str(result)
 
                 marker_line = f"Контекст ID: {sub_context_id}"
                 if marker_line not in result_text:
-                    result_text = result_text.rstrip() + "\n\n" + marker_line
+                    result_text_for_history = result_text.rstrip() + "\n\n" + marker_line
+                else:
+                    result_text_for_history = result_text
 
-                execution.output = result_text
+                execution.output = result_text_for_history
                 
                 duration = execution.end_time - execution.start_time
                 
                 self.context_manager.add_execution(execution)
                 
-                return result_text
+                return result
                 
             except Exception as e:
                 execution.end_time = time.time()

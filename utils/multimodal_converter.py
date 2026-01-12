@@ -207,14 +207,14 @@ class MultimodalConverter:
 
         for part in message.content:
             if isinstance(part, TextContent):
-                # Use input_text format for Realtime API compatibility
+                # SDK совместимый формат input_text
                 content_parts.append({
                     "type": "input_text",
                     "text": part.text
                 })
 
             elif isinstance(part, ImageContent):
-                # Normalize file paths to base64
+                # Нормализуем путь/URL и возвращаем input_image (SDK формат)
                 image_url = part.image_url
                 if isinstance(image_url, ImageUrl):
                     url = image_url.url
@@ -228,10 +228,8 @@ class MultimodalConverter:
                 else:
                     continue
 
-                # Check if it's a local file and convert
-                # Skip if already a base64 data URL
+                # Преобразуем локальные файлы в base64, http оставляем как есть
                 if ImageUtils.is_base64_image(url):
-                    # Already base64, use as is
                     pass
                 elif ImageUtils.is_local_path(url):
                     base64_url = ImageUtils.file_to_base64(url)
@@ -240,10 +238,7 @@ class MultimodalConverter:
                     else:
                         logger.warning(f"Failed to convert image file: {url}")
                         continue
-                # If it's a remote URL (http/https), use as is
 
-                # Use input_image format for Realtime API compatibility
-                # Format: {"type": "input_image", "image_url": "...", "detail": "..."}
                 image_part: Dict[str, Any] = {
                     "type": "input_image",
                     "image_url": url
@@ -253,10 +248,9 @@ class MultimodalConverter:
                 content_parts.append(image_part)
 
             elif isinstance(part, FileImageContent):
-                # Convert file to base64
+                # Convert file to base64 и вернуть input_image
                 base64_url = ImageUtils.file_to_base64(part.file_path)
                 if base64_url:
-                    # Use input_image format for Realtime API compatibility
                     image_part: Dict[str, Any] = {
                         "type": "input_image",
                         "image_url": base64_url
@@ -268,10 +262,9 @@ class MultimodalConverter:
                     logger.warning(f"Failed to convert image file: {part.file_path}")
 
             elif isinstance(part, dict):
-                # Handle dict parts - convert image_url to input_image if needed
+                # Dict-парт: приводим к формату input_text/input_image (SDK)
                 part_type = part.get("type")
                 if part_type == "image_url":
-                    # Convert image_url format to input_image format
                     image_url_data = part.get("image_url")
                     if isinstance(image_url_data, dict):
                         url = image_url_data.get("url", "")
@@ -284,8 +277,7 @@ class MultimodalConverter:
                         detail = "auto"
                     
                     if url:
-                        # Check if it's a local file and convert
-                        if ImageUtils.is_local_path(url):
+                        if ImageUtils.is_local_path(url) and not ImageUtils.is_base64_image(url):
                             base64_url = ImageUtils.file_to_base64(url)
                             if base64_url:
                                 url = base64_url
@@ -300,15 +292,37 @@ class MultimodalConverter:
                         if detail and detail != "auto":
                             image_part["detail"] = detail
                         content_parts.append(image_part)
+                elif part_type == "input_image":
+                    # Оставляем как input_image, но нормализуем локальные пути
+                    url = part.get("image_url", "")
+                    detail = part.get("detail", "auto")
+                    if url:
+                        if ImageUtils.is_local_path(url) and not ImageUtils.is_base64_image(url):
+                            base64_url = ImageUtils.file_to_base64(url)
+                            if base64_url:
+                                url = base64_url
+                            else:
+                                logger.warning(f"Failed to convert image file: {url}")
+                                continue
+                        image_part: Dict[str, Any] = {
+                            "type": "input_image",
+                            "image_url": url
+                        }
+                        if detail and detail != "auto":
+                            image_part["detail"] = detail
+                        content_parts.append(image_part)
                 elif part_type == "text":
-                    # Convert text format to input_text format
+                    # Конвертируем text -> input_text
                     content_parts.append({
                         "type": "input_text",
                         "text": part.get("text", "")
                     })
-                elif part_type in ("input_text", "input_image"):
-                    # Already in correct format, pass through
-                    content_parts.append(part)
+                elif part_type == "input_text":
+                    # Оставляем input_text
+                    content_parts.append({
+                        "type": "input_text",
+                        "text": part.get("text", "")
+                    })
                 else:
                     # Pass through other dict parts
                     content_parts.append(part)
@@ -429,3 +443,140 @@ class MultimodalConverter:
             content=content_parts,
             timestamp=timestamp
         )
+
+    # ------------------------------------------------------------------
+    # Tool output helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def tool_output_to_content_parts(output: Union[List[Any], Dict[str, Any], Any]) -> List[ContentPart]:
+        """
+        Normalize мультимодальный вывод инструмента к списку ContentPart.
+
+        Поддерживает словари формата input_text/input_image/image_url и
+        готовые Pydantic-модели TextContent/ImageContent/FileImageContent.
+        """
+        if output is None:
+            return []
+
+        items: List[Any]
+        if isinstance(output, list):
+            items = output
+        else:
+            items = [output]
+
+        parts: List[ContentPart] = []
+
+        for item in items:
+            if isinstance(item, (TextContent, ImageContent, FileImageContent)):
+                parts.append(item)
+                continue
+
+            if isinstance(item, str):
+                parts.append(TextContent(type="text", text=item))
+                continue
+
+            if isinstance(item, dict):
+                part_type = item.get("type")
+
+                if part_type in ("text", "input_text"):
+                    parts.append(TextContent(type="text", text=item.get("text", "")))
+                    continue
+
+                if part_type in ("input_image", "image_url"):
+                    image_url_data = item.get("image_url")
+                    url = ""
+                    detail = item.get("detail", "auto")
+
+                    if isinstance(image_url_data, dict):
+                        url = image_url_data.get("url", "")
+                        detail = image_url_data.get("detail", detail)
+                    elif isinstance(image_url_data, str):
+                        url = image_url_data
+
+                    if url:
+                        parts.append(
+                            ImageContent(
+                                type="image_url",
+                                image_url=ImageUrl(url=url, detail=detail or "auto"),
+                            )
+                        )
+                    continue
+
+                if part_type == "image_file":
+                    file_path = item.get("file_path", "")
+                    detail = item.get("detail", "auto")
+                    if file_path:
+                        parts.append(
+                            FileImageContent(
+                                type="image_file",
+                                file_path=file_path,
+                                detail=detail,
+                            )
+                        )
+                    continue
+
+                # Неизвестный тип — оставляем как есть
+                parts.append(item)  # type: ignore[arg-type]
+                continue
+
+            # Fallback — превращаем в текст
+            try:
+                parts.append(TextContent(type="text", text=str(item)))
+            except Exception:
+                continue
+
+        return parts
+
+    @staticmethod
+    def store_tool_multimodal_output(
+        ctx: Any,
+        tool_name: str,
+        output: Union[List[Any], Dict[str, Any], Any],
+        *,
+        role: str = "assistant",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """
+        Сохраняет мультимодальный вывод инструмента в контекст вместо возврата пользователю.
+
+        Args:
+            ctx: RunContextWrapper, полученный в инструменте (ctx.context.factory/context_id)
+            tool_name: имя инструмента
+            output: вывод инструмента (строка/список/словарь)
+            role: роль сообщения в контексте
+            metadata: дополнительные метаданные
+
+        Returns:
+            Использованный context_id или None, если сохранить не удалось.
+        """
+        try:
+            parts = MultimodalConverter.tool_output_to_content_parts(output)
+            if not parts:
+                return None
+
+            context_obj = getattr(ctx, "context", None)
+            factory = getattr(context_obj, "factory", None)
+            context_id = getattr(context_obj, "context_id", None)
+
+            if not factory or not hasattr(factory, "context_manager"):
+                logger.debug("store_tool_multimodal_output: нет доступа к factory.context_manager")
+                return None
+
+            meta = {"source": "tool", "tool_name": tool_name}
+            if metadata:
+                meta.update(metadata)
+
+            factory.context_manager.add_message(role, parts, metadata=meta)
+
+            try:
+                return context_id or factory.context_manager.get_current_context_id()
+            except Exception:
+                return context_id
+        except Exception as exc:
+            logger.warning(
+                "Не удалось сохранить мультимодальный вывод инструмента %s в контекст: %s",
+                tool_name,
+                exc,
+                exc_info=exc,
+            )
+            return None

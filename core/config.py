@@ -30,6 +30,7 @@ class Config:
         """
         self.config_path = Path(config_path)
         self._config: Optional[GridConfig] = None
+        self._cli_working_directory = working_directory
         self._working_directory = working_directory or os.getcwd()
         self._load_config()
     
@@ -45,13 +46,28 @@ class Config:
             # Validate using Pydantic
             self._config = GridConfig(**raw_config)
             
+            # Determine effective working directory
+            config_wd = self.config.settings.working_directory
+            allow_override = self.config.settings.allow_path_override
+            
+            if self._cli_working_directory:
+                if allow_override:
+                    self._working_directory = self._cli_working_directory
+                else:
+                    logger.warning("Path override disabled in config. Ignoring CLI working directory.")
+                    self._working_directory = config_wd or os.getcwd()
+            else:
+                # No CLI arg, prefer config, fall back to CWD
+                self._working_directory = config_wd or os.getcwd()
+            
+            self._working_directory = os.path.abspath(self._working_directory)
+            
             # Configuration loaded successfully - this will be traced automatically by Agents SDK
             
             # Do NOT change process working directory to preserve project-relative paths (e.g., logs/)
             # All file resolutions must go through get_absolute_path/working_directory
-            target_working_dir = self.get_working_directory()
-            if target_working_dir and target_working_dir != os.getcwd():
-                if os.path.exists(target_working_dir):
+            if self._working_directory != os.getcwd():
+                if os.path.exists(self._working_directory):
                     pass  # Using configured working directory for path resolution only (no chdir)
                 else:
                     pass  # Configured working directory does not exist (will be ignored for path resolution)
@@ -94,7 +110,7 @@ class Config:
     # Working directory methods
     def get_working_directory(self) -> str:
         """Get current working directory."""
-        return self.config.settings.working_directory or self._working_directory
+        return self._working_directory
     
     def get_config_directory(self) -> str:
         """Get configuration directory."""
