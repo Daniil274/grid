@@ -32,7 +32,13 @@ from .context import ContextManager, safe_lock
 from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError, ContextError, MultimodalContentInjected
+from utils.logger import Logger
 from core.tracing_config import get_tracing_config
+
+# Social Intelligence Framework imports
+from .blackboard import Blackboard
+from .primitives import Primitives
+from .pipeline_memory import PipelineMemory
 
 import json
 import re
@@ -107,6 +113,10 @@ class ConsoleStreamObserver:
                         self._emit(f"\n🔧 {tool_display_name} · {args_str}")
                     else:
                         self._emit(f"\n🔧 {tool_display_name}")
+                    
+                    # Log full tool call to verbose log
+                    Logger("stream").log_verbose(f"STREAM TOOL CALL: {tool_display_name}", arguments)
+
                 elif name == "tool_output" and item is not None:
                     raw_item = getattr(item, "raw_item", None)
                     tool_name = getattr(raw_item, "name", None) or getattr(raw_item, "type", None) or "tool"
@@ -117,6 +127,10 @@ class ConsoleStreamObserver:
                     if len(output_str) > 200:
                         output_str = output_str[:200] + "…"
                     self._emit(f"✅ {tool_display_name} → {output_str}")
+                    
+                    # Log full tool output to verbose log
+                    Logger("stream").log_verbose(f"STREAM TOOL OUTPUT: {tool_display_name}", output_val)
+
                 elif name == "handoff_requested" and item is not None:
                     src = getattr(item, "agent", None)
                     src_name = getattr(src, "name", None) or agent_key or "agent"
@@ -237,6 +251,12 @@ class AgentFactory:
         # Track emitted warnings to avoid log spam (e.g., Responses API fallbacks)
         self._responses_warning_keys: set[str] = set()
         self._stream_observer: StreamObserver = stream_observer or ConsoleStreamObserver()
+        
+        # Track logged agents to log prompt only once
+        self._logged_agents: set[str] = set()
+
+        # Social Intelligence Framework components
+        self._init_social_intelligence()
 
     @staticmethod
     def _configure_tracing_once(level: str) -> None:
@@ -249,9 +269,105 @@ class AgentFactory:
             tracing_config.configure_console_tracing(level)
             tracing_config.apply()
             _TRACING_CONFIGURED = True
-        
 
-    
+    def _init_social_intelligence(self) -> None:
+        """
+        Initialize Social Intelligence Framework components.
+
+        Components:
+        - Blackboard: Shared memory for inter-agent communication
+        - Primitives: Atomic operations for building pipelines
+        - PipelineMemory: Evolutionary storage for successful pipelines
+        """
+        try:
+            # Check if SI is enabled in config
+            si_enabled = True
+            blackboard_config = None
+            pipeline_memory_config = None
+
+            if hasattr(self.config, 'config') and hasattr(self.config.config, 'settings'):
+                settings = self.config.config.settings
+                if hasattr(settings, 'social_intelligence'):
+                    si_config = settings.social_intelligence
+                    si_enabled = getattr(si_config, 'enabled', True)
+                    blackboard_config = getattr(si_config, 'blackboard', None)
+                    pipeline_memory_config = getattr(si_config, 'pipeline_memory', None)
+
+            if not si_enabled:
+                self._blackboard = None
+                self._primitives = None
+                self._pipeline_memory = None
+                logger.info("Social Intelligence Framework disabled by config")
+                return
+
+            # Initialize Blackboard
+            blackboard_path = "logs/blackboard.json"
+            max_entries = 1000
+            entry_ttl = 24
+
+            if blackboard_config:
+                blackboard_path = getattr(blackboard_config, 'persist_path', blackboard_path)
+                max_entries = getattr(blackboard_config, 'max_entries', max_entries)
+                entry_ttl = getattr(blackboard_config, 'entry_ttl_hours', entry_ttl)
+
+            self._blackboard = Blackboard(
+                persist_path=blackboard_path,
+                max_entries=max_entries,
+                entry_ttl_hours=entry_ttl
+            )
+
+            # Initialize PipelineMemory
+            pipeline_path = "logs/pipeline_memory.json"
+            similarity_threshold = 0.7
+            min_success_score = 0.6
+            max_pipelines = 500
+
+            if pipeline_memory_config:
+                pipeline_path = getattr(pipeline_memory_config, 'persist_path', pipeline_path)
+                similarity_threshold = getattr(pipeline_memory_config, 'similarity_threshold', similarity_threshold)
+                min_success_score = getattr(pipeline_memory_config, 'min_success_score', min_success_score)
+                max_pipelines = getattr(pipeline_memory_config, 'max_pipelines', max_pipelines)
+
+            self._pipeline_memory = PipelineMemory(
+                persist_path=pipeline_path,
+                similarity_threshold=similarity_threshold,
+                min_success_score=min_success_score,
+                max_pipelines=max_pipelines
+            )
+
+            # Initialize Primitives (requires factory reference)
+            self._primitives = Primitives(
+                factory=self,
+                blackboard=self._blackboard,
+                default_model_key=None  # Will use factory's default
+            )
+
+            logger.info(
+                f"Social Intelligence Framework initialized: "
+                f"blackboard={blackboard_path}, pipeline_memory={pipeline_path}"
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to initialize Social Intelligence Framework: {e}")
+            self._blackboard = None
+            self._primitives = None
+            self._pipeline_memory = None
+
+    @property
+    def blackboard(self) -> Optional[Blackboard]:
+        """Get the blackboard instance."""
+        return self._blackboard
+
+    @property
+    def primitives(self) -> Optional[Primitives]:
+        """Get the primitives instance."""
+        return self._primitives
+
+    @property
+    def pipeline_memory(self) -> Optional[PipelineMemory]:
+        """Get the pipeline memory instance."""
+        return self._pipeline_memory
+
     async def initialize(self) -> None:
         """Async init hook for compatibility with API lifespan."""
         return None
@@ -693,7 +809,6 @@ class AgentFactory:
             context_id: Optional identifier of a saved conversation context
             stream: Whether to stream response (alias: streaming)
             use_active_context: If True, use the currently active context instead of creating new one
-            skip_input_add: If True, do not add the input message to history (used for recursive calls)
             
         Returns:
             Agent response
@@ -917,6 +1032,11 @@ class AgentFactory:
 
             agent_instructions = self._build_agent_instructions(agent_key, context_path, include_conversation_context)
             
+            # Log full prompt at startup (only once per agent per session)
+            if agent_key not in self._logged_agents:
+                Logger("agent_factory").log_verbose(f"FULL PROMPT STARTUP: {agent_key}", agent_instructions)
+                self._logged_agents.add(agent_key)
+            
             # Run agent with max_turns configuration and timeout
             max_turns = self.config.get_max_turns()
             timeout_seconds = self.config.get_agent_timeout()
@@ -996,7 +1116,6 @@ class AgentFactory:
                         if run_result_streaming.final_output is not None
                         else ""
                     )
-                    
                     if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
                         try:
                             buffered_text = "".join(streaming_text_parts).strip()
@@ -1160,6 +1279,8 @@ class AgentFactory:
             
             self.context_manager.add_execution(execution)
             
+            Logger("agent_factory").log_verbose(f"FULL RESPONSE: {agent_key}", output)
+            
             return output
             
         except Exception as e:
@@ -1182,15 +1303,6 @@ class AgentFactory:
         
         if path_context:
             parts.append(path_context)
-        
-        context_identifier = self.context_manager.get_current_context_id()
-        if context_identifier:
-            context_instruction = (
-                f"Context reference: {context_identifier}. "
-                f"Always append the line \"\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442 ID: {context_identifier}\" "
-                "to every reply so humans or agents can return to this dialogue via that identifier."
-            )
-            parts.append(context_instruction)
 
         # Добавляем контекст текущей сессии только если явно запрошено
         if include_conversation_context:
@@ -1385,6 +1497,8 @@ class AgentFactory:
                 tool_display_name = getattr(agent_tool, 'name', agent_name)
                 # Добавляем префикс для агентов-инструментов
                 formatted_tool_name = f"Agent-Tool: {tool_display_name}"
+                
+                Logger("agent_factory").log_verbose(f"TOOL CALL: {tool_display_name}", normalized_args)
 
                 # Call original function с нормализованными аргументами
                 result = original_invoke(tool_context, **normalized_args)
@@ -1631,6 +1745,10 @@ class AgentFactory:
 
         env = tool_config.env_vars or {}
         cwd = self.config.get_working_directory()
+
+        # Add working directory to args if configured (CRITICAL FIX for filesystem MCP)
+        if getattr(tool_config, 'add_working_directory', False):
+             args.append(cwd)
 
         server = ResilientMCPServerStdio(
             params={

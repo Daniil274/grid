@@ -5,6 +5,7 @@ Tools and utilities for Grid agents.
 from .function_tools import get_tools_by_names, get_all_tools, AVAILABLE_TOOLS
 from .file_tools import *
 from .git_tools import *
+from .markdown_tools import *
 
 __all__ = [
     "get_tools_by_names",
@@ -23,4 +24,6 @@ __all__ = [
     "git_merge", "git_reset", "git_stash",
     # Git tools - теги
     "git_tag", "git_tag_list",
+    # Markdown tools
+    "read_markdown",
 ]
