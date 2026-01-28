@@ -4,9 +4,9 @@
 
 В проект добавлен базовый механизм “динамических агентов” и мета‑инструмент `orchestrate`, который умеет:
 - создавать **временных под‑агентов** на лету (без записи в `config.yaml`);
-- “раздавать” им набор инструментов (по ключам `tools:` из конфигурации);
-- строить пайплайн **исполнение → ревью → комиссия (голосование)**.
+- “раздавать” им набор инструментов (по ключам `tools:` из конфигурации)
 
+![Агенты orchestration pipeline](assets/agents.png)
 ### Как включить
 
 1) Добавьте инструмент `orchestrate` в `tools:` конфигурации (тип `function`):
@@ -16,7 +16,6 @@ tools:
   orchestrate:
     type: "function"
     name: "orchestrate"
-    description: "Запускает динамический пайплайн: executor → reviewer → committee"
 ```
 
 2) Дайте этот tool агенту (например, вашему `orchestrator`/`coordinator`):
@@ -30,14 +29,13 @@ agents:
 
 3) Вызовите агента и попросите его использовать `orchestrate(goal=...)`.
 
-Возвращаемый результат — JSON, в котором есть `final` (итог) и при включённой комиссии — блок `committee`.
+Возвращаемый результат — JSON, в котором есть `final` (итог).
 
 An orchestration system for AI agents focused on engineering tasks.
 
 ### Purpose
 - **Orchestration**: hierarchical coordination of specialized agents (files, Git, task analysis) with efficient context management.
 - **Tools**: a unified tool layer (filesystem, Git, MCP) with optimization for small open-source models.
-- **API**: OpenAI-compatible endpoints for integration with external clients and tools.
 - **Observability**: a unified logger, tool call tracing, and agent session persistence.
 - **Efficiency**: smart delegation and context optimization for resource-constrained models.
 
@@ -46,26 +44,7 @@ An orchestration system for AI agents focused on engineering tasks.
 - **Tools**: file read/write/search, Git operations, MCP integration.
 - **Multimodal**: full support for images in messages (base64, URLs, file paths) via OpenAI Vision API format.
 - **Context**: context propagation between agents and tools, memory sessions (`SQLiteSession`).
-- **Security**: security-aware factory, middleware for authentication, rate limiting, and basic guardrails.
-- **API**: Chat Completions/Completions (OpenAI-compatible), agents, and system routes.
 - **Logging**: unified structured logs, tool call journal, metric collection.
-
-## Architecture
-- `core/`
-  - `config.py`: loads and validates `config.yaml`, manages paths, providers, models, and agents.
-  - `agent_factory.py`: creates/caches agents, assembles tools, runs via `Runner.run`, unified logging, sessions.
-  - `security_agent_factory.py`: factory extension with security guardrails for selected agent types.
-  - `context.py`: manages dialogue and execution context.
-- `tools/`
-  - `file_tools.py`: filesystem operations.
-  - `git_tools.py`: Git wrappers with validation and logging.
-  - `function_tools.py`: integrator and registry of available tools, aliases, statistics.
-  - `mcp.py`: MCP integration (if enabled).
-- `api/`
-  - `main.py`: FastAPI app, middleware, error handlers, routes.
-  - `routers/`: OpenAI-compatible endpoints, agent CRUD, system endpoints.
-- `utils/`: unified logger, metrics, formatters, exceptions.
-- `schemas.py`: Pydantic schemas for configuration and execution.
 
 ## Installation
 1) Clone and environment
@@ -122,19 +101,6 @@ Multiple images:
 python agent_chat.py -a vision_analyzer -m "Compare & img1.png & img2.jpg"
 ```
 See [docs/CLI_IMAGES.md](docs/CLI_IMAGES.md) for full CLI image support guide.
-
-### API (FastAPI)
-- Helper launcher:
-```
-python start_api.py
-```
-- Or directly via uvicorn:
-```
-uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
-```
-Docs: `http://localhost:8000/docs`
-Health check: `http://localhost:8000/health`
-
 ## Configuration
 Configuration is defined in `config.yaml` and validated via Pydantic (`schemas.py`).
 
@@ -191,20 +157,6 @@ Specifics of agent-tools:
 - Accept input in the `input` field. For compatibility, aliases `task`, `message`, `prompt` are supported and are automatically normalized to `input`.
 - Subagent execution inherits `max_turns` from `settings.max_turns` and uses its own `SQLiteSession`.
 
-## API (OpenAI-compatible)
-Main routes (prefix `/v1`):
-- `POST /chat/completions` — OpenAI Chat Completions compatible. Supports `stream`.
-- `POST /completions` — legacy format, converted to internal Chat Completions and back.
-- `GET /agents` etc. — list and details of agents.
-- `GET /system/health` — health check.
-
-Format and context converter is located at `api/utils/openai_converter.py` (routing in `api/routers/openai_compatible.py`).
-
-## Logging and Observability
-- Unified logger (`utils/unified_logger.py`) for agent runs, tool calls, and results.
-- Structured logs, writing to `logs/`, agent sessions stored in `logs/agent_sessions.db`.
-- Deduplication of Responses API warnings (reduces log noise).
-- On API startup, the context is cleared and saved context files are removed.
 
 ## Conversation Context IDs
 The system assigns a lightweight context identifier to every agent turn. This allows
@@ -220,10 +172,7 @@ humans, tools, and downstream agents to resume a previous conversation explicitl
 - **CLI helpers** – `agent_chat.py` shows the current ID after each response, starts
   a fresh context for every prompt by default, lists known contexts via the `contexts`
   command, and lets you reuse a session with `use <id>` (or by embedding `ctx-…`
-  in the message).
-- **API surface** – OpenAI-compatible responses expose the active ID in
-  `grid_metadata.context_id`, and custom API routes return the same field.
-
+  in the message)
 This mechanism prevents accidental cross-talk between independent requests while
 keeping it trivial to stitch conversations back together when needed.
 
@@ -256,22 +205,6 @@ message = MultimodalConverter.create_multimodal_message(
 result = await factory.run_agent("vision_analyzer", str(message))
 ```
 
-### API Example
-
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "vision_analyzer",
-    "messages": [{
-      "role": "user",
-      "content": [
-        {"type": "text", "text": "Что на изображении?"},
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
-      ]
-    }]
-  }'
-```
 
 **Full Documentation**: See [docs/MULTIMODAL_GUIDE.md](docs/MULTIMODAL_GUIDE.md) for complete guide, examples, and API reference.
 

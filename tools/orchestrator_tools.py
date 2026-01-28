@@ -4,13 +4,21 @@ Orchestrator tools: meta-tools that can spawn dynamic agents and run reviewed/co
 These tools are intentionally conservative: they require being executed inside Grid,
 where `context.context.factory` (see `core.agent_factory.GridRunContext`) provides access
 to the current `AgentFactory` instance.
+
+Social Intelligence Framework integration:
+- Blackboard for shared memory between agents
+- Primitives for atomic operations (critique, validate, synthesize, etc.)
+- Pipeline Memory for learning and reusing successful pipelines
+- Emergent orchestration: agents build their own pipelines
 """
 
 from __future__ import annotations
 
 import json
+import random
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from agents import RunContextWrapper, function_tool
@@ -267,8 +275,424 @@ async def orchestrate(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+# =============================================================================
+# Social Intelligence Helper Functions
+# =============================================================================
+
+
+def _get_si_components(ctx: RunContextWrapper) -> Tuple[Any, Any, Any]:
+    """
+    Get Social Intelligence components from context.
+
+    Returns:
+        Tuple of (blackboard, primitives, pipeline_memory) or (None, None, None)
+    """
+    factory = _get_factory_from_context(ctx)
+    if factory is None:
+        return None, None, None
+
+    blackboard = getattr(factory, '_blackboard', None)
+    primitives = getattr(factory, '_primitives', None)
+    pipeline_memory = getattr(factory, '_pipeline_memory', None)
+
+    return blackboard, primitives, pipeline_memory
+
+
+def _should_explore(exploration_rate: float = 0.2) -> bool:
+    """Determine if we should explore (try new approach) vs exploit (use known)."""
+    return random.random() < exploration_rate
+
+
+async def _build_dynamic_pipeline(
+    factory: Any,
+    task: str,
+    blackboard: Any,
+    model_key: str
+) -> List[Dict[str, Any]]:
+    """
+    Let a meta-agent design the pipeline dynamically.
+
+    This is the key emergent behavior: the agent decides
+    which primitives to combine based on the task.
+    """
+    # Try to load planner prompt from config
+    planner_prompt = None
+    try:
+        if hasattr(factory, 'config') and factory.config:
+            config = factory.config
+            if hasattr(config, 'config'):
+                raw_config = config.config.dict() if hasattr(config.config, 'dict') else {}
+                si_prompts = raw_config.get('si_prompts', {})
+                planner_prompt = si_prompts.get('pipeline_planner')
+    except Exception:
+        pass
+
+    # Fallback to default prompt
+    if not planner_prompt:
+        planner_prompt = """Ты архитектор мультиагентных систем. Проанализируй задачу и спроектируй оптимальный пайплайн из примитивов.
+
+ДОСТУПНЫЕ ПРИМИТИВЫ:
+- execute: Выполнить задачу агентом (params: system_prompt, tools)
+- critique: Критический анализ (params: criteria, perspective)
+- validate: Проверка на галлюцинации/ошибки (params: checks)
+- synthesize: Объединить несколько результатов (params: style)
+- branch: Параллельное выполнение с разных перспектив (params: perspectives)
+- vote: Голосование эксперта (params: perspective)
+
+Верни JSON:
+{
+    "pipeline_name": "краткое имя",
+    "rationale": "почему именно такой пайплайн",
+    "steps": [
+        {"primitive": "execute", "params": {"system_prompt": "...", "tools": ["filesystem"]}, "output_key": "draft"},
+        {"primitive": "critique", "params": {"perspective": "security"}, "input_from": "draft", "output_key": "critique"},
+        {"primitive": "validate", "params": {}, "input_from": "draft", "output_key": "validation"}
+    ]
+}
+
+Правила:
+- Минимум примитивов для задачи
+- Для простых задач: только execute
+- Для сложных: execute → critique → execute (revision)
+- Для критичных: добавь validate"""
+
+    try:
+        planner = await factory.create_dynamic_agent(
+            name=f"pipeline-planner-{uuid.uuid4().hex[:6]}",
+            instructions=planner_prompt,
+            model_key=model_key,
+            tool_names=[]
+        )
+
+        raw_output = await factory.run_agent_object_simple(
+            planner, f"ЗАДАЧА:\n{task}"
+        )
+
+        parsed = _parse_json_from_text(raw_output)
+        if parsed and "steps" in parsed:
+            return parsed.get("steps", [])
+
+    except Exception as e:
+        print(f"Pipeline planning failed: {e}")
+
+    # Fallback: simple execute
+    return [{"primitive": "execute", "params": {}, "output_key": "result"}]
+
+
+async def _execute_pipeline(
+    factory: Any,
+    task: str,
+    steps: List[Dict[str, Any]],
+    blackboard: Any,
+    primitives: Any,
+    model_key: str,
+    tools: List[str]
+) -> Tuple[str, float, List[str]]:
+    """
+    Execute a pipeline of primitives.
+
+    Returns:
+        Tuple of (final_output, success_score, blackboard_entry_ids)
+    """
+    outputs = {"task": task}
+    entry_ids = []
+    total_score = 0.0
+    score_count = 0
+
+    for i, step in enumerate(steps):
+        primitive = step.get("primitive", "execute")
+        params = step.get("params", {})
+        input_from = step.get("input_from")
+        output_key = step.get("output_key", f"step_{i}")
+
+        # Get input from previous step if specified
+        input_content = outputs.get(input_from, task) if input_from else task
+
+        try:
+            if primitive == "execute":
+                result = await primitives.execute(
+                    task=input_content,
+                    system_prompt=params.get("system_prompt"),
+                    tools=params.get("tools", tools),
+                    model_key=model_key,
+                    post_to_blackboard=blackboard is not None,
+                    tags=["pipeline", primitive]
+                )
+                outputs[output_key] = result.output
+                if result.success:
+                    total_score += 1.0
+                    score_count += 1
+
+            elif primitive == "critique":
+                result = await primitives.critique(
+                    content=input_content,
+                    criteria=params.get("criteria"),
+                    perspective=params.get("perspective"),
+                    model_key=model_key,
+                    post_to_blackboard=blackboard is not None
+                )
+                outputs[output_key] = result.raw_output
+                total_score += result.overall_score
+                score_count += 1
+
+            elif primitive == "validate":
+                result = await primitives.validate(
+                    content=input_content,
+                    context=task,
+                    checks=params.get("checks"),
+                    model_key=model_key,
+                    post_to_blackboard=blackboard is not None
+                )
+                outputs[output_key] = result.raw_output
+                if result.valid:
+                    total_score += result.confidence
+                else:
+                    total_score += 0.3  # Penalty for invalid
+                score_count += 1
+
+            elif primitive == "synthesize":
+                # Get all previous outputs as inputs
+                inputs_to_synth = [
+                    str(v) for k, v in outputs.items()
+                    if k != "task" and v
+                ]
+                if not inputs_to_synth:
+                    inputs_to_synth = [input_content]
+
+                result = await primitives.synthesize(
+                    inputs=inputs_to_synth,
+                    goal=task,
+                    style=params.get("style", "comprehensive"),
+                    model_key=model_key,
+                    post_to_blackboard=blackboard is not None
+                )
+                outputs[output_key] = result.output
+                if result.success:
+                    total_score += result.confidence
+                    score_count += 1
+
+            elif primitive == "branch":
+                perspectives = params.get("perspectives", ["general"])
+                results = await primitives.branch(
+                    task=input_content,
+                    perspectives=perspectives,
+                    tools=params.get("tools", tools),
+                    model_key=model_key,
+                    post_to_blackboard=blackboard is not None
+                )
+                outputs[output_key] = [r.output for r in results if r.success]
+                total_score += sum(1 for r in results if r.success) / len(results)
+                score_count += 1
+
+            elif primitive == "vote":
+                result = await primitives.vote(
+                    proposal=input_content,
+                    perspective=params.get("perspective", "expert"),
+                    context=task,
+                    model_key=model_key,
+                    post_to_blackboard=blackboard is not None
+                )
+                outputs[output_key] = result.to_dict()
+                total_score += result.confidence
+                score_count += 1
+
+        except Exception as e:
+            outputs[output_key] = f"Error in {primitive}: {e}"
+            score_count += 1  # Count as failed
+
+    # Determine final output (last step or synthesized)
+    final_output = outputs.get(steps[-1].get("output_key", "result"), "")
+    if isinstance(final_output, list):
+        final_output = "\n\n".join(str(x) for x in final_output)
+    elif isinstance(final_output, dict):
+        final_output = json.dumps(final_output, ensure_ascii=False, indent=2)
+
+    avg_score = total_score / score_count if score_count > 0 else 0.5
+
+    return str(final_output), avg_score, entry_ids
+
+
+@function_tool
+async def orchestrate_emergent(
+    context: RunContextWrapper,
+    task: str,
+    agent_system_prompt: Optional[str] = None,
+    executor_tools: Optional[Any] = None,
+    model_key: Optional[str] = None,
+    allow_pipeline_creation: bool = True,
+    save_on_success: bool = True,
+    use_blackboard: bool = True,
+    validation_enabled: bool = True,
+    exploration_rate: float = 0.2,
+) -> str:
+    """
+    Эмерджентная оркестрация с самообучением.
+
+    Мета-инструмент, который:
+    1. Ищет похожий успешный пайплайн в памяти
+    2. Если нашёл и не в режиме exploration — использует его
+    3. Если не нашёл или exploration — строит новый пайплайн из примитивов
+    4. Выполняет пайплайн с записью в blackboard
+    5. Сохраняет успешные пайплайны для будущего
+
+    Args:
+        task: Задача для выполнения
+        agent_system_prompt: Системный промпт (если указан, использует простой execute)
+        executor_tools: Список инструментов
+        model_key: Модель для использования
+        allow_pipeline_creation: Разрешить создание новых пайплайнов
+        save_on_success: Сохранять успешные пайплайны
+        use_blackboard: Использовать общую память
+        validation_enabled: Включить валидацию результата
+        exploration_rate: Частота exploration vs exploitation (0-1)
+
+    Returns:
+        JSON с результатом, pipeline_id, blackboard entries
+    """
+    factory = _get_factory_from_context(context)
+    if factory is None:
+        return json.dumps({"error": "No AgentFactory access"}, ensure_ascii=False)
+
+    # Get SI components
+    blackboard, primitives, pipeline_memory = _get_si_components(context)
+
+    # Resolve model key
+    default_model_key = None
+    try:
+        tool_cfg = factory.config.get_tool("orchestrate")
+        if tool_cfg.env_vars:
+            default_model_key = tool_cfg.env_vars.get("DEFAULT_MODEL")
+    except Exception:
+        pass
+
+    resolved_model_key = _coerce_optional_str(model_key) or default_model_key or factory.resolve_model_key(None)
+    tools = _coerce_tool_list(executor_tools) or ["filesystem", "git", "terminal"]
+
+    result = {
+        "task": task,
+        "mode": "emergent",
+        "model_key": resolved_model_key,
+        "executor_tools": tools,
+        "pipeline_id": None,
+        "pipeline_source": None,
+        "blackboard_entries": [],
+    }
+
+    # If explicit system prompt provided, use simple execute mode
+    if agent_system_prompt:
+        if primitives:
+            exec_result = await primitives.execute(
+                task=task,
+                system_prompt=agent_system_prompt,
+                tools=tools,
+                model_key=resolved_model_key,
+                post_to_blackboard=use_blackboard and blackboard is not None
+            )
+            result["final"] = exec_result.output
+            result["pipeline_source"] = "explicit_prompt"
+        else:
+            # Fallback to original behavior
+            executor = await factory.create_dynamic_agent(
+                name=f"executor-{uuid.uuid4().hex[:6]}",
+                instructions=agent_system_prompt,
+                model_key=resolved_model_key,
+                tool_names=tools,
+            )
+            output = await factory.run_agent_object_simple(executor, task)
+            result["final"] = _extract_text(output)
+            result["pipeline_source"] = "direct_execute"
+
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    # Check pipeline memory for similar tasks
+    pipeline_to_use = None
+    if pipeline_memory and not _should_explore(exploration_rate):
+        similar = pipeline_memory.find_similar(task, limit=1, min_effectiveness=0.5)
+        if similar:
+            pipeline_to_use, similarity = similar[0]
+            result["pipeline_source"] = f"memory:{pipeline_to_use.id} (similarity: {similarity:.2f})"
+
+    # Build or use pipeline
+    if pipeline_to_use:
+        steps = [s.to_dict() for s in pipeline_to_use.steps]
+    elif allow_pipeline_creation and primitives:
+        steps = await _build_dynamic_pipeline(
+            factory, task, blackboard, resolved_model_key
+        )
+        result["pipeline_source"] = "dynamic_generation"
+    else:
+        # Fallback: simple execute
+        steps = [{"primitive": "execute", "params": {}, "output_key": "result"}]
+        result["pipeline_source"] = "fallback"
+
+    # Execute pipeline
+    if primitives:
+        final_output, success_score, entry_ids = await _execute_pipeline(
+            factory=factory,
+            task=task,
+            steps=steps,
+            blackboard=blackboard if use_blackboard else None,
+            primitives=primitives,
+            model_key=resolved_model_key,
+            tools=tools
+        )
+        result["final"] = final_output
+        result["blackboard_entries"] = entry_ids
+        result["success_score"] = success_score
+
+        # Optionally validate
+        if validation_enabled and success_score >= 0.6:
+            validation = await primitives.validate(
+                content=final_output,
+                context=task,
+                model_key=resolved_model_key,
+                post_to_blackboard=use_blackboard and blackboard is not None
+            )
+            result["validation"] = validation.to_dict()
+            if not validation.valid:
+                success_score *= 0.7  # Penalty
+
+        # Save successful pipeline
+        if save_on_success and pipeline_memory and success_score >= 0.6:
+            if not pipeline_to_use:  # New pipeline
+                pipeline_id = pipeline_memory.save_pipeline(
+                    name=f"auto-{uuid.uuid4().hex[:6]}",
+                    description=f"Auto-generated for task: {task[:50]}...",
+                    task=task,
+                    steps=steps,
+                    success_score=success_score,
+                    tags=["auto", "emergent"]
+                )
+                result["pipeline_id"] = pipeline_id
+            else:  # Record usage of existing
+                pipeline_memory.record_usage(
+                    pipeline_to_use.id,
+                    success=success_score >= 0.6,
+                    score=success_score,
+                    task=task
+                )
+                result["pipeline_id"] = pipeline_to_use.id
+    else:
+        # No primitives available, fallback to simple execution
+        executor = await factory.create_dynamic_agent(
+            name=f"executor-{uuid.uuid4().hex[:6]}",
+            instructions=(
+                "Ты исполнитель (executor). Реши задачу максимально качественно.\n"
+                "Если доступны инструменты — используй их.\n"
+                "Дай итог в виде: (1) решение, (2) краткие допущения/ограничения, (3) следующие шаги."
+            ),
+            model_key=resolved_model_key,
+            tool_names=tools,
+        )
+        output = await factory.run_agent_object_simple(executor, task)
+        result["final"] = _extract_text(output)
+
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 ORCHESTRATOR_TOOLS = {
     "orchestrate": orchestrate,
+    "orchestrate_emergent": orchestrate_emergent,
 }
 
 

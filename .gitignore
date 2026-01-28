@@ -88,7 +88,9 @@ private/
 *.key
 *.pem
 *.crt
+assets/
 
+ocr_output/
 workspace/*
 .claude/*
 nul

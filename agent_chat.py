@@ -20,7 +20,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Use Proactor event loop on Windows to support asyncio subprocess APIs (required for MCP)
 if sys.platform == "win32":
     try:
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     except Exception:
         pass
 
