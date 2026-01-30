@@ -1,0 +1,155 @@
+# Тест 4: Сложный пайплайн - Branch → Synthesize → Validate
+# Цель: Проверить параллельное выполнение, синтез и накопительный контекст
+
+settings:
+  default_agent: "test_complex"
+  max_turns: 15
+  debug: true
+  mcp_enabled: true
+
+  allowed_models:
+    - "grok-fast"
+
+  social_intelligence:
+    enabled: true
+    blackboard:
+      enabled: true
+      persist_path: "logs/blackboard.json"
+      max_entries: 1000
+    pipeline_memory:
+      enabled: true
+      persist_path: "logs/pipelines.json"
+      similarity_threshold: 0.5
+      max_pipelines: 50
+    primitives:
+      max_parallel_branches: 5
+    meta_orchestrator:
+      exploration_rate: 0.4  # Больше экспериментов
+    refinement:
+      enabled: true
+      max_iterations: 2
+
+si_prompts:
+  execute_default: |
+    Выполни задачу качественно с учётом контекста из blackboard.
+
+  critique: |
+    Критический анализ. Верни JSON: {issues, strengths, suggestions, severity, overall_score}
+
+  validate: |
+    Проверка на галлюцинации и ошибки. Верни JSON: {valid, issues, confidence}
+
+  revise: |
+    Исправь проблемы. Верни улучшенную версию.
+
+  synthesize: |
+    Ты синтезатор. Объедини несколько источников в единый результат.
+    - Устрани противоречия
+    - Выдели ключевые инсайты из КАЖДОГО источника
+    - Сохрани важные детали
+    - Укажи если источники противоречат друг другу
+
+  pipeline_planner: |
+    Ты архитектор пайплайнов.
+
+    ПРИМИТИВЫ:
+    - execute: выполнить (params: system_prompt, tools)
+    - critique: критика (params: perspective, tools)
+    - validate: валидация (params: checks, tools)
+    - revise: исправление (params: feedback_from, tools)
+    - synthesize: синтез (params: style)
+    - branch: параллельное выполнение (params: perspectives)
+    - vote: голосование (params: perspective)
+
+    Для сложных аналитических задач используй:
+    branch (с разных точек зрения) → synthesize → validate
+
+    Верни JSON:
+    {
+      "pipeline_name": "multi_perspective_analysis",
+      "rationale": "почему",
+      "steps": [
+        {"primitive": "branch", "params": {"perspectives": ["security", "performance", "usability"]}, "output_key": "branches"},
+        {"primitive": "synthesize", "params": {"style": "comprehensive"}, "input_from": "branches", "output_key": "synthesis"},
+        {"primitive": "validate", "params": {"checks": ["hallucination_detection", "logical_coherence"]}, "input_from": "synthesis", "output_key": "validation"}
+      ]
+    }
+
+providers:
+  openrouter:
+    name: "openrouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout: 300
+
+models:
+  grok-fast:
+    name: "x-ai/grok-4.1-fast"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Быстрая модель"
+
+  deepseek:
+    name: "deepseek/deepseek-v3.2-exp"
+    provider: "openrouter"
+    temperature: 0.5
+    max_tokens: 8000
+    description: "Аналитическая"
+
+tools:
+  # Файловая система
+  filesystem:
+    type: "mcp"
+    server_command: ["npx", "@modelcontextprotocol/server-filesystem"]
+    add_working_directory: true
+    description: "MCP сервер для работы с файловой системой (ограничен рабочей директорией)"
+    prompt_addition: "Используй filesystem(task) для доступа к файловой системе. task - это операция, которую нужно выполнить."
+  
+  git:
+    type: "mcp"
+    server_command: ["npx", "@cyanheads/git-mcp-server"]
+    add_working_directory: true
+    env_vars:
+      MCP_LOG_LEVEL: "info"
+      GIT_SIGN_COMMITS: "false"
+    description: "Управление Git: clone, commit, branch, merge, rebase, stash"
+
+
+  orchestrate_emergent:
+    type: function
+    description: "Эмерджентная оркестрация с самообучением"
+    prompt_addition: |
+      Доступные модели: "grok-fast"
+
+agents:
+  test_complex:
+    name: "test_complex"
+    model: "grok-fast"
+    tools: ["filesystem", "git", "orchestrate_emergent"]
+    custom_prompt: |
+      Ты тестируешь сложный мультиагентный пайплайн.
+
+      ТЕСТ: Анализ кода с разных точек зрения
+
+      Задача для orchestrate_emergent:
+      "Проанализируй файл core/primitives.py с точек зрения:
+       1. Безопасности (security) - есть ли уязвимости?
+       2. Производительности (performance) - есть ли узкие места?
+       3. Читаемости (readability) - понятен ли код?"
+
+      Ожидаемый пайплайн:
+      1. branch() создаст 3 параллельных агента с разными перспективами
+      2. Каждый агент увидит в blackboard результаты других (постепенно)
+      3. synthesize() объединит все 3 анализа
+      4. validate() проверит итоговый синтез
+
+      Проверь logs/test_complex_blackboard.json:
+      - Должны быть записи от 3 executor-xxx (branch results)
+      - Запись от synthesizer-xxx
+      - Запись от validator-xxx
+      - Каждый агент должен видеть контекст предыдущих
+
+      Проверь logs/test_complex_pipelines.json:
+      - Должен сохраниться успешный пайплайн
+      - При повторной похожей задаче - должен переиспользоваться

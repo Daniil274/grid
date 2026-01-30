@@ -375,6 +375,46 @@ class AgentFactory:
     # ---------------------------------------------------------------------
     # Lightweight model resolution helpers for API (e.g., Cline endpoint)
     # ---------------------------------------------------------------------
+    def _is_model_allowed(self, model_key: str) -> bool:
+        """
+        Check if a model key is in the allowed models whitelist.
+
+        Args:
+            model_key: Model key to check
+
+        Returns:
+            True if model is allowed (or if no whitelist is configured), False otherwise
+        """
+        try:
+            # Get allowed_models from settings
+            if hasattr(self.config, 'config') and hasattr(self.config.config, 'settings'):
+                allowed_models = getattr(self.config.config.settings, 'allowed_models', None)
+
+                # If no whitelist configured or empty list, allow all models
+                if allowed_models is None or len(allowed_models) == 0:
+                    logger.debug(
+                        f"Model whitelist not configured (None or empty), allowing all models. "
+                        f"Checking model: {model_key}"
+                    )
+                    return True
+
+                # Check if model_key is in whitelist
+                is_allowed = model_key in allowed_models
+                logger.debug(
+                    f"Model whitelist check: model_key='{model_key}', "
+                    f"allowed={is_allowed}, whitelist={allowed_models}"
+                )
+                return is_allowed
+
+            # If config structure is not as expected, allow all models (backward compatibility)
+            logger.debug(
+                f"Config structure unexpected, allowing all models by default. Checking model: {model_key}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to check model whitelist: {e}, allowing model by default")
+            return True
+
     def resolve_model_key(self, key: Optional[str]) -> str:
         """
         Resolve input key into a model key using configuration.
@@ -386,23 +426,32 @@ class AgentFactory:
         try:
             if not key:
                 default_agent_key = self.config.get_default_agent()
-                return self.config.get_agent(default_agent_key).model
+                resolved = self.config.get_agent(default_agent_key).model
+                logger.debug(f"Model key resolution: input=None → default_agent={default_agent_key} → model={resolved}")
+                return resolved
             # Try as model key
             try:
                 _ = self.config.get_model(key)
+                logger.debug(f"Model key resolution: input='{key}' → direct model key → '{key}'")
                 return key
             except Exception:
                 # Try as agent key
                 try:
-                    return self.config.get_agent(key).model
+                    resolved = self.config.get_agent(key).model
+                    logger.debug(f"Model key resolution: input='{key}' → agent key → model={resolved}")
+                    return resolved
                 except Exception:
                     # Fallback
                     default_agent_key = self.config.get_default_agent()
-                    return self.config.get_agent(default_agent_key).model
-        except Exception:
+                    resolved = self.config.get_agent(default_agent_key).model
+                    logger.debug(f"Model key resolution: input='{key}' → fallback to default_agent={default_agent_key} → model={resolved}")
+                    return resolved
+        except Exception as e:
             # Hard fallback
             default_agent_key = self.config.get_default_agent()
-            return self.config.get_agent(default_agent_key).model
+            resolved = self.config.get_agent(default_agent_key).model
+            logger.warning(f"Model key resolution failed: {e}, using hard fallback: default_agent={default_agent_key} → model={resolved}")
+            return resolved
 
     def get_openai_client_for_model(self, model_key: str) -> tuple[AsyncOpenAI, str]:
         """
@@ -477,7 +526,7 @@ class AgentFactory:
             agent_config = self.config.get_agent(agent_key)
             model_config = self.config.get_model(agent_config.model)
             provider_config = self.config.get_provider(model_config.provider)
-            
+
             # Validate API key
             api_key = self.config.get_api_key(model_config.provider)
             if not api_key:
@@ -606,6 +655,54 @@ class AgentFactory:
         This is the core building block for orchestration/meta-agent patterns.
         """
         resolved_model_key = self.resolve_model_key(model_key)
+
+        # Get allowed models list for logging
+        allowed_models = []
+        try:
+            if hasattr(self.config, 'config') and hasattr(self.config.config, 'settings'):
+                allowed_models = getattr(self.config.config.settings, 'allowed_models', [])
+        except Exception:
+            pass
+
+        # Log every dynamic agent creation attempt
+        logger.info(
+            f"Creating dynamic agent: name={name}, model_key_requested={model_key}, "
+            f"model_key_resolved={resolved_model_key}, allowed_models={allowed_models}"
+        )
+
+        # CRITICAL: Validate that the model is in the allowed models whitelist
+        if not self._is_model_allowed(resolved_model_key):
+            error_msg = (
+                f"❌ MODEL VALIDATION FAILED ❌\n"
+                f"Model '{resolved_model_key}' is not in the allowed models whitelist.\n"
+                f"Allowed models: {allowed_models}\n"
+                f"Agent requested: {name}\n"
+                f"Instructions preview: {instructions[:100]}..."
+            )
+            logger.error(
+                f"❌ BLOCKED: Agent '{name}' tried to use non-whitelisted model '{resolved_model_key}'",
+                extra={
+                    "model_key_requested": model_key,
+                    "model_key_resolved": resolved_model_key,
+                    "agent_name": name,
+                    "allowed_models": allowed_models,
+                    "validation_status": "FAILED",
+                }
+            )
+            raise AgentError(
+                error_msg,
+                details={
+                    "model_key": resolved_model_key,
+                    "agent_name": name,
+                    "allowed_models": allowed_models,
+                }
+            )
+
+        # Log successful validation
+        logger.info(
+            f"✅ MODEL VALIDATION PASSED: Agent '{name}' using model '{resolved_model_key}'"
+        )
+
         client, model_name = self.get_openai_client_for_model(resolved_model_key)
         model_cfg = self.config.get_model(resolved_model_key)
         provider_cfg = self.config.get_provider(model_cfg.provider)
@@ -688,7 +785,9 @@ class AgentFactory:
         resolved: List[Any] = []
         if function_tools:
             try:
-                resolved.extend(get_tools_by_names(function_tools))
+                resolved_ft = get_tools_by_names(function_tools)
+                resolved_ft = [self._wrap_tool_with_output_limit(t) for t in resolved_ft]
+                resolved.extend(resolved_ft)
             except Exception as exc:
                 logger.debug("Failed to resolve function tools: %s", exc, exc_info=exc)
 
@@ -1336,7 +1435,50 @@ class AgentFactory:
         ])
         
         return "\n".join(context_parts)
-    
+
+    # ------------------------------------------------------------------
+    # Tool output truncation
+    # ------------------------------------------------------------------
+
+    def _truncate_tool_output(self, output: Any, tool_name: str = "") -> Any:
+        """Обрезает вывод инструмента если он превышает max_tool_output из настроек."""
+        max_output = getattr(self.config.config.settings, 'max_tool_output', None)
+        if max_output is None:
+            return output
+        if isinstance(output, str) and len(output) > max_output:
+            original_length = len(output)
+            truncated = output[:max_output]
+            truncated += (
+                f"\n\n⚠️ Вывод инструмента обрезан "
+                f"(показано {max_output} из {original_length} символов)"
+            )
+            logger.info(
+                "Tool output truncated: %s (%d -> %d chars)",
+                tool_name, original_length, max_output,
+            )
+            return truncated
+        return output
+
+    def _wrap_tool_with_output_limit(self, tool: Any) -> Any:
+        """Оборачивает FunctionTool для обрезки вывода по max_tool_output."""
+        max_output = getattr(self.config.config.settings, 'max_tool_output', None)
+        if max_output is None:
+            return tool
+        if not hasattr(tool, 'on_invoke_tool'):
+            return tool
+
+        original_invoke = tool.on_invoke_tool
+        factory_ref = self
+
+        async def limited_invoke(ctx, args):
+            result = await original_invoke(ctx, args)
+            return factory_ref._truncate_tool_output(
+                result, getattr(tool, 'name', '')
+            )
+
+        tool.on_invoke_tool = limited_invoke
+        return tool
+
     async def _get_agent_tools(self, agent_config: AgentConfig) -> List[Any]:
         """Get all tools for agent with caching."""
         cache_key = f"{agent_config.name}:{hash(tuple(agent_config.tools))}"
@@ -1371,6 +1513,7 @@ class AgentFactory:
         if function_tools:
             try:
                 func_tools = get_tools_by_names(function_tools)
+                func_tools = [self._wrap_tool_with_output_limit(t) for t in func_tools]
                 tools.extend(func_tools)
 
             except Exception as e:
@@ -1605,13 +1748,14 @@ class AgentFactory:
                 duration = execution.end_time - execution.start_time
                 
                 self.context_manager.add_execution(execution)
-                
+
+                result = self._truncate_tool_output(result, tool_display_name)
                 return result
-                
+
             except Exception as e:
                 execution.end_time = time.time()
                 execution.error = str(e)
-                
+
                 self.context_manager.add_execution(execution)
                 
                 raise

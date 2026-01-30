@@ -98,6 +98,15 @@ class Settings(BaseModel):
     agent_logging: AgentLoggingConfig = Field(default_factory=AgentLoggingConfig)
     image_processing: ImageProcessingConfig = Field(default_factory=ImageProcessingConfig)
     tools_common_rules: Optional[str] = None
+    allowed_models: Optional[List[str]] = Field(
+        default=None,
+        description="Whitelist of allowed model keys. If None or empty, all models are allowed."
+    )
+    max_tool_output: Optional[int] = Field(
+        default=None,
+        ge=100,
+        description="Максимальная длина вывода инструмента в символах. None = без ограничения."
+    )
 
 
 class GridConfig(BaseModel):
@@ -256,6 +265,13 @@ class MetaOrchestratorConfig(BaseModel):
     exploration_rate: float = Field(default=0.2, ge=0.0, le=1.0)
 
 
+class RefinementConfig(BaseModel):
+    """Configuration for iterative refinement."""
+    max_iterations: int = Field(default=2, ge=0, le=5)
+    enabled: bool = True
+    revise_model: Optional[str] = None
+
+
 class SocialIntelligenceConfig(BaseModel):
     """Configuration for Social Intelligence Framework."""
     enabled: bool = True
@@ -263,6 +279,7 @@ class SocialIntelligenceConfig(BaseModel):
     pipeline_memory: PipelineMemoryConfig = Field(default_factory=PipelineMemoryConfig)
     primitives: PrimitivesConfig = Field(default_factory=PrimitivesConfig)
     meta_orchestrator: MetaOrchestratorConfig = Field(default_factory=MetaOrchestratorConfig)
+    refinement: RefinementConfig = Field(default_factory=RefinementConfig)
 
 
 class PipelineStepSchema(BaseModel):

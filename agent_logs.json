@@ -1,0 +1,62 @@
+[
+  {
+    "id": "log_001",
+    "agent_id": "agent_001",
+    "agent_name": "Research Agent",
+    "timestamp": "2024-01-15T10:30:00Z",
+    "action": "Search information",
+    "message": "Searching for latest AI developments",
+    "tools_used": ["web_search", "content_analysis"],
+    "result": "Found 15 relevant articles about AI advancements",
+    "status": "success",
+    "level": "info"
+  },
+  {
+    "id": "log_002",
+    "agent_id": "agent_002",
+    "agent_name": "Data Processor",
+    "timestamp": "2024-01-15T10:32:15Z",
+    "action": "Process data",
+    "message": "Analyzing collected articles",
+    "tools_used": ["data_extraction", "nlp_processing"],
+    "result": "Extracted key insights from 10 articles",
+    "status": "success",
+    "level": "info"
+  },
+  {
+    "id": "log_003",
+    "agent_id": "agent_003",
+    "agent_name": "Report Generator",
+    "timestamp": "2024-01-15T10:35:45Z",
+    "action": "Generate report",
+    "message": "Creating summary report",
+    "tools_used": ["report_generator", "formatting"],
+    "result": "Report generated successfully with 5 sections",
+    "status": "success",
+    "level": "info"
+  },
+  {
+    "id": "log_004",
+    "agent_id": "agent_001",
+    "agent_name": "Research Agent",
+    "timestamp": "2024-01-15T10:40:20Z",
+    "action": "Validate sources",
+    "message": "Checking source credibility",
+    "tools_used": ["source_validation"],
+    "result": "3 sources flagged for manual review",
+    "status": "warning",
+    "level": "warning"
+  },
+  {
+    "id": "log_005",
+    "agent_id": "agent_002",
+    "agent_name": "Data Processor",
+    "timestamp": "2024-01-15T10:42:10Z",
+    "action": "Export data",
+    "message": "Exporting processed data to JSON",
+    "tools_used": ["json_exporter"],
+    "result": "Failed to export: File system error",
+    "status": "error",
+    "level": "error"
+  }
+]
