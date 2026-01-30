@@ -15,6 +15,7 @@ Social Intelligence Framework integration:
 from __future__ import annotations
 
 import json
+import logging
 import random
 import uuid
 from dataclasses import asdict, dataclass
@@ -22,6 +23,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from agents import RunContextWrapper, function_tool
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -307,13 +310,17 @@ async def _build_dynamic_pipeline(
     factory: Any,
     task: str,
     blackboard: Any,
-    model_key: str
+    model_key: str,
+    pipeline_memory: Any = None
 ) -> List[Dict[str, Any]]:
     """
-    Let a meta-agent design the pipeline dynamically.
+    Let a meta-agent design the pipeline dynamically with full context.
 
     This is the key emergent behavior: the agent decides
-    which primitives to combine based on the task.
+    which primitives to combine based on:
+    - The task
+    - Current blackboard state
+    - Previously successful pipelines
     """
     # Try to load planner prompt from config
     planner_prompt = None
@@ -333,8 +340,9 @@ async def _build_dynamic_pipeline(
 
 ДОСТУПНЫЕ ПРИМИТИВЫ:
 - execute: Выполнить задачу агентом (params: system_prompt, tools)
-- critique: Критический анализ (params: criteria, perspective)
-- validate: Проверка на галлюцинации/ошибки (params: checks)
+- critique: Критический анализ (params: criteria, perspective, tools)
+- validate: Проверка на галлюцинации/ошибки (params: checks, tools)
+- revise: Исправить контент по обратной связи (params: feedback_from, tools)
 - synthesize: Объединить несколько результатов (params: style)
 - branch: Параллельное выполнение с разных перспектив (params: perspectives)
 - vote: Голосование эксперта (params: perspective)
@@ -353,30 +361,113 @@ async def _build_dynamic_pipeline(
 Правила:
 - Минимум примитивов для задачи
 - Для простых задач: только execute
-- Для сложных: execute → critique → execute (revision)
-- Для критичных: добавь validate"""
+- Для сложных: execute → critique → revise → validate
+- Для критичных: добавь validate
+- revise получает feedback_from (output_key шага critique/validate)"""
+
+    # === INJECT BLACKBOARD CONTEXT ===
+    context_sections = []
+
+    if blackboard:
+        bb_context = blackboard.get_context_for_agent(
+            agent_name="pipeline-planner",
+            max_entries=10,
+            include_types=None
+        )
+        if bb_context and "Пусто" not in bb_context:
+            context_sections.append(
+                f"CURRENT BLACKBOARD STATE (what agents have produced so far):\n{bb_context}"
+            )
+
+    # === INJECT PIPELINE MEMORY CONTEXT ===
+    if pipeline_memory:
+        try:
+            similar = pipeline_memory.find_similar(task, limit=3, min_effectiveness=0.3)
+            if similar:
+                memory_lines = ["PREVIOUSLY SUCCESSFUL PIPELINES FOR SIMILAR TASKS:"]
+                for pipeline, similarity in similar:
+                    steps_summary = " -> ".join(s.primitive for s in pipeline.steps)
+                    memory_lines.append(
+                        f"- '{pipeline.name}' (similarity: {similarity:.0%}, "
+                        f"effectiveness: {pipeline.get_effectiveness():.0%}): {steps_summary}"
+                    )
+                context_sections.append("\n".join(memory_lines))
+        except Exception:
+            pass  # Ignore errors in pipeline memory
+
+    # Build enhanced prompt
+    if context_sections:
+        full_prompt = "\n\n".join(context_sections) + "\n\n" + planner_prompt
+    else:
+        full_prompt = planner_prompt
 
     try:
+        logger.info(f"_build_dynamic_pipeline: Creating pipeline planner for task: {task[:100]}...")
         planner = await factory.create_dynamic_agent(
             name=f"pipeline-planner-{uuid.uuid4().hex[:6]}",
-            instructions=planner_prompt,
+            instructions=full_prompt,
             model_key=model_key,
             tool_names=[]
         )
 
+        logger.info(f"_build_dynamic_pipeline: Running planner agent")
         raw_output = await factory.run_agent_object_simple(
             planner, f"ЗАДАЧА:\n{task}"
         )
+        logger.info(f"_build_dynamic_pipeline: Planner raw output: {raw_output[:500]}...")
 
         parsed = _parse_json_from_text(raw_output)
         if parsed and "steps" in parsed:
-            return parsed.get("steps", [])
+            steps = parsed.get("steps", [])
+            logger.info(f"_build_dynamic_pipeline: Successfully parsed {len(steps)} steps from planner")
+            return steps
+        else:
+            logger.warning("_build_dynamic_pipeline: Failed to parse steps from planner output")
 
     except Exception as e:
-        print(f"Pipeline planning failed: {e}")
+        logger.error(f"Pipeline planning failed: {e}", exc_info=True)
 
     # Fallback: simple execute
+    logger.warning("_build_dynamic_pipeline: Falling back to simple execute")
     return [{"primitive": "execute", "params": {}, "output_key": "result"}]
+
+
+def _build_step_context(outputs: Dict[str, Any], input_from: Optional[str], task: str) -> str:
+    """
+    Build accumulated context for a pipeline step.
+
+    Each step sees:
+    - Primary input (from specified previous step or task)
+    - Accumulated context from ALL prior steps
+
+    This ensures agents don't miss important findings from earlier stages.
+    """
+    # Primary input: specified step output or original task
+    primary_input = outputs.get(input_from, task) if input_from else task
+
+    # Build accumulated context from all prior outputs
+    prior_outputs = []
+    for key, value in outputs.items():
+        if key == "task":
+            continue
+        if key == input_from:
+            continue  # Already the primary input
+        if value is None:
+            continue
+
+        val_str = str(value)
+        if len(val_str) > 500:
+            val_str = val_str[:500] + "..."
+        prior_outputs.append(f"[{key}]: {val_str}")
+
+    if not prior_outputs:
+        return primary_input
+
+    accumulated = "\n".join(prior_outputs)
+    return (
+        f"ACCUMULATED CONTEXT FROM PRIOR STEPS:\n{accumulated}\n\n"
+        f"PRIMARY INPUT:\n{primary_input}"
+    )
 
 
 async def _execute_pipeline(
@@ -386,7 +477,8 @@ async def _execute_pipeline(
     blackboard: Any,
     primitives: Any,
     model_key: str,
-    tools: List[str]
+    tools: List[str],
+    max_refinement_iterations: int = 2
 ) -> Tuple[str, float, List[str]]:
     """
     Execute a pipeline of primitives.
@@ -405,8 +497,8 @@ async def _execute_pipeline(
         input_from = step.get("input_from")
         output_key = step.get("output_key", f"step_{i}")
 
-        # Get input from previous step if specified
-        input_content = outputs.get(input_from, task) if input_from else task
+        # Build context with accumulated knowledge from all prior steps
+        input_content = _build_step_context(outputs, input_from, task)
 
         try:
             if primitive == "execute":
@@ -429,7 +521,8 @@ async def _execute_pipeline(
                     criteria=params.get("criteria"),
                     perspective=params.get("perspective"),
                     model_key=model_key,
-                    post_to_blackboard=blackboard is not None
+                    post_to_blackboard=blackboard is not None,
+                    tools=params.get("tools")
                 )
                 outputs[output_key] = result.raw_output
                 total_score += result.overall_score
@@ -441,14 +534,83 @@ async def _execute_pipeline(
                     context=task,
                     checks=params.get("checks"),
                     model_key=model_key,
-                    post_to_blackboard=blackboard is not None
+                    post_to_blackboard=blackboard is not None,
+                    tools=params.get("tools")
                 )
                 outputs[output_key] = result.raw_output
+
+                # === ITERATIVE REFINEMENT LOOP ===
+                if not result.valid and max_refinement_iterations > 0:
+                    # Find the content that was validated (the input to this step)
+                    content_to_revise = input_content
+                    feedback = result.raw_output
+
+                    for iteration in range(max_refinement_iterations):
+                        # Revise based on validation feedback
+                        revise_result = await primitives.revise(
+                            original_content=content_to_revise,
+                            feedback=feedback,
+                            task=task,
+                            tools=params.get("tools", tools),
+                            model_key=model_key,
+                            post_to_blackboard=blackboard is not None,
+                            tags=["revision", f"iteration_{iteration+1}"]
+                        )
+
+                        if not revise_result.success:
+                            break
+
+                        content_to_revise = revise_result.output
+
+                        # Re-validate
+                        re_validation = await primitives.validate(
+                            content=content_to_revise,
+                            context=task,
+                            checks=params.get("checks"),
+                            model_key=model_key,
+                            post_to_blackboard=blackboard is not None,
+                            tools=params.get("tools")
+                        )
+
+                        if re_validation.valid:
+                            # Success! Update the outputs map so subsequent
+                            # steps see the revised content
+                            if input_from and input_from in outputs:
+                                outputs[input_from] = content_to_revise
+                            result = re_validation
+                            break
+                        else:
+                            feedback = re_validation.raw_output
+
+                    # Update output with final validation
+                    outputs[output_key] = result.raw_output
+                # === END ITERATIVE REFINEMENT ===
+
                 if result.valid:
                     total_score += result.confidence
                 else:
                     total_score += 0.3  # Penalty for invalid
                 score_count += 1
+
+            elif primitive == "revise":
+                # Handle explicit revise steps in pipeline
+                feedback_from = params.get("feedback_from")
+                feedback_content = outputs.get(feedback_from, "") if feedback_from else ""
+
+                result = await primitives.revise(
+                    original_content=input_content,
+                    feedback=feedback_content,
+                    task=task,
+                    system_prompt=params.get("system_prompt"),
+                    tools=params.get("tools", tools),
+                    model_key=model_key,
+                    post_to_blackboard=blackboard is not None,
+                    tags=["pipeline", "revise"]
+                )
+                outputs[output_key] = result.output
+                if result.success:
+                    total_score += 1.0
+                    score_count += 1
 
             elif primitive == "synthesize":
                 # Get all previous outputs as inputs
@@ -578,50 +740,49 @@ async def orchestrate_emergent(
         "blackboard_entries": [],
     }
 
-    # If explicit system prompt provided, use simple execute mode
-    if agent_system_prompt:
-        if primitives:
-            exec_result = await primitives.execute(
-                task=task,
-                system_prompt=agent_system_prompt,
-                tools=tools,
-                model_key=resolved_model_key,
-                post_to_blackboard=use_blackboard and blackboard is not None
-            )
-            result["final"] = exec_result.output
-            result["pipeline_source"] = "explicit_prompt"
-        else:
-            # Fallback to original behavior
-            executor = await factory.create_dynamic_agent(
-                name=f"executor-{uuid.uuid4().hex[:6]}",
-                instructions=agent_system_prompt,
-                model_key=resolved_model_key,
-                tool_names=tools,
-            )
-            output = await factory.run_agent_object_simple(executor, task)
-            result["final"] = _extract_text(output)
-            result["pipeline_source"] = "direct_execute"
-
-        return json.dumps(result, ensure_ascii=False, indent=2)
+    # REMOVED: agent_system_prompt check that was blocking emergent pipeline creation
+    # Now orchestrate_emergent ALWAYS builds emergent pipelines (unless allow_pipeline_creation=False)
+    # If LLM agent passes agent_system_prompt - it will be ignored to enable proper emergent behavior
+    logger.info(
+        f"orchestrate_emergent starting: task='{task[:100]}...', "
+        f"allow_pipeline_creation={allow_pipeline_creation}, "
+        f"primitives={'exists' if primitives else 'none'}, "
+        f"agent_system_prompt={'passed_but_ignored' if agent_system_prompt else 'none'}"
+    )
 
     # Check pipeline memory for similar tasks
     pipeline_to_use = None
-    if pipeline_memory and not _should_explore(exploration_rate):
+    should_explore = _should_explore(exploration_rate)
+    logger.info(
+        f"orchestrate_emergent: exploration_rate={exploration_rate}, "
+        f"should_explore={should_explore}, "
+        f"pipeline_memory={'exists' if pipeline_memory else 'none'}"
+    )
+
+    if pipeline_memory and not should_explore:
         similar = pipeline_memory.find_similar(task, limit=1, min_effectiveness=0.5)
         if similar:
             pipeline_to_use, similarity = similar[0]
             result["pipeline_source"] = f"memory:{pipeline_to_use.id} (similarity: {similarity:.2f})"
+            logger.info(f"Using pipeline from memory: {pipeline_to_use.id} (similarity: {similarity:.2f})")
 
     # Build or use pipeline
     if pipeline_to_use:
         steps = [s.to_dict() for s in pipeline_to_use.steps]
+        logger.info(f"Using existing pipeline with {len(steps)} steps")
     elif allow_pipeline_creation and primitives:
+        logger.info("Building dynamic pipeline via pipeline planner")
         steps = await _build_dynamic_pipeline(
-            factory, task, blackboard, resolved_model_key
+            factory, task, blackboard, resolved_model_key, pipeline_memory
         )
         result["pipeline_source"] = "dynamic_generation"
+        logger.info(f"Pipeline planner returned {len(steps)} steps: {[s.get('primitive') for s in steps]}")
     else:
         # Fallback: simple execute
+        logger.warning(
+            f"Falling back to simple execute: allow_pipeline_creation={allow_pipeline_creation}, "
+            f"primitives={'exists' if primitives else 'none'}"
+        )
         steps = [{"primitive": "execute", "params": {}, "output_key": "result"}]
         result["pipeline_source"] = "fallback"
 
@@ -640,7 +801,7 @@ async def orchestrate_emergent(
         result["blackboard_entries"] = entry_ids
         result["success_score"] = success_score
 
-        # Optionally validate
+        # Optionally validate with post-pipeline refinement
         if validation_enabled and success_score >= 0.6:
             validation = await primitives.validate(
                 content=final_output,
@@ -649,8 +810,43 @@ async def orchestrate_emergent(
                 post_to_blackboard=use_blackboard and blackboard is not None
             )
             result["validation"] = validation.to_dict()
+
+            # === POST-PIPELINE ITERATIVE REFINEMENT ===
             if not validation.valid:
-                success_score *= 0.7  # Penalty
+                # Attempt refinement on the final output
+                for _iter in range(2):  # Max 2 iterations
+                    revise_result = await primitives.revise(
+                        original_content=final_output,
+                        feedback=validation.raw_output,
+                        task=task,
+                        tools=tools,
+                        model_key=resolved_model_key,
+                        post_to_blackboard=use_blackboard and blackboard is not None,
+                        tags=["post_pipeline", f"iteration_{_iter+1}"]
+                    )
+
+                    if not revise_result.success:
+                        break
+
+                    final_output = revise_result.output
+
+                    # Re-validate
+                    re_validation = await primitives.validate(
+                        content=final_output,
+                        context=task,
+                        model_key=resolved_model_key,
+                        post_to_blackboard=use_blackboard and blackboard is not None
+                    )
+                    validation = re_validation
+
+                    if re_validation.valid:
+                        break
+
+                result["final"] = final_output
+                result["validation"] = validation.to_dict()
+                if not validation.valid:
+                    success_score *= 0.7  # Penalty
+            # === END POST-PIPELINE REFINEMENT ===
 
         # Save successful pipeline
         if save_on_success and pipeline_memory and success_score >= 0.6:

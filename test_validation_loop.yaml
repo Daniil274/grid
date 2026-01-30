@@ -1,0 +1,106 @@
+# Тест 3: Validation с автоматическим revise при провале
+# Цель: Проверить итеративный цикл validate → revise → re-validate
+
+settings:
+  default_agent: "test_validator"
+  max_turns: 10
+  debug: true
+  mcp_enabled: true
+
+  social_intelligence:
+    enabled: true
+    blackboard:
+      enabled: true
+      persist_path: "logs/test_validation_blackboard.json"
+    pipeline_memory:
+      enabled: true
+      persist_path: "logs/test_validation_pipelines.json"
+    refinement:
+      enabled: true
+      max_iterations: 3  # До 3 попыток исправления
+
+si_prompts:
+  execute_default: |
+    Выполни задачу. Можешь добавить немного "галлюцинаций" для теста.
+
+  critique: |
+    Критикуй строго. Верни JSON с issues/strengths/suggestions.
+
+  validate: |
+    Ты детектор галлюцинаций. Проверь ВНИМАТЕЛЬНО:
+    - Есть ли выдуманные факты?
+    - Есть ли логические противоречия?
+    - Соответствует ли контексту?
+
+    Верни JSON:
+    {
+      "valid": true|false,
+      "issues": [
+        {"type": "hallucination", "description": "конкретная проблема", "severity": "high"},
+        ...
+      ],
+      "confidence": 0.0-1.0,
+      "checks_performed": ["hallucination_detection", "logical_coherence"]
+    }
+
+    ВАЖНО: Если находишь проблемы - ставь valid: false!
+
+  revise: |
+    Исправь галлюцинации и ошибки.
+    Не добавляй новых выдуманных фактов!
+    Верни исправленную версию.
+
+  pipeline_planner: |
+    Для задач где важна точность используй:
+    execute → validate (с автоматическим revise если провал)
+
+    Верни JSON с pipeline_name и steps.
+
+providers:
+  openrouter:
+    name: "openrouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout: 300
+
+models:
+  deepseek:
+    name: "deepseek/deepseek-v3.2-exp"
+    provider: "openrouter"
+    temperature: 0.3  # Низкая температура для валидации
+    max_tokens: 8000
+
+tools:
+  filesystem:
+    type: mcp
+    server_command: ["python", "openai-agents-python/mcp_servers/mcp_server_local_filesystem/mcp_server_local_filesystem_stdio.py"]
+    add_working_directory: true
+
+  orchestrate_emergent:
+    type: function
+    description: "Эмерджентная оркестрация с самообучением"
+
+agents:
+  test_validator:
+    name: "test_validator"
+    model: "deepseek"
+    tools: ["filesystem", "orchestrate_emergent"]
+    custom_prompt: |
+      Ты тестируешь валидацию с итеративным исправлением.
+
+      ТЕСТ:
+      1. Задай orchestrate_emergent задачу где легко допустить ошибку:
+         "Расскажи про фичи Python 4.0" (Python 4.0 не существует - это галлюцинация!)
+
+      2. Система должна:
+         - Выполнить (execute) - скорее всего создаст галлюцинацию
+         - Валидировать (validate) - должна найти что Python 4.0 не существует
+         - Исправить (revise) - убрать выдуманное
+         - Повторно валидировать - проверить что галлюцинация исправлена
+
+      3. Проверь logs/test_validation_blackboard.json:
+         - Должны быть записи от validator-xxx с valid: false
+         - Должны быть записи от reviser-xxx
+         - Финальная версия должна быть валидной
+
+      4. Если после 3 итераций всё ещё invalid - это ожидаемо (max_iterations достигнут)

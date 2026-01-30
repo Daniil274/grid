@@ -124,6 +124,17 @@ class Primitives:
             "Оцени информационную ценность каждого сообщения. Верни JSON:\n"
             '{"scores": [{"index": 0, "score": 0.0-1.0, "reason": ""}]}'
         ),
+        "revise": (
+            "Ты ревизор контента. Тебе предоставляется:\n"
+            "1. Оригинальная задача\n"
+            "2. Текущая версия (требующая улучшений)\n"
+            "3. Обратная связь (критика, найденные проблемы)\n\n"
+            "Твоя задача:\n"
+            "- Исправить ВСЕ указанные проблемы\n"
+            "- Сохранить всё хорошее из оригинала\n"
+            "- Вернуть полную улучшенную версию\n\n"
+            "Не объясняй что ты изменил — просто верни исправленную версию."
+        ),
     }
 
     def __init__(
@@ -167,6 +178,45 @@ class Primitives:
         """Get a prompt by key, falling back to defaults."""
         return self._prompts.get(key) or self.DEFAULT_PROMPTS.get(key, "")
 
+    def _inject_blackboard_context(
+        self,
+        base_instructions: str,
+        agent_name: str,
+        include_types: Optional[List[str]] = None,
+        max_entries: int = 10
+    ) -> str:
+        """
+        Inject blackboard context into agent instructions.
+
+        This is critical for agents to see what other agents have discovered.
+        Since Agent instructions are immutable after creation (OpenAI SDK limitation),
+        we must build the complete instructions string BEFORE calling create_dynamic_agent().
+
+        Args:
+            base_instructions: Base system prompt
+            agent_name: Name of the agent (for context retrieval)
+            include_types: Optional filter for entry types
+            max_entries: Maximum blackboard entries to include
+
+        Returns:
+            Enhanced instructions with blackboard context prepended
+        """
+        if not self.blackboard:
+            return base_instructions
+
+        bb_context = self.blackboard.get_context_for_agent(
+            agent_name=agent_name,
+            max_entries=max_entries,
+            include_types=include_types,
+            exclude_self=True
+        )
+
+        # Don't inject if blackboard is empty
+        if not bb_context or "Пусто" in bb_context:
+            return base_instructions
+
+        return f"{bb_context}\n\n--- ТВОЯ ЗАДАЧА ---\n{base_instructions}"
+
     async def execute(
         self,
         task: str,
@@ -197,9 +247,18 @@ class Primitives:
         agent_name = f"executor-{uuid.uuid4().hex[:6]}"
 
         try:
+            # Inject blackboard context before creating agent
+            base_prompt = system_prompt or default_prompt
+            effective_prompt = self._inject_blackboard_context(
+                base_prompt,
+                agent_name,
+                include_types=None,  # All types relevant for executors
+                max_entries=10
+            )
+
             agent = await self.factory.create_dynamic_agent(
                 name=agent_name,
-                instructions=system_prompt or default_prompt,
+                instructions=effective_prompt,
                 model_key=model_key or self.default_model_key,
                 tool_names=tools or []
             )
@@ -241,7 +300,8 @@ class Primitives:
         criteria: Optional[str] = None,
         perspective: Optional[str] = None,
         model_key: Optional[str] = None,
-        post_to_blackboard: bool = True
+        post_to_blackboard: bool = True,
+        tools: Optional[List[str]] = None
     ) -> CritiqueResult:
         """
         Perform critical analysis of content.
@@ -264,12 +324,20 @@ class Primitives:
         base_prompt = self.get_prompt("critique")
         prompt = f"{base_prompt}\n\nПерспектива: {perspective_str}{criteria_str}"
 
+        # Inject blackboard context
+        effective_prompt = self._inject_blackboard_context(
+            prompt,
+            critic_name,
+            include_types=[EntryType.ARTIFACT, EntryType.CRITIQUE, EntryType.FACT],
+            max_entries=5
+        )
+
         try:
             agent = await self.factory.create_dynamic_agent(
                 name=critic_name,
-                instructions=prompt,
+                instructions=effective_prompt,
                 model_key=model_key or self.default_model_key,
-                tool_names=[]
+                tool_names=tools or []
             )
 
             raw_output = await self.factory.run_agent_object_simple(
@@ -337,10 +405,18 @@ class Primitives:
         base_prompt = self.get_prompt("vote")
         prompt = f"Ты эксперт с позицией: {perspective}\n\n{base_prompt}{context_str}"
 
+        # Inject blackboard context
+        effective_prompt = self._inject_blackboard_context(
+            prompt,
+            voter_name,
+            include_types=[EntryType.VOTE, EntryType.ARTIFACT, EntryType.CRITIQUE],
+            max_entries=10
+        )
+
         try:
             agent = await self.factory.create_dynamic_agent(
                 name=voter_name,
-                instructions=prompt,
+                instructions=effective_prompt,
                 model_key=model_key or self.default_model_key,
                 tool_names=[]
             )
@@ -384,7 +460,8 @@ class Primitives:
         context: Optional[str] = None,
         checks: Optional[List[str]] = None,
         model_key: Optional[str] = None,
-        post_to_blackboard: bool = True
+        post_to_blackboard: bool = True,
+        tools: Optional[List[str]] = None
     ) -> ValidationResult:
         """
         Validate content for hallucinations, factual errors, and consistency.
@@ -414,12 +491,20 @@ class Primitives:
         base_prompt = self.get_prompt("validate")
         prompt = f"{base_prompt}\n\nПроверки: {', '.join(checks_to_run)}{context_str}"
 
+        # Inject blackboard context
+        effective_prompt = self._inject_blackboard_context(
+            prompt,
+            validator_name,
+            include_types=[EntryType.ARTIFACT, EntryType.HYPOTHESIS, EntryType.FACT],
+            max_entries=8
+        )
+
         try:
             agent = await self.factory.create_dynamic_agent(
                 name=validator_name,
-                instructions=prompt,
+                instructions=effective_prompt,
                 model_key=model_key or self.default_model_key,
-                tool_names=[]
+                tool_names=tools or []
             )
 
             raw_output = await self.factory.run_agent_object_simple(
@@ -496,10 +581,18 @@ class Primitives:
             f"ИСТОЧНИК {i+1}:\n{inp}" for i, inp in enumerate(inputs)
         ])
 
+        # Inject blackboard context
+        effective_prompt = self._inject_blackboard_context(
+            prompt,
+            synthesizer_name,
+            include_types=None,
+            max_entries=15
+        )
+
         try:
             agent = await self.factory.create_dynamic_agent(
                 name=synthesizer_name,
-                instructions=prompt,
+                instructions=effective_prompt,
                 model_key=model_key or self.default_model_key,
                 tool_names=[]
             )
@@ -639,6 +732,97 @@ class Primitives:
                 {"message": msg, "score": 1.0, "keep": True, "reason": f"Error: {e}"}
                 for msg in messages
             ]
+
+    async def revise(
+        self,
+        original_content: str,
+        feedback: str,
+        task: str,
+        system_prompt: Optional[str] = None,
+        tools: Optional[List[str]] = None,
+        model_key: Optional[str] = None,
+        post_to_blackboard: bool = True,
+        tags: Optional[List[str]] = None
+    ) -> PrimitiveResult:
+        """
+        Revise content based on critique/validation feedback.
+
+        This is the key primitive for iterative refinement loops.
+        The reviser receives: original content + feedback + original task,
+        and produces an improved version.
+
+        Args:
+            original_content: The content to revise
+            feedback: Critique or validation feedback
+            task: The original task (for context)
+            system_prompt: Optional custom prompt for the reviser
+            tools: Tools for the reviser agent
+            model_key: Model to use
+            post_to_blackboard: Whether to post result to blackboard
+            tags: Tags for blackboard entry
+
+        Returns:
+            PrimitiveResult with revised output
+        """
+        start_time = datetime.now()
+        agent_name = f"reviser-{uuid.uuid4().hex[:6]}"
+
+        default_prompt = self.get_prompt("revise")
+        base_prompt = system_prompt or default_prompt
+
+        # Inject blackboard context
+        effective_prompt = self._inject_blackboard_context(
+            base_prompt,
+            agent_name,
+            max_entries=10
+        )
+
+        try:
+            agent = await self.factory.create_dynamic_agent(
+                name=agent_name,
+                instructions=effective_prompt,
+                model_key=model_key or self.default_model_key,
+                tool_names=tools or []
+            )
+
+            revision_task = (
+                f"ORIGINAL TASK:\n{task}\n\n"
+                f"CURRENT VERSION:\n{original_content}\n\n"
+                f"FEEDBACK/ISSUES:\n{feedback}\n\n"
+                "Produce an improved version that addresses all feedback."
+            )
+
+            output = await self.factory.run_agent_object_simple(agent, revision_task)
+
+            result = PrimitiveResult(
+                primitive="revise",
+                success=True,
+                output=output,
+                confidence=0.85,
+                agent_name=agent_name,
+                execution_time_ms=int((datetime.now() - start_time).total_seconds() * 1000),
+                metadata={"revision_of": "previous_step"}
+            )
+
+            if post_to_blackboard and self.blackboard:
+                self.blackboard.post(
+                    entry_type=EntryType.ARTIFACT,
+                    author=agent_name,
+                    content=output,
+                    tags=tags or ["revise", "iteration"]
+                )
+
+            return result
+
+        except Exception as e:
+            return PrimitiveResult(
+                primitive="revise",
+                success=False,
+                output=None,
+                error=str(e),
+                agent_name=agent_name,
+                execution_time_ms=int((datetime.now() - start_time).total_seconds() * 1000)
+            )
 
     def _parse_json(self, text: str) -> Dict[str, Any]:
         """Best-effort JSON parsing from LLM output."""
