@@ -854,6 +854,25 @@ class AgentFactory:
         This method is intentionally lightweight: it does not persist full dialogue,
         but it *does* pass a `GridRunContext` so tools can access the AgentFactory.
         """
+        import time as _time
+        _start = _time.time()
+        agent_name = getattr(agent, 'name', 'unknown')
+
+        # --- Log input ---
+        input_preview = message[:200] + ('...' if len(message) > 200 else '')
+        logger.info(
+            f"DYNAMIC_AGENT_INPUT | agent={agent_name} | input_len={len(message)} | preview={input_preview}"
+        )
+        verbose_logger = logging.getLogger("grid.verbose")
+        verbose_logger.debug(
+            f"\n{'='*80}\nDYNAMIC AGENT INPUT\n{'='*80}\n"
+            f"Agent: {agent_name}\n"
+            f"Instructions: {getattr(agent, 'instructions', '<n/a>')[:1000]}{'...' if len(str(getattr(agent, 'instructions', ''))) > 1000 else ''}\n"
+            f"{'─'*80}\n"
+            f"Input message:\n{message}\n"
+            f"{'='*80}\n"
+        )
+
         if max_turns is None:
             max_turns = self.config.get_max_turns()
 
@@ -865,26 +884,60 @@ class AgentFactory:
             session = self._get_agent_session(f"dyn:{agent.name}", active_context_id)
         agent._session = session
 
-        result = await _get_runner().run(
-            agent,
-            message,
-            context=run_ctx,
-            max_turns=max_turns,
-            session=session,
-        )
-        # Extract output robustly (similar to run_agent)
+        output = None
+        error_occurred = None
         try:
-            if isinstance(result, str):
-                return result
-            if hasattr(result, "final_output") and result.final_output:
-                return result.final_output
-            if hasattr(result, "output") and result.output:
-                return result.output
-            if hasattr(result, "content") and result.content:
-                return result.content
-        except Exception:
-            pass
-        return str(result)
+            result = await _get_runner().run(
+                agent,
+                message,
+                context=run_ctx,
+                max_turns=max_turns,
+                session=session,
+            )
+            # Extract output robustly (similar to run_agent)
+            try:
+                if isinstance(result, str):
+                    output = result
+                elif hasattr(result, "final_output") and result.final_output:
+                    output = result.final_output
+                elif hasattr(result, "output") and result.output:
+                    output = result.output
+                elif hasattr(result, "content") and result.content:
+                    output = result.content
+                else:
+                    output = str(result)
+            except Exception:
+                output = str(result)
+        except Exception as e:
+            error_occurred = e
+            raise
+        finally:
+            elapsed = _time.time() - _start
+            if error_occurred:
+                logger.error(
+                    f"DYNAMIC_AGENT_ERROR | agent={agent_name} | elapsed={elapsed:.2f}s | error={error_occurred}"
+                )
+                verbose_logger.debug(
+                    f"\n{'='*80}\nDYNAMIC AGENT ERROR\n{'='*80}\n"
+                    f"Agent: {agent_name}\nElapsed: {elapsed:.2f}s\n"
+                    f"Error: {error_occurred}\n{'='*80}\n"
+                )
+            else:
+                output_preview = (output or '')[:200] + ('...' if len(output or '') > 200 else '')
+                logger.info(
+                    f"DYNAMIC_AGENT_OUTPUT | agent={agent_name} | elapsed={elapsed:.2f}s | "
+                    f"output_len={len(output or '')} | preview={output_preview}"
+                )
+                verbose_logger.debug(
+                    f"\n{'='*80}\nDYNAMIC AGENT OUTPUT\n{'='*80}\n"
+                    f"Agent: {agent_name}\nElapsed: {elapsed:.2f}s\n"
+                    f"Output length: {len(output or '')} chars\n"
+                    f"{'─'*80}\n"
+                    f"Full output:\n{output}\n"
+                    f"{'='*80}\n"
+                )
+
+        return output
     
     async def run_agent(
         self,

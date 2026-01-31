@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agents import RunContextWrapper, function_tool
 
 logger = logging.getLogger(__name__)
+verbose_logger = logging.getLogger("grid.verbose")
 
 
 @dataclass
@@ -200,6 +201,14 @@ async def orchestrate(
     if factory is None:
         return "❌ orchestrate: нет доступа к AgentFactory (ожидается context.context.factory)."
 
+    logger.info(f"orchestrate: START | task_len={len(task)} | mode={mode} | model_key={model_key}")
+    verbose_logger.debug(
+        f"\n{'='*80}\nORCHESTRATE START\n{'='*80}\n"
+        f"Task: {task}\nMode: {mode}\nModel key: {model_key}\n"
+        f"Agent system prompt: {agent_system_prompt[:500] if agent_system_prompt else 'None'}\n"
+        f"Executor tools: {executor_tools}\n{'='*80}\n"
+    )
+
     # Пытаемся получить модель из конфига инструмента orchestrate, если не передана явно
     default_model_key = None
     try:
@@ -275,7 +284,17 @@ async def orchestrate(
     if committee_block:
         result["committee"] = json.loads(committee_block)
 
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    result_json = json.dumps(result, ensure_ascii=False, indent=2)
+    logger.info(
+        f"orchestrate: COMPLETE | mode={mode} | model={resolved_model_key} | "
+        f"output_len={len(result.get('final', ''))}"
+    )
+    verbose_logger.debug(
+        f"\n{'='*80}\nORCHESTRATE COMPLETE\n{'='*80}\n"
+        f"Mode: {mode}\nModel: {resolved_model_key}\n"
+        f"Result (first 3000 chars):\n{result_json[:3000]}\n{'='*80}\n"
+    )
+    return result_json
 
 
 # =============================================================================
@@ -491,6 +510,12 @@ async def _execute_pipeline(
     total_score = 0.0
     score_count = 0
 
+    logger.info(f"_execute_pipeline: Starting pipeline with {len(steps)} steps for task: {task[:100]}...")
+    verbose_logger.debug(
+        f"\n{'='*80}\nPIPELINE EXECUTION START\n{'='*80}\n"
+        f"Task: {task}\nSteps: {json.dumps(steps, ensure_ascii=False, indent=2)}\n{'='*80}\n"
+    )
+
     for i, step in enumerate(steps):
         primitive = step.get("primitive", "execute")
         params = step.get("params", {})
@@ -499,6 +524,14 @@ async def _execute_pipeline(
 
         # Build context with accumulated knowledge from all prior steps
         input_content = _build_step_context(outputs, input_from, task)
+
+        logger.info(f"_execute_pipeline: Step {i+1}/{len(steps)} | primitive={primitive} | input_from={input_from} | output_key={output_key}")
+        verbose_logger.debug(
+            f"\n{'─'*80}\nPIPELINE STEP {i+1}/{len(steps)}\n{'─'*80}\n"
+            f"Primitive: {primitive}\nParams: {json.dumps(params, ensure_ascii=False, default=str)}\n"
+            f"Input from: {input_from}\nOutput key: {output_key}\n"
+            f"Input content (first 2000 chars):\n{str(input_content)[:2000]}\n{'─'*80}\n"
+        )
 
         try:
             if primitive == "execute":
@@ -658,9 +691,26 @@ async def _execute_pipeline(
                 total_score += result.confidence
                 score_count += 1
 
+            # Log step output
+            step_output = outputs.get(output_key, "")
+            step_output_str = str(step_output)
+            logger.info(
+                f"_execute_pipeline: Step {i+1}/{len(steps)} | primitive={primitive} | "
+                f"output_len={len(step_output_str)} | score_so_far={total_score}/{score_count}"
+            )
+            verbose_logger.debug(
+                f"\n{'─'*80}\nPIPELINE STEP {i+1} OUTPUT ({primitive})\n{'─'*80}\n"
+                f"{step_output_str[:3000]}{'...(truncated)' if len(step_output_str) > 3000 else ''}\n{'─'*80}\n"
+            )
+
         except Exception as e:
             outputs[output_key] = f"Error in {primitive}: {e}"
             score_count += 1  # Count as failed
+            logger.error(f"_execute_pipeline: Step {i+1}/{len(steps)} FAILED | primitive={primitive} | error={e}")
+            verbose_logger.debug(
+                f"\n{'─'*80}\nPIPELINE STEP {i+1} ERROR ({primitive})\n{'─'*80}\n"
+                f"Error: {e}\n{'─'*80}\n"
+            )
 
     # Determine final output (last step or synthesized)
     final_output = outputs.get(steps[-1].get("output_key", "result"), "")
@@ -670,6 +720,16 @@ async def _execute_pipeline(
         final_output = json.dumps(final_output, ensure_ascii=False, indent=2)
 
     avg_score = total_score / score_count if score_count > 0 else 0.5
+
+    logger.info(
+        f"_execute_pipeline: COMPLETE | steps={len(steps)} | avg_score={avg_score:.2f} | "
+        f"output_len={len(str(final_output))}"
+    )
+    verbose_logger.debug(
+        f"\n{'='*80}\nPIPELINE EXECUTION COMPLETE\n{'='*80}\n"
+        f"Steps executed: {len(steps)}\nAverage score: {avg_score:.2f}\n"
+        f"Final output (first 3000 chars):\n{str(final_output)[:3000]}\n{'='*80}\n"
+    )
 
     return str(final_output), avg_score, entry_ids
 
@@ -744,10 +804,20 @@ async def orchestrate_emergent(
     # Now orchestrate_emergent ALWAYS builds emergent pipelines (unless allow_pipeline_creation=False)
     # If LLM agent passes agent_system_prompt - it will be ignored to enable proper emergent behavior
     logger.info(
-        f"orchestrate_emergent starting: task='{task[:100]}...', "
-        f"allow_pipeline_creation={allow_pipeline_creation}, "
-        f"primitives={'exists' if primitives else 'none'}, "
+        f"orchestrate_emergent: START | task_len={len(task)} | "
+        f"allow_pipeline_creation={allow_pipeline_creation} | "
+        f"primitives={'exists' if primitives else 'none'} | "
         f"agent_system_prompt={'passed_but_ignored' if agent_system_prompt else 'none'}"
+    )
+    verbose_logger.debug(
+        f"\n{'='*80}\nORCHESTRATE_EMERGENT START\n{'='*80}\n"
+        f"Task: {task}\n"
+        f"Allow pipeline creation: {allow_pipeline_creation}\n"
+        f"Use blackboard: {use_blackboard}\n"
+        f"Validation enabled: {validation_enabled}\n"
+        f"Exploration rate: {exploration_rate}\n"
+        f"Model key: {model_key}\n"
+        f"Executor tools: {executor_tools}\n{'='*80}\n"
     )
 
     # Check pipeline memory for similar tasks
@@ -870,6 +940,7 @@ async def orchestrate_emergent(
                 result["pipeline_id"] = pipeline_to_use.id
     else:
         # No primitives available, fallback to simple execution
+        logger.warning("orchestrate_emergent: No primitives, falling back to simple execution")
         executor = await factory.create_dynamic_agent(
             name=f"executor-{uuid.uuid4().hex[:6]}",
             instructions=(
@@ -883,7 +954,21 @@ async def orchestrate_emergent(
         output = await factory.run_agent_object_simple(executor, task)
         result["final"] = _extract_text(output)
 
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    result_json = json.dumps(result, ensure_ascii=False, indent=2)
+    logger.info(
+        f"orchestrate_emergent: COMPLETE | pipeline_source={result.get('pipeline_source')} | "
+        f"pipeline_id={result.get('pipeline_id')} | "
+        f"success_score={result.get('success_score', 'n/a')} | "
+        f"output_len={len(result.get('final', ''))}"
+    )
+    verbose_logger.debug(
+        f"\n{'='*80}\nORCHESTRATE_EMERGENT COMPLETE\n{'='*80}\n"
+        f"Pipeline source: {result.get('pipeline_source')}\n"
+        f"Pipeline ID: {result.get('pipeline_id')}\n"
+        f"Success score: {result.get('success_score', 'n/a')}\n"
+        f"Result (first 3000 chars):\n{result_json[:3000]}\n{'='*80}\n"
+    )
+    return result_json
 
 
 ORCHESTRATOR_TOOLS = {
