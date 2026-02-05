@@ -208,13 +208,19 @@ class AgentFactory:
         *,
         tracing_level: Optional[str] = "INFO",
         stream_observer: Optional[StreamObserver] = None,
+        broadcaster: Optional[Any] = None,
+        unified_memory: Optional[Any] = None,
     ):
         """
         Initialize Agent Factory.
-        
+
         Args:
             config: Configuration instance (creates default if None)
             working_directory: Working directory override
+            tracing_level: Tracing level for debugging
+            stream_observer: Observer for agent stream events
+            broadcaster: LiveTransparencyBroadcaster for real-time progress updates
+            unified_memory: UnifiedMemory instance for hybrid memory management
         """
         if tracing_level is not None:
             self._configure_tracing_once(tracing_level)
@@ -233,10 +239,19 @@ class AgentFactory:
             ImageUtils.set_config(self.config.config.settings.image_processing)
 
         # Initialize managers
-        self.context_manager = ContextManager(
-            max_history=self.config.get_max_history(),
-            persist_path="logs/context.json"  # Сохраняем контекст в файл для persistence
-        )
+        # If unified_memory is provided, use its context_manager; otherwise create new
+        if unified_memory is not None:
+            self.context_manager = unified_memory.context_manager
+            self.unified_memory = unified_memory
+        else:
+            self.context_manager = ContextManager(
+                max_history=self.config.get_max_history(),
+                persist_path="logs/context.json"  # Сохраняем контекст в файл для persistence
+            )
+            self.unified_memory = None
+
+        # Telegram integration components
+        self.broadcaster = broadcaster
         
         # Caches
         self._agent_cache: Dict[str, Agent] = {}
@@ -367,6 +382,51 @@ class AgentFactory:
     def pipeline_memory(self) -> Optional[PipelineMemory]:
         """Get the pipeline memory instance."""
         return self._pipeline_memory
+
+    # ---------------------------------------------------------------------
+    # Telegram Integration - Progress Broadcasting
+    # ---------------------------------------------------------------------
+    async def emit_progress(
+        self,
+        event_type: str,
+        agent_name: str,
+        content: str,
+        parent_id: Optional[str] = None,
+        status: str = "running",
+        details: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Emit progress event to LiveTransparencyBroadcaster.
+
+        Args:
+            event_type: Type of event (agent_start, agent_end, tool_call, etc.)
+            agent_name: Name of the agent
+            content: Description of the event
+            parent_id: ID of parent agent (for building tree)
+            status: Current status (running, completed, failed)
+            details: Additional details for spoiler content
+        """
+        if not self.broadcaster:
+            return
+
+        try:
+            from channels.live_transparency import ProgressEvent
+            from datetime import datetime
+
+            event = ProgressEvent(
+                event_type=event_type,
+                agent_name=agent_name,
+                content=content,
+                parent_id=parent_id,
+                status=status,
+                timestamp=datetime.now().isoformat(),
+                details=details or {}
+            )
+
+            await self.broadcaster.emit_event(event)
+
+        except Exception as e:
+            logger.warning(f"Failed to emit progress event: {e}")
 
     async def initialize(self) -> None:
         """Async init hook for compatibility with API lifespan."""
