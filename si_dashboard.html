@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SI Dashboard - Blackboard & Pipeline Memory</title>
+    <style>
+        :root {
+            --primary: #6366f1;
+            --primary-light: #818cf8;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --info: #3b82f6;
+            --bg: #0f172a;
+            --bg2: #1e293b;
+            --bg3: #334155;
+            --card: #1e293b;
+            --text: #e2e8f0;
+            --text2: #94a3b8;
+            --border: #334155;
+            --shadow: 0 4px 6px -1px rgba(0,0,0,.3);
+            --radius: 8px;
+        }
+        [data-theme="light"] {
+            --bg: #f1f5f9;
+            --bg2: #e2e8f0;
+            --bg3: #cbd5e1;
+            --card: #ffffff;
+            --text: #1e293b;
+            --text2: #64748b;
+            --border: #cbd5e1;
+            --shadow: 0 4px 6px -1px rgba(0,0,0,.1);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+        .app { display: flex; height: 100vh; }
+
+        /* Sidebar */
+        .sidebar {
+            width: 260px; min-width: 260px; background: var(--bg2); border-right: 1px solid var(--border);
+            display: flex; flex-direction: column; padding: 16px;
+        }
+        .sidebar h1 { font-size: 18px; font-weight: 700; margin-bottom: 4px; color: var(--primary-light); }
+        .sidebar .subtitle { font-size: 12px; color: var(--text2); margin-bottom: 20px; }
+        .nav-btn {
+            display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: none;
+            background: transparent; color: var(--text); font-size: 14px; border-radius: var(--radius);
+            cursor: pointer; text-align: left; width: 100%; transition: all .15s;
+        }
+        .nav-btn:hover { background: var(--bg3); }
+        .nav-btn.active { background: var(--primary); color: #fff; }
+        .nav-btn .icon { font-size: 18px; width: 24px; text-align: center; }
+        .nav-btn .badge {
+            margin-left: auto; background: var(--bg3); padding: 2px 8px; border-radius: 12px;
+            font-size: 11px; font-weight: 600;
+        }
+        .nav-btn.active .badge { background: rgba(255,255,255,.2); }
+        .sidebar-footer { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--border); }
+        .sidebar-footer label { font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 8px; cursor: pointer; }
+        .btn-refresh {
+            width: 100%; padding: 8px; border: 1px solid var(--border); background: var(--bg3);
+            color: var(--text); border-radius: var(--radius); cursor: pointer; font-size: 13px;
+            margin-top: 10px; transition: all .15s;
+        }
+        .btn-refresh:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+        /* Main content */
+        .main { flex: 1; overflow-y: auto; padding: 24px; }
+        .panel { display: none; }
+        .panel.active { display: block; }
+
+        /* Stats bar */
+        .stats-bar { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+        .stat-card {
+            background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 16px 20px; flex: 1; min-width: 150px; box-shadow: var(--shadow);
+        }
+        .stat-card .label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: .5px; }
+        .stat-card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+        .stat-card .value.primary { color: var(--primary-light); }
+        .stat-card .value.success { color: var(--success); }
+        .stat-card .value.warning { color: var(--warning); }
+
+        /* Filters */
+        .filters {
+            display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; align-items: center;
+        }
+        .filter-input, .filter-select {
+            padding: 8px 12px; background: var(--card); border: 1px solid var(--border);
+            color: var(--text); border-radius: var(--radius); font-size: 13px; min-width: 160px;
+        }
+        .filter-input:focus, .filter-select:focus { outline: none; border-color: var(--primary); }
+
+        /* Blackboard entries */
+        .entry {
+            background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 16px; margin-bottom: 12px; box-shadow: var(--shadow); transition: all .15s;
+        }
+        .entry:hover { border-color: var(--primary); }
+        .entry-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+        .entry-type {
+            padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .3px;
+        }
+        .type-hypothesis { background: #7c3aed22; color: #a78bfa; border: 1px solid #7c3aed44; }
+        .type-fact { background: #10b98122; color: #34d399; border: 1px solid #10b98144; }
+        .type-question { background: #f59e0b22; color: #fbbf24; border: 1px solid #f59e0b44; }
+        .type-critique { background: #ef444422; color: #f87171; border: 1px solid #ef444444; }
+        .type-vote { background: #3b82f622; color: #60a5fa; border: 1px solid #3b82f644; }
+        .type-artifact { background: #6366f122; color: #818cf8; border: 1px solid #6366f144; }
+        .type-signal { background: #64748b22; color: #94a3b8; border: 1px solid #64748b44; }
+        .type-decision { background: #10b98122; color: #34d399; border: 1px solid #10b98144; }
+        .type-pipeline { background: #8b5cf622; color: #a78bfa; border: 1px solid #8b5cf644; }
+        .entry-author { font-weight: 600; font-size: 13px; }
+        .entry-time { font-size: 11px; color: var(--text2); margin-left: auto; }
+        .entry-confidence {
+            font-size: 11px; padding: 2px 8px; border-radius: 10px;
+            background: var(--bg3); color: var(--text2);
+        }
+        .entry-tags { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+        .tag {
+            font-size: 11px; padding: 2px 8px; background: var(--bg3); border-radius: 10px;
+            color: var(--text2);
+        }
+        .entry-content {
+            font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+            max-height: 200px; overflow-y: auto; background: var(--bg); padding: 12px;
+            border-radius: 6px; border: 1px solid var(--border); font-family: 'Cascadia Code', 'Fira Code', monospace;
+        }
+        .entry-content.expanded { max-height: none; }
+        .btn-expand {
+            margin-top: 6px; background: none; border: none; color: var(--primary-light);
+            cursor: pointer; font-size: 12px; padding: 2px 0;
+        }
+
+        /* Pipeline cards */
+        .pipeline-card {
+            background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow); transition: all .15s;
+        }
+        .pipeline-card:hover { border-color: var(--primary); }
+        .pipeline-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+        .pipeline-name { font-weight: 700; font-size: 16px; }
+        .pipeline-id { font-size: 11px; color: var(--text2); font-family: monospace; }
+        .pipeline-score {
+            margin-left: auto; font-size: 24px; font-weight: 700;
+        }
+        .score-high { color: var(--success); }
+        .score-mid { color: var(--warning); }
+        .score-low { color: var(--error); }
+        .pipeline-meta { display: flex; gap: 16px; margin-bottom: 14px; flex-wrap: wrap; }
+        .pipeline-meta-item { font-size: 12px; color: var(--text2); }
+        .pipeline-meta-item strong { color: var(--text); }
+        .pipeline-desc { font-size: 13px; color: var(--text2); margin-bottom: 14px; }
+
+        /* Pipeline steps visualization */
+        .pipeline-steps { display: flex; gap: 0; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+        .step-node {
+            display: flex; flex-direction: column; align-items: center; gap: 4px;
+            padding: 10px 16px; background: var(--bg); border: 1px solid var(--border);
+            border-radius: var(--radius); font-size: 12px; min-width: 100px; text-align: center;
+        }
+        .step-node .step-primitive { font-weight: 700; color: var(--primary-light); font-size: 13px; }
+        .step-node .step-detail { color: var(--text2); font-size: 10px; }
+        .step-arrow { color: var(--text2); font-size: 18px; padding: 0 4px; }
+
+        /* Task examples */
+        .task-examples { margin-top: 10px; }
+        .task-example {
+            font-size: 12px; color: var(--text2); padding: 6px 10px; background: var(--bg);
+            border-radius: 4px; margin-top: 4px; border-left: 3px solid var(--primary);
+        }
+
+        /* Empty state */
+        .empty-state {
+            text-align: center; padding: 60px 20px; color: var(--text2);
+        }
+        .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+        .empty-state h3 { font-size: 18px; margin-bottom: 8px; color: var(--text); }
+
+        /* File input area */
+        .load-area {
+            background: var(--card); border: 2px dashed var(--border); border-radius: var(--radius);
+            padding: 24px; text-align: center; margin-bottom: 20px; transition: all .15s;
+        }
+        .load-area:hover { border-color: var(--primary); }
+        .load-area input[type="file"] { display: none; }
+        .load-area label {
+            cursor: pointer; color: var(--primary-light); font-weight: 600;
+        }
+        .load-area p { font-size: 12px; color: var(--text2); margin-top: 6px; }
+
+        /* Auto-refresh indicator */
+        .auto-refresh-indicator {
+            display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text2);
+        }
+        .auto-refresh-indicator .dot {
+            width: 8px; height: 8px; border-radius: 50%; background: var(--success);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+        /* Toggle switch */
+        .toggle { position: relative; width: 36px; height: 20px; }
+        .toggle input { display: none; }
+        .toggle-slider {
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: var(--bg3);
+            border-radius: 10px; cursor: pointer; transition: .2s;
+        }
+        .toggle-slider::before {
+            content: ''; position: absolute; width: 16px; height: 16px; left: 2px; bottom: 2px;
+            background: var(--text); border-radius: 50%; transition: .2s;
+        }
+        .toggle input:checked + .toggle-slider { background: var(--primary); }
+        .toggle input:checked + .toggle-slider::before { transform: translateX(16px); }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--primary); }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <aside class="sidebar">
+            <h1>SI Dashboard</h1>
+            <div class="subtitle">Social Intelligence Monitor</div>
+
+            <nav style="display:flex;flex-direction:column;gap:4px;">
+                <button class="nav-btn active" onclick="switchPanel('blackboard')">
+                    <span class="icon">&#x1f4cb;</span> Blackboard
+                    <span class="badge" id="bb-count">0</span>
+                </button>
+                <button class="nav-btn" onclick="switchPanel('pipelines')">
+                    <span class="icon">&#x1f504;</span> Pipelines
+                    <span class="badge" id="pipe-count">0</span>
+                </button>
+                <button class="nav-btn" onclick="switchPanel('stats')">
+                    <span class="icon">&#x1f4ca;</span> Statistics
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <label>
+                    <span class="toggle">
+                        <input type="checkbox" id="auto-refresh-toggle" onchange="toggleAutoRefresh()">
+                        <span class="toggle-slider"></span>
+                    </span>
+                    Auto-refresh (5s)
+                </label>
+                <div class="auto-refresh-indicator" id="refresh-indicator" style="display:none;margin-top:8px;">
+                    <span class="dot"></span> Auto-refreshing...
+                </div>
+                <button class="btn-refresh" onclick="loadAllData()">Refresh Now</button>
+                <label style="margin-top:10px;">
+                    <span class="toggle">
+                        <input type="checkbox" id="theme-toggle" onchange="toggleTheme()">
+                        <span class="toggle-slider"></span>
+                    </span>
+                    Light theme
+                </label>
+            </div>
+        </aside>
+
+        <main class="main">
+            <!-- Blackboard Panel -->
+            <div class="panel active" id="panel-blackboard">
+                <h2 style="font-size:22px;margin-bottom:16px;">Blackboard</h2>
+
+                <div class="load-area">
+                    <label for="bb-file">Click to load blackboard.json</label>
+                    <input type="file" id="bb-file" accept=".json" onchange="loadFileInput(this, 'blackboard')">
+                    <p>Or auto-loads from <code>logs/blackboard.json</code> when served via HTTP</p>
+                </div>
+
+                <div class="filters">
+                    <input class="filter-input" type="text" id="bb-search" placeholder="Search content..." oninput="renderBlackboard()">
+                    <select class="filter-select" id="bb-type-filter" onchange="renderBlackboard()">
+                        <option value="">All types</option>
+                        <option value="hypothesis">Hypothesis</option>
+                        <option value="fact">Fact</option>
+                        <option value="question">Question</option>
+                        <option value="critique">Critique</option>
+                        <option value="vote">Vote</option>
+                        <option value="artifact">Artifact</option>
+                        <option value="signal">Signal</option>
+                        <option value="decision">Decision</option>
+                        <option value="pipeline">Pipeline</option>
+                    </select>
+                    <select class="filter-select" id="bb-author-filter" onchange="renderBlackboard()">
+                        <option value="">All authors</option>
+                    </select>
+                    <select class="filter-select" id="bb-sort" onchange="renderBlackboard()">
+                        <option value="newest">Newest first</option>
+                        <option value="oldest">Oldest first</option>
+                        <option value="confidence">Confidence desc</option>
+                    </select>
+                </div>
+
+                <div id="bb-entries"></div>
+            </div>
+
+            <!-- Pipelines Panel -->
+            <div class="panel" id="panel-pipelines">
+                <h2 style="font-size:22px;margin-bottom:16px;">Pipeline Memory</h2>
+
+                <div class="load-area">
+                    <label for="pipe-file">Click to load pipeline_memory.json</label>
+                    <input type="file" id="pipe-file" accept=".json" onchange="loadFileInput(this, 'pipelines')">
+                    <p>Or auto-loads from <code>logs/pipeline_memory.json</code> when served via HTTP</p>
+                </div>
+
+                <div class="filters">
+                    <input class="filter-input" type="text" id="pipe-search" placeholder="Search pipelines..." oninput="renderPipelines()">
+                    <select class="filter-select" id="pipe-sort" onchange="renderPipelines()">
+                        <option value="effectiveness">Most effective</option>
+                        <option value="recent">Most recent</option>
+                        <option value="usage">Most used</option>
+                        <option value="score">Highest score</option>
+                    </select>
+                    <select class="filter-select" id="pipe-tag-filter" onchange="renderPipelines()">
+                        <option value="">All tags</option>
+                    </select>
+                </div>
+
+                <div id="pipe-entries"></div>
+            </div>
+
+            <!-- Stats Panel -->
+            <div class="panel" id="panel-stats">
+                <h2 style="font-size:22px;margin-bottom:16px;">Statistics</h2>
+
+                <div class="stats-bar" id="stats-overview"></div>
+
+                <h3 style="font-size:16px;margin:20px 0 12px;">Blackboard by Type</h3>
+                <div id="stats-bb-types" style="display:flex;gap:12px;flex-wrap:wrap;"></div>
+
+                <h3 style="font-size:16px;margin:20px 0 12px;">Blackboard by Author</h3>
+                <div id="stats-bb-authors" style="display:flex;gap:12px;flex-wrap:wrap;"></div>
+
+                <h3 style="font-size:16px;margin:20px 0 12px;">Pipeline Primitives Usage</h3>
+                <div id="stats-primitives" style="display:flex;gap:12px;flex-wrap:wrap;"></div>
+
+                <h3 style="font-size:16px;margin:20px 0 12px;">Top Pipelines</h3>
+                <div id="stats-top-pipelines"></div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+    // ========== State ==========
+    let bbData = { session_id: '', entries: [] };
+    let pipeData = { pipelines: [] };
+    let autoRefreshInterval = null;
+
+    // ========== Navigation ==========
+    function switchPanel(name) {
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('panel-' + name).classList.add('active');
+        event.currentTarget.classList.add('active');
+        if (name === 'stats') renderStats();
+    }
+
+    // ========== Theme ==========
+    function toggleTheme() {
+        const light = document.getElementById('theme-toggle').checked;
+        document.body.setAttribute('data-theme', light ? 'light' : '');
+    }
+
+    // ========== Auto-refresh ==========
+    function toggleAutoRefresh() {
+        const on = document.getElementById('auto-refresh-toggle').checked;
+        document.getElementById('refresh-indicator').style.display = on ? 'flex' : 'none';
+        if (on) {
+            autoRefreshInterval = setInterval(loadAllData, 5000);
+        } else {
+            clearInterval(autoRefreshInterval);
+            autoRefreshInterval = null;
+        }
+    }
+
+    // ========== Data Loading ==========
+    async function loadAllData() {
+        await Promise.all([
+            loadFromUrl('logs/blackboard.json', 'blackboard'),
+            loadFromUrl('logs/pipeline_memory.json', 'pipelines')
+        ]);
+    }
+
+    async function loadFromUrl(url, type) {
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) return;
+            const data = await resp.json();
+            applyData(data, type);
+        } catch (e) {
+            // Silently fail - user may need to load via file input
+        }
+    }
+
+    function loadFileInput(input, type) {
+        const file = input.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const data = JSON.parse(e.target.result);
+                applyData(data, type);
+            } catch (err) {
+                alert('Invalid JSON: ' + err.message);
+            }
+        };
+        reader.readAsText(file);
+    }
+
+    function applyData(data, type) {
+        if (type === 'blackboard') {
+            bbData = data;
+            document.getElementById('bb-count').textContent = (data.entries || []).length;
+            populateBbFilters();
+            renderBlackboard();
+        } else if (type === 'pipelines') {
+            pipeData = data;
+            document.getElementById('pipe-count').textContent = (data.pipelines || []).length;
+            populatePipeFilters();
+            renderPipelines();
+        }
+    }
+
+    // ========== Blackboard Rendering ==========
+    function populateBbFilters() {
+        const authors = [...new Set((bbData.entries || []).map(e => e.author))].sort();
+        const select = document.getElementById('bb-author-filter');
+        const current = select.value;
+        select.innerHTML = '<option value="">All authors</option>';
+        authors.forEach(a => {
+            select.innerHTML += `<option value="${esc(a)}">${esc(a)}</option>`;
+        });
+        select.value = current;
+    }
+
+    function renderBlackboard() {
+        const search = document.getElementById('bb-search').value.toLowerCase();
+        const typeFilter = document.getElementById('bb-type-filter').value;
+        const authorFilter = document.getElementById('bb-author-filter').value;
+        const sort = document.getElementById('bb-sort').value;
+
+        let entries = [...(bbData.entries || [])];
+
+        // Filter
+        if (typeFilter) entries = entries.filter(e => e.entry_type === typeFilter);
+        if (authorFilter) entries = entries.filter(e => e.author === authorFilter);
+        if (search) {
+            entries = entries.filter(e => {
+                const content = typeof e.content === 'string' ? e.content : JSON.stringify(e.content);
+                return content.toLowerCase().includes(search)
+                    || (e.author || '').toLowerCase().includes(search)
+                    || (e.tags || []).some(t => t.toLowerCase().includes(search));
+            });
+        }
+
+        // Sort
+        if (sort === 'newest') entries.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        else if (sort === 'oldest') entries.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+        else if (sort === 'confidence') entries.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+
+        const container = document.getElementById('bb-entries');
+        if (entries.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <div class="icon">&#x1f4cb;</div>
+                    <h3>No entries found</h3>
+                    <p>Load blackboard.json or wait for agents to post entries.</p>
+                </div>`;
+            return;
+        }
+
+        container.innerHTML = entries.map((entry, idx) => {
+            const content = typeof entry.content === 'string'
+                ? entry.content
+                : JSON.stringify(entry.content, null, 2);
+            const typeClass = 'type-' + (entry.entry_type || 'artifact');
+            const tags = (entry.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('');
+            const time = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '';
+            const confPct = Math.round((entry.confidence || 1) * 100);
+
+            return `
+                <div class="entry">
+                    <div class="entry-header">
+                        <span class="entry-type ${typeClass}">${esc(entry.entry_type || 'unknown')}</span>
+                        <span class="entry-author">${esc(entry.author || 'unknown')}</span>
+                        <span class="entry-confidence">${confPct}%</span>
+                        <span class="entry-time">${esc(time)}</span>
+                    </div>
+                    ${tags ? `<div class="entry-tags">${tags}</div>` : ''}
+                    <div class="entry-content" id="bb-content-${idx}">${esc(content)}</div>
+                    ${content.length > 500 ? `<button class="btn-expand" onclick="toggleExpand('bb-content-${idx}', this)">Show more</button>` : ''}
+                </div>`;
+        }).join('');
+    }
+
+    // ========== Pipeline Rendering ==========
+    function populatePipeFilters() {
+        const tags = [...new Set((pipeData.pipelines || []).flatMap(p => p.tags || []))].sort();
+        const select = document.getElementById('pipe-tag-filter');
+        const current = select.value;
+        select.innerHTML = '<option value="">All tags</option>';
+        tags.forEach(t => {
+            select.innerHTML += `<option value="${esc(t)}">${esc(t)}</option>`;
+        });
+        select.value = current;
+    }
+
+    function calcEffectiveness(p) {
+        if (!p.usage_count) return 0;
+        const successRate = p.success_count / p.usage_count;
+        const confidence = Math.min(1.0, p.usage_count / 10);
+        return (p.success_score * 0.6 + successRate * 0.4) * confidence;
+    }
+
+    function renderPipelines() {
+        const search = document.getElementById('pipe-search').value.toLowerCase();
+        const sort = document.getElementById('pipe-sort').value;
+        const tagFilter = document.getElementById('pipe-tag-filter').value;
+
+        let pipelines = [...(pipeData.pipelines || [])];
+
+        // Filter
+        if (tagFilter) pipelines = pipelines.filter(p => (p.tags || []).includes(tagFilter));
+        if (search) {
+            pipelines = pipelines.filter(p =>
+                (p.name || '').toLowerCase().includes(search)
+                || (p.description || '').toLowerCase().includes(search)
+                || (p.task_pattern || '').toLowerCase().includes(search)
+                || (p.task_examples || []).some(t => t.toLowerCase().includes(search))
+            );
+        }
+
+        // Sort
+        if (sort === 'effectiveness') pipelines.sort((a, b) => calcEffectiveness(b) - calcEffectiveness(a));
+        else if (sort === 'recent') pipelines.sort((a, b) => (b.last_used || '').localeCompare(a.last_used || ''));
+        else if (sort === 'usage') pipelines.sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0));
+        else if (sort === 'score') pipelines.sort((a, b) => (b.success_score || 0) - (a.success_score || 0));
+
+        const container = document.getElementById('pipe-entries');
+        if (pipelines.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <div class="icon">&#x1f504;</div>
+                    <h3>No pipelines found</h3>
+                    <p>Load pipeline_memory.json or run orchestrate_emergent to create pipelines.</p>
+                </div>`;
+            return;
+        }
+
+        container.innerHTML = pipelines.map((pipe, idx) => {
+            const eff = calcEffectiveness(pipe);
+            const effPct = Math.round(eff * 100);
+            const scorePct = Math.round((pipe.success_score || 0) * 100);
+            const scoreClass = scorePct >= 70 ? 'score-high' : scorePct >= 40 ? 'score-mid' : 'score-low';
+            const steps = (pipe.steps || []);
+            const tags = (pipe.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('');
+            const lastUsed = pipe.last_used ? new Date(pipe.last_used).toLocaleString() : 'never';
+            const created = pipe.created_at ? new Date(pipe.created_at).toLocaleString() : '';
+
+            const stepsHtml = steps.map((s, si) => {
+                const detail = s.input_from ? `from: ${s.input_from}` : (s.output_key || '');
+                return `<div class="step-node">
+                    <span class="step-primitive">${esc(s.primitive || 'unknown')}</span>
+                    <span class="step-detail">${esc(detail)}</span>
+                </div>${si < steps.length - 1 ? '<span class="step-arrow">&rarr;</span>' : ''}`;
+            }).join('');
+
+            const examples = (pipe.task_examples || []).slice(0, 3).map(t =>
+                `<div class="task-example">${esc(t.length > 150 ? t.substring(0, 150) + '...' : t)}</div>`
+            ).join('');
+
+            return `
+                <div class="pipeline-card">
+                    <div class="pipeline-header">
+                        <span class="pipeline-name">${esc(pipe.name || 'Unnamed')}</span>
+                        <span class="pipeline-id">${esc(pipe.id || '')}</span>
+                        ${tags}
+                        <span class="pipeline-score ${scoreClass}">${scorePct}%</span>
+                    </div>
+                    <div class="pipeline-desc">${esc(pipe.description || '')}</div>
+                    <div class="pipeline-meta">
+                        <span class="pipeline-meta-item">Uses: <strong>${pipe.usage_count || 0}</strong></span>
+                        <span class="pipeline-meta-item">Success: <strong>${pipe.success_count || 0}</strong></span>
+                        <span class="pipeline-meta-item">Fail: <strong>${pipe.failure_count || 0}</strong></span>
+                        <span class="pipeline-meta-item">Effectiveness: <strong>${effPct}%</strong></span>
+                        <span class="pipeline-meta-item">Last used: <strong>${esc(lastUsed)}</strong></span>
+                        <span class="pipeline-meta-item">Created: <strong>${esc(created)}</strong></span>
+                        ${pipe.parent_id ? `<span class="pipeline-meta-item">Parent: <strong>${esc(pipe.parent_id)}</strong></span>` : ''}
+                    </div>
+                    <div class="pipeline-steps">${stepsHtml}</div>
+                    ${examples ? `<div class="task-examples"><strong style="font-size:12px;color:var(--text2);">Task examples:</strong>${examples}</div>` : ''}
+                </div>`;
+        }).join('');
+    }
+
+    // ========== Stats ==========
+    function renderStats() {
+        const entries = bbData.entries || [];
+        const pipelines = pipeData.pipelines || [];
+
+        // Overview
+        const totalEntries = entries.length;
+        const totalPipelines = pipelines.length;
+        const totalUsages = pipelines.reduce((s, p) => s + (p.usage_count || 0), 0);
+        const avgScore = pipelines.length
+            ? (pipelines.reduce((s, p) => s + (p.success_score || 0), 0) / pipelines.length * 100).toFixed(0)
+            : 0;
+
+        document.getElementById('stats-overview').innerHTML = `
+            <div class="stat-card"><div class="label">Blackboard Entries</div><div class="value primary">${totalEntries}</div></div>
+            <div class="stat-card"><div class="label">Pipelines</div><div class="value primary">${totalPipelines}</div></div>
+            <div class="stat-card"><div class="label">Total Pipeline Runs</div><div class="value success">${totalUsages}</div></div>
+            <div class="stat-card"><div class="label">Avg Success Score</div><div class="value warning">${avgScore}%</div></div>
+        `;
+
+        // BB by type
+        const typeCounts = {};
+        entries.forEach(e => { typeCounts[e.entry_type] = (typeCounts[e.entry_type] || 0) + 1; });
+        document.getElementById('stats-bb-types').innerHTML = Object.entries(typeCounts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([type, count]) => `<div class="stat-card"><div class="label">${esc(type)}</div><div class="value">${count}</div></div>`)
+            .join('');
+
+        // BB by author
+        const authorCounts = {};
+        entries.forEach(e => { authorCounts[e.author] = (authorCounts[e.author] || 0) + 1; });
+        document.getElementById('stats-bb-authors').innerHTML = Object.entries(authorCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10)
+            .map(([author, count]) => `<div class="stat-card"><div class="label">${esc(author)}</div><div class="value">${count}</div></div>`)
+            .join('');
+
+        // Primitives usage
+        const primCounts = {};
+        pipelines.forEach(p => {
+            (p.steps || []).forEach(s => {
+                primCounts[s.primitive] = (primCounts[s.primitive] || 0) + 1;
+            });
+        });
+        document.getElementById('stats-primitives').innerHTML = Object.entries(primCounts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([prim, count]) => `<div class="stat-card"><div class="label">${esc(prim)}</div><div class="value">${count}</div></div>`)
+            .join('');
+
+        // Top pipelines
+        const topPipes = [...pipelines].sort((a, b) => calcEffectiveness(b) - calcEffectiveness(a)).slice(0, 5);
+        document.getElementById('stats-top-pipelines').innerHTML = topPipes.map(p => {
+            const eff = Math.round(calcEffectiveness(p) * 100);
+            const steps = (p.steps || []).map(s => s.primitive).join(' -> ');
+            return `<div class="entry" style="padding:12px;">
+                <strong>${esc(p.name)}</strong> <span style="color:var(--text2);font-size:12px;">(${eff}% effective, ${p.usage_count} uses)</span>
+                <div style="font-size:12px;color:var(--primary-light);margin-top:4px;">${esc(steps)}</div>
+            </div>`;
+        }).join('') || '<div class="empty-state"><p>No pipeline data available</p></div>';
+    }
+
+    // ========== Helpers ==========
+    function esc(str) {
+        if (str == null) return '';
+        return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function toggleExpand(id, btn) {
+        const el = document.getElementById(id);
+        el.classList.toggle('expanded');
+        btn.textContent = el.classList.contains('expanded') ? 'Show less' : 'Show more';
+    }
+
+    // ========== Init ==========
+    window.addEventListener('DOMContentLoaded', () => {
+        loadAllData();
+    });
+    </script>
+</body>
+</html>

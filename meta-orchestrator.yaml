@@ -6,13 +6,13 @@ settings:
   default_agent: "meta_orchestrator"
   max_history: 50
   max_turns: 100  # Увеличиваем лимит ходов для агентов
-  agent_timeout: 300  # Таймаут выполнения агента в секундах (5 минут)
+  agent_timeout: 30  # Таймаут выполнения агента в секундах (5 минут)
   debug: false
   mcp_enabled: true
   # Настройки путей
-  working_directory: "C:/Users/rda/Documents/repo/agents_portable"  # Рабочая директория по умолчанию
+  working_directory: "D:/Work/repo/agents_portable"  # Рабочая директория по умолчанию
   config_directory: "."   # Директория конфигурации
-  logs_directory: "C:/Users/rda/Documents/repo/agents_portable/logs"
+  logs_directory: "D:/Work/repo/agents_portable"
   allow_path_override: true  # Разрешить переопределение пути при запуске
   # Настройки логирования
   agent_logging:
@@ -127,7 +127,6 @@ tools:
     server_command: ["npx", "@modelcontextprotocol/server-filesystem"]
     add_working_directory: true
     description: "MCP сервер для работы с файловой системой (ограничен рабочей директорией)"
-    prompt_addition: "Используй filesystem(task) для доступа к файловой системе. task - это операция, которую нужно выполнить."
   
   git:
     type: "mcp"
@@ -158,6 +157,30 @@ tools:
       mode: "basic" (простое исполнение - по умолчанию).
       Пример: orchestrate(task="Напиши скрипт...", agent_system_prompt="Ты Senior Python Developer...", executor_tools=["filesystem"])
 
+  orchestrate_emergent:
+    type: "function"
+    name: "orchestrate_emergent"
+    description: "Эмерджентная оркестрация с blackboard и самообучением для социальных взаимодействий"
+    env_vars:
+      DEFAULT_MODEL: "grok-4.1-fast"
+    prompt_addition: |
+      Используй orchestrate_emergent() для сложных многоагентных сценариев с социальными взаимодействиями.
+
+      Этот инструмент автоматически:
+      - Создает динамические пайплайны из примитивов (execute, critique, validate, vote, synthesize, branch)
+      - Использует blackboard для координации между агентами
+      - Сохраняет успешные пайплайны для переиспользования
+      - Поддерживает exploration vs exploitation стратегию
+
+      Параметры:
+      - task: задача для выполнения
+      - agent_system_prompt: (опционально) явный системный промпт для простого execute
+      - executor_tools: список инструментов
+      - use_blackboard: использовать общую память (по умолчанию true)
+      - validation_enabled: включить валидацию (по умолчанию true)
+      - exploration_rate: частота поиска новых решений vs использование известных (0-1, по умолчанию 0.2)
+
+
 # Агенты - полная конфигурация
 agents:
   meta_orchestrator:
@@ -166,14 +189,15 @@ agents:
     tools: ["orchestrate","read_markdown", "meta-orchestrator"]
     base_prompt: "base"
     verifier: "default_audit"
-    description: "Dynamically creates sub-agents, assigns tools, builds execution chains"
+    description: "Dynamically creates sub-agents, assigns tools, builds execution chains. Specializes in multi-agent social interactions and emergent behavior."
     custom_prompt: |
       You are a meta-orchestrator of a multi-agent system. Your primary responsibility is to create specialized agents dynamically to solve tasks efficiently.
-      
+
       ## Core Principles
       - Always respond in Russian.
       - Before taking active actions: briefly clarify any missing requirements if the risk of error is high without them.
       - Use orchestrate() to create specialized agents for task execution.
+      - Use orchestrate_emergent() for complex social interactions and emergent behavior.
       - Only invoke tools yourself for clarifications and verification of agent work.
       - CRITICAL: Never execute tasks independently! Always delegate to specialized agents.
       - AGENT ISOLATION: Created agents cannot see messages or outputs of other agents. To pass context between agents:
@@ -236,7 +260,7 @@ agents:
       - Summary: Brief description of what was done/resolved.
       - Details: Key decisions and rationale.
       - Next Steps: What to do next (if applicable).
-      
+
       ## Agent Verification Requirements
       
       After creating and executing agents, you MUST verify their work quality:
