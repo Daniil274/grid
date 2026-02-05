@@ -1,0 +1,112 @@
+# Конфигурация Unified Agent Bot - Telegram Server
+# Объединяет nanobot (Telegram, память, скилы) и grid (агенты, оркестрация)
+
+# ===== TELEGRAM =====
+telegram:
+  # ВАЖНО: Укажите ваш токен бота от @BotFather
+  # Для безопасности можно также использовать переменную окружения TELEGRAM_BOT_TOKEN
+  token: "8138042180:AAFOuI6gC24m8J9v86kLjO_m4_-cenMjoWo"
+
+  # Настройки polling
+  polling:
+    timeout: 30
+    drop_pending_updates: false  # true = игнорировать старые сообщения при запуске
+
+# ===== ПУТИ =====
+paths:
+  # Рабочая директория для памяти и навыков (nanobot workspace)
+  workspace: "./workspace"
+
+  # Директория для персистентных данных (логи, история, кэш)
+  persist: "./data"
+
+# ===== ПАМЯТЬ =====
+memory:
+  # Максимальное количество сообщений в краткосрочной памяти
+  max_message_history: 15
+
+  # Автосохранение в долгосрочную память
+  auto_save_to_long_term: true
+  auto_save_interval_minutes: 30
+
+# ===== ВОЗМОЖНОСТИ =====
+features:
+  # Включить систему навыков (nanobot skills)
+  enable_skills: true
+
+  # Включить живую прозрачность (обновления в реальном времени)
+  enable_transparency: true
+
+  # Показывать детали подагентов
+  show_subagents: true
+
+  # Показывать вызовы инструментов
+  show_tool_calls: true
+
+# ===== ДОСТУП =====
+access:
+  # Список разрешенных user_id (null = все пользователи разрешены)
+  # Чтобы узнать ваш user_id: отправьте /start боту и посмотрите логи
+  allowed_users: null
+
+  # Примеры:
+  # allowed_users:
+  #   - 123456789
+  #   - 987654321
+
+# ===== АГЕНТЫ =====
+agents:
+  # Модель OpenAI для агентов
+  model: "gpt-4o"
+
+  # Максимальное время работы агента (секунды)
+  max_execution_time: 300
+
+  # Максимальная глубина вложенности подагентов
+  max_agent_depth: 5
+
+# ===== ЛОГИРОВАНИЕ =====
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+  # Файлы логов
+  files:
+    main: "telegram_server.log"
+    agents: "agents.log"
+    errors: "errors.log"
+
+  # Ротация логов
+  rotation:
+    max_bytes: 10485760  # 10 MB
+    backup_count: 5
+
+# ===== ПРОИЗВОДИТЕЛЬНОСТЬ =====
+performance:
+  # Максимальное количество одновременных задач на пользователя
+  max_concurrent_tasks_per_user: 1
+
+  # Интервал между обновлениями прогресса в Telegram (секунды)
+  progress_update_interval: 1.0
+
+  # Размер очереди событий прозрачности
+  transparency_queue_size: 1000
+
+# ===== УСТОЙЧИВОСТЬ К ОШИБКАМ =====
+resilience:
+  # Количество попыток повторного подключения к Telegram
+  telegram_reconnect_attempts: 5
+  telegram_reconnect_delay: 5  # секунды
+
+  # Автоматический перезапуск при критических ошибках
+  auto_restart_on_critical_error: true
+
+  # Graceful degradation
+  fallback_mode:
+    # Продолжать работу без памяти если она недоступна
+    continue_without_memory: true
+
+    # Продолжать работу без навыков если они недоступны
+    continue_without_skills: true
+
+    # Продолжать работу без прозрачности если она недоступна
+    continue_without_transparency: true

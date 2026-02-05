@@ -60,8 +60,25 @@ models:
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 8192
-    description: "DeepSeek V3.2 Speciale модель"
+    description: "DeepSeek V3.2 Speciale модель. Для коротких задач"
     streaming_enabled: true
+
+  kimi-k2:
+    name: "moonshotai/kimi-k2.5"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Kimi k2 модель. Для оркестрации и комплексных задач."
+    streaming_enabled: true
+
+  glm-flash:
+    name: "z-ai/glm-4.7-flash"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Быстрое качественное решение задач."
+    streaming_enabled: true
+
 
   grok-4.1-fast:
     name: "x-ai/grok-4.1-fast"
@@ -121,12 +138,18 @@ tools:
       GIT_SIGN_COMMITS: "false"
     description: "Управление Git: clone, commit, branch, merge, rebase, stash"
 
+  meta-orchestrator:
+    type: "agent"
+    name: "meta-orchestrator"
+    description: "Вызывает агента оркестрации."
+    prompt_addition: "Используй call_file_agent(task) для задач по работе с файлами, где task - это задача, которую должен выполнить файловый агент.  Используй unified diff для редактирования файлов."
+
   orchestrate:
     type: "function"
     name: "orchestrate"
     description: "Запускает динамический пайплайн (создает агента на лету)"
     env_vars:
-      DEFAULT_MODEL: "deepseek-v3.2-speciale"  # Модель для динамического агента по умолчанию
+      DEFAULT_MODEL: "glm-flash"  # Модель для динамического агента по умолчанию
     prompt_addition: |
       Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
       task: четкая задача для выполнения (строка).
@@ -139,8 +162,8 @@ tools:
 agents:
   meta_orchestrator:
     name: "Meta-Orchestrator"
-    model: "grok-4.1-fast"
-    tools: ["orchestrate", "filesystem", "git", "terminal"]
+    model: "glm-flash"
+    tools: ["orchestrate","read_markdown", "meta-orchestrator"]
     base_prompt: "base"
     verifier: "default_audit"
     description: "Dynamically creates sub-agents, assigns tools, builds execution chains"

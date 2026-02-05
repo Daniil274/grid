@@ -1,0 +1,17 @@
+# Unified Agent Bot - Telegram Server Requirements
+# Установка: pip install -r requirements-telegram.txt
+
+# Telegram Bot API
+python-telegram-bot>=21.0
+
+# OpenAI и Agents SDK (если еще не установлен)
+openai>=1.0.0
+
+# YAML конфигурация
+pyyaml>=6.0
+
+# Системные метрики для health monitoring
+psutil>=5.9.0
+
+# Опционально: для улучшенного логирования
+# loguru>=0.7.0
