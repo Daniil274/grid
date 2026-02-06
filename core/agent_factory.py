@@ -1300,11 +1300,60 @@ class AgentFactory:
                         if run_ctx.should_restart:
                             logger.info("Restart signal detected during streaming. Breaking loop.")
                             break
-                            
+
                         try:
                             fragment = self._stream_observer.handle_event(event, agent_key=agent_key)
                             if fragment:
                                 streaming_text_parts.append(fragment)
+
+                            # Отправить события инструментов в broadcaster
+                            if self.broadcaster:
+                                # DEBUG: Логируем ВСЕ события для понимания структуры
+                                logger.debug(f"Stream event: type={type(event).__name__}, event={event}")
+
+                                if isinstance(event, RunItemStreamEvent):
+                                    event_name = getattr(event, "name", "")
+                                    item = getattr(event, "item", None)
+
+                                    # DEBUG: Детальное логирование RunItemStreamEvent
+                                    logger.info(f"🔍 RunItemStreamEvent: name='{event_name}', item={item}")
+                                    if item:
+                                        raw_item = getattr(item, "raw_item", None)
+                                        logger.info(f"   raw_item: {raw_item}")
+                                        if raw_item:
+                                            logger.info(f"   raw_item.name: {getattr(raw_item, 'name', None)}")
+                                            logger.info(f"   raw_item attrs: {dir(raw_item)}")
+
+                                    if event_name == "tool_called" and item is not None:
+                                        raw_item = getattr(item, "raw_item", None)
+                                        tool_name = getattr(raw_item, "name", None) or "tool"
+                                        arguments = getattr(raw_item, "arguments", None)
+
+                                        await self.emit_progress_event(
+                                            event_type="tool_call_start",
+                                            agent_name=agent_key,
+                                            content=f"Вызов инструмента: {tool_name}",
+                                            status="running",
+                                            details={
+                                                "tool_name": tool_name,
+                                                "arguments": arguments if isinstance(arguments, dict) else str(arguments)
+                                            }
+                                        )
+                                    elif event_name == "tool_output" and item is not None:
+                                        raw_item = getattr(item, "raw_item", None)
+                                        tool_name = getattr(raw_item, "name", None) or "tool"
+                                        output = getattr(raw_item, "output", None)
+
+                                        await self.emit_progress_event(
+                                            event_type="tool_call_end",
+                                            agent_name=agent_key,
+                                            content=f"Результат: {tool_name}",
+                                            status="completed",
+                                            details={
+                                                "tool_name": tool_name,
+                                                "output": str(output)[:500] if output else ""
+                                            }
+                                        )
                         except Exception:
                             logger.exception(
                                 "Stream observer failed for %s", type(event).__name__

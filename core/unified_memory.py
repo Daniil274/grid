@@ -192,7 +192,8 @@ class UnifiedMemory:
         Вспомнить информацию из памяти.
 
         Args:
-            query: Опциональный поисковый запрос (простой keyword search)
+            query: Опциональный поисковый запрос (простой keyword search).
+                   Если query="null" или пустая строка - возвращается весь контекст.
             days_back: Сколько дней назад искать в дневных заметках
 
         Returns:
@@ -207,13 +208,15 @@ class UnifiedMemory:
 
             combined = memory_content + "\n\n" + recent_notes
 
-            if query:
+            # Normalize query: treat "null", "None", empty string as None
+            if query and query.strip().lower() not in ("null", "none", ""):
                 # Simple keyword search
                 if query.lower() in combined.lower():
                     return combined
                 else:
                     return f"Ничего не найдено по запросу: {query}"
             else:
+                # Return all memory if query is None, "null", "none", or empty
                 return combined
         except Exception as e:
             logger.error(f"Failed to recall memory: {e}")

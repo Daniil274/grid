@@ -1,0 +1,173 @@
+# Конфигурация Blackboard системы
+# Blackboard - это общая память для координации между агентами
+
+blackboard:
+  enabled: true
+
+  # Пути для хранения
+  storage:
+    type: "file"  # file или memory (в будущем можно добавить redis, etc.)
+    path: "./data/blackboard"  # Директория для хранения Blackboard записей
+    persist: true  # Сохранять на диск
+
+  # Настройки интеграции с памятью
+  memory_integration:
+    enabled: true  # Включить автосохранение в UnifiedMemory
+    save_decisions: true  # Сохранять DECISION записи в MEMORY.md
+    save_artifacts: true  # Сохранять ARTIFACT записи в MEMORY.md
+    save_pipelines: true  # Сохранять успешные PIPELINE в MEMORY.md
+
+  # Типы записей Blackboard
+  entry_types:
+    DECISION:
+      description: "Важное решение агента или системы"
+      auto_save_to_memory: true
+      priority: "high"
+
+    ARTIFACT:
+      description: "Созданный артефакт (файл, код, документ)"
+      auto_save_to_memory: true
+      priority: "medium"
+
+    PIPELINE:
+      description: "Успешно выполненный пайплайн действий"
+      auto_save_to_memory: true
+      priority: "medium"
+
+    STATUS:
+      description: "Статус выполнения задачи"
+      auto_save_to_memory: false
+      priority: "low"
+
+    QUERY:
+      description: "Запрос информации от агента"
+      auto_save_to_memory: false
+      priority: "low"
+
+    RESPONSE:
+      description: "Ответ на запрос"
+      auto_save_to_memory: false
+      priority: "low"
+
+  # Лимиты
+  limits:
+    max_entries: 1000  # Максимум записей в Blackboard
+    max_age_days: 30  # Максимальный возраст записи (дни)
+    cleanup_enabled: true  # Включить автоочистку старых записей
+    cleanup_interval_hours: 24  # Интервал очистки (часы)
+
+  # Логирование
+  logging:
+    enabled: true
+    level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+    log_all_entries: true  # Логировать все записи
+    log_memory_saves: true  # Логировать сохранения в память
+
+  # Фильтры для автосохранения в память
+  memory_filters:
+    min_content_length: 10  # Минимальная длина контента для сохранения
+    exclude_patterns:  # Паттерны для исключения из автосохранения
+      - "^STATUS:"
+      - "^TEMP:"
+      - "^DEBUG:"
+    include_metadata: true  # Включать метаданные в сохранение
+
+# Агент Blackboard - специализированный агент для управления Blackboard
+agents:
+  blackboard_agent:
+    name: "Blackboard агент"
+    model: "openai-oss-120b"
+    tools: ["filesystem"]  # Минимальный набор инструментов
+    base_prompt: "base"
+    description: "Специалист по управлению Blackboard системой"
+    custom_prompt: |
+      Ты агент Blackboard - специалист по управлению общей памятью для координации агентов.
+      Твоя задача: создавать, читать, обновлять и удалять записи в Blackboard.
+
+      Типы записей:
+      - DECISION: важные решения (автоматически сохраняются в MEMORY.md)
+      - ARTIFACT: созданные артефакты (файлы, код)
+      - PIPELINE: успешные пайплайны действий
+      - STATUS: текущий статус задачи
+      - QUERY: запросы информации
+      - RESPONSE: ответы на запросы
+
+      Правила работы:
+      1. DECISION и ARTIFACT записи автоматически сохраняются в долгосрочную память
+      2. STATUS, QUERY, RESPONSE - временные записи
+      3. Записи старше 30 дней автоматически удаляются
+      4. Всегда используй четкие и описательные заголовки
+      5. Отвечай на русском языке
+
+      Примеры записей:
+      - DECISION: "Решено использовать PostgreSQL для хранения данных"
+      - ARTIFACT: "Создан модуль auth.py с JWT аутентификацией"
+      - PIPELINE: "Успешно выполнен пайплайн: анализ → рефакторинг → тестирование"
+      - STATUS: "Задача в процессе выполнения (50%)"
+
+# Интеграция Blackboard с другими компонентами
+integration:
+  # Интеграция с агентами
+  agent_access:
+    enabled: true
+    # Агенты, имеющие полный доступ к Blackboard
+    full_access:
+      - "orchestrator"
+      - "coordinator"
+      - "meta_orchestrator"
+      - "blackboard_agent"
+    # Агенты с доступом только для чтения
+    read_only:
+      - "file_agent"
+      - "git_agent"
+      - "code_agent"
+    # Агенты без доступа
+    no_access:
+      - "vision_analyzer"
+      - "screenshot_analyzer"
+
+  # Интеграция с UnifiedMemory
+  unified_memory:
+    enabled: true
+    auto_register: true  # Автоматически регистрировать UnifiedMemory при инициализации
+
+  # Webhook для уведомлений (опционально)
+  webhooks:
+    enabled: false
+    on_decision: null  # URL для уведомлений о DECISION записях
+    on_artifact: null  # URL для уведомлений о ARTIFACT записях
+
+# Примеры использования Blackboard
+examples:
+  decision_example: |
+    blackboard.add_entry(
+        entry_type="DECISION",
+        agent_name="coordinator",
+        content="Решено использовать FastAPI вместо Flask для API",
+        metadata={"reason": "Лучшая производительность и async поддержка"}
+    )
+    # Автоматически сохранится в MEMORY.md
+
+  artifact_example: |
+    blackboard.add_entry(
+        entry_type="ARTIFACT",
+        agent_name="code_agent",
+        content="Создан модуль api/auth.py",
+        metadata={"path": "api/auth.py", "lines": 150}
+    )
+
+  pipeline_example: |
+    blackboard.add_entry(
+        entry_type="PIPELINE",
+        agent_name="meta_orchestrator",
+        content="Пайплайн рефакторинга: анализ кода → выявление проблем → рефакторинг → тесты",
+        metadata={"duration": "5 минут", "status": "success"}
+    )
+
+  status_example: |
+    blackboard.add_entry(
+        entry_type="STATUS",
+        agent_name="file_agent",
+        content="Обработка файлов: 45/100 (45%)",
+        metadata={"progress": 45}
+    )

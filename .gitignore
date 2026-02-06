@@ -61,6 +61,10 @@ demo_*.py
 *_demo.*
 traces/
 
+# User data isolation (per-user workspaces and memory)
+workspace/user_*/
+data/user_*/
+
 # Dependencies
 node_modules/
 

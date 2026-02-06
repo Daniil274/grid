@@ -6,10 +6,12 @@ from .function_tools import get_tools_by_names, get_all_tools, AVAILABLE_TOOLS
 from .file_tools import *
 from .git_tools import *
 from .markdown_tools import *
+from .orchestrator_tools import *
+from .memory_tools import *
 
 __all__ = [
     "get_tools_by_names",
-    "get_all_tools", 
+    "get_all_tools",
     "AVAILABLE_TOOLS",
     # File tools
     "read_file", "write_file", "list_files", "get_file_info", "search_files", "edit_file_patch",
@@ -26,4 +28,10 @@ __all__ = [
     "git_tag", "git_tag_list",
     # Markdown tools
     "read_markdown",
+    # Orchestration tools
+    "orchestrate",
+    # Memory tools
+    "save_memory", "recall_memory", "append_daily_note", "get_daily_notes",
+    "get_memory_stats", "clear_conversation_memory",
+    "set_unified_memory", "get_unified_memory",
 ]

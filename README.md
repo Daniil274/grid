@@ -101,6 +101,35 @@ Multiple images:
 python agent_chat.py -a vision_analyzer -m "Compare & img1.png & img2.jpg"
 ```
 See [docs/CLI_IMAGES.md](docs/CLI_IMAGES.md) for full CLI image support guide.
+
+### Telegram Bot
+The system includes a Telegram bot interface with full file handling support:
+
+```bash
+# Set your bot token in .env
+TELEGRAM_BOT_TOKEN=your_token_here
+
+# Run the Telegram server
+python telegram_server.py
+```
+
+**Features:**
+- 💬 Natural language interaction with agents
+- 📤 Send files (documents, images, audio, video) to the bot
+- 📥 Receive files from agents using `/sendfile` command
+- 💾 Per-user workspace isolation
+- 🧠 Integrated memory system
+- 🔄 Real-time agent status updates
+
+**File Support:**
+- Documents (up to 20 MB)
+- Images/Photos (automatic format handling)
+- Audio/Voice messages
+- Video (up to 50 MB)
+
+**Documentation:**
+- [Telegram Files Guide](docs/TELEGRAM_FILES.md) - Complete file handling documentation
+- [Quick Start](docs/TELEGRAM_FILES_QUICKSTART.md) - Testing and troubleshooting guide
 ## Configuration
 Configuration is defined in `config.yaml` and validated via Pydantic (`schemas.py`).
 
