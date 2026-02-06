@@ -162,11 +162,11 @@ class Logger:
             if Path(log_dir).is_absolute():
                 log_path = Path(log_dir)
             else:
-                # Force use of project root logs directory
-                import os
-                project_root = os.environ.get('PROJECT_ROOT', '/workspaces/grid')
-                log_path = Path(project_root) / "logs"
-            
+                # Determine the project root directory (where this file is located)
+                # This file is at <project_root>/utils/logger.py
+                project_root = Path(__file__).parent.parent.resolve()
+                log_path = project_root / log_dir
+
             log_path.mkdir(parents=True, exist_ok=True)
             
             # General log file
@@ -246,15 +246,23 @@ class Logger:
     def setup_file_logging(self, file_path: str, level: int = logging.DEBUG) -> None:
         """Attach a file handler to this logger.
         Args:
-            file_path: Path to the log file to write
+            file_path: Path to the log file to write (absolute or relative to project root)
             level: Minimum level for this handler
         """
         try:
-            # Ensure parent directory exists
+            # Convert to Path object
             path_obj = Path(file_path)
+
+            # If relative path, resolve it relative to project root, not current working directory
+            if not path_obj.is_absolute():
+                # This file is at <project_root>/utils/logger.py
+                project_root = Path(__file__).parent.parent.resolve()
+                path_obj = project_root / path_obj
+
+            # Ensure parent directory exists
             if path_obj.parent and not path_obj.parent.exists():
                 path_obj.parent.mkdir(parents=True, exist_ok=True)
-            
+
             handler = NonLockingFileHandler(path_obj, level=level)
             handler.setLevel(level)
             handler.setFormatter(LegacyFormatter())

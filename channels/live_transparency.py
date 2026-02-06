@@ -68,19 +68,22 @@ class LiveTransparencyBroadcaster:
     с spoilers и обновляет сообщения в Telegram с rate limiting.
     """
 
-    def __init__(self, telegram_app=None):
+    def __init__(self, telegram_app=None, show_tool_calls: bool = True, update_interval: float = 1.0):
         """
         Args:
             telegram_app: python-telegram-bot Application instance
+            show_tool_calls: Показывать ли вызовы инструментов
+            update_interval: Интервал обновления в секундах
         """
         self.app = telegram_app
+        self.show_tool_calls = show_tool_calls
         self.progress_queue: asyncio.Queue[ProgressEvent] = asyncio.Queue()
 
         # Tracking active progress messages
         self.active_messages: Dict[str, ProgressMessageState] = {}
 
-        # Rate limiting: max 1 edit per second per message
-        self.MIN_EDIT_INTERVAL = 1.0  # seconds
+        # Rate limiting: настраиваемый интервал обновления
+        self.MIN_EDIT_INTERVAL = update_interval
 
         # Buffer for pending updates
         self.pending_updates: Dict[str, List[ProgressEvent]] = {}

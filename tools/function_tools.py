@@ -8,6 +8,7 @@ from .git_tools import GIT_TOOLS, get_git_tools, get_git_tools_by_names
 from .orchestrator_tools import ORCHESTRATOR_TOOLS
 from .ocr_tools import OCR_TOOLS
 from .markdown_tools import MARKDOWN_TOOLS
+from .memory_tools import MEMORY_TOOLS
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -28,6 +29,7 @@ AVAILABLE_TOOLS = {
     **ORCHESTRATOR_TOOLS,
     **OCR_TOOLS,
     **MARKDOWN_TOOLS,
+    **MEMORY_TOOLS,  # Добавляем memory инструменты
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -76,6 +78,14 @@ TOOL_ALIASES = {
     # Orchestration
     "orchestrate": "orchestrate",
     "orchestrate_emergent": "orchestrate_emergent",
+
+    # Memory operations
+    "save_memory": "save_memory",
+    "recall_memory": "recall_memory",
+    "append_daily_note": "append_daily_note",
+    "get_daily_notes": "get_daily_notes",
+    "get_memory_stats": "get_memory_stats",
+    "clear_conversation_memory": "clear_conversation_memory",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:
