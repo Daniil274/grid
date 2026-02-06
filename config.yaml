@@ -1,0 +1,545 @@
+# Полная конфигурация AI системы
+# Провайдеры -> Модели -> Инструменты -> Агенты
+
+# Глобальные настройки
+settings:
+  default_agent: "chat_agent"  # Изменено на chat_agent как главную точку входа
+  max_history: 50
+  max_turns: 100  # лимит ходов для агентов
+  agent_timeout: 300  # Таймаут выполнения агента в секундах (5 минут)
+  debug: false
+  mcp_enabled: true
+  # Настройки путей
+  working_directory: "D:/Work/repo/agents_portable"  # Рабочая директория по умолчанию
+  config_directory: "."   # Директория конфигурации
+  logs_directory: "D:/Work/repo/agents_portable/logs"
+  allow_path_override: true  # Разрешить переопределение пути при запуске
+  # Настройки логирования
+  agent_logging:
+    enabled: true
+    level: "full"  # basic, detailed, full
+    save_prompts: true
+    save_conversations: true
+    save_executions: true
+    # Общие правила использования инструментов (добавляются к каждому агенту один раз)
+    tools_common_rules: |
+      Всегда выполняй операции с файлами через инструменты и возвращай их результаты.
+      Запрещено утверждать создание/изменение файла без вызова инструмента.
+  # Настройки обработки изображений
+  image_processing:
+    enabled: true
+    auto_resize: true  # Автоматически уменьшать большие изображения
+    max_width: 1920  # Максимальная ширина в пикселях
+    max_height: 1080  # Максимальная высота в пикселях
+    max_file_size_mb: 10  # Максимальный размер файла в MB
+    jpeg_quality: 85  # Качество JPEG (1-100). 85 дает ~8k токенов, хорошо для текста
+
+# Настройки памяти
+memory:
+  enabled: true
+  workspace: "./workspace"
+  max_daily_notes_days: 30  # Сколько дней хранить daily notes
+  auto_save_important: true  # Автосохранение важных обменов
+  blackboard_integration: true  # Сохранять Blackboard DECISION в память
+
+# Настройки Telegram бота
+telegram:
+  # Токен бота (загружается из переменной окружения TELEGRAM_BOT_TOKEN)
+  token_env: "TELEGRAM_BOT_TOKEN"
+
+  # Базовые настройки
+  polling_timeout: 30  # Таймаут polling в секундах
+
+  # Пути для данных
+  workspace_path: "./workspace"  # Рабочая директория для временных данных
+  persist_path: "./data"  # Директория для постоянных данных
+
+  # Настройки памяти
+  max_message_history: 15  # Количество сообщений в истории
+  memory_commands_enabled: true  # Команды /recall, /daily и т.д.
+
+  # Возможности
+  enable_transparency: false  # Отключено: live-обновления вызывают flood control в Telegram
+  show_tool_calls: false  # Отключено: live-обновления вызывают flood control в Telegram
+
+  # Доступ (null = все пользователи разрешены)
+  allowed_users: null  # Список разрешенных user_id или null для всех
+
+  # Настройки производительности
+  max_concurrent_tasks_per_user: 1  # Максимум одновременных задач на пользователя
+  progress_update_interval: 2.0  # Интервал обновления прогресса (секунды) - увеличен для избежания флуд-контроля
+ 
+# Провайдеры API
+providers:
+  lm-studio:
+    name: "lm-studio"
+    base_url: "http://192.168.3.2:1234/v1"
+    api_key: "lm-studio"
+    timeout: 300
+    max_retries: 3
+  
+  openrouter:
+    name: "openrouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+
+
+
+# Модели
+models:
+  deepseek-v3.2-speciale:
+    name: "deepseek/deepseek-v3.2-exp"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8192
+    description: "DeepSeek V3.2 Speciale модель"
+    streaming_enabled: true
+
+  grok-4.1-fast:
+    name: "x-ai/grok-4.1-fast"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Grok 4.1 Fast модель"
+    streaming_enabled: true
+
+  glm-4.7-flash:
+    name: "z-ai/glm-4.7-flash:turbo"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "GLM 4.7 Flash модель"
+    streaming_enabled: true
+
+  openai-oss-120b:
+    name: "openai/gpt-oss-120b"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8192
+    description: "OpenAI OSS 120b модель"
+
+
+  qwen3-8b:
+    name: "wen/qwen3-vl-8b"
+    provider: "lm-studio"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Qwen 3 8b модель"
+
+# Минимальная секция проверяющих (для аудита в Output guardrail)
+checkers:
+  default_audit:
+    model: "qwen3"   # опционально для будущего расширения; сейчас не вызывается
+    purpose: "output_audit"
+    prompt: |
+      Ты проверяющий агент. Тебе предоставляется контекст задачи агента, вывод агента и список использованных инструментов.
+      Проверь что агент использует оптимальный инструмент для выполнения задачи и его действия соответствуют контексту и цели задачи.
+      Вход: одна строка JSON с полями task_text, tools_used, agent_output.
+      Верни строго JSON: {"status":"ok|failed","reason":"...", "details":"..."}.
+    tool_prompt: |
+      Ты проверяющий агент вызовов инструментов. Оцени, корректен ли вызов инструмента с учётом цели задачи.
+      Не блокируй вызовы инструментов, проверяющих доступ.
+      Вход: JSON {task_text, tools_used, tool_name, tool_arguments}.
+      Верни строго JSON: {"status":"ok|failed","reason":"...","details":"..."}.
+
+# Инструменты
+tools:
+  list_files:
+    type: "function"
+    description: "Инструмент для получения списка файлов в директории."
+    prompt_addition: "Используй list_files(directory) для получения списка файлов в директории. directory - директория (по умолчанию '.')."
+
+  # DeepSeek-OCR (Native Tool)
+  pdf:
+    type: "function"
+    description: "Инструмент для работы с PDF файлами (DeepSeek-OCR). Конвертирует страницы в Markdown с сохранением изображений."
+    prompt_addition: "Используй pdf(pdf_path, pages) для чтения PDF. pages - диапазон страниц (например '1:5' или '1:1')."
+
+  get_screenshot_ocr:
+    type: "function"
+    description: "Инструмент для работы с OCR скриншотами. Извлекает текст из скриншота."
+    prompt_addition: "Используй get_screenshot_ocr(monitor_index) для получения текста из скриншота. monitor_index - индекс монитора (0 по умолчанию)."
+
+  # Markdown Reader
+  read_markdown:
+    type: "function"
+    description: "Инструмент для чтения Markdown файлов. Извлекает и показывает изображения агенту."
+    prompt_addition: "Используй read_markdown(file_path) для чтения .md файлов."
+
+  # Memory Tools - инструменты для работы с памятью
+  save_memory:
+    type: "function"
+    description: "Сохранить важную информацию в память агента (долгосрочную или дневную)"
+    prompt_addition: "Используй save_memory(content, is_long_term) для сохранения информации. is_long_term=True для MEMORY.md, False для daily_notes."
+
+  recall_memory:
+    type: "function"
+    description: "Поиск информации в памяти по ключевым словам"
+    prompt_addition: "Используй recall_memory(query, days_back) для поиска в памяти. query - поисковый запрос, days_back - сколько дней назад искать."
+
+  append_daily_note:
+    type: "function"
+    description: "Добавить заметку в дневник (daily_notes)"
+    prompt_addition: "Используй append_daily_note(note) для добавления заметки в дневной файл."
+
+  get_daily_notes:
+    type: "function"
+    description: "Получить дневные заметки за последние N дней"
+    prompt_addition: "Используй get_daily_notes(days_back) для получения заметок. По умолчанию days_back=1 (только сегодня)."
+
+  get_memory_stats:
+    type: "function"
+    description: "Получить статистику по памяти агента"
+    prompt_addition: "Используй get_memory_stats() для получения статистики: размер памяти, количество заметок, сообщений."
+
+  clear_conversation_memory:
+    type: "function"
+    description: "Очистить историю текущего разговора (краткосрочная память)"
+    prompt_addition: "Используй clear_conversation_memory() для сброса контекста разговора. Долгосрочная память (MEMORY.md) сохранится."
+
+  delete_memory_entry:
+    type: "function"
+    description: "Удалить конкретную запись из памяти агента"
+    prompt_addition: "Используй delete_memory_entry(entry_text, from_long_term) для удаления записи. entry_text - точный текст или его часть, from_long_term=True для MEMORY.md, False для дневных заметок."
+
+  edit_memory_entry:
+    type: "function"
+    description: "Редактировать запись в памяти агента"
+    prompt_addition: "Используй edit_memory_entry(old_text, new_text, in_long_term) для редактирования записи. old_text - текст для поиска, new_text - новый текст, in_long_term=True для MEMORY.md, False для дневных заметок."
+
+  # MCP серверы
+  terminal:
+    type: "mcp"
+    server_command: ["npx", "@dillip285/mcp-terminal"]
+    add_working_directory: true
+    description: "MCP сервер для выполнения команд терминала"
+    prompt_addition: "Используй execute_command для выполнения команд в терминале."
+  
+  # Файловая система
+  filesystem:
+    type: "mcp"
+    server_command: ["npx", "@modelcontextprotocol/server-filesystem"]
+    add_working_directory: true
+    description: "MCP сервер для работы с файловой системой (ограничен рабочей директорией)"
+    prompt_addition: "Используй filesystem для доступа к файловой системе."
+
+  sequentialthinking:
+    type: "mcp"
+    server_command: ["npx", "@modelcontextprotocol/server-sequential-thinking"]
+    description: "MCP сервер для последовательного мышления"
+    prompt_addition: "ВАЖНО!!! ВСЕГДА Используй sequential thinking для анализа, планирования задачи. Вызывай его перед выполнением любой задачи."
+  
+  
+  # Агенты как инструменты
+  file_agent:
+    type: "agent"
+    name: "call_file_agent"
+    description: "Вызывает файлового агента для работы с файлами"
+    prompt_addition: "Используй call_file_agent(task) для задач по работе с файлами, где task - это задача, которую должен выполнить файловый агент.  Используй unified diff для редактирования файлов."
+    # Context sharing configuration for agent tools
+    context_strategy: "conversation"
+    context_depth: 5
+    include_tool_history: true
+   
+  task_analyst:
+    type: "agent"
+    name: "call_task_analyst"
+    description: "Вызывает аналитика задач для анализа задач и составления плана действий."
+    prompt_addition: "ВСЕГДА ВЫЗЫВАЙ call_code_agent(task) для помощи в составлении плана действий. task - это задача, которую нужно решить с полным контекстом и списком досткупных тебе инструментов. БЕЗ ПРЕДОСТАВЛЕНИЯ ПОЛНОГО КОНТЕКСТА И СПИСКА ДОСТУПНЫХ ИНСТРУМЕНТОВ АНАЛИТИК НЕ ПОМОЖЕТ!!! НЕ вызывай другие инструменты до вызова аналитика."
+    # Context sharing configuration for agent tools
+    context_strategy: "full"
+  
+  code_agent:
+    type: "agent"
+    name: "call_code_agent"
+    description: "Вызывает кодового агента для работы с кодом и программированием"
+    prompt_addition: "Всегда call_code_agent(task) для задач, связанных с кодом или с файлами кода. task - это задача, которую должен решить кодовый агент с путем к файлу, директории или репозиторию и подробным описанием задачи."
+    # Context sharing configuration for agent tools
+
+  
+  coordinator:
+    type: "agent"
+    name: "call_coordinator"
+    description: "Вызывает координатора для планирования и решения задачи"
+    prompt_addition: |
+      Вызывай call_coordinator(task) для планирования и решения задачи. 
+      task - это задача, которую нужно решить.
+    # Context sharing configuration for agent tools
+
+  
+  context_wrapper:
+    type: "agent"
+    name: "call_context_wrapper"
+    description: "Вызывает сборщика контекста для управления контекстом и взаимодействия с агентами"
+    prompt_addition: "Используй call_context_wrapper(task) для получения контекста по кодовой базе. task - это задача для которой требуется контекст."
+
+
+  debugger:
+    type: "agent"
+    name: "call_debugger"
+    description: "Вызывает отладчика для отладки кода"
+    prompt_addition: "Используй call_debugger(task) для запуска программ и отладки кода."
+
+
+  orchestrator:
+    type: "agent"
+    name: "orchestrator"
+    description: "Запускает динамический пайплайн."
+    # Модель для динамического агента по умолчанию
+    prompt_addition: |
+      Используй orchestrator(task) когда нужно создать агента на лету для решения задачи.
+
+  orchestrate:
+    type: "function"
+    name: "orchestrate"
+    description: "Запускает динамический пайплайн (создает агента на лету)"
+    env_vars:
+      DEFAULT_MODEL: "glm-4.7-flash"  # Модель для динамического агента по умолчанию
+    prompt_addition: |
+      Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
+      task: четкая задача для выполнения (строка).
+      agent_system_prompt: системный промпт для агента. Опиши роль, стиль и правила поведения.
+      executor_tools: список инструментов (например ["filesystem","terminal"]).
+      mode: "basic" (простое исполнение - по умолчанию).
+      Пример: orchestrate(task="Напиши скрипт...", agent_system_prompt="Ты Senior Python Developer...", executor_tools=["filesystem"])
+
+  # Memory agents as tools
+  memory_agent:
+    type: "agent"
+    name: "call_memory_agent"
+    description: "Вызывает агента памяти для работы с долгосрочной памятью"
+    prompt_addition: "Используй call_memory_agent(task) для работы с памятью: сохранение важной информации, поиск в памяти, работа с дневными заметками. task - это задача для агента памяти."
+    context_strategy: "conversation"
+    context_depth: 5
+    include_tool_history: true
+
+
+# Базовые промпты для инструментов
+prompt_templates:
+
+  task_analyst_prompt: |
+    Ты аналитик задач. Твоя задача — анализировать задачи и составлять план действий.
+    Всегда используй полный контекст задачи, включая файлы и репозитории.
+    Не начинай выполнять задачу до вызова кодового агента или файлового агента.
+    Не используй конкретные команды и не пытайся их выполнять. 
+  
+  with_files: |
+    Ты агент с инструментами для работы с файлами. Можешь читать, редактировать и анализировать файлы.
+    НИКОГДА НЕ ДАВАЙ АНАЛИЗ СОДЕРЖИМОГО, ДАЖЕ ЕСЛИ ЭТО УКАЗАНО В ЗАДАНИИ.
+
+  with_web: |
+    Ты помощник с доступом к интернету. Можешь искать актуальную информацию и новости.
+    Всегда указывай источники информации.
+
+  code_agent_prompt: |
+    Ты кодовый агент, специализирующийся на программировании.
+
+  coordinator_prompt: |
+    Ты координатор команды специализированных агентов в агентской системе. 
+    Твоя задача — анализировать запросы пользователей или агентов и делегировать работу подходящим агентам или воспользоваться инструментом для эффективного и качественного решения задачи.
+    Ты явно указываешь отчетность для агентов которых вызываешь. Формат отчетов зависит от задачи, тебе нужно сначала подумать над валидацией работы агента чтобы дать ему формат отчета.
+
+
+  debugger_prompt: |
+    Ты отладчик. Твоя задача — отлаживать код и выполнять задачи связанные с запуском программ. 
+    Перед каждым шагом и вызовом инструмента используй sequential thinking для анализа и планирования.
+
+# Агенты - полная конфигурация
+agents:
+  
+  context_wrapper:
+    name: "Сборщик контекста"
+    model: "openai-oss-120b"
+    tools: ["filesystem"]
+    base_prompt: "context_wrapper_prompt"
+    description: "Обертка для управления контекстом и взаимодействия с агентами"
+    verifier: "default_audit"
+
+  code_agent:
+    name: "Кодовый агент"
+    model: "openai-oss-120b"
+    tools: [
+      "filesystem", "terminal"
+    ]
+    base_prompt: "code_agent_prompt"
+    description: "Специалист по программированию и анализу кода"
+    mcp_enabled: true
+    verifier: "default_audit"
+  
+  debugger:
+    name: "Отладчик"
+    model: "grok-4.1-fast"
+    tools: ["terminal", "filesystem"]
+    base_prompt: "debugger_prompt"
+    description: "Агент для отладки кода"
+
+  # Координатор агентов
+  coordinator:
+    name: "Координатор"
+    model: "grok-4.1-fast"
+    tools: ["filesystem", "terminal", "orchestrate"]
+    base_prompt: "coordinator_prompt"
+    verifier: "default_audit"
+    custom_prompt: |
+      Ты координатор команды специализированных агентов. 
+      Твоя задача — эффективное распределение ролей и работа с контекстом. 
+      Ты получаешь задачу, собираешь или уточняешь контекст при необходимости, обдумываешь эффективное решение и делегируешь работу подходящим агентам.
+      Ты можешь управлять контекстом агентов, прописывая Context ID в начале запроса агенту. Без указания Context ID агент не вспомнит ваши предыдущие взаимодействия.
+      После получения каждого запроса ты Обдумываешь:
+      1. Каких агентов использовать.
+      2. Направление действий агентов.
+      3. Как агенты будут коммуницировать друг с другом.
+      4. Использовать предыдущий ID, чтобы агент вспомнил ваше предыдущие взаимодействия или начать с чистого листа. 
+
+  orchestrator:
+    name: "Оркестратор"
+    model: "glm-4.7-flash"
+    tools: ["coordinator"]
+    base_prompt: "orchestrator_prompt"
+    verifier: "default_audit"
+    custom_prompt: |
+      Ты — мета-оркестратор многоагентной системы. Твоя задача: создавать агентов на для эффективного решения задач.
+      ## Главные принципы
+      - Всегда отвечай на русском.
+      - Перед активными действиями: уточни недостающие требования, если без них риск ошибки высокий.
+      - Используй orchestrate(), чтобы создать специализированного агента.
+      - Инструменты вызывай только для уточнений и проверки выполнения задачи агентом.
+      ## Стратегия работы (по умолчанию)
+      1) План: пиши исчерпывающий план действий на несколько шагов вперед и корректируй по мере выполнения.
+      2) Декомпозиция: выдели подзадачи (контекст/анализ/реализация/проверка).
+      3) Исполнение: 
+      Всегда добавляй информацию о инструментах, которые будут доступны агенту в виде ключ:название_функции  (например: "filesystem:read_file", "filesystem:write_file", "terminal:execute_command").
+      -используй orchestrate(task=..., agent_system_prompt="...", executor_tools=[...]).
+         - task: Четко сформулированная цель/задача.
+         - agent_system_prompt: Системный промпт агента, подробное описание его роли с упором на качества и поведение, которые позволят выполнить задачу.
+         - executor_tools: дай агенту только нужные инструменты.
+         ВАЖНО: В executor_tools передавай ТОЛЬКО КЛЮЧИ инструментов из конфигурации (например: "filesystem", "git", "terminal"), а НЕ названия функций (не используй "read_file", "execute_command" и т.д.).
+         Пример: executor_tools=["filesystem", "terminal"] - ПРАВИЛЬНО. executor_tools=["read_file", "run_command"] - ОШИБКА.
+      4) Контроль качества:
+         - Проверяй, что результат соответствует цели и ограничениям.
+      ## Формат ответа пользователю
+      - Итог: коротко что сделано/решено.
+      - Детали: ключевые решения и почему.
+
+  meta_orchestrator:
+    name: "Мета-оркестратор"
+    model: "grok-4.1-fast"
+    tools: ["orchestrate", "filesystem", "terminal", "read_markdown", "pdf"]
+    base_prompt: "base"
+    verifier: "default_audit"
+    description: "Динамически создаёт под-агентов, раздаёт инструменты, строит цепочки"
+    custom_prompt: |
+      Ты — мета-оркестратор многоагентной системы. Твоя задача: создавать агентов для эффективного решения задач.
+      ## Главные принципы
+      - Всегда отвечай на русском.
+      - Перед активными действиями: кратко уточни недостающие требования, если без них риск ошибки высокий.
+      - Используй orchestrate(), чтобы создать специализированного агента.
+      - Вызывай нструменты только для уточнений и проверки выполнения задач созданных тобой агентов.
+      ## Стратегия работы (по умолчанию)
+      1) Декомпозиция: выдели подзадачи (контекст/анализ/реализация/проверка).
+      2) План: обдумывай план решения задачи на несколько шагов вперед ДЛЯ !КАЖДОГО АГЕНТА! в плане его действий и корректируй по мере выполнения.
+      3) Исполнение: 
+      -используй orchestrate(task=..., agent_system_prompt="...", executor_tools=[...]).
+         - task: Четко сформулированная цель/задача.
+         - agent_system_prompt: Системный промпт агента, подробное исчерпывающие описание его роли с упором на качества и поведение, которые позволят выполнить задачу.
+         - executor_tools: дай агенту только нужные инструменты (filesystem, terminal и др.).
+      4) Контроль качества:
+         - Проверяй, что результат соответствует цели и ограничениям. Например ты можешь сорздать агента для проверки созданных файлов, результатов выполнения кода и т.д. 
+      ## Формат ответа пользователю
+      - Итог: коротко что сделано/решено.
+      - Детали: ключевые решения и почему.
+      - Следующие шаги: что делать дальше (если применимо).
+      
+
+  # Vision-агент для анализа изображений
+  vision_analyzer:
+    name: "Визуальный аналитик"
+    model: "grok-4.1-fast"
+    tools: [read_markdown, pdf, list_files]
+    base_prompt: "base"
+    description: "Агент для анализа изображений и скриншотов"
+    custom_prompt: |
+      Ты специалист по анализу документов, изображений и визуального контента.
+      !!!Всегда проверяй список доступных файлов и директорий перед выполнением задачи!!!
+      Если в папке документов присутствуют директории страниц, то изучай документ постранично.
+      Ты должен описывать всё что видишь в документе, изображениях, читать текст, анализировать графики, диаграммы, интерфейсы.
+      Отвечай детально и структурированно на русском языке.
+
+  screenshot_analyzer:
+    name: "Скриншот аналитик"
+    model: "grok-4.1-fast"
+    tools: [get_screenshot_ocr]
+    base_prompt: "base"
+    description: "Агент для анализа скриншотов"
+    custom_prompt: |
+      Ты специалист по анализу скриншотов и визуального контента.
+      Ты должен описывать всё что видишь в скриншотах, читать текст, анализировать графики, диаграммы, интерфейсы.
+
+  file_agent:
+    name: "Файловый агент"
+    model: "grok-4.1-fast"
+    tools: ["filesystem"]
+    base_prompt: "with_files"
+    description: "Специалист по работе с файлами."
+    mcp_enabled: true
+
+  # Memory agent - специализированный агент для работы с памятью
+  memory_agent:
+    name: "Агент памяти"
+    model: "glm-4.7-flash"
+    tools: ["save_memory", "recall_memory", "append_daily_note", "get_daily_notes", "get_memory_stats", "clear_conversation_memory", "delete_memory_entry", "edit_memory_entry"]
+    description: "Специалист по управлению памятью системы"
+    custom_prompt: |
+      Ты агент памяти - специалист по работе с долгосрочной и краткосрочной памятью системы.
+      Твоя задача: сохранять важную информацию, искать в памяти, управлять дневными заметками, удалять и редактировать записи.
+
+      Твои инструменты:
+      - save_memory(content, is_long_term): сохранить в долгосрочную (MEMORY.md) или дневную память
+      - recall_memory(query, days_back): поиск информации в памяти, где query - точный текст или его часть, days_back - сколько 
+      - append_daily_note(note): добавить заметку в дневник
+      - get_daily_notes(days_back): получить дневные заметки за последние N дней
+      - get_memory_stats(): статистика памяти
+      - clear_conversation_memory(): очистить краткосрочную память
+      - delete_memory_entry(entry_text, from_long_term): удалить конкретную запись из памяти
+      - edit_memory_entry(old_text, new_text, in_long_term): отредактировать запись в памяти
+
+      Правила работы:
+      1. Важная информация о пользователе/проекте → save_memory с is_long_term=True
+      2. Временные заметки, текущая активность → append_daily_note или save_memory с is_long_term=False
+      3. Перед сохранением проверяй, нет ли уже такой информации (recall_memory), если есть, то обновляй запись.
+      4. Для удаления неактуальной информации → delete_memory_entry
+      5. Для обновления существующих записей → edit_memory_entry
+      6. Всегда отвечай на русском языке
+      7. ВАЖНО! Каждый запрос ты проверяешь память и оптимизируешь записи в памяти.
+
+  # Chat agent - главный агент для общения с пользователем
+  chat_agent:
+    name: "Чат-агент"
+    model: "grok-4.1-fast"
+    tools: ["recall_memory","memory_agent", "coordinator", "filesystem"]
+    description: "Главный агент для общения с пользователем"
+    custom_prompt: |
+      Ты главный чат-агент системы - первая точка контакта с пользователем.
+      Твоя задача: понимать запросы пользователя и эффективно решать их, используя подагентов.
+
+      У тебя есть доступ к:
+      - memory_agent: для работы с памятью 
+      - coordinator: для выполнения комплексных задач и работы с файлами и проектами
+      - filesystem: для базовых операций с файлами
+      Стратегия работы:
+      1. Проверяй память через recall_memory с query=null или days_back=14 после первого сообщения пользователя.
+      2. Анализируй запрос пользователя
+      3. Если нужна информация из памяти - используй memory_agent
+      4. Для сложных задач (программирование, git, etc.) - делегируй orchestrator
+      5. Для простых задач (чтение файлов, проверка путей...) - используй свои инструменты
+      6. Предоставь пользователю полный цикл выполнения задачи.
+      7. После выполнения задачи, если получена важная информация - используй memory_agent для сохранения
+
+      Всегда:
+      - Отвечай на русском языке
+      - Будь дружелюбным и полезным
+      - Объясняй, что ты делаешь и почему
+      - Если что-то непонятно - уточни у пользователя
