@@ -90,8 +90,16 @@ providers:
 
 # Модели
 models:
-  deepseek-v3.2-speciale:
-    name: "deepseek/deepseek-v3.2-exp"
+  black-pony:
+    name: "openrouter/pony-alpha"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8192
+    description: "Темная лошадка."
+    streaming_enabled: true
+
+  deepseek-v3.2:
+    name: "deepseek/deepseek-v3.2:nitro"
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 8192
@@ -301,10 +309,9 @@ tools:
     prompt_addition: |
       Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
       task: четкая задача для выполнения (строка).
-      agent_system_prompt: системный промпт для агента. Опиши роль, стиль и правила поведения.
+      agent_system_prompt: системный промпт для агента. Опиши роль, стиль и правила поведения. Набор инструментов и как ими пользоваться.
       executor_tools: список инструментов (например ["filesystem","terminal"]).
-      mode: "basic" (простое исполнение - по умолчанию).
-      Пример: orchestrate(task="Напиши скрипт...", agent_system_prompt="Ты Senior Python Developer...", executor_tools=["filesystem"])
+      Пример: orchestrate(task="Напиши скрипт...", agent_system_prompt="Ты Senior Python Developer...", executor_tools=["filesystem", "terminal"])
 
   # Memory agents as tools
   memory_agent:
@@ -313,8 +320,7 @@ tools:
     description: "Вызывает агента памяти для работы с долгосрочной памятью"
     prompt_addition: "Используй call_memory_agent(task) для работы с памятью: сохранение важной информации, поиск в памяти, работа с дневными заметками. task - это задача для агента памяти."
     context_strategy: "conversation"
-    context_depth: 5
-    include_tool_history: true
+    context_depth: 544
 
 
 # Базовые промпты для инструментов
@@ -371,7 +377,7 @@ agents:
   
   debugger:
     name: "Отладчик"
-    model: "grok-4.1-fast"
+    model: "deepseek-v3.2"
     tools: ["terminal", "filesystem"]
     base_prompt: "debugger_prompt"
     description: "Агент для отладки кода"
@@ -379,20 +385,27 @@ agents:
   # Координатор агентов
   coordinator:
     name: "Координатор"
-    model: "grok-4.1-fast"
+    model: "black-pony"
     tools: ["filesystem", "terminal", "orchestrate"]
     base_prompt: "coordinator_prompt"
-    verifier: "default_audit"
     custom_prompt: |
       Ты координатор команды специализированных агентов. 
       Твоя задача — эффективное распределение ролей и работа с контекстом. 
       Ты получаешь задачу, собираешь или уточняешь контекст при необходимости, обдумываешь эффективное решение и делегируешь работу подходящим агентам.
-      Ты можешь управлять контекстом агентов, прописывая Context ID в начале запроса агенту. Без указания Context ID агент не вспомнит ваши предыдущие взаимодействия.
+      Ты можешь управлять контекстом агентов, прописывая Context ID в начале текста запроса агенту. Без указания Context ID агент не вспомнит контекст о котором ты его справшиваешь.
       После получения каждого запроса ты Обдумываешь:
       1. Каких агентов использовать.
       2. Направление действий агентов.
       3. Как агенты будут коммуницировать друг с другом.
-      4. Использовать предыдущий ID, чтобы агент вспомнил ваше предыдущие взаимодействия или начать с чистого листа. 
+      4. Использовать предыдущий ID, чтобы агент вспомнил ваше предыдущие взаимодействия или начать с чистого листа.
+      5. Проверять работу агентов после их отчета.
+      Лучшие практики:
+      1. Создавать паралельных агентов с простой задачей, оба вызова вернутся с результатом, эффективность в разы выше.
+      2. Создавать агентов, проверяющих других агентов, особенно после паралельного запуска.
+      3. Давать агентам общий файл с памятью задачи, прописать в промпте агентам сохранять туда знания и проверять после каждого вызова.
+      4. Быть подозрительным к работе агентов. 
+      ВАЖНО: В executor_tools передавай ТОЛЬКО КЛЮЧИ инструментов из конфигурации (например: "filesystem", "git", "terminal"), а НЕ названия функций (не используй "read_file", "execute_command" и т.д.).
+      Пример: executor_tools=["filesystem", "terminal"] - ПРАВИЛЬНО. executor_tools=["read_file", "run_command"] - ОШИБКА.
 
   orchestrator:
     name: "Оркестратор"
@@ -426,7 +439,7 @@ agents:
 
   meta_orchestrator:
     name: "Мета-оркестратор"
-    model: "grok-4.1-fast"
+    model: "deepseek-v3.2"
     tools: ["orchestrate", "filesystem", "terminal", "read_markdown", "pdf"]
     base_prompt: "base"
     verifier: "default_audit"
@@ -457,7 +470,7 @@ agents:
   # Vision-агент для анализа изображений
   vision_analyzer:
     name: "Визуальный аналитик"
-    model: "grok-4.1-fast"
+    model: "deepseek-v3.2"
     tools: [read_markdown, pdf, list_files]
     base_prompt: "base"
     description: "Агент для анализа изображений и скриншотов"
@@ -470,7 +483,7 @@ agents:
 
   screenshot_analyzer:
     name: "Скриншот аналитик"
-    model: "grok-4.1-fast"
+    model: "deepseek-v3.2"
     tools: [get_screenshot_ocr]
     base_prompt: "base"
     description: "Агент для анализа скриншотов"
@@ -480,7 +493,7 @@ agents:
 
   file_agent:
     name: "Файловый агент"
-    model: "grok-4.1-fast"
+    model: "deepseek-v3.2"
     tools: ["filesystem"]
     base_prompt: "with_files"
     description: "Специалист по работе с файлами."
@@ -518,7 +531,7 @@ agents:
   # Chat agent - главный агент для общения с пользователем
   chat_agent:
     name: "Чат-агент"
-    model: "grok-4.1-fast"
+    model: "glm-4.7-flash"
     tools: ["recall_memory","memory_agent", "coordinator", "filesystem"]
     description: "Главный агент для общения с пользователем"
     custom_prompt: |
@@ -530,10 +543,10 @@ agents:
       - coordinator: для выполнения комплексных задач и работы с файлами и проектами
       - filesystem: для базовых операций с файлами
       Стратегия работы:
-      1. Проверяй память через recall_memory с query=null или days_back=14 после первого сообщения пользователя.
+      1. Проверяй память через recall_memory с query=null и days_back=14 после первого сообщения пользователя.
       2. Анализируй запрос пользователя
       3. Если нужна информация из памяти - используй memory_agent
-      4. Для сложных задач (программирование, git, etc.) - делегируй orchestrator
+      4. Для сложных задач (программирование, git, etc.) - делегируй coordinator
       5. Для простых задач (чтение файлов, проверка путей...) - используй свои инструменты
       6. Предоставь пользователю полный цикл выполнения задачи.
       7. После выполнения задачи, если получена важная информация - используй memory_agent для сохранения

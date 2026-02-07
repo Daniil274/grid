@@ -235,7 +235,6 @@ class ContextManager:
                     if len(content) > 2000:
                         content = content[:2000] + "…"
                     lines.append(f"{role}: {content}")
-                lines.append("Пожалуйста, учитывай этот контекст при ответе.")
                 return "\n".join(lines)
         except ContextError:
             # Lock timeout in get_conversation_context
