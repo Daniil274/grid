@@ -50,6 +50,7 @@ tracing_config = get_tracing_config()
 
 CONTEXT_ID_REGEX = re.compile(r"ctx-[0-9a-fA-F]{8,}")
 logger = logging.getLogger("grid.agent_factory")
+verbose_logger = logging.getLogger("grid.verbose")
 _TRACING_CONFIGURED = False
 _TRACING_CONFIG_LOCK = threading.Lock()
 
@@ -811,6 +812,22 @@ class AgentFactory:
         # Добавляем prompt_addition из конфигурации инструментов к инструкциям
         enhanced_instructions = self._build_dynamic_agent_instructions(instructions, all_tool_names)
 
+        # Log final tool configuration
+        function_tool_names = [getattr(t, '__name__', str(t)) for t in tools]
+        logger.info(
+            f"Dynamic agent '{name}' created with {len(tools)} function tools and {len(mcp_servers_list)} MCP servers"
+        )
+        verbose_logger.debug(
+            f"\n{'='*80}\nDYNAMIC AGENT CREATED\n{'='*80}\n"
+            f"Agent name: {name}\n"
+            f"Model: {resolved_model_key}\n"
+            f"Requested tool names: {effective_tool_names}\n"
+            f"Resolved function tools: {function_tool_names}\n"
+            f"MCP tool names: {mcp_tool_names}\n"
+            f"MCP servers created: {len(mcp_servers_list)}\n"
+            f"{'='*80}\n"
+        )
+
         return Agent(
             name=name,
             instructions=enhanced_instructions,
@@ -923,7 +940,6 @@ class AgentFactory:
         logger.info(
             f"DYNAMIC_AGENT_INPUT | agent={agent_name} | input_len={len(message)} | preview={input_preview}"
         )
-        verbose_logger = logging.getLogger("grid.verbose")
         verbose_logger.debug(
             f"\n{'='*80}\nDYNAMIC AGENT INPUT\n{'='*80}\n"
             f"Agent: {agent_name}\n"
@@ -947,27 +963,68 @@ class AgentFactory:
         output = None
         error_occurred = None
         try:
-            result = await _get_runner().run(
+            # Use streaming to capture tool calls for logging
+            run_result_streaming = _get_runner().run_streamed(
                 agent,
                 message,
                 context=run_ctx,
                 max_turns=max_turns,
                 session=session,
             )
-            # Extract output robustly (similar to run_agent)
+
+            # Process streaming events and log tool calls
+            async for event in run_result_streaming.stream_events():
+                if isinstance(event, RunItemStreamEvent):
+                    event_name = getattr(event, "name", "")
+                    item = getattr(event, "item", None)
+
+                    if event_name == "tool_called" and item is not None:
+                        raw_item = getattr(item, "raw_item", None)
+                        tool_name = getattr(raw_item, "name", None) or "tool"
+                        arguments = getattr(raw_item, "arguments", None)
+
+                        # Format arguments for logging
+                        args_str = ""
+                        if isinstance(arguments, str):
+                            args_str = arguments[:200] + ('...' if len(arguments) > 200 else '')
+                        elif isinstance(arguments, dict):
+                            args_str = json.dumps(arguments, ensure_ascii=False)[:200]
+
+                        logger.info(
+                            f"DYNAMIC_AGENT_TOOL_CALL | agent={agent_name} | tool={tool_name} | args={args_str}"
+                        )
+                        verbose_logger.debug(
+                            f"\n{'─'*80}\n🔧 TOOL CALL: {tool_name}\n"
+                            f"Arguments: {arguments}\n{'─'*80}\n"
+                        )
+
+                    elif event_name == "tool_output" and item is not None:
+                        raw_item = getattr(item, "raw_item", None)
+                        tool_name = getattr(raw_item, "name", None) or "tool"
+                        tool_output = getattr(raw_item, "output", None)
+
+                        output_str = str(tool_output)[:500] + ('...' if len(str(tool_output)) > 500 else '')
+
+                        logger.info(
+                            f"DYNAMIC_AGENT_TOOL_OUTPUT | agent={agent_name} | tool={tool_name} | output_len={len(str(tool_output))}"
+                        )
+                        verbose_logger.debug(
+                            f"\n{'─'*80}\n✅ TOOL OUTPUT: {tool_name}\n"
+                            f"Output: {output_str}\n{'─'*80}\n"
+                        )
+
+            # Extract final output from streaming result
             try:
-                if isinstance(result, str):
-                    output = result
-                elif hasattr(result, "final_output") and result.final_output:
-                    output = result.final_output
-                elif hasattr(result, "output") and result.output:
-                    output = result.output
-                elif hasattr(result, "content") and result.content:
-                    output = result.content
+                if hasattr(run_result_streaming, "final_output") and run_result_streaming.final_output:
+                    output = run_result_streaming.final_output
+                elif hasattr(run_result_streaming, "output") and run_result_streaming.output:
+                    output = run_result_streaming.output
+                elif hasattr(run_result_streaming, "content") and run_result_streaming.content:
+                    output = run_result_streaming.content
                 else:
-                    output = str(result)
+                    output = str(run_result_streaming)
             except Exception:
-                output = str(result)
+                output = str(run_result_streaming)
         except Exception as e:
             error_occurred = e
             raise
@@ -2012,35 +2069,47 @@ class AgentFactory:
     
     async def _create_mcp_servers(self, mcp_tool_names: List[str]) -> List[Any]:
         """Create and connect MCP servers using the Agents SDK."""
+        logger.info(f"Creating MCP servers for tools: {mcp_tool_names}")
         servers: list[Any] = []
         unavailable: list[str] = []
         for name in mcp_tool_names:
             try:
+                logger.debug(f"Attempting to create MCP server: {name}")
                 server = await self._get_mcp_server(name)
                 if server is not None:
                     servers.append(server)
+                    logger.info(f"✅ MCP server created successfully: {name}")
                 else:
                     unavailable.append(name)
-            except Exception:
+                    logger.warning(f"❌ MCP server creation returned None: {name}")
+            except Exception as e:
                 unavailable.append(name)
+                logger.error(f"❌ MCP server creation failed: {name} - {e}", exc_info=True)
+
         if unavailable:
+            logger.warning(f"Unavailable MCP servers: {unavailable}")
             try:
                 self.context_manager.set_metadata("mcp_unavailable", unavailable)
             except Exception as exc:
                 logger.warning("Failed to store MCP availability metadata: %s", exc, exc_info=exc)
+
+        logger.info(f"Created {len(servers)} MCP servers out of {len(mcp_tool_names)} requested")
         return servers
 
     async def _get_mcp_server(self, tool_name: str) -> Optional[Any]:
         """Get or create an SDK-based MCP server (MCPServerStdio)."""
         if tool_name in self._mcp_servers:
+            logger.debug(f"Reusing cached MCP server: {tool_name}")
             return self._mcp_servers[tool_name]
 
         tool_config = self.config.get_tool(tool_name)
         if tool_config.type != "mcp":
+            logger.warning(f"Tool '{tool_name}' is not of type 'mcp' (type={tool_config.type})")
             return None
 
         server_command = tool_config.server_command or []
         if not server_command:
+            logger.error(f"MCP tool '{tool_name}' has no server_command configured")
             return None
 
         command = server_command[0]
@@ -2055,6 +2124,11 @@ class AgentFactory:
         # Add working directory to args if configured (CRITICAL FIX for filesystem MCP)
         if getattr(tool_config, 'add_working_directory', False):
              args.append(cwd)
+             logger.debug(f"Added working directory to MCP server args: {cwd}")
+
+        logger.info(
+            f"Creating MCP server: {tool_name} | command={command} | args={args} | cwd={cwd}"
+        )
 
         server = ResilientMCPServerStdio(
             params={
@@ -2069,6 +2143,7 @@ class AgentFactory:
         )
 
         await server.connect()
+        logger.info(f"MCP server connected successfully: {tool_name}")
         self._mcp_servers[tool_name] = server
         return server
     
