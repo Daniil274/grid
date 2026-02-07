@@ -227,7 +227,7 @@ async def orchestrate(
     result = {
         "task": task,
         "model_key": resolved_model_key,
-        "executor_tools": tools,
+        "executor_tools": coerced_executor_tools,
         "final": _extract_text(draft),
     }
     result_json = json.dumps(result, ensure_ascii=False, indent=2)
