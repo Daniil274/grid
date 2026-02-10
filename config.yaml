@@ -130,12 +130,19 @@ models:
     description: "OpenAI OSS 120b модель"
 
 
-  qwen3-8b:
-    name: "wen/qwen3-vl-8b"
-    provider: "lm-studio"
+  qwen3-vl-235b-a22b:
+    name: "qwen/qwen3-vl-235b-a22b-instruct"
+    provider: "openrouter"
     temperature: 0.7
     max_tokens: 8000
     description: "Qwen 3 8b модель"
+
+  aurora:
+    name: "openrouter/aurora-alpha"
+    provider: "openrouter"
+    temperature: 0.5
+    max_tokens: 8000
+    description: "speedy pony"
 
 # Минимальная секция проверяющих (для аудита в Output guardrail)
 checkers:
@@ -160,63 +167,87 @@ tools:
     description: "Инструмент для получения списка файлов в директории."
     prompt_addition: "Используй list_files(directory) для получения списка файлов в директории. directory - директория (по умолчанию '.')."
 
-  # DeepSeek-OCR (Native Tool)
+  # ============================================================================
+  # Document Processing Tools - OCR и работа с документами
+  # ============================================================================
+
   pdf:
     type: "function"
-    description: "Инструмент для работы с PDF файлами (DeepSeek-OCR). Конвертирует страницы в Markdown с сохранением изображений."
-    prompt_addition: "Используй pdf(pdf_path, pages) для чтения PDF. pages - диапазон страниц (например '1:5' или '1:1')."
+    description: "Конвертирует PDF в Markdown через OCR с кэшированием результатов"
+    prompt_addition: "pdf(pdf_path, pages): OCR обработка PDF. ⚠️ ВСЕГДА начинай с pages='1:1' или '1:2'. Максимум '1:5'. Результаты кэшируются."
 
   get_screenshot_ocr:
     type: "function"
-    description: "Инструмент для работы с OCR скриншотами. Извлекает текст из скриншота."
-    prompt_addition: "Используй get_screenshot_ocr(monitor_index) для получения текста из скриншота. monitor_index - индекс монитора (0 по умолчанию)."
+    description: "Извлекает текст из скриншота монитора"
+    prompt_addition: "get_screenshot_ocr(monitor_index): OCR скриншота. monitor_index - номер монитора (0 по умолчанию)."
 
-  # Markdown Reader
   read_markdown:
     type: "function"
-    description: "Инструмент для чтения Markdown файлов. Извлекает и показывает изображения агенту."
-    prompt_addition: "Используй read_markdown(file_path) для чтения .md файлов."
+    description: "Читает Markdown файлы с изображениями"
+    prompt_addition: "read_markdown(file_path): Читает .md файл и извлекает изображения."
+
+  # ============================================================================
+  # Document Conversion & Export Tools - конвертация и экспорт
+  # ============================================================================
+
+  markdown_to_html:
+    type: "function"
+    description: "Конвертирует Markdown в HTML файл"
+    prompt_addition: "markdown_to_html(markdown_content, output_filename, title): Создает HTML из Markdown."
+
+  markdown_to_pdf:
+    type: "function"
+    description: "Конвертирует Markdown в PDF файл"
+    prompt_addition: "markdown_to_pdf(markdown_content, output_filename, title): Создает PDF из Markdown."
+
+  save_report:
+    type: "function"
+    description: "Сохраняет отчет в указанном формате"
+    prompt_addition: "save_report(content, filename, format): Сохраняет отчет. format=md|txt|html|json."
+
+  merge_reports:
+    type: "function"
+    description: "Объединяет несколько отчетов в один"
+    prompt_addition: "merge_reports(report_paths, output_filename, section_headers): Объединяет отчеты с заголовками."
 
   # Memory Tools - инструменты для работы с памятью
-  save_memory:
-    type: "function"
-    description: "Сохранить важную информацию в память агента (долгосрочную или дневную)"
-    prompt_addition: "Используй save_memory(content, is_long_term) для сохранения информации. is_long_term=True для MEMORY.md, False для daily_notes."
+  # ============================================================================
+  # Memory Tools V2  - 3 simplified tools
+  # ============================================================================
 
-  recall_memory:
+  memory_save:
     type: "function"
-    description: "Поиск информации в памяти по ключевым словам"
-    prompt_addition: "Используй recall_memory(query, days_back) для поиска в памяти. query - поисковый запрос, days_back - сколько дней назад искать."
+    description: "Save information to memory"
+    prompt_addition: "memory_save(text, type, tags, importance): Save to memory. type=long_term|short_term|task|task_plan. tags for search. importance 0-1."
 
-  append_daily_note:
+  memory_search:
     type: "function"
-    description: "Добавить заметку в дневник (daily_notes)"
-    prompt_addition: "Используй append_daily_note(note) для добавления заметки в дневной файл."
+    description: "Search memory by keywords"
+    prompt_addition: "memory_search(query, type, limit): Full-text search. query=keywords or empty for recent. type to filter. limit=max results."
 
-  get_daily_notes:
+  memory_delete:
     type: "function"
-    description: "Получить дневные заметки за последние N дней"
-    prompt_addition: "Используй get_daily_notes(days_back) для получения заметок. По умолчанию days_back=1 (только сегодня)."
+    description: "Delete memory entry"
+    prompt_addition: "memory_delete(query, entry_id): Delete memory. query to find entries, entry_id to delete specific. Returns list or confirmation."
 
-  get_memory_stats:
+  task_update:
     type: "function"
-    description: "Получить статистику по памяти агента"
-    prompt_addition: "Используй get_memory_stats() для получения статистики: размер памяти, количество заметок, сообщений."
+    description: "Update task state"
+    prompt_addition: "task_update(content, action, entry_id, importance): action=add|plan|complete|update|delete. Track task progress."
 
-  clear_conversation_memory:
-    type: "function"
-    description: "Очистить историю текущего разговора (краткосрочная память)"
-    prompt_addition: "Используй clear_conversation_memory() для сброса контекста разговора. Долгосрочная память (MEMORY.md) сохранится."
+  # ============================================================================
+  # Vision Tools - инструменты для просмотра и анализа изображений
+  # ============================================================================
 
-  delete_memory_entry:
+  view_image:
     type: "function"
-    description: "Удалить конкретную запись из памяти агента"
-    prompt_addition: "Используй delete_memory_entry(entry_text, from_long_term) для удаления записи. entry_text - точный текст или его часть, from_long_term=True для MEMORY.md, False для дневных заметок."
+    description: "View and analyze an image with vision model"
+    prompt_addition: "view_image(image_path, question): Load image and ask vision model to analyze it. Use for screenshots, photos, diagrams."
 
-  edit_memory_entry:
+  analyze_screenshot:
     type: "function"
-    description: "Редактировать запись в памяти агента"
-    prompt_addition: "Используй edit_memory_entry(old_text, new_text, in_long_term) для редактирования записи. old_text - текст для поиска, new_text - новый текст, in_long_term=True для MEMORY.md, False для дневных заметок."
+    description: "Analyze UI screenshot"
+    prompt_addition: "analyze_screenshot(screenshot_path): Specialized tool for analyzing UI/interface screenshots."
 
   # MCP серверы
   terminal:
@@ -277,7 +308,14 @@ tools:
       task - это задача, которую нужно решить.
     # Context sharing configuration for agent tools
 
-  
+  doc_analyzer:
+    type: "agent"
+    name: "call_doc_analyzer"
+    description: "Вызывает анализатора документов и изображений."
+    prompt_addition: |
+      Используй call_doc_analyzer(task) для анализа изображений, PDF и markdown документов.
+      task - это задача с указанием пути файла и что нужно найти/проанализировать.
+
   context_wrapper:
     type: "agent"
     name: "call_context_wrapper"
@@ -355,14 +393,6 @@ prompt_templates:
 
 # Агенты - полная конфигурация
 agents:
-  
-  context_wrapper:
-    name: "Сборщик контекста"
-    model: "openai-oss-120b"
-    tools: ["filesystem"]
-    base_prompt: "context_wrapper_prompt"
-    description: "Обертка для управления контекстом и взаимодействия с агентами"
-    verifier: "default_audit"
 
   code_agent:
     name: "Кодовый агент"
@@ -375,38 +405,6 @@ agents:
     mcp_enabled: true
     verifier: "default_audit"
   
-  debugger:
-    name: "Отладчик"
-    model: "deepseek-v3.2"
-    tools: ["terminal", "filesystem"]
-    base_prompt: "debugger_prompt"
-    description: "Агент для отладки кода"
-
-  # Координатор агентов
-  coordinator:
-    name: "Координатор"
-    model: "black-pony"
-    tools: ["filesystem", "terminal", "orchestrate"]
-    base_prompt: "coordinator_prompt"
-    custom_prompt: |
-      Ты координатор команды специализированных агентов. 
-      Твоя задача — эффективное распределение ролей и работа с контекстом. 
-      Ты получаешь задачу, собираешь или уточняешь контекст при необходимости, обдумываешь эффективное решение и делегируешь работу подходящим агентам.
-      Ты можешь управлять контекстом агентов, прописывая Context ID в начале текста запроса агенту. Без указания Context ID агент не вспомнит контекст о котором ты его справшиваешь.
-      После получения каждого запроса ты Обдумываешь:
-      1. Каких агентов использовать.
-      2. Направление действий агентов.
-      3. Как агенты будут коммуницировать друг с другом.
-      4. Использовать предыдущий ID, чтобы агент вспомнил ваше предыдущие взаимодействия или начать с чистого листа.
-      5. Проверять работу агентов после их отчета.
-      Лучшие практики:
-      1. Создавать паралельных агентов с простой задачей, оба вызова вернутся с результатом, эффективность в разы выше.
-      2. Создавать агентов, проверяющих других агентов, особенно после паралельного запуска.
-      3. Давать агентам общий файл с памятью задачи, прописать в промпте агентам сохранять туда знания и проверять после каждого вызова.
-      4. Быть подозрительным к работе агентов. 
-      ВАЖНО: В executor_tools передавай ТОЛЬКО КЛЮЧИ инструментов из конфигурации (например: "filesystem", "git", "terminal"), а НЕ названия функций (не используй "read_file", "execute_command" и т.д.).
-      Пример: executor_tools=["filesystem", "terminal"] - ПРАВИЛЬНО. executor_tools=["read_file", "run_command"] - ОШИБКА.
-
   orchestrator:
     name: "Оркестратор"
     model: "glm-4.7-flash"
@@ -436,123 +434,132 @@ agents:
       ## Формат ответа пользователю
       - Итог: коротко что сделано/решено.
       - Детали: ключевые решения и почему.
-
-  meta_orchestrator:
-    name: "Мета-оркестратор"
-    model: "deepseek-v3.2"
-    tools: ["orchestrate", "filesystem", "terminal", "read_markdown", "pdf"]
-    base_prompt: "base"
-    verifier: "default_audit"
-    description: "Динамически создаёт под-агентов, раздаёт инструменты, строит цепочки"
-    custom_prompt: |
-      Ты — мета-оркестратор многоагентной системы. Твоя задача: создавать агентов для эффективного решения задач.
-      ## Главные принципы
-      - Всегда отвечай на русском.
-      - Перед активными действиями: кратко уточни недостающие требования, если без них риск ошибки высокий.
-      - Используй orchestrate(), чтобы создать специализированного агента.
-      - Вызывай нструменты только для уточнений и проверки выполнения задач созданных тобой агентов.
-      ## Стратегия работы (по умолчанию)
-      1) Декомпозиция: выдели подзадачи (контекст/анализ/реализация/проверка).
-      2) План: обдумывай план решения задачи на несколько шагов вперед ДЛЯ !КАЖДОГО АГЕНТА! в плане его действий и корректируй по мере выполнения.
-      3) Исполнение: 
-      -используй orchestrate(task=..., agent_system_prompt="...", executor_tools=[...]).
-         - task: Четко сформулированная цель/задача.
-         - agent_system_prompt: Системный промпт агента, подробное исчерпывающие описание его роли с упором на качества и поведение, которые позволят выполнить задачу.
-         - executor_tools: дай агенту только нужные инструменты (filesystem, terminal и др.).
-      4) Контроль качества:
-         - Проверяй, что результат соответствует цели и ограничениям. Например ты можешь сорздать агента для проверки созданных файлов, результатов выполнения кода и т.д. 
-      ## Формат ответа пользователю
-      - Итог: коротко что сделано/решено.
-      - Детали: ключевые решения и почему.
-      - Следующие шаги: что делать дальше (если применимо).
       
-
-  # Vision-агент для анализа изображений
-  vision_analyzer:
-    name: "Визуальный аналитик"
-    model: "deepseek-v3.2"
-    tools: [read_markdown, pdf, list_files]
-    base_prompt: "base"
-    description: "Агент для анализа изображений и скриншотов"
+ # Координатор агентов
+  coordinator:
+    name: "Координатор"
+    model: "black-pony"
+    tools: ["filesystem", "terminal", "orchestrate", "task_update"]
+    base_prompt: "coordinator_prompt"
     custom_prompt: |
-      Ты специалист по анализу документов, изображений и визуального контента.
-      !!!Всегда проверяй список доступных файлов и директорий перед выполнением задачи!!!
-      Если в папке документов присутствуют директории страниц, то изучай документ постранично.
-      Ты должен описывать всё что видишь в документе, изображениях, читать текст, анализировать графики, диаграммы, интерфейсы.
-      Отвечай детально и структурированно на русском языке.
+      Ты координатор команды специализированных агентов. 
+      Твоя задача — эффективное распределение ролей и работа с контекстом. 
+      Ты получаешь задачу, собираешь или уточняешь контекст при необходимости, обдумываешь эффективное решение и делегируешь работу подходящим агентам.
+      Ты можешь управлять контекстом агентов, прописывая Context ID в начале текста запроса агенту. Без указания Context ID агент не вспомнит контекст о котором ты его справшиваешь.
+      После получения каждого запроса ты Обдумываешь:
+      1. Каких агентов использовать.
+      2. Направление действий агентов.
+      3. Как агенты будут коммуницировать друг с другом. Ставь задачу task_update и объясняй агентам как его использовать. 
+      4. Использовать предыдущий ID, чтобы агент вспомнил ваше предыдущие взаимодействия или начать с чистого листа.
+      5. Проверять работу агентов после их отчета.
+      Лучшие практики:
+      1. Создавать паралельных агентов с простой задачей, оба вызова вернутся с результатом, эффективность в разы выше.
+      2. Создавать агентов, проверяющих других агентов, особенно после паралельного запуска.
+      3. Давать агентам общую task .
+      4. Быть подозрительным к работе агентов. 
+      ВАЖНО: В executor_tools передавай ТОЛЬКО КЛЮЧИ инструментов из конфигурации (например: "filesystem", "git", "terminal"), а НЕ названия функций (не используй "read_file", "execute_command" и т.д.).
+      Пример: executor_tools=["filesystem", "terminal"] - ПРАВИЛЬНО. executor_tools=["read_file", "run_command"] - ОШИБКА.
 
-  screenshot_analyzer:
-    name: "Скриншот аналитик"
-    model: "deepseek-v3.2"
-    tools: [get_screenshot_ocr]
+  # Document analyzer - агент для работы с документами и изображениями
+  doc_analyzer:
+    name: "Анализатор документов"
+    model: "qwen3-vl-235b-a22b"
+    tools: [
+      "read_markdown", "pdf", "list_files", "view_image",
+      "markdown_to_html", "markdown_to_pdf", "save_report", "merge_reports"
+    ]
     base_prompt: "base"
-    description: "Агент для анализа скриншотов"
+    description: "Агент для анализа, конвертации и создания отчетов из документов"
     custom_prompt: |
-      Ты специалист по анализу скриншотов и визуального контента.
-      Ты должен описывать всё что видишь в скриншотах, читать текст, анализировать графики, диаграммы, интерфейсы.
+      Ты специалист по работе с документами: PDF, Markdown, изображения.
 
-  file_agent:
-    name: "Файловый агент"
-    model: "deepseek-v3.2"
-    tools: ["filesystem"]
-    base_prompt: "with_files"
-    description: "Специалист по работе с файлами."
-    mcp_enabled: true
+      ⚠️ КРИТИЧЕСКИ ВАЖНО - НИКОГДА НЕ ЧИТАЙ ДОКУМЕНТЫ ПОЛНОСТЬЮ!
+
+      Обязательная стратегия работы с PDF:
+      1. ВСЕГДА начинай с первых страниц: pdf(path, pages="1:1") или pages="1:2"
+      2. НИКОГДА не читай больше 5 страниц за раз: pages="1:5" максимум
+      3. Если нужно больше - делай несколько запросов по 3-5 страниц
+
+      Инструменты:
+      - pdf(path, pages) - OCR (ТОЛЬКО малые диапазоны!)
+      - list_files(dir) - список файлов
+      - view_image(path, question) - анализ изображений
+      - save_report(content, filename, format) - сохранение
+      - markdown_to_html/pdf(...) - экспорт
+
+      Жесткие правила:
+      1. list_files ПЕРЕД любой работой с файлами
+      2. PDF: ТОЛЬКО pages="1:1" или "1:2" для начала
+      3. НИКОГДА не используй большие диапазоны типа "1:20" или "1:50"
+      5. Отвечай на русском
 
   # Memory agent - специализированный агент для работы с памятью
   memory_agent:
     name: "Агент памяти"
     model: "glm-4.7-flash"
-    tools: ["save_memory", "recall_memory", "append_daily_note", "get_daily_notes", "get_memory_stats", "clear_conversation_memory", "delete_memory_entry", "edit_memory_entry"]
+    tools: ["memory_save", "memory_search", "memory_delete", "task_update"]
     description: "Специалист по управлению памятью системы"
     custom_prompt: |
-      Ты агент памяти - специалист по работе с долгосрочной и краткосрочной памятью системы.
-      Твоя задача: сохранять важную информацию, искать в памяти, управлять дневными заметками, удалять и редактировать записи.
+      Ты агент памяти - специалист по работе с памятью системы.
+      Твоя задача: сохранять важную информацию, искать в памяти, управлять задачами.
 
-      Твои инструменты:
-      - save_memory(content, is_long_term): сохранить в долгосрочную (MEMORY.md) или дневную память
-      - recall_memory(query, days_back): поиск информации в памяти, где query - точный текст или его часть, days_back - сколько 
-      - append_daily_note(note): добавить заметку в дневник
-      - get_daily_notes(days_back): получить дневные заметки за последние N дней
-      - get_memory_stats(): статистика памяти
-      - clear_conversation_memory(): очистить краткосрочную память
-      - delete_memory_entry(entry_text, from_long_term): удалить конкретную запись из памяти
-      - edit_memory_entry(old_text, new_text, in_long_term): отредактировать запись в памяти
+      Твои инструменты (4 простых):
+      - memory_save(text, type, tags, importance): Сохранить в память
+        type: long_term (важное), short_term (временное), task (задача), task_plan (план)
+        tags: ключевые слова через запятую для поиска
+        importance: 0.0-1.0 (выше = важнее)
+
+      - memory_search(query, type, limit): Поиск в памяти
+        query: ключевые слова (пусто = недавние записи)
+        type: фильтр по типу или пусто
+        limit: макс результатов
+
+      - memory_delete(query, entry_id): Удаление из памяти
+        query: найти записи для удаления (без удаления)
+        entry_id: удалить конкретную запись по ID
+        Сначала ищи (query), потом удаляй (entry_id)
+
+      - task_update(content, action, entry_id, importance): Управление задачами
+        action: add (добавить), plan (установить план), complete (завершить)
 
       Правила работы:
-      1. Важная информация о пользователе/проекте → save_memory с is_long_term=True
-      2. Временные заметки, текущая активность → append_daily_note или save_memory с is_long_term=False
-      3. Перед сохранением проверяй, нет ли уже такой информации (recall_memory), если есть, то обновляй запись.
-      4. Для удаления неактуальной информации → delete_memory_entry
-      5. Для обновления существующих записей → edit_memory_entry
+      1. Важная информация → memory_save(type="long_term", importance=0.7-1.0)
+      2. Временные заметки → memory_save(type="short_term", importance=0.3-0.6)
+      3. Задачи → task_update(action="add"), затем task_update(action="plan")
+      4. Перед сохранением проверяй memory_search, не дублируй информацию
+      5. Используй теги для категоризации (python, api, bug, feature и т.д.)
       6. Всегда отвечай на русском языке
-      7. ВАЖНО! Каждый запрос ты проверяешь память и оптимизируешь записи в памяти.
+      7. Контролируй размер памяти. 
+      Твоя второстепенная задача оптимизировать память при каждом запросе, это крайне важно! Ищи способы объединять записи, структурировать и формулировать.
 
   # Chat agent - главный агент для общения с пользователем
   chat_agent:
     name: "Чат-агент"
-    model: "glm-4.7-flash"
-    tools: ["recall_memory","memory_agent", "coordinator", "filesystem"]
+    model: "aurora"
+    tools: ["memory_search", "memory_agent", "coordinator", "doc_analyzer","filesystem"]
     description: "Главный агент для общения с пользователем"
     custom_prompt: |
       Ты главный чат-агент системы - первая точка контакта с пользователем.
       Твоя задача: понимать запросы пользователя и эффективно решать их, используя подагентов.
 
       У тебя есть доступ к:
-      - memory_agent: для работы с памятью 
+      - memory_search: поиск в памяти (долгосрочная память уже предзагружена в твои инструкции!)
+      - memory_agent: для сохранения важной информации
       - coordinator: для выполнения комплексных задач и работы с файлами и проектами
       - filesystem: для базовых операций с файлами
+      - doc_analyzer: для анализа PDF, Markdown документов и изображений
+
       Стратегия работы:
-      1. Проверяй память через recall_memory с query=null и days_back=14 после первого сообщения пользователя.
-      2. Анализируй запрос пользователя
-      3. Если нужна информация из памяти - используй memory_agent
-      4. Для сложных задач (программирование, git, etc.) - делегируй coordinator
-      5. Для простых задач (чтение файлов, проверка путей...) - используй свои инструменты
-      6. Предоставь пользователю полный цикл выполнения задачи.
-      7. После выполнения задачи, если получена важная информация - используй memory_agent для сохранения
+      1. Анализируй запрос пользователя
+      2. Для сложных задач (программирование, git, etc.) - делегируй coordinator
+      3. Для простых задач (чтение файлов, проверка путей...) - используй свои инструменты
+      4. Для анализа изображений, PDF и Markdown документов - делегируй doc_analyzer
+      5. После выполнения задачи, если получена важная информация - используй memory_agent для сохранения
+      6. Используй memory_search только если нужно найти что-то специфическое (долгосрочная память уже загружена)
 
       Всегда:
       - Отвечай на русском языке
       - Будь дружелюбным и полезным
       - Объясняй, что ты делаешь и почему
+      - Передавай полученные документу агенту doc_analyzer
       - Если что-то непонятно - уточни у пользователя

@@ -31,7 +31,7 @@ from .config import Config
 from .context import ContextManager, safe_lock
 from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names
-from utils.exceptions import AgentError, ConfigError, ContextError, MultimodalContentInjected
+from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
 from core.tracing_config import get_tracing_config
 
@@ -184,11 +184,20 @@ class GridRunContext:
 
     It enables `function_tool` implementations to access the live AgentFactory instance
     via `context.context.factory`.
+
+    Also provides access to the current agent's session for local context injection.
+    The should_restart flag allows tools to trigger an additional turn for the CURRENT agent
+    (not parent) to process injected multimodal content.
+
+    user_id provides workspace isolation for tools that need per-user storage.
     """
 
     factory: "AgentFactory"
     context_id: Optional[str] = None
-    should_restart: bool = False
+    session: Optional[Any] = None  # SQLiteSession for local agent history
+    should_restart: bool = False  # Trigger restart for LOCAL agent only
+    user_id: Optional[str] = None  # User identifier for workspace isolation
+    metadata: Optional[dict] = None  # Additional metadata from context manager
 
 
 class AgentFactory:
@@ -211,6 +220,7 @@ class AgentFactory:
         stream_observer: Optional[StreamObserver] = None,
         broadcaster: Optional[Any] = None,
         unified_memory: Optional[Any] = None,
+        memory_store: Optional[Any] = None,
     ):
         """
         Initialize Agent Factory.
@@ -221,7 +231,8 @@ class AgentFactory:
             tracing_level: Tracing level for debugging
             stream_observer: Observer for agent stream events
             broadcaster: LiveTransparencyBroadcaster for real-time progress updates
-            unified_memory: UnifiedMemory instance for hybrid memory management
+            unified_memory: UnifiedMemory instance for hybrid memory management (deprecated)
+            memory_store: MemoryStore instance for SQLite-based memory (new)
         """
         if tracing_level is not None:
             self._configure_tracing_once(tracing_level)
@@ -250,6 +261,17 @@ class AgentFactory:
                 persist_path="logs/context.json"  # Сохраняем контекст в файл для persistence
             )
             self.unified_memory = None
+
+        # Initialize SQLite-based memory store
+        if memory_store is not None:
+            self.memory_store = memory_store
+        else:
+            # Create default memory store
+            from core.memory_store import MemoryStore
+            from pathlib import Path
+            db_path = Path(self.config.get_working_directory()) / "data" / "memory.db"
+            self.memory_store = MemoryStore(db_path=str(db_path))
+            logger.info(f"✅ MemoryStore initialized: {db_path}")
 
         # Telegram integration components
         self.broadcaster = broadcaster
@@ -879,12 +901,30 @@ class AgentFactory:
     def _build_dynamic_agent_instructions(self, base_instructions: str, tool_names: List[str]) -> str:
         """
         Build complete instructions for dynamic agent including tool prompt_additions.
-        
+
         This mirrors the logic from Config.build_agent_prompt but for dynamic agents.
         """
+        # Комбинируем части
+        parts = [base_instructions]
+
+        # Pre-load memory from SQLite (NEW)
+        if hasattr(self, 'memory_store') and self.memory_store:
+            try:
+                preload = self.memory_store.get_preload_context(
+                    max_long_term=15,
+                    max_short_term=5,
+                    max_tasks=3
+                )
+                memory_text = self.memory_store.format_preload(preload, max_chars=2000)
+                if memory_text:
+                    parts.append(memory_text)
+                    logger.debug(f"✅ Pre-loaded memory for dynamic agent ({len(memory_text)} chars)")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to pre-load memory: {e}")
+
         if not tool_names:
-            return base_instructions
-        
+            return "\n\n".join(parts)
+
         # Собираем prompt_addition из конфигурации инструментов
         tool_descriptions = []
         for tool_name in tool_names:
@@ -896,25 +936,22 @@ class AgentFactory:
                 # Игнорируем неизвестные инструменты (для совместимости)
                 logger.debug(f"Tool '{tool_name}' not found in config, skipping prompt_addition")
                 continue
-        
-        # Если нет описаний инструментов, возвращаем базовые инструкции
+
+        # Если нет описаний инструментов, возвращаем базовые инструкции + память
         if not tool_descriptions:
-            return base_instructions
-        
-        # Комбинируем части
-        parts = [base_instructions]
-        
+            return "\n\n".join(parts)
+
         # Общие правила для инструментов (если заданы)
         common_rules = getattr(self.config.config.settings, 'tools_common_rules', None)
         if common_rules:
             parts.append("\nПравила использования инструментов (общие):")
             parts.append(str(common_rules))
-        
+
         # Добавляем описания инструментов
         parts.append("\nДоступные инструменты:")
         parts.extend(tool_descriptions)
-        
-        return "\n".join(parts)
+
+        return "\n\n".join(parts)
 
     async def run_agent_object_simple(
         self,
@@ -953,12 +990,21 @@ class AgentFactory:
             max_turns = self.config.get_max_turns()
 
         active_context_id = context_id or self.context_manager.get_current_context_id() or self.context_manager.start_new_context()
-        run_ctx = GridRunContext(factory=self, context_id=active_context_id)
 
         # Provide a session by default to enable memory for dynamic agents
         if session is None:
             session = self._get_agent_session(f"dyn:{agent.name}", active_context_id)
         agent._session = session
+
+        # Create run context with session access
+        # Get user_id from context metadata if available
+        ctx_user_id = self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, 'get_metadata') else None
+        run_ctx = GridRunContext(
+            factory=self,
+            context_id=active_context_id,
+            session=session,
+            user_id=ctx_user_id
+        )
 
         output = None
         error_occurred = None
@@ -1067,10 +1113,11 @@ class AgentFactory:
         streaming: Optional[bool] = None,
         use_active_context: bool = False,
         skip_input_add: bool = False,
+        user_id: Optional[str] = None,
     ) -> str:
         """
         Run agent with message and context management.
-        
+
         Args:
             agent_key: Agent to run
             message: Input message
@@ -1078,7 +1125,8 @@ class AgentFactory:
             context_id: Optional identifier of a saved conversation context
             stream: Whether to stream response (alias: streaming)
             use_active_context: If True, use the currently active context instead of creating new one
-            
+            user_id: Optional user identifier for workspace isolation
+
         Returns:
             Agent response
         """
@@ -1121,6 +1169,9 @@ class AgentFactory:
                         "timestamp": time.time(),
                     },
                 )
+                # Set user_id in metadata for workspace isolation
+                if user_id:
+                    self.context_manager.set_metadata("user_id", user_id)
             
             # Create agent
             agent = await self.create_agent(agent_key, context_path)
@@ -1338,7 +1389,18 @@ class AgentFactory:
             else:
                 session = self._get_agent_session(agent_key, active_context_id)
                 agent._session = session
-            run_ctx = GridRunContext(factory=self, context_id=active_context_id)
+
+            # Get user_id and metadata from context
+            ctx_user_id = user_id or (self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, 'get_metadata') else None)
+            ctx_metadata = self.context_manager.get_all_metadata() if hasattr(self.context_manager, 'get_all_metadata') else {}
+
+            run_ctx = GridRunContext(
+                factory=self,
+                context_id=active_context_id,
+                session=session,
+                user_id=ctx_user_id,
+                metadata=ctx_metadata
+            )
 
             if stream:
                 # Streaming режим: прозрачная подсветка tool/MCP вызовов через наблюдателя
@@ -1353,11 +1415,6 @@ class AgentFactory:
                     )
                     streaming_text_parts: List[str] = []
                     async for event in run_result_streaming.stream_events():
-                        # Check for restart signal from tools
-                        if run_ctx.should_restart:
-                            logger.info("Restart signal detected during streaming. Breaking loop.")
-                            break
-
                         try:
                             fragment = self._stream_observer.handle_event(event, agent_key=agent_key)
                             if fragment:
@@ -1415,19 +1472,6 @@ class AgentFactory:
                             logger.exception(
                                 "Stream observer failed for %s", type(event).__name__
                             )
-                    
-                    # Check restart signal again after loop
-                    if run_ctx.should_restart:
-                        logger.info("Restart signal active. Triggering recursive run.")
-                        return await self.run_agent(
-                            agent_key,
-                            message="",
-                            context_path=context_path,
-                            context_id=active_context_id,
-                            stream=stream,
-                            use_active_context=True,
-                            skip_input_add=True
-                        )
 
                     result_output = (
                         run_result_streaming.final_output
@@ -1444,30 +1488,6 @@ class AgentFactory:
                 except asyncio.TimeoutError:
                     logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
-                except MultimodalContentInjected:
-                     logger.info("Multimodal content injected. Triggering recursive run.")
-                     return await self.run_agent(
-                        agent_key,
-                        message="",
-                        context_path=context_path,
-                        context_id=active_context_id,
-                        stream=stream,
-                        use_active_context=True,
-                        skip_input_add=True
-                    )
-                except BaseException as e:
-                    if type(e).__name__ == 'MultimodalContentInjected':
-                         logger.info("Multimodal content injected. Triggering recursive run.")
-                         return await self.run_agent(
-                            agent_key,
-                            message="",
-                            context_path=context_path,
-                            context_id=active_context_id,
-                            stream=stream,
-                            use_active_context=True,
-                            skip_input_add=True
-                        )
-                    raise e
                 except Exception as e:
                     raise AgentError(f"Agent execution failed: {e}") from e
                 result = result_output
@@ -1484,45 +1504,10 @@ class AgentFactory:
                         ),
                         timeout=timeout_seconds
                     )
-                    
-                    if run_ctx.should_restart:
-                        logger.info("Restart signal active (non-streaming). Triggering recursive run.")
-                        return await self.run_agent(
-                            agent_key,
-                            message="",
-                            context_path=context_path,
-                            context_id=active_context_id,
-                            stream=stream,
-                            use_active_context=True,
-                            skip_input_add=True
-                        )
 
                 except asyncio.TimeoutError:
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
-                except MultimodalContentInjected:
-                    logger.info("Multimodal content injected. Triggering recursive run.")
-                    # Recursively call run_agent with empty message and skip_input_add=True
-                    return await self.run_agent(
-                        agent_key,
-                        message="",  # Empty message
-                        context_path=context_path,
-                        context_id=active_context_id,
-                        stream=stream,
-                        use_active_context=True,
-                        skip_input_add=True
-                    )
                 except Exception as e:
-                    if type(e).__name__ == 'MultimodalContentInjected':
-                         logger.info("Multimodal content injected. Triggering recursive run.")
-                         return await self.run_agent(
-                            agent_key,
-                            message="", 
-                            context_path=context_path,
-                            context_id=active_context_id,
-                            stream=stream,
-                            use_active_context=True,
-                            skip_input_add=True
-                         )
                     raise AgentError(f"Agent execution failed: {e}") from e
             
             # Process result - more robust extraction
@@ -1612,22 +1597,37 @@ class AgentFactory:
     def _build_agent_instructions(self, agent_key: str, context_path: Optional[str] = None, include_conversation_context: bool = True) -> str:
         """Build complete agent instructions with context."""
         base_instructions = self.config.build_agent_prompt(agent_key)
-        
+
         # Add path context
         path_context = self._build_path_context(context_path)
-        
+
         # Combine all parts
         parts = [base_instructions]
-        
+
         if path_context:
             parts.append(path_context)
+
+        # Pre-load memory from SQLite (NEW)
+        if hasattr(self, 'memory_store') and self.memory_store:
+            try:
+                preload = self.memory_store.get_preload_context(
+                    max_long_term=15,
+                    max_short_term=5,
+                    max_tasks=3
+                )
+                memory_text = self.memory_store.format_preload(preload, max_chars=2000)
+                if memory_text:
+                    parts.append(memory_text)
+                    logger.debug(f"✅ Pre-loaded memory for {agent_key} ({len(memory_text)} chars)")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to pre-load memory: {e}")
 
         # Добавляем контекст текущей сессии только если явно запрошено
         if include_conversation_context:
             conversation_context = self.context_manager.get_conversation_context()
             if conversation_context:
                 parts.append(conversation_context)
-        
+
         return "\n\n".join(parts)
     
     def _build_path_context(self, context_path: Optional[str] = None) -> str:
@@ -1866,81 +1866,11 @@ class AgentFactory:
                 result = original_invoke(tool_context, **normalized_args)
                 if hasattr(result, '__await__'):
                     result = await result
-                
-                # --- Multimodal Handling ---
-                # Если результат содержит мультимодальные данные (изображения), сохраняем их в контекст
-                try:
-                    if isinstance(result, list):
-                        has_images = False
-                        # Check for ToolOutputImage or dict with image info
-                        for item in result:
-                            # Check by class name or duck typing to avoid imports
-                            if type(item).__name__ == 'ToolOutputImage':
-                                 has_images = True
-                                 break
-                            if isinstance(item, dict) and item.get("type") in ("image_url", "input_image"):
-                                 has_images = True
-                                 break
-                        
-                        if has_images:
-                            # Import schemas locally
-                            from schemas import TextContent, ImageContent, ImageUrl
-                            
-                            content_parts = []
-                            for item in result:
-                                item_type = type(item).__name__
-                                if item_type == 'ToolOutputText':
-                                    text_val = getattr(item, 'text', '')
-                                    content_parts.append(TextContent(type="text", text=text_val))
-                                elif item_type == 'ToolOutputImage':
-                                    # ToolOutputImage has .image_url (or .url) and .detail
-                                    url = getattr(item, 'image_url', getattr(item, 'url', None))
-                                    detail = getattr(item, 'detail', 'auto')
-                                    if url:
-                                        content_parts.append(ImageContent(
-                                            type="image_url",
-                                            image_url=ImageUrl(url=url, detail=detail)
-                                        ))
-                                elif isinstance(item, dict):
-                                    # Handle dicts
-                                    part_type = item.get("type")
-                                    if part_type == "text":
-                                        content_parts.append(TextContent(type="text", text=item.get("text", "")))
-                                    elif part_type in ("image_url", "input_image"):
-                                        url_data = item.get("image_url", "")
-                                        detail = item.get("detail", "auto")
-                                        
-                                        url = ""
-                                        if isinstance(url_data, dict):
-                                            url = url_data.get("url", "")
-                                            detail = url_data.get("detail", detail)
-                                        else:
-                                            url = url_data
-                                        
-                                        if url:
-                                            content_parts.append(ImageContent(
-                                                type="image_url",
-                                                image_url=ImageUrl(url=url, detail=detail)
-                                            ))
 
-                            if content_parts:
-                                # Add as User message to ensure visibility by Vision models
-                                # (Many models ignore images in assistant/tool roles)
-                                self.context_manager.add_message(
-                                    "user",
-                                    content_parts,
-                                    metadata={
-                                        "context_id": sub_context_id,
-                                        "agent": agent_name,
-                                        "type": "tool_multimodal_output",
-                                        "tool": tool_display_name,
-                                        "generated_by_tool": True,
-                                        "note": "Automatically injected tool output images"
-                                    }
-                                )
-                                logger.info(f"Stored multimodal tool output in context as USER message ({len(content_parts)} parts)")
-                except Exception as e:
-                    logger.warning(f"Failed to store multimodal tool output: {e}")
+                # ✅ ИЗОЛЯЦИЯ КОНТЕКСТА: НЕ инжектируем мультимодальный вывод в глобальный контекст!
+                # Каждый агент работает со своим изолированным контекстом.
+                # Родительский агент должен видеть только текстовый результат (final_output).
+                # Мультимодальные данные (изображения) остаются внутри подагента и НЕ утекают наверх.
 
                 execution.end_time = time.time()
                 
@@ -2047,22 +1977,72 @@ class AgentFactory:
                 new_context_id = f"ctx-{uuid.uuid4().hex[:8]}"
                 session = self._get_agent_session(agent_key, new_context_id)
             sub_agent._session = session
-            
+
+            # Create GridRunContext for sub-agent with LOCAL session access
+            # Inherit user_id from parent context
+            parent_user_id = context.context.user_id if hasattr(context, 'context') and hasattr(context.context, 'user_id') else None
+            sub_run_ctx = GridRunContext(
+                factory=self,
+                context_id=new_context_id if not should_include_context else current_context_id,
+                session=session,
+                user_id=parent_user_id
+            )
+
             # Run the sub-agent with enhanced input and session
             output = await _get_runner().run(
                 starting_agent=sub_agent,
                 input=enhanced_input,
-                context=context.context,
+                context=sub_run_ctx,  # Pass sub-agent context with session
                 session=session,
                 max_turns=self.config.get_max_turns(),
             )
-            
+
+            # Check if sub-agent needs restart (e.g., for multimodal content processing)
+            if sub_run_ctx.should_restart:
+                logger.info(f"Sub-agent {agent_key} requested restart (multimodal injection). Running additional turn...")
+
+                # Debug: check session items before restart
+                try:
+                    session_items = await session.get_items()
+                    logger.info(f"Session items before restart: {len(session_items)} items")
+
+                    # Log last 3 items with full structure for debugging
+                    for idx, item in enumerate(session_items[-3:]):
+                        # Items might have different structure - log full item first
+                        logger.info(f"  Item {idx} raw keys: {list(item.keys()) if isinstance(item, dict) else type(item)}")
+
+                        # Try to extract role and content
+                        role = item.get('role') if isinstance(item, dict) else 'not_a_dict'
+                        content = item.get('content', '') if isinstance(item, dict) else ''
+
+                        if isinstance(content, list):
+                            # Multimodal content
+                            content_summary = f"[{len(content)} parts: {', '.join(p.get('type', '?') if isinstance(p, dict) else str(type(p)) for p in content)}]"
+                        elif isinstance(content, str):
+                            content_summary = content[:100]
+                        else:
+                            content_summary = f"<{type(content).__name__}>"
+
+                        logger.info(f"  Item {idx}: role={role}, content={content_summary}")
+                except Exception as e:
+                    logger.warning(f"Failed to log session items: {e}", exc_info=True)
+
+                # Run one more turn with a continuation prompt - session items will be included automatically
+                # SDK automatically prepends session items before this new input
+                output = await _get_runner().run(
+                    starting_agent=sub_agent,
+                    input="Проанализируй предоставленный контент.",  # Prompt to process injected content
+                    context=sub_run_ctx,
+                    session=session,
+                    max_turns=self.config.get_max_turns(),
+                )
+
             # Запишем результат как сообщение ассистента, чтобы главный агент мог обсуждать и давать правки
             try:
                 self.context_manager.add_tool_result_as_message(tool_name, output)
             except Exception as exc:
                 logger.debug("Failed to record tool result in context: %s", exc, exc_info=exc)
-            
+
             return output
         
         return run_agent_with_context

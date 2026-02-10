@@ -23,6 +23,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from core.unified_memory import UnifiedMemory
+from core.memory_store import MemoryStore
 
 # Опциональные импорты
 try:
@@ -82,7 +83,8 @@ class TelegramBridge:
         self.agent_factory: Optional[AgentFactory] = None
 
         # Изоляция пользователей: каждый user_id имеет свою память и workspace
-        self.user_memories: Dict[int, UnifiedMemory] = {}  # user_id -> UnifiedMemory
+        self.user_memories: Dict[int, UnifiedMemory] = {}  # user_id -> UnifiedMemory (deprecated)
+        self.user_memory_stores: Dict[int, MemoryStore] = {}  # user_id -> MemoryStore (new SQLite)
         self.user_workspaces: Dict[int, Path] = {}  # user_id -> workspace_path
 
         # Состояние активных операций
@@ -105,15 +107,18 @@ class TelegramBridge:
         """
         Получить workspace пользователя для агентов, создать если не существует.
 
-        Возвращает: workspace/user_{user_id}/workspace - директория для работы агентов
+        Возвращает: workspace/user_{user_id} - корневая директория пользователя
         """
         if user_id not in self.user_workspaces:
-            # Рабочая директория агентов: workspace/user_{user_id}/workspace
-            user_workspace = self.config.workspace_path / f"user_{user_id}" / "workspace"
+            # Корневая директория пользователя: workspace/user_{user_id}
+            user_workspace = self.config.workspace_path / f"user_{user_id}"
             user_workspace.mkdir(parents=True, exist_ok=True)
 
             self.user_workspaces[user_id] = user_workspace
-            logger.debug(f"Создан workspace для user_{user_id}: {user_workspace}")
+            logger.info(f"✅ Created workspace for user_{user_id}: {user_workspace}")
+        else:
+            logger.debug(f"Using cached workspace for user_{user_id}: {self.user_workspaces[user_id]}")
+
         return self.user_workspaces[user_id]
 
     def _get_user_memory(self, user_id: int) -> UnifiedMemory:
@@ -143,6 +148,28 @@ class TelegramBridge:
             logger.info(f"Создана память для user_{user_id}: workspace={user_base_dir}, persist={user_persist}")
 
         return self.user_memories[user_id]
+
+    def _get_user_memory_store(self, user_id: int) -> MemoryStore:
+        """
+        Получить SQLite-based MemoryStore пользователя, создать если не существует.
+
+        Новая система памяти на основе SQLite, заменяет файловую UnifiedMemory.
+        """
+        if user_id not in self.user_memory_stores:
+            # Базовая директория пользователя: workspace/user_{user_id}
+            user_base_dir = self.config.workspace_path / f"user_{user_id}"
+            user_base_dir.mkdir(parents=True, exist_ok=True)
+
+            # SQLite база данных: workspace/user_{user_id}/memory.db
+            db_path = user_base_dir / "memory.db"
+
+            # Создать MemoryStore для пользователя
+            user_memory_store = MemoryStore(db_path=str(db_path))
+            self.user_memory_stores[user_id] = user_memory_store
+
+            logger.info(f"✅ Создан MemoryStore для user_{user_id}: {db_path}")
+
+        return self.user_memory_stores[user_id]
 
     async def initialize(self):
         """Инициализация всех компонентов (Layer 1: Connection resilience)"""
@@ -237,8 +264,12 @@ class TelegramBridge:
             BotCommand("sendfile", "Отправить файл"),
         ]
 
-        await self.app.bot.set_my_commands(commands)
-        logger.info("Команды бота установлены")
+        try:
+            await self.app.bot.set_my_commands(commands)
+            logger.info("Команды бота установлены")
+        except Exception as e:
+            logger.warning(f"Не удалось установить команды бота (возможно проблемы с сетью): {e}")
+            # Не прерываем инициализацию, бот может работать без команд в меню
 
     # ===== ОБРАБОТЧИКИ КОМАНД (Layer 2: Message processing resilience) =====
 
@@ -343,33 +374,113 @@ class TelegramBridge:
             await self._send_error_message(update, "Ошибка при очистке памяти")
 
     async def cmd_memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда /memory - показать содержимое памяти"""
+        """Команда /memory - показать содержимое памяти (SQLite)"""
         try:
             user_id = update.effective_user.id
-            user_memory = self._get_user_memory(user_id)
 
-            # Получить полный контекст
-            full_context = user_memory.get_full_context(last_n_messages=10)
+            # Получить SQLite MemoryStore пользователя
+            memory_store = self._get_user_memory_store(user_id)
 
-            if not full_context or full_context.strip() == "":
+            # Получить статистику
+            stats = memory_store.get_stats()
+
+            if stats["total_entries"] == 0:
                 await update.message.reply_text("📭 Память пуста")
                 return
 
-            # Разбить на части если слишком длинное
+            # Формируем вывод памяти
+            output_parts = []
+
+            # Статистика
+            header = (
+                "💾 <b>Содержимое памяти (SQLite)</b>\n\n"
+                f"📊 <b>Статистика:</b>\n"
+                f"  • Всего записей: {stats['total_entries']}\n"
+                f"  • Архивных: {stats['archived_entries']}\n"
+            )
+
+            # По типам
+            if stats['by_type']:
+                header += "  • По типам:\n"
+                for mem_type, count in stats['by_type'].items():
+                    header += f"    - {mem_type}: {count}\n"
+
+            # По статусам (задачи)
+            if stats.get('by_status'):
+                header += "  • Задачи по статусам:\n"
+                for status, count in stats['by_status'].items():
+                    header += f"    - {status}: {count}\n"
+
+            header += f"\n📁 База данных: {stats['db_size_mb']:.2f} MB\n\n"
+            output_parts.append(header)
+
+            # Долгосрочная память
+            long_term = memory_store.search(type="long_term", limit=50)
+            if long_term:
+                lt_text = "🧠 <b>ДОЛГОСРОЧНАЯ ПАМЯТЬ</b> (важная информация):\n\n"
+                for entry in long_term:
+                    date = entry.created_at[:10] if entry.created_at else "N/A"
+                    importance_stars = "⭐" * int(entry.importance * 3)
+                    tags_str = f" [{entry.tags}]" if entry.tags else ""
+                    lt_text += f"• {date} {importance_stars}{tags_str}\n  {entry.content}\n\n"
+                output_parts.append(lt_text)
+
+            # Краткосрочная память
+            short_term = memory_store.search(type="short_term", limit=20)
+            if short_term:
+                st_text = "📝 <b>КРАТКОСРОЧНАЯ ПАМЯТЬ</b> (недавние заметки):\n\n"
+                for entry in short_term:
+                    date = entry.created_at[:10] if entry.created_at else "N/A"
+                    tags_str = f" [{entry.tags}]" if entry.tags else ""
+                    st_text += f"• {date}{tags_str}\n  {entry.content}\n\n"
+                output_parts.append(st_text)
+
+            # Активные задачи
+            active_tasks = memory_store.search(type="task", status="active", limit=10)
+            if active_tasks:
+                task_text = "📋 <b>АКТИВНЫЕ ЗАДАЧИ</b>:\n\n"
+                for task in active_tasks:
+                    date = task.created_at[:10] if task.created_at else "N/A"
+                    task_text += f"• {date} - {task.content}\n"
+
+                    # Найти план задачи
+                    if task.task_id:
+                        plans = memory_store.search(type="task_plan", task_id=task.task_id, limit=1)
+                        if plans:
+                            task_text += f"  └─ План: {plans[0].content}\n"
+                    task_text += "\n"
+                output_parts.append(task_text)
+
+            # Завершенные задачи (последние 5)
+            completed_tasks = memory_store.search(type="task", status="completed", limit=5)
+            if completed_tasks:
+                ct_text = "✅ <b>ЗАВЕРШЕННЫЕ ЗАДАЧИ</b> (последние 5):\n\n"
+                for task in completed_tasks:
+                    date = task.created_at[:10] if task.created_at else "N/A"
+                    ct_text += f"• {date} - {task.content}\n"
+                output_parts.append(ct_text)
+
+            # Объединить все части и отправить
+            full_output = "".join(output_parts)
+
+            # Разбить на части если слишком длинное (Telegram limit ~4096)
             max_length = 4000
-            if len(full_context) <= max_length:
-                message = f"💾 <b>Содержимое памяти:</b>\n\n<tg-spoiler>{full_context}</tg-spoiler>"
-                await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+            if len(full_output) <= max_length:
+                await update.message.reply_text(full_output, parse_mode=ParseMode.HTML)
             else:
                 # Отправить по частям
-                parts = [full_context[i:i+max_length] for i in range(0, len(full_context), max_length)]
-                await update.message.reply_text(f"💾 <b>Содержимое памяти ({len(parts)} частей):</b>", parse_mode=ParseMode.HTML)
+                parts = [full_output[i:i+max_length] for i in range(0, len(full_output), max_length)]
+                await update.message.reply_text(
+                    f"💾 <b>Содержимое памяти ({len(parts)} частей):</b>",
+                    parse_mode=ParseMode.HTML
+                )
                 for i, part in enumerate(parts, 1):
-                    message = f"<b>Часть {i}/{len(parts)}:</b>\n\n<tg-spoiler>{part}</tg-spoiler>"
+                    message = f"<b>Часть {i}/{len(parts)}:</b>\n\n{part}"
                     await update.message.reply_text(message, parse_mode=ParseMode.HTML)
 
         except Exception as e:
             logger.error(f"Ошибка в cmd_memory: {e}")
+            logger.error(traceback.format_exc())
             await self._send_error_message(update, "Ошибка при получении памяти")
 
     async def cmd_skills(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -493,8 +604,11 @@ class TelegramBridge:
     async def _process_user_message(self, chat_id: int, user_id: int, message_text: str):
         """Обработка сообщения пользователя с запуском агента (Layer 3: Agent resilience)"""
         try:
-            # Получить память пользователя
+            # Получить память пользователя (deprecated - для обратной совместимости)
             user_memory = self._get_user_memory(user_id)
+
+            # Получить SQLite MemoryStore пользователя (new)
+            user_memory_store = self._get_user_memory_store(user_id)
 
             # Получить рабочую директорию пользователя
             user_workspace = self._get_user_workspace(user_id)
@@ -511,15 +625,14 @@ class TelegramBridge:
             else:
                 self.stats["agents_launched"] += 1
 
-                # Временно установить память пользователя для agent_factory
+                # Временно установить память пользователя для agent_factory (deprecated)
                 self.agent_factory.unified_memory = user_memory
 
-                # КРИТИЧЕСКИ ВАЖНО: Установить глобальную память для memory_tools
-                # Это нужно делать перед каждым запуском агента, чтобы memory_tools
-                # работали с памятью текущего пользователя
-                from tools.memory_tools import set_unified_memory
-                set_unified_memory(user_memory)
-                logger.debug(f"Установлена память для memory_tools: user_{user_id}")
+                # КРИТИЧЕСКИ ВАЖНО: Установить MemoryStore для memory_tools_v2
+                # Это нужно делать перед каждым запуском агента, чтобы memory_tools_v2
+                # работали с памятью текущего пользователя через context.factory.memory_store
+                self.agent_factory.memory_store = user_memory_store
+                logger.debug(f"✅ Установлен MemoryStore для user_{user_id}: {user_memory_store.db_path}")
 
                 # Установить рабочую директорию пользователя для agent_factory
                 # Это нужно чтобы все операции с файлами выполнялись в workspace пользователя
@@ -546,11 +659,12 @@ class TelegramBridge:
                     else:
                         message_with_context = message_text
 
-                    # Запускаем агента с контекстом
+                    # Запускаем агента с контекстом и user_id
                     response = await self.agent_factory.run_agent(
                         agent_key=default_agent_key,
                         message=message_with_context,
-                        use_active_context=False  # Не используем глобальный контекст, у нас свой per-chat
+                        use_active_context=False,  # Не используем глобальный контекст, у нас свой per-chat
+                        user_id=str(user_id)  # Передаем user_id для изоляции workspace
                     )
                 except Exception as agent_error:
                     logger.error(f"Ошибка запуска агента: {agent_error}")
@@ -643,11 +757,11 @@ class TelegramBridge:
             tuple[Path, str]: (путь к файлу, оригинальное имя файла)
         """
         try:
-            # Получить workspace пользователя (уже указывает на workspace/user_{user_id}/workspace)
+            # Получить workspace пользователя (workspace/user_{user_id})
             user_workspace = self._get_user_workspace(user_id)
 
             # Создать директорию для файлов если не существует
-            # Теперь файлы будут в workspace/user_{user_id}/workspace/telegram_files
+            # Файлы будут в workspace/user_{user_id}/telegram_files
             files_dir = user_workspace / "telegram_files"
             files_dir.mkdir(exist_ok=True)
 
@@ -694,11 +808,21 @@ class TelegramBridge:
                 await update.message.reply_text("⛔ Доступ запрещен")
                 return
 
+            # Проверка на активную задачу
+            if chat_id in self.active_tasks and not self.active_tasks[chat_id].done():
+                await update.message.reply_text(
+                    "⏳ Предыдущий запрос еще обрабатывается. Подождите завершения."
+                )
+                return
+
             document = update.message.document
             file_name = document.file_name
             file_size = document.file_size
 
-            logger.info(f"Получен документ от {user_id}: {file_name} ({file_size} bytes)")
+            # Получить caption (текст сообщения с файлом)
+            caption = update.message.caption or ""
+
+            logger.info(f"Получен документ от {user_id}: {file_name} ({file_size} bytes), caption: {caption[:50] if caption else 'нет'}")
 
             # Проверка размера файла (ограничение 20MB)
             max_size = 20 * 1024 * 1024  # 20MB
@@ -710,25 +834,83 @@ class TelegramBridge:
                 return
 
             # Сохранить файл
-            status_msg = await update.message.reply_text("📥 Скачиваю файл...")
+            status_msg = None
+            try:
+                status_msg = await update.message.reply_text("📥 Скачиваю файл...")
+            except Exception as e:
+                logger.warning(f"Не удалось отправить статусное сообщение (timeout): {e}")
 
             file_path, original_name = await self._save_file(document, user_id, "document")
 
-            await status_msg.edit_text(
-                f"✅ Файл получен и сохранен:\n\n"
-                f"📄 <b>Имя:</b> <code>{original_name}</code>\n"
-                f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
-                f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
-                f"Файл доступен для обработки агентами.",
-                parse_mode=ParseMode.HTML
-            )
+            # Обновить статус или отправить новое сообщение
+            try:
+                if status_msg:
+                    await status_msg.edit_text(
+                        f"✅ Файл получен и сохранен:\n\n"
+                        f"📄 <b>Имя:</b> <code>{original_name}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
+                        f"🤖 Передаю агенту для обработки...",
+                        parse_mode=ParseMode.HTML
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"✅ Файл получен и сохранен:\n\n"
+                        f"📄 <b>Имя:</b> <code>{original_name}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
+                        f"🤖 Передаю агенту для обработки...",
+                        parse_mode=ParseMode.HTML
+                    )
+            except Exception as e:
+                logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
-            # Добавить информацию о файле в память пользователя
+            # Добавить информацию о файле в память пользователя (deprecated - для обратной совместимости)
             user_memory = self._get_user_memory(user_id)
             user_memory.add_message(
                 "system",
                 f"Пользователь отправил файл: {original_name} (путь: {file_path})"
             )
+
+            # Инициализировать контекст чата если его нет
+            if chat_id not in self.chat_contexts:
+                self.chat_contexts[chat_id] = []
+
+            # Сформировать сообщение для агента с информацией о файле
+            # Передаем абсолютный путь к файлу для инструментов
+            file_info_message = (
+                f"Пользователь отправил файл:\n"
+                f"Имя: {original_name}\n"
+                f"Путь: {file_path}\n"
+                f"Размер: {file_size / 1024:.2f} KB\n"
+            )
+
+            # Добавить текст сообщения (caption) если есть
+            if caption:
+                file_info_message += f"\n📝 Сообщение пользователя: {caption}\n\n"
+                file_info_message += "Обработай запрос пользователя, используя прикрепленный файл."
+            else:
+                file_info_message += "\nОпредели тип файла и предложи что можно с ним сделать."
+
+            # Добавить сообщение о файле в контекст чата
+            self.chat_contexts[chat_id].append({
+                "role": "user",
+                "content": file_info_message
+            })
+
+            # Ограничить размер контекста
+            max_context = self.config.max_message_history * 2
+            if len(self.chat_contexts[chat_id]) > max_context:
+                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
+
+            # Запустить обработку агентом в отдельной задаче
+            task = asyncio.create_task(
+                self._process_user_message(chat_id, user_id, file_info_message)
+            )
+            self.active_tasks[chat_id] = task
+
+            # Очистить завершенную задачу
+            task.add_done_callback(lambda t: self.active_tasks.pop(chat_id, None))
 
         except Exception as e:
             logger.error(f"Ошибка при обработке документа: {e}")
@@ -746,32 +928,100 @@ class TelegramBridge:
                 await update.message.reply_text("⛔ Доступ запрещен")
                 return
 
+            # Проверка на активную задачу
+            if chat_id in self.active_tasks and not self.active_tasks[chat_id].done():
+                await update.message.reply_text(
+                    "⏳ Предыдущий запрос еще обрабатывается. Подождите завершения."
+                )
+                return
+
             # Получить самое большое фото из массива
             photo = update.message.photo[-1]
             file_size = photo.file_size
 
-            logger.info(f"Получено фото от {user_id} ({file_size} bytes)")
+            # Получить caption (текст сообщения с фото)
+            caption = update.message.caption or ""
+
+            logger.info(f"Получено фото от {user_id} ({file_size} bytes), caption: {caption[:50] if caption else 'нет'}")
 
             # Сохранить файл
-            status_msg = await update.message.reply_text("📥 Скачиваю фото...")
+            status_msg = None
+            try:
+                status_msg = await update.message.reply_text("📥 Скачиваю фото...")
+            except Exception as e:
+                logger.warning(f"Не удалось отправить статусное сообщение (timeout): {e}")
 
             file_path, file_name = await self._save_file(photo, user_id, "photo")
 
-            await status_msg.edit_text(
-                f"✅ Фото получено и сохранено:\n\n"
-                f"🖼️ <b>Файл:</b> <code>{file_name}</code>\n"
-                f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
-                f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
-                f"Фото доступно для анализа агентами.",
-                parse_mode=ParseMode.HTML
-            )
+            # Обновить статус или отправить новое сообщение
+            try:
+                if status_msg:
+                    await status_msg.edit_text(
+                        f"✅ Фото получено и сохранено:\n\n"
+                        f"🖼️ <b>Файл:</b> <code>{file_name}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
+                        f"🤖 Передаю агенту для анализа...",
+                        parse_mode=ParseMode.HTML
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"✅ Фото получено и сохранено:\n\n"
+                        f"🖼️ <b>Файл:</b> <code>{file_name}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
+                        f"🤖 Передаю агенту для анализа...",
+                        parse_mode=ParseMode.HTML
+                    )
+            except Exception as e:
+                logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
-            # Добавить в память
+            # Добавить в память (deprecated - для обратной совместимости)
             user_memory = self._get_user_memory(user_id)
             user_memory.add_message(
                 "system",
                 f"Пользователь отправил фото (путь: {file_path})"
             )
+
+            # Инициализировать контекст чата если его нет
+            if chat_id not in self.chat_contexts:
+                self.chat_contexts[chat_id] = []
+
+            # Сформировать сообщение для агента с информацией о фото
+            # Передаем абсолютный путь к файлу для инструментов
+            file_info_message = (
+                f"Пользователь отправил фото:\n"
+                f"Имя файла: {file_name}\n"
+                f"Путь: {file_path}\n"
+                f"Размер: {file_size / 1024:.2f} KB\n"
+            )
+
+            # Добавить текст сообщения (caption) если есть
+            if caption:
+                file_info_message += f"\n📝 Сообщение пользователя: {caption}\n\n"
+                file_info_message += "Обработай запрос пользователя, используя прикрепленное изображение."
+            else:
+                file_info_message += "\nПроанализируй изображение и опиши что на нём изображено."
+
+            # Добавить сообщение о файле в контекст чата
+            self.chat_contexts[chat_id].append({
+                "role": "user",
+                "content": file_info_message
+            })
+
+            # Ограничить размер контекста
+            max_context = self.config.max_message_history * 2
+            if len(self.chat_contexts[chat_id]) > max_context:
+                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
+
+            # Запустить обработку агентом в отдельной задаче
+            task = asyncio.create_task(
+                self._process_user_message(chat_id, user_id, file_info_message)
+            )
+            self.active_tasks[chat_id] = task
+
+            # Очистить завершенную задачу
+            task.add_done_callback(lambda t: self.active_tasks.pop(chat_id, None))
 
         except Exception as e:
             logger.error(f"Ошибка при обработке фото: {e}")
@@ -782,50 +1032,128 @@ class TelegramBridge:
         """Обработка аудио файлов"""
         try:
             user_id = update.effective_user.id
+            chat_id = update.effective_chat.id
 
             if not self._check_access(user_id):
                 await update.message.reply_text("⛔ Доступ запрещен")
+                return
+
+            # Проверка на активную задачу
+            if chat_id in self.active_tasks and not self.active_tasks[chat_id].done():
+                await update.message.reply_text(
+                    "⏳ Предыдущий запрос еще обрабатывается. Подождите завершения."
+                )
                 return
 
             audio = update.message.audio
             file_name = audio.file_name or "audio.mp3"
             file_size = audio.file_size
 
-            logger.info(f"Получено аудио от {user_id}: {file_name}")
+            # Получить caption (текст сообщения с аудио)
+            caption = update.message.caption or ""
 
-            status_msg = await update.message.reply_text("📥 Скачиваю аудио...")
+            logger.info(f"Получено аудио от {user_id}: {file_name}, caption: {caption[:50] if caption else 'нет'}")
+
+            status_msg = None
+            try:
+                status_msg = await update.message.reply_text("📥 Скачиваю аудио...")
+            except Exception as e:
+                logger.warning(f"Не удалось отправить статусное сообщение (timeout): {e}")
 
             file_path, original_name = await self._save_file(audio, user_id, "audio")
 
-            await status_msg.edit_text(
-                f"✅ Аудио получено и сохранено:\n\n"
-                f"🎵 <b>Файл:</b> <code>{original_name}</code>\n"
-                f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
-                f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB",
-                parse_mode=ParseMode.HTML
-            )
+            try:
+                if status_msg:
+                    await status_msg.edit_text(
+                        f"✅ Аудио получено и сохранено:\n\n"
+                        f"🎵 <b>Файл:</b> <code>{original_name}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
+                        f"🤖 Передаю агенту для обработки...",
+                        parse_mode=ParseMode.HTML
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"✅ Аудио получено и сохранено:\n\n"
+                        f"🎵 <b>Файл:</b> <code>{original_name}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
+                        f"🤖 Передаю агенту для обработки...",
+                        parse_mode=ParseMode.HTML
+                    )
+            except Exception as e:
+                logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
             user_memory = self._get_user_memory(user_id)
             user_memory.add_message("system", f"Пользователь отправил аудио: {original_name}")
 
+            # Инициализировать контекст чата если его нет
+            if chat_id not in self.chat_contexts:
+                self.chat_contexts[chat_id] = []
+
+            # Сформировать сообщение для агента
+            file_info_message = (
+                f"Пользователь отправил аудио файл:\n"
+                f"Имя: {original_name}\n"
+                f"Путь: {file_path}\n"
+                f"Размер: {file_size / 1024:.2f} KB\n"
+            )
+
+            # Добавить текст сообщения (caption) если есть
+            if caption:
+                file_info_message += f"\n📝 Сообщение пользователя: {caption}\n\n"
+                file_info_message += "Обработай запрос пользователя, используя прикрепленный аудио файл."
+            else:
+                file_info_message += "\nПредложи что можно сделать с этим аудио файлом."
+
+            # Добавить сообщение о файле в контекст чата
+            self.chat_contexts[chat_id].append({
+                "role": "user",
+                "content": file_info_message
+            })
+
+            # Ограничить размер контекста
+            max_context = self.config.max_message_history * 2
+            if len(self.chat_contexts[chat_id]) > max_context:
+                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
+
+            # Запустить обработку агентом
+            task = asyncio.create_task(
+                self._process_user_message(chat_id, user_id, file_info_message)
+            )
+            self.active_tasks[chat_id] = task
+            task.add_done_callback(lambda t: self.active_tasks.pop(chat_id, None))
+
         except Exception as e:
             logger.error(f"Ошибка при обработке аудио: {e}")
+            logger.error(traceback.format_exc())
             await self._send_error_message(update, "Ошибка при обработке аудио")
 
     async def handle_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка видео файлов"""
         try:
             user_id = update.effective_user.id
+            chat_id = update.effective_chat.id
 
             if not self._check_access(user_id):
                 await update.message.reply_text("⛔ Доступ запрещен")
+                return
+
+            # Проверка на активную задачу
+            if chat_id in self.active_tasks and not self.active_tasks[chat_id].done():
+                await update.message.reply_text(
+                    "⏳ Предыдущий запрос еще обрабатывается. Подождите завершения."
+                )
                 return
 
             video = update.message.video
             file_name = video.file_name or "video.mp4"
             file_size = video.file_size
 
-            logger.info(f"Получено видео от {user_id}: {file_name}")
+            # Получить caption (текст сообщения с видео)
+            caption = update.message.caption or ""
+
+            logger.info(f"Получено видео от {user_id}: {file_name}, caption: {caption[:50] if caption else 'нет'}")
 
             # Проверка размера (видео может быть большим)
             max_size = 50 * 1024 * 1024  # 50MB
@@ -836,20 +1164,75 @@ class TelegramBridge:
                 )
                 return
 
-            status_msg = await update.message.reply_text("📥 Скачиваю видео...")
+            status_msg = None
+            try:
+                status_msg = await update.message.reply_text("📥 Скачиваю видео...")
+            except Exception as e:
+                logger.warning(f"Не удалось отправить статусное сообщение (timeout): {e}")
 
             file_path, original_name = await self._save_file(video, user_id, "video")
 
-            await status_msg.edit_text(
-                f"✅ Видео получено и сохранено:\n\n"
-                f"🎬 <b>Файл:</b> <code>{original_name}</code>\n"
-                f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
-                f"📊 <b>Размер:</b> {file_size / 1024 / 1024:.2f} MB",
-                parse_mode=ParseMode.HTML
-            )
+            try:
+                if status_msg:
+                    await status_msg.edit_text(
+                        f"✅ Видео получено и сохранено:\n\n"
+                        f"🎬 <b>Файл:</b> <code>{original_name}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📊 <b>Размер:</b> {file_size / 1024 / 1024:.2f} MB\n\n"
+                        f"🤖 Передаю агенту для обработки...",
+                        parse_mode=ParseMode.HTML
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"✅ Видео получено и сохранено:\n\n"
+                        f"🎬 <b>Файл:</b> <code>{original_name}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📊 <b>Размер:</b> {file_size / 1024 / 1024:.2f} MB\n\n"
+                        f"🤖 Передаю агенту для обработки...",
+                        parse_mode=ParseMode.HTML
+                    )
+            except Exception as e:
+                logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
             user_memory = self._get_user_memory(user_id)
             user_memory.add_message("system", f"Пользователь отправил видео: {original_name}")
+
+            # Инициализировать контекст чата если его нет
+            if chat_id not in self.chat_contexts:
+                self.chat_contexts[chat_id] = []
+
+            # Сформировать сообщение для агента
+            file_info_message = (
+                f"Пользователь отправил видео файл:\n"
+                f"Имя: {original_name}\n"
+                f"Путь: {file_path}\n"
+                f"Размер: {file_size / 1024 / 1024:.2f} MB\n"
+            )
+
+            # Добавить текст сообщения (caption) если есть
+            if caption:
+                file_info_message += f"\n📝 Сообщение пользователя: {caption}\n\n"
+                file_info_message += "Обработай запрос пользователя, используя прикрепленное видео."
+            else:
+                file_info_message += "\nПредложи что можно сделать с этим видео файлом."
+
+            # Добавить сообщение о файле в контекст чата
+            self.chat_contexts[chat_id].append({
+                "role": "user",
+                "content": file_info_message
+            })
+
+            # Ограничить размер контекста
+            max_context = self.config.max_message_history * 2
+            if len(self.chat_contexts[chat_id]) > max_context:
+                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
+
+            # Запустить обработку агентом
+            task = asyncio.create_task(
+                self._process_user_message(chat_id, user_id, file_info_message)
+            )
+            self.active_tasks[chat_id] = task
+            task.add_done_callback(lambda t: self.active_tasks.pop(chat_id, None))
 
         except Exception as e:
             logger.error(f"Ошибка при обработке видео: {e}")
@@ -859,33 +1242,100 @@ class TelegramBridge:
         """Обработка голосовых сообщений"""
         try:
             user_id = update.effective_user.id
+            chat_id = update.effective_chat.id
 
             if not self._check_access(user_id):
                 await update.message.reply_text("⛔ Доступ запрещен")
                 return
 
+            # Проверка на активную задачу
+            if chat_id in self.active_tasks and not self.active_tasks[chat_id].done():
+                await update.message.reply_text(
+                    "⏳ Предыдущий запрос еще обрабатывается. Подождите завершения."
+                )
+                return
+
             voice = update.message.voice
             file_size = voice.file_size
 
-            logger.info(f"Получено голосовое сообщение от {user_id}")
+            # Получить caption (текст сообщения с голосовым)
+            caption = update.message.caption or ""
 
-            status_msg = await update.message.reply_text("📥 Скачиваю голосовое сообщение...")
+            logger.info(f"Получено голосовое сообщение от {user_id}, caption: {caption[:50] if caption else 'нет'}")
+
+            status_msg = None
+            try:
+                status_msg = await update.message.reply_text("📥 Скачиваю голосовое сообщение...")
+            except Exception as e:
+                logger.warning(f"Не удалось отправить статусное сообщение (timeout): {e}")
 
             file_path, file_name = await self._save_file(voice, user_id, "voice")
 
-            await status_msg.edit_text(
-                f"✅ Голосовое сообщение получено:\n\n"
-                f"🎤 <b>Файл:</b> <code>{file_name}</code>\n"
-                f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
-                f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB",
-                parse_mode=ParseMode.HTML
-            )
+            try:
+                if status_msg:
+                    await status_msg.edit_text(
+                        f"✅ Голосовое сообщение получено:\n\n"
+                        f"🎤 <b>Файл:</b> <code>{file_name}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
+                        f"🤖 Передаю агенту для обработки...",
+                        parse_mode=ParseMode.HTML
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"✅ Голосовое сообщение получено:\n\n"
+                        f"🎤 <b>Файл:</b> <code>{file_name}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
+                        f"🤖 Передаю агенту для обработки...",
+                        parse_mode=ParseMode.HTML
+                    )
+            except Exception as e:
+                logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
             user_memory = self._get_user_memory(user_id)
             user_memory.add_message("system", f"Пользователь отправил голосовое сообщение")
 
+            # Инициализировать контекст чата если его нет
+            if chat_id not in self.chat_contexts:
+                self.chat_contexts[chat_id] = []
+
+            # Сформировать сообщение для агента
+            file_info_message = (
+                f"Пользователь отправил голосовое сообщение:\n"
+                f"Имя файла: {file_name}\n"
+                f"Путь: {file_path}\n"
+                f"Размер: {file_size / 1024:.2f} KB\n"
+            )
+
+            # Добавить текст сообщения (caption) если есть
+            if caption:
+                file_info_message += f"\n📝 Сообщение пользователя: {caption}\n\n"
+                file_info_message += "Обработай запрос пользователя, используя прикрепленное голосовое сообщение."
+            else:
+                file_info_message += "\nПредложи что можно сделать с этим голосовым сообщением (например, транскрибация)."
+
+            # Добавить сообщение о файле в контекст чата
+            self.chat_contexts[chat_id].append({
+                "role": "user",
+                "content": file_info_message
+            })
+
+            # Ограничить размер контекста
+            max_context = self.config.max_message_history * 2
+            if len(self.chat_contexts[chat_id]) > max_context:
+                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
+
+            # Запустить обработку агентом
+            task = asyncio.create_task(
+                self._process_user_message(chat_id, user_id, file_info_message)
+            )
+            self.active_tasks[chat_id] = task
+            task.add_done_callback(lambda t: self.active_tasks.pop(chat_id, None))
+
         except Exception as e:
             logger.error(f"Ошибка при обработке голосового сообщения: {e}")
+            logger.error(traceback.format_exc())
             await self._send_error_message(update, "Ошибка при обработке голосового сообщения")
 
     async def cmd_sendfile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1043,8 +1493,8 @@ class TelegramBridge:
                 logger.info(f"Ожидание завершения {len(self.active_tasks)} активных задач...")
                 await asyncio.gather(*self.active_tasks.values(), return_exceptions=True)
 
-            # Остановить broadcaster
-            if self.broadcaster:
+            # Остановить broadcaster (если существует)
+            if hasattr(self, 'broadcaster') and self.broadcaster:
                 self.broadcaster.stop()  # Not async, no await needed
 
             # Остановить Telegram
