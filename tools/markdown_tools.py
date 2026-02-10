@@ -13,13 +13,30 @@ from agents.tool import ToolOutputImage, ToolOutputText
 logger = logging.getLogger("tools.markdown")
 
 @function_tool
-def read_markdown(ctx: RunContextWrapper[Any], file_path: str) -> List[Union[ToolOutputText, ToolOutputImage]]:
+async def read_markdown(
+    ctx: RunContextWrapper[Any],
+    file_path: str,
+    start_char: int = 0,
+    max_chars: int = 50000
+) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
     Read a Markdown file and return structured content with images.
     Images in the markdown (e.g. ![alt](path)) are extracted and provided as visual inputs to the agent.
-    
+
+    ВАЖНО ДЛЯ БОЛЬШИХ ДОКУМЕНТОВ:
+    - Для документов > 50000 символов используй start_char и max_chars для постепенного чтения
+    - Сначала прочитай начало (0-50000) чтобы найти содержание/оглавление
+    - Затем читай нужные разделы по диапазонам символов
+    - Не пытайся прочитать весь большой документ за раз!
+
     Args:
         file_path: Path to the markdown file.
+        start_char: Starting character position (default: 0).
+        max_chars: Maximum number of characters to read (default: 50000, ~10-15 pages).
+
+    Example:
+        read_markdown(ctx, "large_doc.md", start_char=0, max_chars=50000)  # Первая часть
+        read_markdown(ctx, "large_doc.md", start_char=50000, max_chars=50000)  # Вторая часть
     """
     try:
         # Resolve file path
@@ -40,10 +57,22 @@ def read_markdown(ctx: RunContextWrapper[Any], file_path: str) -> List[Union[Too
             
         try:
             with open(abs_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+                # Read full content to get total size
+                full_content = f.read()
+                total_chars = len(full_content)
+
+                # Apply character range
+                end_char = min(start_char + max_chars, total_chars)
+                content = full_content[start_char:end_char]
+
+                # Add metadata about pagination
+                if start_char > 0 or end_char < total_chars:
+                    pagination_info = f"\n[Документ: символы {start_char}-{end_char} из {total_chars}]\n\n"
+                    content = pagination_info + content
+
         except Exception as e:
             return [ToolOutputText(text=f"Error reading file: {e}")]
-            
+
         # Parse Markdown for images
         # Regex for ![alt](url "title") or ![alt](url)
         # We simplify to capture url
@@ -104,59 +133,51 @@ def read_markdown(ctx: RunContextWrapper[Any], file_path: str) -> List[Union[Too
             if text_segment.strip():
                 final_output.append(ToolOutputText(text=text_segment))
                 
-        # --- Injection Strategy: Persist FULL content as USER message ---
-        # If output contains images, we inject EVERYTHING (text + images) as a User message
-        # and force a restart to make the agent "see" the images immediately.
+        # ✅ ИЗОЛЯЦИЯ КОНТЕКСТА: Инжектируем в ЛОКАЛЬНУЮ сессию агента!
         has_images = any(isinstance(item, ToolOutputImage) for item in final_output)
-        
+
         if has_images and factory and hasattr(factory, 'context_manager'):
             try:
-                # Import schemas locally to avoid circular deps
-                from schemas import ImageContent, ImageUrl, TextContent
-                
-                content_parts = []
-                # Add a text prefix to explain context
-                content_parts.append(TextContent(type="text", text=f"[System: Content of {file_path} (Text + Images)]"))
-                
-                for item in final_output:
-                    if isinstance(item, ToolOutputText):
-                        content_parts.append(TextContent(type="text", text=item.text))
-                    elif isinstance(item, ToolOutputImage):
-                        url = getattr(item, 'image_url', getattr(item, 'url', None))
-                        detail = getattr(item, 'detail', 'auto')
-                        if url:
-                            content_parts.append(ImageContent(
-                                type="image_url",
-                                image_url=ImageUrl(url=url, detail=detail)
-                            ))
-                
-                # Inject as USER message
-                if len(content_parts) > 1:
-                    factory.context_manager.add_message(
-                        "user",
-                        content_parts,
-                        metadata={
-                            "source": "tool_injection",
-                            "tool": "read_markdown",
-                            "file": file_path,
-                            "generated_by_tool": True,
-                            "note": "Full content injection for Vision compatibility"
-                        }
-                    )
-                    logger.info(f"Injected full multimodal content ({len(content_parts)} parts) as USER message")
-                    
-                    # Set restart flag on GridRunContext
-                    if hasattr(ctx.context, 'should_restart'):
-                        ctx.context.should_restart = True
-                        logger.info("Set should_restart flag on context")
-                    
-                    # Return dummy text to complete tool call gracefully
-                    return [ToolOutputText(text=f"[System: Content of {file_path} loaded with {len(content_parts)} parts (images detected). Agent is restarting to process visuals...]")]
-                    
+                session = getattr(ctx.context, 'session', None)
+                if session:
+                    from schemas import ImageContent, ImageUrl, TextContent
+
+                    # ✅ Используем правильный формат Agents SDK (input_text, input_image)
+                    content_list = []
+                    content_list.append({
+                        "type": "input_text",
+                        "text": f"[System: Content of {file_path} (Text + Images)]"
+                    })
+
+                    for item in final_output:
+                        if isinstance(item, ToolOutputText):
+                            content_list.append({
+                                "type": "input_text",
+                                "text": item.text
+                            })
+                        elif isinstance(item, ToolOutputImage):
+                            url = getattr(item, 'image_url', getattr(item, 'url', None))
+                            detail = getattr(item, 'detail', 'auto')
+                            if url:
+                                content_list.append({
+                                    "type": "input_image",
+                                    "image_url": url,
+                                    "detail": detail
+                                })
+
+                    if len(content_list) > 1:
+                        await session.add_items([{"role": "user", "content": content_list}])
+                        logger.info(f"✅ Injected multimodal content into LOCAL session ({len(content_list)} parts)")
+
+                        if hasattr(ctx.context, 'should_restart'):
+                            ctx.context.should_restart = True
+                            logger.info("✅ Set should_restart flag for LOCAL agent")
+
+                        return [ToolOutputText(text=f"[System: Content of {file_path} loaded with {len(content_list)} parts. Restarting...]")]
+
             except Exception as e:
-                logger.warning(f"Failed to inject tool content into context: {e}")
-                # Fallback to returning original output if injection fails
-        
+                logger.warning(f"⚠️ Failed to inject into local session: {e}")
+
         if not final_output:
             return [ToolOutputText(text="File is empty.")]
             

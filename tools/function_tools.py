@@ -8,7 +8,15 @@ from .git_tools import GIT_TOOLS, get_git_tools, get_git_tools_by_names
 from .orchestrator_tools import ORCHESTRATOR_TOOLS
 from .ocr_tools import OCR_TOOLS
 from .markdown_tools import MARKDOWN_TOOLS
-from .memory_tools import MEMORY_TOOLS
+from .memory_tools_v2 import MEMORY_TOOLS_V2  # New SQLite-based memory tools
+from .vision_tools import VISION_TOOLS  # Vision tools for image viewing
+from .document_tools import DOCUMENT_TOOLS  # Document conversion and export tools
+
+# Keep old tools for backward compatibility during migration
+try:
+    from .memory_tools import MEMORY_TOOLS as MEMORY_TOOLS_OLD
+except ImportError:
+    MEMORY_TOOLS_OLD = {}
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -29,7 +37,9 @@ AVAILABLE_TOOLS = {
     **ORCHESTRATOR_TOOLS,
     **OCR_TOOLS,
     **MARKDOWN_TOOLS,
-    **MEMORY_TOOLS,  # Добавляем memory инструменты
+    **MEMORY_TOOLS_V2,  # New SQLite-based memory tools (3 tools)
+    **VISION_TOOLS,  # Vision tools for image viewing (2 tools)
+    **DOCUMENT_TOOLS,  # Document conversion and export tools (4 tools)
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -79,13 +89,27 @@ TOOL_ALIASES = {
     "orchestrate": "orchestrate",
     "orchestrate_emergent": "orchestrate_emergent",
 
-    # Memory operations
-    "save_memory": "save_memory",
-    "recall_memory": "recall_memory",
-    "append_daily_note": "append_daily_note",
-    "get_daily_notes": "get_daily_notes",
-    "get_memory_stats": "get_memory_stats",
-    "clear_conversation_memory": "clear_conversation_memory",
+    # Memory operations V2 (new SQLite-based)
+    "memory_save": "memory_save",
+    "memory_search": "memory_search",
+    "task_update": "task_update",
+
+    # Old memory operations (backward compatibility aliases -> new tools)
+    "save_memory": "memory_save",  # Redirects to new tool
+    "recall_memory": "memory_search",  # Redirects to new tool
+    "append_daily_note": "memory_save",  # Use memory_save with type=short_term
+    "get_daily_notes": "memory_search",  # Use memory_search with type=short_term
+
+    # Document conversion and export operations
+    "markdown_to_html": "markdown_to_html",
+    "markdown_to_pdf": "markdown_to_pdf",
+    "save_report": "save_report",
+    "merge_reports": "merge_reports",
+
+    # OCR and document processing
+    "pdf": "pdf_to_markdown",
+    "pdf_to_markdown": "pdf_to_markdown",
+    "read_markdown": "read_markdown",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:

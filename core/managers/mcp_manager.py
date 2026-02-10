@@ -33,17 +33,27 @@ class DictObj(dict):
         except KeyError:
             # Must raise AttributeError for missing attributes so that hasattr() works correctly
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-            
+
     def __setattr__(self, name, value):
         self[name] = value
 
     def model_dump(self, **kwargs):
         """Mock Pydantic v2 model_dump method."""
         return dict(self)
-        
+
+    def model_dump_json(self, **kwargs):
+        """Mock Pydantic v2 model_dump_json method."""
+        import json
+        return json.dumps(dict(self))
+
     def dict(self, **kwargs):
         """Mock Pydantic v1 dict method."""
         return dict(self)
+
+    def json(self, **kwargs):
+        """Mock Pydantic v1 json method."""
+        import json
+        return json.dumps(dict(self))
 
 
 class ProxyCallToolResult:

@@ -22,7 +22,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+*.safetensors
 # Virtual environments
 .env
 .venv
@@ -100,3 +100,4 @@ workspace/*
 nul
 tools/DeepSeek-OCR/
 ocr_cache/
+*.db
