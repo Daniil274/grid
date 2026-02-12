@@ -8,7 +8,7 @@ Replaces 8 old tools with 3:
 """
 
 import logging
-from typing import Any
+from typing import Any, Tuple, Optional
 from agents import function_tool, RunContextWrapper
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,39 @@ def _get_memory_store(context: RunContextWrapper) -> Any:
     except Exception as e:
         logger.error(f"❌ Failed to get memory_store from context: {e}")
         return None
+
+
+def _get_context_ids(context: RunContextWrapper) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Get session_id, user_id, agent_id from context.
+    
+    Returns:
+        (session_id, user_id, agent_id)
+    """
+    session_id = None
+    user_id = None
+    agent_id = None
+    
+    try:
+        raw = getattr(context, "context", None)
+        if raw:
+            # Direct attributes
+            session_id = getattr(raw, "session_id", None)
+            user_id = getattr(raw, "user_id", None)
+            agent_id = getattr(raw, "agent_id", None)
+            
+            # Metadata fallback (if context manager is used)
+            if hasattr(raw, "context_manager"):
+                cm = raw.context_manager
+                if hasattr(cm, "get_metadata"):
+                    if not user_id:
+                        user_id = cm.get_metadata("user_id")
+                    if not agent_id:
+                        agent_id = cm.get_metadata("agent_id")
+    except Exception:
+        pass
+        
+    return session_id, user_id, agent_id
 
 
 # ============================================================================
@@ -98,14 +131,8 @@ async def memory_save(
         if not 0 <= importance <= 1:
             return f"❌ Invalid importance {importance}. Must be 0.0 to 1.0"
 
-        # Get session_id from context if available
-        session_id = None
-        try:
-            raw_context = getattr(context, "context", None)
-            if raw_context:
-                session_id = getattr(raw_context, "session_id", None)
-        except Exception:
-            pass
+        # Get context IDs
+        session_id, user_id, agent_id = _get_context_ids(context)
 
         # Save to store
         entry_id = store.save(
@@ -113,7 +140,9 @@ async def memory_save(
             type=type,
             tags=tags,
             importance=importance,
-            session_id=session_id
+            session_id=session_id,
+            user_id=user_id,
+            agent_id=agent_id
         )
 
         logger.info(f"💾 Saved memory #{entry_id} [{type}]: {text[:50]}...")
@@ -164,20 +193,16 @@ async def memory_search(
         if type and type not in {"long_term", "short_term", "task", "task_plan"}:
             return f"❌ Invalid type '{type}'. Use: long_term, short_term, task, task_plan, or empty for all"
 
-        # Get session_id from context if available
-        session_id = None
-        try:
-            raw_context = getattr(context, "context", None)
-            if raw_context:
-                session_id = getattr(raw_context, "session_id", None)
-        except Exception:
-            pass
+        # Get context IDs
+        session_id, user_id, agent_id = _get_context_ids(context)
 
         # Search
         results = store.search(
             query=query,
             type=type or None,
             session_id=session_id,
+            user_id=user_id,
+            agent_id=agent_id,
             limit=limit
         )
 
@@ -261,14 +286,8 @@ async def memory_delete(
         return "❌ Memory store not available"
 
     try:
-        # Get session_id from context if available
-        session_id = None
-        try:
-            raw_context = getattr(context, "context", None)
-            if raw_context:
-                session_id = getattr(raw_context, "session_id", None)
-        except Exception:
-            pass
+        # Get context IDs
+        session_id, user_id, agent_id = _get_context_ids(context)
 
         # If entry_id provided, delete it
         if entry_id > 0:
@@ -284,6 +303,8 @@ async def memory_delete(
             results = store.search(
                 query=query,
                 session_id=session_id,
+                user_id=user_id,
+                agent_id=agent_id,
                 limit=10
             )
 
@@ -368,14 +389,15 @@ async def task_update(
         if action in {"update", "delete"} and entry_id == 0:
             return f"❌ entry_id required for {action} action"
 
-        # Get session_id and task_id from context
-        session_id = None
+        # Get context IDs
+        session_id, user_id, agent_id = _get_context_ids(context)
+        
+        # Get task_id from context
         task_id = None
         try:
-            raw_context = getattr(context, "context", None)
-            if raw_context:
-                session_id = getattr(raw_context, "session_id", None)
-                task_id = getattr(raw_context, "task_id", None)
+            raw = getattr(context, "context", None)
+            if raw:
+                task_id = getattr(raw, "task_id", None)
         except Exception:
             pass
 
@@ -393,6 +415,8 @@ async def task_update(
                 importance=importance,
                 session_id=session_id,
                 task_id=task_id,
+                user_id=user_id,
+                agent_id=agent_id,
                 status="active"
             )
             logger.info(f"📋 Added task entry #{entry_id}: {content[:50]}...")
@@ -406,6 +430,8 @@ async def task_update(
                 importance=importance,
                 session_id=session_id,
                 task_id=task_id,
+                user_id=user_id,
+                agent_id=agent_id,
                 status="active"
             )
             logger.info(f"📝 Set task plan #{entry_id}")
@@ -433,6 +459,8 @@ async def task_update(
                 importance=0.5,
                 session_id=session_id,
                 task_id=task_id,
+                user_id=user_id,
+                agent_id=agent_id,
                 status="completed"
             )
 

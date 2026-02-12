@@ -172,6 +172,12 @@ async def main():
         default="config.yaml",
         help="Configuration file path"
     )
+    parser.add_argument(
+        "--user-id", "-u",
+        type=str,
+        default="default_user",
+        help="User identifier for isolation"
+    )
     
     args = parser.parse_args()
     
@@ -264,6 +270,7 @@ async def main():
                     context_id=request_context_id,
                     stream=use_streaming,
                     use_active_context=use_active_context,
+                    user_id=args.user_id if hasattr(args, 'user_id') else None
                 )
                 last_context_id = factory.get_active_context_id()
                 duration = time.time() - start_time
@@ -431,6 +438,7 @@ async def main():
                             context_id=request_context_id,
                             stream=use_streaming,
                             use_active_context=use_active_context,
+                            user_id=args.user_id if hasattr(args, 'user_id') else None
                         )
                         last_context_id = factory.get_active_context_id()
                         duration = time.time() - start_time

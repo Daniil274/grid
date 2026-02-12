@@ -7,6 +7,7 @@ import time
 import logging
 import threading
 import sys
+import json
 from typing import List, Dict, Any, Optional, Protocol
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -40,6 +41,17 @@ from .blackboard import Blackboard
 from .primitives import Primitives
 from .pipeline_memory import PipelineMemory
 
+# Skill Management
+from core.managers.skill_manager import SkillManager
+from tools.skill_tools import (
+    skill_create, 
+    skill_update, 
+    skill_delete, 
+    skill_read, 
+    skill_search, 
+    skill_broadcast
+)
+
 import json
 import re
 import uuid
@@ -71,6 +83,13 @@ class StreamObserver(Protocol):
 
     def handle_event(self, event: Any, *, agent_key: Optional[str] = None) -> Optional[str]:
         """Render a streaming event. Return text fragments to append to buffers if any."""
+
+
+# Helper class to mock the SDK's ToolContext for auto-run tools
+class AutoRunToolContext:
+    """Mock context that mimics SDK's ToolContext for direct tool invocation."""
+    def __init__(self, context: Any):
+        self.context = context
 
 
 class ConsoleStreamObserver:
@@ -197,6 +216,7 @@ class GridRunContext:
     session: Optional[Any] = None  # SQLiteSession for local agent history
     should_restart: bool = False  # Trigger restart for LOCAL agent only
     user_id: Optional[str] = None  # User identifier for workspace isolation
+    agent_id: Optional[str] = None  # Agent identifier for isolation
     metadata: Optional[dict] = None  # Additional metadata from context manager
 
 
@@ -272,6 +292,14 @@ class AgentFactory:
             db_path = Path(self.config.get_working_directory()) / "data" / "memory.db"
             self.memory_store = MemoryStore(db_path=str(db_path))
             logger.info(f"✅ MemoryStore initialized: {db_path}")
+
+        # Initialize SkillManager
+        from pathlib import Path
+        self.skill_manager = SkillManager(
+            memory_store=self.memory_store,
+            workspace_root=Path(self.config.get_working_directory()) / "workspace"
+        )
+        logger.info("✅ SkillManager initialized")
 
         # Telegram integration components
         self.broadcaster = broadcaster
@@ -689,6 +717,20 @@ class AgentFactory:
             # Get tools (function and agent tools only; MCP tools handled via mcp_servers)
             tools = await self._get_agent_tools(agent_config)
 
+            # Add Skill Tools (always available)
+            # Wrap them to inject context
+            skill_tools_list = [
+                skill_create, 
+                skill_update, 
+                skill_delete, 
+                skill_read, 
+                skill_search, 
+                skill_broadcast
+            ]
+            # Wrap tools if needed (e.g. output limit), though they are function_tools
+            # function_tool decorator handles context injection if signature matches
+            tools.extend(skill_tools_list)
+
             # Prepare MCP servers for this agent (if enabled)
             mcp_server_names: list[str] = []
             for tool_key in agent_config.tools:
@@ -712,6 +754,41 @@ class AgentFactory:
                 mcp_servers=mcp_servers_list,
             )
             
+            # --- Auto-run tools (NEW) ---
+            if agent_config.auto_run_tools:
+                try:
+                    # Get user_id from context metadata if available
+                    ctx_user_id = self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, 'get_metadata') else None
+                    # Create a temporary run context for auto-run tools
+                    temp_run_ctx = GridRunContext(
+                        factory=self,
+                        context_id=cache_key, # Use cache_key as context_id for initialization
+                        user_id=ctx_user_id
+                    )
+                    
+                    for auto_tool in agent_config.auto_run_tools:
+                        tool_name = auto_tool.get("name")
+                        tool_params = auto_tool.get("parameters", {})
+                        
+                        # Find the tool in the agent's tool list
+                        target_tool = next((t for t in tools if getattr(t, 'name', '') == tool_name), None)
+                        if target_tool and hasattr(target_tool, 'on_invoke_tool'):
+                            logger.info(f"Auto-running tool '{tool_name}' for agent '{agent_key}'")
+                            # Run the tool
+                            try:
+                                # SDK tools (FunctionTool) expect arguments as a JSON string in on_invoke_tool
+                                # AND they expect a ToolContext wrapper around our GridRunContext
+                                tool_ctx_wrapper = AutoRunToolContext(temp_run_ctx)
+                                tool_result = await target_tool.on_invoke_tool(tool_ctx_wrapper, json.dumps(tool_params))
+                                # Inject the result into instructions to save tokens (agent doesn't need to call it again)
+                                auto_run_info = f"\n\n=== РЕЗУЛЬТАТ АВТО-ЗАПУСКА ИНСТРУМЕНТА '{tool_name}' ===\n{tool_result}\n"
+                                agent.instructions += auto_run_info
+                                logger.debug(f"Injected auto-run result of '{tool_name}' into instructions")
+                            except Exception as tool_err:
+                                logger.warning(f"⚠️ Error in auto-run tool '{tool_name}': {tool_err}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to auto-run tools for agent '{agent_key}': {e}")
+
             self._agent_cache[cache_key] = agent
             
             return agent
@@ -1399,6 +1476,7 @@ class AgentFactory:
                 context_id=active_context_id,
                 session=session,
                 user_id=ctx_user_id,
+                agent_id=agent_key,
                 metadata=ctx_metadata
             )
 
@@ -1606,22 +1684,6 @@ class AgentFactory:
 
         if path_context:
             parts.append(path_context)
-
-        # Pre-load memory from SQLite (NEW)
-        if hasattr(self, 'memory_store') and self.memory_store:
-            try:
-                preload = self.memory_store.get_preload_context(
-                    max_long_term=15,
-                    max_short_term=5,
-                    max_tasks=3
-                )
-                memory_text = self.memory_store.format_preload(preload, max_chars=2000)
-                if memory_text:
-                    parts.append(memory_text)
-                    logger.debug(f"✅ Pre-loaded memory for {agent_key} ({len(memory_text)} chars)")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to pre-load memory: {e}")
-
         # Добавляем контекст текущей сессии только если явно запрошено
         if include_conversation_context:
             conversation_context = self.context_manager.get_conversation_context()
