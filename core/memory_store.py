@@ -4,9 +4,11 @@ SQLite-based Memory Store for Agent Platform.
 Provides:
 - Long-term and short-term memory
 - Task tracking and plan management
+- Skill indexing
 - Full-text search (FTS5)
 - Thread-safe operations
 - Pre-loading for agent instructions
+- User and Agent isolation
 """
 
 import sqlite3
@@ -24,13 +26,15 @@ logger = logging.getLogger(__name__)
 class MemoryEntry:
     """Single memory entry."""
     id: int
-    type: str  # long_term | short_term | task | task_plan
+    type: str  # long_term | short_term | task | task_plan | skill
     content: str
     tags: str
     created_at: str
     updated_at: str
     session_id: Optional[str] = None
     task_id: Optional[str] = None
+    user_id: Optional[str] = None
+    agent_id: Optional[str] = None
     status: Optional[str] = None  # active | completed | abandoned
     importance: float = 0.5
     is_archived: int = 0
@@ -45,29 +49,37 @@ class MemoryStore:
     SQLite-based memory storage with FTS5 full-text search.
 
     Features:
-    - 4 memory types: long_term, short_term, task, task_plan
+    - 5 memory types: long_term, short_term, task, task_plan, skill
     - Full-text search via FTS5
     - Pre-loading for agent instructions
     - Automatic cleanup of old short-term entries
     - Thread-safe via WAL mode
+    - User and Agent isolation via user_id and agent_id
 
     Usage:
         store = MemoryStore(db_path="data/memory.db")
 
         # Save memory
-        entry_id = store.save("User prefers Python", type="long_term", tags="preference")
+        entry_id = store.save(
+            "User prefers Python", 
+            type="long_term", 
+            tags="preference",
+            user_id="user_123",
+            agent_id="agent_456"
+        )
 
         # Search
-        results = store.search("Python", type="long_term", limit=10)
-
-        # Pre-load for agent
-        preload = store.get_preload_context()
-        text = store.format_preload(preload)
+        results = store.search(
+            "Python", 
+            type="long_term", 
+            user_id="user_123",
+            limit=10
+        )
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
-    VALID_TYPES = {"long_term", "short_term", "task", "task_plan"}
+    VALID_TYPES = {"long_term", "short_term", "task", "task_plan", "skill"}
     VALID_STATUSES = {"active", "completed", "abandoned"}
 
     def __init__(self, db_path: str):
@@ -86,6 +98,36 @@ class MemoryStore:
 
     def _init_db(self):
         """Initialize database schema with FTS5."""
+        # Check if we need to reset the database (schema migration)
+        # We do this by checking if the 'user_id' column exists in the 'memory' table
+        # if the table already exists.
+        reset_needed = False
+        if self.db_path.exists():
+            try:
+                with sqlite3.connect(str(self.db_path)) as conn:
+                    cursor = conn.execute("PRAGMA table_info(memory)")
+                    columns = [row[1] for row in cursor.fetchall()]
+                    if columns and "user_id" not in columns:
+                        reset_needed = True
+                        logger.info("🔄 Old schema detected (missing user_id). Resetting memory database as requested.")
+            except Exception as e:
+                logger.warning(f"⚠️ Error checking schema: {e}")
+
+        if reset_needed:
+            try:
+                # Close any existing connections and delete the file
+                # Since we are in __init__, there shouldn't be other connections yet
+                # but let's be safe and just drop the table instead of deleting the file
+                # to avoid permission issues if the file is open.
+                with sqlite3.connect(str(self.db_path)) as conn:
+                    conn.execute("DROP TABLE IF EXISTS memory")
+                    conn.execute("DROP TABLE IF EXISTS memory_fts")
+                    conn.execute("DROP TABLE IF EXISTS metadata")
+                    conn.commit()
+                logger.info("🗑️ Old memory tables dropped.")
+            except Exception as e:
+                logger.error(f"❌ Failed to reset database: {e}")
+
         with self._get_connection() as conn:
             # Enable WAL mode for better concurrency
             conn.execute("PRAGMA journal_mode=WAL")
@@ -95,13 +137,15 @@ class MemoryStore:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS memory (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    type        TEXT NOT NULL CHECK(type IN ('long_term','short_term','task','task_plan')),
+                    type        TEXT NOT NULL CHECK(type IN ('long_term','short_term','task','task_plan','skill')),
                     content     TEXT NOT NULL,
                     tags        TEXT DEFAULT '',
                     created_at  TEXT DEFAULT (datetime('now')),
                     updated_at  TEXT DEFAULT (datetime('now')),
                     session_id  TEXT,
                     task_id     TEXT,
+                    user_id     TEXT,
+                    agent_id    TEXT,
                     status      TEXT CHECK(status IS NULL OR status IN ('active','completed','abandoned')),
                     importance  REAL DEFAULT 0.5 CHECK(importance >= 0 AND importance <= 1),
                     is_archived INTEGER DEFAULT 0 CHECK(is_archived IN (0, 1))
@@ -112,6 +156,8 @@ class MemoryStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_type ON memory(type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_session ON memory(session_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_task ON memory(task_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_agent ON memory(agent_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_importance ON memory(importance)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_created ON memory(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_status ON memory(status)")
@@ -181,6 +227,8 @@ class MemoryStore:
         importance: float = 0.5,
         session_id: Optional[str] = None,
         task_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
         status: Optional[str] = None
     ) -> int:
         """
@@ -188,11 +236,13 @@ class MemoryStore:
 
         Args:
             content: Memory content
-            type: long_term | short_term | task | task_plan
+            type: long_term | short_term | task | task_plan | skill
             tags: Comma-separated tags
             importance: 0.0 to 1.0 (higher = more important)
             session_id: Optional session identifier
             task_id: Optional task identifier
+            user_id: Optional user identifier
+            agent_id: Optional agent identifier
             status: active | completed | abandoned (for tasks)
 
         Returns:
@@ -210,10 +260,10 @@ class MemoryStore:
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO memory (type, content, tags, importance, session_id, task_id, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memory (type, content, tags, importance, session_id, task_id, user_id, agent_id, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (type, content, tags, importance, session_id, task_id, status)
+                (type, content, tags, importance, session_id, task_id, user_id, agent_id, status)
             )
             conn.commit()
             entry_id = cursor.lastrowid
@@ -226,6 +276,8 @@ class MemoryStore:
         type: Optional[str] = None,
         session_id: Optional[str] = None,
         task_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
         status: Optional[str] = None,
         min_importance: float = 0.0,
         limit: int = 50,
@@ -239,6 +291,8 @@ class MemoryStore:
             type: Filter by type
             session_id: Filter by session
             task_id: Filter by task
+            user_id: Filter by user
+            agent_id: Filter by agent
             status: Filter by status
             min_importance: Minimum importance
             limit: Max results
@@ -263,6 +317,14 @@ class MemoryStore:
         if task_id:
             conditions.append("task_id = ?")
             params.append(task_id)
+
+        if user_id:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+
+        if agent_id:
+            conditions.append("agent_id = ?")
+            params.append(agent_id)
 
         if status:
             if status not in self.VALID_STATUSES:
@@ -412,7 +474,9 @@ class MemoryStore:
         max_long_term: int = 15,
         max_short_term: int = 5,
         max_tasks: int = 3,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None
     ) -> Dict[str, List[MemoryEntry]]:
         """
         Get memory entries for pre-loading into agent instructions.
@@ -422,6 +486,8 @@ class MemoryStore:
             max_short_term: Max short-term entries
             max_tasks: Max active tasks
             session_id: Optional session filter
+            user_id: Optional user filter
+            agent_id: Optional agent filter
 
         Returns:
             Dict with 'long_term', 'short_term', 'tasks' lists
@@ -436,6 +502,8 @@ class MemoryStore:
         result["long_term"] = self.search(
             type="long_term",
             session_id=session_id,
+            user_id=user_id,
+            agent_id=agent_id,
             limit=max_long_term,
             min_importance=0.3  # Only meaningful entries
         )
@@ -444,6 +512,8 @@ class MemoryStore:
         result["short_term"] = self.search(
             type="short_term",
             session_id=session_id,
+            user_id=user_id,
+            agent_id=agent_id,
             limit=max_short_term
         )
 
@@ -452,6 +522,8 @@ class MemoryStore:
             type="task",
             status="active",
             session_id=session_id,
+            user_id=user_id,
+            agent_id=agent_id,
             limit=max_tasks
         )
 
@@ -462,6 +534,8 @@ class MemoryStore:
                 plans = self.search(
                     type="task_plan",
                     task_id=task.task_id,
+                    user_id=user_id,
+                    agent_id=agent_id,
                     limit=1
                 )
                 if plans:
@@ -521,13 +595,21 @@ class MemoryStore:
 
         return "\n".join(lines)
 
-    def cleanup_short_term(self, max_age_hours: int = 48, session_id: Optional[str] = None):
+    def cleanup_short_term(
+        self, 
+        max_age_hours: int = 48, 
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None
+    ):
         """
         Clean up old short-term memory entries.
 
         Args:
             max_age_hours: Archive entries older than this
             session_id: Optional session filter
+            user_id: Optional user filter
+            agent_id: Optional agent filter
         """
         cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
 
@@ -541,6 +623,14 @@ class MemoryStore:
             if session_id:
                 sql += " AND session_id = ?"
                 params.append(session_id)
+            
+            if user_id:
+                sql += " AND user_id = ?"
+                params.append(user_id)
+            
+            if agent_id:
+                sql += " AND agent_id = ?"
+                params.append(agent_id)
 
             cursor = conn.execute(sql, params)
             conn.commit()

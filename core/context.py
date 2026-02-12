@@ -409,6 +409,11 @@ class ContextManager:
         with safe_lock(self._lock, timeout=5.0):
             return self._metadata.get(key, default)
 
+    def get_all_metadata(self) -> Dict[str, Any]:
+        """Get all context metadata."""
+        with safe_lock(self._lock, timeout=5.0):
+            return self._metadata.copy()
+
     def _normalize_message_content(self, content: Union[str, List[Any]]) -> Union[str, List[Any]]:
         """
         Normalize message content by converting file images to base64.

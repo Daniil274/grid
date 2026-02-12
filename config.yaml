@@ -10,7 +10,7 @@ settings:
   debug: false
   mcp_enabled: true
   # Настройки путей
-  working_directory: "D:/Work/repo/agents_portable"  # Рабочая директория по умолчанию
+  working_directory: "D:/Work/repo/agents_portable/workspace/default_user"  # Рабочая директория по умолчанию
   config_directory: "."   # Директория конфигурации
   logs_directory: "D:/Work/repo/agents_portable/logs"
   allow_path_override: true  # Разрешить переопределение пути при запуске
@@ -34,13 +34,6 @@ settings:
     max_file_size_mb: 10  # Максимальный размер файла в MB
     jpeg_quality: 85  # Качество JPEG (1-100). 85 дает ~8k токенов, хорошо для текста
 
-# Настройки памяти
-memory:
-  enabled: true
-  workspace: "./workspace"
-  max_daily_notes_days: 30  # Сколько дней хранить daily notes
-  auto_save_important: true  # Автосохранение важных обменов
-  blackboard_integration: true  # Сохранять Blackboard DECISION в память
 
 # Настройки Telegram бота
 telegram:
@@ -235,6 +228,33 @@ tools:
     description: "Update task state"
     prompt_addition: "task_update(content, action, entry_id, importance): action=add|plan|complete|update|delete. Track task progress."
 
+  # Skill Tools - инструменты для работы со скиллами (базой знаний)
+  # ============================================================================
+
+  skill_create:
+    type: "function"
+    description: "Create a new skill (knowledge base entry)"
+    prompt_addition: "skill_create(name, file_path, tags): Register a skill from a file. First write content to file_path, then call this to index it."
+
+  skill_update:
+    type: "function"
+    description: "Update an existing skill"
+    prompt_addition: "skill_update(name, content): Update skill file and DB entry."
+
+  skill_delete:
+    type: "function"
+    description: "Delete a skill"
+    prompt_addition: "skill_delete(name): Remove skill file and DB entry."
+
+  skill_read:
+    type: "function"
+    description: "Read the content of a skill"
+    prompt_addition: "skill_read(name): Read skill markdown content from user directory."
+
+  skill_search:
+    type: "function"
+    description: "Search for skills by keywords"
+    prompt_addition: "skill_search(query): FTS search in skill database. Returns matching skill names and snippets."
   # ============================================================================
   # Vision Tools - инструменты для просмотра и анализа изображений
   # ============================================================================
@@ -385,6 +405,15 @@ prompt_templates:
     Ты координатор команды специализированных агентов в агентской системе. 
     Твоя задача — анализировать запросы пользователей или агентов и делегировать работу подходящим агентам или воспользоваться инструментом для эффективного и качественного решения задачи.
     Ты явно указываешь отчетность для агентов которых вызываешь. Формат отчетов зависит от задачи, тебе нужно сначала подумать над валидацией работы агента чтобы дать ему формат отчета.
+    Второстепенной целью является твое обучение. Каждый запрос анализируй свой запрос и результат выполнения агента и корректируй или добавляй свой скилл перед финальным ответом.
+    ## Работа с Памятью и Скиллами
+    Тебе доступны продвинутые инструменты управления знаниями:
+    1. **Память (Memory)**: Используй `memory_save` для сохранения важных фактов, предпочтений или результатов работы. Используй `memory_search` для поиска по истории. Память изолирована для каждого агента и пользователя.
+    2. **Скиллы (Skills)**: Это многоразовые инструкции, гайды или базы знаний. 
+       - Используй `skill_read(name)` для получения контента скилла.
+       - Используй `skill_create` для создания новых скиллов на основе успешного опыта.
+    3. **Задачи (Tasks)**: Используй `task_update` для фиксации текущего прогресса и планов. Это помогает другим агентам (и тебе в будущем) понимать статус выполнения.
+
 
 
   debugger_prompt: |
@@ -438,8 +467,12 @@ agents:
  # Координатор агентов
   coordinator:
     name: "Координатор"
-    model: "black-pony"
-    tools: ["filesystem", "terminal", "orchestrate", "task_update"]
+    model: "aurora"
+    tools: [
+      "filesystem", "terminal", "orchestrate", 
+      "memory_save", "memory_search", "memory_delete", "task_update",
+      "skill_create", "skill_update", "skill_delete", "skill_read", "skill_search",
+    ]
     base_prompt: "coordinator_prompt"
     custom_prompt: |
       Ты координатор команды специализированных агентов. 
@@ -497,22 +530,29 @@ agents:
   memory_agent:
     name: "Агент памяти"
     model: "glm-4.7-flash"
-    tools: ["memory_save", "memory_search", "memory_delete", "task_update"]
+    tools: [
+      "memory_save", "memory_search", "memory_delete", "task_update",
+      "skill_create", "skill_update", "skill_delete", "skill_read", "skill_search",
+    ]
     description: "Специалист по управлению памятью системы"
     custom_prompt: |
       Ты агент памяти - специалист по работе с памятью системы.
-      Твоя задача: сохранять важную информацию, искать в памяти, управлять задачами.
+      Твоя задача: сохранять важную информацию, искать в памяти, управлять задачами и скиллами (базой знаний).
 
-      Твои инструменты (4 простых):
-      - memory_save(text, type, tags, importance): Сохранить в память
-        type: long_term (важное), short_term (временное), task (задача), task_plan (план)
-        tags: ключевые слова через запятую для поиска
-        importance: 0.0-1.0 (выше = важнее)
+      Твои инструменты:
+      1. Память (Memory):
+         - memory_save(text, type, tags, importance): Сохранить в память
+         - memory_search(query, type, limit): Поиск в памяти
+         - memory_delete(query, entry_id): Удалить из памяти
+         - task_update(content, action, entry_id, importance): Управление задачами
 
-      - memory_search(query, type, limit): Поиск в памяти
-        query: ключевые слова (пусто = недавние записи)
-        type: фильтр по типу или пусто
-        limit: макс результатов
+      2. Скиллы (Skills - База знаний):
+         - skill_create(name, content, tags): Создать новый скилл
+         - skill_update(name, content): Обновить существующий скилл
+         - skill_delete(name): Удалить скилл
+         - skill_read(name): Прочитать контент скилла
+         - skill_search(query): Поиск по скиллам
+
 
       - memory_delete(query, entry_id): Удаление из памяти
         query: найти записи для удаления (без удаления)
@@ -536,7 +576,15 @@ agents:
   chat_agent:
     name: "Чат-агент"
     model: "aurora"
-    tools: ["memory_search", "memory_agent", "coordinator", "doc_analyzer","filesystem"]
+    tools: [
+      "memory_search", "memory_agent", "doc_analyzer", "filesystem", "coordinator",
+      "skill_create", "skill_update", "skill_delete", "skill_read", "skill_search", "terminal"
+    ]
+    auto_run_tools:
+      - name: "memory_search"
+        parameters: { "query": "", "limit": 5 }
+      - name: "skill_search"
+        parameters: { "query": "" }
     description: "Главный агент для общения с пользователем"
     custom_prompt: |
       Ты главный чат-агент системы - первая точка контакта с пользователем.
@@ -551,11 +599,10 @@ agents:
 
       Стратегия работы:
       1. Анализируй запрос пользователя
-      2. Для сложных задач (программирование, git, etc.) - делегируй coordinator
-      3. Для простых задач (чтение файлов, проверка путей...) - используй свои инструменты
-      4. Для анализа изображений, PDF и Markdown документов - делегируй doc_analyzer
-      5. После выполнения задачи, если получена важная информация - используй memory_agent для сохранения
-      6. Используй memory_search только если нужно найти что-то специфическое (долгосрочная память уже загружена)
+      2. Для простых задач (чтение файлов, проверка путей...) - используй свои инструменты
+      3. Для анализа изображений, PDF и Markdown документов - делегируй doc_analyzer
+      4. После выполнения задачи, если получена важная информация - используй memory_agent для сохранения
+      5. Используй memory_search только если нужно найти что-то специфическое
 
       Всегда:
       - Отвечай на русском языке

@@ -9,6 +9,7 @@ from .orchestrator_tools import ORCHESTRATOR_TOOLS
 from .ocr_tools import OCR_TOOLS
 from .markdown_tools import MARKDOWN_TOOLS
 from .memory_tools_v2 import MEMORY_TOOLS_V2  # New SQLite-based memory tools
+from .skill_tools import SKILL_TOOLS  # New file-based skill tools
 from .vision_tools import VISION_TOOLS  # Vision tools for image viewing
 from .document_tools import DOCUMENT_TOOLS  # Document conversion and export tools
 
@@ -38,6 +39,7 @@ AVAILABLE_TOOLS = {
     **OCR_TOOLS,
     **MARKDOWN_TOOLS,
     **MEMORY_TOOLS_V2,  # New SQLite-based memory tools (3 tools)
+    **SKILL_TOOLS,  # New file-based skill tools (6 tools)
     **VISION_TOOLS,  # Vision tools for image viewing (2 tools)
     **DOCUMENT_TOOLS,  # Document conversion and export tools (4 tools)
     **MOCK_TOOLS,  # Добавляем мок инструменты
@@ -92,6 +94,7 @@ TOOL_ALIASES = {
     # Memory operations V2 (new SQLite-based)
     "memory_save": "memory_save",
     "memory_search": "memory_search",
+    "memory_delete": "memory_delete",
     "task_update": "task_update",
 
     # Old memory operations (backward compatibility aliases -> new tools)

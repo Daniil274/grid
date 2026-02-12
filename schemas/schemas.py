@@ -63,6 +63,10 @@ class AgentConfig(BaseModel):
     custom_prompt: Optional[str] = None
     description: str = ""
     mcp_enabled: bool = False
+    auto_run_tools: Optional[List[Dict[str, Any]]] = Field(
+        default=None, 
+        description="List of tools to run automatically on agent startup. Each item: {'name': 'tool_name', 'parameters': {}}"
+    )
 
 
 class AgentLoggingConfig(BaseModel):
