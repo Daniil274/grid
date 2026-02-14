@@ -112,6 +112,14 @@ models:
     description: "GLM 4.7 Flash модель"
     streaming_enabled: true
 
+  glm-4.7-flash-local:
+    name: "z-ai/glm-4.7-flash:turbo"
+    provider: "lm-studio"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "GLM 4.7 Flash модель"
+    streaming_enabled: true
+
   glm-5:
     name: "z-ai/glm-5:friendli"
     provider: "openrouter"
@@ -693,7 +701,7 @@ agents:
   # Chat agent - главный агент для общения с пользователем
   chat_agent:
     name: "Чат-агент"
-    model: "glm-4.7-flash"
+    model: "glm-4.7-flash-local"
     tools: [
       "doc_analyzer", "filesystem", "coordinator",
       "terminal",

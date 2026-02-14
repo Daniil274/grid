@@ -8,6 +8,8 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 from functools import lru_cache
 import logging
+import ipaddress
+from urllib.parse import urlparse
 
 from schemas import GridConfig, ProviderConfig, ModelConfig, AgentConfig, ToolConfig
 from utils.exceptions import ConfigError
@@ -259,3 +261,51 @@ class Config:
         if self.config.telegram and self.config.telegram.get("proxy"):
             return self.config.telegram["proxy"]
         return os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+
+    @staticmethod
+    def _is_local_or_private_host(host: Optional[str]) -> bool:
+        """
+        Return True if host is localhost or a private/LAN IP.
+
+        This is used to prevent routing local providers (e.g. LM Studio on LAN)
+        through a global proxy intended for external APIs.
+        """
+        if not host:
+            return False
+        h = host.strip().lower()
+        if h in ("localhost", "127.0.0.1", "::1"):
+            return True
+        if h.endswith(".local"):
+            return True
+        try:
+            ip = ipaddress.ip_address(h)
+            return bool(
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+            )
+        except ValueError:
+            # Not an IP (domain name). Treat as non-local unless it matches known patterns.
+            return False
+
+    def get_proxy_for_provider(self, provider_key: Optional[str] = None) -> Optional[str]:
+        """
+        Provider-aware proxy resolution.
+
+        Rule:
+        - For providers with local/private base_url host (LAN/localhost), return None.
+        - Otherwise return global proxy (settings.proxy / telegram.proxy / env).
+        """
+        if not provider_key:
+            return self.get_proxy()
+        try:
+            provider = self.get_provider(provider_key)
+            base_url = getattr(provider, "base_url", None) or ""
+            host = urlparse(base_url).hostname
+            if self._is_local_or_private_host(host):
+                return None
+        except Exception:
+            # If we cannot resolve provider details, fall back to global proxy.
+            pass
+        return self.get_proxy()

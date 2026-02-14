@@ -455,21 +455,28 @@ class AgentFactory:
         base_url: str,
         timeout: int = 30,
         max_retries: int = 2,
+        provider_key: Optional[str] = None,
     ) -> AsyncOpenAI:
-        """Create AsyncOpenAI client; use proxy from config if set."""
+        """Create AsyncOpenAI client; avoid proxy for local providers."""
         kwargs: Dict[str, Any] = dict(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
         )
-        proxy_url = self.config.get_proxy()
+        proxy_url = self.config.get_proxy_for_provider(provider_key)
+        # We control proxy selection explicitly; disable env proxy usage in httpx.
         if proxy_url:
-            http_client = httpx.AsyncClient(
+            kwargs["http_client"] = httpx.AsyncClient(
                 proxy=proxy_url,
                 timeout=float(timeout),
+                trust_env=False,
             )
-            kwargs["http_client"] = http_client
+        else:
+            kwargs["http_client"] = httpx.AsyncClient(
+                timeout=float(timeout),
+                trust_env=False,
+            )
         return AsyncOpenAI(**kwargs)
 
     def get_openai_client_for_model(self, model_key: str) -> tuple[AsyncOpenAI, str]:
@@ -489,6 +496,7 @@ class AgentFactory:
             base_url=provider_cfg.base_url,
             timeout=provider_cfg.timeout,
             max_retries=provider_cfg.max_retries,
+            provider_key=model_cfg.provider,
         )
         return client, model_cfg.name
     
@@ -563,6 +571,7 @@ class AgentFactory:
                 base_url=provider_config.base_url,
                 timeout=provider_config.timeout,
                 max_retries=provider_config.max_retries,
+                provider_key=model_config.provider,
             )
             
             # Create model (auto-switch to Responses API for reasoning models if available)
@@ -2123,14 +2132,21 @@ class AgentFactory:
 
     async def _get_mcp_server(self, tool_name: str) -> Optional[Any]:
         """Get or create an SDK-based MCP server (MCPServerStdio)."""
-        if tool_name in self._mcp_servers:
-            logger.debug(f"Reusing cached MCP server: {tool_name}")
-            return self._mcp_servers[tool_name]
-
         tool_config = self.config.get_tool(tool_name)
         if tool_config.type != "mcp":
             logger.warning(f"Tool '{tool_name}' is not of type 'mcp' (type={tool_config.type})")
             return None
+
+        cwd = self.config.get_working_directory()
+
+        # IMPORTANT:
+        # MCP tools like terminal/filesystem are started with cwd and/or a cwd argument.
+        # If we cache only by tool_name, then per-user TG runs can reuse a server created
+        # for a different cwd, breaking the "cwd is always user workspace" invariant.
+        cache_key = f"{tool_name}::{cwd}" if getattr(tool_config, "add_working_directory", False) else tool_name
+        if cache_key in self._mcp_servers:
+            logger.debug("Reusing cached MCP server: %s", cache_key)
+            return self._mcp_servers[cache_key]
 
         server_command = tool_config.server_command or []
         if not server_command:
@@ -2143,13 +2159,19 @@ class AgentFactory:
         if command.lower() in ("npx", "npx.cmd") and "-y" not in args:
             args.insert(0, "-y")
 
-        env = tool_config.env_vars or {}
-        cwd = self.config.get_working_directory()
+        env = dict(tool_config.env_vars or {})
 
         # Add working directory to args if configured (CRITICAL FIX for filesystem MCP)
         if getattr(tool_config, 'add_working_directory', False):
-             args.append(cwd)
-             logger.debug(f"Added working directory to MCP server args: {cwd}")
+            args.append(cwd)
+            logger.debug(f"Added working directory to MCP server args: {cwd}")
+
+            # CRITICAL SAFETY (TG invariant):
+            # Prevent `git` from walking up from the per-user workspace into the main repo.
+            # This makes commands like `git reset --hard` impossible to run against the
+            # project root when executed from /home/daniil/grid/workspace/user_<id>.
+            env.setdefault("GIT_CEILING_DIRECTORIES", cwd)
+            env.setdefault("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
 
         logger.info(
             f"Creating MCP server: {tool_name} | command={command} | args={args} | cwd={cwd}"
@@ -2169,7 +2191,7 @@ class AgentFactory:
 
         await server.connect()
         logger.info(f"MCP server connected successfully: {tool_name}")
-        self._mcp_servers[tool_name] = server
+        self._mcp_servers[cache_key] = server
         return server
     
     def _extract_tools_used(self, result: Any) -> List[str]:
