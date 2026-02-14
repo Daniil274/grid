@@ -170,7 +170,6 @@ tools:
   list_files:
     type: "function"
     description: "Инструмент для получения списка файлов в директории."
-    prompt_addition: "Используй list_files(directory) для получения списка файлов в директории. directory - директория (по умолчанию '.')."
 
   # ============================================================================
   # Document Processing Tools - OCR и работа с документами
@@ -179,17 +178,14 @@ tools:
   pdf:
     type: "function"
     description: "Конвертирует PDF в Markdown через OCR с кэшированием результатов"
-    prompt_addition: "pdf(pdf_path, pages): OCR обработка PDF. ⚠️ ВСЕГДА начинай с pages='1:1' или '1:2'. Максимум '1:5'. Результаты кэшируются."
 
   get_screenshot_ocr:
     type: "function"
     description: "Извлекает текст из скриншота монитора"
-    prompt_addition: "get_screenshot_ocr(monitor_index): OCR скриншота. monitor_index - номер монитора (0 по умолчанию)."
 
   read_markdown:
     type: "function"
     description: "Читает Markdown файлы с изображениями"
-    prompt_addition: "read_markdown(file_path): Читает .md файл и извлекает изображения."
 
   # ============================================================================
   # Document Conversion & Export Tools - конвертация и экспорт
@@ -198,22 +194,18 @@ tools:
   markdown_to_html:
     type: "function"
     description: "Конвертирует Markdown в HTML файл"
-    prompt_addition: "markdown_to_html(markdown_content, output_filename, title): Создает HTML из Markdown."
 
   markdown_to_pdf:
     type: "function"
     description: "Конвертирует Markdown в PDF файл"
-    prompt_addition: "markdown_to_pdf(markdown_content, output_filename, title): Создает PDF из Markdown."
 
   save_report:
     type: "function"
     description: "Сохраняет отчет в указанном формате"
-    prompt_addition: "save_report(content, filename, format): Сохраняет отчет. format=md|txt|html|json."
 
   merge_reports:
     type: "function"
     description: "Объединяет несколько отчетов в один"
-    prompt_addition: "merge_reports(report_paths, output_filename, section_headers): Объединяет отчеты с заголовками."
 
   # Memory Tools - инструменты для работы с памятью
   # ============================================================================
@@ -223,17 +215,14 @@ tools:
   memory_save:
     type: "function"
     description: "Save information to memory"
-    prompt_addition: "memory_save(text, type, tags, importance): Save to memory. type=long_term|short_term|task|task_plan. tags for search. importance 0-1."
 
   memory_search:
     type: "function"
     description: "Search memory by keywords"
-    prompt_addition: "memory_search(query, type, limit): Full-text search. query=keywords or empty for recent. type to filter. limit=max results."
 
   memory_delete:
     type: "function"
     description: "Delete memory entry"
-    prompt_addition: "memory_delete(query, entry_id): Delete memory. query to find entries, entry_id to delete specific. Returns list or confirmation."
 
   # Skill Tools - инструменты для работы со скиллами (базой знаний)
   # ============================================================================
@@ -241,40 +230,33 @@ tools:
   skill_create:
     type: "function"
     description: "Create a new skill (knowledge base entry)"
-    prompt_addition: "skill_create(name, file_path, tags): Register a skill from a file. First write content to file_path, then call this to index it."
 
   skill_update:
     type: "function"
     description: "Update an existing skill"
-    prompt_addition: "skill_update(name, content): Update skill file and DB entry."
 
   skill_delete:
     type: "function"
     description: "Delete a skill"
-    prompt_addition: "skill_delete(name): Remove skill file and DB entry."
 
   skill_read:
     type: "function"
     description: "Read the content of a skill"
-    prompt_addition: "skill_read(name): Read skill markdown content from user directory."
 
   skill_search:
     type: "function"
     description: "Search for skills by keywords"
-    prompt_addition: "skill_search(query): FTS search in skill database. Returns matching skill names and snippets."
-  # ============================================================================
+# ============================================================================
   # Vision Tools - инструменты для просмотра и анализа изображений
   # ============================================================================
 
   view_image:
     type: "function"
     description: "View and analyze an image with vision model"
-    prompt_addition: "view_image(image_path, question): Load image and ask vision model to analyze it. Use for screenshots, photos, diagrams."
 
   analyze_screenshot:
     type: "function"
     description: "Analyze UI screenshot"
-    prompt_addition: "analyze_screenshot(screenshot_path): Specialized tool for analyzing UI/interface screenshots."
 
   # ============================================================================
   # Beads Tools - инструменты для работы с трекером задач Beads (bd)
@@ -283,42 +265,38 @@ tools:
   beads_init:
     type: "function"
     description: "Initialize beads (bd) in the given directory. Idempotent; safe if already initialized."
-    prompt_addition: "beads_init(directory): Ensure beads DB exists in directory (default '.')."
 
   beads_ready:
     type: "function"
     description: "List beads tasks that are ready to be worked on (no open blockers)"
-    prompt_addition: "beads_ready(directory): List unblocked tasks. directory default is '.'."
+
+  beads_list:
+    type: "function"
+    description: "List beads tasks with optional filters and pagination"
 
   beads_create:
     type: "function"
     description: "Create a new bead (task, epic, message, etc.)"
-    prompt_addition: "beads_create(title, priority, type, description, directory): Create a bead. priority 0-3 (0=P0). type=task|epic|message. description is optional."
 
   beads_show:
     type: "function"
     description: "Show detailed information about a specific bead"
-    prompt_addition: "beads_show(bead_id, directory): View bead details and audit trail."
-
+ 
   beads_update:
     type: "function"
     description: "Update an existing bead"
-    prompt_addition: "beads_update(bead_id, status, title, description, notes, claim, directory): Update bead. claim=true sets assignee and status=in_progress."
 
   beads_close:
     type: "function"
     description: "Close a bead"
-    prompt_addition: "beads_close(bead_id, reason, directory): Close bead with reason."
 
   beads_sync:
     type: "function"
     description: "Sync beads with the remote repository"
-    prompt_addition: "beads_sync(directory): Sync DB with git (pull, export, commit, push). Call at end of session."
 
   beads_dep:
     type: "function"
     description: "Manage dependencies between beads"
-    prompt_addition: "beads_dep(action, child_id, parent_id, directory): action=add|remove. child_id is blocked by parent_id."
 
   # MCP серверы
   terminal:
@@ -464,7 +442,7 @@ prompt_templates:
 
     ## Инструменты знаний
     - **Память**: `memory_save` / `memory_search` / `memory_delete` — долгосрочное хранение фактов и решений.
-    - **Задачи (Beads)**: `beads_ready` / `beads_create` / `beads_show` / `beads_update` / `beads_close` / `beads_sync` / `beads_dep` — основной трекер задач для долгосрочной работы.
+    - **Задачи (Beads)**: `beads_ready` / `beads_list` / `beads_create` / `beads_show` / `beads_update` / `beads_close` / `beads_sync` / `beads_dep` — основной трекер задач для долгосрочной работы.
 
     Перед каждой задачей проверяй `beads_ready` и `beads_show` для понимания текущего состояния проекта.
 
@@ -525,7 +503,7 @@ agents:
     tools: [
       "filesystem", "terminal", "orchestrate",
       "memory_save", "memory_search", "memory_delete",
-      "beads_ready", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
+      "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
     ]
     base_prompt: "coordinator_prompt"
     custom_prompt: |
@@ -667,7 +645,7 @@ agents:
     model: "glm-4.7-flash"
     tools: [
       "memory_save", "memory_search", "memory_delete",
-      "beads_ready", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
+      "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
     ]
     description: "Специалист по управлению памятью системы"
     custom_prompt: |
@@ -681,7 +659,7 @@ agents:
          - memory_delete(query, entry_id): Удалить из памяти
 
       2. Задачи (Beads):
-         - beads_ready, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep — трекер задач для долгосрочной работы
+         - beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep — трекер задач для долгосрочной работы
 
       - memory_delete(query, entry_id): Удаление из памяти
         query: найти записи для удаления (без удаления)
@@ -703,9 +681,10 @@ agents:
     name: "Чат-агент"
     model: "glm-4.7-flash-local"
     tools: [
-      "doc_analyzer", "filesystem", "coordinator",
-      "terminal",
-      "beads_init", "beads_ready", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
+      "filesystem", "doc_analyzer",  "coordinator",
+      "beads_init", "beads_ready", "beads_list", "beads_create", 
+      "beads_show", "beads_update", "beads_close", 
+      "beads_sync", "beads_dep",
     ]
     auto_run_tools:
       - name: "beads_init"
@@ -718,7 +697,7 @@ agents:
       Твоя задача: понимать запросы пользователя и эффективно решать их, используя подагентов.
 
       У тебя есть доступ к:
-      - beads (beads_init, beads_ready, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep): трекер задач для планирования и отслеживания работы
+      - beads (beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep): трекер задач для планирования и отслеживания работы
       - coordinator: для выполнения комплексных задач и работы с файлами и проектами
       - filesystem: для базовых операций с файлами
       - doc_analyzer: для анализа PDF, Markdown документов и изображений
@@ -734,5 +713,6 @@ agents:
       - Отвечай на русском языке
       - Будь дружелюбным и полезным
       - Объясняй, что ты делаешь и почему
-      - Передавай полученные документы агенту doc_analyzer
+      - Перед передачей задачи агенту сделай запись в трекере.
+      - Рекомендуется одновременно делать запись и вызывать агента.
       - Если что-то непонятно - уточни у пользователя
