@@ -230,7 +230,7 @@ class MCPManager:
 
         return servers
 
-    async def get_mcp_server(self, tool_name: str) -> Optional[Any]:
+    async def get_mcp_server(self, tool_name: str, container_id: Optional[str] = None) -> Optional[Any]:
         """
         Get or create an SDK-based MCP server (MCPServerStdio).
 
@@ -239,6 +239,7 @@ class MCPManager:
 
         Args:
             tool_name: MCP tool name from configuration
+            container_id: Optional Docker container ID for isolation
 
         Returns:
             MCP server instance or None if tool is not MCP type
@@ -293,15 +294,60 @@ class MCPManager:
             )
 
         # Get environment variables and working directory
-        env = tool_config.env_vars or {}
+        env = dict(tool_config.env_vars or {})
         cwd = self.config.get_working_directory()
 
         # Add working directory to args if configured
         if getattr(tool_config, 'add_working_directory', False):
-             args.append(cwd)
+             # For containerized execution, we use the container's path
+             # which is usually mapped to /workspace
+             target_cwd = "/workspace" if container_id else cwd
+             args.append(target_cwd)
              logger.debug(
                 "Added working directory to command arguments",
-                extra={"tool_name": tool_name, "cwd": cwd},
+                extra={"tool_name": tool_name, "cwd": target_cwd},
+            )
+            
+             # CRITICAL SAFETY:
+             # Prevent `git` from walking up from the per-user workspace into the main repo.
+             target_ceiling = "/workspace" if container_id else cwd
+             env.setdefault("GIT_CEILING_DIRECTORIES", target_ceiling)
+             env.setdefault("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
+
+        # Wrap command for Docker execution if container_id is provided
+        if container_id:
+            # Original command and args
+            orig_cmd = server_command[0]
+            orig_args = list(server_command[1:])
+            
+            # Handle npx -y
+            if orig_cmd.lower() in ("npx", "npx.cmd") and "-y" not in orig_args:
+                orig_args.insert(0, "-y")
+            
+            # Add working directory to args if configured (for the tool itself)
+            if getattr(tool_config, 'add_working_directory', False):
+                 orig_args.append("/workspace")
+
+            # Construct docker exec arguments
+            # docker exec -i -w /workspace [ENV_VARS] <container_id> <command> <args>
+            args = ["exec", "-i", "-w", "/workspace"]
+            
+            # Pass environment variables
+            for k, v in env.items():
+                args.extend(["-e", f"{k}={v}"])
+            
+            # Ensure beads daemon is disabled in container
+            if "BEADS_DAEMON" not in env:
+                args.extend(["-e", "BEADS_DAEMON=0"])
+                
+            args.extend([container_id, orig_cmd])
+            args.extend(orig_args)
+            
+            command = "docker"
+            
+            logger.info(
+                f"Wrapping MCP server in container {container_id}",
+                extra={"tool_name": tool_name, "mcp_command": command, "mcp_args": args}
             )
 
         logger.info(
@@ -312,6 +358,7 @@ class MCPManager:
                 "args": args,
                 "cwd": cwd,
                 "env_vars": list(env.keys()),
+                "container_id": container_id
             },
         )
 

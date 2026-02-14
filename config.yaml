@@ -35,6 +35,12 @@ settings:
     jpeg_quality: 85  # Качество JPEG (1-100). 85 дает ~8k токенов, хорошо для текста
 
 
+# Настройки изоляции агентов
+isolation:
+  enabled: true
+  type: "docker"
+  image: "grid-agent:latest"
+
 # Настройки Telegram бота
 telegram:
   # Токен бота (загружается из переменной окружения TELEGRAM_BOT_TOKEN)
@@ -301,7 +307,7 @@ tools:
   # MCP серверы
   terminal:
     type: "mcp"
-    server_command: ["npx", "@dillip285/mcp-terminal"]
+    server_command: ["mcp-terminal"]
     add_working_directory: true
     description: "MCP сервер для выполнения команд терминала"
     prompt_addition: "Используй execute_command для выполнения команд в терминале."
@@ -309,14 +315,14 @@ tools:
   # Файловая система
   filesystem:
     type: "mcp"
-    server_command: ["npx", "@modelcontextprotocol/server-filesystem"]
+    server_command: ["mcp-server-filesystem"]
     add_working_directory: true
     description: "MCP сервер для работы с файловой системой (ограничен рабочей директорией)"
     prompt_addition: "Используй filesystem для доступа к файловой системе."
 
   sequentialthinking:
     type: "mcp"
-    server_command: ["npx", "@modelcontextprotocol/server-sequential-thinking"]
+    server_command: ["mcp-server-sequential-thinking"]
     description: "MCP сервер для последовательного мышления"
     prompt_addition: "ВАЖНО!!! ВСЕГДА Используй sequential thinking для анализа, планирования задачи. Вызывай его перед выполнением любой задачи."
   
@@ -679,7 +685,7 @@ agents:
   # Chat agent - главный агент для общения с пользователем
   chat_agent:
     name: "Чат-агент"
-    model: "glm-4.7-flash-local"
+    model: "glm-4.7-flash"
     tools: [
       "filesystem", "doc_analyzer",  "coordinator",
       "beads_init", "beads_ready", "beads_list", "beads_create", 

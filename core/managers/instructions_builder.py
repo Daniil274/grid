@@ -31,6 +31,7 @@ class InstructionsBuilder:
         self,
         config: IConfig,
         context_manager: IContextManager,
+        container_id: Optional[str] = None,
     ) -> None:
         """
         Initialize InstructionsBuilder.
@@ -38,9 +39,11 @@ class InstructionsBuilder:
         Args:
             config: Configuration instance
             context_manager: Context manager instance
+            container_id: Optional Docker container ID
         """
         self.config = config
         self.context_manager = context_manager
+        self.container_id = container_id
 
     def build_agent_instructions(
         self,
@@ -142,26 +145,47 @@ class InstructionsBuilder:
 
             Используй эти пути для работы с файлами и директориями.
         """
-        working_dir = self.config.get_working_directory()
+        # When running in a container, the agent's view of the world is /workspace
+        working_dir = "/workspace" if self.container_id else self.config.get_working_directory()
         config_dir = self.config.get_config_directory()
 
         context_parts = [
             "Информация о путях:",
             f"Рабочая директория: {working_dir}",
-            f"Директория конфигурации: {config_dir}"
         ]
+        
+        # Only add config dir if not in container
+        if not self.container_id:
+            context_parts.append(f"Директория конфигурации: {config_dir}")
 
         if context_path:
-            # Get absolute path if available (some configs may implement this)
-            absolute_path = context_path
-            if hasattr(self.config, 'get_absolute_path'):
-                try:
-                    absolute_path = self.config.get_absolute_path(context_path)
-                except Exception as e:
-                    logger.debug(
-                        "Failed to get absolute path",
-                        extra={"context_path": context_path, "error": str(e)},
-                    )
+            # If in container, we try to make the path relative to the workspace
+            if self.container_id:
+                import os
+                from pathlib import Path
+                # If it's already relative, keep it. If absolute host path, try to convert.
+                if os.path.isabs(context_path):
+                    host_wd = self.config.get_working_directory()
+                    if context_path.startswith(host_wd):
+                        rel_path = os.path.relpath(context_path, host_wd)
+                        absolute_path = (Path("/workspace") / rel_path).as_posix()
+                        context_path = rel_path
+                    else:
+                        # Outside host workspace, can't map easily
+                        absolute_path = context_path 
+                else:
+                    absolute_path = (Path("/workspace") / context_path).as_posix()
+            else:
+                # Get absolute path if available (some configs may implement this)
+                absolute_path = context_path
+                if hasattr(self.config, 'get_absolute_path'):
+                    try:
+                        absolute_path = self.config.get_absolute_path(context_path)
+                    except Exception as e:
+                        logger.debug(
+                            "Failed to get absolute path",
+                            extra={"context_path": context_path, "error": str(e)},
+                        )
 
             context_parts.extend([
                 f"Контекстный путь: {context_path}",

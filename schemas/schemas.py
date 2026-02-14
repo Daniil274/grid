@@ -88,6 +88,13 @@ class ImageProcessingConfig(BaseModel):
     jpeg_quality: int = Field(default=70, ge=1, le=100)
 
 
+class IsolationConfig(BaseModel):
+    """Configuration for agent isolation."""
+    enabled: bool = False
+    type: str = "docker"
+    image: str = "grid-agent:latest"
+
+
 class Settings(BaseModel):
     """Global system settings."""
     default_agent: str = "assistant"
@@ -120,6 +127,7 @@ class Settings(BaseModel):
 class GridConfig(BaseModel):
     """Complete Grid system configuration."""
     settings: Settings = Field(default_factory=Settings)
+    isolation: IsolationConfig = Field(default_factory=IsolationConfig)
     providers: Dict[str, ProviderConfig] = Field(default_factory=dict)
     models: Dict[str, ModelConfig] = Field(default_factory=dict)
     tools: Dict[str, ToolConfig] = Field(default_factory=dict)
