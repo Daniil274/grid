@@ -250,3 +250,12 @@ class Config:
     def get_agent_timeout(self) -> int:
         """Get agent execution timeout in seconds."""
         return self.config.settings.agent_timeout
+
+    def get_proxy(self) -> Optional[str]:
+        """Get proxy URL for outgoing requests (API, Telegram, etc.).
+        Priority: settings.proxy -> telegram.proxy -> HTTPS_PROXY -> HTTP_PROXY."""
+        if getattr(self.config.settings, "proxy", None):
+            return self.config.settings.proxy
+        if self.config.telegram and self.config.telegram.get("proxy"):
+            return self.config.telegram["proxy"]
+        return os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")

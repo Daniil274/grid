@@ -3,7 +3,8 @@ Model Manager for handling model resolution and client creation.
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+import httpx
 from openai import AsyncOpenAI
 
 from core.config import Config
@@ -55,6 +56,29 @@ class ModelManager:
             default_agent_key = self.config.get_default_agent()
             return self.config.get_agent(default_agent_key).model
 
+    def _make_openai_client(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        timeout: int = 30,
+        max_retries: int = 2,
+    ) -> AsyncOpenAI:
+        """Create AsyncOpenAI client; use proxy from config if set."""
+        kwargs: Dict[str, Any] = dict(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        proxy_url = self.config.get_proxy()
+        if proxy_url:
+            kwargs["http_client"] = httpx.AsyncClient(
+                proxy=proxy_url,
+                timeout=float(timeout),
+            )
+        return AsyncOpenAI(**kwargs)
+
     def get_openai_client_for_model(self, model_key: str) -> Tuple[AsyncOpenAI, str]:
         """
         Create OpenAI client and return (client, model_name) using configuration.
@@ -67,7 +91,7 @@ class ModelManager:
                 f"API key not found for provider '{model_cfg.provider}'",
                 details={"provider": model_cfg.provider, "env_var": provider_cfg.api_key_env},
             )
-        client = AsyncOpenAI(
+        client = self._make_openai_client(
             api_key=api_key,
             base_url=provider_cfg.base_url,
             timeout=provider_cfg.timeout,

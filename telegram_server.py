@@ -86,6 +86,7 @@ class TelegramServer:
         self.config_path = config_path
         self.bridge: Optional[TelegramBridge] = None
         self.shutdown_event = asyncio.Event()
+        self._shutdown_requested = False
 
     def load_config(self) -> BridgeConfig:
         """Загрузка конфигурации из YAML файла"""
@@ -117,6 +118,19 @@ class TelegramServer:
             workspace_path.mkdir(parents=True, exist_ok=True)
             persist_path.mkdir(parents=True, exist_ok=True)
 
+            # Прокси: из конфига или из переменных HTTPS_PROXY / HTTP_PROXY
+            proxy_url = telegram_config.get('proxy') or os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY')
+
+            if proxy_url:
+                os.environ['HTTP_PROXY'] = proxy_url
+                os.environ['HTTPS_PROXY'] = proxy_url
+                # Также важно исключить локальные адреса, чтобы не ломать локальные сервисы (MCP, локальные LLM)
+                if not os.getenv('NO_PROXY'):
+                    os.environ['NO_PROXY'] = "localhost,127.0.0.1,0.0.0.0,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
+                
+                logger.info(f"🌍 Установлены глобальные настройки прокси: {proxy_url}")
+                logger.info(f"   NO_PROXY: {os.environ.get('NO_PROXY')}")
+
             # Создать BridgeConfig
             bridge_config = BridgeConfig(
                 telegram_token=telegram_token,
@@ -127,7 +141,8 @@ class TelegramServer:
                 show_tool_calls=telegram_config.get('show_tool_calls', True),
                 allowed_users=telegram_config.get('allowed_users'),
                 max_concurrent_tasks_per_user=telegram_config.get('max_concurrent_tasks_per_user', 1),
-                progress_update_interval=telegram_config.get('progress_update_interval', 1.0)
+                progress_update_interval=telegram_config.get('progress_update_interval', 1.0),
+                proxy_url=proxy_url,
             )
 
             logger.info("✅ Конфигурация успешно загружена")
@@ -172,12 +187,16 @@ class TelegramServer:
             await self.shutdown()
 
     async def shutdown(self):
-        """Graceful shutdown"""
+        """Graceful shutdown с таймаутом, чтобы не висеть при зависании stop()."""
+        shutdown_timeout = 15.0
         try:
             logger.info("🛑 Начало graceful shutdown...")
 
             if self.bridge:
-                await self.bridge.stop()
+                try:
+                    await asyncio.wait_for(self.bridge.stop(), timeout=shutdown_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Shutdown не завершился за {shutdown_timeout}s, выход")
 
             logger.info("✅ Shutdown завершен")
 
@@ -185,7 +204,13 @@ class TelegramServer:
             logger.error(f"Ошибка при shutdown: {e}")
 
     def handle_shutdown_signal(self, signum, _frame):
-        """Обработчик сигналов остановки"""
+        """Обработчик сигналов остановки. Второй Ctrl+C — принудительный выход."""
+        if self._shutdown_requested:
+            logger.warning("Повторный сигнал остановки — принудительный выход")
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            os._exit(1)
+        self._shutdown_requested = True
         logger.info(f"Получен сигнал {signum}, начинаю остановку...")
         self.shutdown_event.set()
 

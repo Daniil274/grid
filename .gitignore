@@ -101,3 +101,4 @@ nul
 tools/DeepSeek-OCR/
 ocr_cache/
 *.db
+*.json
