@@ -203,6 +203,7 @@ class GridRunContext:
     user_id: Optional[str] = None  # User identifier for workspace isolation
     agent_id: Optional[str] = None  # Agent identifier for isolation
     metadata: Optional[dict] = None  # Additional metadata from context manager
+    container_id: Optional[str] = None  # Docker container ID for isolation
 
 
 class AgentFactory:
@@ -226,6 +227,7 @@ class AgentFactory:
         broadcaster: Optional[Any] = None,
         unified_memory: Optional[Any] = None,
         memory_store: Optional[Any] = None,
+        container_id: Optional[str] = None,
     ):
         """
         Initialize Agent Factory.
@@ -238,6 +240,7 @@ class AgentFactory:
             broadcaster: LiveTransparencyBroadcaster for real-time progress updates
             unified_memory: UnifiedMemory instance for hybrid memory management (deprecated)
             memory_store: MemoryStore instance for SQLite-based memory (new)
+            container_id: Docker container ID for isolation
         """
         if tracing_level is not None:
             self._configure_tracing_once(tracing_level)
@@ -247,6 +250,7 @@ class AgentFactory:
         agents_logger.setLevel(logging.WARNING)
         
         self.config = config or Config()
+        self.container_id = container_id
         if working_directory:
             self.config.set_working_directory(working_directory)
 
@@ -285,6 +289,12 @@ class AgentFactory:
             workspace_root=Path(self.config.get_working_directory()) / "workspace"
         )
         logger.info("✅ SkillManager initialized")
+
+        # Initialize ContainerManager
+        from core.managers.container_manager import ContainerManager
+        self.container_manager = ContainerManager(self.config)
+        if self.container_id:
+            logger.info(f"✅ AgentFactory initialized with container isolation: {self.container_id}")
 
         # Telegram integration components
         self.broadcaster = broadcaster
@@ -982,7 +992,8 @@ class AgentFactory:
             factory=self,
             context_id=active_context_id,
             session=session,
-            user_id=ctx_user_id
+            user_id=ctx_user_id,
+            container_id=self.container_id
         )
 
         output = None
@@ -1201,10 +1212,13 @@ class AgentFactory:
             
             if init_key not in self._initialized_agents and getattr(run_agent_config, "auto_run_tools", None):
                 try:
-                    working_dir = self.config.get_working_directory()
+                    working_dir = "/workspace" if self.container_id else self.config.get_working_directory()
                     ctx_user_id = self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, "get_metadata") else None
                     temp_run_ctx = GridRunContext(
-                        self, active_context_id or "run", ctx_user_id
+                        factory=self,
+                        context_id=active_context_id or "run",
+                        user_id=ctx_user_id,
+                        container_id=self.container_id
                     )
                     agent_tools = getattr(agent, "tools", []) or []
                     auto_run_info = await self._execute_auto_run_tools(
@@ -1413,7 +1427,8 @@ class AgentFactory:
                 session=session,
                 user_id=ctx_user_id,
                 agent_id=agent_key,
-                metadata=ctx_metadata
+                metadata=ctx_metadata,
+                container_id=self.container_id
             )
 
             if stream:
@@ -1646,17 +1661,37 @@ class AgentFactory:
     
     def _build_path_context(self, context_path: Optional[str] = None) -> str:
         """Build path context information."""
-        working_dir = self.config.get_working_directory()
+        # When running in a container, the agent's view of the world is /workspace
+        working_dir = "/workspace" if self.container_id else self.config.get_working_directory()
         config_dir = self.config.get_config_directory()
         
         context_parts = [
             "Информация о путях:",
             f"Рабочая директория: {working_dir}",
-            f"Директория конфигурации: {config_dir}"
         ]
         
+        # Only add config dir if not in container (or if we decide to map it later)
+        if not self.container_id:
+            context_parts.append(f"Директория конфигурации: {config_dir}")
+        
         if context_path:
-            absolute_path = self.config.get_absolute_path(context_path)
+            # If in container, we try to make the path relative to the workspace
+            if self.container_id:
+                # If it's already relative, keep it. If absolute host path, try to convert.
+                if os.path.isabs(context_path):
+                    host_wd = self.config.get_working_directory()
+                    if context_path.startswith(host_wd):
+                        rel_path = os.path.relpath(context_path, host_wd)
+                        absolute_path = (Path("/workspace") / rel_path).as_posix()
+                        context_path = rel_path
+                    else:
+                        # Outside host workspace, can't map easily
+                        absolute_path = context_path 
+                else:
+                    absolute_path = (Path("/workspace") / context_path).as_posix()
+            else:
+                absolute_path = self.config.get_absolute_path(context_path)
+
             context_parts.extend([
                 f"Контекстный путь: {context_path}",
                 f"Абсолютный контекстный путь: {absolute_path}"
@@ -1999,7 +2034,8 @@ class AgentFactory:
                 factory=self,
                 context_id=new_context_id if not should_include_context else current_context_id,
                 session=session,
-                user_id=parent_user_id
+                user_id=parent_user_id,
+                container_id=self.container_id
             )
 
             # Run the sub-agent with enhanced input and session
@@ -2143,7 +2179,11 @@ class AgentFactory:
         # MCP tools like terminal/filesystem are started with cwd and/or a cwd argument.
         # If we cache only by tool_name, then per-user TG runs can reuse a server created
         # for a different cwd, breaking the "cwd is always user workspace" invariant.
+        # Also include container_id in cache key
         cache_key = f"{tool_name}::{cwd}" if getattr(tool_config, "add_working_directory", False) else tool_name
+        if self.container_id:
+            cache_key += f"::{self.container_id}"
+            
         if cache_key in self._mcp_servers:
             logger.debug("Reusing cached MCP server: %s", cache_key)
             return self._mcp_servers[cache_key]
@@ -2163,15 +2203,46 @@ class AgentFactory:
 
         # Add working directory to args if configured (CRITICAL FIX for filesystem MCP)
         if getattr(tool_config, 'add_working_directory', False):
-            args.append(cwd)
-            logger.debug(f"Added working directory to MCP server args: {cwd}")
+            # If running in container, use /workspace
+            target_cwd = "/workspace" if self.container_id else cwd
+            args.append(target_cwd)
+            logger.debug(f"Added working directory to MCP server args: {target_cwd}")
 
             # CRITICAL SAFETY (TG invariant):
             # Prevent `git` from walking up from the per-user workspace into the main repo.
             # This makes commands like `git reset --hard` impossible to run against the
             # project root when executed from /home/daniil/grid/workspace/user_<id>.
-            env.setdefault("GIT_CEILING_DIRECTORIES", cwd)
+            target_ceiling = "/workspace" if self.container_id else cwd
+            env.setdefault("GIT_CEILING_DIRECTORIES", target_ceiling)
             env.setdefault("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
+            # For beads, ensure it doesn't try to use a host daemon
+            env.setdefault("BEADS_DAEMON", "0")
+
+        # Wrap command for Docker execution if container_id is provided
+        if self.container_id:
+            # Construct docker exec command
+            # docker exec -i -w /workspace [ENV] <container_id> <command> <args>
+            
+            # Save original command/args for logging/debug
+            orig_cmd = command
+            orig_args = args
+            
+            # Build docker exec args
+            args = ["exec", "-i", "-w", "/workspace"]
+            
+            # Pass environment variables
+            for k, v in env.items():
+                args.extend(["-e", f"{k}={v}"])
+                
+            args.extend([self.container_id, orig_cmd])
+            args.extend(orig_args)
+            
+            command = "docker"
+            
+            logger.info(
+                f"Wrapping MCP server in container {self.container_id}",
+                extra={"tool_name": tool_name, "mcp_command": command, "mcp_args": args}
+            )
 
         logger.info(
             f"Creating MCP server: {tool_name} | command={command} | args={args} | cwd={cwd}"

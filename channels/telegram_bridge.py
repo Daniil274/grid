@@ -43,6 +43,10 @@ except ImportError:
     AGENT_FACTORY_AVAILABLE = False
     AgentFactory = None
 
+try:
+    from core.managers.container_manager import ContainerManager
+except ImportError:
+    ContainerManager = None
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +110,23 @@ class TelegramBridge:
             "errors_handled": 0,
         }
 
+        # Container Manager
+        self.container_manager = None
+        if ContainerManager:
+            try:
+                from core.config import Config
+                # Load global config to check isolation settings
+                cfg = Config(config_path="config.yaml")
+                self.container_manager = ContainerManager(cfg)
+                if self.container_manager.enabled:
+                    logger.info("🐳 Container isolation enabled")
+                else:
+                    logger.info("ℹ️ Container isolation disabled in config")
+            except Exception as e:
+                logger.error(f"Failed to initialize ContainerManager: {e}")
+        else:
+            logger.warning("⚠️ ContainerManager class not found")
+
         logger.info("TelegramBridge инициализирован")
 
     def _get_user_agent_factory(self, user_id: int) -> Optional["AgentFactory"]:
@@ -125,6 +146,20 @@ class TelegramBridge:
         user_memory = self._get_user_memory(user_id)
         user_memory_store = self._get_user_memory_store(user_id)
 
+        # Get container if isolation is enabled
+        container_id = None
+        if self.container_manager and self.container_manager.enabled:
+            try:
+                container = self.container_manager.get_or_create_container(str(user_id))
+                if container:
+                    container_id = container.id
+                    logger.info(f"🐳 Using container {container.name} ({container_id[:12]}) for user_{user_id}")
+            except Exception as e:
+                logger.error(f"❌ Failed to get container for user_{user_id}: {e}")
+                # Fallback to local execution? Or fail?
+                # For now, log error and proceed locally if container fails, but ideally should fail if strict isolation required.
+                pass
+
         try:
             from core.config import Config
 
@@ -136,6 +171,7 @@ class TelegramBridge:
                 broadcaster=None,  # избегаем flood control
                 unified_memory=user_memory,  # per-user контекст
                 memory_store=user_memory_store,  # per-user SQLite память
+                container_id=container_id,  # Pass container ID
             )
             self.user_agent_factories[user_id] = factory
             logger.info(f"✅ Created per-user AgentFactory for user_{user_id}: cwd={user_workspace}")

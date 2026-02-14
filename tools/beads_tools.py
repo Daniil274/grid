@@ -15,13 +15,62 @@ from agents import function_tool, RunContextWrapper
 
 logger = logging.getLogger(__name__)
 
-def _run_bd_command(args: List[str], cwd: Optional[str] = None) -> Dict[str, Any]:
+def _get_container_id(context: Any) -> Optional[str]:
+    """Extract container_id from context."""
+    if hasattr(context, 'context') and hasattr(context.context, 'container_id'):
+        return context.context.container_id
+    return None
+
+def _map_path_to_container(path: Optional[str], context: Any) -> str:
+    """Map a host path to a container path (/workspace)."""
+    if not path or path == ".":
+        return "/workspace"
+    
+    # If it's already a container path, return it
+    if path.startswith("/workspace"):
+        return path
+        
+    # If it's an absolute host path, try to map it
+    if os.path.isabs(path):
+        try:
+            # We need the host working directory to calculate relative path
+            raw = getattr(context, "context", None)
+            factory = getattr(raw, "factory", None) if raw else None
+            if factory:
+                host_wd = factory.config.get_working_directory()
+                # Ensure paths are normalized
+                norm_path = os.path.normpath(path)
+                norm_host_wd = os.path.normpath(host_wd)
+                
+                if norm_path.startswith(norm_host_wd):
+                    rel = os.path.relpath(norm_path, norm_host_wd)
+                    if rel == ".":
+                        return "/workspace"
+                    return (Path("/workspace") / rel).as_posix()
+        except Exception:
+            pass
+            
+    # Fallback: if it's relative, assume it's relative to /workspace
+    if not os.path.isabs(path):
+        return (Path("/workspace") / path).as_posix()
+        
+    # If path is already /workspace or inside it, return it
+    if path.startswith("/workspace"):
+        return path
+
+    return "/workspace"
+
+def _run_bd_command(args: List[str], cwd: Optional[str] = None, container_id: Optional[str] = None, context: Any = None) -> Dict[str, Any]:
     """
     Run a 'bd' command and return the result.
     Always adds --json for machine-readable output when possible.
     """
     # Use absolute path to bd if it's not in PATH
     bd_path = "/home/daniil/.local/bin/bd"
+    # In container, bd is in /usr/local/bin/bd or just 'bd'
+    if container_id:
+        bd_path = "/usr/local/bin/bd"
+        
     cmd = [bd_path] + args
     
     # Add --json if not already present and likely supported
@@ -31,14 +80,33 @@ def _run_bd_command(args: List[str], cwd: Optional[str] = None) -> Dict[str, Any
 
     try:
         logger.debug(f"Running beads command: {' '.join(cmd)}")
-        result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            timeout=30
-        )
+        
+        # Prepare environment
+        env = os.environ.copy()
+        env["BEADS_DAEMON"] = "0"
+        
+        if container_id:
+            # docker exec -i -w /workspace <container_id> <command>
+            workdir = _map_path_to_container(cwd, context)
+            docker_cmd = ["docker", "exec", "-i", "-w", workdir, "-e", "BEADS_DAEMON=0", container_id] + cmd
+            
+            result = subprocess.run(
+                docker_cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                timeout=30
+            )
+        else:
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                env=env,
+                timeout=30
+            )
         
         success = result.returncode == 0
         output = result.stdout.strip()
@@ -62,8 +130,8 @@ def _run_bd_command(args: List[str], cwd: Optional[str] = None) -> Dict[str, Any
         }
     except subprocess.TimeoutExpired:
         return {"success": False, "output": "", "error": "Command timed out", "data": None, "exit_code": -1}
-    except FileNotFoundError:
-        return {"success": False, "output": "", "error": "'bd' CLI not found. Please install it first.", "data": None, "exit_code": -1}
+    except FileNotFoundError as e:
+        return {"success": False, "output": "", "error": f"Executable not found: {e}. cmd={cmd if not container_id else docker_cmd}", "data": None, "exit_code": -1}
     except Exception as e:
         return {"success": False, "output": "", "error": str(e), "data": None, "exit_code": -1}
 
@@ -124,7 +192,9 @@ async def beads_init(context: RunContextWrapper, directory: str = ".") -> str:
         directory: Path to the project directory (default: ".")
     """
     directory = _resolve_directory(context, directory)
-    res = _run_bd_command(["init"], cwd=directory)
+    container_id = _get_container_id(context)
+    
+    res = _run_bd_command(["init"], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         # "already a beads database" or similar is often success for idempotent init
         if "already" in (res.get("error") or "").lower() or "already" in (res.get("output") or "").lower():
@@ -142,7 +212,9 @@ async def beads_ready(context: RunContextWrapper, directory: str = ".") -> str:
         directory: Path to the project directory (default: ".")
     """
     directory = _resolve_directory(context, directory)
-    res = _run_bd_command(["ready"], cwd=directory)
+    container_id = _get_container_id(context)
+    
+    res = _run_bd_command(["ready"], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error: {res['error'] or res['output']}"
     return res["output"]
@@ -167,11 +239,13 @@ async def beads_create(
         directory: Path to the project directory
     """
     directory = _resolve_directory(context, directory)
+    container_id = _get_container_id(context)
+    
     args = ["create", title, "-p", str(priority), "-t", type]
     if description:
         args.extend(["--description", description])
     
-    res = _run_bd_command(args, cwd=directory)
+    res = _run_bd_command(args, cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error creating bead: {res['error'] or res['output']}"
     return res["output"]
@@ -186,7 +260,9 @@ async def beads_show(context: RunContextWrapper, bead_id: str, directory: str = 
         directory: Path to the project directory
     """
     directory = _resolve_directory(context, directory)
-    res = _run_bd_command(["show", bead_id], cwd=directory)
+    container_id = _get_container_id(context)
+    
+    res = _run_bd_command(["show", bead_id], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error showing bead {bead_id}: {res['error'] or res['output']}"
     return res["output"]
@@ -215,6 +291,8 @@ async def beads_update(
         directory: Path to the project directory
     """
     directory = _resolve_directory(context, directory)
+    container_id = _get_container_id(context)
+    
     args = ["update", bead_id]
     if claim:
         args.append("--claim")
@@ -227,7 +305,7 @@ async def beads_update(
     if notes:
         args.extend(["--notes", notes])
         
-    res = _run_bd_command(args, cwd=directory)
+    res = _run_bd_command(args, cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error updating bead {bead_id}: {res['error'] or res['output']}"
     return res["output"]
@@ -248,7 +326,9 @@ async def beads_close(
         directory: Path to the project directory
     """
     directory = _resolve_directory(context, directory)
-    res = _run_bd_command(["close", bead_id, "--reason", reason], cwd=directory)
+    container_id = _get_container_id(context)
+    
+    res = _run_bd_command(["close", bead_id, "--reason", reason], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error closing bead {bead_id}: {res['error'] or res['output']}"
     return res["output"]
@@ -263,7 +343,9 @@ async def beads_sync(context: RunContextWrapper, directory: str = ".") -> str:
         directory: Path to the project directory
     """
     directory = _resolve_directory(context, directory)
-    res = _run_bd_command(["sync"], cwd=directory)
+    container_id = _get_container_id(context)
+    
+    res = _run_bd_command(["sync"], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error syncing beads: {res['error'] or res['output']}"
     return res["output"]
@@ -286,10 +368,12 @@ async def beads_dep(
         directory: Path to the project directory
     """
     directory = _resolve_directory(context, directory)
+    container_id = _get_container_id(context)
+    
     if action not in ["add", "remove"]:
         return "❌ Error: action must be 'add' or 'remove'"
         
-    res = _run_bd_command(["dep", action, child_id, parent_id], cwd=directory)
+    res = _run_bd_command(["dep", action, child_id, parent_id], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error managing dependency: {res['error'] or res['output']}"
     return res["output"]
@@ -318,6 +402,7 @@ async def beads_list(
         directory: Path to the project directory (default: ".")
     """
     directory = _resolve_directory(context, directory)
+    container_id = _get_container_id(context)
 
     # Safety clamps to avoid huge tool outputs.
     try:
@@ -344,7 +429,7 @@ async def beads_list(
     if status:
         args.extend(["--status", status])
     
-    res = _run_bd_command(args, cwd=directory)
+    res = _run_bd_command(args, cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error listing beads: {res['error'] or res['output']}"
 
