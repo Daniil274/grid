@@ -82,7 +82,10 @@ class TelegramBridge:
 
         # Основные компоненты (глобальные)
         self.skills: Optional[SkillsIntegration] = None
-        self.agent_factory: Optional[AgentFactory] = None
+        # ВАЖНО: для Telegram нельзя иметь "глобальный" AgentFactory с cwd проекта/конфига.
+        # Держим фабрики строго per-user, чтобы не было переключений working_directory.
+        self.agent_factory: Optional[AgentFactory] = None  # legacy; не использовать для TG
+        self.user_agent_factories: Dict[int, AgentFactory] = {}  # user_id -> AgentFactory
 
         # Изоляция пользователей: каждый user_id имеет свою память и workspace
         self.user_memories: Dict[int, UnifiedMemory] = {}  # user_id -> UnifiedMemory (deprecated)
@@ -104,6 +107,43 @@ class TelegramBridge:
         }
 
         logger.info("TelegramBridge инициализирован")
+
+    def _get_user_agent_factory(self, user_id: int) -> Optional["AgentFactory"]:
+        """
+        Получить per-user AgentFactory с фиксированным working_directory:
+        /home/daniil/grid/workspace/user_<id>
+
+        Ключевое: никакого "set_working_directory туда/обратно".
+        """
+        if not AGENT_FACTORY_AVAILABLE:
+            return None
+        if user_id in self.user_agent_factories:
+            return self.user_agent_factories[user_id]
+
+        # Ensure dirs exist
+        user_workspace = self._get_user_workspace(user_id)
+        user_memory = self._get_user_memory(user_id)
+        user_memory_store = self._get_user_memory_store(user_id)
+
+        try:
+            from core.config import Config
+
+            # Загружаем config.yaml, но жёстко переопределяем working_directory на user workspace.
+            cfg = Config(config_path="config.yaml", working_directory=str(user_workspace))
+            factory = AgentFactory(
+                config=cfg,
+                working_directory=str(user_workspace),
+                broadcaster=None,  # избегаем flood control
+                unified_memory=user_memory,  # per-user контекст
+                memory_store=user_memory_store,  # per-user SQLite память
+            )
+            self.user_agent_factories[user_id] = factory
+            logger.info(f"✅ Created per-user AgentFactory for user_{user_id}: cwd={user_workspace}")
+            return factory
+        except Exception as e:
+            logger.error(f"❌ Failed to create per-user AgentFactory for user_{user_id}: {e}")
+            logger.error(traceback.format_exc())
+            return None
 
     def _get_user_workspace(self, user_id: int) -> Path:
         """
@@ -207,21 +247,10 @@ class TelegramBridge:
                     self.skills = None
 
             # 3. AgentFactory (главная система)
-            # Примечание: UnifiedMemory передается per-user при запуске агента
-            if AGENT_FACTORY_AVAILABLE:
-                try:
-                    from core.config import Config
-                    # Используем основной config.yaml
-                    config = Config(config_path="config.yaml")
-                    self.agent_factory = AgentFactory(
-                        config=config,
-                        broadcaster=None,  # Отключаем live updates для избежания flood control
-                        unified_memory=None  # Память будет передаваться per-user
-                    )
-                    logger.info("✅ AgentFactory инициализирован (без глобальной памяти)")
-                except Exception as e:
-                    logger.warning(f"⚠️ AgentFactory не доступен: {e}")
-                    self.agent_factory = None
+            # ВАЖНО: НЕ создаём глобальную AgentFactory.
+            # Для TG используем строго per-user фабрики (см. _get_user_agent_factory),
+            # чтобы рабочая директория никогда не была cwd проекта/конфига.
+            self.agent_factory = None
 
             # 4. Регистрация обработчиков
             self._register_handlers()
@@ -547,9 +576,9 @@ class TelegramBridge:
                 f"🔄 <b>Активных задач:</b> {len(self.active_tasks)}\n\n"
                 "<b>Компоненты:</b>\n"
                 f"{'✅' if self.broadcaster else '❌'} LiveTransparencyBroadcaster\n"
-                f"{'✅' if self.memory else '❌'} UnifiedMemory\n"
+                f"{'✅' if True else '❌'} UnifiedMemory (per-user)\n"
                 f"{'✅' if self.skills else '❌'} SkillsIntegration\n"
-                f"{'✅' if self.agent_factory else '❌'} AgentFactory\n"
+                f"{'✅' if AGENT_FACTORY_AVAILABLE else '❌'} AgentFactory (per-user)\n"
             )
 
             await update.message.reply_text(status_text, parse_mode=ParseMode.HTML)
@@ -635,61 +664,48 @@ class TelegramBridge:
             )
 
             # Запустить агента
-            if not self.agent_factory:
+            user_factory = self._get_user_agent_factory(user_id)
+            if not user_factory:
                 response = "⚠️ AgentFactory недоступен. Система работает в ограниченном режиме."
             else:
                 self.stats["agents_launched"] += 1
 
-                # Временно установить память пользователя для agent_factory (deprecated)
-                self.agent_factory.unified_memory = user_memory
-
-                # КРИТИЧЕСКИ ВАЖНО: Установить MemoryStore для memory_tools_v2
-                # Это нужно делать перед каждым запуском агента, чтобы memory_tools_v2
-                # работали с памятью текущего пользователя через context.factory.memory_store
-                self.agent_factory.memory_store = user_memory_store
-                logger.debug(f"✅ Установлен MemoryStore для user_{user_id}: {user_memory_store.db_path}")
-
-                # Установить рабочую директорию пользователя для agent_factory
-                # Это нужно чтобы все операции с файлами выполнялись в workspace пользователя
-                original_working_dir = self.agent_factory.config.get_working_directory()
-                self.agent_factory.config.set_working_directory(str(user_workspace))
-                logger.debug(f"Установлена рабочая директория для user_{user_id}: {user_workspace}")
-
-                # Запуск агента через AgentFactory
+                # Sanity log: cwd must always be user workspace for TG.
                 try:
-                    # Получаем default агента из конфигурации
-                    default_agent_key = self.agent_factory.config.get_default_agent()
+                    wd = user_factory.config.get_working_directory()
+                    if Path(wd).resolve() != user_workspace.resolve():
+                        logger.warning(
+                            "⚠️ TG invariant violated: AgentFactory working_directory mismatch "
+                            f"(expected={user_workspace}, actual={wd})"
+                        )
+                except Exception:
+                    pass
 
-                    # Получить историю контекста для этого чата
+                # Запуск агента через per-user AgentFactory (без переключений cwd)
+                try:
+                    default_agent_key = user_factory.config.get_default_agent()
+
                     chat_history = self.chat_contexts.get(chat_id, [])
-
-                    # Подготовить сообщение с контекстом если есть история
-                    if len(chat_history) > 1:  # Есть история кроме текущего сообщения
-                        # Формируем контекст из истории чата
+                    if len(chat_history) > 1:
                         context_text = "\n".join([
                             f"{'Пользователь' if msg['role'] == 'user' else 'Ассистент'}: {msg['content']}"
-                            for msg in chat_history[:-1]  # Все кроме текущего сообщения
+                            for msg in chat_history[:-1]
                         ])
                         message_with_context = f"[Контекст диалога]\n{context_text}\n\n[Текущий вопрос]\n{message_text}"
                     else:
                         message_with_context = message_text
 
-                    # Запускаем агента с контекстом и user_id
-                    response = await self.agent_factory.run_agent(
+                    response = await user_factory.run_agent(
                         agent_key=default_agent_key,
                         message=message_with_context,
-                        use_active_context=False,  # Не используем глобальный контекст, у нас свой per-chat
-                        user_id=str(user_id),  # Передаем user_id для изоляции workspace
-                        stream=True  # Включаем streaming для отображения tool calls в реальном времени
+                        use_active_context=False,
+                        user_id=str(user_id),
+                        stream=True,
                     )
                 except Exception as agent_error:
                     logger.error(f"Ошибка запуска агента: {agent_error}")
                     logger.error(traceback.format_exc())
                     response = f"❌ Ошибка при выполнении запроса:\n\n{str(agent_error)}"
-                finally:
-                    # Восстановить оригинальную рабочую директорию
-                    self.agent_factory.config.set_working_directory(original_working_dir)
-                    logger.debug(f"Восстановлена исходная рабочая директория: {original_working_dir}")
 
             # Сохранить ответ в контекст чата
             if chat_id in self.chat_contexts:

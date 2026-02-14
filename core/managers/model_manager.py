@@ -63,19 +63,27 @@ class ModelManager:
         base_url: str,
         timeout: int = 30,
         max_retries: int = 2,
+        provider_key: Optional[str] = None,
     ) -> AsyncOpenAI:
-        """Create AsyncOpenAI client; use proxy from config if set."""
+        """Create AsyncOpenAI client; avoid proxy for local providers."""
         kwargs: Dict[str, Any] = dict(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
         )
-        proxy_url = self.config.get_proxy()
+        proxy_url = self.config.get_proxy_for_provider(provider_key)
+        # We control proxy selection explicitly; disable env proxy usage in httpx.
         if proxy_url:
             kwargs["http_client"] = httpx.AsyncClient(
                 proxy=proxy_url,
                 timeout=float(timeout),
+                trust_env=False,
+            )
+        else:
+            kwargs["http_client"] = httpx.AsyncClient(
+                timeout=float(timeout),
+                trust_env=False,
             )
         return AsyncOpenAI(**kwargs)
 
@@ -96,6 +104,7 @@ class ModelManager:
             base_url=provider_cfg.base_url,
             timeout=provider_cfg.timeout,
             max_retries=provider_cfg.max_retries,
+            provider_key=model_cfg.provider,
         )
         return client, model_cfg.name
 
