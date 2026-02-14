@@ -294,10 +294,96 @@ async def beads_dep(
         return f"❌ Error managing dependency: {res['error'] or res['output']}"
     return res["output"]
 
+@function_tool
+async def beads_list(
+    context: RunContextWrapper,
+    all: bool = False,
+    status: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 15,
+    directory: str = ".",
+) -> str:
+    """
+    List beads tasks with optional filters and simple pagination.
+
+    Important:
+    - By default returns at most 15 items to keep tool output bounded.
+    - Use `page=2` (and so on) to fetch subsequent pages.
+    
+    Args:
+        all: If True, show all issues including closed ones.
+        status: Filter by status (open, in_progress, blocked, deferred, closed).
+        page: 1-based page number.
+        page_size: Items per page (clamped to 1..15).
+        directory: Path to the project directory (default: ".")
+    """
+    directory = _resolve_directory(context, directory)
+
+    # Safety clamps to avoid huge tool outputs.
+    try:
+        page = int(page)
+    except Exception:
+        page = 1
+    if page < 1:
+        page = 1
+
+    try:
+        page_size = int(page_size)
+    except Exception:
+        page_size = 15
+    if page_size < 1:
+        page_size = 1
+    if page_size > 15:
+        page_size = 15
+
+    # Fetch full list (JSON) then paginate locally to preserve total count and navigation hints.
+    # Sorting newest-first tends to be the most useful for agents.
+    args = ["list", "--limit", "0", "--sort", "updated", "--reverse"]
+    if all:
+        args.append("--all")
+    if status:
+        args.extend(["--status", status])
+    
+    res = _run_bd_command(args, cwd=directory)
+    if not res["success"]:
+        return f"❌ Error listing beads: {res['error'] or res['output']}"
+
+    issues = res.get("data")
+    if issues is None:
+        # Fallback: try to parse JSON from stdout (e.g., if warnings preceded JSON).
+        try:
+            issues = json.loads(res.get("output") or "[]")
+        except Exception:
+            issues = []
+
+    if not isinstance(issues, list):
+        return f"❌ Error listing beads: unexpected output format"
+
+    total = len(issues)
+    total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = issues[start:end] if start < total else []
+
+    payload = {
+        "page": page,
+        "page_size": page_size,
+        "returned": len(items),
+        "total": total,
+        "total_pages": total_pages,
+        "has_prev": page > 1 and total_pages > 0,
+        "has_next": total_pages > 0 and page < total_pages,
+        "prev_page": (page - 1) if page > 1 else None,
+        "next_page": (page + 1) if total_pages > 0 and page < total_pages else None,
+        "items": items,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
 # Registry for easy integration
 BEADS_TOOLS = {
     "beads_init": beads_init,
     "beads_ready": beads_ready,
+    "beads_list": beads_list,
     "beads_create": beads_create,
     "beads_show": beads_show,
     "beads_update": beads_update,
