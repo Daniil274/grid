@@ -21,6 +21,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from telegram.constants import ParseMode
+from telegram.request import HTTPXRequest
 
 from core.unified_memory import UnifiedMemory
 from core.memory_store import MemoryStore
@@ -58,6 +59,7 @@ class BridgeConfig:
     allowed_users: Optional[list] = None  # None = все пользователи
     max_concurrent_tasks_per_user: int = 1
     progress_update_interval: float = 1.0
+    proxy_url: Optional[str] = None  # например http://127.0.0.1:10809
 
 
 class TelegramBridge:
@@ -68,7 +70,7 @@ class TelegramBridge:
     - Telegram bot (python-telegram-bot) -> TelegramBridge
     - TelegramBridge -> AgentFactory -> OpenAI Agents
     - LiveTransparencyBroadcaster -> Telegram (обновления в реальном времени)
-    - UnifiedMemory (grid ContextManager + nanobot MemoryStore)
+    - UnifiedMemory (контекст разговора), MemoryStore (SQLite — долгосрочная память)
     - SkillsIntegration (nanobot skills как grid tools)
     """
 
@@ -123,23 +125,18 @@ class TelegramBridge:
 
     def _get_user_memory(self, user_id: int) -> UnifiedMemory:
         """
-        Получить память пользователя, создать если не существует.
-
-        Память располагается в workspace/user_{user_id}/ (MEMORY.md и daily_notes)
+        Получить контекст разговора пользователя (UnifiedMemory = ContextManager),
+        создать если не существует. Долгосрочная память — в SQLite (MemoryStore).
         """
         if user_id not in self.user_memories:
-            # Базовая директория пользователя для памяти: workspace/user_{user_id}
             user_base_dir = self.config.workspace_path / f"user_{user_id}"
             user_base_dir.mkdir(parents=True, exist_ok=True)
 
-            # Директория для persist (контекст)
             user_persist = self.config.persist_path / f"user_{user_id}"
             user_persist.mkdir(parents=True, exist_ok=True)
 
-            # Создать UnifiedMemory для пользователя
-            # workspace используется для MEMORY.md и daily_notes
             user_memory = UnifiedMemory(
-                workspace=user_base_dir,  # workspace/user_{user_id}/ для MEMORY.md и daily_notes
+                workspace=user_base_dir,
                 persist_path=user_persist,
                 max_history=self.config.max_message_history
             )
@@ -176,8 +173,26 @@ class TelegramBridge:
         try:
             logger.info("Запуск инициализации TelegramBridge...")
 
-            # 1. Telegram Application
-            self.app = Application.builder().token(self.config.telegram_token).build()
+            # 1. Telegram Application (увеличенные таймауты для медленного TLS)
+            request_kw: Dict[str, Any] = dict(
+                connect_timeout=60.0,
+                read_timeout=60.0,
+                write_timeout=60.0,
+                pool_timeout=60.0,
+            )
+            if self.config.proxy_url:
+                request_kw["proxy"] = self.config.proxy_url
+                logger.info(f"Используется прокси: {self.config.proxy_url}")
+            request = HTTPXRequest(**request_kw)
+            # Timeouts are set via request/get_updates_request; builder timeout params
+            # cannot be used when a custom request instance is set.
+            self.app = (
+                Application.builder()
+                .token(self.config.telegram_token)
+                .request(request)
+                .get_updates_request(HTTPXRequest(**request_kw))
+                .build()
+            )
             logger.info("✅ Telegram Application создан")
 
             # 2. SkillsIntegration (опционально)
@@ -365,7 +380,7 @@ class TelegramBridge:
             await update.message.reply_text(
                 "✅ <b>История диалога очищена</b>\n\n"
                 "Контекст чата сброшен.\n"
-                "Долгосрочная память (MEMORY.md) сохранена.",
+                "Память в SQLite не затронута.",
                 parse_mode=ParseMode.HTML
             )
 
@@ -664,7 +679,8 @@ class TelegramBridge:
                         agent_key=default_agent_key,
                         message=message_with_context,
                         use_active_context=False,  # Не используем глобальный контекст, у нас свой per-chat
-                        user_id=str(user_id)  # Передаем user_id для изоляции workspace
+                        user_id=str(user_id),  # Передаем user_id для изоляции workspace
+                        stream=True  # Включаем streaming для отображения tool calls в реальном времени
                     )
                 except Exception as agent_error:
                     logger.error(f"Ошибка запуска агента: {agent_error}")
@@ -1484,24 +1500,43 @@ class TelegramBridge:
             raise
 
     async def stop(self):
-        """Остановка бота"""
+        """Остановка бота. Активные задачи отменяются по таймауту, запросы не ждут бесконечно."""
+        shutdown_timeout = 8.0  # секунд на отмену задач и остановку Telegram
         try:
             logger.info("🛑 Остановка TelegramBridge...")
 
-            # Дождаться завершения активных задач
+            # Отменить активные задачи и ждать не дольше таймаута
             if self.active_tasks:
-                logger.info(f"Ожидание завершения {len(self.active_tasks)} активных задач...")
-                await asyncio.gather(*self.active_tasks.values(), return_exceptions=True)
+                tasks = list(self.active_tasks.values())
+                logger.info(f"Отмена {len(tasks)} активных задач (таймаут {shutdown_timeout}s)...")
+                for t in tasks:
+                    t.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=shutdown_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Часть задач не завершилась за таймаут, продолжаем остановку")
 
             # Остановить broadcaster (если существует)
             if hasattr(self, 'broadcaster') and self.broadcaster:
                 self.broadcaster.stop()  # Not async, no await needed
 
-            # Остановить Telegram
+            # Остановить Telegram с таймаутом
             if self.app:
-                await self.app.updater.stop()
-                await self.app.stop()
-                await self.app.shutdown()
+                try:
+                    await asyncio.wait_for(self.app.updater.stop(), timeout=shutdown_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning("updater.stop() по таймауту")
+                try:
+                    await asyncio.wait_for(self.app.stop(), timeout=shutdown_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning("app.stop() по таймауту")
+                try:
+                    await asyncio.wait_for(self.app.shutdown(), timeout=shutdown_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning("app.shutdown() по таймауту")
 
             logger.info("✅ TelegramBridge остановлен")
 

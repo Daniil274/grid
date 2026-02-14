@@ -10,6 +10,7 @@ import sys
 import json
 from typing import List, Dict, Any, Optional, Protocol
 from dotenv import load_dotenv
+import httpx
 from openai import AsyncOpenAI
 
 # OpenAI Agents SDK imports
@@ -35,24 +36,8 @@ from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
 from core.tracing_config import get_tracing_config
-
-# Social Intelligence Framework imports
-from .blackboard import Blackboard
-from .primitives import Primitives
-from .pipeline_memory import PipelineMemory
-
-# Skill Management
 from core.managers.skill_manager import SkillManager
-from tools.skill_tools import (
-    skill_create, 
-    skill_update, 
-    skill_delete, 
-    skill_read, 
-    skill_search, 
-    skill_broadcast
-)
 
-import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -307,9 +292,6 @@ class AgentFactory:
         # Caches
         self._agent_cache: Dict[str, Agent] = {}
         self._tool_cache: Dict[str, List[Any]] = {}
-        # Deprecated: _mcp_clients kept for backward compatibility (no longer used)
-        self._mcp_clients: Dict[str, Any] = {}
-        # New MCP servers cache (SDK-based)
         self._mcp_servers: Dict[str, Any] = {}
         
         # Session management for agent memory (per agent/context pair)
@@ -320,9 +302,9 @@ class AgentFactory:
         
         # Track logged agents to log prompt only once
         self._logged_agents: set[str] = set()
-
-        # Social Intelligence Framework components
-        self._init_social_intelligence()
+        
+        # Track initialized agents (auto_run_tools executed) per user
+        self._initialized_agents: set[str] = set()
 
     @staticmethod
     def _configure_tracing_once(level: str) -> None:
@@ -335,104 +317,6 @@ class AgentFactory:
             tracing_config.configure_console_tracing(level)
             tracing_config.apply()
             _TRACING_CONFIGURED = True
-
-    def _init_social_intelligence(self) -> None:
-        """
-        Initialize Social Intelligence Framework components.
-
-        Components:
-        - Blackboard: Shared memory for inter-agent communication
-        - Primitives: Atomic operations for building pipelines
-        - PipelineMemory: Evolutionary storage for successful pipelines
-        """
-        try:
-            # Check if SI is enabled in config
-            si_enabled = True
-            blackboard_config = None
-            pipeline_memory_config = None
-
-            if hasattr(self.config, 'config') and hasattr(self.config.config, 'settings'):
-                settings = self.config.config.settings
-                if hasattr(settings, 'social_intelligence'):
-                    si_config = settings.social_intelligence
-                    si_enabled = getattr(si_config, 'enabled', True)
-                    blackboard_config = getattr(si_config, 'blackboard', None)
-                    pipeline_memory_config = getattr(si_config, 'pipeline_memory', None)
-
-            if not si_enabled:
-                self._blackboard = None
-                self._primitives = None
-                self._pipeline_memory = None
-                logger.info("Social Intelligence Framework disabled by config")
-                return
-
-            # Initialize Blackboard
-            blackboard_path = "logs/blackboard.json"
-            max_entries = 1000
-            entry_ttl = 24
-
-            if blackboard_config:
-                blackboard_path = getattr(blackboard_config, 'persist_path', blackboard_path)
-                max_entries = getattr(blackboard_config, 'max_entries', max_entries)
-                entry_ttl = getattr(blackboard_config, 'entry_ttl_hours', entry_ttl)
-
-            self._blackboard = Blackboard(
-                persist_path=blackboard_path,
-                max_entries=max_entries,
-                entry_ttl_hours=entry_ttl
-            )
-
-            # Initialize PipelineMemory
-            pipeline_path = "logs/pipeline_memory.json"
-            similarity_threshold = 0.7
-            min_success_score = 0.6
-            max_pipelines = 500
-
-            if pipeline_memory_config:
-                pipeline_path = getattr(pipeline_memory_config, 'persist_path', pipeline_path)
-                similarity_threshold = getattr(pipeline_memory_config, 'similarity_threshold', similarity_threshold)
-                min_success_score = getattr(pipeline_memory_config, 'min_success_score', min_success_score)
-                max_pipelines = getattr(pipeline_memory_config, 'max_pipelines', max_pipelines)
-
-            self._pipeline_memory = PipelineMemory(
-                persist_path=pipeline_path,
-                similarity_threshold=similarity_threshold,
-                min_success_score=min_success_score,
-                max_pipelines=max_pipelines
-            )
-
-            # Initialize Primitives (requires factory reference)
-            self._primitives = Primitives(
-                factory=self,
-                blackboard=self._blackboard,
-                default_model_key=None  # Will use factory's default
-            )
-
-            logger.info(
-                f"Social Intelligence Framework initialized: "
-                f"blackboard={blackboard_path}, pipeline_memory={pipeline_path}"
-            )
-
-        except Exception as e:
-            logger.warning(f"Failed to initialize Social Intelligence Framework: {e}")
-            self._blackboard = None
-            self._primitives = None
-            self._pipeline_memory = None
-
-    @property
-    def blackboard(self) -> Optional[Blackboard]:
-        """Get the blackboard instance."""
-        return self._blackboard
-
-    @property
-    def primitives(self) -> Optional[Primitives]:
-        """Get the primitives instance."""
-        return self._primitives
-
-    @property
-    def pipeline_memory(self) -> Optional[PipelineMemory]:
-        """Get the pipeline memory instance."""
-        return self._pipeline_memory
 
     # ---------------------------------------------------------------------
     # Telegram Integration - Progress Broadcasting
@@ -564,6 +448,30 @@ class AgentFactory:
             logger.warning(f"Model key resolution failed: {e}, using hard fallback: default_agent={default_agent_key} → model={resolved}")
             return resolved
 
+    def _make_openai_client(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        timeout: int = 30,
+        max_retries: int = 2,
+    ) -> AsyncOpenAI:
+        """Create AsyncOpenAI client; use proxy from config if set."""
+        kwargs: Dict[str, Any] = dict(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        proxy_url = self.config.get_proxy()
+        if proxy_url:
+            http_client = httpx.AsyncClient(
+                proxy=proxy_url,
+                timeout=float(timeout),
+            )
+            kwargs["http_client"] = http_client
+        return AsyncOpenAI(**kwargs)
+
     def get_openai_client_for_model(self, model_key: str) -> tuple[AsyncOpenAI, str]:
         """
         Create OpenAI client and return (client, model_name) using configuration.
@@ -576,7 +484,7 @@ class AgentFactory:
                 f"API key not found for provider '{model_cfg.provider}'",
                 details={"provider": model_cfg.provider, "env_var": provider_cfg.api_key_env},
             )
-        client = AsyncOpenAI(
+        client = self._make_openai_client(
             api_key=api_key,
             base_url=provider_cfg.base_url,
             timeout=provider_cfg.timeout,
@@ -649,12 +557,12 @@ class AgentFactory:
                     }
                 )
             
-            # Create OpenAI client
-            client = AsyncOpenAI(
+            # Create OpenAI client (with optional proxy for API requests)
+            client = self._make_openai_client(
                 api_key=api_key,
                 base_url=provider_config.base_url,
                 timeout=provider_config.timeout,
-                max_retries=provider_config.max_retries
+                max_retries=provider_config.max_retries,
             )
             
             # Create model (auto-switch to Responses API for reasoning models if available)
@@ -717,20 +625,6 @@ class AgentFactory:
             # Get tools (function and agent tools only; MCP tools handled via mcp_servers)
             tools = await self._get_agent_tools(agent_config)
 
-            # Add Skill Tools (always available)
-            # Wrap them to inject context
-            skill_tools_list = [
-                skill_create, 
-                skill_update, 
-                skill_delete, 
-                skill_read, 
-                skill_search, 
-                skill_broadcast
-            ]
-            # Wrap tools if needed (e.g. output limit), though they are function_tools
-            # function_tool decorator handles context injection if signature matches
-            tools.extend(skill_tools_list)
-
             # Prepare MCP servers for this agent (if enabled)
             mcp_server_names: list[str] = []
             for tool_key in agent_config.tools:
@@ -753,41 +647,8 @@ class AgentFactory:
                 tools=tools,
                 mcp_servers=mcp_servers_list,
             )
-            
-            # --- Auto-run tools (NEW) ---
-            if agent_config.auto_run_tools:
-                try:
-                    # Get user_id from context metadata if available
-                    ctx_user_id = self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, 'get_metadata') else None
-                    # Create a temporary run context for auto-run tools
-                    temp_run_ctx = GridRunContext(
-                        factory=self,
-                        context_id=cache_key, # Use cache_key as context_id for initialization
-                        user_id=ctx_user_id
-                    )
-                    
-                    for auto_tool in agent_config.auto_run_tools:
-                        tool_name = auto_tool.get("name")
-                        tool_params = auto_tool.get("parameters", {})
-                        
-                        # Find the tool in the agent's tool list
-                        target_tool = next((t for t in tools if getattr(t, 'name', '') == tool_name), None)
-                        if target_tool and hasattr(target_tool, 'on_invoke_tool'):
-                            logger.info(f"Auto-running tool '{tool_name}' for agent '{agent_key}'")
-                            # Run the tool
-                            try:
-                                # SDK tools (FunctionTool) expect arguments as a JSON string in on_invoke_tool
-                                # AND they expect a ToolContext wrapper around our GridRunContext
-                                tool_ctx_wrapper = AutoRunToolContext(temp_run_ctx)
-                                tool_result = await target_tool.on_invoke_tool(tool_ctx_wrapper, json.dumps(tool_params))
-                                # Inject the result into instructions to save tokens (agent doesn't need to call it again)
-                                auto_run_info = f"\n\n=== РЕЗУЛЬТАТ АВТО-ЗАПУСКА ИНСТРУМЕНТА '{tool_name}' ===\n{tool_result}\n"
-                                agent.instructions += auto_run_info
-                                logger.debug(f"Injected auto-run result of '{tool_name}' into instructions")
-                            except Exception as tool_err:
-                                logger.warning(f"⚠️ Error in auto-run tool '{tool_name}': {tool_err}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to auto-run tools for agent '{agent_key}': {e}")
+            # Auto-run tools (beads_init, beads_ready, etc.) run only once per user/agent
+            # in run_agent() when handling the first request — see _initialized_agents.
 
             self._agent_cache[cache_key] = agent
             
@@ -796,6 +657,38 @@ class AgentFactory:
         except Exception as e:
             error_msg = f"Failed to create agent '{agent_key}': {e}"
             raise AgentError(error_msg, details={"agent_key": agent_key}) from e
+
+    async def _execute_auto_run_tools(
+        self,
+        agent_key: str,
+        agent_config: AgentConfig,
+        tools: list,
+        working_dir: str,
+        run_context: GridRunContext,
+    ) -> str:
+        """Run auto_run_tools with given working_dir; return combined result string to inject."""
+        result_parts: List[str] = []
+        for auto_tool in agent_config.auto_run_tools or []:
+            tool_name = auto_tool.get("name")
+            tool_params = dict(auto_tool.get("parameters", {}))
+            for k, v in list(tool_params.items()):
+                if v == "${working_directory}":
+                    tool_params[k] = working_dir
+            target_tool = next((t for t in tools if getattr(t, "name", "") == tool_name), None)
+            if target_tool and hasattr(target_tool, "on_invoke_tool"):
+                logger.info(f"Auto-running tool '{tool_name}' for agent '{agent_key}' (cwd={working_dir})")
+                try:
+                    tool_ctx_wrapper = AutoRunToolContext(run_context)
+                    tool_result = await target_tool.on_invoke_tool(
+                        tool_ctx_wrapper, json.dumps(tool_params)
+                    )
+                    result_parts.append(
+                        f"\n\n=== РЕЗУЛЬТАТ АВТО-ЗАПУСКА ИНСТРУМЕНТА '{tool_name}' ===\n{tool_result}\n"
+                    )
+                    logger.debug(f"Injected auto-run result of '{tool_name}' into instructions")
+                except Exception as tool_err:
+                    logger.warning(f"⚠️ Error in auto-run tool '{tool_name}': {tool_err}")
+        return "".join(result_parts)
 
     # ---------------------------------------------------------------------
     # Dynamic agents (not declared in config.yaml)
@@ -1097,6 +990,10 @@ class AgentFactory:
 
             # Process streaming events and log tool calls
             async for event in run_result_streaming.stream_events():
+                # Use the factory's stream observer to log events
+                if hasattr(self, '_stream_observer'):
+                    self._stream_observer.handle_event(event, agent_key=agent_name)
+
                 if isinstance(event, RunItemStreamEvent):
                     event_name = getattr(event, "name", "")
                     item = getattr(event, "item", None)
@@ -1210,7 +1107,7 @@ class AgentFactory:
         start_time = time.time()
         execution = AgentExecution(
             agent_name=agent_key,
-            start_time=str(start_time),
+            start_time=start_time,
             input_message=message
         )
         active_context_id: Optional[str] = None
@@ -1250,9 +1147,9 @@ class AgentFactory:
                 if user_id:
                     self.context_manager.set_metadata("user_id", user_id)
             
-            # Create agent
+            # Create agent (or get from cache)
             agent = await self.create_agent(agent_key, context_path)
-            
+
             # Parse message if it's a JSON string (for multimodal messages with images)
             # According to Agents SDK, Runner.run accepts: str | list[TResponseInputItem]
             # If message is JSON string, parse it to dict/list before passing to Runner
@@ -1287,7 +1184,37 @@ class AgentFactory:
             except (json.JSONDecodeError, ValueError):
                 # Not JSON, keep as string
                 parsed_message = message
+
+            # Run auto_run_tools with current working_dir ONLY ONCE per user/agent session.
+            # This avoids running initialization tools (like beads_init) on every request.
+            run_agent_config = self.config.get_agent(agent_key)
+            init_key = f"{agent_key}:{user_id or 'default'}"
             
+            if init_key not in self._initialized_agents and getattr(run_agent_config, "auto_run_tools", None):
+                try:
+                    working_dir = self.config.get_working_directory()
+                    ctx_user_id = self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, "get_metadata") else None
+                    temp_run_ctx = GridRunContext(
+                        self, active_context_id or "run", ctx_user_id
+                    )
+                    agent_tools = getattr(agent, "tools", []) or []
+                    auto_run_info = await self._execute_auto_run_tools(
+                        agent_key, run_agent_config, agent_tools, working_dir, temp_run_ctx
+                    )
+                    if auto_run_info and isinstance(parsed_message, str):
+                        parsed_message = (
+                            auto_run_info
+                            + "\n\n[Текущий запрос пользователя]\n\n"
+                            + parsed_message
+                        )
+                    
+                    # Mark as initialized
+                    self._initialized_agents.add(init_key)
+                    logger.info(f"✅ Auto-run tools executed for {init_key}")
+
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to run auto_run_tools at run time: {e}")
+
             # Определяем, нужно ли включать контекст диалога
             # Контекст включается если:
             # 1. Указан явный context_id (пользователь хочет продолжить диалог)
@@ -1500,21 +1427,9 @@ class AgentFactory:
 
                             # Отправить события инструментов в broadcaster
                             if self.broadcaster:
-                                # DEBUG: Логируем ВСЕ события для понимания структуры
-                                logger.debug(f"Stream event: type={type(event).__name__}, event={event}")
-
                                 if isinstance(event, RunItemStreamEvent):
                                     event_name = getattr(event, "name", "")
                                     item = getattr(event, "item", None)
-
-                                    # DEBUG: Детальное логирование RunItemStreamEvent
-                                    logger.info(f"🔍 RunItemStreamEvent: name='{event_name}', item={item}")
-                                    if item:
-                                        raw_item = getattr(item, "raw_item", None)
-                                        logger.info(f"   raw_item: {raw_item}")
-                                        if raw_item:
-                                            logger.info(f"   raw_item.name: {getattr(raw_item, 'name', None)}")
-                                            logger.info(f"   raw_item attrs: {dir(raw_item)}")
 
                                     if event_name == "tool_called" and item is not None:
                                         raw_item = getattr(item, "raw_item", None)
@@ -1590,7 +1505,8 @@ class AgentFactory:
             
             # Process result - more robust extraction
             try:
-                            # Проверяем, является ли result строкой (уже обработанной)
+                output = None
+                # Проверяем, является ли result строкой (уже обработанной)
                 if isinstance(result, str):
                     output = result
                 elif hasattr(result, 'final_output') and result.final_output:
@@ -1599,6 +1515,20 @@ class AgentFactory:
                     output = result.output
                 elif hasattr(result, 'content') and result.content:
                     output = result.content
+                # Fallback for RunResult if final_output is missing but we have raw responses
+                elif hasattr(result, 'new_items') and result.new_items:
+                     # Try to find the last message content
+                     try:
+                         last_item = result.new_items[-1]
+                         if hasattr(last_item, 'content') and last_item.content:
+                             output = str(last_item.content)
+                             logger.info(f"Recovered output from last new item: {output[:50]}...")
+                     except Exception:
+                         pass
+                     
+                     # If still None, convert result to string
+                     if output is None:
+                         output = str(result)
                 else:
                     output = str(result)
                 
@@ -1606,11 +1536,16 @@ class AgentFactory:
                 if not output or output.strip() == "":
                     output = "Агент выполнил задачу, но не предоставил текстовый ответ. Проверьте логи для деталей выполнения."
             except Exception as e:
-                output = "Произошла ошибка при обработке результата агента. Проверьте логи."
+                logger.error(f"Error processing agent result: {e}", exc_info=True)
+                output = f"Произошла ошибка при обработке результата агента: {e}"
             
             # Добавляем ответ агента в контекст для текущей сессии
             # Post-process potential manual tool call before storing response
             try:
+                # Ensure output is defined before using it
+                if 'output' not in locals():
+                    output = "Ошибка: переменная output не определена."
+                
                 manual_tool_result = await self._execute_first_tool_call_in_text(output)
                 if manual_tool_result is not None:
                     output = manual_tool_result
@@ -1659,6 +1594,14 @@ class AgentFactory:
             duration = execution.end_time - start_time
             
             self.context_manager.add_execution(execution)
+            
+            # Ensure we log the final output for debugging
+            if not output:
+                logger.warning(f"⚠️ Agent '{agent_key}' returned empty output. Result type: {type(result)}")
+                if isinstance(result, str):
+                    logger.warning(f"Result (str): '{result}'")
+                elif hasattr(result, '__dict__'):
+                    logger.warning(f"Result attrs: {result.__dict__}")
             
             Logger("agent_factory").log_verbose(f"FULL RESPONSE: {agent_key}", output)
             
@@ -1909,7 +1852,7 @@ class AgentFactory:
 
             execution = AgentExecution(
                 agent_name=agent_name,
-                start_time=str(start_time),
+                start_time=start_time,
                 input_message=input_data
             )
             execution.context_id = sub_context_id
@@ -2051,13 +1994,55 @@ class AgentFactory:
             )
 
             # Run the sub-agent with enhanced input and session
-            output = await _get_runner().run(
+            # Use streaming to capture tool calls for logging
+            run_result_streaming = _get_runner().run_streamed(
                 starting_agent=sub_agent,
                 input=enhanced_input,
                 context=sub_run_ctx,  # Pass sub-agent context with session
                 session=session,
                 max_turns=self.config.get_max_turns(),
             )
+
+            # Process streaming events and log tool calls
+            output = None
+            async for event in run_result_streaming.stream_events():
+                # Use the factory's stream observer to log events
+                if hasattr(self, '_stream_observer'):
+                    self._stream_observer.handle_event(event, agent_key=agent_key)
+                
+                # Also log specific events to file logs if needed (redundant if observer does it, but good for safety)
+                if isinstance(event, RunItemStreamEvent):
+                    event_name = getattr(event, "name", "")
+                    item = getattr(event, "item", None)
+
+                    if event_name == "tool_called" and item is not None:
+                        raw_item = getattr(item, "raw_item", None)
+                        tool_name = getattr(raw_item, "name", None) or "tool"
+                        arguments = getattr(raw_item, "arguments", None)
+                        
+                        # Format arguments for logging
+                        args_str = ""
+                        if isinstance(arguments, str):
+                            args_str = arguments[:200] + ('...' if len(arguments) > 200 else '')
+                        elif isinstance(arguments, dict):
+                            args_str = json.dumps(arguments, ensure_ascii=False)[:200]
+                            
+                        logger.info(
+                            f"SUB_AGENT_TOOL_CALL | agent={agent_key} | tool={tool_name} | args={args_str}"
+                        )
+
+            # Extract final output
+            try:
+                if hasattr(run_result_streaming, "final_output") and run_result_streaming.final_output:
+                    output = run_result_streaming.final_output
+                elif hasattr(run_result_streaming, "output") and run_result_streaming.output:
+                    output = run_result_streaming.output
+                elif hasattr(run_result_streaming, "content") and run_result_streaming.content:
+                    output = run_result_streaming.content
+                else:
+                    output = str(run_result_streaming)
+            except Exception:
+                output = str(run_result_streaming)
 
             # Check if sub-agent needs restart (e.g., for multimodal content processing)
             if sub_run_ctx.should_restart:
@@ -2067,37 +2052,35 @@ class AgentFactory:
                 try:
                     session_items = await session.get_items()
                     logger.info(f"Session items before restart: {len(session_items)} items")
-
-                    # Log last 3 items with full structure for debugging
-                    for idx, item in enumerate(session_items[-3:]):
-                        # Items might have different structure - log full item first
-                        logger.info(f"  Item {idx} raw keys: {list(item.keys()) if isinstance(item, dict) else type(item)}")
-
-                        # Try to extract role and content
-                        role = item.get('role') if isinstance(item, dict) else 'not_a_dict'
-                        content = item.get('content', '') if isinstance(item, dict) else ''
-
-                        if isinstance(content, list):
-                            # Multimodal content
-                            content_summary = f"[{len(content)} parts: {', '.join(p.get('type', '?') if isinstance(p, dict) else str(type(p)) for p in content)}]"
-                        elif isinstance(content, str):
-                            content_summary = content[:100]
-                        else:
-                            content_summary = f"<{type(content).__name__}>"
-
-                        logger.info(f"  Item {idx}: role={role}, content={content_summary}")
                 except Exception as e:
                     logger.warning(f"Failed to log session items: {e}", exc_info=True)
 
                 # Run one more turn with a continuation prompt - session items will be included automatically
                 # SDK automatically prepends session items before this new input
-                output = await _get_runner().run(
+                restart_streaming = _get_runner().run_streamed(
                     starting_agent=sub_agent,
                     input="Проанализируй предоставленный контент.",  # Prompt to process injected content
                     context=sub_run_ctx,
                     session=session,
                     max_turns=self.config.get_max_turns(),
                 )
+                
+                async for event in restart_streaming.stream_events():
+                    if hasattr(self, '_stream_observer'):
+                        self._stream_observer.handle_event(event, agent_key=agent_key)
+                
+                # Extract output from restart
+                try:
+                    if hasattr(restart_streaming, "final_output") and restart_streaming.final_output:
+                        output = restart_streaming.final_output
+                    elif hasattr(restart_streaming, "output") and restart_streaming.output:
+                        output = restart_streaming.output
+                    elif hasattr(restart_streaming, "content") and restart_streaming.content:
+                        output = restart_streaming.content
+                    else:
+                        output = str(restart_streaming)
+                except Exception:
+                    output = str(restart_streaming)
 
             # Запишем результат как сообщение ассистента, чтобы главный агент мог обсуждать и давать правки
             try:

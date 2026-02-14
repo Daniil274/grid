@@ -111,6 +111,10 @@ class Settings(BaseModel):
         ge=100,
         description="Максимальная длина вывода инструмента в символах. None = без ограничения."
     )
+    proxy: Optional[str] = Field(
+        default=None,
+        description="Прокси для всех исходящих запросов (API, Telegram). Пример: http://127.0.0.1:10809"
+    )
 
 
 class GridConfig(BaseModel):
@@ -122,6 +126,7 @@ class GridConfig(BaseModel):
     agents: Dict[str, AgentConfig] = Field(default_factory=dict)
     prompt_templates: Dict[str, str] = Field(default_factory=dict)
     scenarios: Optional[Dict[str, Any]] = None
+    telegram: Optional[Dict[str, Any]] = None  # telegram bot config, incl. proxy for API requests
     
     @field_validator('agents')
     @classmethod

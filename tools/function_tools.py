@@ -8,16 +8,11 @@ from .git_tools import GIT_TOOLS, get_git_tools, get_git_tools_by_names
 from .orchestrator_tools import ORCHESTRATOR_TOOLS
 from .ocr_tools import OCR_TOOLS
 from .markdown_tools import MARKDOWN_TOOLS
-from .memory_tools_v2 import MEMORY_TOOLS_V2  # New SQLite-based memory tools
+from .memory_tools_v2 import MEMORY_TOOLS_V2  # SQLite-based memory tools
 from .skill_tools import SKILL_TOOLS  # New file-based skill tools
 from .vision_tools import VISION_TOOLS  # Vision tools for image viewing
 from .document_tools import DOCUMENT_TOOLS  # Document conversion and export tools
-
-# Keep old tools for backward compatibility during migration
-try:
-    from .memory_tools import MEMORY_TOOLS as MEMORY_TOOLS_OLD
-except ImportError:
-    MEMORY_TOOLS_OLD = {}
+from .beads_tools import BEADS_TOOLS  # Beads issue tracker tools
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -42,6 +37,7 @@ AVAILABLE_TOOLS = {
     **SKILL_TOOLS,  # New file-based skill tools (6 tools)
     **VISION_TOOLS,  # Vision tools for image viewing (2 tools)
     **DOCUMENT_TOOLS,  # Document conversion and export tools (4 tools)
+    **BEADS_TOOLS,  # Beads issue tracker tools (7 tools)
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -97,11 +93,9 @@ TOOL_ALIASES = {
     "memory_delete": "memory_delete",
     "task_update": "task_update",
 
-    # Old memory operations (backward compatibility aliases -> new tools)
-    "save_memory": "memory_save",  # Redirects to new tool
-    "recall_memory": "memory_search",  # Redirects to new tool
-    "append_daily_note": "memory_save",  # Use memory_save with type=short_term
-    "get_daily_notes": "memory_search",  # Use memory_search with type=short_term
+    # Memory aliases (old names -> SQLite tools)
+    "save_memory": "memory_save",
+    "recall_memory": "memory_search",
 
     # Document conversion and export operations
     "markdown_to_html": "markdown_to_html",

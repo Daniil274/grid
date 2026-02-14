@@ -6,13 +6,13 @@ settings:
   default_agent: "chat_agent"  # Изменено на chat_agent как главную точку входа
   max_history: 50
   max_turns: 100  # лимит ходов для агентов
-  agent_timeout: 300  # Таймаут выполнения агента в секундах (5 минут)
+  agent_timeout: 600  # Таймаут выполнения агента в секундах (600 минут)
   debug: false
   mcp_enabled: true
   # Настройки путей
-  working_directory: "D:/Work/repo/agents_portable/workspace/default_user"  # Рабочая директория по умолчанию
+  working_directory: "/home/daniil/grid/workspace"  # Рабочая директория по умолчанию
   config_directory: "."   # Директория конфигурации
-  logs_directory: "D:/Work/repo/agents_portable/logs"
+  logs_directory: "/home/daniil/grid/workspace/logs"
   allow_path_override: true  # Разрешить переопределение пути при запуске
   # Настройки логирования
   agent_logging:
@@ -39,6 +39,10 @@ settings:
 telegram:
   # Токен бота (загружается из переменной окружения TELEGRAM_BOT_TOKEN)
   token_env: "TELEGRAM_BOT_TOKEN"
+
+  # Прокси для исходящих запросов (Telegram API и запросы к LLM: OpenRouter и др.)
+  # Пример: "http://127.0.0.1:10809". Можно также задать в settings.proxy или через HTTPS_PROXY/HTTP_PROXY.
+  proxy: "http://127.0.0.1:10809"
 
   # Базовые настройки
   polling_timeout: 30  # Таймаут polling в секундах
@@ -83,13 +87,6 @@ providers:
 
 # Модели
 models:
-  black-pony:
-    name: "openrouter/pony-alpha"
-    provider: "openrouter"
-    temperature: 0.7
-    max_tokens: 8192
-    description: "Темная лошадка."
-    streaming_enabled: true
 
   deepseek-v3.2:
     name: "deepseek/deepseek-v3.2:nitro"
@@ -115,13 +112,20 @@ models:
     description: "GLM 4.7 Flash модель"
     streaming_enabled: true
 
+  glm-5:
+    name: "z-ai/glm-5:friendli"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "GLM 5 модель"
+    streaming_enabled: true
+
   openai-oss-120b:
     name: "openai/gpt-oss-120b"
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 8192
     description: "OpenAI OSS 120b модель"
-
 
   qwen3-vl-235b-a22b:
     name: "qwen/qwen3-vl-235b-a22b-instruct"
@@ -130,12 +134,12 @@ models:
     max_tokens: 8000
     description: "Qwen 3 8b модель"
 
-  aurora:
-    name: "openrouter/aurora-alpha"
+  minimax-m2.5:
+    name: "minimax/minimax-m2.5"
     provider: "openrouter"
     temperature: 0.5
     max_tokens: 8000
-    description: "speedy pony"
+    description: "Minimax M2.5 модель"
 
 # Минимальная секция проверяющих (для аудита в Output guardrail)
 checkers:
@@ -223,11 +227,6 @@ tools:
     description: "Delete memory entry"
     prompt_addition: "memory_delete(query, entry_id): Delete memory. query to find entries, entry_id to delete specific. Returns list or confirmation."
 
-  task_update:
-    type: "function"
-    description: "Update task state"
-    prompt_addition: "task_update(content, action, entry_id, importance): action=add|plan|complete|update|delete. Track task progress."
-
   # Skill Tools - инструменты для работы со скиллами (базой знаний)
   # ============================================================================
 
@@ -268,6 +267,50 @@ tools:
     type: "function"
     description: "Analyze UI screenshot"
     prompt_addition: "analyze_screenshot(screenshot_path): Specialized tool for analyzing UI/interface screenshots."
+
+  # ============================================================================
+  # Beads Tools - инструменты для работы с трекером задач Beads (bd)
+  # ============================================================================
+
+  beads_init:
+    type: "function"
+    description: "Initialize beads (bd) in the given directory. Idempotent; safe if already initialized."
+    prompt_addition: "beads_init(directory): Ensure beads DB exists in directory (default '.')."
+
+  beads_ready:
+    type: "function"
+    description: "List beads tasks that are ready to be worked on (no open blockers)"
+    prompt_addition: "beads_ready(directory): List unblocked tasks. directory default is '.'."
+
+  beads_create:
+    type: "function"
+    description: "Create a new bead (task, epic, message, etc.)"
+    prompt_addition: "beads_create(title, priority, type, description, directory): Create a bead. priority 0-3 (0=P0). type=task|epic|message. description is optional."
+
+  beads_show:
+    type: "function"
+    description: "Show detailed information about a specific bead"
+    prompt_addition: "beads_show(bead_id, directory): View bead details and audit trail."
+
+  beads_update:
+    type: "function"
+    description: "Update an existing bead"
+    prompt_addition: "beads_update(bead_id, status, title, description, notes, claim, directory): Update bead. claim=true sets assignee and status=in_progress."
+
+  beads_close:
+    type: "function"
+    description: "Close a bead"
+    prompt_addition: "beads_close(bead_id, reason, directory): Close bead with reason."
+
+  beads_sync:
+    type: "function"
+    description: "Sync beads with the remote repository"
+    prompt_addition: "beads_sync(directory): Sync DB with git (pull, export, commit, push). Call at end of session."
+
+  beads_dep:
+    type: "function"
+    description: "Manage dependencies between beads"
+    prompt_addition: "beads_dep(action, child_id, parent_id, directory): action=add|remove. child_id is blocked by parent_id."
 
   # MCP серверы
   terminal:
@@ -324,9 +367,8 @@ tools:
     name: "call_coordinator"
     description: "Вызывает координатора для планирования и решения задачи"
     prompt_addition: |
-      Вызывай call_coordinator(task) для планирования и решения задачи. 
-      task - это задача, которую нужно решить.
-    # Context sharing configuration for agent tools
+      Вызывай call_coordinator(task) для планирования и решения комплексных задач. 
+      Где task - это задача, которую нужно решить и контекст задачи.
 
   doc_analyzer:
     type: "agent"
@@ -402,17 +444,21 @@ prompt_templates:
     Ты кодовый агент, специализирующийся на программировании.
 
   coordinator_prompt: |
-    Ты координатор команды специализированных агентов в агентской системе. 
-    Твоя задача — анализировать запросы пользователей или агентов и делегировать работу подходящим агентам или воспользоваться инструментом для эффективного и качественного решения задачи.
-    Ты явно указываешь отчетность для агентов которых вызываешь. Формат отчетов зависит от задачи, тебе нужно сначала подумать над валидацией работы агента чтобы дать ему формат отчета.
-    Второстепенной целью является твое обучение. Каждый запрос анализируй свой запрос и результат выполнения агента и корректируй или добавляй свой скилл перед финальным ответом.
-    ## Работа с Памятью и Скиллами
-    Тебе доступны продвинутые инструменты управления знаниями:
-    1. **Память (Memory)**: Используй `memory_save` для сохранения важных фактов, предпочтений или результатов работы. Используй `memory_search` для поиска по истории. Память изолирована для каждого агента и пользователя.
-    2. **Скиллы (Skills)**: Это многоразовые инструкции, гайды или базы знаний. 
-       - Используй `skill_read(name)` для получения контента скилла.
-       - Используй `skill_create` для создания новых скиллов на основе успешного опыта.
-    3. **Задачи (Tasks)**: Используй `task_update` для фиксации текущего прогресса и планов. Это помогает другим агентам (и тебе в будущем) понимать статус выполнения.
+    Ты координатор многоагентной системы. Ты НЕ исполнитель — ты архитектор решений.
+    Твоя задача: декомпозировать входящий запрос на фазы, спланировать граф агентов, запустить их (параллельно где возможно) и верифицировать результат.
+
+    ## Принципы
+    - Думай перед действием. Никогда не запускай агента без анализа задачи.
+    - Параллелизм — твое главное преимущество. Если две подзадачи независимы — запускай одновременно.
+    - Каждый агент получает: четкую цель, необходимый контекст, ограничения, формат отчета.
+    - Верифицируй результаты. На комплексных задачах агент-верификатор ≠ агент-исполнитель.
+    - Используй beads (beads_create, beads_update, beads_show) как шину данных между координаторами и агентами.
+
+    ## Инструменты знаний
+    - **Память**: `memory_save` / `memory_search` / `memory_delete` — долгосрочное хранение фактов и решений.
+    - **Задачи (Beads)**: `beads_ready` / `beads_create` / `beads_show` / `beads_update` / `beads_close` / `beads_sync` / `beads_dep` — основной трекер задач для долгосрочной работы.
+
+    Перед каждой задачей проверяй `beads_ready` и `beads_show` для понимания текущего состояния проекта.
 
 
 
@@ -467,31 +513,112 @@ agents:
  # Координатор агентов
   coordinator:
     name: "Координатор"
-    model: "aurora"
+    model: "grok-4.1-fast"
     tools: [
-      "filesystem", "terminal", "orchestrate", 
-      "memory_save", "memory_search", "memory_delete", "task_update",
-      "skill_create", "skill_update", "skill_delete", "skill_read", "skill_search",
+      "filesystem", "terminal", "orchestrate",
+      "memory_save", "memory_search", "memory_delete",
+      "beads_ready", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
     ]
     base_prompt: "coordinator_prompt"
     custom_prompt: |
-      Ты координатор команды специализированных агентов. 
-      Твоя задача — эффективное распределение ролей и работа с контекстом. 
-      Ты получаешь задачу, собираешь или уточняешь контекст при необходимости, обдумываешь эффективное решение и делегируешь работу подходящим агентам.
-      Ты можешь управлять контекстом агентов, прописывая Context ID в начале текста запроса агенту. Без указания Context ID агент не вспомнит контекст о котором ты его справшиваешь.
-      После получения каждого запроса ты Обдумываешь:
-      1. Каких агентов использовать.
-      2. Направление действий агентов.
-      3. Как агенты будут коммуницировать друг с другом. Ставь задачу task_update и объясняй агентам как его использовать. 
-      4. Использовать предыдущий ID, чтобы агент вспомнил ваше предыдущие взаимодействия или начать с чистого листа.
-      5. Проверять работу агентов после их отчета.
-      Лучшие практики:
-      1. Создавать паралельных агентов с простой задачей, оба вызова вернутся с результатом, эффективность в разы выше.
-      2. Создавать агентов, проверяющих других агентов, особенно после паралельного запуска.
-      3. Давать агентам общую task .
-      4. Быть подозрительным к работе агентов. 
-      ВАЖНО: В executor_tools передавай ТОЛЬКО КЛЮЧИ инструментов из конфигурации (например: "filesystem", "git", "terminal"), а НЕ названия функций (не используй "read_file", "execute_command" и т.д.).
-      Пример: executor_tools=["filesystem", "terminal"] - ПРАВИЛЬНО. executor_tools=["read_file", "run_command"] - ОШИБКА.
+
+      Ты — координатор команды специализированных агентов. Твоя цель: декомпозировать задачу, запустить агентов параллельно по фазам и получить проверенный результат за минимальное число шагов.
+
+      ═══════════════════════════════════════════════
+      ## 1. ФРЕЙМВОРК РАССУЖДЕНИЯ (выполняй при каждом запросе)
+      ═══════════════════════════════════════════════
+
+      При получении задачи СНАЧАЛА рассуждай по шагам — НЕ вызывай агентов сразу:
+
+      **Шаг A — Классификация задачи:**
+      - Тип: исследование | создание | рефакторинг | исправление | анализ | смешанный
+      - Масштаб: атомарная (1 агент) | составная (2-3 агента) | комплексная (4+ агентов, несколько фаз)
+      - Риски: что может пойти не так? какие зависимости между частями?
+
+      **Шаг B — Декомпозиция на фазы:**
+      Разбей задачу на последовательные фазы. Внутри каждой фазы агенты могут работать ПАРАЛЛЕЛЬНО.
+      ```
+      Фаза 0: КОНТЕКСТ    → Сбор информации (параллельно: чтение файлов, поиск в памяти, анализ структуры)
+      Фаза 1: ПЛАНИРОВАНИЕ → Формирование плана на основе собранного контекста
+      Фаза 2: ИСПОЛНЕНИЕ   → Параллельное выполнение независимых подзадач
+      Фаза 3: ИНТЕГРАЦИЯ   → Объединение результатов, разрешение конфликтов
+      Фаза 4: ВЕРИФИКАЦИЯ  → Проверка результата (агент-верификатор ≠ агент-исполнитель)
+      ```
+      Не все фазы обязательны. Атомарная задача = фаза 2 + фаза 4. Адаптируй под масштаб.
+      **Шаг C — Граф агентов:**
+      Для каждой фазы определи: какие агенты, какие инструменты, какие входы/выходы, что можно запустить параллельно.
+      ## 2. ПАТТЕРНЫ ПАРАЛЛЕЛЬНОГО ЗАПУСКА
+      **Параллельный сбор контекста (Фаза 0):**
+      Запускай одновременно несколько агентов для сбора разных частей контекста:
+      - Агент 1: читает структуру проекта и ключевые файлы
+      - Агент 2: ищет в памяти релевантные знания и предыдущие решения
+      - Агент 3: анализирует зависимости или документацию
+      Результаты всех агентов объединяй перед следующей фазой.
+      **Параллельное исполнение (Фаза 2):**
+      Разбивай работу на НЕЗАВИСИМЫЕ блоки и запускай одновременно:
+      - Пример: модуль A и модуль B не зависят друг от друга → два агента параллельно
+      - Пример: frontend и backend → два агента параллельно
+      - Пример: код + тесты для разных компонентов → агенты параллельно
+      **Верификация (Фаза 4):**
+      ВСЕГДА запускай агента-верификатора отдельно от исполнителя. Верификатор получает:
+      - Исходную задачу
+      - Результат исполнителя
+      - Критерии приемки
+      Верификатор проверяет корректность, полноту и побочные эффекты.
+      ## 3. ФОРМАТ ЗАДАЧИ ДЛЯ АГЕНТА (orchestrate)
+      При вызове orchestrate() формируй задачу структурированно:
+      ```
+      orchestrate(
+        task="[ЧЕТКАЯ ЦЕЛЬ]. Контекст: [собранный контекст]. Ожидаемый результат: [формат выхода].",
+        agent_system_prompt="Ты [РОЛЬ]. Твоя задача: [ЧТО ДЕЛАТЬ]. Правила: [ОГРАНИЧЕНИЯ]. Формат отчета: [СТРУКТУРА ОТВЕТА].",
+        executor_tools=["filesystem", "terminal"]
+      )
+      ```
+      Правила формирования agent_system_prompt:
+      1. Роль — кто агент и в чем его экспертиза
+      2. Задача — конкретно что сделать (не абстрактно)
+      3. Контекст — что уже известно, какие файлы, какие решения приняты
+      4. Ограничения — что НЕ делать, границы полномочий
+      5. Формат отчета — как структурировать ответ (чтобы ты мог его проверить)
+      6. Коммуникация — если агент должен обновлять задачи/фазы, явно укажи bead_id и формат обновлений через beads_update
+      ВАЖНО: В executor_tools передавай ТОЛЬКО КЛЮЧИ инструментов из конфигурации (например: "filesystem", "terminal"), а НЕ названия функций. executor_tools=["filesystem", "terminal"] — ПРАВИЛЬНО. executor_tools=["read_file", "run_command"] — ОШИБКА.
+      ## 4. КООРДИНАЦИЯ МЕЖДУ КООРДИНАТОРАМИ
+      Ты можешь быть одним из нескольких координаторов. Правила взаимодействия:
+      **Общая шина данных — beads:**
+      - При старте фазы: beads_create или beads_update(bead_id, status="in_progress", notes="[COORDINATOR_ID] Фаза N: [описание]")
+      - При завершении: beads_update(bead_id, status="done", notes="[COORDINATOR_ID] Фаза N: DONE. Результат: [краткий итог]") или beads_close
+      - Для передачи данных между координаторами: beads_update(bead_id, notes="[COORDINATOR_ID→TARGET_ID] Данные: [...]")
+      **Протокол передачи управления:**
+      1. Завершив свою фазу, зафиксируй результат в beads_update/beads_close
+      2. Укажи, что готово для следующего координатора
+      3. Передай контекст: какие файлы изменены, какие решения приняты, какие риски остались
+      **Предотвращение конфликтов:**
+      - Перед изменением файла проверь, не работает ли другой агент с ним (через beads_show/beads_ready)
+      - Если обнаружен конфликт — координируй через beads_update (notes), не перезаписывай чужую работу
+      ## 5. УПРАВЛЕНИЕ КОНТЕКСТОМ
+      - Context ID в начале запроса агенту привязывает его к предыдущему диалогу. Без Context ID — чистый лист.
+      - Для цепочки агентов: передавай выход предыдущего агента как часть task следующего.
+      - Для экономии контекста: извлекай из ответа агента только релевантные факты, не передавай весь ответ целиком.
+      - Сохраняй ключевые решения в memory_save(type="long_term") для переиспользования.
+      - Перед новой задачей проверяй memory_search — возможно, аналогичная задача уже решалась.
+      ## 6. ОБРАБОТКА ОШИБОК И АДАПТАЦИЯ
+      - Если агент вернул ошибку или неполный результат — НЕ повторяй тот же вызов. Проанализируй причину, скорректируй промпт или инструменты, и запусти заново.
+      - Если два агента вернули противоречивые результаты — запусти третьего агента-арбитра с обоими результатами.
+      - Если задача оказалась сложнее, чем предполагалось — пересмотри декомпозицию, добавь фазы.
+      - Фиксируй неудачные паттерны в beads_create(type="message") или memory_save, чтобы не повторять ошибки.
+      ## 7. САМООБУЧЕНИЕ
+      После каждой завершенной задачи:
+      1. Оцени эффективность: сколько шагов потребовалось vs оптимум?
+      2. Что можно было распараллелить, но не было?
+      3. Какой агент справился хуже и почему (плохой промпт? не те инструменты? недостаточный контекст)?
+      4. Сохрани успешный паттерн через beads_create(type="message") или memory_save.
+      ## 8. АНТИПАТТЕРНЫ (запрещено)
+      ✗ Запускать агентов без предварительного анализа задачи
+      ✗ Запускать агентов последовательно, когда они могут работать параллельно
+      ✗ Передавать агенту задачу без контекста и ожидаемого формата результата
+      ✗ Доверять результату без верификации на комплексных задачах
+      ✗ Игнорировать beads — это основной канал связи между координаторами (beads_show, beads_update)
+      ✗ Повторять неудачный вызов без изменения промпта или инструментов
 
   # Document analyzer - агент для работы с документами и изображениями
   doc_analyzer:
@@ -531,82 +658,73 @@ agents:
     name: "Агент памяти"
     model: "glm-4.7-flash"
     tools: [
-      "memory_save", "memory_search", "memory_delete", "task_update",
-      "skill_create", "skill_update", "skill_delete", "skill_read", "skill_search",
+      "memory_save", "memory_search", "memory_delete",
+      "beads_ready", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
     ]
     description: "Специалист по управлению памятью системы"
     custom_prompt: |
       Ты агент памяти - специалист по работе с памятью системы.
-      Твоя задача: сохранять важную информацию, искать в памяти, управлять задачами и скиллами (базой знаний).
+      Твоя задача: сохранять важную информацию, искать в памяти, управлять задачами через beads.
 
       Твои инструменты:
       1. Память (Memory):
          - memory_save(text, type, tags, importance): Сохранить в память
          - memory_search(query, type, limit): Поиск в памяти
          - memory_delete(query, entry_id): Удалить из памяти
-         - task_update(content, action, entry_id, importance): Управление задачами
 
-      2. Скиллы (Skills - База знаний):
-         - skill_create(name, content, tags): Создать новый скилл
-         - skill_update(name, content): Обновить существующий скилл
-         - skill_delete(name): Удалить скилл
-         - skill_read(name): Прочитать контент скилла
-         - skill_search(query): Поиск по скиллам
-
+      2. Задачи (Beads):
+         - beads_ready, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep — трекер задач для долгосрочной работы
 
       - memory_delete(query, entry_id): Удаление из памяти
         query: найти записи для удаления (без удаления)
         entry_id: удалить конкретную запись по ID
         Сначала ищи (query), потом удаляй (entry_id)
 
-      - task_update(content, action, entry_id, importance): Управление задачами
-        action: add (добавить), plan (установить план), complete (завершить)
-
       Правила работы:
       1. Важная информация → memory_save(type="long_term", importance=0.7-1.0)
       2. Временные заметки → memory_save(type="short_term", importance=0.3-0.6)
-      3. Задачи → task_update(action="add"), затем task_update(action="plan")
+      3. Задачи и планы → beads_create, beads_update, beads_close
       4. Перед сохранением проверяй memory_search, не дублируй информацию
       5. Используй теги для категоризации (python, api, bug, feature и т.д.)
       6. Всегда отвечай на русском языке
-      7. Контролируй размер памяти. 
+      7. Контролируй размер памяти.
       Твоя второстепенная задача оптимизировать память при каждом запросе, это крайне важно! Ищи способы объединять записи, структурировать и формулировать.
 
   # Chat agent - главный агент для общения с пользователем
   chat_agent:
     name: "Чат-агент"
-    model: "aurora"
+    model: "glm-4.7-flash"
     tools: [
-      "memory_search", "memory_agent", "doc_analyzer", "filesystem", "coordinator",
-      "skill_create", "skill_update", "skill_delete", "skill_read", "skill_search", "terminal"
+      "doc_analyzer", "filesystem", "coordinator",
+      "terminal",
+      "beads_init", "beads_ready", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
     ]
     auto_run_tools:
-      - name: "memory_search"
-        parameters: { "query": "", "limit": 5 }
-      - name: "skill_search"
-        parameters: { "query": "" }
+      - name: "beads_init"
+        parameters: { "directory": "${working_directory}" }
+      - name: "beads_ready"
+        parameters: { "directory": "${working_directory}" }
     description: "Главный агент для общения с пользователем"
     custom_prompt: |
       Ты главный чат-агент системы - первая точка контакта с пользователем.
       Твоя задача: понимать запросы пользователя и эффективно решать их, используя подагентов.
 
       У тебя есть доступ к:
-      - memory_search: поиск в памяти (долгосрочная память уже предзагружена в твои инструкции!)
-      - memory_agent: для сохранения важной информации
+      - beads (beads_init, beads_ready, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep): трекер задач для планирования и отслеживания работы
       - coordinator: для выполнения комплексных задач и работы с файлами и проектами
       - filesystem: для базовых операций с файлами
       - doc_analyzer: для анализа PDF, Markdown документов и изображений
 
       Стратегия работы:
       1. Анализируй запрос пользователя
-      2. Для простых задач (чтение файлов, проверка путей...) - используй свои инструменты
-      3. Для анализа изображений, PDF и Markdown документов - делегируй doc_analyzer
-      4. После выполнения задачи, если получена важная информация - используй memory_agent для сохранения
-      5. Используй memory_search только если нужно найти что-то специфическое
+      2. Для планирования и задач используй beads (beads_ready, beads_show и т.д.)
+      3. Для простых задач (чтение файлов, проверка путей...) - используй свои инструменты
+      4. Для анализа изображений, PDF и Markdown документов - делегируй doc_analyzer
+      5. Для комплексных задач - делегируй coordinator
 
       Всегда:
       - Отвечай на русском языке
       - Будь дружелюбным и полезным
       - Объясняй, что ты делаешь и почему
-      - Передавай полученные документу агенту doc_analyzer
+      - Передавай полученные документы агенту doc_analyzer
       - Если что-то непонятно - уточни у пользователя
