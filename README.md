@@ -73,6 +73,23 @@ Fill in `config.yaml` for your environment (see the “Configuration” section)
 4) Environment variables
 Create a `.env` (following `.env.example`, if present) and set API keys, or use environment variables corresponding to `providers.*.api_key_env`.
 
+### Docker Installation
+You can also run the system in a Docker container:
+
+1) Build the image:
+```bash
+docker build -t agent-system .
+```
+
+2) Run the container with your current directory mounted:
+```bash
+# Windows PowerShell
+docker run -it --rm -v "${PWD}:/workspace" --env-file .env agent-system
+
+# Linux/macOS
+docker run -it --rm -v "$(pwd):/workspace" --env-file .env agent-system
+```
+
 Note for Windows/pytest: add the current folder to `PYTHONPATH` for the session:
 ```
 $env:PYTHONPATH = "."

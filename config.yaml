@@ -10,9 +10,9 @@ settings:
   debug: false
   mcp_enabled: true
   # Настройки путей
-  working_directory: "/home/daniil/grid/workspace"  # Рабочая директория по умолчанию
+  working_directory: "D:/Work/repo/agents_portable/workspace"  # Рабочая директория по умолчанию
   config_directory: "."   # Директория конфигурации
-  logs_directory: "/home/daniil/grid/workspace/logs"
+  logs_directory: "D:/Work/repo/agents_portable/logs"
   allow_path_override: true  # Разрешить переопределение пути при запуске
   # Настройки логирования
   agent_logging:
@@ -48,7 +48,7 @@ telegram:
 
   # Прокси для исходящих запросов (Telegram API и запросы к LLM: OpenRouter и др.)
   # Пример: "http://127.0.0.1:10809". Можно также задать в settings.proxy или через HTTPS_PROXY/HTTP_PROXY.
-  proxy: "http://127.0.0.1:10809"
+  # proxy: "http://127.0.0.1:10809"
 
   # Базовые настройки
   polling_timeout: 30  # Таймаут polling в секундах
@@ -304,10 +304,22 @@ tools:
     type: "function"
     description: "Manage dependencies between beads"
 
-  # MCP серверы
+  # ============================================================================
+  # Shared append-only log (for games / chat-like streams)
+  # ============================================================================
+
+  beads_log_append:
+    type: "function"
+    description: "Append a single entry to a shared, append-only JSONL log (inside .beads/shared_log/)."
+
+  beads_log_read:
+    type: "function"
+    description: "Read ONLY new log data for (channel, reader) since the last read (cursor-based)."
+
+  # MCP серверы (на Windows нужен npx + имя пакета; иначе WinError 2 - файл не найден)
   terminal:
     type: "mcp"
-    server_command: ["mcp-terminal"]
+    server_command: ["npx", "@dillip285/mcp-terminal"]
     add_working_directory: true
     description: "MCP сервер для выполнения команд терминала"
     prompt_addition: "Используй execute_command для выполнения команд в терминале."
@@ -315,14 +327,14 @@ tools:
   # Файловая система
   filesystem:
     type: "mcp"
-    server_command: ["mcp-server-filesystem"]
+    server_command: ["npx", "@modelcontextprotocol/server-filesystem"]
     add_working_directory: true
     description: "MCP сервер для работы с файловой системой (ограничен рабочей директорией)"
     prompt_addition: "Используй filesystem для доступа к файловой системе."
 
   sequentialthinking:
     type: "mcp"
-    server_command: ["mcp-server-sequential-thinking"]
+    server_command: ["npx", "@modelcontextprotocol/server-sequential-thinking"]
     description: "MCP сервер для последовательного мышления"
     prompt_addition: "ВАЖНО!!! ВСЕГДА Используй sequential thinking для анализа, планирования задачи. Вызывай его перед выполнением любой задачи."
   
@@ -349,7 +361,7 @@ tools:
   code_agent:
     type: "agent"
     name: "call_code_agent"
-    description: "Вызывает кодового агента для работы с кодом и программированием"
+    description: "Вызывает кодового агента для работы с кодом и программированием."
     prompt_addition: "Всегда call_code_agent(task) для задач, связанных с кодом или с файлами кода. task - это задача, которую должен решить кодовый агент с путем к файлу, директории или репозиторию и подробным описанием задачи."
     # Context sharing configuration for agent tools
 
@@ -357,7 +369,7 @@ tools:
   coordinator:
     type: "agent"
     name: "call_coordinator"
-    description: "Вызывает координатора для планирования и решения задачи"
+    description: "Вызывает координатора для планирования и решения задачи."
     prompt_addition: |
       Вызывай call_coordinator(task) для планирования и решения комплексных задач. 
       Где task - это задача, которую нужно решить и контекст задачи.
@@ -373,7 +385,7 @@ tools:
   context_wrapper:
     type: "agent"
     name: "call_context_wrapper"
-    description: "Вызывает сборщика контекста для управления контекстом и взаимодействия с агентами"
+    description: "Вызывает сборщика контекста для управления контекстом и взаимодействия с агентами."
     prompt_addition: "Используй call_context_wrapper(task) для получения контекста по кодовой базе. task - это задача для которой требуется контекст."
 
 
@@ -397,7 +409,7 @@ tools:
     name: "orchestrate"
     description: "Запускает динамический пайплайн (создает агента на лету)"
     env_vars:
-      DEFAULT_MODEL: "glm-4.7-flash"  # Модель для динамического агента по умолчанию
+      DEFAULT_MODEL: "grok-4.1-fast"  # Модель для динамического агента по умолчанию
     prompt_addition: |
       Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
       task: четкая задача для выполнения (строка).
@@ -519,6 +531,7 @@ agents:
       "filesystem", "terminal", "orchestrate",
       "memory_save", "memory_search", "memory_delete",
       "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
+      "beads_log_append", "beads_log_read",
     ]
     custom_prompt: |
       Ты — координатор команды специализированных агентов. Твоя цель: декомпозировать задачу, запустить цепочку агентов и получить проверенный результат за минимальное число шагов.
@@ -740,6 +753,7 @@ agents:
       "beads_init", "beads_ready", "beads_list", "beads_create", 
       "beads_show", "beads_update", "beads_close", 
       "beads_sync", "beads_dep",
+      "beads_log_append", "beads_log_read",
     ]
     auto_run_tools:
       - name: "beads_init"
@@ -753,6 +767,7 @@ agents:
 
       У тебя есть доступ к:
       - beads (beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep): трекер задач для планирования и отслеживания работы
+      - shared log (beads_log_append, beads_log_read): единый append-only лог (удобно для игр/чатов, чтение только новых записей)
       - coordinator: для выполнения комплексных задач и работы с файлами и проектами
       - filesystem: для базовых операций с файлами
       - doc_analyzer: для анализа PDF, Markdown документов и изображений
