@@ -50,6 +50,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Лимит длины одного сообщения в Telegram (API)
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+
 
 @dataclass
 class BridgeConfig:
@@ -759,12 +762,13 @@ class TelegramBridge:
             except Exception as e:
                 logger.debug(f"Не удалось удалить статусное сообщение: {e}")
 
-            # Отправить финальный ответ отдельным сообщением с экранированием HTML
+            # Отправить финальный ответ (несколькими сообщениями, если текст длинный)
             escaped_response = self._escape_html(response)
-            await self.app.bot.send_message(
+            await self._send_long_message(
                 chat_id=chat_id,
-                text=f"✅ <b>Ответ:</b>\n\n{escaped_response}",
-                parse_mode=ParseMode.HTML
+                text=escaped_response,
+                parse_mode=ParseMode.HTML,
+                first_prefix="✅ <b>Ответ:</b>\n\n",
             )
 
         except Exception as e:
@@ -772,12 +776,13 @@ class TelegramBridge:
             logger.error(traceback.format_exc())
             self.stats["errors_handled"] += 1
 
-            # Отправить сообщение об ошибке
-            error_msg = f"❌ <b>Ошибка при обработке запроса:</b>\n\n<code>{str(e)}</code>"
-            await self.app.bot.send_message(
+            # Отправить сообщение об ошибке (несколькими сообщениями, если длинное)
+            error_body = f"<code>{self._escape_html(str(e))}</code>"
+            await self._send_long_message(
                 chat_id=chat_id,
-                text=error_msg,
-                parse_mode=ParseMode.HTML
+                text=error_body,
+                parse_mode=ParseMode.HTML,
+                first_prefix="❌ <b>Ошибка при обработке запроса:</b>\n\n",
             )
 
     # ===== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ =====
@@ -785,6 +790,43 @@ class TelegramBridge:
     def _escape_html(self, text: str) -> str:
         """Экранирование HTML для безопасной отправки в Telegram"""
         return html.escape(text)
+
+    async def _send_long_message(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: str = ParseMode.HTML,
+        first_prefix: str = "",
+    ) -> None:
+        """Отправляет длинный текст несколькими сообщениями, не превышая лимит Telegram."""
+        if not text and not first_prefix:
+            return
+        if first_prefix and not text:
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=first_prefix,
+                parse_mode=parse_mode,
+            )
+            return
+        max_len = TELEGRAM_MAX_MESSAGE_LENGTH
+        first_max = max(1, max_len - len(first_prefix)) if first_prefix else max_len
+
+        offset = 0
+        is_first = True
+        while offset < len(text):
+            chunk_size = first_max if (is_first and first_prefix) else max_len
+            chunk = text[offset : offset + chunk_size]
+            offset += len(chunk)
+            if is_first and first_prefix:
+                chunk = first_prefix + chunk
+                is_first = False
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=chunk,
+                parse_mode=parse_mode,
+            )
+            if offset < len(text):
+                await asyncio.sleep(0.25)
 
     def _check_access(self, user_id: int) -> bool:
         """Проверка доступа пользователя"""
