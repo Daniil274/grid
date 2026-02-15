@@ -29,6 +29,11 @@ if sys.platform == "win32":
 
 from core.config import Config
 from core.agent_factory import AgentFactory
+try:
+    # Optional: only available when Docker SDK is installed and Docker is running
+    from core.managers.container_manager import ContainerManager
+except Exception:
+    ContainerManager = None
 from core.tracing_config import configure_tracing_from_env
 from utils.exceptions import GridError
 from utils.logger import Logger
@@ -189,10 +194,46 @@ async def main():
         print("Load Config")
         config = Config(args.config, args.path)
         print("Load Config - Конфигурация загружена")
-        
+
+        # Container isolation (optional)
+        # If enabled, we run tools (git/beads/mcp) inside a per-user container.
+        container_id = None
+        user_workspace = None
+        try:
+            isolation_cfg = getattr(config.config, "isolation", None)
+            isolation_enabled = False
+            if isolation_cfg:
+                isolation_enabled = getattr(isolation_cfg, "enabled", False) if not isinstance(isolation_cfg, dict) else bool(isolation_cfg.get("enabled", False))
+
+            if isolation_enabled:
+                # Use per-user workspace to match ContainerManager mount strategy
+                workspace_root = Path(config.get_working_directory())
+                user_workspace = workspace_root / f"user_{args.user_id}"
+                user_workspace.mkdir(parents=True, exist_ok=True)
+
+                if ContainerManager:
+                    cm = ContainerManager(config)
+                    if cm.enabled:
+                        container = cm.get_or_create_container(str(args.user_id))
+                        if container:
+                            container_id = container.id
+                            print(f"🐳 Container isolation enabled: {container.name} ({container_id[:12]})")
+                        else:
+                            print("⚠️ Container isolation enabled in config, but container could not be created. Falling back to local tools.")
+                    else:
+                        print("⚠️ Container isolation enabled in config, but Docker client is unavailable. Falling back to local tools.")
+                else:
+                    print("⚠️ Container isolation enabled in config, but Docker SDK is unavailable. Falling back to local tools.")
+
+                # Reload config with per-user working directory (keeps CLI behavior deterministic)
+                config = Config(args.config, str(user_workspace))
+
+        except Exception as e:
+            print(f"⚠️ Failed to initialize container isolation: {e}. Falling back to local tools.")
+
         # Create factory
         print("Initialize SecurityAwareAgentFactory")
-        factory = AgentFactory(config, args.path)
+        factory = AgentFactory(config=config, working_directory=config.get_working_directory(), container_id=container_id)
         print("Initialize SecurityAwareAgentFactory - Фабрика агентов инициализирована")
         selected_context_id: Optional[str] = None
         last_context_id: Optional[str] = None

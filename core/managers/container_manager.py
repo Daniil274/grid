@@ -4,6 +4,7 @@ Container Manager for agent isolation using Docker.
 
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import docker
@@ -90,7 +91,17 @@ class ContainerManager:
             }
             
             logger.info(f"Creating container {container_name} with workspace {user_workspace}")
-            
+
+            # Docker Desktop (Windows/macOS) does not support network_mode="host" for Linux containers.
+            # Use host networking only on Linux.
+            run_kwargs: Dict[str, Any] = {}
+            if sys.platform.startswith("linux"):
+                run_kwargs["network_mode"] = "host"  # Allow access to host's proxy at 127.0.0.1
+            else:
+                # On Docker Desktop, access host services via host.docker.internal when needed.
+                # Keep default bridge networking for portability.
+                pass
+
             container = self.client.containers.run(
                 self.image,
                 name=container_name,
@@ -100,9 +111,9 @@ class ContainerManager:
                 volumes=volumes,
                 working_dir="/workspace",
                 user="agent",
-                network_mode="host", # Allow access to host's proxy at 127.0.0.1
                 environment={"BEADS_DAEMON": "0"}, # Disable beads daemon in container
-                restart_policy={"Name": "unless-stopped"}
+                restart_policy={"Name": "unless-stopped"},
+                **run_kwargs,
             )
             return container
         except Exception as e:
