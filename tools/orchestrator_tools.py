@@ -14,6 +14,8 @@ Social Intelligence Framework integration:
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import json
 import logging
 import random
@@ -26,6 +28,11 @@ from agents import RunContextWrapper, function_tool
 
 logger = logging.getLogger(__name__)
 verbose_logger = logging.getLogger("grid.verbose")
+
+# Семафор для последовательного выполнения orchestrate (лимит = 1)
+_orchestrate_semaphore = asyncio.Semaphore(1)
+# Глубина вложенности orchestrate в текущем asyncio-контексте (для защиты от deadlock при реэнтерансе)
+_orchestrate_depth: contextvars.ContextVar[int] = contextvars.ContextVar("_orchestrate_depth", default=0)
 
 
 @dataclass
@@ -188,59 +195,78 @@ async def orchestrate(
     - task: Задача, которую должен выполнить агент
     - agent_system_prompt: Системный промпт (роль и инструкции) для агента.
     - executor_tools: Список инструментов для агента 
-    """
-    factory = _get_factory_from_context(context)
-    if factory is None:
-        return "❌ orchestrate: нет доступа к AgentFactory (ожидается context.context.factory)."
-
-    logger.info(f"orchestrate: START | task_len={len(task)} | model_key={model_key}")
-    verbose_logger.debug(
-        f"\n{'='*80}\nORCHESTRATE START\n{'='*80}\n"
-        f"Task: {task}\nModel key: {model_key}\n"
-        f"Agent system prompt: {agent_system_prompt[:500] if agent_system_prompt else 'None'}\n"
-        f"Executor tools: {executor_tools}\n{'='*80}\n"
-    )
-
-    # Пытаемся получить модель из конфига инструмента orchestrate, если не передана явно
-    default_model_key = None
-    try:
-        tool_cfg = factory.config.get_tool("orchestrate")
-        if tool_cfg.env_vars:
-            default_model_key = tool_cfg.env_vars.get("DEFAULT_MODEL")
-    except Exception:
-        pass
-
-    resolved_model_key = _coerce_optional_str(model_key) or default_model_key or factory.resolve_model_key(None)
-    coerced_executor_tools = _coerce_tool_list(executor_tools)
-
-    base_instructions = _coerce_optional_str(agent_system_prompt)
     
-    executor = await factory.create_dynamic_agent(
-        name=f"executor-{uuid.uuid4().hex[:6]}",
-        instructions=base_instructions,
-        model_key=resolved_model_key,
-        tool_names=coerced_executor_tools,
-    )
+    Примечание: Вызовы orchestrate выполняются последовательно (не параллельно)
+    для предотвращения конфликтов и обеспечения предсказуемости выполнения.
+    """
+    depth = _orchestrate_depth.get()
+    token = _orchestrate_depth.set(depth + 1)
+    acquired = False
+    try:
+        # Используем семафор только на верхнем уровне.
+        # Это делает orchestrate реентерабельным (если orchestrate вызывает orchestrate),
+        # не создавая deadlock внутри одного и того же asyncio Task.
+        if depth == 0:
+            await _orchestrate_semaphore.acquire()
+            acquired = True
 
-    draft = await factory.run_agent_object_simple(executor, task)
+        factory = _get_factory_from_context(context)
+        if factory is None:
+            return "❌ orchestrate: нет доступа к AgentFactory (ожидается context.context.factory)."
 
-    result = {
-        "task": task,
-        "model_key": resolved_model_key,
-        "executor_tools": coerced_executor_tools,
-        "final": _extract_text(draft),
-    }
-    result_json = json.dumps(result, ensure_ascii=False, indent=2)
-    logger.info(
-        f"orchestrate: COMPLETE  | model={resolved_model_key} | "
-        f"output_len={len(result.get('final', ''))}"
-    )
-    verbose_logger.debug(
-        f"\n{'='*80}\nORCHESTRATE COMPLETE\n{'='*80}\n"
-        f"Model: {resolved_model_key}\n"
-        f"Result (first 3000 chars):\n{result_json[:3000]}\n{'='*80}\n"
-    )
-    return result_json
+        logger.info(f"orchestrate: START | task_len={len(task)} | model_key={model_key}")
+        verbose_logger.debug(
+            f"\n{'='*80}\nORCHESTRATE START\n{'='*80}\n"
+            f"Task: {task}\nModel key: {model_key}\n"
+            f"Agent system prompt: {agent_system_prompt[:500] if agent_system_prompt else 'None'}\n"
+            f"Executor tools: {executor_tools}\n{'='*80}\n"
+        )
+
+        # Пытаемся получить модель из конфига инструмента orchestrate, если не передана явно
+        default_model_key = None
+        try:
+            tool_cfg = factory.config.get_tool("orchestrate")
+            if tool_cfg.env_vars:
+                default_model_key = tool_cfg.env_vars.get("DEFAULT_MODEL")
+        except Exception:
+            pass
+
+        resolved_model_key = _coerce_optional_str(model_key) or default_model_key or factory.resolve_model_key(None)
+        coerced_executor_tools = _coerce_tool_list(executor_tools)
+
+        base_instructions = _coerce_optional_str(agent_system_prompt)
+        
+        executor = await factory.create_dynamic_agent(
+            name=f"executor-{uuid.uuid4().hex[:6]}",
+            instructions=base_instructions,
+            model_key=resolved_model_key,
+            tool_names=coerced_executor_tools,
+        )
+
+        draft = await factory.run_agent_object_simple(executor, task)
+
+        result = {
+            "task": task,
+            "model_key": resolved_model_key,
+            "executor_tools": coerced_executor_tools,
+            "final": _extract_text(draft),
+        }
+        result_json = json.dumps(result, ensure_ascii=False, indent=2)
+        logger.info(
+            f"orchestrate: COMPLETE  | model={resolved_model_key} | "
+            f"output_len={len(result.get('final', ''))}"
+        )
+        verbose_logger.debug(
+            f"\n{'='*80}\nORCHESTRATE COMPLETE\n{'='*80}\n"
+            f"Model: {resolved_model_key}\n"
+            f"Result (first 3000 chars):\n{result_json[:3000]}\n{'='*80}\n"
+        )
+        return result_json
+    finally:
+        # Важно: сбрасываем depth корректно даже при исключениях
+        _orchestrate_depth.reset(token)
+        if acquired:
+            _orchestrate_semaphore.release()
 
 
 # =============================================================================
