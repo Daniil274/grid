@@ -188,6 +188,7 @@ async def orchestrate(
     agent_system_prompt: Optional[str] = None,
     model_key: Optional[str] = None,
     executor_tools: Optional[Any] = None,
+    context_id: Optional[str] = None,
 ) -> str:
     """
     Мета-инструмент: запускает динамического исполнителя для решения задачи.
@@ -243,10 +244,12 @@ async def orchestrate(
             tool_names=coerced_executor_tools,
         )
 
-        draft = await factory.run_agent_object_simple(executor, task)
+        draft = await factory.run_agent_object_simple(executor, task, context_id=context_id)
+        active_context_id = context_id or factory.get_active_context_id()
 
         result = {
             "task": task,
+            "context_id": active_context_id,
             "model_key": resolved_model_key,
             "executor_tools": coerced_executor_tools,
             "final": _extract_text(draft),
@@ -761,9 +764,11 @@ async def orchestrate_emergent(
 
     resolved_model_key = _coerce_optional_str(model_key) or default_model_key or factory.resolve_model_key(None)
     tools = _coerce_tool_list(executor_tools) or ["filesystem", "git", "terminal"]
+    context_id = factory.get_active_context_id()
 
     result = {
         "task": task,
+        "context_id": context_id,
         "mode": "emergent",
         "model_key": resolved_model_key,
         "executor_tools": tools,

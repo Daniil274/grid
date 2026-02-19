@@ -533,6 +533,11 @@ agents:
       "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
       "beads_log_append", "beads_log_read",
     ]
+    auto_run_tools:
+      - name: "beads_init"
+        parameters: { "directory": "${working_directory}" }
+      - name: "beads_ready"
+        parameters: { "directory": "${working_directory}" }
     custom_prompt: |
       Ты — координатор команды специализированных агентов. Твоя цель: декомпозировать задачу, запустить цепочку агентов и получить проверенный результат за минимальное число шагов.
       ## 1. КЛЮЧЕВАЯ МЕХАНИКА: ПОСЛЕДОВАТЕЛЬНЫЕ АГЕНТЫ + BEADS КАК ШИНА ДАННЫХ
@@ -605,7 +610,7 @@ agents:
       **Шаблон инструкции для агента (включай в agent_system_prompt):**
       ```
       ПРОТОКОЛ КОММУНИКАЦИИ:
-      1. Context ID в начале запроса агенту привязывает его к предыдущему диалогу. Без Context ID — чистый лист. Например: "ctx-36fda1f8 Уточни информацию из предыдущего запроса..."
+      1. context_id в параметрах вызова агента создаст агента с контекстом из предыдущего запроса. Без Context ID — чистый лист.
       1. Начни с beads_show('BEAD_ID') — прочитай описание задачи и notes от предыдущих агентов.
       2. Выполни свою работу.
       3. Запиши результат: beads_update('BEAD_ID', notes='[ТВОЯ_РОЛЬ] РЕЗУЛЬТАТ: краткий итог того, что сделано. Детали: ...').

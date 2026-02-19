@@ -102,3 +102,4 @@ tools/DeepSeek-OCR/
 ocr_cache/
 *.db
 *.json
+tools/DeepSeek-OCR-2/
