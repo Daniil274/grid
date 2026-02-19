@@ -181,13 +181,15 @@ async def orchestrate(
     agent_system_prompt: Optional[str] = None,
     model_key: Optional[str] = None,
     executor_tools: Optional[Any] = None,
+    context_id: Optional[str] = None,
 ) -> str:
     """
     Мета-инструмент: запускает динамического исполнителя для решения задачи.
     Аргументы:
-    - task: Задача, которую должен выполнить агент
-    - agent_system_prompt: Системный промпт (роль и инструкции) для агента.
-    - executor_tools: Список инструментов для агента 
+    - task: Задача, которую должен выполнить агент. Опишите задачу максимально подробно.
+    - agent_system_prompt: Системный промпт (роль и инструкции) для агента. Пропишите здесь роль, экспертизу, ограничения и требуемый формат вывода.
+    - executor_tools: Список инструментов для агента (например, ["filesystem", "terminal"]).
+    - context_id: Опциональный идентификатор контекста. Если передан, агент продолжит работу в рамках этой сессии (будет иметь доступ к истории общения и памяти).
     """
     factory = _get_factory_from_context(context)
     if factory is None:
@@ -222,13 +224,13 @@ async def orchestrate(
         tool_names=coerced_executor_tools,
     )
 
-    draft = await factory.run_agent_object_simple(executor, task)
+    draft = await factory.run_agent_object_simple(executor, task, context_id=context_id)
 
-    context_id = factory.get_active_context_id()
+    active_context_id = context_id or factory.get_active_context_id()
 
     result = {
         "task": task,
-        "context_id": context_id,
+        "context_id": active_context_id,
         "model_key": resolved_model_key,
         "executor_tools": coerced_executor_tools,
         "final": _extract_text(draft),
