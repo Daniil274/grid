@@ -150,12 +150,13 @@ tools:
     env_vars:
       DEFAULT_MODEL: "glm-flash"  # Модель для динамического агента по умолчанию
     prompt_addition: |
-      Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
+      Используй orchestrate(task, agent_system_prompt, executor_tools, context_id) когда нужно создать агента.
       task: четкая задача для выполнения (строка).
       agent_system_prompt: системный промпт для агента. Опиши роль, стиль и правила поведения.
       executor_tools: список инструментов (например ["filesystem","git","terminal"]).
-      mode: "basic" (простое исполнение - по умолчанию).
+      context_id: (опционально) ID контекста из предыдущего ответа агента для возврата прошлой сессии.
       Пример: orchestrate(task="Напиши скрипт...", agent_system_prompt="Ты Senior Python Developer...", executor_tools=["filesystem"])
+      orchestrate(task="Напиши тесты для скрипта, который ты написал ранее...", agent_system_prompt="Ты Senior Python Developer...", executor_tools=["filesystem"], context_id="ctx_123")
 
   orchestrate_emergent:
     type: "function"
