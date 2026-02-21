@@ -33,6 +33,11 @@ class ModelConfig(BaseModel):
     max_tokens: int = Field(default=4000, ge=1, le=100000)
     description: str = ""
     use_responses_api: bool = False
+    reasoning: Optional[Dict[str, Any]] = None
+    """Reasoning control. Use one of:
+      reasoning: {effort: "none"}     — SDK-native (OpenAI reasoning_effort param)
+      reasoning: {enabled: false}     — via extra_body (OpenRouter / any provider)
+    """
 
 
 class ToolConfig(BaseModel):

@@ -105,6 +105,9 @@ class TelegramBridge:
         # Контекст для каждого чата (chat_id -> список сообщений)
         self.chat_contexts: Dict[int, list] = {}  # chat_id -> [{"role": "user/assistant", "content": str}]
 
+        # Speech processor (lazy init)
+        self._speech_processor = None
+
         # Статистика (для команды /status)
         self.stats = {
             "start_time": datetime.now(),
@@ -247,6 +250,45 @@ class TelegramBridge:
 
         return self.user_memory_stores[user_id]
 
+    def _get_speech_processor(self):
+        """
+        Возвращает SpeechProcessor (lazy init).
+        Читает настройки из voice: секции config.yaml.
+        Возвращает None если voice.enabled=false или зависимости недоступны.
+        """
+        if self._speech_processor is not None:
+            return self._speech_processor
+
+        try:
+            import yaml
+            with open("config.yaml", "r", encoding="utf-8") as f:
+                cfg_data = yaml.safe_load(f)
+            voice_cfg = cfg_data.get("voice", {})
+            if not voice_cfg.get("enabled", False):
+                return None
+            from core.speech_processor import get_speech_processor
+            self._speech_processor = get_speech_processor(voice_cfg)
+            return self._speech_processor
+        except Exception as e:
+            logger.error(f"❌ SpeechProcessor инициализация провалилась: {e}")
+            logger.error("   Проверь зависимости: pip install faster-whisper pydub scipy")
+            logger.error("   Или отключи: voice.enabled: false в config.yaml")
+            return None
+
+    async def _warmup_speech_processor(self) -> None:
+        """
+        Запускает предзагрузку STT/TTS моделей в фоне при старте бота.
+        Вызывается как asyncio.Task из initialize() — не блокирует старт.
+        После прогрева первый реальный голосовой запрос не тратит время на загрузку.
+        """
+        sp = self._get_speech_processor()
+        if sp is None:
+            return  # voice.enabled=false или зависимости недоступны
+        try:
+            await sp.warmup()
+        except Exception as e:
+            logger.warning(f"⚠ Прогрев голосовых моделей завершился с ошибкой: {e}")
+
     async def initialize(self):
         """Инициализация всех компонентов (Layer 1: Connection resilience)"""
         try:
@@ -297,6 +339,9 @@ class TelegramBridge:
 
             # 5. Установка команд бота
             await self._setup_bot_commands()
+
+            # 6. Предзагрузка голосовых моделей (фоново, не блокируя старт)
+            asyncio.create_task(self._warmup_speech_processor())
 
             logger.info("🚀 TelegramBridge полностью инициализирован")
 
@@ -695,6 +740,13 @@ class TelegramBridge:
 
             # Получить рабочую директорию пользователя
             user_workspace = self._get_user_workspace(user_id)
+
+            # Установить голосовой контекст для инструмента send_voice_reply
+            try:
+                from core.voice_context import set_voice_context
+                set_voice_context(self.app.bot, chat_id, str(user_workspace))
+            except Exception as e:
+                logger.debug(f"Не удалось установить voice_context: {e}")
 
             # Отправить одно простое сообщение о начале работы
             status_message = await self.app.bot.send_message(
@@ -1381,54 +1433,100 @@ class TelegramBridge:
 
             file_path, file_name = await self._save_file(voice, user_id, "voice")
 
-            try:
-                if status_msg:
-                    await status_msg.edit_text(
-                        f"✅ Голосовое сообщение получено:\n\n"
-                        f"🎤 <b>Файл:</b> <code>{file_name}</code>\n"
-                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
-                        f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
-                        f"🤖 Передаю агенту для обработки...",
-                        parse_mode=ParseMode.HTML
-                    )
+            # Попытаться распознать речь (STT)
+            sp = self._get_speech_processor()
+            transcribed_text = None
+            stt_error_msg = None
+
+            if sp is None:
+                # STT явно недоступен — сообщить пользователю
+                stt_error_msg = (
+                    "⚠️ <b>Распознавание речи недоступно</b>\n"
+                    "Установите зависимости: <code>pip install faster-whisper</code>\n"
+                    "Или отключите в конфиге: <code>voice.enabled: false</code>"
+                )
+            else:
+                try:
+                    if status_msg:
+                        await status_msg.edit_text("🎙️ Распознаю речь...")
+                    transcribed_text = await sp.transcribe(file_path)
+                    if not transcribed_text:
+                        stt_error_msg = "⚠️ Речь не распознана (пустой результат — возможно тишина или шум)"
+                    else:
+                        logger.info(f"STT ok user_{user_id}: {transcribed_text[:80]}")
+                except Exception as stt_err:
+                    logger.error(f"STT failed: {stt_err}")
+                    stt_error_msg = f"⚠️ <b>Ошибка распознавания речи:</b> <code>{html.escape(str(stt_err))}</code>"
+
+            # Показать ошибку STT пользователю (если есть)
+            if stt_error_msg:
+                try:
+                    await update.message.reply_text(stt_error_msg, parse_mode=ParseMode.HTML)
+                except Exception:
+                    pass
+
+            if transcribed_text:
+                # Показать расшифровку пользователю
+                transcription_preview = (transcribed_text[:200] + "...") if len(transcribed_text) > 200 else transcribed_text
+                try:
+                    if status_msg:
+                        await status_msg.edit_text(
+                            f"🎤 <b>Расшифровка:</b> <i>{self._escape_html(transcription_preview)}</i>\n\n"
+                            f"🤖 Обрабатываю...",
+                            parse_mode=ParseMode.HTML
+                        )
+                    else:
+                        await update.message.reply_text(
+                            f"🎤 <b>Расшифровка:</b> <i>{self._escape_html(transcription_preview)}</i>",
+                            parse_mode=ParseMode.HTML
+                        )
+                except Exception as e:
+                    logger.warning(f"Не удалось показать расшифровку: {e}")
+
+                # Сформировать сообщение для агента:
+                # Префикс [ГОЛОСОВОЕ СООБЩЕНИЕ] — агент знает формат запроса
+                user_message = f"[ГОЛОСОВОЕ СООБЩЕНИЕ]\n{transcribed_text}"
+                if caption:
+                    user_message += f"\n{caption}"
+            else:
+                # Fallback: STT недоступен или вернул пустой результат
+                try:
+                    if status_msg:
+                        await status_msg.edit_text(
+                            f"✅ Голосовое сообщение получено:\n\n"
+                            f"🎤 <b>Файл:</b> <code>{file_name}</code>\n"
+                            f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
+                            f"🤖 Передаю агенту для обработки...",
+                            parse_mode=ParseMode.HTML
+                        )
+                    else:
+                        await update.message.reply_text(
+                            f"✅ Голосовое сообщение получено:\n\n"
+                            f"🎤 <b>Файл:</b> <code>{file_name}</code>\n"
+                            f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
+                            f"🤖 Передаю агенту для обработки...",
+                            parse_mode=ParseMode.HTML
+                        )
+                except Exception as e:
+                    logger.warning(f"Не удалось обновить статус (timeout): {e}")
+
+                user_message = f"[ГОЛОСОВОЕ СООБЩЕНИЕ]\nФайл: {file_path}\n"
+                if caption:
+                    user_message += caption
                 else:
-                    await update.message.reply_text(
-                        f"✅ Голосовое сообщение получено:\n\n"
-                        f"🎤 <b>Файл:</b> <code>{file_name}</code>\n"
-                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
-                        f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
-                        f"🤖 Передаю агенту для обработки...",
-                        parse_mode=ParseMode.HTML
-                    )
-            except Exception as e:
-                logger.warning(f"Не удалось обновить статус (timeout): {e}")
+                    user_message += "Распознавание речи недоступно. Предложи варианты работы с файлом."
 
             user_memory = self._get_user_memory(user_id)
-            user_memory.add_message("system", f"Пользователь отправил голосовое сообщение")
+            user_memory.add_message("system", "Пользователь отправил голосовое сообщение")
 
             # Инициализировать контекст чата если его нет
             if chat_id not in self.chat_contexts:
                 self.chat_contexts[chat_id] = []
 
-            # Сформировать сообщение для агента
-            file_info_message = (
-                f"Пользователь отправил голосовое сообщение:\n"
-                f"Имя файла: {file_name}\n"
-                f"Путь: {file_path}\n"
-                f"Размер: {file_size / 1024:.2f} KB\n"
-            )
-
-            # Добавить текст сообщения (caption) если есть
-            if caption:
-                file_info_message += f"\n📝 Сообщение пользователя: {caption}\n\n"
-                file_info_message += "Обработай запрос пользователя, используя прикрепленное голосовое сообщение."
-            else:
-                file_info_message += "\nПредложи что можно сделать с этим голосовым сообщением (например, транскрибация)."
-
-            # Добавить сообщение о файле в контекст чата
+            # Добавить сообщение в контекст чата
             self.chat_contexts[chat_id].append({
                 "role": "user",
-                "content": file_info_message
+                "content": user_message
             })
 
             # Ограничить размер контекста
@@ -1438,7 +1536,7 @@ class TelegramBridge:
 
             # Запустить обработку агентом
             task = asyncio.create_task(
-                self._process_user_message(chat_id, user_id, file_info_message)
+                self._process_user_message(chat_id, user_id, user_message)
             )
             self.active_tasks[chat_id] = task
             task.add_done_callback(lambda t: self.active_tasks.pop(chat_id, None))

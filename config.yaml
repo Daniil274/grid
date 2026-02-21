@@ -71,7 +71,20 @@ telegram:
   # Настройки производительности
   max_concurrent_tasks_per_user: 1  # Максимум одновременных задач на пользователя
   progress_update_interval: 2.0  # Интервал обновления прогресса (секунды) - увеличен для избежания флуд-контроля
- 
+
+# Настройки голосового ввода/вывода
+voice:
+  enabled: true
+  stt:
+    model_size: "large-v3"      # Whisper: tiny, base, small, medium, large-v3
+    device: "cuda"              # cuda или cpu
+    compute_type: "float16"     # float16 (GPU), int8 (CPU fallback)
+  tts:
+    model_path: "speech-text/model.pt"  # Silero v5_ru model
+    speaker: "xenia"            # xenia, aidar, kseniya, baya, eugene
+    sample_rate: 48000
+  reply_with_voice: true        # Авто TTS-ответ на голосовые сообщения
+
 # Провайдеры API
 providers:
   lm-studio:
@@ -92,7 +105,27 @@ providers:
 
 
 # Модели
-models:
+
+
+  kimi-k2.5:
+    name: "moonshotai/kimi-k2.5"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8192
+    description: "Kimi K2.5 модель"
+    streaming_enabled: true
+    # Отключить reasoning через extra_body (для OpenRouter и др. провайдеров):
+    # reasoning: {enabled: false}
+    # Отключить через SDK-native reasoning_effort (для OpenAI):
+    # reasoning: {effort: "none"}
+
+  qwen-3.5-397b:
+    name: "qwen/qwen3.5-397b-a17b"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8192
+    description: "Qwen 3.5 397b модель"
+    streaming_enabled: true
 
   deepseek-v3.2:
     name: "deepseek/deepseek-v3.2:nitro"
@@ -100,6 +133,14 @@ models:
     temperature: 0.7
     max_tokens: 8192
     description: "DeepSeek V3.2 Speciale модель"
+    streaming_enabled: true
+
+  mistral-large:
+    name: "mistralai/mistral-large-2512"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8192
+    description: "Mistral Large 2512 модель"
     streaming_enabled: true
 
   grok-4.1-fast:
@@ -154,6 +195,14 @@ models:
     temperature: 0.5
     max_tokens: 8000
     description: "Minimax M2.5 модель"
+
+  liquid-lfm2.5-1.2b:
+    name: "liquid/lfm2.5-1.2b"
+    provider: "lm-studio"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Liquid LFM2.5 1.2b модель"
+    streaming_enabled: true
 
 # Минимальная секция проверяющих (для аудита в Output guardrail)
 checkers:
@@ -233,6 +282,10 @@ tools:
   # Skill Tools - инструменты для работы со скиллами (базой знаний)
   # ============================================================================
 
+  skill_list:
+    type: "function"
+    description: "List all available skill names (not content) for the current user"
+
   skill_create:
     type: "function"
     description: "Create a new skill (knowledge base entry)"
@@ -252,6 +305,27 @@ tools:
   skill_search:
     type: "function"
     description: "Search for skills by keywords"
+
+  # ============================================================================
+  # Input & Screen Tools - эмуляция ввода и скриншоты
+  # ============================================================================
+
+  keyboard_type:
+    type: "function"
+    description: "Печатает текст как на клавиатуре"
+
+  keyboard_press:
+    type: "function"
+    description: "Нажимает одну или несколько клавиш (hotkey)"
+
+  keyboard_hotkey:
+    type: "function"
+    description: "Нажимает комбинацию клавиш одновременно"
+
+  take_screenshot:
+    type: "function"
+    description: "Делает скриншот всего экрана и сохраняет в файл"
+
 # ============================================================================
   # Vision Tools - инструменты для просмотра и анализа изображений
   # ============================================================================
@@ -315,6 +389,31 @@ tools:
   beads_log_read:
     type: "function"
     description: "Read ONLY new log data for (channel, reader) since the last read (cursor-based)."
+
+  # ============================================================================
+  # Voice Tools - голосовой синтез и отправка
+  # ============================================================================
+
+  send_voice_reply:
+    type: "function"
+    description: "Синтезирует речь из текста и отправляет голосовое сообщение пользователю в Telegram"
+    prompt_addition: |
+      Используй send_voice_reply(text, speaker) чтобы ответить пользователю голосом.
+      По умолчанию отвечай в том же формате, в каком пользователь написал тебе:
+      - Если пользователь прислал голосовое сообщение — ответь голосом через send_voice_reply().
+      - Если пользователь написал текстом — отвечай текстом.
+      Исключение: если в памяти пользователя указан другой предпочтительный формат ответов.
+      Голоса: xenia (женский, по умолч.), aidar, kseniya, baya, eugene.
+
+  send_voice_ssml:
+    type: "function"
+    description: "Синтезирует речь из SSML-разметки и отправляет голосовое сообщение в Telegram"
+    prompt_addition: |
+      Используй send_voice_ssml(ssml_text, speaker) для выразительного голосового ответа с SSML.
+      SSML позволяет управлять темпом, тоном и паузами:
+        <speak><p><prosody rate="slow">медленно</prosody></p><break time="500ms"/>текст</speak>
+      Теги: <speak>, <p>, <s>, <break time="Xms"/>, <prosody rate="slow|fast">, <prosody pitch="high|low">
+      Голоса: xenia (по умолч.), aidar, kseniya, baya, eugene.
 
   # MCP серверы (на Windows нужен npx + имя пакета; иначе WinError 2 - файл не найден)
   terminal:
@@ -409,7 +508,7 @@ tools:
     name: "orchestrate"
     description: "Запускает динамический пайплайн (создает агента на лету)"
     env_vars:
-      DEFAULT_MODEL: "grok-4.1-fast"  # Модель для динамического агента по умолчанию
+      DEFAULT_MODEL: "mistral-large"  # Модель для динамического агента по умолчанию
     prompt_addition: |
       Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
       task: четкая задача для выполнения (строка).
@@ -526,7 +625,7 @@ agents:
  # Координатор агентов
   coordinator:
     name: "Координатор"
-    model: "grok-4.1-fast"
+    model: "qwen-3.5-397b"
     tools: [
       "filesystem", "terminal", "orchestrate",
       "memory_save", "memory_search", "memory_delete",
@@ -754,17 +853,21 @@ agents:
     name: "Чат-агент"
     model: "glm-4.7-flash"
     tools: [
-      "filesystem", "doc_analyzer",  "coordinator",
-      "beads_init", "beads_ready", "beads_list", "beads_create", 
-      "beads_show", "beads_update", "beads_close", 
+      "filesystem", "doc_analyzer", "coordinator",
+      "beads_init", "beads_ready", "beads_list", "beads_create",
+      "beads_show", "beads_update", "beads_close",
       "beads_sync", "beads_dep",
       "beads_log_append", "beads_log_read",
+      "send_voice_reply", "send_voice_ssml",
+      "skill_list", "skill_read", "skill_search", "skill_create", "skill_update", "skill_delete",
     ]
     auto_run_tools:
       - name: "beads_init"
         parameters: { "directory": "${working_directory}" }
       - name: "beads_ready"
         parameters: { "directory": "${working_directory}" }
+      - name: "skill_list"
+        parameters: {}
     description: "Главный агент для общения с пользователем"
     custom_prompt: |
       Ты главный чат-агент системы - первая точка контакта с пользователем.
@@ -776,6 +879,22 @@ agents:
       - coordinator: для выполнения комплексных задач и работы с файлами и проектами
       - filesystem: для базовых операций с файлами
       - doc_analyzer: для анализа PDF, Markdown документов и изображений
+      - send_voice_reply(text, speaker): синтез речи и отправка голосового сообщения
+      - send_voice_ssml(ssml_text, speaker): синтез речи с SSML (темп, тон, паузы) и отправка
+      - skill_read(name), skill_search(query): чтение и поиск скиллов из базы знаний
+      - skill_create(name, file_path, tags), skill_update(name, content), skill_delete(name): управление скиллами
+
+      ## Скиллы
+      При старте автоматически выполняется skill_list() — в результатах инструмента ты видишь доступные скиллы.
+      Скиллы — это твои знания о специальных задачах и процедурах.
+      Если запрос связан с каким-либо скиллом — прочитай его через skill_read(name) прежде чем отвечать.
+
+      ## Формат ответа
+      Отвечай в том же формате, в котором пользователь написал тебе:
+      - Если запрос помечен [ГОЛОСОВОЕ СООБЩЕНИЕ] — ОБЯЗАТЕЛЬНО вызови send_voice_reply() с кратким ответом,
+        а затем при необходимости дополни текстом.
+      - Если пользователь написал текстом — отвечай текстом.
+      Исключение: если в памяти пользователя сохранён другой предпочтительный формат ответов.
 
       Стратегия работы:
       1. Анализируй запрос пользователя

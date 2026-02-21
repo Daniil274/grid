@@ -60,6 +60,74 @@ def _image_path_to_data_url(image_path: str) -> str:
         raise
 
 
+async def _inject_image_for_analysis(
+    ctx: RunContextWrapper[Any],
+    image_path: str,
+    question: str,
+) -> List[Union[ToolOutputText, ToolOutputImage]]:
+    """
+    Внутренняя логика: загрузка изображения и инжект в сессию агента для анализа.
+    Можно вызывать из других инструментов (например take_screenshot) без вызова FunctionTool.
+    """
+    logger.info(f"Processing image: {image_path}")
+
+    file_ext = Path(image_path).suffix.lower()
+    if file_ext == '.pdf':
+        return [ToolOutputText(
+            text=f"❌ ОШИБКА: view_image не поддерживает PDF файлы!\n\n"
+                 f"Для анализа PDF используй инструмент pdf:\n"
+                 f'pdf(ctx, "{image_path}", pages="1:1")'
+        )]
+
+    try:
+        data_url = _image_path_to_data_url(image_path)
+    except Exception as e:
+        return [ToolOutputText(text=f"❌ Ошибка при загрузке изображения: {str(e)}")]
+
+    img_output = ToolOutputImage(image_url=data_url, detail="high")
+
+    try:
+        session = getattr(ctx.context, 'session', None)
+        if session:
+            user_message = {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"[System: Результат инструмента view_image]\n\nВопрос: {question}"
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": data_url,
+                        "detail": "high"
+                    }
+                ]
+            }
+            logger.info(f"📝 Adding user message to session (SDK format)")
+            await session.add_items([user_message])
+
+            if hasattr(ctx.context, 'should_restart'):
+                ctx.context.should_restart = True
+                logger.info("✅ Set should_restart flag for LOCAL agent")
+
+            # Force short delay to ensure IO catches up before LLM triggers restart
+            import asyncio
+            await asyncio.sleep(0.05)
+
+            return [ToolOutputText(
+                text="[System: Изображение загружено в локальную сессию агента для анализа. Перезапуск...]"
+            )]
+        else:
+            logger.warning("⚠️ No session available in context - returning image as tool output")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to inject image into local session: {e}")
+
+    return [
+        ToolOutputText(text=f"📷 Изображение: {image_path}\n\nВопрос: {question}"),
+        img_output
+    ]
+
+
 @function_tool
 async def view_image(
     ctx: RunContextWrapper[Any],
@@ -86,79 +154,7 @@ async def view_image(
         view_image(ctx, "/path/to/screenshot.png", "Найди все элементы UI на скриншоте")
     """
     try:
-        logger.info(f"Processing image: {image_path}")
-
-        # Проверка расширения файла - отклоняем PDF
-        file_ext = Path(image_path).suffix.lower()
-        if file_ext == '.pdf':
-            return [ToolOutputText(
-                text=f"❌ ОШИБКА: view_image не поддерживает PDF файлы!\n\n"
-                     f"Для анализа PDF используй инструмент pdf:\n"
-                     f'pdf(ctx, "{image_path}", pages="1:1")'
-            )]
-
-        # Конвертировать изображение в data URL
-        try:
-            data_url = _image_path_to_data_url(image_path)
-        except Exception as e:
-            return [ToolOutputText(text=f"❌ Ошибка при загрузке изображения: {str(e)}")]
-
-        # Создать ToolOutputImage для отображения в результате инструмента
-        img_output = ToolOutputImage(image_url=data_url, detail="high")
-
-        # ✅ ИЗОЛЯЦИЯ КОНТЕКСТА: Инжектируем изображение в ЛОКАЛЬНУЮ сессию агента!
-        # Это позволяет vision-модели видеть изображение в следующем turn'е.
-        # Изображение НЕ утечет в родительского агента, т.к. каждый агент имеет свою сессию.
-        try:
-            session = getattr(ctx.context, 'session', None)
-            if session:
-                # ✅ Используем правильный формат Agents SDK для multimodal контента
-                # SDK ожидает: type="input_text" и type="input_image"
-                # НЕ старый OpenAI Vision API формат (type="text", type="image_url")
-                user_message = {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": f"[System: Результат инструмента view_image]\n\nВопрос: {question}"
-                        },
-                        {
-                            "type": "input_image",
-                            "image_url": data_url,
-                            "detail": "high"
-                        }
-                    ]
-                }
-                logger.info(f"📝 Adding user message to session (SDK format): {user_message}")
-                await session.add_items([user_message])
-
-                # Проверяем что добавилось
-                session_items = await session.get_items()
-                logger.info(f"✅ Session now has {len(session_items)} items")
-                logger.info(f"   Last item keys: {list(session_items[-1].keys()) if session_items else 'EMPTY'}")
-                logger.info(f"✅ Injected image into LOCAL agent session (isolated from parent)")
-
-                # Установить флаг перезапуска для ЛОКАЛЬНОГО агента
-                if hasattr(ctx.context, 'should_restart'):
-                    ctx.context.should_restart = True
-                    logger.info("✅ Set should_restart flag for LOCAL agent")
-
-                # Вернуть заглушку - реальный ответ будет после перезапуска ЛОКАЛЬНОГО агента
-                return [ToolOutputText(
-                    text="[System: Изображение загружено в локальную сессию агента для анализа. Перезапуск...]"
-                )]
-            else:
-                logger.warning("⚠️ No session available in context - returning image as tool output")
-
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to inject image into local session: {e}")
-
-        # Fallback: если сессия недоступна, вернуть изображение как результат инструмента
-        return [
-            ToolOutputText(text=f"📷 Изображение: {image_path}\n\nВопрос: {question}"),
-            img_output
-        ]
-
+        return await _inject_image_for_analysis(ctx, image_path, question)
     except Exception as e:
         logger.error(f"Error in view_image tool: {e}", exc_info=True)
         return [ToolOutputText(text=f"❌ Ошибка при обработке изображения: {str(e)}")]
@@ -181,7 +177,7 @@ async def analyze_screenshot(
     Example:
         analyze_screenshot(ctx, "/path/to/screenshot.png")
     """
-    return await view_image(
+    return await _inject_image_for_analysis(
         ctx,
         screenshot_path,
         "Проанализируй этот скриншот: определи тип интерфейса, найди все элементы UI (кнопки, поля, меню), опиши что отображается на экране."

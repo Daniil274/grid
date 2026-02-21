@@ -103,3 +103,7 @@ ocr_cache/
 *.db
 *.json
 tools/DeepSeek-OCR-2/
+*.ogg
+*.wav
+*.pt
+speech-text/
