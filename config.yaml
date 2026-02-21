@@ -105,8 +105,7 @@ providers:
 
 
 # Модели
-
-
+models:
   kimi-k2.5:
     name: "moonshotai/kimi-k2.5"
     provider: "openrouter"

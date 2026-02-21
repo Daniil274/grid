@@ -8,7 +8,6 @@ import base64
 
 from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputImage, ToolOutputText
-from schemas import ImageContent, ImageUrl, TextContent
 
 logger = logging.getLogger("tools.vision")
 
@@ -66,8 +65,8 @@ async def _inject_image_for_analysis(
     question: str,
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
-    Внутренняя логика: загрузка изображения и инжект в сессию агента для анализа.
-    Можно вызывать из других инструментов (например take_screenshot) без вызова FunctionTool.
+    Загрузка изображения и возврат как ToolOutputImage для анализа агентом.
+    VisionChatCompletionsModel доставляет его в API как image_url в tool result.
     """
     logger.info(f"Processing image: {image_path}")
 
@@ -84,47 +83,10 @@ async def _inject_image_for_analysis(
     except Exception as e:
         return [ToolOutputText(text=f"❌ Ошибка при загрузке изображения: {str(e)}")]
 
-    img_output = ToolOutputImage(image_url=data_url, detail="high")
-
-    try:
-        session = getattr(ctx.context, 'session', None)
-        if session:
-            user_message = {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": f"[System: Результат инструмента view_image]\n\nВопрос: {question}"
-                    },
-                    {
-                        "type": "input_image",
-                        "image_url": data_url,
-                        "detail": "high"
-                    }
-                ]
-            }
-            logger.info(f"📝 Adding user message to session (SDK format)")
-            await session.add_items([user_message])
-
-            if hasattr(ctx.context, 'should_restart'):
-                ctx.context.should_restart = True
-                logger.info("✅ Set should_restart flag for LOCAL agent")
-
-            # Force short delay to ensure IO catches up before LLM triggers restart
-            import asyncio
-            await asyncio.sleep(0.05)
-
-            return [ToolOutputText(
-                text="[System: Изображение загружено в локальную сессию агента для анализа. Перезапуск...]"
-            )]
-        else:
-            logger.warning("⚠️ No session available in context - returning image as tool output")
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to inject image into local session: {e}")
-
+    logger.info(f"✅ Returning ToolOutputImage for {image_path}")
     return [
         ToolOutputText(text=f"📷 Изображение: {image_path}\n\nВопрос: {question}"),
-        img_output
+        ToolOutputImage(image_url=data_url, detail="high"),
     ]
 
 

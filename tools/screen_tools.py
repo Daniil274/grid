@@ -5,10 +5,10 @@ Screen and Vision Tools - Capture screenshots and analyze screen content.
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, List, Optional, Union
 import pyautogui
 from agents import function_tool, RunContextWrapper
-from agents.tool import ToolOutputText
+from agents.tool import ToolOutputImage, ToolOutputText
 
 from .vision_tools import _inject_image_for_analysis
 
@@ -19,7 +19,7 @@ async def take_screenshot(
     context: RunContextWrapper,
     question: str = "Что на экране?",
     filename: Optional[str] = None
-) -> str:
+) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
     Take a screenshot of the entire screen and analyze it.
 
@@ -28,7 +28,7 @@ async def take_screenshot(
         filename: Optional name for the screenshot file
 
     Returns:
-        Analysis result of the screenshot
+        Screenshot image and description for the vision model to analyze
     """
     try:
         workspace = Path("d:/Work/repo/agents_portable/workspace")
@@ -48,15 +48,12 @@ async def take_screenshot(
         screenshot = pyautogui.screenshot()
         screenshot.save(str(filepath))
 
-        logger.info(f"📸 Screenshot saved to {filepath}, analyzing with question: {question}")
+        logger.info(f"📸 Screenshot saved to {filepath}")
 
-        result = await _inject_image_for_analysis(context, str(filepath), question)
-
-        texts = [item.text for item in result if isinstance(item, ToolOutputText) and getattr(item, "text", None)]
-        return "\n".join(texts) if texts else "Скриншот сохранён. Изображение передано агенту для анализа."
+        return await _inject_image_for_analysis(context, str(filepath), question)
     except Exception as e:
-        logger.error(f"❌ Error taking/analyzing screenshot: {e}")
-        return f"❌ Error taking/analyzing screenshot: {e}"
+        logger.error(f"❌ Error taking screenshot: {e}")
+        return [ToolOutputText(text=f"❌ Error taking screenshot: {e}")]
 
 SCREEN_TOOLS = {
     "take_screenshot": take_screenshot,
