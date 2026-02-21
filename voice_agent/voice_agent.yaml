@@ -1,0 +1,172 @@
+settings:
+  default_agent: "voice_assistant"
+  max_turns: 10
+  working_directory: "voice_agent/workspace"
+  mcp_enabled: true
+
+  agent_logging:
+    enabled: true
+    level: "basic"  # basic, detailed, full
+    save_prompts: true
+    save_conversations: true
+    save_executions: true
+    # Общие правила использования инструментов (добавляются к каждому агенту один раз)
+    tools_common_rules: |
+      Всегда выполняй операции с файлами через инструменты и возвращай их результаты.
+      Запрещено утверждать создание/изменение файла без вызова инструмента.
+
+# Голосовой движок (STT + TTS)
+voice:
+  enabled: true
+  stt:
+    model_size: "large-v3"    # для RPi5: "base" или "small"
+    device: "cuda"            # для RPi5: "cpu"
+    compute_type: "int8"   # для RPi5: "int8"
+  tts:
+    model_path: "speech-text/model.pt"
+    speaker: "eugene"          # xenia, aidar, kseniya, baya, eugene
+    sample_rate: 48000
+
+# Параметры голосового ассистента
+voice_agent:
+  keywords:
+    start: ["начало запроса", "начало", "слушай", "агент", "джарвис", "квен"]
+    end: ["конец строки", "конец запроса", "конец", "стоп", "выполняй", "выполни", "исполни", "исполняй", "отвечай"]
+  recording:
+    sample_rate: 16000          # 16kHz — стандарт Whisper
+    channels: 1
+    chunk_duration: 0.5         # секунд на чанк
+    silence_threshold: 0.002    # RMS порог энергии (тишина vs речь) (уменьшено с 0.008 для чувствительности)
+    silence_chunks_end: 4       # чанков тишины для конца сегмента (~2с)
+    auto_end_silence_seconds: 2.5  # пауза после речи → авто-завершение запроса (0 = отключено)
+    max_record_seconds: 120     # максимум записи (безопасность)
+    device: null                # null = системный default; число = индекс (см. --list-devices)
+  tts:
+    temp_dir: "voice_agent/tts_temp"
+    speaker: "xenia"            # переопределяет voice.tts.speaker
+
+providers:
+  openrouter:
+    name: "OpenRouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout: 60
+    max_retries: 2
+
+  lm-studio:
+    name: "lm-studio"
+    base_url: "http://192.168.3.2:1234/v1"
+    api_key: "lm-studio"
+    timeout: 300
+    max_retries: 3
+
+models: 
+  liquid-lfm2.5-1.2b:
+    name: "liquid/lfm2.5-1.2b"
+    provider: "lm-studio"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Liquid LFM2.5 1.2b модель"
+    streaming_enabled: true   # TTS нужен полный ответ (не стриминг)
+
+  qwen3-4b:
+    name: "qwen/qwen3-vl-4b"
+    provider: "lm-studio"
+    temperature: 0.3
+    max_tokens: 8000
+    description: "qwen3-4b"
+    streaming_enabled: true
+
+  qwen3.5-397b:
+    name: "qwen/qwen3.5-397b-a17b:nitro"
+    provider: "openrouter"
+    reasoning: {enabled: false}
+    temperature: 0.3
+    max_tokens: 8000
+    description: "qwen3.5-397b-a17b:nitro"
+    streaming_enabled: true  
+
+  grok-4.1-fast:
+    name: "x-ai/grok-4.1-fast"
+    provider: "openrouter"
+    temperature: 0.3
+    max_tokens: 8000
+    description: "grok-4.1-fast"
+    streaming_enabled: true  
+
+  gemini-2.5-flash-lite:
+    name: "google/gemini-2.5-flash-lite:turbo"
+    provider: "openrouter"
+    temperature: 0.3
+    max_tokens: 8000
+    description: "gemini-2.5-flash-lite"
+    streaming_enabled: true  
+
+  gpt-oss-20b:
+    name: "openai/gpt-oss-20b:turbo"
+    provider: "openrouter"
+    temperature: 0.3
+    max_tokens: 8000
+    description: "gpt-oss-20b"
+    streaming_enabled: true  
+    
+tools:
+  keyboard_type:
+    type: "function"
+    description: "Печатает текст как на клавиатуре"
+
+  keyboard_press:
+    type: "function"
+    description: "Нажимает одну или несколько клавиш (hotkey)"
+
+  keyboard_hotkey:
+    type: "function"
+    description: "Нажимает комбинацию клавиш одновременно"
+
+  take_screenshot:
+    type: "function"
+    description: "Делает скриншот экрана и сразу возвращает результат анализа (что на экране). Вызывай с question — что нужно найти или описать."
+
+  terminal:
+    type: "mcp"
+    server_command: ["npx", "@dillip285/mcp-terminal"]
+    add_working_directory: true
+    description: "MCP сервер для выполнения команд терминала"
+    prompt_addition: "Используй execute_command для выполнения команд в терминале."
+
+agents:
+  voice_assistant:
+    name: "Голосовой ассистент"
+    model: "gpt-oss-20b"
+    tools: ["keyboard_type", "keyboard_press", "keyboard_hotkey", "take_screenshot", "terminal"]
+    custom_prompt: |
+      Ты голосовой ассистент с возможностью управления компьютером. 
+      Ты можешь эмулировать ввод с клавиатуры и делать скриншоты экрана для анализа.
+      КРИТИЧЕСКИ ВАЖНО — ВЫЗОВ ИНСТРУМЕНТОВ:
+      Если пользователь просит сделать скриншот, напечатать текст или нажать клавишу — ты ОБЯЗАН сначала ВЫЗВАТЬ соответствующий инструмент, дождаться результата и только потом ответить голосом. Никогда не отвечай текстом «сейчас сделаю» или «готово» без реального вызова инструмента.
+      - Запрос «сделай скриншот» / «что на экране» → обязательно вызови take_screenshot(question="..."), затем озвучь результат.
+      - Запрос напечатать текст → вызови keyboard_type(text="...").
+      - Запрос нажать клавишу/комбинацию → вызови keyboard_press или keyboard_hotkey.
+      - Вызывать команды в терминале.
+      В конце выполнения задачи отвечай в блоке <speak>...</speak>.
+      Вне тегов <speak>...</speak> не должно быть ВООБЩЕ ничего. Никакого текста до, никакого текста после.
+      Правила SSML (Silero v5):
+        <speak>...</speak>                    — корневой элемент (строго один на весь ответ)
+        <p>...</p>                            — абзац (пауза ~500мс)
+        <s>...</s>                            — предложение (пауза ~200мс)
+        <break time="300ms"/>                 — явная пауза
+        <prosody rate="slow">текст</prosody>  — темп: x-slow slow medium fast x-fast
+        <prosody pitch="high">текст</prosody> — тон: x-low low medium high x-high
+      Правила общения:
+        - Кратко: 1–4 предложения, максимум ~100 слов
+        - Разговорный стиль, как в живом диалоге
+        - Никаких списков, таблиц, маркдауна (включая ```xml или ```)
+        - Паузы между смысловыми блоками через <break> или <p>
+      Пример ПРАВИЛЬНОГО ответа:
+        <speak>
+          <p>Конечно, <prosody rate="slow">отвечу на твой вопрос.</prosody></p>
+          <break time="300ms"/>
+          <p>Сегодня <prosody pitch="high">отличная</prosody> погода для прогулки!</p>
+        </speak>
+      Пример НЕПРАВИЛЬНОГО ответа (ТАК ДЕЛАТЬ НЕЛЬЗЯ):
+        <speak>Привет!</speak> <p>Да, я готов помочь.</p>

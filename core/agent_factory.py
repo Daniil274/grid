@@ -18,6 +18,7 @@ import agents
 from agents import (
     Agent,
     OpenAIChatCompletionsModel,
+    ModelSettings,
     set_tracing_disabled,
     function_tool,
     RunContextWrapper,
@@ -25,6 +26,7 @@ from agents import (
     RunItemStreamEvent,
     RawResponsesStreamEvent,
 )
+from agents.model_settings import Reasoning
 from agents.items import ItemHelpers
 from agents.mcp import MCPServerStdio
 from core.managers.mcp_manager import ResilientMCPServerStdio
@@ -530,6 +532,32 @@ class AgentFactory:
             "thinking",      # thinking-style models
         ]
         return any(marker in name for marker in reasoning_markers)
+
+    def _build_model_settings(self, model_config: Any) -> ModelSettings:
+        """Build ModelSettings from model config, applying reasoning overrides if configured.
+
+        Config examples:
+          reasoning: {effort: "none"}    → SDK-native reasoning_effort (OpenAI)
+          reasoning: {enabled: false}    → extra_body {"reasoning": {"enabled": false}} (OpenRouter etc.)
+        """
+        reasoning_cfg: Optional[Dict[str, Any]] = getattr(model_config, "reasoning", None)
+        if not reasoning_cfg:
+            return ModelSettings()
+
+        sdk_reasoning: Optional[Reasoning] = None
+        extra_body: Optional[Dict[str, Any]] = None
+
+        effort = reasoning_cfg.get("effort")
+        enabled = reasoning_cfg.get("enabled")
+
+        if effort is not None:
+            # SDK-native: sent as reasoning_effort=<effort> in the API call
+            sdk_reasoning = Reasoning(effort=effort)
+        elif enabled is False:
+            # Provider-specific: sent via extra_body as {"reasoning": {"enabled": false}}
+            extra_body = {"reasoning": {"enabled": False}}
+
+        return ModelSettings(reasoning=sdk_reasoning, extra_body=extra_body)
     
     async def create_agent(
         self, 
@@ -663,6 +691,7 @@ class AgentFactory:
                 name=agent_config.name,
                 instructions=instructions,
                 model=model,
+                model_settings=self._build_model_settings(model_config),
                 tools=tools,
                 mcp_servers=mcp_servers_list,
             )
@@ -843,6 +872,7 @@ class AgentFactory:
             name=name,
             instructions=enhanced_instructions,
             model=model,
+            model_settings=self._build_model_settings(model_cfg),
             tools=tools,
             mcp_servers=mcp_servers_list,
         )
@@ -1502,6 +1532,32 @@ class AgentFactory:
                                 result_output = buffered_text
                         except Exception:
                             logger.exception("Failed to merge streaming text fragments")
+
+                    # Если инструмент инжектировал изображение в сессию — второй проход (streaming)
+                    if getattr(run_ctx, "should_restart", False) and session is not None:
+                        logger.info("Main agent requested restart (e.g. image injected). Running additional turn...")
+                        restart_streaming = _get_runner().run_streamed(
+                            agent,
+                            "Проанализируй предоставленный контент и ответь кратко.",
+                            context=run_ctx,
+                            max_turns=2, # Только 2 хода для быстрого ответа, без длинных рассуждений
+                            session=session,
+                        )
+                        streaming_text_parts = []
+                        async for event in restart_streaming.stream_events():
+                            try:
+                                fragment = self._stream_observer.handle_event(event, agent_key=agent_key)
+                                if fragment:
+                                    streaming_text_parts.append(fragment)
+                            except Exception:
+                                pass
+                        result_output = (
+                            restart_streaming.final_output
+                            if restart_streaming.final_output is not None
+                            else ""
+                        )
+                        if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
+                            result_output = "".join(streaming_text_parts).strip()
                 except asyncio.TimeoutError:
                     logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
@@ -1513,20 +1569,35 @@ class AgentFactory:
                     # Запускаем агента и получаем RunResult объект
                     result = await asyncio.wait_for(
                         _get_runner().run(
-                            agent, 
+                            agent,
                             parsed_message,  # Use parsed message (dict/list or string) with history prepended
                             context=run_ctx,
-                            max_turns=max_turns, 
+                            max_turns=max_turns,
                             session=session
                         ),
                         timeout=timeout_seconds
                     )
 
+                    # Если инструмент инжектировал изображение в сессию (take_screenshot, view_image) — делаем второй проход
+                    if getattr(run_ctx, "should_restart", False) and session is not None:
+                        logger.info("Main agent requested restart (e.g. image injected). Running additional turn...")
+                        restart_result = await asyncio.wait_for(
+                            _get_runner().run(
+                                agent,
+                                "Проанализируй предоставленный контент и ответь кратко.",
+                                context=run_ctx,
+                                max_turns=2, # Только 2 хода для быстрого ответа, без длинных рассуждений
+                                session=session,
+                            ),
+                            timeout=timeout_seconds
+                        )
+                        result = restart_result
+
                 except asyncio.TimeoutError:
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
                 except Exception as e:
                     raise AgentError(f"Agent execution failed: {e}") from e
-            
+
             # Process result - more robust extraction
             try:
                 output = None
@@ -2107,7 +2178,7 @@ class AgentFactory:
                     input="Проанализируй предоставленный контент.",  # Prompt to process injected content
                     context=sub_run_ctx,
                     session=session,
-                    max_turns=self.config.get_max_turns(),
+                    max_turns=2, # Только 2 хода для быстрого ответа, без длинных рассуждений
                 )
                 
                 async for event in restart_streaming.stream_events():

@@ -13,6 +13,9 @@ from .skill_tools import SKILL_TOOLS  # New file-based skill tools
 from .vision_tools import VISION_TOOLS  # Vision tools for image viewing
 from .document_tools import DOCUMENT_TOOLS  # Document conversion and export tools
 from .beads_tools import BEADS_TOOLS  # Beads issue tracker tools
+from .voice_tools import VOICE_TOOLS  # Voice synthesis and sending tools
+from .input_tools import INPUT_TOOLS  # Keyboard and input tools
+from .screen_tools import SCREEN_TOOLS  # Screen capture tools
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -38,6 +41,9 @@ AVAILABLE_TOOLS = {
     **VISION_TOOLS,  # Vision tools for image viewing (2 tools)
     **DOCUMENT_TOOLS,  # Document conversion and export tools (4 tools)
     **BEADS_TOOLS,  # Beads issue tracker tools (7 tools)
+    **VOICE_TOOLS,  # Voice synthesis tools (2 tools: send_voice_reply, send_voice_ssml)
+    **INPUT_TOOLS,  # Keyboard and input tools (3 tools)
+    **SCREEN_TOOLS,  # Screen capture tools (1 tool)
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -107,6 +113,16 @@ TOOL_ALIASES = {
     "pdf": "pdf_to_markdown",
     "pdf_to_markdown": "pdf_to_markdown",
     "read_markdown": "read_markdown",
+
+    # Voice tools
+    "send_voice_reply": "send_voice_reply",
+    "send_voice_ssml": "send_voice_ssml",
+
+    # Input and screen tools
+    "keyboard_type": "keyboard_type",
+    "keyboard_press": "keyboard_press",
+    "keyboard_hotkey": "keyboard_hotkey",
+    "take_screenshot": "take_screenshot",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:

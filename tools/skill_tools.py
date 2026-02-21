@@ -245,6 +245,31 @@ async def skill_search(
 
 
 @function_tool
+async def skill_list(context: RunContextWrapper) -> str:
+    """
+    List all available skill names for the current user.
+
+    Returns only names, not content. Use skill_read(name) to get the full content of a skill.
+
+    Returns:
+        Newline-separated list of skill names, or a message if no skills exist.
+    """
+    manager = _get_skill_manager(context)
+    if not manager:
+        return "❌ Skill manager not available"
+
+    user_id = _get_user_id(context)
+
+    try:
+        names = manager.list_skills(user_id)
+        if not names:
+            return "ℹ️ No skills available."
+        return "📚 Available skills:\n" + "\n".join(f"- {n}" for n in names)
+    except Exception as e:
+        return f"❌ Error listing skills: {e}"
+
+
+@function_tool
 async def skill_broadcast(
     context: RunContextWrapper,
     name: str,
@@ -291,6 +316,7 @@ async def skill_broadcast(
 # ============================================================================
 
 SKILL_TOOLS = {
+    "skill_list": skill_list,
     "skill_create": skill_create,
     "skill_update": skill_update,
     "skill_delete": skill_delete,
