@@ -28,6 +28,7 @@ from agents import (
 )
 from agents.model_settings import Reasoning
 from agents.items import ItemHelpers
+from core.vision_model import VisionChatCompletionsModel
 from agents.mcp import MCPServerStdio
 from core.managers.mcp_manager import ResilientMCPServerStdio
 
@@ -192,8 +193,6 @@ class GridRunContext:
     via `context.context.factory`.
 
     Also provides access to the current agent's session for local context injection.
-    The should_restart flag allows tools to trigger an additional turn for the CURRENT agent
-    (not parent) to process injected multimodal content.
 
     user_id provides workspace isolation for tools that need per-user storage.
     """
@@ -201,7 +200,6 @@ class GridRunContext:
     factory: "AgentFactory"
     context_id: Optional[str] = None
     session: Optional[Any] = None  # SQLiteSession for local agent history
-    should_restart: bool = False  # Trigger restart for LOCAL agent only
     user_id: Optional[str] = None  # User identifier for workspace isolation
     agent_id: Optional[str] = None  # Agent identifier for isolation
     metadata: Optional[dict] = None  # Additional metadata from context manager
@@ -661,7 +659,7 @@ class AgentFactory:
                     use_responses = False
             
             if model is None:
-                model = OpenAIChatCompletionsModel(
+                model = VisionChatCompletionsModel(
                     model=model_config.name,
                     openai_client=client
                 )
@@ -824,7 +822,7 @@ class AgentFactory:
                 model = None
 
         if model is None:
-            model = OpenAIChatCompletionsModel(model=model_name, openai_client=client)
+            model = VisionChatCompletionsModel(model=model_name, openai_client=client)
 
         tools: List[Any] = []
         mcp_servers_list: List[Any] = []
@@ -1533,31 +1531,6 @@ class AgentFactory:
                         except Exception:
                             logger.exception("Failed to merge streaming text fragments")
 
-                    # Если инструмент инжектировал изображение в сессию — второй проход (streaming)
-                    if getattr(run_ctx, "should_restart", False) and session is not None:
-                        logger.info("Main agent requested restart (e.g. image injected). Running additional turn...")
-                        restart_streaming = _get_runner().run_streamed(
-                            agent,
-                            "Проанализируй предоставленный контент и ответь кратко.",
-                            context=run_ctx,
-                            max_turns=2, # Только 2 хода для быстрого ответа, без длинных рассуждений
-                            session=session,
-                        )
-                        streaming_text_parts = []
-                        async for event in restart_streaming.stream_events():
-                            try:
-                                fragment = self._stream_observer.handle_event(event, agent_key=agent_key)
-                                if fragment:
-                                    streaming_text_parts.append(fragment)
-                            except Exception:
-                                pass
-                        result_output = (
-                            restart_streaming.final_output
-                            if restart_streaming.final_output is not None
-                            else ""
-                        )
-                        if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
-                            result_output = "".join(streaming_text_parts).strip()
                 except asyncio.TimeoutError:
                     logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
@@ -1577,21 +1550,6 @@ class AgentFactory:
                         ),
                         timeout=timeout_seconds
                     )
-
-                    # Если инструмент инжектировал изображение в сессию (take_screenshot, view_image) — делаем второй проход
-                    if getattr(run_ctx, "should_restart", False) and session is not None:
-                        logger.info("Main agent requested restart (e.g. image injected). Running additional turn...")
-                        restart_result = await asyncio.wait_for(
-                            _get_runner().run(
-                                agent,
-                                "Проанализируй предоставленный контент и ответь кратко.",
-                                context=run_ctx,
-                                max_turns=2, # Только 2 хода для быстрого ответа, без длинных рассуждений
-                                session=session,
-                            ),
-                            timeout=timeout_seconds
-                        )
-                        result = restart_result
 
                 except asyncio.TimeoutError:
                     raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
@@ -2159,44 +2117,6 @@ class AgentFactory:
                     output = str(run_result_streaming)
             except Exception:
                 output = str(run_result_streaming)
-
-            # Check if sub-agent needs restart (e.g., for multimodal content processing)
-            if sub_run_ctx.should_restart:
-                logger.info(f"Sub-agent {agent_key} requested restart (multimodal injection). Running additional turn...")
-
-                # Debug: check session items before restart
-                try:
-                    session_items = await session.get_items()
-                    logger.info(f"Session items before restart: {len(session_items)} items")
-                except Exception as e:
-                    logger.warning(f"Failed to log session items: {e}", exc_info=True)
-
-                # Run one more turn with a continuation prompt - session items will be included automatically
-                # SDK automatically prepends session items before this new input
-                restart_streaming = _get_runner().run_streamed(
-                    starting_agent=sub_agent,
-                    input="Проанализируй предоставленный контент.",  # Prompt to process injected content
-                    context=sub_run_ctx,
-                    session=session,
-                    max_turns=2, # Только 2 хода для быстрого ответа, без длинных рассуждений
-                )
-                
-                async for event in restart_streaming.stream_events():
-                    if hasattr(self, '_stream_observer'):
-                        self._stream_observer.handle_event(event, agent_key=agent_key)
-                
-                # Extract output from restart
-                try:
-                    if hasattr(restart_streaming, "final_output") and restart_streaming.final_output:
-                        output = restart_streaming.final_output
-                    elif hasattr(restart_streaming, "output") and restart_streaming.output:
-                        output = restart_streaming.output
-                    elif hasattr(restart_streaming, "content") and restart_streaming.content:
-                        output = restart_streaming.content
-                    else:
-                        output = str(restart_streaming)
-                except Exception:
-                    output = str(restart_streaming)
 
             # Запишем результат как сообщение ассистента, чтобы главный агент мог обсуждать и давать правки
             try:

@@ -137,7 +137,7 @@ tools:
 agents:
   voice_assistant:
     name: "Голосовой ассистент"
-    model: "gpt-oss-20b"
+    model: "grok-4.1-fast"
     tools: ["keyboard_type", "keyboard_press", "keyboard_hotkey", "take_screenshot", "terminal"]
     custom_prompt: |
       Ты голосовой ассистент с возможностью управления компьютером. 

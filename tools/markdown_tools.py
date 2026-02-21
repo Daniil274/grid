@@ -9,6 +9,7 @@ from typing import List, Union, Any, Optional
 
 from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputImage, ToolOutputText
+from utils.image_utils import ImageUtils
 
 logger = logging.getLogger("tools.markdown")
 
@@ -109,10 +110,14 @@ async def read_markdown(
                     img_path = base_dir / image_url
                 
                 if img_path.exists():
-                    # For local files, we might need to convert to absolute path or file URI
-                    # The system (multimodal_converter) generally handles paths if they exist
-                    # We pass the absolute path
-                    resolved_url = str(img_path.absolute())
+                    data_url = ImageUtils.file_to_base64(str(img_path), resize=True)
+                    if data_url:
+                        resolved_url = data_url
+                    else:
+                        logger.warning(f"Failed to encode image to base64: {img_path}")
+                        final_output.append(ToolOutputText(text=f"[Image encode failed: {image_url}]"))
+                        last_pos = end
+                        continue
                 else:
                     # Image not found, return as text
                     logger.warning(f"Markdown image not found: {img_path}")
@@ -133,51 +138,6 @@ async def read_markdown(
             if text_segment.strip():
                 final_output.append(ToolOutputText(text=text_segment))
                 
-        # ✅ ИЗОЛЯЦИЯ КОНТЕКСТА: Инжектируем в ЛОКАЛЬНУЮ сессию агента!
-        has_images = any(isinstance(item, ToolOutputImage) for item in final_output)
-
-        if has_images and factory and hasattr(factory, 'context_manager'):
-            try:
-                session = getattr(ctx.context, 'session', None)
-                if session:
-                    from schemas import ImageContent, ImageUrl, TextContent
-
-                    # ✅ Используем правильный формат Agents SDK (input_text, input_image)
-                    content_list = []
-                    content_list.append({
-                        "type": "input_text",
-                        "text": f"[System: Content of {file_path} (Text + Images)]"
-                    })
-
-                    for item in final_output:
-                        if isinstance(item, ToolOutputText):
-                            content_list.append({
-                                "type": "input_text",
-                                "text": item.text
-                            })
-                        elif isinstance(item, ToolOutputImage):
-                            url = getattr(item, 'image_url', getattr(item, 'url', None))
-                            detail = getattr(item, 'detail', 'auto')
-                            if url:
-                                content_list.append({
-                                    "type": "input_image",
-                                    "image_url": url,
-                                    "detail": detail
-                                })
-
-                    if len(content_list) > 1:
-                        await session.add_items([{"role": "user", "content": content_list}])
-                        logger.info(f"✅ Injected multimodal content into LOCAL session ({len(content_list)} parts)")
-
-                        if hasattr(ctx.context, 'should_restart'):
-                            ctx.context.should_restart = True
-                            logger.info("✅ Set should_restart flag for LOCAL agent")
-
-                        return [ToolOutputText(text=f"[System: Content of {file_path} loaded with {len(content_list)} parts. Restarting...]")]
-
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to inject into local session: {e}")
-
         if not final_output:
             return [ToolOutputText(text="File is empty.")]
             

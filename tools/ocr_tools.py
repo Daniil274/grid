@@ -161,75 +161,11 @@ async def pdf_to_markdown(
                     img_data = item.get("image_url", {})
                     url = img_data.get("url", "")
                     detail = img_data.get("detail", "auto")
-
                     if url:
-                        try:
-                            img_out = ToolOutputImage(
-                                image_url=url,
-                                detail=detail if detail in ["low", "high", "auto"] else "auto"
-                            )
-                            final_output.append(img_out)
-                        except TypeError:
-                            # Fallback для других версий SDK
-                            try:
-                                img_out = ToolOutputImage(url=url, detail=detail)
-                                final_output.append(img_out)
-                            except Exception as e:
-                                logger.error(f"Failed to create ToolOutputImage: {e}")
-                                final_output.append(ToolOutputText(text="[Image not available]"))
-                        except Exception as e:
-                            logger.error(f"Failed to create ToolOutputImage: {e}")
-                            final_output.append(ToolOutputText(text="[Image not available]"))
-
-        # Мультимодальная инжекция в локальную сессию
-        has_images = any(isinstance(item, ToolOutputImage) for item in final_output)
-
-        if has_images:
-            try:
-                session = getattr(ctx.context, 'session', None)
-                if session:
-                    content_list = [{
-                        "type": "input_text",
-                        "text": "[System: PDF OCR Result - Text and Images]"
-                    }]
-
-                    # ✅ КРИТИЧЕСКИ ВАЖНО: НЕ передаем весь markdown текст!
-                    # Собираем только краткий summary (первые 500 символов)
-                    full_text = ""
-                    for item in final_output:
-                        if isinstance(item, ToolOutputText):
-                            full_text += item.text + "\n"
-                        elif isinstance(item, ToolOutputImage):
-                            url = getattr(item, 'image_url', getattr(item, 'url', None))
-                            detail = getattr(item, 'detail', 'auto')
-                            if url:
-                                content_list.append({
-                                    "type": "input_image",
-                                    "image_url": url,
-                                    "detail": detail
-                                })
-
-                    # Добавляем только краткий summary текста (max 500 символов)
-                    if full_text:
-                        summary = full_text[:500]
-                        if len(full_text) > 500:
-                            summary += f"...\n\n[Truncated. Full content: {len(full_text)} chars, ~{len(full_text)//4} tokens]"
-                        content_list.insert(1, {
-                            "type": "input_text",
-                            "text": summary
-                        })
-
-                    if len(content_list) > 1:
-                        await session.add_items([{"role": "user", "content": content_list}])
-                        logger.info(f"✅ Injected {len(content_list)} multimodal items into session (text truncated to 500 chars)")
-
-                        if hasattr(ctx.context, 'should_restart'):
-                            ctx.context.should_restart = True
-
-                        return [ToolOutputText(text="✅ PDF content injected into session. Ready for analysis.")]
-
-            except Exception as e:
-                logger.warning(f"⚠️ Multimodal injection failed: {e}")
+                        final_output.append(ToolOutputImage(
+                            image_url=url,
+                            detail=detail if detail in ["low", "high", "auto"] else "auto"
+                        ))
 
         if not final_output:
             return [ToolOutputText(text="⚠️ No content extracted from PDF")]
