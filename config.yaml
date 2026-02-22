@@ -202,7 +202,7 @@ models:
     max_tokens: 8000
     description: "Liquid LFM2.5 1.2b модель"
     streaming_enabled: true
-
+  
 # Минимальная секция проверяющих (для аудита в Output guardrail)
 checkers:
   default_audit:

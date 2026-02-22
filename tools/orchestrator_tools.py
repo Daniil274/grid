@@ -272,11 +272,6 @@ async def orchestrate(
             _orchestrate_semaphore.release()
 
 
-# =============================================================================
-# Social Intelligence Helper Functions
-# =============================================================================
-
-
 def _get_si_components(ctx: RunContextWrapper) -> Tuple[Any, Any, Any]:
     """
     Get Social Intelligence components from context.

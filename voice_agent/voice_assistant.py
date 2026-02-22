@@ -524,10 +524,14 @@ def main() -> None:
         _list_audio_devices()
         return
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+    from utils.logger import Logger
+    Logger.configure(
+        level=args.log_level,
+        log_dir=str(_ROOT / "logs"),
+        enable_console=True,
+        enable_json=True,
+        enable_legacy_logs=True,
+        force_reconfigure=True,
     )
     # Приглушить шумные логи зависимостей
     logging.getLogger("httpx").setLevel(logging.ERROR)

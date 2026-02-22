@@ -107,3 +107,5 @@ tools/DeepSeek-OCR-2/
 *.wav
 *.pt
 speech-text/
+workspace/screenshots/
+voice_agent/workspace/screenshots/
