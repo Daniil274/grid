@@ -123,6 +123,7 @@ TOOL_ALIASES = {
     "keyboard_press": "keyboard_press",
     "keyboard_hotkey": "keyboard_hotkey",
     "take_screenshot": "take_screenshot",
+    "crop_image": "crop_image",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:

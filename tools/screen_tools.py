@@ -2,55 +2,45 @@
 Screen and Vision Tools - Capture screenshots and analyze screen content.
 """
 
+import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import List, Union
 import pyautogui
 from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputImage, ToolOutputText
 
-from .vision_tools import _inject_image_for_analysis
+from .vision_tools import _image_path_to_data_url
 
 logger = logging.getLogger(__name__)
 
 @function_tool
 async def take_screenshot(
     context: RunContextWrapper,
-    question: str = "Что на экране?",
-    filename: Optional[str] = None
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
-    """
-    Take a screenshot of the entire screen and analyze it.
-
-    Args:
-        question: Question about the screen content for the vision model
-        filename: Optional name for the screenshot file
-
-    Returns:
-        Screenshot image and description for the vision model to analyze
-    """
+    """Take a screenshot of the entire screen and return it as an image."""
     try:
-        workspace = Path("d:/Work/repo/agents_portable/workspace")
-        screenshots_dir = workspace / "screenshots"
+        wd = Path(context.context.factory.config.get_working_directory())
+        screenshots_dir = wd / "screenshots"
         screenshots_dir.mkdir(parents=True, exist_ok=True)
 
-        if not filename:
-            filename = f"screenshot_{int(time.time())}.png"
-        if not filename.endswith(".png"):
-            filename += ".png"
+        filepath = screenshots_dir / f"screenshot_{int(time.time())}.png"
+        last_path = screenshots_dir / "last_screenshot.png"
 
-        filepath = screenshots_dir / filename
-
-        import asyncio
         await asyncio.sleep(0.05)
-
         screenshot = pyautogui.screenshot()
         screenshot.save(str(filepath))
+        screenshot.save(str(last_path))
 
-        logger.info(f"📸 Screenshot saved to {filepath}")
+        width, height = screenshot.size
+        logger.info(f"📸 Screenshot saved to {filepath} ({width}x{height})")
 
-        return await _inject_image_for_analysis(context, str(filepath), question)
+        data_url = _image_path_to_data_url(str(filepath))
+        return [
+            ToolOutputText(text=f"Screenshot: {filepath}\nSize: {width}x{height}px"),
+            ToolOutputImage(image_url=data_url, detail="high"),
+        ]
     except Exception as e:
         logger.error(f"❌ Error taking screenshot: {e}")
         return [ToolOutputText(text=f"❌ Error taking screenshot: {e}")]

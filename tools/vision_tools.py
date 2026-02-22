@@ -1,9 +1,10 @@
 """
 Vision Tools for Grid agents - просмотр и анализ изображений.
 """
+import io
 import logging
 from pathlib import Path
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
 import base64
 
 from agents import function_tool, RunContextWrapper
@@ -97,23 +98,11 @@ async def view_image(
     question: str = "Опиши подробно что изображено на этой картинке"
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
-    Просмотр и анализ изображения. Изображение будет показано агенту для анализа.
-
-    ВАЖНО: Этот инструмент ТОЛЬКО для файлов изображений (jpg, png, gif, webp, bmp).
-    Для PDF используй инструмент pdf!
+    Показывает изображение агенту для анализа. Только для jpg, png, gif, webp, bmp — не для PDF.
 
     Args:
-        image_path: Абсолютный путь к файлу изображения (ТОЛЬКО jpg, png, gif, webp, bmp, НЕ PDF!)
-        question: Вопрос или инструкция для анализа изображения (по умолчанию: "Опиши подробно что изображено на этой картинке")
-
-    Returns:
-        Список с результатом обработки изображения
-
-    Example:
-        view_image(ctx, "/path/to/image.jpg", "Что изображено на картинке?")
-
-    НЕ ИСПОЛЬЗУЙ для PDF! Для PDF используй pdf(ctx, "file.pdf", pages="1:1")
-        view_image(ctx, "/path/to/screenshot.png", "Найди все элементы UI на скриншоте")
+        image_path: Абсолютный путь к файлу изображения
+        question: Что нужно найти или описать на изображении
     """
     try:
         return await _inject_image_for_analysis(ctx, image_path, question)
@@ -146,8 +135,83 @@ async def analyze_screenshot(
     )
 
 
+@function_tool
+async def crop_image(
+    ctx: RunContextWrapper[Any],
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    image_path: Optional[str] = None,
+) -> List[Union[ToolOutputText, ToolOutputImage]]:
+    """
+    Вырезает фрагмент изображения по пиксельным координатам для детального zoom-in.
+
+    Координаты в пикселях (берутся из размера скриншота, который возвращает take_screenshot).
+
+    Args:
+        left: X левого края (пиксели)
+        top: Y верхнего края (пиксели)
+        right: X правого края (пиксели)
+        bottom: Y нижнего края (пиксели)
+        image_path: Путь к изображению (None = последний скриншот)
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return [ToolOutputText(text="❌ Pillow не установлен. Установи: pip install Pillow")]
+
+    # Определяем источник изображения
+    if image_path is None:
+        wd = Path(ctx.context.factory.config.get_working_directory())
+        img_file = wd / "screenshots" / "last_screenshot.png"
+        if not img_file.exists():
+            return [ToolOutputText(
+                text="❌ Нет последнего скриншота. Сначала вызови take_screenshot()."
+            )]
+    else:
+        img_file = Path(image_path)
+        if not img_file.is_absolute():
+            img_file = Path.cwd() / img_file
+        img_file = img_file.resolve()
+        if not img_file.exists():
+            return [ToolOutputText(text=f"❌ Файл не найден: {image_path}")]
+
+    try:
+        with Image.open(img_file) as img:
+            w, h = img.size
+
+            if left >= right or top >= bottom:
+                return [ToolOutputText(
+                    text=f"❌ Некорректные координаты: left={left}, top={top}, right={right}, bottom={bottom}."
+                )]
+
+            cropped = img.crop((left, top, right, bottom))
+            crop_w, crop_h = cropped.size
+
+            # Конвертируем в JPEG bytes
+            output = io.BytesIO()
+            rgb = cropped.convert("RGB") if cropped.mode not in ("RGB", "L") else cropped
+            rgb.save(output, format="JPEG", quality=90)
+            img_bytes = output.getvalue()
+
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+        data_url = f"data:image/jpeg;base64,{b64}"
+
+        logger.info(f"✂️ Crop {left},{top}→{right},{bottom} ({crop_w}x{crop_h}px) from {img_file.name}")
+        return [
+            ToolOutputText(text=f"✂️ Crop {left},{top}→{right},{bottom} ({crop_w}x{crop_h}px)"),
+            ToolOutputImage(image_url=data_url, detail="high"),
+        ]
+
+    except Exception as e:
+        logger.error(f"Error in crop_image: {e}", exc_info=True)
+        return [ToolOutputText(text=f"❌ Ошибка при кропе: {e}")]
+
+
 # Экспорт инструментов
 VISION_TOOLS = {
     "view_image": view_image,
     "analyze_screenshot": analyze_screenshot,
+    "crop_image": crop_image,
 }
