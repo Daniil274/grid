@@ -220,6 +220,43 @@ def write_file(filepath: str, content: str) -> str:
         log_tool_error("write_file", str(e))
         return f"❌ Ошибка при записи файла {filepath}: {str(e)}"
 
+
+@function_tool
+def append_to_file(filepath: str, content: str) -> str:
+    """
+    Добавляет текст в конец файла.
+    
+    Args:
+        filepath: Путь к файлу
+        content: Текст для добавления
+        
+    Returns:
+        str: Сообщение о количестве добавленных байт и диапазоне позиций (from start to end).
+             Для пустого файла: "Insert N bytes from 0 to N".
+             Для непустого: "Insert N bytes from {old_size} to {new_size}".
+    """
+    log_tool_call("append_to_file", {"filepath": filepath, "content_length": len(content)})
+    
+    try:
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        old_size = path.stat().st_size if path.exists() else 0
+        content_bytes = content.encode("utf-8")
+        n_bytes = len(content_bytes)
+        
+        with path.open("ab") as f:
+            f.write(content_bytes)
+        
+        new_size = old_size + n_bytes
+        log_tool_result("append_to_file", f"Добавлено {n_bytes} байт, позиции {old_size}–{new_size}")
+        return f"Insert {n_bytes} bytes from {old_size} to {new_size}"
+        
+    except Exception as e:
+        log_tool_error("append_to_file", str(e))
+        return f"❌ Ошибка при добавлении в файл {filepath}: {str(e)}"
+
+
 @function_tool
 def search_files(
     search_pattern: str, 
@@ -510,6 +547,7 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
 FILE_TOOLS = {
     "file_read": read_file,
     "file_write": write_file,
+    "file_append": append_to_file,
     "file_list": list_files,
     "file_info": get_file_info,
     "file_search": search_files,

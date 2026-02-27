@@ -32,3 +32,6 @@ uvicorn>=0.20.0    # ASGI server for ingestor
 
 # Containerization
 docker>=7.0.0
+
+#tools
+pyautogui>=0.9.0     # Управление мышью и клавиатурой

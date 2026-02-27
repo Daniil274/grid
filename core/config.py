@@ -41,17 +41,76 @@ class Config:
         try:
             if not self.config_path.exists():
                 raise ConfigError(f"Configuration file {self.config_path} not found")
-            
+
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 raw_config = yaml.safe_load(f)
-            
+
+            # -----------------------------------------------------------------
+            # Auto-attach base system tools for project configs
+            # -----------------------------------------------------------------
+            try:
+                settings_dict = (raw_config or {}).get("settings") or {}
+                project_tools_dict = settings_dict.get("project_tools") or {}
+                base_tools = project_tools_dict.get("base_tools") or []
+
+                if base_tools:
+                    # Import system tools registry lazily to avoid heavy imports on startup
+                    from tools.function_tools import AVAILABLE_TOOLS, TOOL_ALIASES, get_tool_info
+
+                    tools_section = raw_config.setdefault("tools", {})
+                    attached_count = 0
+
+                    for tool_name in base_tools:
+                        # Skip if tool is already declared explicitly in this config
+                        if tool_name in tools_section:
+                            continue
+
+                        # Resolve actual system tool name via aliases
+                        actual_name = TOOL_ALIASES.get(tool_name, tool_name)
+                        if actual_name not in AVAILABLE_TOOLS:
+                            logger.warning(
+                                "Base tool '%s' from settings.project_tools.base_tools "
+                                "not found in system tools registry; skipping",
+                                tool_name,
+                            )
+                            continue
+
+                        # Try to get human-friendly description from system tools
+                        desc = ""
+                        try:
+                            info = get_tool_info(tool_name)
+                            if isinstance(info, dict) and "error" not in info:
+                                desc = info.get("description") or ""
+                        except Exception:
+                            # Fallback description if inspection fails
+                            desc = ""
+
+                        tools_section[tool_name] = {
+                            "type": "function",
+                            "description": desc or f"System tool '{tool_name}'",
+                        }
+                        attached_count += 1
+
+                    if attached_count:
+                        logger.info(
+                            "Attached %s base system tool(s) to config from settings.project_tools.base_tools: %s",
+                            attached_count,
+                            base_tools,
+                        )
+            except Exception as e:
+                logger.error(
+                    "Failed to attach base system tools from settings.project_tools.base_tools: %s",
+                    e,
+                    exc_info=True,
+                )
+
             # Validate using Pydantic
             self._config = GridConfig(**raw_config)
-            
+
             # Determine effective working directory
             config_wd = self.config.settings.working_directory
             allow_override = self.config.settings.allow_path_override
-            
+
             if self._cli_working_directory:
                 if allow_override:
                     self._working_directory = self._cli_working_directory
@@ -61,11 +120,11 @@ class Config:
             else:
                 # No CLI arg, prefer config, fall back to CWD
                 self._working_directory = config_wd or os.getcwd()
-            
+
             self._working_directory = os.path.abspath(self._working_directory)
-            
+
             # Configuration loaded successfully - this will be traced automatically by Agents SDK
-            
+
             # Do NOT change process working directory to preserve project-relative paths (e.g., logs/)
             # All file resolutions must go through get_absolute_path/working_directory
             if self._working_directory != os.getcwd():
@@ -73,13 +132,50 @@ class Config:
                     pass  # Using configured working directory for path resolution only (no chdir)
                 else:
                     pass  # Configured working directory does not exist (will be ignored for path resolution)
-            
+
+            # Initialize project tools loader (if enabled)
+            self._init_project_tools()
+
         except FileNotFoundError as e:
             raise ConfigError(f"Configuration file not found: {e}")
         except yaml.YAMLError as e:
             raise ConfigError(f"Invalid YAML format: {e}")
         except Exception as e:
             raise ConfigError(f"Configuration validation failed: {e}")
+
+    def _init_project_tools(self) -> None:
+        """Initialize project tools loader if enabled in configuration."""
+        try:
+            # Get project_tools settings
+            project_tools_config = self.config.settings.project_tools
+
+            logger.info(f"Project tools config: {project_tools_config}")
+
+            # Check if configured and enabled
+            if project_tools_config is None:
+                logger.info("Project tools config is None - not configured")
+                return
+
+            if not project_tools_config.enabled:
+                logger.info("Project tools loader is disabled in config")
+                return
+
+            # Get tools directory
+            tools_directory = project_tools_config.tools_directory
+            config_dir = str(self.config_path.parent.resolve())
+
+            logger.info(f"[INIT] Initializing project tools from: {config_dir}/{tools_directory}")
+
+            # Import and initialize loader
+            from core.managers.project_tools_loader import initialize_project_tools
+
+            loader = initialize_project_tools(config_dir, tools_directory)
+            loaded_tools = loader.get_all_tools()
+
+            logger.info(f"[OK] Loaded {len(loaded_tools)} project tools: {list(loaded_tools.keys())}")
+
+        except Exception as exc:
+            logger.error(f"[ERROR] Failed to initialize project tools: {exc}", exc_info=True)
     
     def reload(self) -> None:
         """Reload configuration from file."""
