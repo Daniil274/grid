@@ -129,20 +129,34 @@ TOOL_ALIASES = {
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:
     """
     Возвращает список инструментов по их именам.
-    
+    Поддерживает загрузку из:
+    1. Проектных инструментов (если инициализирован project_tools_loader)
+    2. Базовых системных инструментов
+    3. Алиасов
+
     Args:
         tool_names: Список имен инструментов
-        
+
     Returns:
         List[Any]: Список функций инструментов
     """
+    from core.managers.project_tools_loader import get_project_loader
+
     tools = []
-    
+    project_loader = get_project_loader()
+
     for name in tool_names:
-        # Проверяем прямое совпадение
+        # 1. Проверяем проектные инструменты (приоритет!)
+        if project_loader and project_loader.has_tool(name):
+            tool = project_loader.get_tool(name)
+            if tool:
+                tools.append(tool)
+                continue
+
+        # 2. Проверяем прямое совпадение в системных инструментах
         if name in AVAILABLE_TOOLS:
             tools.append(AVAILABLE_TOOLS[name])
-        # Проверяем алиасы
+        # 3. Проверяем алиасы
         elif name in TOOL_ALIASES:
             actual_name = TOOL_ALIASES[name]
             if actual_name in AVAILABLE_TOOLS:
@@ -150,8 +164,8 @@ def get_tools_by_names(tool_names: List[str]) -> List[Any]:
             else:
                 from utils.logger import Logger
                 Logger(__name__).warning(f"Инструмент '{actual_name}' (алиас для '{name}') не найден")
+        # 4. Попробуем найти в отдельных модулях
         else:
-            # Попробуем найти в отдельных модулях
             if name.startswith('file_') or name in ['read_file', 'write_file', 'list_files', 'get_file_info', 'search_files', 'edit_file_patch']:
                 file_tools = get_file_tools_by_names([name])
                 tools.extend(file_tools)
@@ -160,8 +174,8 @@ def get_tools_by_names(tool_names: List[str]) -> List[Any]:
                 tools.extend(git_tools)
             else:
                 from utils.logger import Logger
-                Logger(__name__).warning(f"Инструмент '{name}' не найден")
-    
+                Logger(__name__).warning(f"Инструмент '{name}' не найден ни в проектных, ни в системных инструментах")
+
     return tools
 
 def get_all_tools() -> List[Any]:

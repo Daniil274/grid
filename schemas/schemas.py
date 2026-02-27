@@ -100,6 +100,13 @@ class IsolationConfig(BaseModel):
     image: str = "grid-agent:latest"
 
 
+class ProjectToolsConfig(BaseModel):
+    """Configuration for project-specific tools loading."""
+    enabled: bool = False
+    tools_directory: str = "./tools"
+    base_tools: List[str] = Field(default_factory=list)
+
+
 class Settings(BaseModel):
     """Global system settings."""
     default_agent: str = "assistant"
@@ -108,6 +115,7 @@ class Settings(BaseModel):
     agent_timeout: int = Field(default=300, ge=30, le=1800)
     debug: bool = False
     mcp_enabled: bool = False
+    project_tools: Optional[ProjectToolsConfig] = Field(default=None)
     working_directory: str = "."
     config_directory: str = "."
     allow_path_override: bool = True
