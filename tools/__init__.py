@@ -23,7 +23,7 @@ __all__ = [
     # Screen tools
     "take_screenshot",
     # File tools
-    "read_file", "write_file", "list_files", "get_file_info", "search_files", "edit_file_patch",
+    "read_file", "write_file", "list_files", "get_file_info", "search_files", "edit_file_patch", "append_to_file",
     # Git tools - основные операции
     "git_status", "git_log", "git_diff", "git_branch_list", "git_add_file", "git_add_all",
     "git_commit", "git_checkout_branch",

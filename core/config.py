@@ -160,6 +160,14 @@ class Config:
                 logger.info("Project tools loader is disabled in config")
                 return
 
+            # Set ISKOR serial retries for project tools (get_screen, etc.)
+            serial_cfg = getattr(self.config.settings, "serial", None)
+            if serial_cfg is not None and getattr(serial_cfg, "retries", None) is not None:
+                os.environ["ISKOR_RETRIES"] = str(serial_cfg.retries)
+                logger.debug(f"ISKOR_RETRIES set to {serial_cfg.retries} from config")
+            else:
+                os.environ.setdefault("ISKOR_RETRIES", "3")
+
             # Get tools directory
             tools_directory = project_tools_config.tools_directory
             config_dir = str(self.config_path.parent.resolve())
