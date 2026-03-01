@@ -56,6 +56,7 @@ TOOL_ALIASES = {
     "get_file_info": "file_info",
     "search_files": "file_search",
     "edit_file_patch": "file_edit_patch",
+    "append_to_file": "file_append",
     
     # Git operations - основные
     "git_status": "git_status",
@@ -166,7 +167,7 @@ def get_tools_by_names(tool_names: List[str]) -> List[Any]:
                 Logger(__name__).warning(f"Инструмент '{actual_name}' (алиас для '{name}') не найден")
         # 4. Попробуем найти в отдельных модулях
         else:
-            if name.startswith('file_') or name in ['read_file', 'write_file', 'list_files', 'get_file_info', 'search_files', 'edit_file_patch']:
+            if name.startswith('file_') or name in ['read_file', 'write_file', 'list_files', 'get_file_info', 'search_files', 'edit_file_patch', 'append_to_file']:
                 file_tools = get_file_tools_by_names([name])
                 tools.extend(file_tools)
             elif name.startswith('git_') or name in ['git_status', 'git_log', 'git_diff', 'git_branch_list', 'git_add_file', 'git_commit', 'git_checkout_branch', 'git_pull', 'git_remote_info']:

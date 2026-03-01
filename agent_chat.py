@@ -43,7 +43,7 @@ from utils.image_utils import ImageUtils
 # Configure tracing instead of logging
 configure_tracing_from_env()
 
-# Configure logging: console + files
+# Initial logging (console + files); will be reconfigured after config load if agent_logging.enabled is set
 Logger.configure(
     level="INFO",
     log_dir=str(Path(__file__).parent / "logs"),
@@ -230,6 +230,17 @@ async def main():
 
         except Exception as e:
             print(f"⚠️ Failed to initialize container isolation: {e}. Falling back to local tools.")
+
+        # Reconfigure logging from config (e.g. disable console when agent_logging.enabled is False)
+        agent_logging = config.config.settings.agent_logging
+        Logger.configure(
+            level="INFO",
+            log_dir=str(Path(__file__).parent / "logs"),
+            enable_console=agent_logging.enabled,
+            enable_json=True,
+            enable_legacy_logs=agent_logging.enabled,
+            force_reconfigure=True,
+        )
 
         # Create factory
         print("Initialize SecurityAwareAgentFactory")
