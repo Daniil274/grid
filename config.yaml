@@ -118,8 +118,8 @@ models:
     # Отключить через SDK-native reasoning_effort (для OpenAI):
     # reasoning: {effort: "none"}
 
-  qwen-3.5-397b:
-    name: "qwen/qwen3.5-397b-a17b"
+  qwen-3.5-plus:
+    name: "qwen/qwen3.5-plus-02-15"
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 8192
@@ -186,6 +186,14 @@ models:
     temperature: 0.3
     max_tokens: 8000
     description: "qwen3.5-9b"
+    streaming_enabled: true
+
+  mercury-2:
+    name: "inception/mercury-2"
+    provider: "openrouter"
+    temperature: 0.5
+    max_tokens: 8000
+    description: "Mercury 2 - диффузионная модель"
     streaming_enabled: true
   
 # Минимальная секция проверяющих (для аудита в Output guardrail)
@@ -491,7 +499,7 @@ tools:
     name: "orchestrate"
     description: "Запускает динамический пайплайн (создает агента на лету)"
     env_vars:
-      DEFAULT_MODEL: "mistral-large"  # Модель для динамического агента по умолчанию
+      DEFAULT_MODEL: "qwen-3.5-plus"  # Модель для динамического агента по умолчанию
     prompt_addition: |
       Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
       task: четкая задача для выполнения (строка).
@@ -648,10 +656,11 @@ agents:
         executor_tools=["filesystem", "terminal", "beads_show", "beads_update"]
       )
       ```
-      **ШАГ 4 — Координатор читает итоговый bead и отвечает пользователю:**
+      **ШАГ 4 — Координатор читает итоговый bead и сохраняет отчет в файл и закрывает bead**
       ```
       beads_show("bd-a1b2")  → видишь notes с результатом + верификацией
       beads_close("bd-a1b2", reason="Выполнено и верифицировано")
+      save_report("path": "workspace/task_title/final_report.md", content="## Отчет по задаче\n\n...результаты работы агентов...")
       ```
       ## 2. ПАТТЕРНЫ КОНВЕЙЕРОВ (выбирай подходящий)
       ### Паттерн A: Простая цепочка (2 агента)
@@ -772,10 +781,8 @@ agents:
     base_prompt: "base"
     description: "Агент для анализа, конвертации и создания отчетов из документов"
     custom_prompt: |
-      Ты специалист по работе с документами: PDF, Markdown, изображения.
-
+      Ты специалист по работе с документами: PDF, Markdown, изображениями.
       ⚠️ КРИТИЧЕСКИ ВАЖНО - НИКОГДА НЕ ЧИТАЙ ДОКУМЕНТЫ ПОЛНОСТЬЮ!
-
       Обязательная стратегия работы с PDF:
       1. ВСЕГДА начинай с первых страниц: pdf(path, pages="1:1") или pages="1:2"
       2. НИКОГДА не читай больше 5 страниц за раз: pages="1:5" максимум
@@ -834,7 +841,7 @@ agents:
   # Chat agent - главный агент для общения с пользователем
   chat_agent:
     name: "Чат-агент"
-    model: "qwen3.5-9b"
+    model: "mercury-2"
     tools: [
       "filesystem", "doc_analyzer", "coordinator",
       "beads_init", "beads_ready", "beads_list", "beads_create",
