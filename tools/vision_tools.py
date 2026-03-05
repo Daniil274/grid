@@ -9,6 +9,7 @@ import base64
 
 from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputImage, ToolOutputText
+from utils.path_utils import resolve_agent_path_from_ctx
 
 logger = logging.getLogger("tools.vision")
 
@@ -16,48 +17,29 @@ logger = logging.getLogger("tools.vision")
 def _image_path_to_data_url(image_path: str) -> str:
     """
     Конвертировать путь к изображению в data URL (base64).
-
-    Args:
-        image_path: Путь к файлу изображения (абсолютный или относительный от cwd)
-
-    Returns:
-        data:image/jpeg;base64,... URL строка
+    Принимает абсолютный хост-путь.
     """
-    try:
-        img_file = Path(image_path)
+    img_file = Path(image_path).resolve()
 
-        # Если путь относительный, попытаться разрешить от текущей рабочей директории
-        if not img_file.is_absolute():
-            img_file = Path.cwd() / img_file
+    if not img_file.exists():
+        raise FileNotFoundError(f"Image file not found: {image_path} (resolved to: {img_file})")
 
-        # Разрешить символические ссылки и относительные компоненты (..)
-        img_file = img_file.resolve()
+    ext = img_file.suffix.lower()
+    mime_types = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.bmp': 'image/bmp'
+    }
+    mime_type = mime_types.get(ext, 'image/jpeg')
 
-        if not img_file.exists():
-            raise FileNotFoundError(f"Image file not found: {image_path} (resolved to: {img_file})")
+    with open(img_file, 'rb') as f:
+        img_data = f.read()
 
-        # Определить MIME тип по расширению
-        ext = img_file.suffix.lower()
-        mime_types = {
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.png': 'image/png',
-            '.gif': 'image/gif',
-            '.webp': 'image/webp',
-            '.bmp': 'image/bmp'
-        }
-        mime_type = mime_types.get(ext, 'image/jpeg')
-
-        # Прочитать и закодировать в base64
-        with open(img_file, 'rb') as f:
-            img_data = f.read()
-
-        b64_data = base64.b64encode(img_data).decode('utf-8')
-        return f"data:{mime_type};base64,{b64_data}"
-
-    except Exception as e:
-        logger.error(f"Failed to convert image to data URL: {e}")
-        raise
+    b64_data = base64.b64encode(img_data).decode('utf-8')
+    return f"data:{mime_type};base64,{b64_data}"
 
 
 async def _inject_image_for_analysis(
@@ -67,7 +49,6 @@ async def _inject_image_for_analysis(
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
     Загрузка изображения и возврат как ToolOutputImage для анализа агентом.
-    VisionChatCompletionsModel доставляет его в API как image_url в tool result.
     """
     logger.info(f"Processing image: {image_path}")
 
@@ -79,8 +60,9 @@ async def _inject_image_for_analysis(
                  f'pdf(ctx, "{image_path}", pages="1:1")'
         )]
 
+    resolved = resolve_agent_path_from_ctx(image_path, ctx)
     try:
-        data_url = _image_path_to_data_url(image_path)
+        data_url = _image_path_to_data_url(resolved)
     except Exception as e:
         return [ToolOutputText(text=f"❌ Ошибка при загрузке изображения: {str(e)}")]
 
@@ -101,7 +83,7 @@ async def view_image(
     Показывает изображение агенту для анализа. Только для jpg, png, gif, webp, bmp — не для PDF.
 
     Args:
-        image_path: Абсолютный путь к файлу изображения
+        image_path: Путь к файлу изображения
         question: Что нужно найти или описать на изображении
     """
     try:
@@ -120,7 +102,7 @@ async def analyze_screenshot(
     Анализ скриншота UI/интерфейса. Специализированная версия view_image для скриншотов.
 
     Args:
-        screenshot_path: Абсолютный путь к скриншоту
+        screenshot_path: Путь к скриншоту
 
     Returns:
         Список с результатом анализа скриншота
@@ -161,7 +143,6 @@ async def crop_image(
     except ImportError:
         return [ToolOutputText(text="❌ Pillow не установлен. Установи: pip install Pillow")]
 
-    # Определяем источник изображения
     if image_path is None:
         wd = Path(ctx.context.factory.config.get_working_directory())
         img_file = wd / "screenshots" / "last_screenshot.png"
@@ -170,10 +151,7 @@ async def crop_image(
                 text="❌ Нет последнего скриншота. Сначала вызови take_screenshot()."
             )]
     else:
-        img_file = Path(image_path)
-        if not img_file.is_absolute():
-            img_file = Path.cwd() / img_file
-        img_file = img_file.resolve()
+        img_file = Path(resolve_agent_path_from_ctx(image_path, ctx)).resolve()
         if not img_file.exists():
             return [ToolOutputText(text=f"❌ Файл не найден: {image_path}")]
 
@@ -189,7 +167,6 @@ async def crop_image(
             cropped = img.crop((left, top, right, bottom))
             crop_w, crop_h = cropped.size
 
-            # Конвертируем в JPEG bytes
             output = io.BytesIO()
             rgb = cropped.convert("RGB") if cropped.mode not in ("RGB", "L") else cropped
             rgb.save(output, format="JPEG", quality=90)

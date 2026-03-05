@@ -13,6 +13,7 @@ Tools:
 import logging
 from typing import Any, Optional
 from agents import function_tool, RunContextWrapper
+from utils.path_utils import resolve_agent_path
 
 logger = logging.getLogger(__name__)
 
@@ -32,19 +33,25 @@ def _get_skill_manager(context: RunContextWrapper) -> Any:
         return None
 
 
+def _get_factory(context: RunContextWrapper) -> Any:
+    """Get AgentFactory from context."""
+    try:
+        raw = getattr(context, "context", None)
+        if raw is None:
+            return None
+        return getattr(raw, "factory", None)
+    except Exception:
+        return None
+
+
 def _get_user_id(context: RunContextWrapper) -> str:
     """Get user_id from context."""
     try:
         raw = getattr(context, "context", None)
         if raw:
-            # Try to get from direct attribute
             uid = getattr(raw, "user_id", None)
             if uid:
                 return uid
-            
-            # Try to get from metadata via context manager if available
-            # This depends on how context is structured in execution
-            # Fallback to "default_user" if not found (for safety in dev)
             return "default_user"
     except Exception:
         pass
@@ -60,7 +67,7 @@ async def skill_create(
 ) -> str:
     """
     Register a new skill from a file.
-    
+
     The agent should first create the skill file (using write_file) in a temporary or skills directory,
     and then call this tool to register/index it as a formal skill.
     The content will be copied to the standard skill storage.
@@ -80,12 +87,12 @@ async def skill_create(
     user_id = _get_user_id(context)
 
     try:
-        # Read content from file
+        resolved_path = resolve_agent_path(file_path, _get_factory(context))
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(resolved_path, 'r', encoding='utf-8') as f:
                 content = f.read()
         except Exception as e:
-            return f"❌ Error reading skill file from '{file_path}': {e}"
+            return f"❌ Error reading skill file from '{resolved_path}': {e}"
 
         manager.create_skill(user_id, name, content, tags)
         return f"✅ Skill '{name}' created/registered successfully from '{file_path}'."
@@ -208,36 +215,29 @@ async def skill_search(
     user_id = _get_user_id(context)
 
     try:
-        # Use memory store directly for search via manager or add search to manager?
-        # Manager doesn't have search method exposed, but we can use memory_store via manager
-        # or add a search method to manager.
-        # Let's use memory_store directly here since we have access to it via manager.memory_store
-        
         results = manager.memory_store.search(
             query=query,
             type="skill",
             user_id=user_id,
             limit=10
         )
-        
+
         if not results:
             return f"ℹ️ No skills found for '{query}'"
 
         lines = [f"🔍 Found {len(results)} skills for '{query}':", ""]
         for entry in results:
-            # Extract name from tags "skill:name"
             tags = entry.tags.split(",")
             name = "unknown"
             for t in tags:
                 if t.startswith("skill:"):
                     name = t.split(":", 1)[1]
                     break
-            
+
             lines.append(f"- {name} (ID: {entry.id})")
-            # Show snippet
             snippet = entry.content[:100].replace("\n", " ") + "..."
             lines.append(f"  {snippet}")
-        
+
         return "\n".join(lines)
 
     except Exception as e:
@@ -297,15 +297,15 @@ async def skill_broadcast(
 
     try:
         results = manager.broadcast_skill(user_id, name, targets)
-        
+
         success_count = sum(1 for v in results.values() if v)
         fail_count = len(results) - success_count
-        
+
         msg = f"📢 Broadcast '{name}': {success_count} success, {fail_count} failed."
         if fail_count > 0:
             failed = [u for u, v in results.items() if not v]
             msg += f"\nFailed for: {', '.join(failed)}"
-            
+
         return msg
     except Exception as e:
         return f"❌ Error broadcasting skill: {e}"
@@ -324,4 +324,3 @@ SKILL_TOOLS = {
     "skill_search": skill_search,
     "skill_broadcast": skill_broadcast,
 }
-

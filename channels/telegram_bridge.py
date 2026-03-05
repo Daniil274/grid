@@ -459,7 +459,7 @@ class TelegramBridge:
                 "📥 <b>Получение файлов от бота:</b>\n"
                 "• <code>/sendfile путь/к/файлу</code>\n"
                 "• Путь относительно вашего workspace\n"
-                "• Пример: <code>/sendfile telegram_files/document.pdf</code>\n\n"
+                "• Пример: <code>/sendfile workspace/telegram_files/document.pdf</code>\n\n"
                 "<b>Особенности:</b>\n"
                 "✨ Полная прозрачность - видны все действия агентов и подагентов\n"
                 "💾 Гибридная память - краткосрочная + долгосрочная\n"
@@ -815,10 +815,10 @@ class TelegramBridge:
                 logger.debug(f"Не удалось удалить статусное сообщение: {e}")
 
             # Отправить финальный ответ (несколькими сообщениями, если текст длинный)
-            escaped_response = self._escape_html(response)
+            formatted_response = self._markdown_to_html(response)
             await self._send_long_message(
                 chat_id=chat_id,
-                text=escaped_response,
+                text=formatted_response,
                 parse_mode=ParseMode.HTML,
                 first_prefix="✅ <b>Ответ:</b>\n\n",
             )
@@ -842,6 +842,56 @@ class TelegramBridge:
     def _escape_html(self, text: str) -> str:
         """Экранирование HTML для безопасной отправки в Telegram"""
         return html.escape(text)
+
+    def _markdown_to_html(self, text: str) -> str:
+        """
+        Конвертирует Markdown агента в HTML-теги Telegram.
+        Порядок важен: сначала код (чтобы не трогать содержимое), потом остальное.
+        """
+        import re
+
+        # 1. Код-блоки ```lang\n...\n``` → <pre><code>...</code></pre>
+        def replace_code_block(m: re.Match) -> str:
+            code = html.escape(m.group(2))
+            return f"<pre><code>{code}</code></pre>"
+        text = re.sub(r"```(\w*)\n?(.*?)```", replace_code_block, text, flags=re.DOTALL)
+
+        # 2. Инлайн-код `...` → <code>...</code>
+        def replace_inline_code(m: re.Match) -> str:
+            return f"<code>{html.escape(m.group(1))}</code>"
+        text = re.sub(r"`([^`\n]+)`", replace_inline_code, text)
+
+        # 3. Экранируем HTML в обычном тексте (вне тегов уже вставленных выше)
+        # Делаем это через замену: разбиваем на теги и не-теги
+        parts = re.split(r"(<(?:pre|code|/pre|/code)[^>]*>)", text)
+        escaped_parts = []
+        inside_tag = False
+        for part in parts:
+            if re.match(r"<(?:pre|code)[^>]*>", part):
+                inside_tag = True
+                escaped_parts.append(part)
+            elif re.match(r"</(?:pre|code)>", part):
+                inside_tag = False
+                escaped_parts.append(part)
+            elif inside_tag:
+                escaped_parts.append(part)  # внутри тега — уже escaped
+            else:
+                escaped_parts.append(html.escape(part))
+        text = "".join(escaped_parts)
+
+        # 4. Жирный **text** или __text__ (bold)
+        text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+        # 5. Курсив *text* или _text_ (italic) — после bold чтобы ** не конфликтовал
+        text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
+        text = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", text)
+        # 6. Перечёркнутый ~~text~~
+        text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+        # 7. Спойлер ||text||
+        text = re.sub(r"\|\|(.+?)\|\|", r'<tg-spoiler>\1</tg-spoiler>', text)
+        # 8. Ссылки [text](url)
+        text = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r'<a href="\2">\1</a>', text)
+
+        return text
 
     async def _send_long_message(
         self,
@@ -1004,13 +1054,21 @@ class TelegramBridge:
 
             file_path, original_name = await self._save_file(document, user_id, "document")
 
+            # Путь для агента: относительно user_workspace, чтобы агент (в изоляции) мог открыть файл
+            user_workspace = self._get_user_workspace(user_id)
+            try:
+                path_for_agent = file_path.relative_to(user_workspace)
+            except ValueError:
+                path_for_agent = file_path
+            path_for_agent_str = path_for_agent.as_posix()
+
             # Обновить статус или отправить новое сообщение
             try:
                 if status_msg:
                     await status_msg.edit_text(
                         f"✅ Файл получен и сохранен:\n\n"
                         f"📄 <b>Имя:</b> <code>{original_name}</code>\n"
-                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{path_for_agent_str}</code>\n"
                         f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
                         f"🤖 Передаю агенту для обработки...",
                         parse_mode=ParseMode.HTML
@@ -1019,7 +1077,7 @@ class TelegramBridge:
                     await update.message.reply_text(
                         f"✅ Файл получен и сохранен:\n\n"
                         f"📄 <b>Имя:</b> <code>{original_name}</code>\n"
-                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{path_for_agent_str}</code>\n"
                         f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
                         f"🤖 Передаю агенту для обработки...",
                         parse_mode=ParseMode.HTML
@@ -1027,23 +1085,22 @@ class TelegramBridge:
             except Exception as e:
                 logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
-            # Добавить информацию о файле в память пользователя (deprecated - для обратной совместимости)
+            # Добавить информацию о файле в память пользователя (путь — относительно workspace агента)
             user_memory = self._get_user_memory(user_id)
             user_memory.add_message(
                 "system",
-                f"Пользователь отправил файл: {original_name} (путь: {file_path})"
+                f"Пользователь отправил файл: {original_name} (путь: {path_for_agent_str})"
             )
 
             # Инициализировать контекст чата если его нет
             if chat_id not in self.chat_contexts:
                 self.chat_contexts[chat_id] = []
 
-            # Сформировать сообщение для агента с информацией о файле
-            # Передаем абсолютный путь к файлу для инструментов
+            # Сообщение для агента: путь относительно его рабочей директории (агент в изоляции)
             file_info_message = (
                 f"Пользователь отправил файл:\n"
                 f"Имя: {original_name}\n"
-                f"Путь: {file_path}\n"
+                f"Путь: {path_for_agent_str}\n"
                 f"Размер: {file_size / 1024:.2f} KB\n"
             )
 
@@ -1115,13 +1172,20 @@ class TelegramBridge:
 
             file_path, file_name = await self._save_file(photo, user_id, "photo")
 
+            user_workspace = self._get_user_workspace(user_id)
+            try:
+                path_for_agent = file_path.relative_to(user_workspace)
+            except ValueError:
+                path_for_agent = file_path
+            path_for_agent_str = path_for_agent.as_posix()
+
             # Обновить статус или отправить новое сообщение
             try:
                 if status_msg:
                     await status_msg.edit_text(
                         f"✅ Фото получено и сохранено:\n\n"
                         f"🖼️ <b>Файл:</b> <code>{file_name}</code>\n"
-                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{path_for_agent_str}</code>\n"
                         f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
                         f"🤖 Передаю агенту для анализа...",
                         parse_mode=ParseMode.HTML
@@ -1130,7 +1194,7 @@ class TelegramBridge:
                     await update.message.reply_text(
                         f"✅ Фото получено и сохранено:\n\n"
                         f"🖼️ <b>Файл:</b> <code>{file_name}</code>\n"
-                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{path_for_agent_str}</code>\n"
                         f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
                         f"🤖 Передаю агенту для анализа...",
                         parse_mode=ParseMode.HTML
@@ -1138,23 +1202,22 @@ class TelegramBridge:
             except Exception as e:
                 logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
-            # Добавить в память (deprecated - для обратной совместимости)
+            # Добавить в память (путь — относительно workspace агента)
             user_memory = self._get_user_memory(user_id)
             user_memory.add_message(
                 "system",
-                f"Пользователь отправил фото (путь: {file_path})"
+                f"Пользователь отправил фото (путь: {path_for_agent_str})"
             )
 
             # Инициализировать контекст чата если его нет
             if chat_id not in self.chat_contexts:
                 self.chat_contexts[chat_id] = []
 
-            # Сформировать сообщение для агента с информацией о фото
-            # Передаем абсолютный путь к файлу для инструментов
+            # Сообщение для агента: путь относительно его рабочей директории
             file_info_message = (
                 f"Пользователь отправил фото:\n"
                 f"Имя файла: {file_name}\n"
-                f"Путь: {file_path}\n"
+                f"Путь: {path_for_agent_str}\n"
                 f"Размер: {file_size / 1024:.2f} KB\n"
             )
 
@@ -1224,12 +1287,19 @@ class TelegramBridge:
 
             file_path, original_name = await self._save_file(audio, user_id, "audio")
 
+            user_workspace = self._get_user_workspace(user_id)
+            try:
+                path_for_agent = file_path.relative_to(user_workspace)
+            except ValueError:
+                path_for_agent = file_path
+            path_for_agent_str = path_for_agent.as_posix()
+
             try:
                 if status_msg:
                     await status_msg.edit_text(
                         f"✅ Аудио получено и сохранено:\n\n"
                         f"🎵 <b>Файл:</b> <code>{original_name}</code>\n"
-                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{path_for_agent_str}</code>\n"
                         f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
                         f"🤖 Передаю агенту для обработки...",
                         parse_mode=ParseMode.HTML
@@ -1238,7 +1308,7 @@ class TelegramBridge:
                     await update.message.reply_text(
                         f"✅ Аудио получено и сохранено:\n\n"
                         f"🎵 <b>Файл:</b> <code>{original_name}</code>\n"
-                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{path_for_agent_str}</code>\n"
                         f"📊 <b>Размер:</b> {file_size / 1024:.2f} KB\n\n"
                         f"🤖 Передаю агенту для обработки...",
                         parse_mode=ParseMode.HTML
@@ -1247,17 +1317,17 @@ class TelegramBridge:
                 logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
             user_memory = self._get_user_memory(user_id)
-            user_memory.add_message("system", f"Пользователь отправил аудио: {original_name}")
+            user_memory.add_message("system", f"Пользователь отправил аудио: {original_name} (путь: {path_for_agent_str})")
 
             # Инициализировать контекст чата если его нет
             if chat_id not in self.chat_contexts:
                 self.chat_contexts[chat_id] = []
 
-            # Сформировать сообщение для агента
+            # Сообщение для агента: путь относительно workspace
             file_info_message = (
                 f"Пользователь отправил аудио файл:\n"
                 f"Имя: {original_name}\n"
-                f"Путь: {file_path}\n"
+                f"Путь: {path_for_agent_str}\n"
                 f"Размер: {file_size / 1024:.2f} KB\n"
             )
 
@@ -1334,12 +1404,19 @@ class TelegramBridge:
 
             file_path, original_name = await self._save_file(video, user_id, "video")
 
+            user_workspace = self._get_user_workspace(user_id)
+            try:
+                path_for_agent = file_path.relative_to(user_workspace)
+            except ValueError:
+                path_for_agent = file_path
+            path_for_agent_str = path_for_agent.as_posix()
+
             try:
                 if status_msg:
                     await status_msg.edit_text(
                         f"✅ Видео получено и сохранено:\n\n"
                         f"🎬 <b>Файл:</b> <code>{original_name}</code>\n"
-                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{path_for_agent_str}</code>\n"
                         f"📊 <b>Размер:</b> {file_size / 1024 / 1024:.2f} MB\n\n"
                         f"🤖 Передаю агенту для обработки...",
                         parse_mode=ParseMode.HTML
@@ -1348,7 +1425,7 @@ class TelegramBridge:
                     await update.message.reply_text(
                         f"✅ Видео получено и сохранено:\n\n"
                         f"🎬 <b>Файл:</b> <code>{original_name}</code>\n"
-                        f"📂 <b>Путь:</b> <code>{file_path}</code>\n"
+                        f"📂 <b>Путь:</b> <code>{path_for_agent_str}</code>\n"
                         f"📊 <b>Размер:</b> {file_size / 1024 / 1024:.2f} MB\n\n"
                         f"🤖 Передаю агенту для обработки...",
                         parse_mode=ParseMode.HTML
@@ -1357,17 +1434,17 @@ class TelegramBridge:
                 logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
             user_memory = self._get_user_memory(user_id)
-            user_memory.add_message("system", f"Пользователь отправил видео: {original_name}")
+            user_memory.add_message("system", f"Пользователь отправил видео: {original_name} (путь: {path_for_agent_str})")
 
             # Инициализировать контекст чата если его нет
             if chat_id not in self.chat_contexts:
                 self.chat_contexts[chat_id] = []
 
-            # Сформировать сообщение для агента
+            # Сообщение для агента: путь относительно workspace
             file_info_message = (
                 f"Пользователь отправил видео файл:\n"
                 f"Имя: {original_name}\n"
-                f"Путь: {file_path}\n"
+                f"Путь: {path_for_agent_str}\n"
                 f"Размер: {file_size / 1024 / 1024:.2f} MB\n"
             )
 
@@ -1432,6 +1509,13 @@ class TelegramBridge:
                 logger.warning(f"Не удалось отправить статусное сообщение (timeout): {e}")
 
             file_path, file_name = await self._save_file(voice, user_id, "voice")
+
+            user_workspace = self._get_user_workspace(user_id)
+            try:
+                path_for_agent = file_path.relative_to(user_workspace)
+            except ValueError:
+                path_for_agent = file_path
+            path_for_agent_str = path_for_agent.as_posix()
 
             # Попытаться распознать речь (STT)
             sp = self._get_speech_processor()
@@ -1510,7 +1594,7 @@ class TelegramBridge:
                 except Exception as e:
                     logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
-                user_message = f"[ГОЛОСОВОЕ СООБЩЕНИЕ]\nФайл: {file_path}\n"
+                user_message = f"[ГОЛОСОВОЕ СООБЩЕНИЕ]\nФайл: {path_for_agent_str}\n"
                 if caption:
                     user_message += caption
                 else:

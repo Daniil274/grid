@@ -111,6 +111,14 @@ models:
     max_tokens: 8000
     description: "gpt-oss-20b"
     streaming_enabled: true  
+
+  mercury-2:
+    name: "inception/mercury-2"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8000
+    description: "Mercury 2 модель"
+    streaming_enabled: true
     
 tools:
   keyboard_type:
@@ -186,7 +194,7 @@ agents:
 
   voice_assistant:
     name: "Голосовой ассистент"
-    model: "qwen3.5-4b"
+    model: "mercury-2"
     tools: ["image_analyzer", "keyboard_agent"]
     custom_prompt: |
       You are a voice assistant. Your task is to communicate with the user
