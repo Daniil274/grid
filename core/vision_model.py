@@ -52,19 +52,77 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
     """
 
     @staticmethod
+    def _normalize_tool_content_to_parts(content: Any) -> list[dict] | None:
+        """
+        Normalize tool message content to a list of parts for image extraction.
+        MCP tools often return content as a JSON string (SDK stringifies result.content).
+        Also supports MCP image format: {"type": "image", "data": base64, "mimeType": "..."}.
+        """
+        if isinstance(content, list):
+            parts = content
+        elif isinstance(content, str) and content.strip():
+            try:
+                parsed = json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                return None
+            if not isinstance(parsed, list):
+                return None
+            parts = parsed
+        else:
+            return None
+
+        normalized: list[dict] = []
+        for part in parts:
+            if not isinstance(part, dict):
+                normalized.append({"type": "text", "text": str(part)})
+                continue
+            ptype = part.get("type")
+            if ptype == "image_url":
+                normalized.append(part)
+            elif ptype == "input_image":
+                url = part.get("image_url")
+                if isinstance(url, dict):
+                    url = url.get("url", "")
+                if url:
+                    normalized.append({
+                        "type": "image_url",
+                        "image_url": {"url": url, "detail": part.get("detail", "high")},
+                    })
+            elif ptype == "image":
+                # MCP format: {"type": "image", "data": base64, "mimeType": "image/png"}
+                data = part.get("data", "")
+                mime = part.get("mimeType", "image/png")
+                if data:
+                    data_uri = f"data:{mime};base64,{data}"
+                    normalized.append({
+                        "type": "image_url",
+                        "image_url": {"url": data_uri, "detail": "high"},
+                    })
+            else:
+                normalized.append(part)
+        return normalized
+
+    @staticmethod
     def _extract_images_from_tool_messages(
         messages: list[dict],
     ) -> list[dict]:
-        """Move image_url parts from tool messages into follow-up user messages."""
+        """Move image_url parts from tool messages into follow-up user messages.
+        Handles both list content (function tools) and JSON-string content (MCP tools)."""
         result: list[dict] = []
         for msg in messages:
-            if msg.get("role") != "tool" or not isinstance(msg.get("content"), list):
+            if msg.get("role") != "tool":
+                result.append(msg)
+                continue
+
+            raw_content = msg.get("content")
+            parts = VisionChatCompletionsModel._normalize_tool_content_to_parts(raw_content)
+            if parts is None:
                 result.append(msg)
                 continue
 
             text_parts = []
             image_parts = []
-            for part in msg["content"]:
+            for part in parts:
                 if isinstance(part, dict) and part.get("type") == "image_url":
                     image_parts.append(part)
                 else:

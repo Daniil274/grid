@@ -10,7 +10,7 @@ settings:
   debug: false
   mcp_enabled: true
   # Настройки путей
-  working_directory: "D:/Work/repo/agents_portable/workspace"  # Рабочая директория по умолчанию
+  working_directory: "./workspace"  # Рабочая директория по умолчанию
   config_directory: "."   # Директория конфигурации
   logs_directory: "D:/Work/repo/agents_portable/logs"
   allow_path_override: true  # Разрешить переопределение пути при запуске
@@ -126,14 +126,6 @@ models:
     description: "Qwen 3.5 397b модель"
     streaming_enabled: true
 
-  deepseek-v3.2:
-    name: "deepseek/deepseek-v3.2:nitro"
-    provider: "openrouter"
-    temperature: 0.7
-    max_tokens: 8192
-    description: "DeepSeek V3.2 Speciale модель"
-    streaming_enabled: true
-
   mistral-large:
     name: "mistralai/mistral-large-2512"
     provider: "openrouter"
@@ -181,13 +173,6 @@ models:
     max_tokens: 8192
     description: "OpenAI OSS 120b модель"
 
-  qwen3-vl-235b-a22b:
-    name: "qwen/qwen3-vl-235b-a22b-instruct"
-    provider: "openrouter"
-    temperature: 0.7
-    max_tokens: 8000
-    description: "Qwen 3 8b модель"
-
   minimax-m2.5:
     name: "minimax/minimax-m2.5"
     provider: "openrouter"
@@ -195,12 +180,12 @@ models:
     max_tokens: 8000
     description: "Minimax M2.5 модель"
 
-  liquid-lfm2.5-1.2b:
-    name: "liquid/lfm2.5-1.2b"
+  qwen3.5-9b:
+    name: "qwen_qwen3.5-9b"
     provider: "lm-studio"
-    temperature: 0.7
+    temperature: 0.3
     max_tokens: 8000
-    description: "Liquid LFM2.5 1.2b модель"
+    description: "qwen3.5-9b"
     streaming_enabled: true
   
 # Минимальная секция проверяющих (для аудита в Output guardrail)
@@ -436,7 +421,6 @@ tools:
     description: "MCP сервер для последовательного мышления"
     prompt_addition: "ВАЖНО!!! ВСЕГДА Используй sequential thinking для анализа, планирования задачи. Вызывай его перед выполнением любой задачи."
   
-  
   # Агенты как инструменты
   file_agent:
     type: "agent"
@@ -624,7 +608,7 @@ agents:
  # Координатор агентов
   coordinator:
     name: "Координатор"
-    model: "qwen-3.5-397b"
+    model: "glm-5"
     tools: [
       "filesystem", "terminal", "orchestrate",
       "memory_save", "memory_search", "memory_delete",
@@ -746,7 +730,7 @@ agents:
       ```
       orchestrate(
         task="Задача в bead bd-a1b2. Прочитай beads_show('bd-a1b2'). Реализуй то что описано. Запиши результат beads_update('bd-a1b2', notes='[CODER] РЕЗУЛЬТАТ: ...'). Если возникли вопросы — запиши в notes.",
-        agent_system_prompt="Ты Senior Python Developer. ПРОТОКОЛ: 1) beads_show('bd-a1b2') — прочитай задачу. 2) Выполни работу с помощью filesystem и terminal. 3) beads_update('bd-a1b2', notes='[CODER] РЕЗУЛЬТАТ: что сделано, какие файлы изменены').",
+        agent_system_prompt="Ты Epic Python Developer. Ты всегда пишещь чистый код, придерживаясь принципов SOLID. ПРОТОКОЛ: 1) beads_show('bd-a1b2') — прочитай задачу. 2) Выполни работу в файловой системе. 3) beads_update('bd-a1b2', notes='[CODER] РЕЗУЛЬТАТ: что сделано, какие файлы изменены'). 4) В конце работы напиши слово Готов.",
         executor_tools=["filesystem", "terminal", "beads_show", "beads_update"]
       )
       ```
@@ -780,7 +764,7 @@ agents:
   # Document analyzer - агент для работы с документами и изображениями
   doc_analyzer:
     name: "Анализатор документов"
-    model: "qwen3-vl-235b-a22b"
+    model: "qwen3.5-9b"
     tools: [
       "read_markdown", "pdf", "list_files", "view_image",
       "markdown_to_html", "markdown_to_pdf", "save_report", "merge_reports"
@@ -850,7 +834,7 @@ agents:
   # Chat agent - главный агент для общения с пользователем
   chat_agent:
     name: "Чат-агент"
-    model: "glm-4.7-flash"
+    model: "qwen3.5-9b"
     tools: [
       "filesystem", "doc_analyzer", "coordinator",
       "beads_init", "beads_ready", "beads_list", "beads_create",

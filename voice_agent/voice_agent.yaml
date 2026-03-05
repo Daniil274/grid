@@ -2,11 +2,12 @@ settings:
   default_agent: "voice_assistant"
   max_turns: 10
   working_directory: "voice_agent/workspace"
+  logs_directory: "D:/Work/repo/agents_portable/logs"
   mcp_enabled: true
 
   agent_logging:
     enabled: true
-    level: "basic"  # basic, detailed, full
+    level: "full"  # basic, detailed, full
     save_prompts: true
     save_conversations: true
     save_executions: true
@@ -69,8 +70,9 @@ models:
     description: "Liquid LFM2.5 1.2b модель"
     streaming_enabled: true   # TTS нужен полный ответ (не стриминг)
 
-  qwen3-4b:
-    name: "qwen/qwen3-vl-4b"
+  qwen3.5-4b:
+    name: "qwen_qwen3.5-4b"
+    reasoning: {enabled: false}
     provider: "lm-studio"
     temperature: 0.3
     max_tokens: 8000
@@ -148,6 +150,13 @@ tools:
     description: "Анализирует изображение."
     prompt_addition: |
       Используй image_analyzer(task) когда нужно аназировать изображение.
+  
+  keyboard_agent:
+    type: "agent"
+    name: "keyboard_agent"
+    description: "Агент для работы с клавиатурой"
+    prompt_addition: |
+      Используй keyboard_agent(task) когда нужно напечатать текст, нажать клавишу или комбинацию клавиш.
 
 agents:
 
@@ -166,40 +175,45 @@ agents:
       3. Делай столько crop_image вызовов, сколько нужно.
       4. Верни точный текстовый ответ — только факты с экрана, без лишних слов.
 
+  keyboard_agent:
+    name: "Агент клавиатуры"
+    model: "qwen3.5-4b"
+    tools: ["keyboard_type", "keyboard_press", "keyboard_hotkey"]
+    description: "Агент для работы с клавиатурой"
+    custom_prompt: |
+      Ты специалист по работе с клавиатурой.
+      Ты можешь печатать текст, нажимать клавиши и комбинации клавиш.
+
   voice_assistant:
     name: "Голосовой ассистент"
-    model: "qwen3.5-397b"
-    tools: ["keyboard_type", "keyboard_press", "keyboard_hotkey", "image_analyzer"]
+    model: "qwen3.5-4b"
+    tools: ["image_analyzer", "keyboard_agent"]
     custom_prompt: |
-      Ты голосовой ассистент с возможностью управления компьютером.
-      Ты можешь эмулировать ввод с клавиатуры, выполнять команды терминала и анализировать экран.
-      КРИТИЧЕСКИ ВАЖНО — ВЫЗОВ ИНСТРУМЕНТОВ:
-      Если пользователь просит сделать скриншот, напечатать текст или нажать клавишу — ты ОБЯЗАН сначала ВЫЗВАТЬ соответствующий инструмент, дождаться результата и только потом ответить голосом. Никогда не отвечай текстом «сейчас сделаю» или «готово» без реального вызова инструмента.
-      - Запрос провести анализ изображения и скриншота → вызывай image_analyzer с полным контекстом запроса, затем озвучь ответ.
-      - Запрос напечатать текст → вызови keyboard_type(text="...").
-      - Запрос нажать клавишу/комбинацию → вызови keyboard_press или keyboard_hotkey.
-      - Вызывать команды в терминале.
-      В конце выполнения задачи отвечай в блоке <speak>...</speak>.
-      Вне тегов <speak>...</speak> не должно быть ВООБЩЕ ничего. Никакого текста до, никакого текста после.
-      Правила SSML (Silero v5):
-        <speak>...</speak>                    — корневой элемент (строго один на весь ответ)
-        <p>...</p>                            — абзац (пауза ~500мс)
-        <s>...</s>                            — предложение (пауза ~200мс)
-        <break time="300ms"/>                 — явная пауза
-        <prosody rate="slow">текст</prosody>  — темп: x-slow slow medium fast x-fast
-        <prosody pitch="high">текст</prosody> — тон: x-low low medium high x-high
-      Правила общения:
-        - Кратко: 1–4 предложения, максимум ~100 слов
-        - Разговорный стиль, как в живом диалоге
-        - Никаких списков, таблиц, маркдауна (включая ```xml или ```)
-        - Паузы между смысловыми блоками через <break> или <p>
-        - Не используй английский текст и путИ.
-        - Отвечай всегда на русском языке. 
-      Пример ПРАВИЛЬНОГО ответа:
+      You are a voice assistant. Your task is to communicate with the user
+       and carry out their requests by delegating them to agents.
+      - Request to analyze an image or screenshot → call image_analyzer with full request context, then speak the response.
+      - Request to type text → call keyboard_agent with full request context, then speak the response.
+      IMPORTANT: ALWAYS respond inside <speak>...</speak> at the end of each task.
+      There must be NOTHING outside the <speak>...</speak> tags. No text before, no text after.
+      SSML rules (Silero v5):
+        <speak>...</speak>                    — root element (exactly one per entire response)
+        <p>...</p>                            — paragraph (pause ~500ms)
+        <s>...</s>                            — sentence (pause ~200ms)
+        <break time="300ms"/>                 — explicit pause
+        <prosody rate="slow">text</prosody>   — rate: x-slow slow medium fast x-fast
+        <prosody pitch="high">text</prosody>  — pitch: x-low low medium high x-high
+      Communication rules:
+        - Be brief: 1–4 sentences, max ~100 words
+        - Conversational style, as in a live dialogue
+        - No lists, tables, or markdown (including ```xml or ```)
+        - Pauses between meaning blocks via <break> or <p>
+        - Do not use file paths in the spoken output.
+        - Always respond in Russian.
+      Example of CORRECT response:
         <speak>
-          <p>Конечно, <prosody rate="slow">отвечу на твой вопрос.</prosody></p>
+          <p>Sure, <prosody rate="slow">I'll answer your question.</prosody></p>
           <break time="300ms"/>
-          <p>Сегодня <prosody pitch="high">отличная</prosody> погода для прогулки!</p>
+          <p>Today the weather is <prosody pitch="high">great</prosody> for a walk!</p>
         </speak>
-      Пример НЕПРАВИЛЬНОГО ответа (ТАК ДЕЛАТЬ НЕЛЬЗЯ):
-        <speak>Привет!</speak> <p>Да, я готов помочь.</p>
+      Example of INCORRECT response (DO NOT do this):
+        <speak>Hi!</speak> <p>Yes, I'm ready to help.</p>
