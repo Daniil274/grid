@@ -103,12 +103,11 @@ class ResilientMCPServerStdio(MCPServerStdio):
                         data_uri = f"data:{mime};base64,{data}"
                         
                         # Convert to Agents SDK format (Chat Completions API style)
-                        # {"type": "image_url", "image_url": {"url": "..."}}
-                        # Use DictObj to support both dict access and attribute access (obj.type)
-                        # And mock Pydantic methods
+                        # {"type": "image_url", "image_url": {"url": "...", "detail": "high"}}
+                        # detail="high" for better vision analysis (same as tools/vision_tools.py)
                         new_content.append(DictObj({
-                            "type": "image_url", 
-                            "image_url": {"url": data_uri}
+                            "type": "image_url",
+                            "image_url": {"url": data_uri, "detail": "high"},
                         }))
                     else:
                         new_content.append(item)

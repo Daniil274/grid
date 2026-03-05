@@ -68,7 +68,7 @@ async def send_voice_reply(ctx: RunContextWrapper[Any], text: str, speaker: str 
                 await bot.send_audio(chat_id=chat_id, audio=f)
         effective_speaker = speaker or sp._config.get("tts", {}).get("speaker", "xenia")
         logger.info(f"Голосовой ответ отправлен в chat_id={chat_id}, файл={audio_path}")
-        return f"Голосовое сообщение отправлено ({len(tts_text)} символов, голос: {effective_speaker})"
+        return f"Голосовое сообщение отправлено ({len(tts_text)} символов, голос: {effective_speaker}). Текст: {tts_text}"
     except Exception as e:
         logger.error(f"Ошибка отправки голосового сообщения: {e}")
         return f"Ошибка отправки: {e}"
