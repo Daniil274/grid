@@ -76,8 +76,9 @@ class StreamObserver(Protocol):
 # Helper class to mock the SDK's ToolContext for auto-run tools
 class AutoRunToolContext:
     """Mock context that mimics SDK's ToolContext for direct tool invocation."""
-    def __init__(self, context: Any):
+    def __init__(self, context: Any, tool_name: str = ""):
         self.context = context
+        self.tool_name = tool_name
 
 
 class ConsoleStreamObserver:
@@ -724,7 +725,7 @@ class AgentFactory:
             if target_tool and hasattr(target_tool, "on_invoke_tool"):
                 logger.info(f"Auto-running tool '{tool_name}' for agent '{agent_key}' (cwd={working_dir})")
                 try:
-                    tool_ctx_wrapper = AutoRunToolContext(run_context)
+                    tool_ctx_wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
                     tool_result = await target_tool.on_invoke_tool(
                         tool_ctx_wrapper, json.dumps(tool_params)
                     )
@@ -2357,6 +2358,19 @@ class AgentFactory:
             except Exception as e:
                 logger.warning("Failed to cleanup agent session: %s", e, exc_info=e)
         
+        # Kill stale dolt server started by beads inside the container (network_mode=host
+        # makes container ports visible on the host, so orphaned dolt processes persist).
+        if self.container_id:
+            try:
+                import subprocess
+                subprocess.run(
+                    ["docker", "exec", self.container_id, "pkill", "-f", "dolt"],
+                    capture_output=True, timeout=5,
+                )
+                logger.debug("Sent pkill dolt to container %s", self.container_id[:12])
+            except Exception as e:
+                logger.debug("Could not pkill dolt in container: %s", e)
+
         # Clear caches
         self.clear_cache()
         self._mcp_servers.clear()

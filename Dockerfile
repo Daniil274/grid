@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     nodejs \
     npm \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Install global NPM packages for MCP servers
@@ -30,6 +31,9 @@ RUN npm install -g \
     @modelcontextprotocol/server-filesystem \
     @modelcontextprotocol/server-sequential-thinking \
     @dillip285/mcp-terminal
+
+# Install Dolt (required by Beads as database backend)
+RUN curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | bash
 
 # Install Beads (bd) tool
 # The installer seems to install to /usr/local/bin/bd automatically in some environments

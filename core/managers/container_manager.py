@@ -46,13 +46,15 @@ class ContainerManager:
                     logger.error(f"❌ Failed to initialize Docker client: {e}")
                     self.enabled = False
 
-    def get_or_create_container(self, user_id: str) -> Optional[Container]:
+    def get_or_create_container(self, user_id: str, workspace: Optional[Path] = None) -> Optional[Container]:
         """
         Get existing container for user or create a new one.
-        
+
         Args:
             user_id: User identifier
-            
+            workspace: Explicit workspace path. When provided it is used as-is
+                       instead of computing ``workspace_root / "user_{user_id}"``.
+
         Returns:
             Container object or None if failed
         """
@@ -60,26 +62,54 @@ class ContainerManager:
             return None
 
         container_name = f"grid-agent-{user_id}"
-        
+
+        # Determine the expected host path for /workspace
+        if workspace is not None:
+            expected_host_path = str(Path(workspace).resolve())
+        else:
+            expected_host_path = str((Path(self.config.get_working_directory()) / f"user_{user_id}").resolve())
+
         try:
-            # Try to get existing container
             container = self.client.containers.get(container_name)
+
+            # Check that the existing container mounts the correct host path.
+            # Mounts cannot be changed on a running container — recreate if mismatched.
+            current_host_path = None
+            for mount in container.attrs.get("Mounts", []):
+                if mount.get("Destination") == "/workspace":
+                    current_host_path = mount.get("Source")
+                    break
+
+            if current_host_path != expected_host_path:
+                logger.warning(
+                    "Container %s mounts '%s' but expected '%s'. Recreating.",
+                    container_name, current_host_path, expected_host_path,
+                )
+                container.stop()
+                container.remove()
+                return self._create_container(user_id, container_name, workspace=workspace)
+
             if container.status != "running":
                 container.start()
             return container
         except NotFound:
             # Create new container
-            return self._create_container(user_id, container_name)
+            return self._create_container(user_id, container_name, workspace=workspace)
         except Exception as e:
             logger.error(f"Error getting container {container_name}: {e}")
             return None
 
-    def _create_container(self, user_id: str, container_name: str) -> Optional[Container]:
+    def _create_container(self, user_id: str, container_name: str, workspace: Optional[Path] = None) -> Optional[Container]:
         """Create and start a new container for the user."""
         try:
-            # Resolve user workspace path on host
-            workspace_root = Path(self.config.get_working_directory())
-            user_workspace = workspace_root / f"user_{user_id}"
+            # Resolve user workspace path on host.
+            # If an explicit workspace was provided (e.g. caller passed --path), use it directly.
+            # Otherwise fall back to the legacy behaviour: append user_{user_id} to workspace root.
+            if workspace is not None:
+                user_workspace = Path(workspace)
+            else:
+                workspace_root = Path(self.config.get_working_directory())
+                user_workspace = workspace_root / f"user_{user_id}"
             user_workspace.mkdir(parents=True, exist_ok=True)
             
             # Mounts: Host path -> Container path

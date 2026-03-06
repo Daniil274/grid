@@ -22,7 +22,7 @@ import random
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from agents import RunContextWrapper, function_tool
 
@@ -187,7 +187,7 @@ async def orchestrate(
     task: str,
     agent_system_prompt: Optional[str] = None,
     model_key: Optional[str] = None,
-    executor_tools: Optional[Any] = None,
+    executor_tools: Optional[Union[List[str], str]] = None,
     context_id: Optional[str] = None,
 ) -> str:
     """
@@ -709,7 +709,7 @@ async def orchestrate_emergent(
     context: RunContextWrapper,
     task: str,
     agent_system_prompt: Optional[str] = None,
-    executor_tools: Optional[Any] = None,
+    executor_tools: Optional[Union[List[str], str]] = None,
     model_key: Optional[str] = None,
     allow_pipeline_creation: bool = True,
     save_on_success: bool = True,
