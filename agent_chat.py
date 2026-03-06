@@ -207,14 +207,18 @@ async def main():
 
             if isolation_enabled:
                 # Use per-user workspace to match ContainerManager mount strategy
+                # If user explicitly passed --path, use that path as-is; otherwise add user_ subdirectory
                 workspace_root = Path(config.get_working_directory())
-                user_workspace = workspace_root / f"user_{args.user_id}"
+                if args.path is not None:
+                    user_workspace = workspace_root
+                else:
+                    user_workspace = workspace_root / f"user_{args.user_id}"
                 user_workspace.mkdir(parents=True, exist_ok=True)
 
                 if ContainerManager:
                     cm = ContainerManager(config)
                     if cm.enabled:
-                        container = cm.get_or_create_container(str(args.user_id))
+                        container = cm.get_or_create_container(str(args.user_id), workspace=user_workspace)
                         if container:
                             container_id = container.id
                             print(f"🐳 Container isolation enabled: {container.name} ({container_id[:12]})")
