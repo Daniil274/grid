@@ -92,7 +92,6 @@ TOOL_ALIASES = {
 
     # Orchestration
     "orchestrate": "orchestrate",
-    "orchestrate_emergent": "orchestrate_emergent",
 
     # Memory operations V2 (new SQLite-based)
     "memory_save": "memory_save",

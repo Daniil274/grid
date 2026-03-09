@@ -8,9 +8,13 @@ settings:
   max_turns: 100  # лимит ходов для агентов
   agent_timeout: 600  # Таймаут выполнения агента в секундах (600 минут)
   debug: false
+  # Защита контекста от переполнения выводом инструментов
+  # max_tool_output_tokens: при превышении агент получает ошибку (без обрезки результата)
+  # max_tool_output: при превышении результат обрезается с предупреждением (символы)
+  max_tool_output_tokens: 8000  # ~32K символов; 0 или отсутствие = без ограничения
   mcp_enabled: true
   # Настройки путей
-  working_directory: "./workspace"  # Рабочая директория по умолчанию
+  working_directory: "."  # Рабочая директория по умолчанию
   config_directory: "."   # Директория конфигурации
   logs_directory: "D:/Work/repo/agents_portable/logs"
   allow_path_override: true  # Разрешить переопределение пути при запуске
@@ -54,7 +58,7 @@ telegram:
   polling_timeout: 30  # Таймаут polling в секундах
 
   # Пути для данных
-  workspace_path: "./workspace"  # Рабочая директория для временных данных
+  workspace_path: "./workspace"  # Рабочая директория для данных пользователей
   persist_path: "./data"  # Директория для постоянных данных
 
   # Настройки памяти
@@ -101,6 +105,15 @@ providers:
     timeout: 300
     max_retries: 3
     streaming_enabled: true
+  
+  anthropic:
+    name: "anthropic"
+    base_url: "https://api.anthropic.com/v1/"
+    api_key_env: "ANTHROPIC_API_KEY"
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+
 
 
 
@@ -203,6 +216,14 @@ models:
     max_tokens: 8000
     description: "GPT-5.4 модель"
     streaming_enabled: true
+
+  sonnet:
+    name: "claude-sonnet-4-6"
+    provider: "anthropic"
+    temperature: 0.5
+    max_tokens: 4000
+    description: "Sonnet модель"
+    streaming_enabled: true
   
 # Минимальная секция проверяющих (для аудита в Output guardrail)
 checkers:
@@ -222,6 +243,26 @@ checkers:
 
 # Инструменты
 tools:
+  # Встроенные файловые инструменты (tools/file_tools.py) — чтение, запись, лист, инфо, патч
+  file_read:
+    type: "function"
+    description: "Читает содержимое файла."
+  file_write:
+    type: "function"
+    description: "Записывает содержимое в файл."
+  file_append:
+    type: "function"
+    description: "Добавляет текст в конец файла."
+  file_edit_patch:
+    type: "function"
+    description: "Редактирует файл с помощью патча в формате unified diff."
+  file_list:
+    type: "function"
+    description: "Список файлов в директории (без дерева)."
+  file_info:
+    type: "function"
+    description: "Информация о файле (размер, строки, расширение)."
+
   list_files:
     type: "function"
     description: "Инструмент для получения списка файлов в директории."
@@ -507,7 +548,7 @@ tools:
     name: "orchestrate"
     description: "Запускает динамический пайплайн (создает агента на лету)"
     env_vars:
-      DEFAULT_MODEL: "mercury-2"  # Модель для динамического агента по умолчанию
+      DEFAULT_MODEL: "grok-4.1-fast"  # Модель для динамического агента по умолчанию
     prompt_addition: |
       Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
       task: четкая задача для выполнения (строка).
@@ -624,12 +665,14 @@ agents:
  # Координатор агентов
   coordinator:
     name: "Координатор"
-    model: "gpt-5.4"
+    model: "qwen-3.5-plus"
     tools: [
-      "filesystem", "terminal", "orchestrate",
+      "file_read", "file_write", "file_append", "file_edit_patch", "file_list", "file_info",
+      "terminal", "orchestrate",
       "memory_save", "memory_search", "memory_delete",
       "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
       "beads_log_append", "beads_log_read",
+      "skill_create", "skill_list", "skill_update", "skill_read", "skill_delete"
     ]
     auto_run_tools:
       - name: "beads_init"
@@ -792,7 +835,7 @@ agents:
   # Document analyzer - агент для работы с документами и изображениями
   doc_analyzer:
     name: "Анализатор документов"
-    model: "qwen3.5-9b"
+    model: "qwen-3.5-plus"
     tools: [
       "read_markdown", "pdf", "list_files", "view_image",
       "markdown_to_html", "markdown_to_pdf", "save_report", "merge_reports"

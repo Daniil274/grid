@@ -131,6 +131,11 @@ class Settings(BaseModel):
         ge=100,
         description="Максимальная длина вывода инструмента в символах. None = без ограничения."
     )
+    max_tool_output_tokens: Optional[int] = Field(
+        default=None,
+        ge=100,
+        description="Максимальное количество токенов в выводе инструмента. При превышении агент получает ошибку. None = без ограничения."
+    )
     proxy: Optional[str] = Field(
         default=None,
         description="Прокси для всех исходящих запросов (API, Telegram). Пример: http://127.0.0.1:10809"

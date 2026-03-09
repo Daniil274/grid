@@ -25,7 +25,7 @@ from urllib.parse import urlparse, parse_qs
 
 # Корень проекта = директория скрипта
 ROOT = Path(__file__).resolve().parent
-WORKSPACE = ROOT / "workspace"
+WORKSPACE = ROOT 
 PERSIST = ROOT / "data"
 
 

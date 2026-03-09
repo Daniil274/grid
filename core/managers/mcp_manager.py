@@ -17,6 +17,7 @@ except ImportError:
     TextContent = mcp.types.TextContent
 
 from core.protocols import IConfig, IContextManager
+from core.managers.container_manager import CONTAINER_WORKDIR
 from utils.exceptions import ConfigError
 
 logger = logging.getLogger("grid.mcp_manager")
@@ -71,12 +72,60 @@ class ResilientMCPServerStdio(MCPServerStdio):
     """
     MCPServerStdio that catches exceptions during tool calls and returns them as error results.
     This prevents the agent execution from crashing due to tool timeouts or errors.
-    Also handles multimodal content conversion.
+    Also handles multimodal content conversion and output token limits.
     """
+
+    def __init__(self, *args, max_output_tokens: Optional[int] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._max_output_tokens = max_output_tokens
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        return max(1, len(text) // 4)
+
+    def _check_output_size(self, tool_name: str, result: Any) -> Optional["CallToolResult"]:
+        """Проверяет размер вывода MCP-инструмента. Возвращает ошибку если превышен лимит токенов."""
+        if self._max_output_tokens is None:
+            return None
+        if not hasattr(result, "content") or not result.content:
+            return None
+
+        total_text = ""
+        for item in result.content:
+            item_type = getattr(item, "type", None) or (item.get("type") if isinstance(item, dict) else None)
+            if item_type == "text":
+                text = getattr(item, "text", None) or (item.get("text") if isinstance(item, dict) else "")
+                total_text += text or ""
+
+        if not total_text:
+            return None
+
+        estimated = self._estimate_tokens(total_text)
+        if estimated > self._max_output_tokens:
+            logger.warning(
+                "MCP tool output rejected (token limit): %s (~%d tokens > %d limit)",
+                tool_name, estimated, self._max_output_tokens,
+            )
+            error_msg = (
+                f"ERROR: Tool output is too large (~{estimated} tokens, limit {self._max_output_tokens} tokens). "
+                f"The result of '{tool_name}' was not passed to avoid context overflow. "
+                f"Use more specific parameters or split the request into smaller parts."
+            )
+            return CallToolResult(
+                content=[TextContent(type="text", text=error_msg)],
+                isError=True,
+            )
+        return None
+
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any] | None) -> Union[CallToolResult, ProxyCallToolResult]:
         try:
             result = await super().call_tool(tool_name, arguments)
-            
+
+            # Check output token limit before any further processing
+            size_error = self._check_output_size(tool_name, result)
+            if size_error is not None:
+                return size_error
+
             # Post-process result to convert MCP ImageContent to Agents SDK format
             # MCP returns: {"type": "image", "data": "base64...", "mimeType": "..."}
             # SDK needs: {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
@@ -298,9 +347,9 @@ class MCPManager:
 
         # Add working directory to args if configured
         if getattr(tool_config, 'add_working_directory', False):
-             # For containerized execution, we use the container's path
-             # which is usually mapped to /workspace
-             target_cwd = "/workspace" if container_id else cwd
+             # Agent sees root as "/". In container pass "/" so MCP filesystem accepts
+             # any absolute path the agent sends (e.g. /docs, /sub/file).
+             target_cwd = "/" if container_id else cwd
              args.append(target_cwd)
              logger.debug(
                 "Added working directory to command arguments",
@@ -309,12 +358,19 @@ class MCPManager:
             
              # CRITICAL SAFETY:
              # Prevent `git` from walking up from the per-user workspace into the main repo.
-             target_ceiling = "/workspace" if container_id else cwd
+             target_ceiling = CONTAINER_WORKDIR if container_id else cwd
              env.setdefault("GIT_CEILING_DIRECTORIES", target_ceiling)
              env.setdefault("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
 
         # Wrap command for Docker execution if container_id is provided
         if container_id:
+            # Forward proxy env vars from host so npm/npx can download packages inside container
+            import os as _os
+            for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"):
+                _proxy_val = _os.environ.get(_proxy_var)
+                if _proxy_val:
+                    env.setdefault(_proxy_var, _proxy_val)
+
             # Original command and args
             orig_cmd = server_command[0]
             orig_args = list(server_command[1:])
@@ -324,12 +380,13 @@ class MCPManager:
                 orig_args.insert(0, "-y")
             
             # Add working directory to args if configured (for the tool itself)
+            # Use "/" so the agent can access any path (container is isolated)
             if getattr(tool_config, 'add_working_directory', False):
-                 orig_args.append("/workspace")
+                 orig_args.append("/")
 
             # Construct docker exec arguments
-            # docker exec -i -w /workspace [ENV_VARS] <container_id> <command> <args>
-            args = ["exec", "-i", "-w", "/workspace"]
+            # docker exec -i -w <CONTAINER_WORKDIR> [ENV_VARS] <container_id> <command> <args>
+            args = ["exec", "-i", "-w", CONTAINER_WORKDIR]
             
             # Pass environment variables
             for k, v in env.items():
@@ -361,6 +418,13 @@ class MCPManager:
             },
         )
 
+        # Read token limit from config if available
+        max_output_tokens: Optional[int] = None
+        if hasattr(self.config, "config") and hasattr(self.config.config, "settings"):
+            max_output_tokens = getattr(self.config.config.settings, "max_tool_output_tokens", None)
+        elif hasattr(self.config, "settings"):
+            max_output_tokens = getattr(self.config.settings, "max_tool_output_tokens", None)
+
         # Create server instance
         server = ResilientMCPServerStdio(
             params={
@@ -372,6 +436,7 @@ class MCPManager:
             cache_tools_list=True,
             name=tool_name,
             client_session_timeout_seconds=60,  # 1 minute timeout
+            max_output_tokens=max_output_tokens,
         )
 
         # Connect to server

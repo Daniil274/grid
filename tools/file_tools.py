@@ -14,8 +14,10 @@ import time
 import stat
 from pathlib import Path
 from typing import List, Any
+
 from agents import function_tool
 from utils.logger import Logger
+from utils.path_utils import resolve_agent_path_auto
 
 
 def _has_unix_write_permission(path: Path) -> bool:
@@ -63,76 +65,75 @@ def log_tool_error(tool_name: str, error: str | Exception) -> None:
 def read_file(filepath: str) -> str:
     """
     Читает содержимое файла.
-    
+
     Args:
         filepath: Путь к файлу
-        
+
     Returns:
         str: Содержимое файла
     """
-    # Универсальное логирование
     log_tool_call("read_file", {"filepath": filepath})
-    
+    filepath = resolve_agent_path_auto(filepath)
+
     try:
         path = Path(filepath)
         if not path.exists():
             log_tool_error("read_file", f"Файл {filepath} не найден")
             return f"❌ Файл {filepath} не найден"
-        
+
         if not path.is_file():
             log_tool_error("read_file", f"{filepath} не является файлом")
             return f"❌ {filepath} не является файлом"
-        
+
         content = path.read_text(encoding='utf-8')
         lines_count = len(content.splitlines())
-        
+
         log_tool_result("read_file", f"Прочитано {lines_count} строк")
         return f"📄 Содержимое файла {filepath}:\n\n{content}"
-        
+
     except Exception as e:
         log_tool_error("read_file", str(e))
         return f"❌ Ошибка при чтении {filepath}: {str(e)}"
 
-@function_tool 
+@function_tool
 def get_file_info(filepath: str) -> str:
     """
     Получает информацию о файле.
-    
+
     Args:
         filepath: Путь к файлу
-        
+
     Returns:
         str: Информация о файле
     """
-
-    
     log_tool_call("get_file_info", {"filepath": filepath})
-    
+    filepath = resolve_agent_path_auto(filepath)
+
     try:
         path = Path(filepath)
         if not path.exists():
             log_tool_error("get_file_info", f"Файл {filepath} не найден")
             return f"❌ Файл {filepath} не найден"
-        
+
         if not path.is_file():
             log_tool_error("get_file_info", f"{filepath} не является файлом")
             return f"❌ {filepath} не является файлом"
-        
+
         stat = path.stat()
         content = path.read_text(encoding='utf-8')
         lines_count = len(content.splitlines())
         extension = path.suffix.lower()
-        
+
         log_tool_result("get_file_info", f"Файл {stat.st_size} байт, {lines_count} строк")
-        
+
         result = f"""📄 Информация о файле {filepath}:
 • Имя: {path.name}
 • Размер: {stat.st_size} байт
 • Строк: {lines_count}
 • Расширение: {extension if extension else 'без расширения'}"""
-        
+
         return result
-        
+
     except Exception as e:
         log_tool_error("get_file_info", str(e))
         return f"❌ Ошибка при получении информации о {filepath}: {str(e)}"
@@ -148,10 +149,9 @@ def list_files(directory: str = ".") -> str:
     Returns:
         str: Список файлов
     """
-
-    
     log_tool_call("list_files", {"directory": directory})
-    
+    directory = resolve_agent_path_auto(directory)
+
     try:
         path = Path(directory)
         if not path.exists():
@@ -189,33 +189,32 @@ def list_files(directory: str = ".") -> str:
 def write_file(filepath: str, content: str) -> str:
     """
     Записывает содержимое в файл.
-    
+
     Args:
         filepath: Путь к файлу
         content: Содержимое для записи
-        
+
     Returns:
         str: Результат операции
     """
-
-    
     log_tool_call("write_file", {"filepath": filepath, "content_length": len(content)})
-    
+    filepath = resolve_agent_path_auto(filepath)
+
     try:
         path = Path(filepath)
-        
+
         # Создаем родительские директории если нужно
         path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Записываем файл
         path.write_text(content, encoding='utf-8')
-        
+
         size = path.stat().st_size
         lines_count = len(content.splitlines())
-        
+
         log_tool_result("write_file", f"Записано {lines_count} строк, {size} байт")
         return f"✅ Файл {filepath} успешно записан ({size} байт)"
-        
+
     except Exception as e:
         log_tool_error("write_file", str(e))
         return f"❌ Ошибка при записи файла {filepath}: {str(e)}"
@@ -236,7 +235,8 @@ def append_to_file(filepath: str, content: str) -> str:
              Для непустого: "Insert N bytes from {old_size} to {new_size}".
     """
     log_tool_call("append_to_file", {"filepath": filepath, "content_length": len(content)})
-    
+    filepath = resolve_agent_path_auto(filepath)
+
     try:
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,12 +259,12 @@ def append_to_file(filepath: str, content: str) -> str:
 
 @function_tool
 def search_files(
-    search_pattern: str, 
-    directory: str = ".", 
+    search_pattern: str,
+    directory: str = ".",
     use_regex: bool = False,
     search_in_content: bool = False,
     file_extensions: str = "",
-    max_results: int = 50
+    max_results: int = 50,
 ) -> str:
     """
     Поиск файлов и директорий по имени или содержимому с поддержкой регулярных выражений.
@@ -281,6 +281,7 @@ def search_files(
         str: Результаты поиска
     """
     start_time = time.time()
+    directory = resolve_agent_path_auto(directory)
     args = {
         "search_pattern": search_pattern,
         "directory": directory,
@@ -290,7 +291,7 @@ def search_files(
         "max_results": max_results
     }
     log_tool_call("search_files", args)
-    
+
     try:
         base_path = Path(directory)
         if not base_path.exists():
@@ -420,9 +421,10 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
         str: Результат операции
     """
     start_time = time.time()
+    filepath = resolve_agent_path_auto(filepath)
     args = {"filepath": filepath, "patch_content_length": patch_content}
     log_tool_call("edit_file_patch", args)
-    
+
     try:
         path = Path(filepath)
         if not path.exists():
