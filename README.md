@@ -81,13 +81,13 @@ You can also run the system in a Docker container:
 docker build -t agent-system .
 ```
 
-2) Run the container with your current directory mounted:
+2) Run the container with your current directory mounted (agent sees it as root "/"):
 ```bash
 # Windows PowerShell
-docker run -it --rm -v "${PWD}:/workspace" --env-file .env agent-system
+docker run -it --rm -v "${PWD}:/workspace" -w /workspace --env-file .env agent-system
 
 # Linux/macOS
-docker run -it --rm -v "$(pwd):/workspace" --env-file .env agent-system
+docker run -it --rm -v "$(pwd):/workspace" -w /workspace --env-file .env agent-system
 ```
 
 Note for Windows/pytest: add the current folder to `PYTHONPATH` for the session:

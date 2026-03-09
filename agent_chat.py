@@ -206,13 +206,14 @@ async def main():
                 isolation_enabled = getattr(isolation_cfg, "enabled", False) if not isinstance(isolation_cfg, dict) else bool(isolation_cfg.get("enabled", False))
 
             if isolation_enabled:
-                # Use per-user workspace to match ContainerManager mount strategy
-                # If user explicitly passed --path, use that path as-is; otherwise add user_ subdirectory
-                workspace_root = Path(config.get_working_directory())
+                # Container workspace is separate from the agent's working_directory concept.
+                # If user explicitly passed --path, use that path as-is;
+                # otherwise use a fixed ./workspace/user_{id} base so containers
+                # are never recreated just because working_directory config changed.
                 if args.path is not None:
-                    user_workspace = workspace_root
+                    user_workspace = Path(args.path).resolve()
                 else:
-                    user_workspace = workspace_root / f"user_{args.user_id}"
+                    user_workspace = Path("workspace") / f"user_{args.user_id}"
                 user_workspace.mkdir(parents=True, exist_ok=True)
 
                 if ContainerManager:
@@ -258,9 +259,16 @@ async def main():
                 return None
             match = re.search(r"ctx-[0-9a-f]{8}", text)
             return match.group(0) if match else None
-        
+
+        # Start timeline dashboard server in background (with factory for rerun support)
+        try:
+            from timeline.integration import run_timeline_server
+            asyncio.create_task(run_timeline_server(factory=factory, port=8789))
+        except Exception as _tl_err:
+            print(f"Timeline server not started: {_tl_err}")
+
         # Tracing is configured automatically by Agents SDK
-        
+
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
 

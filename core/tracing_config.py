@@ -311,32 +311,36 @@ class HttpSpanExporter(TracingExporter):
 
 class ImmediateTraceProcessor(TracingProcessor):
     """Синхронный процессор, немедленно экспортирующий трейсы/спаны без фоновой очереди."""
-    def __init__(self, exporter: TracingExporter):
+    def __init__(self, exporter: TracingExporter, export_span_start: bool = False):
         self._exporter = exporter
-    
+        self._export_span_start = export_span_start
+
     def on_trace_start(self, trace: Trace) -> None:
         try:
             self._exporter.export([trace])
         except Exception:
             pass
-    
+
     def on_trace_end(self, trace: Trace) -> None:
         # Ничего не делаем — уже экспортировано на старте
         pass
-    
+
     def on_span_start(self, span: Span[Any]) -> None:
-        # Начало спана не печатаем — ждём завершения для длительности
-        pass
-    
+        if self._export_span_start:
+            try:
+                self._exporter.export([span])
+            except Exception:
+                pass
+
     def on_span_end(self, span: Span[Any]) -> None:
         try:
             self._exporter.export([span])
         except Exception:
             pass
-    
+
     def shutdown(self, timeout: float | None = None):
         pass
-    
+
     def force_flush(self):
         pass
 
@@ -415,7 +419,7 @@ def configure_tracing_from_env() -> None:
     tracing_type = os.getenv("GRID_TRACING_TYPE", "console").lower()
     tracing_level = os.getenv("GRID_TRACING_LEVEL", "INFO")
     file_path = os.getenv("GRID_TRACING_FILE", "traces/traces.jsonl")
-    
+
     if tracing_type == "file":
         tracing_config.configure_file_tracing(file_path)
     elif tracing_type == "http":
@@ -436,7 +440,18 @@ def configure_tracing_from_env() -> None:
         # По умолчанию консоль + файл
         exporters = [ConsoleSpanExporter(tracing_level), FileSpanExporter(file_path)]
         tracing_config.configure_custom_tracing(exporters)
-    
+
+    # Timeline tracer: всегда включён (если не отключён явно)
+    if os.getenv("GRID_TIMELINE_ENABLED", "true").lower() not in ("0", "false", "no"):
+        try:
+            from core.timeline_tracer import get_tracer
+            timeline_exporter = get_tracer()
+            # Используем export_span_start=True чтобы видеть running-статус в реальном времени
+            timeline_processor = ImmediateTraceProcessor(timeline_exporter, export_span_start=True)
+            tracing_config._processors.append(timeline_processor)
+        except Exception as e:
+            logging.getLogger("grid.tracing").warning(f"Timeline tracer init failed: {e}")
+
     # Применяем конфигурацию
     tracing_config.apply()
 

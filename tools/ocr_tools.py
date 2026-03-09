@@ -74,8 +74,8 @@ def get_workspace_root() -> Path:
     if workspace_env:
         return Path(workspace_env).resolve()
 
-    # Fallback на ./workspace относительно корня проекта
-    return Path(__file__).parent.parent / "workspace"
+    # Fallback на корень проекта
+    return Path(__file__).parent.parent
 
 
 @function_tool

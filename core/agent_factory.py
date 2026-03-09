@@ -27,7 +27,13 @@ from agents import (
     RawResponsesStreamEvent,
 )
 from agents.model_settings import Reasoning
-from agents.items import ItemHelpers
+from agents.items import ItemHelpers, MessageOutputItem
+from agents.exceptions import (
+    ModelBehaviorError,
+    MaxTurnsExceeded,
+    AgentsException,
+    UserError as AgentsUserError,
+)
 from core.vision_model import VisionChatCompletionsModel
 from agents.mcp import MCPServerStdio
 from core.managers.mcp_manager import ResilientMCPServerStdio
@@ -38,17 +44,47 @@ from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
+from utils.path_utils import set_current_factory, reset_current_factory
 from core.tracing_config import get_tracing_config
 from core.managers.skill_manager import SkillManager
 
+import os
 import re
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 load_dotenv()
 tracing_config = get_tracing_config()
 
 CONTEXT_ID_REGEX = re.compile(r"ctx-[0-9a-fA-F]{8,}")
+
+# Monkey-patch: normalize tool names returned by model (strip whitespace)
+# Some models (e.g. kimi-k2.5) generate tool call names with leading/trailing spaces
+# which causes "Tool  orchestrate not found in agent" errors.
+def _patch_run_impl_tool_name_normalization() -> None:
+    try:
+        from agents import _run_impl
+        original_process = _run_impl.RunImpl.process_model_response.__func__  # type: ignore[attr-defined]
+
+        @classmethod  # type: ignore[misc]
+        def _patched_process(cls, *, agent, all_tools, response, output_schema, handoffs):  # type: ignore[override]
+            # Normalize tool call names before processing
+            for item in getattr(response, "output", []):
+                name = getattr(item, "name", None)
+                if isinstance(name, str) and name != name.strip():
+                    try:
+                        object.__setattr__(item, "name", name.strip())
+                    except (AttributeError, TypeError):
+                        pass
+            return original_process(cls, agent=agent, all_tools=all_tools, response=response,
+                                    output_schema=output_schema, handoffs=handoffs)
+
+        _run_impl.RunImpl.process_model_response = _patched_process
+    except Exception:
+        pass  # Patch is best-effort; do not break startup if SDK internals change
+
+_patch_run_impl_tool_name_normalization()
 logger = logging.getLogger("grid.agent_factory")
 verbose_logger = logging.getLogger("grid.verbose")
 _TRACING_CONFIGURED = False
@@ -287,13 +323,14 @@ class AgentFactory:
         from pathlib import Path
         self.skill_manager = SkillManager(
             memory_store=self.memory_store,
-            workspace_root=Path(self.config.get_working_directory()) / "workspace"
+            workspace_root=Path(self.config.get_working_directory())
         )
         logger.info("✅ SkillManager initialized")
 
         # Initialize ContainerManager
-        from core.managers.container_manager import ContainerManager
+        from core.managers.container_manager import ContainerManager, CONTAINER_WORKDIR
         self.container_manager = ContainerManager(self.config)
+        self._container_workdir = CONTAINER_WORKDIR
         if self.container_id:
             logger.info(f"✅ AgentFactory initialized with container isolation: {self.container_id}")
 
@@ -1027,6 +1064,7 @@ class AgentFactory:
 
         output = None
         error_occurred = None
+        set_current_factory(self)
         try:
             # Use streaming to capture tool calls for logging
             run_result_streaming = _get_runner().run_streamed(
@@ -1094,10 +1132,37 @@ class AgentFactory:
                     output = str(run_result_streaming)
             except Exception:
                 output = str(run_result_streaming)
+        except MaxTurnsExceeded as e:
+            # Max turns hit — extract partial output so the caller can work with it
+            partial = self._extract_partial_output(e)
+            if partial:
+                output = partial
+                logger.warning(
+                    f"DYNAMIC_AGENT_MAX_TURNS | agent={agent_name} | partial_output_len={len(partial)}"
+                )
+            else:
+                output = f"⚠️ Agent reached max turns limit. No final output produced."
+                error_occurred = e
+        except ModelBehaviorError as e:
+            # Model produced malformed JSON or called non-existent tool — return error string
+            # so the calling agent can see and potentially fix it
+            output = f"ERROR: Model behavior error — {e}. Please retry with corrected tool call arguments."
+            error_occurred = e
+            logger.error(
+                f"DYNAMIC_AGENT_MODEL_ERROR | agent={agent_name} | error={e}"
+            )
+        except AgentsUserError as e:
+            # SDK user/tool error — return as recoverable error string
+            output = f"ERROR: Tool execution error — {e}. Please check tool call and retry."
+            error_occurred = e
+            logger.error(
+                f"DYNAMIC_AGENT_TOOL_ERROR | agent={agent_name} | error={e}"
+            )
         except Exception as e:
             error_occurred = e
             raise
         finally:
+            reset_current_factory()
             elapsed = _time.time() - _start
             if error_occurred:
                 logger.error(
@@ -1241,7 +1306,7 @@ class AgentFactory:
             
             if init_key not in self._initialized_agents and getattr(run_agent_config, "auto_run_tools", None):
                 try:
-                    working_dir = "/workspace" if self.container_id else self.config.get_working_directory()
+                    working_dir = "/" if self.container_id else self.config.get_working_directory()
                     ctx_user_id = self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, "get_metadata") else None
                     temp_run_ctx = GridRunContext(
                         factory=self,
@@ -1460,102 +1525,153 @@ class AgentFactory:
                 container_id=self.container_id
             )
 
-            if stream:
-                # Streaming режим: прозрачная подсветка tool/MCP вызовов через наблюдателя
-                result_output: Optional[str] = None
-                try:
-                    run_result_streaming = _get_runner().run_streamed(
-                        agent,
-                        parsed_message,  # Use parsed message (dict/list or string) with history prepended
-                        context=run_ctx,
-                        max_turns=max_turns,
-                        session=session,
-                    )
+            set_current_factory(self)
+            try:
+                if stream:
+                    # Streaming режим: прозрачная подсветка tool/MCP вызовов через наблюдателя
+                    result_output: Optional[str] = None
                     streaming_text_parts: List[str] = []
-                    async for event in run_result_streaming.stream_events():
-                        try:
-                            fragment = self._stream_observer.handle_event(event, agent_key=agent_key)
-                            if fragment:
-                                streaming_text_parts.append(fragment)
-
-                            # Отправить события инструментов в broadcaster
-                            if self.broadcaster:
-                                if isinstance(event, RunItemStreamEvent):
-                                    event_name = getattr(event, "name", "")
-                                    item = getattr(event, "item", None)
-
-                                    if event_name == "tool_called" and item is not None:
-                                        raw_item = getattr(item, "raw_item", None)
-                                        tool_name = getattr(raw_item, "name", None) or "tool"
-                                        arguments = getattr(raw_item, "arguments", None)
-
-                                        await self.emit_progress_event(
-                                            event_type="tool_call_start",
-                                            agent_name=agent_key,
-                                            content=f"Вызов инструмента: {tool_name}",
-                                            status="running",
-                                            details={
-                                                "tool_name": tool_name,
-                                                "arguments": arguments if isinstance(arguments, dict) else str(arguments)
-                                            }
-                                        )
-                                    elif event_name == "tool_output" and item is not None:
-                                        raw_item = getattr(item, "raw_item", None)
-                                        tool_name = getattr(raw_item, "name", None) or "tool"
-                                        output = getattr(raw_item, "output", None)
-
-                                        await self.emit_progress_event(
-                                            event_type="tool_call_end",
-                                            agent_name=agent_key,
-                                            content=f"Результат: {tool_name}",
-                                            status="completed",
-                                            details={
-                                                "tool_name": tool_name,
-                                                "output": str(output)[:500] if output else ""
-                                            }
-                                        )
-                        except Exception:
-                            logger.exception(
-                                "Stream observer failed for %s", type(event).__name__
-                            )
-
-                    result_output = (
-                        run_result_streaming.final_output
-                        if run_result_streaming.final_output is not None
-                        else ""
-                    )
-                    if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
-                        try:
-                            buffered_text = "".join(streaming_text_parts).strip()
-                            if buffered_text:
-                                result_output = buffered_text
-                        except Exception:
-                            logger.exception("Failed to merge streaming text fragments")
-
-                except asyncio.TimeoutError:
-                    logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
-                    raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
-                except Exception as e:
-                    raise AgentError(f"Agent execution failed: {e}") from e
-                result = result_output
-            else:
-                try:
-                    # Запускаем агента и получаем RunResult объект
-                    result = await asyncio.wait_for(
-                        _get_runner().run(
+                    try:
+                        run_result_streaming = _get_runner().run_streamed(
                             agent,
                             parsed_message,  # Use parsed message (dict/list or string) with history prepended
                             context=run_ctx,
                             max_turns=max_turns,
-                            session=session
-                        ),
-                        timeout=timeout_seconds
-                    )
+                            session=session,
+                        )
+                        async for event in run_result_streaming.stream_events():
+                            try:
+                                fragment = self._stream_observer.handle_event(event, agent_key=agent_key)
+                                if fragment:
+                                    streaming_text_parts.append(fragment)
 
-                except asyncio.TimeoutError:
-                    raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
-                except Exception as e:
-                    raise AgentError(f"Agent execution failed: {e}") from e
+                                # Отправить события инструментов в broadcaster
+                                if self.broadcaster:
+                                    if isinstance(event, RunItemStreamEvent):
+                                        event_name = getattr(event, "name", "")
+                                        item = getattr(event, "item", None)
+
+                                        if event_name == "tool_called" and item is not None:
+                                            raw_item = getattr(item, "raw_item", None)
+                                            tool_name = getattr(raw_item, "name", None) or "tool"
+                                            arguments = getattr(raw_item, "arguments", None)
+
+                                            await self.emit_progress_event(
+                                                event_type="tool_call_start",
+                                                agent_name=agent_key,
+                                                content=f"Вызов инструмента: {tool_name}",
+                                                status="running",
+                                                details={
+                                                    "tool_name": tool_name,
+                                                    "arguments": arguments if isinstance(arguments, dict) else str(arguments)
+                                                }
+                                            )
+                                        elif event_name == "tool_output" and item is not None:
+                                            raw_item = getattr(item, "raw_item", None)
+                                            tool_name = getattr(raw_item, "name", None) or "tool"
+                                            output = getattr(raw_item, "output", None)
+
+                                            await self.emit_progress_event(
+                                                event_type="tool_call_end",
+                                                agent_name=agent_key,
+                                                content=f"Результат: {tool_name}",
+                                                status="completed",
+                                                details={
+                                                    "tool_name": tool_name,
+                                                    "output": str(output)[:500] if output else ""
+                                                }
+                                            )
+                            except Exception:
+                                logger.exception(
+                                    "Stream observer failed for %s", type(event).__name__
+                                )
+
+                        result_output = (
+                            run_result_streaming.final_output
+                            if run_result_streaming.final_output is not None
+                            else ""
+                        )
+                        if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
+                            try:
+                                buffered_text = "".join(streaming_text_parts).strip()
+                                if buffered_text:
+                                    result_output = buffered_text
+                            except Exception:
+                                logger.exception("Failed to merge streaming text fragments")
+
+                    except asyncio.TimeoutError:
+                        logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
+                        raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
+                    except MaxTurnsExceeded as e:
+                        # Return partial output if available, otherwise best-effort from streaming buffer
+                        partial = self._extract_partial_output(e) or (
+                            "".join(streaming_text_parts).strip() if streaming_text_parts else None
+                        )
+                        if partial:
+                            logger.warning(
+                                "Agent reached max turns; returning partial output (%d chars)", len(partial)
+                            )
+                            result_output = partial
+                        else:
+                            result_output = f"⚠️ Agent reached max turns limit ({max_turns}). No final output produced."
+                            logger.warning("Agent reached max turns with no partial output")
+                    except ModelBehaviorError as e:
+                        logger.error("Model behavior error during streaming: %s", e)
+                        result_output = (
+                            f"ERROR: Model produced an invalid response — {e}. "
+                            f"Please retry the request."
+                        )
+                    except AgentsUserError as e:
+                        logger.error("SDK user error during streaming: %s", e)
+                        result_output = (
+                            f"ERROR: Tool execution failed — {e}. "
+                            f"Please check tool call arguments and retry."
+                        )
+                    except Exception as e:
+                        raise AgentError(f"Agent execution failed: {e}") from e
+                    result = result_output
+                else:
+                    try:
+                        # Запускаем агента и получаем RunResult объект
+                        result = await asyncio.wait_for(
+                            _get_runner().run(
+                                agent,
+                                parsed_message,  # Use parsed message (dict/list or string) with history prepended
+                                context=run_ctx,
+                                max_turns=max_turns,
+                                session=session
+                            ),
+                            timeout=timeout_seconds
+                        )
+
+                    except asyncio.TimeoutError:
+                        raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
+                    except MaxTurnsExceeded as e:
+                        partial = self._extract_partial_output(e)
+                        if partial:
+                            logger.warning(
+                                "Agent reached max turns; returning partial output (%d chars)", len(partial)
+                            )
+                            result = partial
+                        else:
+                            result = f"⚠️ Agent reached max turns limit ({max_turns}). No final output produced."
+                            logger.warning("Agent reached max turns with no partial output")
+                    except ModelBehaviorError as e:
+                        logger.error("Model behavior error (non-streaming): %s", e)
+                        result = (
+                            f"ERROR: Model produced an invalid response — {e}. "
+                            f"Please retry the request."
+                        )
+                    except AgentsUserError as e:
+                        logger.error("SDK user error (non-streaming): %s", e)
+                        result = (
+                            f"ERROR: Tool execution failed — {e}. "
+                            f"Please check tool call arguments and retry."
+                        )
+                    except Exception as e:
+                        raise AgentError(f"Agent execution failed: {e}") from e
+            finally:
+                reset_current_factory()
 
             # Process result - more robust extraction
             try:
@@ -1691,8 +1807,8 @@ class AgentFactory:
     
     def _build_path_context(self, context_path: Optional[str] = None) -> str:
         """Build path context information."""
-        # When running in a container, the agent's view of the world is /workspace
-        working_dir = "/workspace" if self.container_id else self.config.get_working_directory()
+        # In container mode the agent sees "/" as its root.
+        working_dir = "/" if self.container_id else self.config.get_working_directory()
         config_dir = self.config.get_config_directory()
         
         context_parts = [
@@ -1712,13 +1828,14 @@ class AgentFactory:
                     host_wd = self.config.get_working_directory()
                     if context_path.startswith(host_wd):
                         rel_path = os.path.relpath(context_path, host_wd)
-                        absolute_path = (Path("/workspace") / rel_path).as_posix()
+                        absolute_path = (Path("/") / rel_path).as_posix()
                         context_path = rel_path
                     else:
-                        # Outside host workspace, can't map easily
-                        absolute_path = context_path 
+                        # Outside host workspace — use relative form to avoid leaking container paths
+                        absolute_path = context_path.lstrip("/") or "/"
+                        context_path = absolute_path
                 else:
-                    absolute_path = (Path("/workspace") / context_path).as_posix()
+                    absolute_path = (Path("/") / context_path).as_posix()
             else:
                 absolute_path = self.config.get_absolute_path(context_path)
 
@@ -1735,32 +1852,90 @@ class AgentFactory:
         return "\n".join(context_parts)
 
     # ------------------------------------------------------------------
+    # SDK exception helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_partial_output(exc: AgentsException) -> Optional[str]:
+        """Extract the last assistant text from an AgentsException's run_data.new_items."""
+        run_data = getattr(exc, 'run_data', None)
+        if not run_data:
+            return None
+        new_items = getattr(run_data, 'new_items', []) or []
+        for item in reversed(new_items):
+            if isinstance(item, MessageOutputItem):
+                try:
+                    raw = item.raw_item
+                    content = getattr(raw, 'content', None) or []
+                    texts = []
+                    for part in content:
+                        if hasattr(part, 'text'):
+                            texts.append(part.text)
+                        elif isinstance(part, dict) and part.get('type') in ('output_text', 'text'):
+                            texts.append(part.get('text', ''))
+                    if texts:
+                        return ' '.join(texts)
+                except Exception:
+                    pass
+        return None
+
+    # ------------------------------------------------------------------
     # Tool output truncation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Оценивает количество токенов в строке (~4 символа = 1 токен)."""
+        return max(1, len(text) // 4)
+
     def _truncate_tool_output(self, output: Any, tool_name: str = "") -> Any:
-        """Обрезает вывод инструмента если он превышает max_tool_output из настроек."""
-        max_output = getattr(self.config.config.settings, 'max_tool_output', None)
-        if max_output is None:
-            return output
-        if isinstance(output, str) and len(output) > max_output:
+        """Проверяет вывод инструмента на превышение лимитов.
+
+        Порядок проверок:
+        1. max_tool_output_tokens — при превышении возвращает ошибку агенту (без обрезки).
+        2. max_tool_output — при превышении обрезает строку с предупреждением.
+        """
+        settings = self.config.config.settings
+        output_str = str(output) if not isinstance(output, str) else output
+
+        # Проверка по токенам — возвращаем ошибку без обрезки
+        max_tokens = getattr(settings, 'max_tool_output_tokens', None)
+        if max_tokens is not None and isinstance(output, str):
+            estimated = self._estimate_tokens(output_str)
+            if estimated > max_tokens:
+                logger.warning(
+                    "Tool output rejected (token limit): %s (~%d tokens > %d limit)",
+                    tool_name, estimated, max_tokens,
+                )
+                return (
+                    f"ERROR: Tool output is too large (~{estimated} tokens, limit {max_tokens} tokens). "
+                    f"The result of '{tool_name}' was not passed to avoid context overflow. "
+                    f"Use more specific parameters or split the request into smaller parts."
+                )
+
+        # Проверка по символам — обрезаем с предупреждением
+        max_chars = getattr(settings, 'max_tool_output', None)
+        if max_chars is not None and isinstance(output, str) and len(output) > max_chars:
             original_length = len(output)
-            truncated = output[:max_output]
+            truncated = output[:max_chars]
             truncated += (
                 f"\n\n⚠️ Вывод инструмента обрезан "
-                f"(показано {max_output} из {original_length} символов)"
+                f"(показано {max_chars} из {original_length} символов)"
             )
             logger.info(
                 "Tool output truncated: %s (%d -> %d chars)",
-                tool_name, original_length, max_output,
+                tool_name, original_length, max_chars,
             )
             return truncated
+
         return output
 
     def _wrap_tool_with_output_limit(self, tool: Any) -> Any:
-        """Оборачивает FunctionTool для обрезки вывода по max_tool_output."""
-        max_output = getattr(self.config.config.settings, 'max_tool_output', None)
-        if max_output is None:
+        """Оборачивает FunctionTool для проверки вывода по лимитам из настроек."""
+        settings = self.config.config.settings
+        max_tokens = getattr(settings, 'max_tool_output_tokens', None)
+        max_chars = getattr(settings, 'max_tool_output', None)
+        if max_tokens is None and max_chars is None:
             return tool
         if not hasattr(tool, 'on_invoke_tool'):
             return tool
@@ -2070,54 +2245,58 @@ class AgentFactory:
 
             # Run the sub-agent with enhanced input and session
             # Use streaming to capture tool calls for logging
-            run_result_streaming = _get_runner().run_streamed(
-                starting_agent=sub_agent,
-                input=enhanced_input,
-                context=sub_run_ctx,  # Pass sub-agent context with session
-                session=session,
-                max_turns=self.config.get_max_turns(),
-            )
-
-            # Process streaming events and log tool calls
-            output = None
-            async for event in run_result_streaming.stream_events():
-                # Use the factory's stream observer to log events
-                if hasattr(self, '_stream_observer'):
-                    self._stream_observer.handle_event(event, agent_key=agent_key)
-                
-                # Also log specific events to file logs if needed (redundant if observer does it, but good for safety)
-                if isinstance(event, RunItemStreamEvent):
-                    event_name = getattr(event, "name", "")
-                    item = getattr(event, "item", None)
-
-                    if event_name == "tool_called" and item is not None:
-                        raw_item = getattr(item, "raw_item", None)
-                        tool_name = getattr(raw_item, "name", None) or "tool"
-                        arguments = getattr(raw_item, "arguments", None)
-                        
-                        # Format arguments for logging
-                        args_str = ""
-                        if isinstance(arguments, str):
-                            args_str = arguments[:200] + ('...' if len(arguments) > 200 else '')
-                        elif isinstance(arguments, dict):
-                            args_str = json.dumps(arguments, ensure_ascii=False)[:200]
-                            
-                        logger.info(
-                            f"SUB_AGENT_TOOL_CALL | agent={agent_key} | tool={tool_name} | args={args_str}"
-                        )
-
-            # Extract final output
+            set_current_factory(self)
             try:
-                if hasattr(run_result_streaming, "final_output") and run_result_streaming.final_output:
-                    output = run_result_streaming.final_output
-                elif hasattr(run_result_streaming, "output") and run_result_streaming.output:
-                    output = run_result_streaming.output
-                elif hasattr(run_result_streaming, "content") and run_result_streaming.content:
-                    output = run_result_streaming.content
-                else:
+                run_result_streaming = _get_runner().run_streamed(
+                    starting_agent=sub_agent,
+                    input=enhanced_input,
+                    context=sub_run_ctx,  # Pass sub-agent context with session
+                    session=session,
+                    max_turns=self.config.get_max_turns(),
+                )
+
+                # Process streaming events and log tool calls
+                output = None
+                async for event in run_result_streaming.stream_events():
+                    # Use the factory's stream observer to log events
+                    if hasattr(self, '_stream_observer'):
+                        self._stream_observer.handle_event(event, agent_key=agent_key)
+                    
+                    # Also log specific events to file logs if needed (redundant if observer does it, but good for safety)
+                    if isinstance(event, RunItemStreamEvent):
+                        event_name = getattr(event, "name", "")
+                        item = getattr(event, "item", None)
+
+                        if event_name == "tool_called" and item is not None:
+                            raw_item = getattr(item, "raw_item", None)
+                            tool_name = getattr(raw_item, "name", None) or "tool"
+                            arguments = getattr(raw_item, "arguments", None)
+                            
+                            # Format arguments for logging
+                            args_str = ""
+                            if isinstance(arguments, str):
+                                args_str = arguments[:200] + ('...' if len(arguments) > 200 else '')
+                            elif isinstance(arguments, dict):
+                                args_str = json.dumps(arguments, ensure_ascii=False)[:200]
+                                
+                            logger.info(
+                                f"SUB_AGENT_TOOL_CALL | agent={agent_key} | tool={tool_name} | args={args_str}"
+                            )
+
+                # Extract final output
+                try:
+                    if hasattr(run_result_streaming, "final_output") and run_result_streaming.final_output:
+                        output = run_result_streaming.final_output
+                    elif hasattr(run_result_streaming, "output") and run_result_streaming.output:
+                        output = run_result_streaming.output
+                    elif hasattr(run_result_streaming, "content") and run_result_streaming.content:
+                        output = run_result_streaming.content
+                    else:
+                        output = str(run_result_streaming)
+                except Exception:
                     output = str(run_result_streaming)
-            except Exception:
-                output = str(run_result_streaming)
+            finally:
+                reset_current_factory()
 
             # Запишем результат как сообщение ассистента, чтобы главный агент мог обсуждать и давать правки
             try:
@@ -2195,16 +2374,17 @@ class AgentFactory:
 
         # Add working directory to args if configured (CRITICAL FIX for filesystem MCP)
         if getattr(tool_config, 'add_working_directory', False):
-            # If running in container, use /workspace
-            target_cwd = "/workspace" if self.container_id else cwd
+            # Agent sees root as "/". In container pass "/" as the allowed root so MCP
+            # filesystem accepts any absolute agent path (e.g. /docs, /sub/file).
+            # The docker exec still runs with -w /workspace so relative ops work correctly.
+            target_cwd = "/" if self.container_id else cwd
             args.append(target_cwd)
             logger.debug(f"Added working directory to MCP server args: {target_cwd}")
 
             # CRITICAL SAFETY (TG invariant):
             # Prevent `git` from walking up from the per-user workspace into the main repo.
-            # This makes commands like `git reset --hard` impossible to run against the
-            # project root when executed from /home/daniil/grid/workspace/user_<id>.
-            target_ceiling = "/workspace" if self.container_id else cwd
+            # project root when executed from host workspace.
+            target_ceiling = self._container_workdir if self.container_id else cwd
             env.setdefault("GIT_CEILING_DIRECTORIES", target_ceiling)
             env.setdefault("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
             # For beads, ensure it doesn't try to use a host daemon
@@ -2213,15 +2393,21 @@ class AgentFactory:
         # Wrap command for Docker execution if container_id is provided
         if self.container_id:
             # Construct docker exec command
-            # docker exec -i -w /workspace [ENV] <container_id> <command> <args>
-            
+            # docker exec -i -w <container workdir> [ENV] <container_id> <command> <args>
+
+            # Forward proxy env vars from host so npm/npx can download packages inside container
+            for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"):
+                _proxy_val = os.environ.get(_proxy_var)
+                if _proxy_val:
+                    env.setdefault(_proxy_var, _proxy_val)
+
             # Save original command/args for logging/debug
             orig_cmd = command
             orig_args = args
-            
+
             # Build docker exec args
-            args = ["exec", "-i", "-w", "/workspace"]
-            
+            args = ["exec", "-i", "-w", self._container_workdir]
+
             # Pass environment variables
             for k, v in env.items():
                 args.extend(["-e", f"{k}={v}"])
@@ -2240,6 +2426,7 @@ class AgentFactory:
             f"Creating MCP server: {tool_name} | command={command} | args={args} | cwd={cwd}"
         )
 
+        max_output_tokens = getattr(self.config.config.settings, "max_tool_output_tokens", None)
         server = ResilientMCPServerStdio(
             params={
                 "command": command,
@@ -2250,6 +2437,7 @@ class AgentFactory:
             cache_tools_list=True,
             name=tool_name,
             client_session_timeout_seconds=300,  # 5 minutes timeout (increased from default 5s)
+            max_output_tokens=max_output_tokens,
         )
 
         await server.connect()

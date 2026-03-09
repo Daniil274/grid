@@ -43,46 +43,39 @@ def log_tool_result(name_or_operation, *, result: str | None = None, error: str 
     else:
         pretty_logger.tool_result({"name": name_or_operation, "args": {}}, result=result, error=error)
 
+# Container path for workspace (Docker forbids bind to "/"). Agent sees root as "/".
+_CONTAINER_ROOT = "/workspace"
+
 def _map_path_to_container(path: Optional[str], context: Any) -> str:
-    """Map a host path to a container path (/workspace)."""
-    if not path or path == ".":
-        return "/workspace"
-    
-    # If it's already a container path, return it
-    if path.startswith("/workspace"):
-        return path
-        
-    # If it's an absolute host path, try to map it
-    if os.path.isabs(path):
-        try:
-            # We need the host working directory to calculate relative path
-            # This is a bit tricky since we don't have direct access to factory.config here
-            # but we can try to get it from context
-            if hasattr(context, 'context') and hasattr(context.context, 'factory'):
-                host_wd = context.context.factory.config.get_working_directory()
-                # Ensure paths are normalized (resolve symlinks, etc.)
-                norm_path = os.path.normpath(path)
-                norm_host_wd = os.path.normpath(host_wd)
-                
-                if norm_path.startswith(norm_host_wd):
-                    rel = os.path.relpath(norm_path, norm_host_wd)
-                    # Handle root case
-                    if rel == ".":
-                        return "/workspace"
-                    return (Path("/workspace") / rel).as_posix()
-        except Exception:
-            pass
-            
-    # Fallback: if it's relative, assume it's relative to /workspace
-    if not os.path.isabs(path):
-        return (Path("/workspace") / path).as_posix()
-        
-    # If path is already /workspace or inside it, return it
-    if path.startswith("/workspace"):
+    """Map a host or agent path to the container path (agent root is "/", container uses _CONTAINER_ROOT)."""
+    if not path or path == "." or path == "/":
+        return _CONTAINER_ROOT
+
+    if path.startswith(_CONTAINER_ROOT + "/") or path == _CONTAINER_ROOT:
         return path
 
-    # If we can't map it, default to /workspace to be safe
-    return "/workspace"
+    # Agent may send paths as "/file" (root is "/")
+    if path.startswith("/"):
+        return (_CONTAINER_ROOT + path).replace("//", "/")
+
+    if os.path.isabs(path):
+        try:
+            if hasattr(context, 'context') and hasattr(context.context, 'factory'):
+                host_wd = context.context.factory.config.get_working_directory()
+                norm_path = os.path.normpath(path)
+                norm_host_wd = os.path.normpath(host_wd)
+                if norm_path.startswith(norm_host_wd):
+                    rel = os.path.relpath(norm_path, norm_host_wd)
+                    if rel == ".":
+                        return _CONTAINER_ROOT
+                    return (Path(_CONTAINER_ROOT) / rel).as_posix()
+        except Exception:
+            pass
+
+    if not os.path.isabs(path):
+        return (Path(_CONTAINER_ROOT) / path).as_posix()
+
+    return _CONTAINER_ROOT
 
 def _run_git_command(command: List[str], cwd: Optional[str] = None, container_id: Optional[str] = None, context: Any = None) -> Dict[str, Any]:
     """
@@ -117,8 +110,7 @@ def _run_git_command(command: List[str], cwd: Optional[str] = None, container_id
         # Выполняем команду
         if container_id:
             # Конструируем команду docker exec
-            # docker exec -i -w /workspace <container_id> <command>
-            # Используем /workspace как рабочую директорию в контейнере, если cwd не указан или относительный
+            # docker exec -i -w <container_root> <container_id> <command>
             
             workdir = _map_path_to_container(cwd, context)
 
@@ -194,7 +186,7 @@ def git_status(context: RunContextWrapper, directory: str = ".") -> str:
                 return f"❌ Директория {directory} не найдена"
             cwd = str(path)
         else:
-            cwd = None # В контейнере используем дефолтную рабочую директорию /workspace
+            cwd = None  # В контейнере используем дефолтную рабочую директорию (корень)
         
         cmd_result = _run_git_command(["git", "status", "--porcelain"], cwd=cwd, container_id=container_id, context=context)
         
@@ -789,7 +781,7 @@ def git_config(context: RunContextWrapper, directory: str = ".", name: str = "",
             cwd = str(path) if not global_config else None
         else:
             if not global_config:
-                cwd = None # /workspace
+                cwd = None  # контейнер: рабочая директория по умолчанию
         
         results = []
         
@@ -1343,7 +1335,7 @@ def git_clone(context: RunContextWrapper, directory: str, repository_url: str, b
                 return result
             cwd = None # clone uses current dir, but here we specify target dir in command
         else:
-             # In container, we assume directory is relative to /workspace or absolute
+             # In container, directory is relative to container root or absolute
              pass
         
         # Валидация URL

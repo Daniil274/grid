@@ -28,7 +28,7 @@ rich>=13.0.0       # Terminal formatting
 
 # Tracing and monitoring
 fastapi>=0.100.0   # HTTP ingestor
-uvicorn>=0.20.0    # ASGI server for ingestor
+uvicorn[standard]>=0.20.0   # ASGI server (includes websockets for timeline dashboard)
 
 # Containerization
 docker>=7.0.0

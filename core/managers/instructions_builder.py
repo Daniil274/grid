@@ -138,15 +138,14 @@ class InstructionsBuilder:
             >>> path_context = builder.build_path_context("/path/to/project")
             >>> print(path_context)
             Информация о путях:
-            Рабочая директория: /home/user/workspace
-            Директория конфигурации: /home/user/.config/agents
-            Контекстный путь: /path/to/project
-            Абсолютный контекстный путь: /home/user/workspace/path/to/project
+            Рабочая директория: /workspace
+            Контекстный путь: project
+            Абсолютный контекстный путь: /workspace/project
 
             Используй эти пути для работы с файлами и директориями.
         """
-        # When running in a container, the agent's view of the world is /workspace
-        working_dir = "/workspace" if self.container_id else self.config.get_working_directory()
+        # In container mode the agent sees "/" as its root.
+        working_dir = "/" if self.container_id else self.config.get_working_directory()
         config_dir = self.config.get_config_directory()
 
         context_parts = [
@@ -168,13 +167,14 @@ class InstructionsBuilder:
                     host_wd = self.config.get_working_directory()
                     if context_path.startswith(host_wd):
                         rel_path = os.path.relpath(context_path, host_wd)
-                        absolute_path = (Path("/workspace") / rel_path).as_posix()
+                        absolute_path = (Path("/") / rel_path).as_posix()
                         context_path = rel_path
                     else:
-                        # Outside host workspace, can't map easily
-                        absolute_path = context_path 
+                        # Outside host workspace — strip leading slash to avoid leaking container paths
+                        absolute_path = context_path.lstrip("/") or "/"
+                        context_path = absolute_path
                 else:
-                    absolute_path = (Path("/workspace") / context_path).as_posix()
+                    absolute_path = (Path("/") / context_path).as_posix()
             else:
                 # Get absolute path if available (some configs may implement this)
                 absolute_path = context_path

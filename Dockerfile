@@ -44,9 +44,9 @@ RUN curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/i
 # Create a non-root user 'agent'
 RUN useradd -m -s /bin/bash agent
 
-# Set up workspace directory
+# Set up workspace mount point (agent sees it as "/" in instructions)
+RUN mkdir -p /workspace && chown agent:agent /workspace
 WORKDIR /workspace
-RUN chown agent:agent /workspace
 
 # Install Python dependencies
 COPY requirements.txt /tmp/requirements.txt

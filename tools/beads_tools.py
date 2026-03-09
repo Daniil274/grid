@@ -45,44 +45,41 @@ def _get_container_id(context: Any) -> Optional[str]:
         return context.context.container_id
     return None
 
+# Container path for workspace (Docker forbids bind to "/"). Agent sees root as "/".
+_CONTAINER_ROOT = "/workspace"
+
 def _map_path_to_container(path: Optional[str], context: Any) -> str:
-    """Map a host path to a container path (/workspace)."""
-    if not path or path == ".":
-        return "/workspace"
-    
-    # If it's already a container path, return it
-    if path.startswith("/workspace"):
+    """Map a host or agent path to the container path (agent root is "/", container uses _CONTAINER_ROOT)."""
+    if not path or path == "." or path == "/":
+        return _CONTAINER_ROOT
+
+    # If it's already the container path, return it
+    if path.startswith(_CONTAINER_ROOT + "/") or path == _CONTAINER_ROOT:
         return path
-        
+
+    # Agent may send paths as "/file" (root is "/")
+    if path.startswith("/"):
+        return (_CONTAINER_ROOT + path).replace("//", "/")
+
     # If it's an absolute host path, try to map it
     if os.path.isabs(path):
         try:
-            # We need the host working directory to calculate relative path
             raw = getattr(context, "context", None)
             factory = getattr(raw, "factory", None) if raw else None
             if factory:
                 host_wd = factory.config.get_working_directory()
-                # Ensure paths are normalized
                 norm_path = os.path.normpath(path)
                 norm_host_wd = os.path.normpath(host_wd)
-                
                 if norm_path.startswith(norm_host_wd):
                     rel = os.path.relpath(norm_path, norm_host_wd)
                     if rel == ".":
-                        return "/workspace"
-                    return (Path("/workspace") / rel).as_posix()
+                        return _CONTAINER_ROOT
+                    return (Path(_CONTAINER_ROOT) / rel).as_posix()
         except Exception:
             pass
-            
-    # Fallback: if it's relative, assume it's relative to /workspace
-    if not os.path.isabs(path):
-        return (Path("/workspace") / path).as_posix()
-        
-    # If path is already /workspace or inside it, return it
-    if path.startswith("/workspace"):
-        return path
 
-    return "/workspace"
+    # Relative path: assume relative to container root
+    return (Path(_CONTAINER_ROOT) / path).as_posix()
 
 
 def _find_bd(container_id: Optional[str] = None) -> str:
@@ -103,7 +100,7 @@ def _find_bd(container_id: Optional[str] = None) -> str:
 def _run_bd_via_docker_run(args: List[str], cwd: str, context: Any) -> Dict[str, Any]:
     """
     Run bd inside a short-lived container (no Docker SDK required).
-    Mounts the provided cwd as /workspace.
+    Mounts the provided cwd as container root.
     """
     image = _get_isolation_image(context)
     host_cwd = os.path.abspath(cwd) if cwd else os.path.abspath(".")
@@ -111,7 +108,7 @@ def _run_bd_via_docker_run(args: List[str], cwd: str, context: Any) -> Dict[str,
     host_cwd_vol = host_cwd.replace("\\", "/")
 
     bd_path = "/usr/local/bin/bd"
-    cmd = ["docker", "run", "--rm", "-i", "-e", "BEADS_DAEMON=0", "-v", f"{host_cwd_vol}:/workspace", "-w", "/workspace", image, bd_path] + args
+    cmd = ["docker", "run", "--rm", "-i", "-e", "BEADS_DAEMON=0", "-v", f"{host_cwd_vol}:{_CONTAINER_ROOT}", "-w", _CONTAINER_ROOT, image, bd_path] + args
 
     # Add --json if not already present and likely supported
     if "--json" not in cmd and args and args[0] in ["ready", "create", "show", "update", "list", "search", "close", "agent", "mol", "wisp", "pour"]:
@@ -192,7 +189,7 @@ def _run_bd_command(args: List[str], cwd: Optional[str] = None, container_id: Op
         env["BEADS_DAEMON"] = "0"
         
         if container_id:
-            # docker exec -i -w /workspace <container_id> <command>
+            # docker exec -i -w <container_root> <container_id> <command>
             workdir = _map_path_to_container(cwd, context)
             docker_cmd = ["docker", "exec", "-i", "-w", workdir, "-e", "BEADS_DAEMON=0", container_id] + cmd
             

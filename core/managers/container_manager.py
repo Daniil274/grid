@@ -13,6 +13,10 @@ from docker.models.containers import Container
 
 logger = logging.getLogger("grid.container_manager")
 
+# Path inside the container where the host workspace is mounted. Docker forbids bind to "/", so we use /workspace.
+# Agent-facing paths are shown as "/"; this is the actual mount point for docker.
+CONTAINER_WORKDIR = "/workspace"
+
 class ContainerManager:
     """
     Manages Docker containers for agent isolation.
@@ -63,7 +67,7 @@ class ContainerManager:
 
         container_name = f"grid-agent-{user_id}"
 
-        # Determine the expected host path for /workspace
+        # Determine the expected host path for the container workdir
         if workspace is not None:
             expected_host_path = str(Path(workspace).resolve())
         else:
@@ -76,7 +80,7 @@ class ContainerManager:
             # Mounts cannot be changed on a running container — recreate if mismatched.
             current_host_path = None
             for mount in container.attrs.get("Mounts", []):
-                if mount.get("Destination") == "/workspace":
+                if mount.get("Destination") == CONTAINER_WORKDIR:
                     current_host_path = mount.get("Source")
                     break
 
@@ -115,7 +119,7 @@ class ContainerManager:
             # Mounts: Host path -> Container path
             volumes = {
                 str(user_workspace.absolute()): {
-                    'bind': '/workspace',
+                    'bind': CONTAINER_WORKDIR,
                     'mode': 'rw'
                 }
             }
@@ -139,7 +143,7 @@ class ContainerManager:
                 tty=True,        # Keep running
                 stdin_open=True, # Keep stdin open
                 volumes=volumes,
-                working_dir="/workspace",
+                working_dir=CONTAINER_WORKDIR,
                 user="agent",
                 environment={"BEADS_DAEMON": "0"}, # Disable beads daemon in container
                 restart_policy={"Name": "unless-stopped"},
@@ -150,14 +154,14 @@ class ContainerManager:
             logger.error(f"Failed to create container {container_name}: {e}")
             return None
 
-    def exec_command(self, container_id: str, cmd: list[str], workdir: str = "/workspace", env: Dict[str, str] = None) -> Tuple[int, str, str]:
+    def exec_command(self, container_id: str, cmd: list[str], workdir: Optional[str] = None, env: Dict[str, str] = None) -> Tuple[int, str, str]:
         """
         Execute command in container.
-        
+
         Args:
             container_id: Container ID or name
             cmd: Command to execute (list of strings)
-            workdir: Working directory inside container
+            workdir: Working directory inside container (default: CONTAINER_WORKDIR)
             env: Environment variables
             
         Returns:
@@ -167,6 +171,7 @@ class ContainerManager:
             # Fallback to local execution if isolation disabled (should be handled by caller, but safety check)
             return -1, "", "Isolation disabled"
 
+        workdir = workdir or CONTAINER_WORKDIR
         try:
             container = self.client.containers.get(container_id)
             

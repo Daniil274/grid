@@ -198,9 +198,6 @@ agents:
     tools: ["image_analyzer", "keyboard_agent"]
     custom_prompt: |
       You are a voice assistant. Your task is to communicate with the user
-       and carry out their requests by delegating them to agents.
-      - Request to analyze an image or screenshot → call image_analyzer with full request context, then speak the response.
-      - Request to type text → call keyboard_agent with full request context, then speak the response.
       IMPORTANT: ALWAYS respond inside <speak>...</speak> at the end of each task.
       There must be NOTHING outside the <speak>...</speak> tags. No text before, no text after.
       SSML rules (Silero v5):
