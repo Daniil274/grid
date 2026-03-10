@@ -176,7 +176,7 @@ def create_app(
             raise HTTPException(
                 status_code=503,
                 detail="Rerun unavailable: timeline server started standalone (no factory). "
-                       "Start via agent_chat.py or telegram_server.py for rerun support.",
+                       "Start via agent_chat.py or examples/telegram_bot/telegram_server.py for rerun support.",
             )
 
         node = tracer.get_node(node_id)

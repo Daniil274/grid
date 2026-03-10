@@ -409,7 +409,7 @@ class AgentFactory:
             return
 
         try:
-            from channels.live_transparency import ProgressEvent
+            from core.events import ProgressEvent
             from datetime import datetime
 
             event = ProgressEvent(

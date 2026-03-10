@@ -2,8 +2,8 @@
 
 ## Оглавление
 1. [Обзор](#обзор)
-2. [Telegram Bridge](channels/telegram_bridge.py)
-3. [Live Transparency](channels/live_transparency.py)
+2. [Telegram Bridge](../examples/telegram_bot/telegram_bridge.py)
+3. [Live Transparency](../examples/telegram_bot/live_transparency.py)
 4. [Конфигурация](#конфигурация)
 5. [Примеры использования](#примеры-использования)
 
@@ -45,7 +45,7 @@ User → Telegram Message/Voice/Image → Bridge → AgentFactory → Response �
 
 **Пример запуска:**
 ```python
-from channels.telegram_bridge import TelegramBridge
+from examples.telegram_bot.telegram_bridge import TelegramBridge
 bridge = TelegramBridge(config)
 await bridge.start_polling()
 ```
@@ -69,7 +69,7 @@ await bridge.start_polling()
 
 **Интеграция:**
 ```python
-from channels.live_transparency import LiveTransparencyBroadcaster
+from examples.telegram_bot.live_transparency import LiveTransparencyBroadcaster
 broadcaster = LiveTransparencyBroadcaster(channel="telegram_progress")
 factory = AgentFactory(broadcaster=broadcaster)
 ```
@@ -107,7 +107,7 @@ telegram:
 
 ### 1. Запуск бота
 ```bash
-TELEGRAM_BOT_TOKEN=your_token python -m channels.telegram_bridge
+TELEGRAM_BOT_TOKEN=your_token python -m examples.telegram_bot.telegram_server
 ```
 
 ### 2. Transparency в AgentFactory
@@ -119,4 +119,4 @@ response = await factory.run_agent("chat_agent", "Задача...")
 
 ---
 
-*Документация на основе channels/ (2 файла, 103KB).*
+*Документация на основе examples/telegram_bot/.*

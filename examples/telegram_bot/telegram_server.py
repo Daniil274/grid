@@ -2,8 +2,8 @@
 Telegram Server - главная точка входа для Unified Agent Bot
 
 Запуск:
-    python telegram_server.py
-    python telegram_server.py --config config.yaml
+    python examples/telegram_bot/telegram_server.py
+    python examples/telegram_bot/telegram_server.py --config config.yaml
 """
 
 import sys
@@ -24,7 +24,7 @@ from typing import Optional
 import yaml
 from dotenv import load_dotenv
 
-from channels.telegram_bridge import TelegramBridge, BridgeConfig
+from .telegram_bridge import TelegramBridge, BridgeConfig
 
 # Загрузка переменных окружения
 load_dotenv()

@@ -32,7 +32,7 @@ async def send_voice_reply(ctx: RunContextWrapper[Any], text: str, speaker: str 
     Returns:
         Статус отправки
     """
-    from core.voice_context import get_voice_context
+    from voice_context import get_voice_context
     from core.speech_processor import get_existing_speech_processor
 
     voice_ctx = get_voice_context()
@@ -107,7 +107,7 @@ async def send_voice_ssml(ctx: RunContextWrapper[Any], ssml_text: str, speaker: 
     Returns:
         Статус отправки
     """
-    from core.voice_context import get_voice_context
+    from voice_context import get_voice_context
     from core.speech_processor import get_existing_speech_processor
 
     voice_ctx = get_voice_context()

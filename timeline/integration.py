@@ -1,7 +1,7 @@
 """
 Timeline server integration — запуск dashboard внутри агентной системы.
 
-Используется из agent_chat.py и telegram_server.py для запуска timeline
+Используется из agent_chat.py и examples/telegram_bot/telegram_server.py для запуска timeline
 в фоне в том же event loop, с доступом к AgentFactory (нужно для rerun).
 
 Использование:

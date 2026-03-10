@@ -28,7 +28,7 @@
 ```
 ┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
 │     User Input      │    │   Telegram Bridge   │    │   Voice Input       │
-│   (CLI/API/Files)   │◄──►│ (channels/telegram) │◄──►│ (STT/TTS)          │
+│   (CLI/API/Files)   │◄──►│ (examples/telegram) │◄──►│ (STT/TTS)          │
 └─────────────────────┘    └─────────────────────┘    └─────────────────────┘
                                    │
                                    ▼
@@ -78,7 +78,7 @@
 ```
 config.yaml → AgentFactory → Agent (SDK)
 tools/* → Agent.tools
-channels/* → AgentFactory.broadcaster
+examples/telegram_bot/* → AgentFactory.broadcaster
 docker → ContainerManager → GridRunContext
 ```
 
@@ -97,7 +97,7 @@ docker → ContainerManager → GridRunContext
 - **Function Tools**: Прямые вызовы (beads_tools, file_tools, git_tools)
 - **Agent Tools**: Подагенты (orchestrator_tools, skill_tools)
 
-### 3. Channels (channels/)
+### 3. Channels (examples/telegram_bot/)
 - **TelegramBridge**: Обработка сообщений, запуск агентов
 - **LiveTransparency**: Прогресс-уведомления в реальном времени
 
@@ -154,4 +154,4 @@ AgentFactory.emit_progress() → LiveTransparencyBroadcaster → Telegram Update
 
 ---
 
-*Архитектура составлена на основе анализа core/, tools/, channels/ (2026).*
+*Архитектура составлена на основе анализа core/, tools/, examples/telegram_bot/ (2026).*

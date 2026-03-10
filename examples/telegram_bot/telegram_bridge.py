@@ -743,7 +743,7 @@ class TelegramBridge:
 
             # Установить голосовой контекст для инструмента send_voice_reply
             try:
-                from core.voice_context import set_voice_context
+                from voice_context import set_voice_context
                 set_voice_context(self.app.bot, chat_id, str(user_workspace))
             except Exception as e:
                 logger.debug(f"Не удалось установить voice_context: {e}")

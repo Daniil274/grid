@@ -5,8 +5,8 @@
 Ответ агента синтезируется в речь и воспроизводится через динамик.
 
 Запуск:
-    python voice_agent/voice_assistant.py
-    python voice_agent/voice_assistant.py --config voice_agent/voice_agent.yaml
+    python examples/voice_assistant/voice_assistant.py
+    python examples/voice_assistant/voice_assistant.py --config examples/voice_assistant/voice_agent.yaml
 """
 
 import argparse
@@ -33,7 +33,7 @@ logger.setLevel(logging.INFO)
 class VoiceAssistant:
     """Голосовой ассистент с детекцией ключевых слов через Whisper STT."""
 
-    def __init__(self, config_path: str = "voice_agent/voice_agent.yaml"):
+    def __init__(self, config_path: str = "examples/voice_assistant/voice_agent.yaml"):
         import yaml
         from core.config import Config
 
@@ -71,7 +71,7 @@ class VoiceAssistant:
             "speaker",
             self._voice_cfg.get("tts", {}).get("speaker", "xenia"),
         )
-        self._tts_dir = _ROOT / self._tts_cfg.get("temp_dir", "voice_agent/tts_temp")
+        self._tts_dir = _ROOT / self._tts_cfg.get("temp_dir", "examples/voice_assistant/tts_temp")
         self._tts_dir.mkdir(parents=True, exist_ok=True)
 
         # Зависимости (инициализируются в startup)
@@ -497,8 +497,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Голосовой ассистент")
     parser.add_argument(
         "--config",
-        default="voice_agent/voice_agent.yaml",
-        help="Путь к конфигу (по умолчанию: voice_agent/voice_agent.yaml)",
+        default="examples/voice_assistant/voice_agent.yaml",
+        help="Путь к конфигу (по умолчанию: examples/voice_assistant/voice_agent.yaml)",
     )
     parser.add_argument(
         "--device",
