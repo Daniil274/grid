@@ -54,10 +54,7 @@ def _map_path_to_container(path: Optional[str], context: Any) -> str:
     if path.startswith(_CONTAINER_ROOT + "/") or path == _CONTAINER_ROOT:
         return path
 
-    # Agent may send paths as "/file" (root is "/")
-    if path.startswith("/"):
-        return (_CONTAINER_ROOT + path).replace("//", "/")
-
+    # If it's an absolute host path (e.g. /home/user/grid), map to container root first (avoid /workspace/home/user/grid).
     if os.path.isabs(path):
         try:
             if hasattr(context, 'context') and hasattr(context.context, 'factory'):
@@ -71,6 +68,10 @@ def _map_path_to_container(path: Optional[str], context: Any) -> str:
                     return (Path(_CONTAINER_ROOT) / rel).as_posix()
         except Exception:
             pass
+
+    # Agent may send paths as "/file" (root is "/")
+    if path.startswith("/"):
+        return (_CONTAINER_ROOT + path).replace("//", "/")
 
     if not os.path.isabs(path):
         return (Path(_CONTAINER_ROOT) / path).as_posix()
