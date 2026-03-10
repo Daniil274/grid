@@ -16,6 +16,7 @@ from .beads_tools import BEADS_TOOLS  # Beads issue tracker tools
 from .voice_tools import VOICE_TOOLS  # Voice synthesis and sending tools
 from .input_tools import INPUT_TOOLS  # Keyboard and input tools
 from .screen_tools import SCREEN_TOOLS  # Screen capture tools
+from .emergency_tools import EMERGENCY_TOOLS  # Emergency shutdown and pipeline status tools
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -44,6 +45,7 @@ AVAILABLE_TOOLS = {
     **VOICE_TOOLS,  # Voice synthesis tools (2 tools: send_voice_reply, send_voice_ssml)
     **INPUT_TOOLS,  # Keyboard and input tools (3 tools)
     **SCREEN_TOOLS,  # Screen capture tools (1 tool)
+    **EMERGENCY_TOOLS,  # Emergency shutdown and pipeline status tools (2 tools)
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 

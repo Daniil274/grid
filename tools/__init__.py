@@ -10,6 +10,7 @@ from .orchestrator_tools import *
 from .voice_tools import send_voice_reply, send_voice_ssml
 from .input_tools import keyboard_type, keyboard_press, keyboard_hotkey
 from .screen_tools import take_screenshot
+from .emergency_tools import emergency_shutdown, get_pipeline_status
 
 __all__ = [
     "get_tools_by_names",
@@ -22,6 +23,8 @@ __all__ = [
     "keyboard_type", "keyboard_press", "keyboard_hotkey",
     # Screen tools
     "take_screenshot",
+    # Emergency tools
+    "emergency_shutdown", "get_pipeline_status",
     # File tools
     "read_file", "write_file", "list_files", "get_file_info", "search_files", "edit_file_patch", "append_to_file",
     # Git tools - основные операции
