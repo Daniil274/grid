@@ -208,7 +208,21 @@ async def orchestrate(
         if factory is None:
             return "❌ orchestrate: нет доступа к AgentFactory (ожидается context.context.factory)."
 
-        logger.info(f"orchestrate: START | task_len={len(task)} | model_key={model_key}")
+        # Import pipeline registry (inside function to avoid circular import)
+        from core.pipeline_registry import PipelineRegistry, PipelineStatus
+
+        # Register pipeline
+        registry = PipelineRegistry()
+        active_context_id = context_id or factory.get_active_context_id()
+        ctx_user_id = getattr(getattr(context, "context", None), "user_id", None)
+
+        pipeline_id = await registry.register_pipeline(
+            orchestrator_name="orchestrate",
+            context_id=active_context_id,
+            user_id=ctx_user_id
+        )
+
+        logger.info(f"orchestrate: START | task_len={len(task)} | model_key={model_key} | pipeline_id={pipeline_id}")
         verbose_logger.debug(
             f"\n{'='*80}\nORCHESTRATE START\n{'='*80}\n"
             f"Task: {task}\nModel key: {model_key}\n"
@@ -229,7 +243,7 @@ async def orchestrate(
         coerced_executor_tools = _coerce_tool_list(executor_tools)
 
         base_instructions = _coerce_optional_str(agent_system_prompt)
-        
+
         executor = await factory.create_dynamic_agent(
             name=f"executor-{uuid.uuid4().hex[:6]}",
             instructions=base_instructions,
@@ -237,12 +251,55 @@ async def orchestrate(
             tool_names=coerced_executor_tools,
         )
 
+        # Wrap execution in asyncio.Task for pipeline tracking
+        agent_task = asyncio.create_task(
+            factory.run_agent_object_simple(executor, task, context_id=context_id)
+        )
+
+        # Register task in pipeline
+        task_id = await registry.register_task(
+            pipeline_id=pipeline_id,
+            agent_name=executor.name,
+            task=agent_task,
+            metadata={"model_key": resolved_model_key, "tools": coerced_executor_tools}
+        )
+
+        # Execute with emergency shutdown handling
         try:
-            draft = await factory.run_agent_object_simple(executor, task, context_id=context_id)
+            draft = await agent_task
+            await registry.mark_task_completed(pipeline_id, task_id, success=True)
+        except asyncio.CancelledError:
+            # Task was cancelled - check if it was emergency shutdown
+            await registry.mark_task_completed(pipeline_id, task_id, success=False, error="Cancelled")
+            status = await registry.get_pipeline_status(pipeline_id)
+
+            if status.get("status") == PipelineStatus.EMERGENCY_STOPPED.value:
+                # Return emergency shutdown information to orchestrator
+                result = {
+                    "emergency_stopped": True,
+                    "emergency_reason": status.get("emergency_reason"),
+                    "emergency_severity": status.get("emergency_severity"),
+                    "pipeline_id": pipeline_id,
+                    "completed_tasks": len(status.get("completed_tasks", [])),
+                    "failed_tasks": len(status.get("failed_tasks", {})),
+                    "total_tasks": status.get("all_tasks", 0),
+                    "task": task,
+                    "context_id": active_context_id
+                }
+                result_json = json.dumps(result, ensure_ascii=False, indent=2)
+                logger.warning(f"orchestrate: EMERGENCY STOPPED | pipeline_id={pipeline_id} | reason={status.get('emergency_reason')}")
+                verbose_logger.debug(
+                    f"\n{'='*80}\nORCHESTRATE EMERGENCY STOPPED\n{'='*80}\n"
+                    f"Pipeline ID: {pipeline_id}\n"
+                    f"Result:\n{result_json}\n{'='*80}\n"
+                )
+                return result_json
+            # Re-raise if not emergency shutdown
+            raise
         except Exception as exec_err:
+            await registry.mark_task_completed(pipeline_id, task_id, success=False, error=str(exec_err))
             logger.error(f"orchestrate: executor failed | error={exec_err}")
             draft = f"❌ Executor failed: {exec_err}"
-        active_context_id = context_id or factory.get_active_context_id()
 
         result = {
             "task": task,
@@ -250,6 +307,7 @@ async def orchestrate(
             "model_key": resolved_model_key,
             "executor_tools": coerced_executor_tools,
             "final": _extract_text(draft),
+            "pipeline_id": pipeline_id
         }
         result_json = json.dumps(result, ensure_ascii=False, indent=2)
         logger.info(
