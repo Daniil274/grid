@@ -13,6 +13,7 @@ from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputImage, ToolOutputText
 
 from .vision_tools import _image_path_to_data_url
+from utils.path_utils import display_agent_path_from_ctx
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +39,12 @@ if os.environ.get("DISPLAY"):
             screenshot.save(str(last_path))
 
             width, height = screenshot.size
-            logger.info(f"📸 Screenshot saved to {filepath} ({width}x{height})")
+            visible_path = display_agent_path_from_ctx(str(filepath), context)
+            logger.info(f"📸 Screenshot saved to {visible_path} ({width}x{height})")
 
             data_url = _image_path_to_data_url(str(filepath))
             return [
-                ToolOutputText(text=f"Screenshot: {filepath}\nSize: {width}x{height}px"),
+                ToolOutputText(text=f"Screenshot: {visible_path}\nSize: {width}x{height}px"),
                 ToolOutputImage(image_url=data_url, detail="high"),
             ]
         except Exception as e:

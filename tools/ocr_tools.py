@@ -13,6 +13,7 @@ from typing import List, Union, Dict, Any, Optional
 # Import from agents SDK
 from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputImage, ToolOutputText
+from utils.path_utils import display_agent_path_from_ctx, resolve_agent_path_from_ctx
 
 logger = logging.getLogger("tools.ocr")
 
@@ -96,9 +97,10 @@ async def pdf_to_markdown(
         Список блоков контента (текст и изображения) в порядке следования
     """
     python_exe = get_python_executable()
+    visible_pdf_path = display_agent_path_from_ctx(pdf_path, ctx)
 
     if not WRAPPER_SCRIPT.exists():
-        return [ToolOutputText(text=f"❌ OCR wrapper not found at {WRAPPER_SCRIPT}")]
+        return [ToolOutputText(text="❌ OCR wrapper not found")]
 
     # Получаем user_id и workspace
     user_id = get_user_id_from_context(ctx)
@@ -107,19 +109,20 @@ async def pdf_to_markdown(
     # Отладка: логируем что получили
     logger.info(f"OCR tool - user_id: {user_id}, workspace: {workspace_root}")
 
-    # Команда для запуска wrapper
-    cmd = [
-        python_exe,
-        str(WRAPPER_SCRIPT),
-        "--pdf", pdf_path,
-        "--pages", pages,
-        "--quality", "12gb",
-        "--user-id", user_id,
-        "--workspace", str(workspace_root)
-    ]
-
     try:
-        logger.info(f"Running OCR wrapper for user {user_id}: {pdf_path} pages {pages}")
+        resolved_pdf_path = resolve_agent_path_from_ctx(pdf_path, ctx)
+        # Команда для запуска wrapper
+        cmd = [
+            python_exe,
+            str(WRAPPER_SCRIPT),
+            "--pdf", resolved_pdf_path,
+            "--pages", pages,
+            "--quality", "12gb",
+            "--user-id", user_id,
+            "--workspace", str(workspace_root)
+        ]
+
+        logger.info(f"Running OCR wrapper for user {user_id}: {visible_pdf_path} pages {pages}")
 
         result = subprocess.run(
             cmd,

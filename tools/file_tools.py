@@ -17,7 +17,7 @@ from typing import List, Any
 
 from agents import function_tool
 from utils.logger import Logger
-from utils.path_utils import resolve_agent_path_auto
+from utils.path_utils import display_agent_path_auto, resolve_agent_path_auto
 
 
 def _has_unix_write_permission(path: Path) -> bool:
@@ -61,6 +61,14 @@ def log_tool_result(tool_name: str, result: str | Exception = "") -> None:
 def log_tool_error(tool_name: str, error: str | Exception) -> None:
     Logger("tool").error(f"TOOL_ERROR | {tool_name} | {error}")
 
+
+def _resolve_tool_path(raw_path: str) -> tuple[str, str]:
+    """Resolve a tool path and preserve a safe agent-visible representation."""
+    visible_path = display_agent_path_auto(raw_path)
+    resolved_path = resolve_agent_path_auto(raw_path)
+    return visible_path, resolved_path
+
+
 @function_tool
 def read_file(filepath: str) -> str:
     """
@@ -72,28 +80,28 @@ def read_file(filepath: str) -> str:
     Returns:
         str: Содержимое файла
     """
-    log_tool_call("read_file", {"filepath": filepath})
-    filepath = resolve_agent_path_auto(filepath)
-
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("read_file", {"filepath": visible_path})
     try:
+        visible_path, filepath = _resolve_tool_path(filepath)
         path = Path(filepath)
         if not path.exists():
-            log_tool_error("read_file", f"Файл {filepath} не найден")
-            return f"❌ Файл {filepath} не найден"
+            log_tool_error("read_file", f"Файл {visible_path} не найден")
+            return f"❌ Файл {visible_path} не найден"
 
         if not path.is_file():
-            log_tool_error("read_file", f"{filepath} не является файлом")
-            return f"❌ {filepath} не является файлом"
+            log_tool_error("read_file", f"{visible_path} не является файлом")
+            return f"❌ {visible_path} не является файлом"
 
         content = path.read_text(encoding='utf-8')
         lines_count = len(content.splitlines())
 
         log_tool_result("read_file", f"Прочитано {lines_count} строк")
-        return f"📄 Содержимое файла {filepath}:\n\n{content}"
+        return f"📄 Содержимое файла {visible_path}:\n\n{content}"
 
     except Exception as e:
         log_tool_error("read_file", str(e))
-        return f"❌ Ошибка при чтении {filepath}: {str(e)}"
+        return f"❌ Ошибка при чтении {visible_path}: {str(e)}"
 
 @function_tool
 def get_file_info(filepath: str) -> str:
@@ -106,18 +114,18 @@ def get_file_info(filepath: str) -> str:
     Returns:
         str: Информация о файле
     """
-    log_tool_call("get_file_info", {"filepath": filepath})
-    filepath = resolve_agent_path_auto(filepath)
-
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("get_file_info", {"filepath": visible_path})
     try:
+        visible_path, filepath = _resolve_tool_path(filepath)
         path = Path(filepath)
         if not path.exists():
-            log_tool_error("get_file_info", f"Файл {filepath} не найден")
-            return f"❌ Файл {filepath} не найден"
+            log_tool_error("get_file_info", f"Файл {visible_path} не найден")
+            return f"❌ Файл {visible_path} не найден"
 
         if not path.is_file():
-            log_tool_error("get_file_info", f"{filepath} не является файлом")
-            return f"❌ {filepath} не является файлом"
+            log_tool_error("get_file_info", f"{visible_path} не является файлом")
+            return f"❌ {visible_path} не является файлом"
 
         stat = path.stat()
         content = path.read_text(encoding='utf-8')
@@ -126,7 +134,7 @@ def get_file_info(filepath: str) -> str:
 
         log_tool_result("get_file_info", f"Файл {stat.st_size} байт, {lines_count} строк")
 
-        result = f"""📄 Информация о файле {filepath}:
+        result = f"""📄 Информация о файле {visible_path}:
 • Имя: {path.name}
 • Размер: {stat.st_size} байт
 • Строк: {lines_count}
@@ -136,7 +144,7 @@ def get_file_info(filepath: str) -> str:
 
     except Exception as e:
         log_tool_error("get_file_info", str(e))
-        return f"❌ Ошибка при получении информации о {filepath}: {str(e)}"
+        return f"❌ Ошибка при получении информации о {visible_path}: {str(e)}"
 
 @function_tool
 def list_files(directory: str = ".") -> str:
@@ -149,18 +157,18 @@ def list_files(directory: str = ".") -> str:
     Returns:
         str: Список файлов
     """
-    log_tool_call("list_files", {"directory": directory})
-    directory = resolve_agent_path_auto(directory)
-
+    visible_directory = display_agent_path_auto(directory)
+    log_tool_call("list_files", {"directory": visible_directory})
     try:
+        visible_directory, directory = _resolve_tool_path(directory)
         path = Path(directory)
         if not path.exists():
-            log_tool_error("list_files", f"Директория {directory} не найдена")
-            return f"❌ Директория {directory} не найдена"
+            log_tool_error("list_files", f"Директория {visible_directory} не найдена")
+            return f"❌ Директория {visible_directory} не найдена"
         
         if not path.is_dir():
-            log_tool_error("list_files", f"{directory} не является директорией")
-            return f"❌ {directory} не является директорией"
+            log_tool_error("list_files", f"{visible_directory} не является директорией")
+            return f"❌ {visible_directory} не является директорией"
         
         files = []
         dirs = []
@@ -175,15 +183,15 @@ def list_files(directory: str = ".") -> str:
         log_tool_result("list_files", f"Найдено {total_items} элементов")
         
         if total_items == 0:
-            return f"📂 Директория {directory} пуста"
+            return f"📂 Директория {visible_directory} пуста"
         
         all_items = dirs + files  # Директории сначала
-        result = f"📂 Содержимое директории {directory} ({total_items} элементов):\n\n" + "\n".join(all_items)
+        result = f"📂 Содержимое директории {visible_directory} ({total_items} элементов):\n\n" + "\n".join(all_items)
         return result
         
     except Exception as e:
         log_tool_error("list_files", str(e))
-        return f"❌ Ошибка при чтении директории {directory}: {str(e)}"
+        return f"❌ Ошибка при чтении директории {visible_directory}: {str(e)}"
 
 @function_tool
 def write_file(filepath: str, content: str) -> str:
@@ -197,10 +205,10 @@ def write_file(filepath: str, content: str) -> str:
     Returns:
         str: Результат операции
     """
-    log_tool_call("write_file", {"filepath": filepath, "content_length": len(content)})
-    filepath = resolve_agent_path_auto(filepath)
-
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("write_file", {"filepath": visible_path, "content_length": len(content)})
     try:
+        visible_path, filepath = _resolve_tool_path(filepath)
         path = Path(filepath)
 
         # Создаем родительские директории если нужно
@@ -213,11 +221,11 @@ def write_file(filepath: str, content: str) -> str:
         lines_count = len(content.splitlines())
 
         log_tool_result("write_file", f"Записано {lines_count} строк, {size} байт")
-        return f"✅ Файл {filepath} успешно записан ({size} байт)"
+        return f"✅ Файл {visible_path} успешно записан ({size} байт)"
 
     except Exception as e:
         log_tool_error("write_file", str(e))
-        return f"❌ Ошибка при записи файла {filepath}: {str(e)}"
+        return f"❌ Ошибка при записи файла {visible_path}: {str(e)}"
 
 
 @function_tool
@@ -234,10 +242,10 @@ def append_to_file(filepath: str, content: str) -> str:
              Для пустого файла: "Insert N bytes from 0 to N".
              Для непустого: "Insert N bytes from {old_size} to {new_size}".
     """
-    log_tool_call("append_to_file", {"filepath": filepath, "content_length": len(content)})
-    filepath = resolve_agent_path_auto(filepath)
-
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("append_to_file", {"filepath": visible_path, "content_length": len(content)})
     try:
+        visible_path, filepath = _resolve_tool_path(filepath)
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -254,7 +262,7 @@ def append_to_file(filepath: str, content: str) -> str:
         
     except Exception as e:
         log_tool_error("append_to_file", str(e))
-        return f"❌ Ошибка при добавлении в файл {filepath}: {str(e)}"
+        return f"❌ Ошибка при добавлении в файл {visible_path}: {str(e)}"
 
 
 @function_tool
@@ -281,10 +289,10 @@ def search_files(
         str: Результаты поиска
     """
     start_time = time.time()
-    directory = resolve_agent_path_auto(directory)
+    visible_directory = display_agent_path_auto(directory)
     args = {
         "search_pattern": search_pattern,
-        "directory": directory,
+        "directory": visible_directory,
         "use_regex": use_regex,
         "search_in_content": search_in_content,
         "file_extensions": file_extensions,
@@ -293,14 +301,15 @@ def search_files(
     log_tool_call("search_files", args)
 
     try:
+        visible_directory, directory = _resolve_tool_path(directory)
         base_path = Path(directory)
         if not base_path.exists():
-            result = f"ОШИБКА: Директория {directory} не найдена"
+            result = f"ОШИБКА: Директория {visible_directory} не найдена"
             log_tool_result("search_files", result)
             return result
         
         if not base_path.is_dir():
-            result = f"ОШИБКА: {directory} не является директорией"
+            result = f"ОШИБКА: {visible_directory} не является директорией"
             log_tool_result("search_files", result)
             return result
         
@@ -327,7 +336,7 @@ def search_files(
         
         # Логгируем начало поиска
         from utils.logger import log_custom
-        log_custom('debug', 'file_operation', f"Начало поиска в: {directory}", pattern=search_pattern, use_regex=use_regex)
+        log_custom('debug', 'file_operation', f"Начало поиска в: {visible_directory}", pattern=search_pattern, use_regex=use_regex)
         
         # Рекурсивно обходим директории
         for root, dirs, files in os.walk(base_path):
@@ -389,9 +398,9 @@ def search_files(
         
         # Формируем результат
         if not results:
-            result = f"Поиск по паттерну '{search_pattern}' в {directory} не дал результатов"
+            result = f"Поиск по паттерну '{search_pattern}' в {visible_directory} не дал результатов"
         else:
-            result_header = f"Результаты поиска по паттерну '{search_pattern}' в {directory}:\n"
+            result_header = f"Результаты поиска по паттерну '{search_pattern}' в {visible_directory}:\n"
             result_header += f"Найдено {len(results)} результат(ов)"
             if len(results) >= max_results:
                 result_header += f" (показаны первые {max_results})"
@@ -421,19 +430,20 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
         str: Результат операции
     """
     start_time = time.time()
-    filepath = resolve_agent_path_auto(filepath)
-    args = {"filepath": filepath, "patch_content_length": patch_content}
+    visible_path = display_agent_path_auto(filepath)
+    args = {"filepath": visible_path, "patch_content_length": len(patch_content)}
     log_tool_call("edit_file_patch", args)
 
     try:
+        visible_path, filepath = _resolve_tool_path(filepath)
         path = Path(filepath)
         if not path.exists():
-            result = f"ОШИБКА: Файл {filepath} не найден"
+            result = f"ОШИБКА: Файл {visible_path} не найден"
             log_tool_result("edit_file_patch", result)
             return result
         
         if not path.is_file():
-            result = f"ОШИБКА: {filepath} не является файлом"
+            result = f"ОШИБКА: {visible_path} не является файлом"
             log_tool_result("edit_file_patch", result)
             return result
         
@@ -441,7 +451,7 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
         from utils.logger import log_custom
         original_content = path.read_text(encoding='utf-8')
         original_lines = original_content.splitlines(keepends=True)
-        log_custom('debug', 'file_operation', f"Редактирование файла: {filepath}", 
+        log_custom('debug', 'file_operation', f"Редактирование файла: {visible_path}", 
                   original_lines=len(original_lines), patch_lines=len(patch_content.splitlines()))
         
         # Парсим патч
@@ -526,10 +536,10 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
         changes = new_line_count - original_line_count
         
         # Логгируем результат редактирования
-        log_custom('debug', 'file_operation', f"Файл обновлен: {filepath}", 
+        log_custom('debug', 'file_operation', f"Файл обновлен: {visible_path}", 
                   changes=changes, new_lines=new_line_count)
         
-        result = f"✅ Файл {filepath} успешно обновлен патчем"
+        result = f"✅ Файл {visible_path} успешно обновлен патчем"
         if changes != 0:
             result += f" (изменено строк: {changes:+d})"
         
@@ -538,7 +548,7 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
         
     except Exception as e:
         log_tool_error("edit_file_patch", e)
-        result = f"ОШИБКА при применении патча к файлу {filepath}: {str(e)}"
+        result = f"ОШИБКА при применении патча к файлу {visible_path}: {str(e)}"
         log_tool_result("edit_file_patch", result)
         return result
 

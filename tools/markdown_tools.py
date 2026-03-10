@@ -10,7 +10,10 @@ from typing import List, Union, Any, Optional
 from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputImage, ToolOutputText
 from utils.image_utils import ImageUtils
-from utils.path_utils import resolve_agent_path_from_ctx
+from utils.path_utils import (
+    display_agent_path_from_ctx,
+    resolve_agent_path_from_ctx,
+)
 
 logger = logging.getLogger("tools.markdown")
 
@@ -41,10 +44,11 @@ async def read_markdown(
         read_markdown(ctx, "large_doc.md", start_char=50000, max_chars=50000)  # Вторая часть
     """
     try:
+        visible_path = display_agent_path_from_ctx(file_path, ctx)
         abs_path = Path(resolve_agent_path_from_ctx(file_path, ctx))
 
         if not abs_path.exists():
-            return [ToolOutputText(text=f"File not found: {file_path}")]
+            return [ToolOutputText(text=f"File not found: {visible_path}")]
 
         try:
             with open(abs_path, 'r', encoding='utf-8') as f:

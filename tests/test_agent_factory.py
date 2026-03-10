@@ -33,16 +33,12 @@ class TestAgentFactory:
         config = Config(str(config_file))
         factory = AgentFactory(config, str(temp_dir))
         
-        # AgentFactory passes working_directory override to Config constructor
-        # But Config prioritizes settings.working_directory from YAML over constructor parameter
-        # From sample_config, working_directory="/tmp/test" which doesn't exist,
-        # so Config should fall back to the constructor parameter
+        # AgentFactory calls config.set_working_directory with the override
+        # Since allow_path_override is True in sample_config, it should update the working directory
         assert factory.config is config
         
-        # Since "/tmp/test" doesn't exist, Config should use the constructor override
-        # However, get_working_directory() returns config.settings.working_directory if set
-        # So we verify the factory has config reference
-        assert factory.config.get_working_directory() == "/tmp/test"  # From sample_config
+        # We verify the factory updated the config's working directory
+        assert factory.config.get_working_directory() == str(temp_dir)
     
     @pytest.mark.asyncio
     async def test_agent_factory_initialize(self, config_file):
@@ -165,7 +161,7 @@ class TestAgentFactory:
         factory = AgentFactory(config)
         
         with patch('core.agent_factory.AsyncOpenAI') as mock_openai, \
-             patch('core.agent_factory.OpenAIChatCompletionsModel') as mock_model, \
+             patch('core.agent_factory.VisionChatCompletionsModel') as mock_model, \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
@@ -200,7 +196,7 @@ class TestAgentFactory:
         factory = AgentFactory(config)
         
         with patch('core.agent_factory.AsyncOpenAI'), \
-             patch('core.agent_factory.OpenAIChatCompletionsModel'), \
+             patch('core.agent_factory.VisionChatCompletionsModel'), \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
@@ -229,7 +225,7 @@ class TestAgentFactory:
         factory = AgentFactory(config)
         
         with patch('core.agent_factory.AsyncOpenAI'), \
-             patch('core.agent_factory.OpenAIChatCompletionsModel'), \
+             patch('core.agent_factory.VisionChatCompletionsModel'), \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \

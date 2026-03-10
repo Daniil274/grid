@@ -10,6 +10,7 @@ from datetime import datetime
 
 from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputText
+from utils.path_utils import display_agent_path_from_ctx, resolve_agent_path_from_ctx
 
 logger = logging.getLogger("tools.document")
 
@@ -126,9 +127,10 @@ async def markdown_to_html(
         output_path = user_workspace / output_filename
 
         output_path.write_text(html_template, encoding='utf-8')
-        logger.info(f"✅ Created HTML: {output_path}")
+        visible_output = output_path.name
+        logger.info(f"✅ Created HTML: {visible_output}")
 
-        return ToolOutputText(text=f"✅ HTML файл создан: {output_path}")
+        return ToolOutputText(text=f"✅ HTML файл создан: {visible_output}")
 
     except ImportError:
         return ToolOutputText(text="❌ Требуется установить библиотеку 'markdown': pip install markdown")
@@ -218,8 +220,9 @@ async def markdown_to_pdf(
         html_doc = HTML(string=html_template)
         html_doc.write_pdf(output_path)
 
-        logger.info(f"✅ Created PDF: {output_path}")
-        return ToolOutputText(text=f"✅ PDF файл создан: {output_path}")
+        visible_output = output_path.name
+        logger.info(f"✅ Created PDF: {visible_output}")
+        return ToolOutputText(text=f"✅ PDF файл создан: {visible_output}")
 
     except ImportError as e:
         return ToolOutputText(
@@ -269,8 +272,9 @@ async def save_report(
         else:
             output_path.write_text(content, encoding='utf-8')
 
-        logger.info(f"✅ Saved report: {output_path}")
-        return ToolOutputText(text=f"✅ Отчет сохранен: {output_path}")
+        visible_output = output_path.name
+        logger.info(f"✅ Saved report: {visible_output}")
+        return ToolOutputText(text=f"✅ Отчет сохранен: {visible_output}")
 
     except Exception as e:
         logger.error(f"Save report failed: {e}", exc_info=True)
@@ -301,9 +305,10 @@ async def merge_reports(
         combined_content.append(f"Дата создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
         for idx, report_path in enumerate(report_paths):
-            path = Path(report_path)
+            visible_input = display_agent_path_from_ctx(report_path, ctx)
+            path = Path(resolve_agent_path_from_ctx(report_path, ctx))
             if not path.exists():
-                logger.warning(f"Report not found: {report_path}")
+                logger.warning(f"Report not found: {visible_input}")
                 continue
 
             # Добавляем заголовок секции
@@ -324,8 +329,9 @@ async def merge_reports(
 
         output_path.write_text("".join(combined_content), encoding='utf-8')
 
-        logger.info(f"✅ Merged {len(report_paths)} reports into: {output_path}")
-        return ToolOutputText(text=f"✅ Объединенный отчет создан: {output_path}\nОбработано файлов: {len(report_paths)}")
+        visible_output = output_path.name
+        logger.info(f"✅ Merged {len(report_paths)} reports into: {visible_output}")
+        return ToolOutputText(text=f"✅ Объединенный отчет создан: {visible_output}\nОбработано файлов: {len(report_paths)}")
 
     except Exception as e:
         logger.error(f"Merge reports failed: {e}", exc_info=True)

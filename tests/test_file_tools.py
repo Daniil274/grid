@@ -483,7 +483,7 @@ Line 4"""
         # Check that we get tool objects (not necessarily callable directly)
         assert hasattr(tools[0], 'name')  # FunctionTool objects have name attribute
         # Should contain expected file tools
-        assert len(tools) == 6  # Based on FILE_TOOLS dict
+        assert len(tools) == 7  # Based on FILE_TOOLS dict
     
     def test_get_file_tools_by_names_valid(self):
         """Test getting file tools by valid names."""

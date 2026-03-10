@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from agents import function_tool, RunContextWrapper
+from utils.path_utils import sanitize_text_for_agent_from_ctx
 
 logger = logging.getLogger(__name__)
 
@@ -156,8 +157,8 @@ def _run_bd_via_docker_run(args: List[str], cwd: str, context: Any) -> Dict[str,
 
         return {
             "success": success,
-            "output": output,
-            "error": error,
+            "output": sanitize_text_for_agent_from_ctx(output, context),
+            "error": sanitize_text_for_agent_from_ctx(error, context),
             "data": data,
             "exit_code": result.returncode,
         }
@@ -227,8 +228,8 @@ def _run_bd_command(args: List[str], cwd: Optional[str] = None, container_id: Op
 
         return {
             "success": success,
-            "output": output,
-            "error": error,
+            "output": sanitize_text_for_agent_from_ctx(output, context),
+            "error": sanitize_text_for_agent_from_ctx(error, context),
             "data": data,
             "exit_code": result.returncode
         }

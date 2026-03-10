@@ -13,7 +13,7 @@ Tools:
 import logging
 from typing import Any, Optional
 from agents import function_tool, RunContextWrapper
-from utils.path_utils import resolve_agent_path
+from utils.path_utils import display_agent_path, resolve_agent_path
 
 logger = logging.getLogger(__name__)
 
@@ -87,15 +87,16 @@ async def skill_create(
     user_id = _get_user_id(context)
 
     try:
+        visible_path = display_agent_path(file_path, _get_factory(context))
         resolved_path = resolve_agent_path(file_path, _get_factory(context))
         try:
             with open(resolved_path, 'r', encoding='utf-8') as f:
                 content = f.read()
         except Exception as e:
-            return f"❌ Error reading skill file from '{resolved_path}': {e}"
+            return f"❌ Error reading skill file from '{visible_path}': {e}"
 
         manager.create_skill(user_id, name, content, tags)
-        return f"✅ Skill '{name}' created/registered successfully from '{file_path}'."
+        return f"✅ Skill '{name}' created/registered successfully from '{visible_path}'."
     except FileExistsError:
         return f"❌ Skill '{name}' already exists. Use skill_update to modify it."
     except Exception as e:
