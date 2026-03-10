@@ -45,7 +45,7 @@ from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
 from utils.path_utils import set_current_factory, reset_current_factory
-from core.tracing_config import get_tracing_config
+from core.tracing_config import get_tracing_config, ImmediateTraceProcessor
 from core.managers.skill_manager import SkillManager
 
 import os
@@ -363,6 +363,15 @@ class AgentFactory:
             if _TRACING_CONFIGURED:
                 return
             tracing_config.configure_console_tracing(level)
+            # Timeline tracer: тот же путь к БД, что и у serve_timeline / configure_tracing_from_env
+            if os.getenv("GRID_TIMELINE_ENABLED", "true").lower() not in ("0", "false", "no"):
+                try:
+                    from core.timeline_tracer import get_tracer
+                    timeline_exporter = get_tracer()
+                    timeline_processor = ImmediateTraceProcessor(timeline_exporter, export_span_start=True)
+                    tracing_config._processors.append(timeline_processor)
+                except Exception as e:
+                    logging.getLogger("grid.tracing").warning(f"Timeline tracer init failed: {e}")
             tracing_config.apply()
             _TRACING_CONFIGURED = True
 

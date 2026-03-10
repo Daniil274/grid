@@ -119,20 +119,49 @@ class ExecutionTracer(TracingExporter):
 
     def get_traces(self, limit: int = 50, offset: int = 0) -> list[dict]:
         """Список трейсов (новые первые)."""
-        with self._connect() as conn:
-            cur = conn.execute(
-                """
-                SELECT t.*,
-                       COUNT(n.id) as node_count
-                FROM traces t
-                LEFT JOIN nodes n ON n.trace_id = t.id
-                GROUP BY t.id
-                ORDER BY t.started_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (limit, offset),
-            )
-            return [dict(r) for r in cur.fetchall()]
+        # #region agent log
+        _log = {"id": "log_get_traces_enter", "timestamp": datetime.now(timezone.utc).timestamp() * 1000, "location": "core/timeline_tracer.py:get_traces", "message": "get_traces enter", "data": {"db_path": str(self._db_path), "limit": limit, "offset": offset}, "runId": "serve", "hypothesisId": "H2"}
+        try:
+            with open("/home/user/grid/.cursor/debug-11be9a.log", "a") as f:
+                f.write(json.dumps(_log, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT t.*,
+                           COUNT(n.id) as node_count
+                    FROM traces t
+                    LEFT JOIN nodes n ON n.trace_id = t.id
+                    GROUP BY t.id
+                    ORDER BY t.started_at DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
+                result = [dict(r) for r in rows]
+            # #region agent log
+            _log2 = {"id": "log_get_traces_exit", "timestamp": datetime.now(timezone.utc).timestamp() * 1000, "location": "core/timeline_tracer.py:get_traces", "message": "get_traces exit", "data": {"row_count": len(rows), "db_path": str(self._db_path)}, "runId": "serve", "hypothesisId": "H3"}
+            try:
+                with open("/home/user/grid/.cursor/debug-11be9a.log", "a") as f:
+                    f.write(json.dumps(_log2, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            return result
+        except Exception as e:
+            # #region agent log
+            _log3 = {"id": "log_get_traces_error", "timestamp": datetime.now(timezone.utc).timestamp() * 1000, "location": "core/timeline_tracer.py:get_traces", "message": "get_traces error", "data": {"error": str(e), "db_path": str(self._db_path)}, "runId": "serve", "hypothesisId": "H3"}
+            try:
+                with open("/home/user/grid/.cursor/debug-11be9a.log", "a") as f:
+                    f.write(json.dumps(_log3, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            raise
 
     def get_trace(self, trace_id: str) -> dict | None:
         """Полное дерево трейса: trace + вложенные nodes."""
@@ -194,7 +223,14 @@ class ExecutionTracer(TracingExporter):
         trace_id = data.get("id") or ""
         if not trace_id:
             return
-
+        # #region agent log
+        _log = {"id": "log_handle_trace", "timestamp": datetime.now(timezone.utc).timestamp() * 1000, "location": "core/timeline_tracer.py:_handle_trace", "message": "writing trace to DB", "data": {"trace_id": trace_id, "db_path": str(self._db_path)}, "runId": "agent", "hypothesisId": "H1"}
+        try:
+            with open("/home/user/grid/.cursor/debug-11be9a.log", "a") as f:
+                f.write(json.dumps(_log, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         row = {
             "id": trace_id,
             "workflow_name": data.get("workflow_name"),

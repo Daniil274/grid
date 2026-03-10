@@ -111,7 +111,21 @@ def create_app(
 
     @app.get("/api/traces")
     async def list_traces(limit: int = 100, offset: int = 0) -> JSONResponse:
+        # #region agent log
+        try:
+            _log = {"id": "log_list_traces", "timestamp": __import__("time").time() * 1000, "location": "timeline/server.py:list_traces", "message": "GET /api/traces", "data": {"limit": limit, "offset": offset, "tracer_db": str(getattr(tracer, "_db_path", "?"))}, "runId": "serve", "hypothesisId": "H2"}
+            open("/home/user/grid/.cursor/debug-11be9a.log", "a").write(__import__("json").dumps(_log, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         traces = tracer.get_traces(limit=limit, offset=offset)
+        # #region agent log
+        try:
+            _log = {"id": "log_list_traces_result", "timestamp": __import__("time").time() * 1000, "location": "timeline/server.py:list_traces", "message": "get_traces result", "data": {"count": len(traces), "first_id": traces[0]["id"] if traces else None}, "runId": "serve", "hypothesisId": "H1"}
+            open("/home/user/grid/.cursor/debug-11be9a.log", "a").write(__import__("json").dumps(_log, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         return JSONResponse({"traces": traces, "limit": limit, "offset": offset})
 
     @app.get("/api/traces/{trace_id}")

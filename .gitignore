@@ -111,3 +111,6 @@ workspace/screenshots/
 voice_agent/workspace/screenshots/
 ISKOR-autotest
 data/
+
+# Dolt database files (added by bd init)
+.dolt/

@@ -449,6 +449,15 @@ def configure_tracing_from_env() -> None:
             # Используем export_span_start=True чтобы видеть running-статус в реальном времени
             timeline_processor = ImmediateTraceProcessor(timeline_exporter, export_span_start=True)
             tracing_config._processors.append(timeline_processor)
+            # #region agent log
+            try:
+                import time
+                _log = {"id": "log_timeline_registered", "timestamp": time.time() * 1000, "location": "core/tracing_config.py:configure_tracing_from_env", "message": "timeline tracer registered", "data": {"db_path": str(getattr(timeline_exporter, "_db_path", "?"))}, "runId": "agent", "hypothesisId": "H1"}
+                with open("/home/user/grid/.cursor/debug-11be9a.log", "a") as f:
+                    f.write(json.dumps(_log, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
         except Exception as e:
             logging.getLogger("grid.tracing").warning(f"Timeline tracer init failed: {e}")
 

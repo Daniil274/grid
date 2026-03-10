@@ -57,11 +57,8 @@ def _map_path_to_container(path: Optional[str], context: Any) -> str:
     if path.startswith(_CONTAINER_ROOT + "/") or path == _CONTAINER_ROOT:
         return path
 
-    # Agent may send paths as "/file" (root is "/")
-    if path.startswith("/"):
-        return (_CONTAINER_ROOT + path).replace("//", "/")
-
-    # If it's an absolute host path, try to map it
+    # If it's an absolute host path (e.g. /home/user/grid), map it to container root or relative under it.
+    # Must run before the generic "path.startswith("/")" branch, otherwise host path becomes /workspace/home/user/grid.
     if os.path.isabs(path):
         try:
             raw = getattr(context, "context", None)
@@ -77,6 +74,10 @@ def _map_path_to_container(path: Optional[str], context: Any) -> str:
                     return (Path(_CONTAINER_ROOT) / rel).as_posix()
         except Exception:
             pass
+
+    # Agent may send paths as "/file" (root is "/") — only for paths that are not host absolutes
+    if path.startswith("/"):
+        return (_CONTAINER_ROOT + path).replace("//", "/")
 
     # Relative path: assume relative to container root
     return (Path(_CONTAINER_ROOT) / path).as_posix()
@@ -264,7 +265,17 @@ def _extract_factory(context: RunContextWrapper) -> Optional[Any]:
 
 
 def _resolve_directory(context: RunContextWrapper, directory: str) -> str:
-    """Resolve directory for bd commands with robust context fallbacks."""
+    """Resolve directory for bd commands. In container never returns host paths (agent must not see them)."""
+    container_id = _get_container_id(context)
+    if container_id:
+        # Agent must never see or use full host paths. In container only "." or relative paths.
+        if not directory or directory in (".", "/"):
+            return "."
+        if os.path.isabs(directory):
+            # Treat any absolute path as workspace root (e.g. leaked host path) — never pass through
+            return "."
+        return directory
+
     if directory != ".":
         return os.path.abspath(directory)
 
