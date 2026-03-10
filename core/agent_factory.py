@@ -347,12 +347,19 @@ class AgentFactory:
         # Track emitted warnings to avoid log spam (e.g., Responses API fallbacks)
         self._responses_warning_keys: set[str] = set()
         self._stream_observer: StreamObserver = stream_observer or ConsoleStreamObserver()
-        
+
         # Track logged agents to log prompt only once
         self._logged_agents: set[str] = set()
-        
+
         # Track initialized agents (auto_run_tools executed) per user
         self._initialized_agents: set[str] = set()
+
+        # Initialize pipeline registry for emergency shutdown
+        from core.pipeline_registry import PipelineRegistry
+        self._pipeline_registry = PipelineRegistry()
+        # Link memory_store to registry for persistence
+        self._pipeline_registry._memory_store = self.memory_store
+        logger.info("✅ PipelineRegistry initialized")
 
     @staticmethod
     def _configure_tracing_once(level: str) -> None:
@@ -874,7 +881,23 @@ class AgentFactory:
         tools: List[Any] = []
         mcp_servers_list: List[Any] = []
         effective_tool_names = tool_names or []
-        
+
+        # Auto-add emergency_shutdown for agents in active pipeline
+        try:
+            context_id = self.get_active_context_id()
+            if context_id:
+                pipeline = await self._pipeline_registry.get_pipeline_by_context(context_id)
+                from core.pipeline_registry import PipelineStatus
+                if pipeline and pipeline.status == PipelineStatus.RUNNING:
+                    if "emergency_shutdown" not in effective_tool_names:
+                        effective_tool_names.append("emergency_shutdown")
+                        logger.debug(
+                            f"Auto-added emergency_shutdown to agent {name} in pipeline {pipeline.pipeline_id}"
+                        )
+        except Exception as e:
+            # Don't fail agent creation if pipeline check fails
+            logger.warning(f"Failed to check pipeline for emergency_shutdown auto-add: {e}")
+
         # Собираем все имена инструментов (включая MCP)
         all_tool_names = list(effective_tool_names)
         if mcp_tool_names:
@@ -1211,6 +1234,7 @@ class AgentFactory:
         use_active_context: bool = False,
         skip_input_add: bool = False,
         user_id: Optional[str] = None,
+        _retry_count: int = 0,
     ) -> str:
         """
         Run agent with message and context management.
@@ -1724,12 +1748,83 @@ class AgentFactory:
                 # Ensure output is defined before using it
                 if 'output' not in locals():
                     output = "Ошибка: переменная output не определена."
-                
+
                 manual_tool_result = await self._execute_first_tool_call_in_text(output)
                 if manual_tool_result is not None:
                     output = manual_tool_result
             except Exception as e:
                 logger.debug("Manual tool-call hook failed: %s", e, exc_info=e)
+
+            # Check for malformed tool calls and retry with correction
+            MAX_RETRY_COUNT = 2
+            if _retry_count < MAX_RETRY_COUNT and self._detect_malformed_tool_calls(output):
+                logger.warning(
+                    f"Detected malformed tool call in agent output (attempt {_retry_count + 1}/{MAX_RETRY_COUNT}). "
+                    "Retrying with correction prompt..."
+                )
+                Logger("agent_factory").log_verbose(
+                    f"MALFORMED TOOL CALL DETECTED (retry {_retry_count + 1}/{MAX_RETRY_COUNT})",
+                    {
+                        "output_preview": output[:500],
+                        "context_id": active_context_id,
+                        "agent": agent_key,
+                    }
+                )
+
+                # Add the malformed response to context first
+                self.context_manager.add_message(
+                    "assistant",
+                    output,
+                    metadata={
+                        "context_id": active_context_id,
+                        "agent": agent_key,
+                        "type": "agent_response_malformed",
+                        "retry_count": _retry_count,
+                    },
+                )
+
+                # Add system correction message
+                correction_prompt = """КРИТИЧЕСКАЯ ОШИБКА: Вы использовали неправильный формат вызова инструментов!
+
+Ваш ответ содержал некорректный XML формат вида:
+<tool_call><function=имя_функции><parameter=имя_параметра>значение</parameter></function></tool_call>
+
+Это НЕПРАВИЛЬНО! SDK обрабатывает вызовы инструментов автоматически через JSON tool_use blocks.
+Вы НЕ должны писать XML теги вручную.
+
+ПРАВИЛЬНЫЙ способ вызова инструментов:
+- Просто используйте доступные инструменты как обычно через SDK
+- SDK автоматически сериализует вызовы в правильный формат
+- Ваша задача - просто выбрать нужный инструмент и параметры
+
+Пожалуйста, повторите последнее действие, используя ТОЛЬКО стандартные вызовы инструментов через SDK.
+НЕ пишите XML теги вручную!"""
+
+                self.context_manager.add_message(
+                    "user",
+                    correction_prompt,
+                    metadata={
+                        "context_id": active_context_id,
+                        "agent": agent_key,
+                        "type": "system_correction",
+                        "retry_count": _retry_count,
+                    },
+                )
+
+                # Retry with same context (use_active_context=True to preserve history)
+                # Skip adding new input since we already added correction prompt
+                logger.info(f"Retrying agent execution with correction (attempt {_retry_count + 2}/{MAX_RETRY_COUNT + 1})")
+                return await self.run_agent(
+                    agent_key=agent_key,
+                    message="",  # Empty message - we added correction prompt already
+                    context_path=context_path,
+                    context_id=active_context_id,  # Preserve context
+                    stream=stream,
+                    use_active_context=True,
+                    skip_input_add=True,  # Don't add empty message to context again
+                    user_id=user_id,
+                    _retry_count=_retry_count + 1,
+                )
 
             if active_context_id:
                 context_marker_line = f"\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442 ID: {active_context_id}"
@@ -2579,3 +2674,24 @@ class AgentFactory:
     async def _execute_first_tool_call_in_text(self, output: str) -> Optional[str]:
         """Safely ignore manual tool call parsing until fully implemented."""
         return None
+
+    def _detect_malformed_tool_calls(self, output: str) -> bool:
+        """
+        Detect malformed tool call formats in agent output.
+
+        Returns True if malformed tool calls are detected.
+        Examples of malformed formats:
+        - <tool_call><function=get_screen><parameter=save_path>...</parameter></function></tool_call>
+        """
+        # Pattern for malformed tool_call format
+        malformed_patterns = [
+            r'<tool_call>\s*<function=',  # <tool_call><function=...>
+            r'<function=[^>]+>\s*<parameter=',  # <function=name><parameter=...>
+        ]
+
+        for pattern in malformed_patterns:
+            if re.search(pattern, output):
+                logger.warning(f"Detected malformed tool call format in output: {pattern}")
+                return True
+
+        return False
