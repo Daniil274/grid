@@ -60,7 +60,7 @@ source .venv/bin/activate
 2) Dependencies
 ```
 pip install -r requirements.txt           # core and CLI
-pip install -r requirements-api.txt       # API dependencies (FastAPI/uvicorn, etc.)
+
 ```
 3) Configuration
 ```
@@ -117,7 +117,7 @@ Multiple images:
 ```
 python agent_chat.py -a vision_analyzer -m "Compare & img1.png & img2.jpg"
 ```
-See [docs/CLI_IMAGES.md](docs/CLI_IMAGES.md) for full CLI image support guide.
+
 
 ### Telegram Bot
 The system includes a Telegram bot interface with full file handling support:
@@ -145,8 +145,8 @@ python telegram_server.py
 - Video (up to 50 MB)
 
 **Documentation:**
-- [Telegram Files Guide](docs/TELEGRAM_FILES.md) - Complete file handling documentation
-- [Quick Start](docs/TELEGRAM_FILES_QUICKSTART.md) - Testing and troubleshooting guide
+- Telegram Files Guide - Complete file handling documentation
+- Quick Start - Testing and troubleshooting guide
 ## Configuration
 Configuration is defined in `config.yaml` and validated via Pydantic (`schemas.py`).
 
@@ -223,7 +223,7 @@ This mechanism prevents accidental cross-talk between independent requests while
 keeping it trivial to stitch conversations back together when needed.
 
 ## Security
-- Security-aware factory (`core/security_agent_factory.py`) applies guardrails to specified agents.
+- Security-aware factory applies guardrails to specified agents.
 - Middleware: authentication, request security, rate limiting.
 - Git commands run with parameter validation and timeouts; filesystem operations verify path existence/type.
 
@@ -252,9 +252,9 @@ result = await factory.run_agent("vision_analyzer", str(message))
 ```
 
 
-**Full Documentation**: See [docs/MULTIMODAL_GUIDE.md](docs/MULTIMODAL_GUIDE.md) for complete guide, examples, and API reference.
 
-**Examples**: Run `python examples/vision_example.py` for working examples.
+
+
 
 ## Testing
 ```
@@ -275,4 +275,4 @@ pytest --cov=. --cov-report=html
 - Responses API warnings — provider does not support it; set `use_responses_api: false` for the model or use a compatible provider.
 
 ## License
-MIT. See the `LICENSE` file.
+MIT License.

@@ -195,7 +195,6 @@ def __init__(
 | `tracing_level` | str | Уровень трассировки ("INFO", "DEBUG", etc.) |
 | `stream_observer` | StreamObserver | Наблюдатель потоковых событий |
 | `broadcaster` | LiveTransparencyBroadcaster | Для прогресс-уведомлений в Telegram |
-| `unified_memory` | UnifiedMemory | Гибридное управление памятью (устарело) (deprecated) — будет удалён в следующей версии. |
 | `memory_store` | MemoryStore | SQLite-память (новый подход) |
 | `container_id` | str | ID Docker-контейнера для изоляции |
 
@@ -820,5 +819,27 @@ def _configure_tracing_once(level: str) -> None:
 | `ConfigError` | Выбрасывается при невалидной конфигурации |
 
 ---
+
+## Устаревшие компоненты
+
+### UnifiedMemory (deprecated)
+
+**Статус:** Deprecated. Будет удалён в следующей версии. Используйте `memory_store` вместо этого.
+
+**Описание:** Гибридное управление памятью (long-term/short-term).
+
+**Ранее использовалось в:**
+- Конструкторе `AgentFactory(unified_memory=UnifiedMemory(...))`
+
+**Миграция:**
+Перейдите на `memory_store: MemoryStore` (SQLite-based).
+
+```
+# Старое
+factory = AgentFactory(unified_memory=um)
+
+# Новое
+factory = AgentFactory(memory_store=memory_store)
+```
 
 *Документация подготовлена на основе анализа `core/agent_factory.py` (2572 строки).*
