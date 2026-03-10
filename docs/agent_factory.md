@@ -627,7 +627,7 @@ response = await factory.run_agent("vision_agent", message)
 ### 5. Прогресс-уведомления в Telegram
 
 ```python
-from channels.live_transparency import LiveTransparencyBroadcaster
+from examples.telegram_bot.live_transparency import LiveTransparencyBroadcaster
 
 # Создание broadcaster
 broadcaster = LiveTransparencyBroadcaster(channel="telegram_progress")

@@ -7,7 +7,6 @@ from .file_tools import *
 from .git_tools import *
 from .markdown_tools import *
 from .orchestrator_tools import *
-from .voice_tools import send_voice_reply, send_voice_ssml
 from .input_tools import keyboard_type, keyboard_press, keyboard_hotkey
 from .screen_tools import take_screenshot
 from .emergency_tools import emergency_shutdown, get_pipeline_status
@@ -16,9 +15,6 @@ __all__ = [
     "get_tools_by_names",
     "get_all_tools",
     "AVAILABLE_TOOLS",
-    # Voice tools
-    "send_voice_reply",
-    "send_voice_ssml",
     # Input tools
     "keyboard_type", "keyboard_press", "keyboard_hotkey",
     # Screen tools

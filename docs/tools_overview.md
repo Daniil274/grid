@@ -40,7 +40,7 @@
 | screen_tools.py | 2KB | Скриншоты и захват экрана | capture_screen |
 | skill_tools.py | 8KB | Выполнение навыков (skills/md) | execute_skill |
 | vision_tools.py | 7KB | Компьютерное зрение | describe_image, detect_objects |
-| voice_tools.py | 7KB | Голосовые операции (STT/TTS) | transcribe_audio, synthesize_speech |
+| examples/telegram_bot/voice_tools.py | 7KB | Голосовые операции (STT/TTS) | transcribe_audio, synthesize_speech |
 
 ---
 
@@ -66,7 +66,7 @@ tools:
 | Категория | Инструменты | Зависимости |
 |-----------|-------------|-------------|
 | **Файлы/FS** | file_tools.py, git_tools.py | filesystem MCP |
-| **Мультимедиа** | vision_tools.py, ocr_tools.py, voice_tools.py, screen_tools.py | OpenCV, Whisper, TTS |
+| **Мультимедиа** | vision_tools.py, ocr_tools.py, screen_tools.py | OpenCV, Whisper, TTS |
 | **Память** | memory_tools_v2.py | MemoryStore (SQLite) |
 | **Beads** | beads_tools.py | beads API |
 | **Документы** | document_tools.py, markdown_tools.py | pandas, markdown-it |

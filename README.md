@@ -127,7 +127,7 @@ The system includes a Telegram bot interface with full file handling support:
 TELEGRAM_BOT_TOKEN=your_token_here
 
 # Run the Telegram server
-python telegram_server.py
+python examples/telegram_bot/telegram_server.py
 ```
 
 **Features:**
