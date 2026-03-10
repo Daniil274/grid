@@ -32,6 +32,53 @@ def get_current_factory() -> Any:
     return _current_factory.get(None)
 
 
+def _get_working_dir(factory: Any) -> Path | None:
+    """Return the resolved working directory for the current factory."""
+    if factory is None:
+        return None
+    try:
+        return Path(factory.config.get_working_directory()).resolve()
+    except Exception:
+        return None
+
+
+def _is_within(base: Path, candidate: Path) -> bool:
+    """Check that candidate is base or a child of base."""
+    return candidate == base or base in candidate.parents
+
+
+def _resolve_inside_working_dir(file_path: str, working_dir: Path, container_id: Any) -> Path:
+    """
+    Resolve an agent-supplied path inside the working directory.
+
+    Agents must never access anything above the configured working directory.
+    Absolute paths are interpreted as agent-root paths, except when they already
+    point inside the working directory (a leaked host path).
+    """
+    normalized = (file_path or ".").replace("\\", "/")
+    if normalized in ("", ".", "/", "/workspace"):
+        return working_dir
+
+    # Accept leaked absolute host paths only if they still point inside working_dir.
+    if os.path.isabs(file_path):
+        host_candidate = Path(file_path).resolve()
+        if _is_within(working_dir, host_candidate):
+            return host_candidate
+
+        if container_id and normalized.startswith("/workspace/"):
+            relative_part = normalized[len("/workspace/"):]
+        else:
+            relative_part = normalized.lstrip("/")
+        candidate = (working_dir / relative_part).resolve()
+    else:
+        candidate = (working_dir / file_path).resolve()
+
+    if not _is_within(working_dir, candidate):
+        raise ValueError("Path escapes working directory")
+
+    return candidate
+
+
 def resolve_agent_path(file_path: str, factory: Any) -> str:
     """
     Resolve a file path supplied by an agent to an absolute host path.
@@ -51,27 +98,12 @@ def resolve_agent_path(file_path: str, factory: Any) -> str:
     if factory is None:
         return file_path
 
-    working_dir = factory.config.get_working_directory()
-    normalized = file_path.replace("\\", "/")
-    container_id = getattr(factory, "container_id", None)
-
-    if container_id and normalized.startswith("/"):
-        # Container mounts workspace at /workspace; agent paths start with /workspace/...
-        # Strip the mount prefix (/workspace) and resolve the rest against host working_dir.
-        # E.g. "/workspace/sub/file.txt" → "sub/file.txt" → working_dir/sub/file.txt
-        parts = Path(normalized).parts  # ('/', 'workspace', 'sub', 'file.txt')
-        if len(parts) > 2:
-            rel = str(Path(*parts[2:]))
-            return str(Path(working_dir) / rel)
-        # Bare mount root ("/workspace") or bare "/" → return working_dir itself
-        return working_dir
-
-    # Already an absolute host path — return as-is
-    if os.path.isabs(file_path):
+    working_dir = _get_working_dir(factory)
+    if working_dir is None:
         return file_path
 
-    # Relative path → working_dir / file_path
-    return str(Path(working_dir) / file_path)
+    container_id = getattr(factory, "container_id", None)
+    return str(_resolve_inside_working_dir(file_path, working_dir, container_id))
 
 
 def resolve_agent_path_from_ctx(file_path: str, ctx: Any) -> str:
@@ -94,3 +126,86 @@ def resolve_agent_path_auto(file_path: str) -> str:
     Use in tools that must not add a context parameter to their schema.
     """
     return resolve_agent_path(file_path, get_current_factory())
+
+
+def display_agent_path(file_path: str, factory: Any) -> str:
+    """
+    Convert a host or agent path into a safe, agent-visible workspace-relative path.
+
+    Never reveals directories above the working directory.
+    """
+    if factory is None:
+        return file_path
+
+    working_dir = _get_working_dir(factory)
+    if working_dir is None:
+        return file_path
+
+    try:
+        resolved = _resolve_inside_working_dir(file_path, working_dir, getattr(factory, "container_id", None))
+    except Exception:
+        return "."
+
+    rel = os.path.relpath(resolved, working_dir)
+    if rel == ".":
+        return "."
+    return rel.replace("\\", "/")
+
+
+def display_agent_path_from_ctx(file_path: str, ctx: Any) -> str:
+    """Context-based wrapper for safe agent-visible paths."""
+    factory = None
+    try:
+        raw = getattr(ctx, "context", None)
+        if raw is not None:
+            factory = getattr(raw, "factory", None)
+    except Exception:
+        pass
+    return display_agent_path(file_path, factory)
+
+
+def display_agent_path_auto(file_path: str) -> str:
+    """Current-context wrapper for safe agent-visible paths."""
+    return display_agent_path(file_path, get_current_factory())
+
+
+def sanitize_text_for_agent(text: str, factory: Any) -> str:
+    """
+    Best-effort scrub absolute workspace paths from human-facing tool output.
+    """
+    if not text or factory is None:
+        return text
+
+    working_dir = _get_working_dir(factory)
+    if working_dir is None:
+        return text
+
+    sanitized = str(text)
+    variants = {
+        str(working_dir),
+        working_dir.as_posix(),
+        working_dir.as_posix().rstrip("/"),
+    }
+    if os.name == "nt":
+        variants.add(str(working_dir).replace("\\", "/"))
+        variants.add(str(working_dir).replace("/", "\\"))
+
+    for variant in sorted((v for v in variants if v), key=len, reverse=True):
+        sanitized = sanitized.replace(variant + "/", "./")
+        sanitized = sanitized.replace(variant, ".")
+
+    sanitized = sanitized.replace("/workspace/", "./")
+    sanitized = sanitized.replace("/workspace", ".")
+    return sanitized
+
+
+def sanitize_text_for_agent_from_ctx(text: str, ctx: Any) -> str:
+    """Context-based wrapper for output sanitization."""
+    factory = None
+    try:
+        raw = getattr(ctx, "context", None)
+        if raw is not None:
+            factory = getattr(raw, "factory", None)
+    except Exception:
+        pass
+    return sanitize_text_for_agent(text, factory)

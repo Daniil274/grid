@@ -9,7 +9,7 @@ import base64
 
 from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputImage, ToolOutputText
-from utils.path_utils import resolve_agent_path_from_ctx
+from utils.path_utils import display_agent_path_from_ctx, resolve_agent_path_from_ctx
 
 logger = logging.getLogger("tools.vision")
 
@@ -50,25 +50,26 @@ async def _inject_image_for_analysis(
     """
     Загрузка изображения и возврат как ToolOutputImage для анализа агентом.
     """
-    logger.info(f"Processing image: {image_path}")
+    visible_path = display_agent_path_from_ctx(image_path, ctx)
+    logger.info(f"Processing image: {visible_path}")
 
     file_ext = Path(image_path).suffix.lower()
     if file_ext == '.pdf':
         return [ToolOutputText(
             text=f"❌ ОШИБКА: view_image не поддерживает PDF файлы!\n\n"
                  f"Для анализа PDF используй инструмент pdf:\n"
-                 f'pdf(ctx, "{image_path}", pages="1:1")'
+                 f'pdf(ctx, "{visible_path}", pages="1:1")'
         )]
 
-    resolved = resolve_agent_path_from_ctx(image_path, ctx)
     try:
+        resolved = resolve_agent_path_from_ctx(image_path, ctx)
         data_url = _image_path_to_data_url(resolved)
     except Exception as e:
         return [ToolOutputText(text=f"❌ Ошибка при загрузке изображения: {str(e)}")]
 
-    logger.info(f"✅ Returning ToolOutputImage for {image_path}")
+    logger.info(f"✅ Returning ToolOutputImage for {visible_path}")
     return [
-        ToolOutputText(text=f"📷 Изображение: {image_path}\n\nВопрос: {question}"),
+        ToolOutputText(text=f"📷 Изображение: {visible_path}\n\nВопрос: {question}"),
         ToolOutputImage(image_url=data_url, detail="high"),
     ]
 
@@ -151,9 +152,13 @@ async def crop_image(
                 text="❌ Нет последнего скриншота. Сначала вызови take_screenshot()."
             )]
     else:
-        img_file = Path(resolve_agent_path_from_ctx(image_path, ctx)).resolve()
+        try:
+            img_file = Path(resolve_agent_path_from_ctx(image_path, ctx)).resolve()
+        except Exception as e:
+            return [ToolOutputText(text=f"❌ Ошибка при загрузке изображения: {str(e)}")]
         if not img_file.exists():
-            return [ToolOutputText(text=f"❌ Файл не найден: {image_path}")]
+            visible_path = display_agent_path_from_ctx(image_path, ctx)
+            return [ToolOutputText(text=f"❌ Файл не найден: {visible_path}")]
 
     try:
         with Image.open(img_file) as img:
