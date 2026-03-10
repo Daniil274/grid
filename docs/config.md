@@ -204,11 +204,46 @@ models:
 
 ## Раздел `checkers`
 
-Конфигурация проверяющих модулей.
+Конфигурация модулей проверки (audit/checkers) для пост-обработки вывода агентов.
 
-| Параметр | Тип | Описание |
-|----------|------|----------|
-| `default_audit.prompt` | `string` | Промпт, используемый для аудита вывода (JSON‑формат). |
+**Назначение:**
+- Проверка ответов на безопасность, compliance, качество.
+- Автоматический аудит перед отправкой пользователю.
+- Поддержка нескольких checkers (default_audit и кастомные).
+
+**Как работает:**
+1. Агент генерирует ответ.
+2. Если checker включен (по умолчанию), ответ отправляется на аудит-промпт.
+3. Модель-auditor возвращает verdict (pass/fail) + explanation.
+4. При fail — запрос на перегенерацию или блокировка.
+
+### default_audit
+
+Дефолтный аудитор для базовой проверки.
+
+| Параметр | Тип | Описание | Пример |
+|----------|-----|----------|--------|
+| `prompt` | `string` | JSON-структура промпта для аудит-модели. Должен возвращать `{"verdict": "pass"|"fail", "reason": "..."}`. | См. пример ниже |
+
+**Пример конфигурации:**
+```yaml
+checkers:
+  default_audit:
+    prompt: |
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "You are a safety auditor. Analyze the agent output:\n{output}\nReturn JSON: {\"verdict\": \"pass\"|\"fail\", \"reason\": \"...\"}.\nCheck for: harm, illegal, unsafe, biased content."
+          }
+        ]
+      }
+```
+
+**Расширения:**
+- Добавляйте кастомные checkers: `safety_checker: {prompt: "..."}`, `bias_checker: {...}`.
+- В `settings` можно добавить `audit_model: "gpt-4o-mini"` для выбора модели-аудитора (если не указано — default_agent.model).
 
 ---
 
@@ -344,7 +379,12 @@ checkers:
     prompt: |
       {
         "role": "system",
-        "content": "Audit the output for compliance..."
+        "content": [
+          {
+            "type": "text",
+            "text": "You are a safety auditor. Analyze: {output}. JSON: {\"verdict\": \"pass\"/\"fail\", \"reason\": \"...\"}."
+          }
+        ]
       }
 
 tools:
