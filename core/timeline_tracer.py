@@ -1,6 +1,5 @@
 """
 ExecutionTracer — сохраняет дерево выполнения агентов в SQLite.
-
 Хукается в систему трассировки Agents SDK через TracingExporter.
 Поддерживает live-обновления через WebSocket callbacks.
 
@@ -242,17 +241,24 @@ class ExecutionTracer(TracingExporter):
         }
 
         with self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
-                INSERT INTO traces (id, workflow_name, group_id, metadata, started_at, ended_at, status)
-                VALUES (:id, :workflow_name, :group_id, :metadata, :started_at, :ended_at, :status)
-                ON CONFLICT(id) DO UPDATE SET
-                    ended_at = excluded.ended_at,
-                    status   = excluded.status,
-                    metadata = COALESCE(excluded.metadata, traces.metadata)
+                UPDATE traces SET
+                    ended_at = :ended_at,
+                    status   = :status,
+                    metadata = COALESCE(:metadata, metadata)
+                WHERE id = :id
                 """,
                 row,
             )
+            if cur.rowcount == 0:
+                conn.execute(
+                    """
+                    INSERT INTO traces (id, workflow_name, group_id, metadata, started_at, ended_at, status)
+                    VALUES (:id, :workflow_name, :group_id, :metadata, :started_at, :ended_at, :status)
+                    """,
+                    row,
+                )
 
         self._notify_ws({"event": "trace_update", "trace": row})
 
@@ -328,21 +334,28 @@ class ExecutionTracer(TracingExporter):
         }
 
         with self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
-                INSERT INTO nodes (id, trace_id, parent_id, node_type, name, input_data, output_data,
-                                   started_at, ended_at, duration_ms, status, metadata)
-                VALUES (:id, :trace_id, :parent_id, :node_type, :name, :input_data, :output_data,
-                        :started_at, :ended_at, :duration_ms, :status, :metadata)
-                ON CONFLICT(id) DO UPDATE SET
-                    ended_at    = excluded.ended_at,
-                    duration_ms = excluded.duration_ms,
-                    status      = excluded.status,
-                    output_data = COALESCE(excluded.output_data, nodes.output_data),
-                    metadata    = COALESCE(excluded.metadata, nodes.metadata)
+                UPDATE nodes SET
+                    ended_at    = :ended_at,
+                    duration_ms = :duration_ms,
+                    status      = :status,
+                    output_data = COALESCE(:output_data, output_data),
+                    metadata    = COALESCE(:metadata, metadata)
+                WHERE id = :id
                 """,
                 row,
             )
+            if cur.rowcount == 0:
+                conn.execute(
+                    """
+                    INSERT INTO nodes (id, trace_id, parent_id, node_type, name, input_data, output_data,
+                                       started_at, ended_at, duration_ms, status, metadata)
+                    VALUES (:id, :trace_id, :parent_id, :node_type, :name, :input_data, :output_data,
+                            :started_at, :ended_at, :duration_ms, :status, :metadata)
+                    """,
+                    row,
+                )
 
         self._notify_ws({"event": "node_update", "node": row})
 

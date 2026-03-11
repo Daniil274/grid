@@ -48,7 +48,6 @@ async def run_timeline_server(
         port=port,
         log_level="error",
         access_log=False,
-        loop="none",  # use running loop
     )
     server = uvicorn.Server(config)
 
