@@ -379,9 +379,19 @@ async def main():
             print("  Multiple images: 'Message & image1.jpg & image2.png'")
             print("-" * 60)
             
+            async def ainput(prompt: str = "") -> str:
+                print(prompt, end="", flush=True)
+                loop = asyncio.get_running_loop()
+                import sys
+                line = await loop.run_in_executor(None, sys.stdin.readline)
+                if not line:
+                    raise EOFError
+                return line.rstrip('\n')
+            
             while True:
                 try:
-                    user_input = input("\nYou: ").strip()
+                    user_input = await ainput("\nYou: ")
+                    user_input = user_input.strip()
                     
                     if user_input.lower() in ['exit', 'quit']:
                         print("Goodbye!")

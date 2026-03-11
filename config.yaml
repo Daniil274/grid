@@ -670,8 +670,8 @@ agents:
       "file_read", "file_write", "file_append", "file_edit_patch", "file_list", "file_info",
       "terminal", "orchestrate",
       "memory_save", "memory_search", "memory_delete",
-      "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
-      "beads_log_append", "beads_log_read",
+      "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", 
+      "beads_sync", "beads_dep", "beads_init", "beads_log_append", "beads_log_read",
       "skill_create", "skill_list", "skill_update", "skill_read", "skill_delete"
     ]
     auto_run_tools:

@@ -1,8 +1,6 @@
 """
 Запуск сервера визуализации агентов.
-
-    python serve_timeline.py [--port 8789] [--db data/timeline.db]
-
+python serve_timeline.py [--port 8789] [--db data/timeline.db]
 Открывает timeline_dashboard.html по адресу http://127.0.0.1:8789/
 """
 
