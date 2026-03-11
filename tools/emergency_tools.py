@@ -105,7 +105,9 @@ async def emergency_shutdown(
         }, ensure_ascii=False, indent=2)
 
     try:
-        context_id = factory.get_active_context_id()
+        raw_ctx = getattr(context, "context", None)
+        context_id = getattr(raw_ctx, "context_id", None) or factory.get_active_context_id()
+        direct_pipeline_id = getattr(raw_ctx, "pipeline_id", None)
         if not context_id:
             error_msg = "❌ emergency_shutdown: No active context ID"
             logger.error(error_msg)
@@ -117,9 +119,18 @@ async def emergency_shutdown(
         # Get pipeline registry
         registry = PipelineRegistry()
 
-        # Find pipeline by context
-        pipeline = await registry.get_pipeline_by_context(context_id)
-        if pipeline is None:
+        pipeline_id = None
+        if direct_pipeline_id:
+            status = await registry.get_pipeline_status(direct_pipeline_id)
+            if "error" not in status:
+                pipeline_id = direct_pipeline_id
+
+        if pipeline_id is None:
+            pipeline = await registry.get_pipeline_by_context(context_id)
+            if pipeline is not None:
+                pipeline_id = pipeline.pipeline_id
+
+        if pipeline_id is None:
             error_msg = f"❌ emergency_shutdown: No active pipeline found for context {context_id}"
             logger.warning(error_msg)
             return json.dumps({
@@ -130,7 +141,7 @@ async def emergency_shutdown(
 
         logger.critical(
             f"🚨 EMERGENCY SHUTDOWN TRIGGERED 🚨\n"
-            f"Pipeline: {pipeline.pipeline_id}\n"
+            f"Pipeline: {pipeline_id}\n"
             f"Context: {context_id}\n"
             f"Reason: {reason}\n"
             f"Severity: {severity}"
@@ -138,7 +149,7 @@ async def emergency_shutdown(
 
         # Execute emergency shutdown
         result = await registry.emergency_shutdown(
-            pipeline_id=pipeline.pipeline_id,
+            pipeline_id=pipeline_id,
             reason=reason,
             severity=severity
         )
@@ -224,7 +235,9 @@ async def get_pipeline_status(
         }, ensure_ascii=False, indent=2)
 
     try:
-        context_id = factory.get_active_context_id()
+        raw_ctx = getattr(context, "context", None)
+        context_id = getattr(raw_ctx, "context_id", None) or factory.get_active_context_id()
+        direct_pipeline_id = getattr(raw_ctx, "pipeline_id", None)
         if not context_id:
             error_msg = "❌ get_pipeline_status: No active context ID"
             logger.warning(error_msg)
@@ -235,16 +248,25 @@ async def get_pipeline_status(
         # Get pipeline registry
         registry = PipelineRegistry()
 
-        # Find pipeline by context
-        pipeline = await registry.get_pipeline_by_context(context_id)
-        if pipeline is None:
+        pipeline_id = None
+        if direct_pipeline_id:
+            status = await registry.get_pipeline_status(direct_pipeline_id)
+            if "error" not in status:
+                pipeline_id = direct_pipeline_id
+
+        if pipeline_id is None:
+            pipeline = await registry.get_pipeline_by_context(context_id)
+            if pipeline is not None:
+                pipeline_id = pipeline.pipeline_id
+
+        if pipeline_id is None:
             return json.dumps({
                 "error": f"No active pipeline found for context {context_id}",
                 "context_id": context_id
             }, ensure_ascii=False, indent=2)
 
         # Get detailed status
-        status = await registry.get_pipeline_status(pipeline.pipeline_id)
+        status = await registry.get_pipeline_status(pipeline_id)
 
         return json.dumps(status, ensure_ascii=False, indent=2)
 

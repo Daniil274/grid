@@ -241,6 +241,10 @@ class GridRunContext:
     agent_id: Optional[str] = None  # Agent identifier for isolation
     metadata: Optional[dict] = None  # Additional metadata from context manager
     container_id: Optional[str] = None  # Docker container ID for isolation
+    pipeline_id: Optional[str] = None  # Shared serial pipeline for nested agent/tool trees
+    step_id: Optional[str] = None  # Current serialized execution step
+    parent_step_id: Optional[str] = None  # Parent serialized execution step
+    execution_mode: Optional[str] = None  # Runtime execution mode (e.g. serial_subtree)
 
 
 class AgentFactory:
@@ -594,7 +598,7 @@ class AgentFactory:
         """
         reasoning_cfg: Optional[Dict[str, Any]] = getattr(model_config, "reasoning", None)
         if not reasoning_cfg:
-            return ModelSettings()
+            return ModelSettings(parallel_tool_calls=False)
 
         sdk_reasoning: Optional[Reasoning] = None
         extra_body: Optional[Dict[str, Any]] = None
@@ -609,7 +613,11 @@ class AgentFactory:
             # Provider-specific: sent via extra_body as {"reasoning": {"enabled": false}}
             extra_body = {"reasoning": {"enabled": False}}
 
-        return ModelSettings(reasoning=sdk_reasoning, extra_body=extra_body)
+        return ModelSettings(
+            reasoning=sdk_reasoning,
+            extra_body=extra_body,
+            parallel_tool_calls=False,
+        )
     
     async def create_agent(
         self, 
@@ -972,7 +980,10 @@ class AgentFactory:
         if function_tools:
             try:
                 resolved_ft = get_tools_by_names(function_tools)
-                resolved_ft = [self._wrap_tool_with_output_limit(t) for t in resolved_ft]
+                resolved_ft = [
+                    self._wrap_tool_with_output_limit(tool, tool_key)
+                    for tool, tool_key in zip(resolved_ft, function_tools)
+                ]
                 resolved.extend(resolved_ft)
             except Exception as exc:
                 logger.debug("Failed to resolve function tools: %s", exc, exc_info=exc)
@@ -1048,6 +1059,7 @@ class AgentFactory:
         context_id: Optional[str] = None,
         max_turns: Optional[int] = None,
         session: Optional[SQLiteSession] = None,
+        pipeline_id: Optional[str] = None,
     ) -> str:
         """
         Run an Agent instance directly (useful for dynamic agents).
@@ -1091,7 +1103,9 @@ class AgentFactory:
             context_id=active_context_id,
             session=session,
             user_id=ctx_user_id,
-            container_id=self.container_id
+            container_id=self.container_id,
+            pipeline_id=pipeline_id,
+            execution_mode="serial_subtree" if pipeline_id else None,
         )
 
         output = None
@@ -2034,23 +2048,87 @@ class AgentFactory:
 
         return output
 
-    def _wrap_tool_with_output_limit(self, tool: Any) -> Any:
-        """Оборачивает FunctionTool для проверки вывода по лимитам из настроек."""
+    async def _ensure_pipeline_for_run_context(
+        self,
+        run_context_obj: Any,
+        orchestrator_name: str,
+    ) -> tuple[Any, str, str]:
+        """Attach the current execution tree to a shared serial pipeline."""
+        from core.pipeline_registry import PipelineRegistry
+
+        raw_ctx = getattr(run_context_obj, "context", run_context_obj)
+        if raw_ctx is None:
+            raise ValueError("Run context is missing")
+
+        active_context_id = (
+            getattr(raw_ctx, "context_id", None)
+            or self.get_active_context_id()
+            or self.context_manager.start_new_context()
+        )
+        user_id = getattr(raw_ctx, "user_id", None)
+        pipeline_id = getattr(raw_ctx, "pipeline_id", None)
+
+        registry = PipelineRegistry()
+        if not pipeline_id:
+            pipeline_id = await registry.get_or_create_pipeline(
+                orchestrator_name=orchestrator_name,
+                context_id=active_context_id,
+                user_id=user_id,
+            )
+
+        if hasattr(raw_ctx, "context_id") and getattr(raw_ctx, "context_id", None) is None:
+            raw_ctx.context_id = active_context_id
+        if hasattr(raw_ctx, "pipeline_id"):
+            raw_ctx.pipeline_id = pipeline_id
+        if hasattr(raw_ctx, "step_id"):
+            raw_ctx.step_id = registry.get_current_step_id(pipeline_id)
+        if hasattr(raw_ctx, "execution_mode") and getattr(raw_ctx, "execution_mode", None) is None:
+            raw_ctx.execution_mode = "serial_subtree"
+
+        return registry, pipeline_id, active_context_id
+
+    def _wrap_tool_with_output_limit(self, tool: Any, tool_key: Optional[str] = None) -> Any:
+        """Оборачивает FunctionTool сериализацией pipeline и лимитами вывода."""
         settings = self.config.config.settings
         max_tokens = getattr(settings, 'max_tool_output_tokens', None)
         max_chars = getattr(settings, 'max_tool_output', None)
-        if max_tokens is None and max_chars is None:
-            return tool
         if not hasattr(tool, 'on_invoke_tool'):
             return tool
 
         original_invoke = tool.on_invoke_tool
         factory_ref = self
+        tool_name = tool_key or getattr(tool, 'name', '') or getattr(tool, '__name__', 'tool')
+
+        async def invoke_original(ctx, args):
+            result = await original_invoke(ctx, args)
+            if max_tokens is None and max_chars is None:
+                return result
+            return factory_ref._truncate_tool_output(
+                result, getattr(tool, 'name', '') or tool_name
+            )
 
         async def limited_invoke(ctx, args):
-            result = await original_invoke(ctx, args)
-            return factory_ref._truncate_tool_output(
-                result, getattr(tool, 'name', '')
+            registry, pipeline_id, active_context_id = await factory_ref._ensure_pipeline_for_run_context(
+                ctx,
+                f"tool:{tool_name}",
+            )
+            raw_ctx = getattr(ctx, "context", None)
+            if raw_ctx is not None:
+                raw_ctx.context_id = active_context_id
+                raw_ctx.pipeline_id = pipeline_id
+                raw_ctx.execution_mode = "serial_subtree"
+
+            async def execute_step():
+                return await invoke_original(ctx, args)
+
+            return await registry.run_serialized_step(
+                pipeline_id=pipeline_id,
+                agent_name=f"tool:{tool_name}",
+                step_coro_factory=execute_step,
+                metadata={
+                    "kind": "function_tool",
+                    "tool_name": tool_name,
+                },
             )
 
         tool.on_invoke_tool = limited_invoke
@@ -2090,7 +2168,10 @@ class AgentFactory:
         if function_tools:
             try:
                 func_tools = get_tools_by_names(function_tools)
-                func_tools = [self._wrap_tool_with_output_limit(t) for t in func_tools]
+                func_tools = [
+                    self._wrap_tool_with_output_limit(tool, tool_key)
+                    for tool, tool_key in zip(func_tools, function_tools)
+                ]
                 tools.extend(func_tools)
 
             except Exception as e:
@@ -2211,8 +2292,6 @@ class AgentFactory:
             execution.context_id = sub_context_id
 
             try:
-                
-                
                 # Логируем вызов инструмента с красивым именем
                 tool_display_name = getattr(agent_tool, 'name', agent_name)
                 # Добавляем префикс для агентов-инструментов
@@ -2220,10 +2299,32 @@ class AgentFactory:
                 
                 Logger("agent_factory").log_verbose(f"TOOL CALL: {tool_display_name}", normalized_args)
 
-                # Call original function с нормализованными аргументами
-                result = original_invoke(tool_context, **normalized_args)
-                if hasattr(result, '__await__'):
-                    result = await result
+                registry, pipeline_id, active_context_id = await self._ensure_pipeline_for_run_context(
+                    tool_context,
+                    formatted_tool_name,
+                )
+                raw_ctx = getattr(tool_context, "context", None)
+                if raw_ctx is not None:
+                    raw_ctx.context_id = active_context_id
+                    raw_ctx.pipeline_id = pipeline_id
+                    raw_ctx.execution_mode = "serial_subtree"
+
+                async def execute_original():
+                    result = original_invoke(tool_context, **normalized_args)
+                    if hasattr(result, '__await__'):
+                        return await result
+                    return result
+
+                result = await registry.run_serialized_step(
+                    pipeline_id=pipeline_id,
+                    agent_name=formatted_tool_name,
+                    step_coro_factory=execute_original,
+                    metadata={
+                        "kind": "agent_tool",
+                        "tool_name": tool_display_name,
+                        "target_agent": agent_name,
+                    },
+                )
 
                 # ✅ ИЗОЛЯЦИЯ КОНТЕКСТА: НЕ инжектируем мультимодальный вывод в глобальный контекст!
                 # Каждый агент работает со своим изолированным контекстом.
@@ -2339,12 +2440,17 @@ class AgentFactory:
             # Create GridRunContext for sub-agent with LOCAL session access
             # Inherit user_id from parent context
             parent_user_id = context.context.user_id if hasattr(context, 'context') and hasattr(context.context, 'user_id') else None
+            parent_pipeline_id = context.context.pipeline_id if hasattr(context, 'context') and hasattr(context.context, 'pipeline_id') else None
+            parent_step_id = context.context.step_id if hasattr(context, 'context') and hasattr(context.context, 'step_id') else None
             sub_run_ctx = GridRunContext(
                 factory=self,
                 context_id=new_context_id if not should_include_context else current_context_id,
                 session=session,
                 user_id=parent_user_id,
-                container_id=self.container_id
+                container_id=self.container_id,
+                pipeline_id=parent_pipeline_id,
+                parent_step_id=parent_step_id,
+                execution_mode="serial_subtree" if parent_pipeline_id else None,
             )
 
             # Run the sub-agent with enhanced input and session

@@ -211,16 +211,24 @@ async def orchestrate(
         # Import pipeline registry (inside function to avoid circular import)
         from core.pipeline_registry import PipelineRegistry, PipelineStatus
 
-        # Register pipeline
+        # Register or reuse a shared serial pipeline
         registry = PipelineRegistry()
-        active_context_id = context_id or factory.get_active_context_id()
-        ctx_user_id = getattr(getattr(context, "context", None), "user_id", None)
+        raw_ctx = getattr(context, "context", None)
+        active_context_id = context_id or getattr(raw_ctx, "context_id", None) or factory.get_active_context_id()
+        if not active_context_id:
+            active_context_id = factory.context_manager.start_new_context()
+        ctx_user_id = getattr(raw_ctx, "user_id", None)
+        inherited_pipeline_id = getattr(raw_ctx, "pipeline_id", None)
 
-        pipeline_id = await registry.register_pipeline(
+        pipeline_id = inherited_pipeline_id or await registry.get_or_create_pipeline(
             orchestrator_name="orchestrate",
             context_id=active_context_id,
             user_id=ctx_user_id
         )
+        if raw_ctx is not None:
+            raw_ctx.context_id = active_context_id
+            raw_ctx.pipeline_id = pipeline_id
+            raw_ctx.execution_mode = "serial_subtree"
 
         logger.info(f"orchestrate: START | task_len={len(task)} | model_key={model_key} | pipeline_id={pipeline_id}")
         verbose_logger.debug(
@@ -251,26 +259,24 @@ async def orchestrate(
             tool_names=coerced_executor_tools,
         )
 
-        # Wrap execution in asyncio.Task for pipeline tracking
-        agent_task = asyncio.create_task(
-            factory.run_agent_object_simple(executor, task, context_id=context_id)
-        )
-
-        # Register task in pipeline
-        task_id = await registry.register_task(
-            pipeline_id=pipeline_id,
-            agent_name=executor.name,
-            task=agent_task,
-            metadata={"model_key": resolved_model_key, "tools": coerced_executor_tools}
-        )
-
         # Execute with emergency shutdown handling
         try:
-            draft = await agent_task
-            await registry.mark_task_completed(pipeline_id, task_id, success=True)
+            async def run_executor() -> Any:
+                return await factory.run_agent_object_simple(
+                    executor,
+                    task,
+                    context_id=active_context_id,
+                    pipeline_id=pipeline_id,
+                )
+
+            draft = await registry.run_serialized_step(
+                pipeline_id=pipeline_id,
+                agent_name=executor.name,
+                step_coro_factory=run_executor,
+                metadata={"model_key": resolved_model_key, "tools": coerced_executor_tools},
+            )
         except asyncio.CancelledError:
             # Task was cancelled - check if it was emergency shutdown
-            await registry.mark_task_completed(pipeline_id, task_id, success=False, error="Cancelled")
             status = await registry.get_pipeline_status(pipeline_id)
 
             if status.get("status") == PipelineStatus.EMERGENCY_STOPPED.value:
@@ -297,7 +303,6 @@ async def orchestrate(
             # Re-raise if not emergency shutdown
             raise
         except Exception as exec_err:
-            await registry.mark_task_completed(pipeline_id, task_id, success=False, error=str(exec_err))
             logger.error(f"orchestrate: executor failed | error={exec_err}")
             draft = f"❌ Executor failed: {exec_err}"
 

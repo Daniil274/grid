@@ -6,14 +6,22 @@ with emergency shutdown capabilities.
 """
 
 import asyncio
+import contextvars
 import uuid
 import logging
 from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Set, Optional, Any, List
+from typing import Dict, Set, Optional, Any, List, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+_pipeline_lock_tokens: contextvars.ContextVar[Dict[str, str]] = contextvars.ContextVar(
+    "_pipeline_lock_tokens", default={}
+)
+_pipeline_step_ids: contextvars.ContextVar[Dict[str, str]] = contextvars.ContextVar(
+    "_pipeline_step_ids", default={}
+)
 
 
 class PipelineStatus(str, Enum):
@@ -59,6 +67,9 @@ class PipelineInfo:
     emergency_severity: Optional[str] = None
     shutdown_requested_at: Optional[datetime] = None
     shutdown_completed_at: Optional[datetime] = None
+    serial_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    serial_owner_token: Optional[str] = None
+    serial_depth: int = 0
 
 
 class PipelineRegistry:
@@ -127,13 +138,41 @@ class PipelineRegistry:
 
             return pipeline_id
 
+    async def get_or_create_pipeline(
+        self,
+        orchestrator_name: str,
+        context_id: str,
+        user_id: Optional[str] = None,
+    ) -> str:
+        """
+        Return an active pipeline for the context or create a new one.
+
+        This lets nested orchestrators and agent-tools share a single serial runtime.
+        """
+        async with self._lock:
+            pipeline_id = self._context_to_pipeline.get(context_id)
+            if pipeline_id:
+                pipeline = self._pipelines.get(pipeline_id)
+                if pipeline and pipeline.status in (
+                    PipelineStatus.RUNNING,
+                    PipelineStatus.CANCELLING,
+                ):
+                    return pipeline_id
+
+        return await self.register_pipeline(
+            orchestrator_name=orchestrator_name,
+            context_id=context_id,
+            user_id=user_id,
+        )
+
     async def register_task(
         self,
         pipeline_id: str,
         agent_name: str,
         task: asyncio.Task,
         parent_task_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        task_id: Optional[str] = None,
     ) -> str:
         """
         Register a task in a pipeline.
@@ -152,7 +191,7 @@ class PipelineRegistry:
             if pipeline_id not in self._pipelines:
                 raise ValueError(f"Pipeline {pipeline_id} not found")
 
-            task_id = f"task-{uuid.uuid4().hex[:8]}"
+            task_id = task_id or f"task-{uuid.uuid4().hex[:8]}"
 
             task_info = AgentTaskInfo(
                 task_id=task_id,
@@ -178,6 +217,136 @@ class PipelineRegistry:
             )
 
             return task_id
+
+    def get_current_step_id(self, pipeline_id: str) -> Optional[str]:
+        """Return the currently executing step ID for the pipeline in this task context."""
+        return _pipeline_step_ids.get().get(pipeline_id)
+
+    def _set_context_map_value(
+        self,
+        var: contextvars.ContextVar[Dict[str, str]],
+        pipeline_id: str,
+        value: Optional[str],
+    ) -> contextvars.Token:
+        current = dict(var.get())
+        if value is None:
+            current.pop(pipeline_id, None)
+        else:
+            current[pipeline_id] = value
+        return var.set(current)
+
+    async def _enter_serial_scope(self, pipeline_id: str) -> Optional[contextvars.Token]:
+        async with self._lock:
+            pipeline = self._pipelines.get(pipeline_id)
+            if pipeline is None:
+                raise ValueError(f"Pipeline {pipeline_id} not found")
+
+            current_owner = _pipeline_lock_tokens.get().get(pipeline_id)
+            if current_owner and current_owner == pipeline.serial_owner_token:
+                pipeline.serial_depth += 1
+                return None
+
+            serial_lock = pipeline.serial_lock
+
+        await serial_lock.acquire()
+
+        owner_token = uuid.uuid4().hex
+        token = self._set_context_map_value(_pipeline_lock_tokens, pipeline_id, owner_token)
+
+        async with self._lock:
+            pipeline = self._pipelines.get(pipeline_id)
+            if pipeline is None:
+                _pipeline_lock_tokens.reset(token)
+                serial_lock.release()
+                raise ValueError(f"Pipeline {pipeline_id} not found")
+
+            pipeline.serial_owner_token = owner_token
+            pipeline.serial_depth = 1
+
+        return token
+
+    async def _exit_serial_scope(self, pipeline_id: str, token: Optional[contextvars.Token]) -> None:
+        should_release = False
+
+        async with self._lock:
+            pipeline = self._pipelines.get(pipeline_id)
+            if pipeline is None:
+                return
+
+            current_owner = _pipeline_lock_tokens.get().get(pipeline_id)
+            if not current_owner or current_owner != pipeline.serial_owner_token:
+                return
+
+            pipeline.serial_depth = max(0, pipeline.serial_depth - 1)
+            if pipeline.serial_depth == 0:
+                pipeline.serial_owner_token = None
+                should_release = True
+
+        if token is not None:
+            _pipeline_lock_tokens.reset(token)
+
+        if should_release:
+            pipeline = self._pipelines.get(pipeline_id)
+            if pipeline and pipeline.serial_lock.locked():
+                pipeline.serial_lock.release()
+
+    async def run_serialized_step(
+        self,
+        *,
+        pipeline_id: str,
+        agent_name: str,
+        step_coro_factory: Callable[[], Awaitable[Any]],
+        parent_task_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        task_id: Optional[str] = None,
+    ) -> Any:
+        """
+        Run a step under the per-pipeline serial runtime.
+
+        Nested calls within the same pipeline are re-entrant, which preserves depth-first
+        execution of precompiled agent/tool subtrees.
+        """
+        serial_token = await self._enter_serial_scope(pipeline_id)
+        async with self._lock:
+            pipeline = self._pipelines.get(pipeline_id)
+            if pipeline is None:
+                await self._exit_serial_scope(pipeline_id, serial_token)
+                raise ValueError(f"Pipeline {pipeline_id} not found")
+            if pipeline.status not in (
+                PipelineStatus.EMERGENCY_STOPPED,
+                PipelineStatus.CANCELLING,
+            ):
+                pipeline.status = PipelineStatus.RUNNING
+        step_id = task_id or f"task-{uuid.uuid4().hex[:8]}"
+        parent_id = parent_task_id or self.get_current_step_id(pipeline_id)
+        step_token = self._set_context_map_value(_pipeline_step_ids, pipeline_id, step_id)
+        task: Optional[asyncio.Task] = None
+
+        try:
+            task = asyncio.create_task(step_coro_factory())
+            await self.register_task(
+                pipeline_id=pipeline_id,
+                agent_name=agent_name,
+                task=task,
+                parent_task_id=parent_id,
+                metadata=metadata,
+                task_id=step_id,
+            )
+            result = await task
+            await self.mark_task_completed(pipeline_id, step_id, success=True)
+            return result
+        except asyncio.CancelledError:
+            await self.mark_task_completed(pipeline_id, step_id, success=False, error="Cancelled")
+            raise
+        except Exception as exc:
+            await self.mark_task_completed(pipeline_id, step_id, success=False, error=str(exc))
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise
+        finally:
+            _pipeline_step_ids.reset(step_token)
+            await self._exit_serial_scope(pipeline_id, serial_token)
 
     async def get_pipeline_by_context(self, context_id: str) -> Optional[PipelineInfo]:
         """
@@ -357,6 +526,14 @@ class PipelineRegistry:
             else:
                 pipeline.failed_tasks[task_id] = error or "Unknown error"
                 logger.warning(f"Task {task_id} failed: {error}")
+
+            if pipeline.status == PipelineStatus.RUNNING:
+                has_running = any(not info.task.done() for info in pipeline.tasks.values())
+                if not has_running:
+                    if pipeline.failed_tasks:
+                        pipeline.status = PipelineStatus.FAILED
+                    else:
+                        pipeline.status = PipelineStatus.COMPLETED
 
     async def get_pipeline_status(self, pipeline_id: str) -> Dict[str, Any]:
         """
