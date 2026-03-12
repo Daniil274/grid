@@ -55,8 +55,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .leg-sq{width:9px;height:9px;border-width:1.5px;border-style:solid;}
 
 /* -- Detail panel -- */
-.detail{width:440px;background:var(--bg2);border-left:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;transform:translateX(100%);transition:transform .2s ease;}
-.detail.open{transform:translateX(0);}
+.detail{width:440px;background:var(--bg2);border-left:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;margin-right:-440px;transition:margin-right .2s ease;}
+.detail.open{margin-right:0;}
 .dp-h{padding:10px 13px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:8px;flex-shrink:0;}
 .dp-icon{font-size:20px;flex-shrink:0;margin-top:1px;}
 .dp-info{flex:1;min-width:0;}
@@ -182,6 +182,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
     <div class="toolbar">
       <span class="tbar-name" id="traceTitle">Выберите трейс</span>
       <div class="sep"></div>
+      <button class="btn" id="snakeBtn" onclick="toggleSnake()" title="Змейка">🐍</button>
       <button class="btn" onclick="cy&&cy.zoom(cy.zoom()*1.25)">＋</button>
       <button class="btn" onclick="cy&&cy.zoom(cy.zoom()*.8)">－</button>
       <button class="btn" onclick="cy&&cy.fit(40)">Fit</button>
@@ -245,7 +246,7 @@ cytoscape.use(cytoscapeDagre);
 const API='';
 let allTraces=[],activeTraceId=null,curTrace=null;
 let ws=null,liveMode=true;
-let cy=null,layoutDir='LR',genHidden=false;
+let cy=null,layoutDir='LR',genHidden=false,snakeMode=false;
 let detNode=null,rrNodeId=null,rrTraceId=null,rrMsgs=[];
 
 // ── Cytoscape styles ──────────────────────────────────────────────────────
@@ -429,23 +430,39 @@ function buildEls(nodesFlat){
   const byId={};
   for(const n of nodesFlat) byId[n.id]=n;
 
+  const isHiddenNode=node=>genHidden&&node&&node.node_type==='generation';
+
   // Global step numbers by started_at
   const sorted=[...nodesFlat].sort((a,b)=>(a.started_at||'').localeCompare(b.started_at||''));
   const stepOf={};
   sorted.forEach((n,i)=>{stepOf[n.id]=i+1;});
 
-  // Group children by parent, sorted by start time
+  const visibleNodes=nodesFlat.filter(n=>!isHiddenNode(n));
+  const visibleById={};
+  for(const n of visibleNodes) visibleById[n.id]=n;
+
+  function nearestVisibleParentId(node){
+    let cur=byId[node.parent_id];
+    while(cur){
+      if(!isHiddenNode(cur)) return cur.id;
+      cur=byId[cur.parent_id];
+    }
+    return null;
+  }
+
+  // Group visible children by nearest visible parent, sorted by start time
   const groups={};
-  for(const n of nodesFlat){
-    if(!n.parent_id)continue;
-    if(!groups[n.parent_id])groups[n.parent_id]=[];
-    groups[n.parent_id].push(n);
+  for(const n of visibleNodes){
+    const parentId=nearestVisibleParentId(n);
+    if(!parentId) continue;
+    if(!groups[parentId]) groups[parentId]=[];
+    groups[parentId].push(n);
   }
   for(const g of Object.values(groups))
     g.sort((a,b)=>(a.started_at||'').localeCompare(b.started_at||''));
 
   const els=[];
-  for(const n of nodesFlat){
+  for(const n of visibleNodes){
     els.push({group:'nodes',data:{
       id:n.id,label:mkLabel(n,stepOf[n.id]),
       type:n.node_type||'unknown',status:n.status||'completed',
@@ -453,27 +470,40 @@ function buildEls(nodesFlat){
     }});
   }
 
-  // Sequential chain edges
+  // Sequential chain edges over visible nodes.
   for(const [pid,children] of Object.entries(groups)){
-    const parent=byId[pid];
-    if(!children.length)continue;
+    const parent=visibleById[pid];
+    if(!children.length) continue;
 
     if(parent){
-      // Entry: parent agent/function → first child
-      els.push({group:'edges',data:{id:`en-${pid}`,source:pid,target:children[0].id,type:'entry'}});
+      els.push({group:'edges',data:{id:`en-${pid}-${children[0].id}`,source:pid,target:children[0].id,type:'entry'}});
     }
 
-    for(let i=0;i<children.length-1;i++){
-      const a=children[i], b=children[i+1];
-      // If next node is an agent — it's a spawn
-      const isSpawn=b.node_type==='agent';
-      const stepDiff=`→${stepOf[b.id]}`;
-      els.push({group:'edges',data:{
-        id:`sq-${a.id}-${b.id}`,
-        source:a.id,target:b.id,
-        type:isSpawn?'spawn':'seq',
-        seqLabel:isSpawn?'':stepDiff,
-      }});
+    let lastMainNode = null;
+    for(let i=0;i<children.length;i++){
+      const a=children[i];
+      if (a.node_type === 'agent') {
+          // Динамический агент: связываем его с последним основным узлом
+          if (lastMainNode) {
+              els.push({group:'edges',data:{
+                id:`sq-${lastMainNode.id}-${a.id}`,
+                source:lastMainNode.id,target:a.id,
+                type:'spawn',
+                seqLabel:'',
+              }});
+          }
+      } else {
+          // Обычный узел: связываем с предыдущим основным узлом
+          if (lastMainNode) {
+              els.push({group:'edges',data:{
+                id:`sq-${lastMainNode.id}-${a.id}`,
+                source:lastMainNode.id,target:a.id,
+                type:'seq',
+                seqLabel:`→${stepOf[a.id]}`,
+              }});
+          }
+          lastMainNode = a;
+      }
     }
   }
 
@@ -497,6 +527,155 @@ function applyLaneLayout(nodesFlat){
   const globalIdx={};
   sorted.forEach((n,i)=>{ globalIdx[n.id]=i; });
 
+  if(snakeMode){
+    const MAIN_ROW_GAP=90;
+    const BRANCH_ROW_GAP=80;
+    const BRANCH_STACK_GAP=60;
+    const mainStepsPerRow=4;
+    const branchStepsPerRow=3;
+
+    function nearestVisibleParentId(node){
+      let cur=byId[node.parent_id];
+      while(cur){
+        if(cy.$('#'+cur.id).length) return cur.id;
+        cur=byId[cur.parent_id];
+      }
+      return null;
+    }
+
+    const childGroups={};
+    for(const n of nodesFlat){
+      const pid=nearestVisibleParentId(n);
+      if(!pid) continue;
+      if(!childGroups[pid]) childGroups[pid]=[];
+      childGroups[pid].push(n);
+    }
+    for(const g of Object.values(childGroups))
+      g.sort((a,b)=>(a.started_at||'').localeCompare(b.started_at||''));
+
+    const rootNodes=sorted.filter(n=>!nearestVisibleParentId(n));
+    const placed=new Set();
+
+    function collectMainFlow(nodeId, includeSelf=true){
+      const flow=[];
+      if(includeSelf) flow.push(nodeId);
+      for(const child of (childGroups[nodeId]||[])){
+        const isDynamicAgent=child.node_type==='agent';
+        if(isDynamicAgent){
+          flow.push(child.id);
+          continue;
+        }
+        flow.push(...collectMainFlow(child.id,true));
+      }
+      return flow;
+    }
+
+    function collectBranchFlow(agentId, includeSelf=false){
+      const flow=includeSelf?[agentId]:[];
+      for(const child of (childGroups[agentId]||[])){
+        const isDynamicAgent=child.node_type==='agent';
+        if(isDynamicAgent){
+          flow.push(child.id);
+          // Внутри ветки динамические агенты тоже собирают свои ветки
+          flow.push(...collectBranchFlow(child.id, false));
+          continue;
+        }
+        flow.push(...collectMainFlow(child.id,true));
+      }
+      return flow;
+    }
+
+    function snakePoint(originX, originY, index, stepsPerRow, dirSign, rowGap){
+      const row=Math.floor(index/stepsPerRow);
+      const col=index%stepsPerRow;
+      const actualCol=row%2===0?col:(stepsPerRow-1-col);
+      return {
+        x: originX + dirSign*actualCol*(W+STEP_GAP),
+        y: originY + row*(H+rowGap),
+      };
+    }
+
+    function snakeHeight(count, stepsPerRow, rowGap){
+      if(!count) return 0;
+      const rows=Math.ceil(count/stepsPerRow);
+      return rows*H + Math.max(0,rows-1)*rowGap;
+    }
+
+    function placeSnake(flowIds, options={}){
+      const {
+        originX=0,
+        originY=0,
+        stepsPerRow=mainStepsPerRow,
+        dirSign=1,
+        rowGap=MAIN_ROW_GAP,
+      }=options;
+
+      for(let i=0;i<flowIds.length;i++){
+        const id=flowIds[i];
+        if(placed.has(id)) continue;
+        const node=cy.$('#'+id);
+        if(!node.length) continue;
+        const pt=snakePoint(originX,originY,i,stepsPerRow,dirSign,rowGap);
+        node.position(pt);
+        placed.add(id);
+      }
+    }
+
+    const mainFlow=[];
+    for(const root of rootNodes){
+      mainFlow.push(...collectMainFlow(root.id,true));
+    }
+
+    const branchAgents=sorted.filter(n=>n.node_type==='agent'&&nearestVisibleParentId(n));
+
+    cy.startBatch();
+    
+    const mainOriginX = 0;
+    const rightOriginX = mainStepsPerRow * (W + STEP_GAP) + 60;
+    const leftOriginX = -(W + STEP_GAP) - 60;
+
+    placeSnake(mainFlow,{originX:mainOriginX,originY:0,stepsPerRow:mainStepsPerRow,dirSign:1,rowGap:MAIN_ROW_GAP});
+    
+    let leftY = 0;
+    let rightY = 0;
+    let branchCount=0;
+    
+    for(const agent of branchAgents){
+      const childFlow=collectBranchFlow(agent.id,false);
+      if(!childFlow.length) continue;
+      const anchor=cy.$('#'+agent.id);
+      if(!anchor.length) continue;
+      
+      const isRight=branchCount%2===0;
+      branchCount++;
+      
+      if(isRight){
+        const startY = Math.max(rightY, anchor.position('y'));
+        placeSnake(childFlow,{
+          originX:rightOriginX,
+          originY:startY,
+          stepsPerRow:branchStepsPerRow,
+          dirSign:1,
+          rowGap:BRANCH_ROW_GAP,
+        });
+        rightY = startY + snakeHeight(childFlow.length, branchStepsPerRow, BRANCH_ROW_GAP) + BRANCH_STACK_GAP;
+      } else {
+        const startY = Math.max(leftY, anchor.position('y'));
+        placeSnake(childFlow,{
+          originX:leftOriginX,
+          originY:startY,
+          stepsPerRow:branchStepsPerRow,
+          dirSign:-1,
+          rowGap:BRANCH_ROW_GAP,
+        });
+        leftY = startY + snakeHeight(childFlow.length, branchStepsPerRow, BRANCH_ROW_GAP) + BRANCH_STACK_GAP;
+      }
+    }
+    cy.endBatch();
+    cy.fit(40);
+    return;
+  }
+
   // Find the closest agent ancestor (or self) for each node
   function agentOf(node){
     if(!node) return null;
@@ -512,7 +691,6 @@ function applyLaneLayout(nodesFlat){
     if(aid!=null && !(aid in agentLane)) agentLane[aid]=nextLane++;
   }
 
-  // Position nodes
   cy.startBatch();
   for(const n of nodesFlat){
     const node=cy.$('#'+n.id);
@@ -530,16 +708,31 @@ function applyLaneLayout(nodesFlat){
 }
 
 // ── Layout ─────────────────────────────────────────────────────────────────
-function runLayout(animate=true, nodesFlat=null){
+function getRenderedNodesFlat(nodesFlat=null){
+  const source=nodesFlat||(curTrace&&curTrace.nodes_flat)||[];
+  return source.filter(n=>!(genHidden&&n.node_type==='generation'));
+}
+
+function runLayout(animate=true, nodesFlat=null, fitViewport=true){
   if(!cy)return;
-  const nf=nodesFlat||(curTrace&&curTrace.nodes_flat)||[];
+  const nf=getRenderedNodesFlat(nodesFlat);
   if(nf.length>0){
     applyLaneLayout(nf);
-    if(animate) cy.animate({fit:{eles:cy.elements(),padding:40}},{duration:280});
+    if(fitViewport){
+      if(animate) cy.animate({fit:{eles:cy.elements(),padding:40}},{duration:280});
+      else cy.fit(cy.elements(),40);
+    }
     return;
   }
   // Fallback: dagre
-  cy.layout({name:'dagre',rankDir:layoutDir,nodeSep:20,rankSep:70,ranker:'longest-path',animate,animationDuration:250,padding:40,fit:true}).run();
+  cy.layout({name:'dagre',rankDir:layoutDir,nodeSep:20,rankSep:70,ranker:'longest-path',animate,animationDuration:250,padding:40,fit:fitViewport}).run();
+}
+
+function toggleSnake(){
+  snakeMode = !snakeMode;
+  const btn = document.getElementById('snakeBtn');
+  if(btn) btn.classList.toggle('on', snakeMode);
+  runLayout(true);
 }
 
 function toggleDir(){
@@ -551,13 +744,7 @@ function toggleDir(){
 function toggleGen(){
   genHidden=!genHidden;
   document.getElementById('genBtn').classList.toggle('on',genHidden);
-  if(!cy)return;
-  cy.nodes('[type="generation"]').style('display',genHidden?'none':'element');
-  cy.edges().forEach(e=>{
-    const sd=e.source().data('type'),td=e.target().data('type');
-    if(sd==='generation'||td==='generation')e.style('display',genHidden?'none':'element');
-  });
-  runLayout(true);
+  if(curTrace) renderTrace(curTrace);
 }
 
 // ── Load & render ─────────────────────────────────────────────────────────
@@ -580,8 +767,8 @@ function renderTrace(trace){
   document.getElementById('legend').style.display='flex';
   if(!cy)initCy();
   cy.elements().remove();
-  const nf=trace.nodes_flat||[];
-  cy.add(buildEls(nf));
+  const nf=getRenderedNodesFlat(trace.nodes_flat||[]);
+  cy.add(buildEls(trace.nodes_flat||[]));
   runLayout(false, nf);
   pulseRunning();
 }
@@ -623,6 +810,28 @@ function renderSidebar(){
 // ── Detail panel ──────────────────────────────────────────────────────────
 let _dpTab='text'; // active tab id
 
+function animateCyResize() {
+  const zoom=cy?cy.zoom():1;
+  const pan=cy?{...cy.pan()}:null;
+  const start = Date.now();
+  const interval = setInterval(() => {
+    if (cy) cy.resize();
+    if (Date.now() - start > 250) {
+      clearInterval(interval);
+      if (cy) {
+        cy.resize();
+        if (snakeMode) {
+          runLayout(false, null, false);
+        }
+        cy.zoom(zoom);
+        if(pan){
+          cy.pan(pan);
+        }
+      }
+    }
+  }, 16);
+}
+
 function showDetail(node){
   if(!node)return;
   detNode=node;
@@ -642,12 +851,14 @@ function showDetail(node){
   }
   renderDetailTabs(node);
   document.getElementById('detail').classList.add('open');
+  animateCyResize();
 }
 
 function closeDetail(){
   document.getElementById('detail').classList.remove('open');
   detNode=null;
   if(cy)cy.elements().removeClass('dim');
+  animateCyResize();
 }
 
 function renderDetailTabs(node){
@@ -885,7 +1096,7 @@ function handleWS(p){
         if(idx>=0)Object.assign(curTrace.nodes_flat[idx],n);else curTrace.nodes_flat.push(n);
         cy.elements().remove();
         cy.add(buildEls(curTrace.nodes_flat));
-        runLayout(true,curTrace.nodes_flat);
+        runLayout(true,getRenderedNodesFlat(curTrace.nodes_flat));
       }
     }
     if(n.status==='running')pulseRunning();
@@ -912,6 +1123,14 @@ function toast(msg,type=''){const c=document.getElementById('toasts');const el=d
   await loadTraces();
   setInterval(()=>{if(!liveMode)loadTraces();},15000);
   connectWS();
+  
+  window.addEventListener('resize', () => {
+    if(cy) cy.resize();
+    if(snakeMode) {
+      clearTimeout(window._resizeTimer);
+      window._resizeTimer = setTimeout(() => runLayout(true), 200);
+    }
+  });
 })();
 </script>
 </body>
