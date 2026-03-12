@@ -232,6 +232,15 @@ models:
     max_tokens: 8000
     description: "Hunter Alpha модель"
     streaming_enabled: true
+
+  grok-4.20-beta:
+    name: "x-ai/grok-4.20-beta"
+    provider: "openrouter"
+    temperature: 0.5
+    max_tokens: 4000
+    description: "Grok 4.20 Beta модель"
+    streaming_enabled: true
+  
   
 # Минимальная секция проверяющих (для аудита в Output guardrail)
 checkers:
@@ -566,7 +575,7 @@ tools:
     name: "orchestrate"
     description: "Запускает динамический пайплайн (создает агента на лету)"
     env_vars:
-      DEFAULT_MODEL: "mercury-2"  # Модель для динамического агента по умолчанию
+      DEFAULT_MODEL: "grok-4.1-fast"  # Модель для динамического агента по умолчанию
     prompt_addition: |
       Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
       task: четкая задача для выполнения (строка).
@@ -685,7 +694,7 @@ agents:
  # Координатор агентов
   coordinator:
     name: "Координатор"
-    model: "hunter-alpha"
+    model: "grok-4.20-beta"
     tools: [
       "file_read", "file_write", "file_append", "file_edit_patch", "file_list", "file_info",
       "terminal", "orchestrate",
