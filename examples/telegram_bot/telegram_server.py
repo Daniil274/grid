@@ -8,6 +8,13 @@ Telegram Server - главная точка входа для Unified Agent Bot
 
 import sys
 import io
+from pathlib import Path
+
+# При прямом запуске (python telegram_server.py) корень проекта не в пакете — добавляем в path
+if __package__ is None:
+    _grid_root = Path(__file__).resolve().parent.parent.parent  # repo root (grid/)
+    if str(_grid_root) not in sys.path:
+        sys.path.insert(0, str(_grid_root))
 
 # Настроить stdout и stderr для UTF-8 СРАЗУ (fix для Windows эмодзи)
 if sys.platform == 'win32':
@@ -19,12 +26,14 @@ import argparse
 import logging
 import signal
 import os
-from pathlib import Path
 from typing import Optional
 import yaml
 from dotenv import load_dotenv
 
-from .telegram_bridge import TelegramBridge, BridgeConfig
+if __package__ is None:
+    from examples.telegram_bot.telegram_bridge import TelegramBridge, BridgeConfig
+else:
+    from .telegram_bridge import TelegramBridge, BridgeConfig
 
 # Загрузка переменных окружения
 load_dotenv()

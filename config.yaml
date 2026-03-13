@@ -29,6 +29,10 @@ settings:
     tools_common_rules: |
       Всегда выполняй операции с файлами через инструменты и возвращай их результаты.
       Запрещено утверждать создание/изменение файла без вызова инструмента.
+  # Проектные инструменты (голос и др.) — загружаются из указанной директории
+  project_tools:
+    enabled: true
+    tools_directory: "examples/telegram_bot"
   # Настройки обработки изображений
   image_processing:
     enabled: true
@@ -80,9 +84,9 @@ telegram:
 voice:
   enabled: true
   stt:
-    model_size: "large-v3"      # Whisper: tiny, base, small, medium, large-v3
-    device: "cuda"              # cuda или cpu
-    compute_type: "float16"     # float16 (GPU), int8 (CPU fallback)
+    model_size: "base"      # Whisper: tiny, base, small, medium, large-v3
+    device: "cpu"              # cuda или cpu
+    compute_type: "int8"     # float16 (GPU), int8 (CPU fallback)
   tts:
     model_path: "speech-text/model.pt"  # Silero v5_ru model
     speaker: "xenia"            # xenia, aidar, kseniya, baya, eugene
@@ -276,6 +280,9 @@ tools:
   file_list:
     type: "function"
     description: "Список файлов в директории (без дерева)."
+  get_file_info:
+    type: "function"
+    description: "Информация о файле."
   file_info:
     type: "function"
     description: "Информация о файле (размер, строки, расширение)."
@@ -1011,7 +1018,7 @@ agents:
     name: "Чат-агент"
     model: "mercury-2"
     tools: [
-      "filesystem", "doc_analyzer", "coordinator",
+      "file_list", "file_read", "get_file_info", "coordinator",
       "beads_init", "beads_ready", "beads_list", "beads_create",
       "beads_show", "beads_update", "beads_close",
       "beads_sync", "beads_dep",
