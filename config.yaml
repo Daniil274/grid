@@ -244,6 +244,14 @@ models:
     max_tokens: 4000
     description: "Grok 4.20 Beta модель"
     streaming_enabled: true
+
+  healer-alpha:
+    name: "openrouter/healer-alpha"
+    provider: "openrouter"
+    temperature: 0.5
+    max_tokens: 4000
+    description: "Healer Alpha модель"
+    streaming_enabled: true
   
   
 # Минимальная секция проверяющих (для аудита в Output guardrail)
@@ -297,7 +305,11 @@ tools:
 
   pdf:
     type: "function"
-    description: "Конвертирует PDF в Markdown через OCR с кэшированием результатов"
+    description: "Рендерит страницы PDF в PNG, сохраняет их в pdf_output и возвращает как изображения"
+
+  pdf-ocr:
+    type: "function"
+    description: "Выполняет OCR по страницам PDF и возвращает структурированный текст/изображения"
 
   get_screenshot_ocr:
     type: "function"
@@ -402,6 +414,10 @@ tools:
   analyze_screenshot:
     type: "function"
     description: "Analyze UI screenshot"
+  
+  crop_image:
+    type: "function"
+    description: "Crop an image to a specific region"
 
   # ============================================================================
   # Beads Tools - инструменты для работы с трекером задач Beads (bd)
@@ -701,7 +717,7 @@ agents:
  # Координатор агентов
   coordinator:
     name: "Координатор"
-    model: "grok-4.20-beta"
+    model: "qwen-3.5-plus"
     tools: [
       "file_read", "file_write", "file_append", "file_edit_patch", "file_list", "file_info",
       "terminal", "orchestrate",
@@ -948,33 +964,25 @@ agents:
   # Document analyzer - агент для работы с документами и изображениями
   doc_analyzer:
     name: "Анализатор документов"
-    model: "qwen-3.5-plus"
+    model: "healer-alpha"
     tools: [
-      "read_markdown", "pdf", "list_files", "view_image",
-      "markdown_to_html", "markdown_to_pdf", "save_report", "merge_reports"
+      "pdf", "list_files", "file_read", "view_image", "crop_image", "get_file_info"
     ]
     base_prompt: "base"
     description: "Агент для анализа, конвертации и создания отчетов из документов"
     custom_prompt: |
-      Ты специалист по работе с документами: PDF, Markdown, изображениями.
+      Ты специалист по работе с документами.
       ⚠️ КРИТИЧЕСКИ ВАЖНО - НИКОГДА НЕ ЧИТАЙ ДОКУМЕНТЫ ПОЛНОСТЬЮ!
       Обязательная стратегия работы с PDF:
       1. ВСЕГДА начинай с первых страниц: pdf(path, pages="1:1") или pages="1:2"
-      2. НИКОГДА не читай больше 5 страниц за раз: pages="1:5" максимум
-      3. Если нужно больше - делай несколько запросов по 3-5 страниц
-
-      Инструменты:
-      - pdf(path, pages) - OCR (ТОЛЬКО малые диапазоны!)
-      - list_files(dir) - список файлов
-      - view_image(path, question) - анализ изображений
-      - save_report(content, filename, format) - сохранение
-      - markdown_to_html/pdf(...) - экспорт
+      2. НИКОГДА не читай больше 3 страниц за раз: pages="1:3" максимум
+      3. Сначала используй pdf(...) чтобы получить страницы как изображения
+      4. Если нужно больше - делай несколько запросов по 2-5 страниц
 
       Жесткие правила:
       1. list_files ПЕРЕД любой работой с файлами
       2. PDF: ТОЛЬКО pages="1:1" или "1:2" для начала
       3. НИКОГДА не используй большие диапазоны типа "1:20" или "1:50"
-      5. Отвечай на русском
 
   # Memory agent - специализированный агент для работы с памятью
   memory_agent:
@@ -1016,15 +1024,16 @@ agents:
   # Chat agent - главный агент для общения с пользователем
   chat_agent:
     name: "Чат-агент"
-    model: "mercury-2"
+    model: "hunter-alpha"
     tools: [
-      "file_list", "file_read", "get_file_info", "coordinator",
+      "file_list", "file_read", "get_file_info", 
+      "coordinator", "doc_analyzer",
       "beads_init", "beads_ready", "beads_list", "beads_create",
       "beads_show", "beads_update", "beads_close",
       "beads_sync", "beads_dep",
-      "beads_log_append", "beads_log_read",
       "send_voice_reply", "send_voice_ssml",
       "skill_list", "skill_read", "skill_search", "skill_create", "skill_update", "skill_delete",
+      "memory_search", "memory_agent"
     ]
     auto_run_tools:
       - name: "beads_init"
@@ -1033,46 +1042,36 @@ agents:
         parameters: { "directory": "${working_directory}" }
       - name: "skill_list"
         parameters: {}
+      - name: "memory_search"
+        parameters: {}
     description: "Главный агент для общения с пользователем"
     custom_prompt: |
       Ты главный чат-агент системы - первая точка контакта с пользователем.
-      Твоя задача: понимать запросы пользователя и эффективно решать их, используя подагентов.
-
-      У тебя есть доступ к:
-      - beads (beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep): трекер задач для планирования и отслеживания работы
-      - shared log (beads_log_append, beads_log_read): единый append-only лог (удобно для игр/чатов, чтение только новых записей)
-      - coordinator: для выполнения комплексных задач и работы с файлами и проектами
-      - filesystem: для базовых операций с файлами
-      - doc_analyzer: для анализа PDF, Markdown документов и изображений
-      - send_voice_reply(text, speaker): синтез речи и отправка голосового сообщения
-      - send_voice_ssml(ssml_text, speaker): синтез речи с SSML (темп, тон, паузы) и отправка
-      - skill_read(name), skill_search(query): чтение и поиск скиллов из базы знаний
-      - skill_create(name, file_path, tags), skill_update(name, content), skill_delete(name): управление скиллами
-
+      Твоя задача: понимать запросы пользователя и эффективно решать их, используя свои инструменты или агентов.
       ## Скиллы
       При старте автоматически выполняется skill_list() — в результатах инструмента ты видишь доступные скиллы.
       Скиллы — это твои знания о специальных задачах и процедурах.
-      Если запрос связан с каким-либо скиллом — прочитай его через skill_read(name) прежде чем отвечать.
-
+      После запроса пользователя прочитай скилл который можно использовать для решения задачи из списка доступных скиллов.
       ## Формат ответа
       Отвечай в том же формате, в котором пользователь написал тебе:
-      - Если запрос помечен [ГОЛОСОВОЕ СООБЩЕНИЕ] — ОБЯЗАТЕЛЬНО вызови send_voice_reply() с кратким ответом,
-        а затем при необходимости дополни текстом.
+      - Если запрос помечен [ГОЛОСОВОЕ СООБЩЕНИЕ] — ОБЯЗАТЕЛЬНО вызови send_voice_reply() или send_voice_ssml()
+        а затем при необходимости дополни коротким сообщением.
       - Если пользователь написал текстом — отвечай текстом.
       Исключение: если в памяти пользователя сохранён другой предпочтительный формат ответов.
-
       Стратегия работы:
       1. Анализируй запрос пользователя
-      2. Для планирования и задач используй beads (beads_ready, beads_show и т.д.)
+      2. Для планирования и комплексных задач используй beads (beads_ready, beads_show и т.д.)
       3. Для простых задач (чтение файлов, проверка путей...) - используй свои инструменты
-      4. Для анализа изображений, PDF и Markdown документов - делегируй doc_analyzer
+      4. Для анализа изображений и документов - делегируй doc_analyzer
       5. Для комплексных задач - делегируй coordinator
 
       Всегда:
       - Отвечай на русском языке
-      - Будь дружелюбным и полезным
-      - Объясняй, что ты делаешь и почему
       - Перед передачей задачи агенту сделай запись в трекере.
-      - Допустимо в одном ответе сделать запись и сразу запустить заранее спланированный compiled pipeline.
+      - Допустимо в одном ответе использовать несколько инструментов и/или агентов. При одновременном вызове они будут выполняться последовательно.
       - Не рассчитывай на промежуточное мышление между уже запущенными шагами; передавай зависимости через beads и другие внешние артефакты.
-      - Если что-то непонятно - уточни у пользователя
+      - Если контекст запроса непонятен - уточни у пользователя
+      - Делая запросы к агентам передавай им весь контекст задачи.
+
+      Запрещено:
+      - Использовать в финальном ответе таблицы, md разметку и другие тэги, коды и т.п.

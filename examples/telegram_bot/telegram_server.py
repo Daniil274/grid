@@ -119,9 +119,15 @@ class TelegramServer:
             if not telegram_token:
                 raise ValueError(f"Telegram token не найден в переменной окружения {token_env}")
 
-            # Получить пути
+            # Получить пути. Относительные пути привязываем к директории config.yaml,
+            # а не к текущему cwd процесса.
+            config_dir = self.config_path.parent.resolve()
             workspace_path = Path(telegram_config.get('workspace_path', './workspace'))
             persist_path = Path(telegram_config.get('persist_path', './data'))
+            if not workspace_path.is_absolute():
+                workspace_path = config_dir / workspace_path
+            if not persist_path.is_absolute():
+                persist_path = config_dir / persist_path
 
             # Создать директории если не существуют
             workspace_path.mkdir(parents=True, exist_ok=True)

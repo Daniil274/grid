@@ -110,7 +110,9 @@ TOOL_ALIASES = {
     "merge_reports": "merge_reports",
 
     # OCR and document processing
-    "pdf": "pdf_to_markdown",
+    "pdf": "pdf",
+    "pdf-ocr": "pdf-ocr",
+    "pdf_ocr": "pdf-ocr",
     "pdf_to_markdown": "pdf_to_markdown",
     "read_markdown": "read_markdown",
 
