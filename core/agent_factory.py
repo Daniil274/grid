@@ -2606,7 +2606,16 @@ class AgentFactory:
             # docker exec -i -w <container workdir> [ENV] <container_id> <command> <args>
 
             # Forward proxy env vars from host so npm/npx can download packages inside container
-            for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"):
+            for _proxy_var in (
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "NO_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "no_proxy",
+                "all_proxy",
+            ):
                 _proxy_val = os.environ.get(_proxy_var)
                 if _proxy_val:
                     env.setdefault(_proxy_var, _proxy_val)
