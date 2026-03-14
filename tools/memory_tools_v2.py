@@ -13,6 +13,9 @@ from agents import function_tool, RunContextWrapper
 
 logger = logging.getLogger(__name__)
 
+GLOBAL_MEMORY_TYPES = {"long_term", "insight", "skill"}
+SESSION_MEMORY_TYPES = {"short_term", "task", "task_plan"}
+
 
 def _get_memory_store(context: RunContextWrapper) -> Any:
     """
@@ -47,6 +50,22 @@ def _get_memory_store(context: RunContextWrapper) -> Any:
         logger.error(f"❌ Failed to get memory_store from context: {e}")
         return None
 
+def _get_memory_optimizer(context: RunContextWrapper) -> Any:
+    """
+    Get MemoryOptimizer from context.
+    """
+    try:
+        raw = getattr(context, "context", None)
+        if raw is None:
+            return None
+        factory = getattr(raw, "factory", None)
+        if factory is None:
+            return None
+        return getattr(factory, "memory_optimizer", None)
+    except Exception as e:
+        logger.error(f"❌ Failed to get memory_optimizer from context: {e}")
+        return None
+
 
 def _get_context_ids(context: RunContextWrapper) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
@@ -79,6 +98,29 @@ def _get_context_ids(context: RunContextWrapper) -> Tuple[Optional[str], Optiona
         pass
         
     return session_id, user_id, agent_id
+
+
+def _scope_session_for_type(memory_type: Optional[str], session_id: Optional[str]) -> Optional[str]:
+    """
+    Only session-scoped memory types should be tied to the current session.
+
+    Long-term memory and insights must remain visible across sessions.
+    """
+    if memory_type in SESSION_MEMORY_TYPES:
+        return session_id
+    return None
+
+
+def _scope_agent_for_type(memory_type: Optional[str], agent_id: Optional[str]) -> Optional[str]:
+    """
+    Shared memory must be visible across agents for the same user.
+
+    We still keep creator agent_id as metadata in storage, but do not use it
+    as a default filter for global memory reads.
+    """
+    if memory_type in SESSION_MEMORY_TYPES:
+        return agent_id
+    return None
 
 
 # ============================================================================
@@ -134,18 +176,33 @@ async def memory_save(
         # Get context IDs
         session_id, user_id, agent_id = _get_context_ids(context)
 
+        scoped_session_id = _scope_session_for_type(type, session_id)
+
         # Save to store
         entry_id = store.save(
             content=text,
             type=type,
             tags=tags,
             importance=importance,
-            session_id=session_id,
+            session_id=scoped_session_id,
             user_id=user_id,
             agent_id=agent_id
         )
 
         logger.info(f"💾 Saved memory #{entry_id} [{type}]: {text[:50]}...")
+
+        # Trigger async optimization
+        optimizer = _get_memory_optimizer(context)
+        if optimizer:
+            import asyncio
+            try:
+                # Use the running event loop to schedule the task
+                loop = asyncio.get_running_loop()
+                loop.create_task(optimizer.process_new_entry(entry_id))
+                logger.debug(f"⚡ Scheduled optimization for memory #{entry_id}")
+            except Exception as e:
+                logger.error(f"⚠️ Could not schedule memory optimization: {e}")
+
         return f"✅ Saved to {type} memory (ID: {entry_id})"
 
     except Exception as e:
@@ -190,19 +247,21 @@ async def memory_search(
 
     try:
         # Validate type if provided
-        if type and type not in {"long_term", "short_term", "task", "task_plan"}:
-            return f"❌ Invalid type '{type}'. Use: long_term, short_term, task, task_plan, or empty for all"
+        if type and type not in {"long_term", "short_term", "task", "task_plan", "insight"}:
+            return f"❌ Invalid type '{type}'. Use: long_term, short_term, task, task_plan, insight, or empty for all"
 
         # Get context IDs
         session_id, user_id, agent_id = _get_context_ids(context)
+        scoped_session_id = _scope_session_for_type(type or None, session_id)
+        scoped_agent_id = _scope_agent_for_type(type or None, agent_id)
 
         # Search
         results = store.search(
             query=query,
             type=type or None,
-            session_id=session_id,
+            session_id=scoped_session_id,
             user_id=user_id,
-            agent_id=agent_id,
+            agent_id=scoped_agent_id,
             limit=limit
         )
 
@@ -302,7 +361,7 @@ async def memory_delete(
         if query:
             results = store.search(
                 query=query,
-                session_id=session_id,
+                session_id=None,
                 user_id=user_id,
                 agent_id=agent_id,
                 limit=10
@@ -420,6 +479,17 @@ async def task_update(
                 status="active"
             )
             logger.info(f"📋 Added task entry #{entry_id}: {content[:50]}...")
+            
+            # Trigger async optimization
+            optimizer = _get_memory_optimizer(context)
+            if optimizer:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(optimizer.process_new_entry(entry_id))
+                except Exception as e:
+                    logger.error(f"⚠️ Could not schedule memory optimization: {e}")
+                    
             return f"✅ Added task entry (ID: {entry_id})"
 
         elif action == "plan":
@@ -491,6 +561,69 @@ async def task_update(
 
 
 # ============================================================================
+# TOOL 5: memory_ingest_file - Ingest file into memory
+# ============================================================================
+
+@function_tool
+async def memory_ingest_file(
+    context: RunContextWrapper,
+    filepath: str,
+    type: str = "long_term",
+    tags: str = "",
+    importance: float = 0.5
+) -> str:
+    """
+    Read a file and ingest its contents into memory.
+    
+    Use this to quickly remember the contents of a text file, log, or document.
+    The file will be read, saved to memory, and asynchronously optimized (summarized and entities extracted).
+
+    Args:
+        filepath: Path to the file to ingest
+        type: Memory type (default: long_term)
+        tags: Comma-separated tags
+        importance: 0.0 to 1.0
+
+    Returns:
+        Confirmation message
+    """
+    import os
+    from pathlib import Path
+    
+    # Try to read the file
+    try:
+        path = Path(filepath)
+        if not path.exists():
+            return f"❌ File not found: {filepath}"
+            
+        # Basic text reading
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        # Truncate if too large (e.g., > 100KB)
+        if len(content) > 100000:
+            content = content[:100000] + "\n...[TRUNCATED]"
+            
+        # Format the memory content
+        memory_content = f"File: {path.name}\nPath: {filepath}\n\nContent:\n{content}"
+        
+        # Save to memory
+        return await memory_save(
+            context=context,
+            text=memory_content,
+            type=type,
+            tags=f"file,{tags}" if tags else "file",
+            importance=importance
+        )
+        
+    except UnicodeDecodeError:
+        return f"❌ Cannot read {filepath}: Not a text file or unsupported encoding."
+    except Exception as e:
+        logger.error(f"❌ Failed to ingest file {filepath}: {e}")
+        return f"❌ Error ingesting file: {e}"
+
+
+# ============================================================================
 # TOOL REGISTRY
 # ============================================================================
 
@@ -499,6 +632,7 @@ MEMORY_TOOLS_V2 = {
     "memory_search": memory_search,
     "memory_delete": memory_delete,
     "task_update": task_update,
+    "memory_ingest_file": memory_ingest_file,
 }
 
 

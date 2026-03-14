@@ -25,6 +25,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
+import httpx
 
 from core.unified_memory import UnifiedMemory
 from core.memory_store import MemoryStore
@@ -2082,12 +2083,44 @@ class TelegramBridge:
 
     # ===== УПРАВЛЕНИЕ ЖИЗНЕННЫМ ЦИКЛОМ =====
 
+    async def _check_proxy_reachable(self) -> bool:
+        """Проверка доступности прокси перед запросами к Telegram. Возвращает True если прокси ок или не задан."""
+        if not self.config.proxy_url:
+            return True
+        try:
+            async with httpx.AsyncClient(
+                proxy=self.config.proxy_url,
+                timeout=10.0,
+                follow_redirects=True,
+            ) as client:
+                r = await client.get("https://api.telegram.org")
+            # 200 или редирект (302 и т.д.) — прокси и Telegram доступны
+            if r.status_code < 400:
+                logger.info("Прокси доступен, соединение с Telegram API возможно")
+                return True
+            raise RuntimeError(f"api.telegram.org вернул HTTP {r.status_code}")
+        except Exception as e:
+            logger.error(
+                "Не удалось подключиться к Telegram через прокси %s: %s. "
+                "Проверьте: 1) Xray запущен и слушает на указанном порту (ss -tlnp | grep 10808); "
+                "2) для SOCKS5 установлен httpx[socks] (pip install httpx[socks]); "
+                "3) попробуйте HTTP-прокси Xray вместо SOCKS5 (например http://127.0.0.1:10809).",
+                self.config.proxy_url,
+                e,
+            )
+            return False
+
     async def start(self):
         """Запуск бота"""
         try:
             logger.info("🚀 Запуск TelegramBridge...")
 
             await self.initialize()
+
+            if not await self._check_proxy_reachable():
+                raise RuntimeError(
+                    "Прокси недоступен. Запустите Xray и проверьте порт в config (telegram.proxy)."
+                )
 
             logger.info("📡 Запуск Telegram polling...")
             await self.app.initialize()
@@ -2129,10 +2162,20 @@ class TelegramBridge:
             if self.app:
                 try:
                     await asyncio.wait_for(self.app.updater.stop(), timeout=shutdown_timeout)
+                except RuntimeError as re:
+                    if "not running" in str(re).lower():
+                        logger.debug("Updater не был запущен (инициализация не завершилась), пропуск stop")
+                    else:
+                        raise
                 except asyncio.TimeoutError:
                     logger.warning("updater.stop() по таймауту")
                 try:
                     await asyncio.wait_for(self.app.stop(), timeout=shutdown_timeout)
+                except RuntimeError as re:
+                    if "not running" in str(re).lower():
+                        logger.debug("Application не была запущена, пропуск app.stop()")
+                    else:
+                        raise
                 except asyncio.TimeoutError:
                     logger.warning("app.stop() по таймауту")
                 try:
