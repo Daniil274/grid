@@ -323,6 +323,16 @@ class AgentFactory:
             self.memory_store = MemoryStore(db_path=str(db_path))
             logger.info(f"✅ MemoryStore initialized: {db_path}")
 
+        # Initialize MemoryOptimizer
+        from core.memory_optimizer import MemoryOptimizer
+        
+        self.memory_optimizer = MemoryOptimizer(
+            memory_store=self.memory_store,
+            config=self.config,
+            agent_factory=self
+        )
+        logger.info("✅ MemoryOptimizer initialized")
+
         # Initialize SkillManager
         from pathlib import Path
         self.skill_manager = SkillManager(
@@ -1360,6 +1370,7 @@ class AgentFactory:
                         factory=self,
                         context_id=active_context_id or "run",
                         user_id=ctx_user_id,
+                        agent_id=agent_key,
                         container_id=self.container_id
                     )
                     agent_tools = getattr(agent, "tools", []) or []

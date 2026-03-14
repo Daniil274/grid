@@ -11,6 +11,7 @@ Provides:
 - User and Agent isolation
 """
 
+import shutil
 import sqlite3
 import logging
 from pathlib import Path
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 class MemoryEntry:
     """Single memory entry."""
     id: int
-    type: str  # long_term | short_term | task | task_plan | skill
+    type: str  # long_term | short_term | task | task_plan | skill | insight
     content: str
     tags: str
     created_at: str
@@ -38,6 +39,10 @@ class MemoryEntry:
     status: Optional[str] = None  # active | completed | abandoned
     importance: float = 0.5
     is_archived: int = 0
+    summary: Optional[str] = None
+    entities: str = '[]'
+    connections: str = '[]'
+    source_ids: str = '[]'
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -77,9 +82,9 @@ class MemoryStore:
         )
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
-    VALID_TYPES = {"long_term", "short_term", "task", "task_plan", "skill"}
+    VALID_TYPES = {"long_term", "short_term", "task", "task_plan", "skill", "insight"}
     VALID_STATUSES = {"active", "completed", "abandoned"}
 
     def __init__(self, db_path: str):
@@ -98,8 +103,35 @@ class MemoryStore:
 
     def _init_db(self):
         """Initialize database schema with FTS5."""
+        # If DB file exists, check integrity first (handles "database disk image is malformed")
+        if self.db_path.exists():
+            try:
+                with sqlite3.connect(str(self.db_path)) as conn:
+                    cursor = conn.execute("PRAGMA integrity_check")
+                    row = cursor.fetchone()
+                    if row is None or (row[0] if isinstance(row, (tuple, list)) else row) != "ok":
+                        raise sqlite3.DatabaseError(
+                            "PRAGMA integrity_check failed: " + (str(row[0]) if row else "unknown")
+                        )
+            except sqlite3.DatabaseError as e:
+                logger.error(
+                    "❌ Memory database is corrupted (%s). Backing up and recreating. Backup: %s",
+                    e,
+                    self.db_path.with_suffix(self.db_path.suffix + ".corrupted"),
+                )
+                backup = self.db_path.with_suffix(self.db_path.suffix + ".corrupted")
+                try:
+                    shutil.copy2(str(self.db_path), str(backup))
+                    self.db_path.unlink()
+                except Exception as backup_err:
+                    logger.exception("Failed to backup/remove corrupted DB: %s", backup_err)
+                    raise
+                logger.info("🔄 Corrupted DB removed. A new database will be created.")
+            except Exception as e:
+                logger.warning("⚠️ Error checking integrity: %s", e)
+
         # Check if we need to reset the database (schema migration)
-        # We do this by checking if the 'user_id' column exists in the 'memory' table
+        # We do this by checking if the 'summary' column exists in the 'memory' table
         # if the table already exists.
         reset_needed = False
         if self.db_path.exists():
@@ -107,11 +139,11 @@ class MemoryStore:
                 with sqlite3.connect(str(self.db_path)) as conn:
                     cursor = conn.execute("PRAGMA table_info(memory)")
                     columns = [row[1] for row in cursor.fetchall()]
-                    if columns and "user_id" not in columns:
+                    if columns and "summary" not in columns:
                         reset_needed = True
-                        logger.info("🔄 Old schema detected (missing user_id). Resetting memory database as requested.")
+                        logger.info("🔄 Old schema detected (missing summary). Resetting memory database as requested.")
             except Exception as e:
-                logger.warning(f"⚠️ Error checking schema: {e}")
+                logger.warning("⚠️ Error checking schema: %s", e)
 
         if reset_needed:
             try:
@@ -137,7 +169,7 @@ class MemoryStore:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS memory (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    type        TEXT NOT NULL CHECK(type IN ('long_term','short_term','task','task_plan','skill')),
+                    type        TEXT NOT NULL CHECK(type IN ('long_term','short_term','task','task_plan','skill','insight')),
                     content     TEXT NOT NULL,
                     tags        TEXT DEFAULT '',
                     created_at  TEXT DEFAULT (datetime('now')),
@@ -148,7 +180,11 @@ class MemoryStore:
                     agent_id    TEXT,
                     status      TEXT CHECK(status IS NULL OR status IN ('active','completed','abandoned')),
                     importance  REAL DEFAULT 0.5 CHECK(importance >= 0 AND importance <= 1),
-                    is_archived INTEGER DEFAULT 0 CHECK(is_archived IN (0, 1))
+                    is_archived INTEGER DEFAULT 0 CHECK(is_archived IN (0, 1)),
+                    summary     TEXT,
+                    entities    TEXT DEFAULT '[]',
+                    connections TEXT DEFAULT '[]',
+                    source_ids  TEXT DEFAULT '[]'
                 )
             """)
 
@@ -167,6 +203,8 @@ class MemoryStore:
                 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                     content,
                     tags,
+                    summary,
+                    entities,
                     content='memory',
                     content_rowid='id'
                 )
@@ -175,8 +213,8 @@ class MemoryStore:
             # Triggers to sync FTS5 with main table
             conn.execute("""
                 CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
-                    INSERT INTO memory_fts(rowid, content, tags)
-                    VALUES (new.id, new.content, new.tags);
+                    INSERT INTO memory_fts(rowid, content, tags, summary, entities)
+                    VALUES (new.id, new.content, new.tags, new.summary, new.entities);
                 END
             """)
 
@@ -188,7 +226,7 @@ class MemoryStore:
 
             conn.execute("""
                 CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
-                    UPDATE memory_fts SET content = new.content, tags = new.tags
+                    UPDATE memory_fts SET content = new.content, tags = new.tags, summary = new.summary, entities = new.entities
                     WHERE rowid = new.id;
                 END
             """)
@@ -229,14 +267,18 @@ class MemoryStore:
         task_id: Optional[str] = None,
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
-        status: Optional[str] = None
+        status: Optional[str] = None,
+        summary: Optional[str] = None,
+        entities: str = '[]',
+        connections: str = '[]',
+        source_ids: str = '[]'
     ) -> int:
         """
         Save a memory entry.
 
         Args:
             content: Memory content
-            type: long_term | short_term | task | task_plan | skill
+            type: long_term | short_term | task | task_plan | skill | insight
             tags: Comma-separated tags
             importance: 0.0 to 1.0 (higher = more important)
             session_id: Optional session identifier
@@ -244,6 +286,10 @@ class MemoryStore:
             user_id: Optional user identifier
             agent_id: Optional agent identifier
             status: active | completed | abandoned (for tasks)
+            summary: Optional short summary
+            entities: JSON array of entities
+            connections: JSON array of connections
+            source_ids: JSON array of source memory IDs
 
         Returns:
             ID of created entry
@@ -260,10 +306,10 @@ class MemoryStore:
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO memory (type, content, tags, importance, session_id, task_id, user_id, agent_id, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memory (type, content, tags, importance, session_id, task_id, user_id, agent_id, status, summary, entities, connections, source_ids)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (type, content, tags, importance, session_id, task_id, user_id, agent_id, status)
+                (type, content, tags, importance, session_id, task_id, user_id, agent_id, status, summary, entities, connections, source_ids)
             )
             conn.commit()
             entry_id = cursor.lastrowid
@@ -386,7 +432,11 @@ class MemoryStore:
         content: Optional[str] = None,
         status: Optional[str] = None,
         importance: Optional[float] = None,
-        is_archived: Optional[bool] = None
+        is_archived: Optional[bool] = None,
+        summary: Optional[str] = None,
+        entities: Optional[str] = None,
+        connections: Optional[str] = None,
+        source_ids: Optional[str] = None
     ) -> bool:
         """
         Update an existing entry.
@@ -397,6 +447,10 @@ class MemoryStore:
             status: New status
             importance: New importance
             is_archived: Archive flag
+            summary: New summary
+            entities: New entities JSON
+            connections: New connections JSON
+            source_ids: New source_ids JSON
 
         Returns:
             True if updated, False if not found
@@ -424,22 +478,48 @@ class MemoryStore:
             updates.append("is_archived = ?")
             params.append(1 if is_archived else 0)
 
+        if summary is not None:
+            updates.append("summary = ?")
+            params.append(summary)
+
+        if entities is not None:
+            updates.append("entities = ?")
+            params.append(entities)
+
+        if connections is not None:
+            updates.append("connections = ?")
+            params.append(connections)
+
+        if source_ids is not None:
+            updates.append("source_ids = ?")
+            params.append(source_ids)
+
         if not updates:
             return False
 
         updates.append("updated_at = datetime('now')")
 
-        with self._get_connection() as conn:
-            sql = f"UPDATE memory SET {', '.join(updates)} WHERE id = ?"
-            params.append(entry_id)
+        try:
+            with self._get_connection() as conn:
+                sql = f"UPDATE memory SET {', '.join(updates)} WHERE id = ?"
+                params.append(entry_id)
 
-            cursor = conn.execute(sql, params)
-            conn.commit()
+                cursor = conn.execute(sql, params)
+                conn.commit()
 
-            success = cursor.rowcount > 0
-            if success:
-                logger.debug(f"✏️ Updated memory #{entry_id}")
-            return success
+                success = cursor.rowcount > 0
+                if success:
+                    logger.debug("✏️ Updated memory #%s", entry_id)
+                return success
+        except sqlite3.DatabaseError as e:
+            logger.error(
+                "❌ Memory database error on update (entry_id=%s): %s. "
+                "If you see 'database disk image is malformed', remove or replace %s (e.g. backup as .corrupted and restart).",
+                entry_id,
+                e,
+                self.db_path,
+            )
+            raise
 
     def delete(self, entry_id: int, hard: bool = False) -> bool:
         """
@@ -471,7 +551,8 @@ class MemoryStore:
 
     def get_preload_context(
         self,
-        max_long_term: int = 15,
+        max_insights: int = 5,
+        max_long_term: int = 10,
         max_short_term: int = 5,
         max_tasks: int = 3,
         session_id: Optional[str] = None,
@@ -482,6 +563,7 @@ class MemoryStore:
         Get memory entries for pre-loading into agent instructions.
 
         Args:
+            max_insights: Max insight entries
             max_long_term: Max long-term entries
             max_short_term: Max short-term entries
             max_tasks: Max active tasks
@@ -490,25 +572,35 @@ class MemoryStore:
             agent_id: Optional agent filter
 
         Returns:
-            Dict with 'long_term', 'short_term', 'tasks' lists
+            Dict with 'insights', 'long_term', 'short_term', 'tasks' lists
         """
         result = {
+            "insights": [],
             "long_term": [],
             "short_term": [],
             "tasks": []
         }
 
-        # Long-term: most important
+        # Insights: highest priority
+        result["insights"] = self.search(
+            type="insight",
+            session_id=None,
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=max_insights
+        )
+
+        # Long-term: important facts
         result["long_term"] = self.search(
             type="long_term",
-            session_id=session_id,
+            session_id=None,
             user_id=user_id,
             agent_id=agent_id,
             limit=max_long_term,
             min_importance=0.3  # Only meaningful entries
         )
 
-        # Short-term: recent
+        # Short-term: recent context
         result["short_term"] = self.search(
             type="short_term",
             session_id=session_id,
@@ -543,7 +635,7 @@ class MemoryStore:
 
         return result
 
-    def format_preload(self, preload: Dict[str, List[MemoryEntry]], max_chars: int = 2000) -> str:
+    def format_preload(self, preload: Dict[str, List[MemoryEntry]], max_chars: int = 2500) -> str:
         """
         Format pre-loaded memory for agent instructions.
 
@@ -557,11 +649,23 @@ class MemoryStore:
         lines = []
         char_count = 0
 
+        # Insights
+        if preload.get("insights"):
+            lines.append("=== КЛЮЧЕВЫЕ ИНСАЙТЫ ===")
+            for entry in preload["insights"]:
+                content = entry.summary if entry.summary else entry.content
+                line = f"💡 {content}"
+                if char_count + len(line) > max_chars:
+                    break
+                lines.append(line)
+                char_count += len(line)
+
         # Long-term memory
-        if preload.get("long_term"):
-            lines.append("=== ДОЛГОСРОЧНАЯ ПАМЯТЬ ===")
+        if preload.get("long_term") and char_count < max_chars:
+            lines.append("\n=== ДОЛГОСРОЧНАЯ ПАМЯТЬ ===")
             for entry in preload["long_term"]:
-                line = f"- {entry.content}"
+                content = entry.summary if entry.summary else entry.content
+                line = f"- {content}"
                 if char_count + len(line) > max_chars:
                     break
                 lines.append(line)
@@ -571,7 +675,8 @@ class MemoryStore:
         if preload.get("short_term") and char_count < max_chars:
             lines.append("\n=== НЕДАВНИЕ ЗАМЕТКИ ===")
             for entry in preload["short_term"]:
-                line = f"- [{entry.created_at[:10]}] {entry.content}"
+                content = entry.summary if entry.summary else entry.content
+                line = f"- [{entry.created_at[:10]}] {content}"
                 if char_count + len(line) > max_chars:
                     break
                 lines.append(line)
