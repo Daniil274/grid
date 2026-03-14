@@ -1248,6 +1248,7 @@ class AgentFactory:
         use_active_context: bool = False,
         skip_input_add: bool = False,
         user_id: Optional[str] = None,
+        stream_observer: Optional[Any] = None,
         _retry_count: int = 0,
     ) -> str:
         """
@@ -1588,7 +1589,8 @@ class AgentFactory:
                         )
                         async for event in run_result_streaming.stream_events():
                             try:
-                                fragment = self._stream_observer.handle_event(event, agent_key=agent_key)
+                                obs = stream_observer or self._stream_observer
+                                fragment = obs.handle_event(event, agent_key=agent_key)
                                 if fragment:
                                     streaming_text_parts.append(fragment)
 
