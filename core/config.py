@@ -160,13 +160,19 @@ class Config:
                 logger.info("Project tools loader is disabled in config")
                 return
 
-            # Set ISKOR serial retries for project tools (get_screen, etc.)
+            # Set ISKOR serial retries and command timeout for project tools (get_screen, key_press, key_sequence)
             serial_cfg = getattr(self.config.settings, "serial", None)
-            if serial_cfg is not None and getattr(serial_cfg, "retries", None) is not None:
-                os.environ["ISKOR_RETRIES"] = str(serial_cfg.retries)
-                logger.debug(f"ISKOR_RETRIES set to {serial_cfg.retries} from config")
-            else:
+            if serial_cfg is not None:
+                if getattr(serial_cfg, "retries", None) is not None:
+                    os.environ["ISKOR_RETRIES"] = str(serial_cfg.retries)
+                    logger.debug(f"ISKOR_RETRIES set to {serial_cfg.retries} from config")
+                if getattr(serial_cfg, "command_timeout_sec", None) is not None:
+                    os.environ["ISKOR_COMMAND_TIMEOUT"] = str(serial_cfg.command_timeout_sec)
+                    logger.debug(f"ISKOR_COMMAND_TIMEOUT set to {serial_cfg.command_timeout_sec} from config")
+            if "ISKOR_RETRIES" not in os.environ:
                 os.environ.setdefault("ISKOR_RETRIES", "3")
+            if "ISKOR_COMMAND_TIMEOUT" not in os.environ:
+                os.environ.setdefault("ISKOR_COMMAND_TIMEOUT", "0.5")
 
             # Get tools directory
             tools_directory = project_tools_config.tools_directory
