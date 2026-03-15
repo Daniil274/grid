@@ -142,6 +142,14 @@ class Settings(BaseModel):
     )
 
 
+class MemoryOptimizerConfig(BaseModel):
+    """Configuration for memory optimizer."""
+    consolidation_batch_size: int = Field(default=5, ge=1, le=100)
+    consolidation_trigger: str = Field(default="on_save", description="on_save, periodic, or manual")
+    consolidation_interval_seconds: int = Field(default=3600, ge=60)
+    min_short_term_age_hours: float = Field(default=1.0, ge=0.0)
+
+
 class GridConfig(BaseModel):
     """Complete Grid system configuration."""
     settings: Settings = Field(default_factory=Settings)
@@ -153,6 +161,7 @@ class GridConfig(BaseModel):
     prompt_templates: Dict[str, str] = Field(default_factory=dict)
     scenarios: Optional[Dict[str, Any]] = None
     telegram: Optional[Dict[str, Any]] = None  # telegram bot config, incl. proxy for API requests
+    memory_optimizer: Optional[MemoryOptimizerConfig] = Field(default=None, description="Memory optimizer configuration")
     
     @field_validator('agents')
     @classmethod

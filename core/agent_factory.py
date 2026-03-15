@@ -320,7 +320,7 @@ class AgentFactory:
             from core.memory_store import MemoryStore
             from pathlib import Path
             db_path = Path(self.config.get_working_directory()) / "data" / "memory.db"
-            self.memory_store = MemoryStore(db_path=str(db_path))
+            self.memory_store = MemoryStore(db_path=str(db_path), config=self.config)
             logger.info(f"✅ MemoryStore initialized: {db_path}")
 
         # Initialize MemoryOptimizer
