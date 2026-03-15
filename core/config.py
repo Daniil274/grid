@@ -413,3 +413,32 @@ class Config:
             # If we cannot resolve provider details, fall back to global proxy.
             pass
         return self.get_proxy()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """
+        Get arbitrary configuration value using dot notation.
+        
+        Args:
+            key: Dot-separated key path (e.g., 'memory_optimizer.consolidation_batch_size')
+            default: Default value if key not found
+            
+        Returns:
+            Configuration value or default
+            
+        Example:
+            config.get('memory_optimizer.consolidation_batch_size', 5)
+        """
+        try:
+            keys = key.split('.')
+            value = self.config
+            for k in keys:
+                # Try as attribute first (for Pydantic models)
+                if hasattr(value, k):
+                    value = getattr(value, k)
+                elif isinstance(value, dict) and k in value:
+                    value = value[k]
+                else:
+                    return default
+            return value if value is not None else default
+        except Exception:
+            return default

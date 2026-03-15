@@ -5,7 +5,7 @@ Replaces 8 old tools with 3:
 - memory_save: Save information to memory
 - memory_search: Search memory
 - task_update: Update task state
-"""
+""" 
 
 import logging
 from typing import Any, Tuple, Optional
@@ -602,10 +602,10 @@ async def memory_ingest_file(
             
         # Truncate if too large (e.g., > 100KB)
         if len(content) > 100000:
-            content = content[:100000] + "\n...[TRUNCATED]"
+            content = content[:100000] + "\\n...[TRUNCATED]"
             
         # Format the memory content
-        memory_content = f"File: {path.name}\nPath: {filepath}\n\nContent:\n{content}"
+        memory_content = f"File: {path.name}\\nPath: {filepath}\\n\\nContent:\\n{content}"
         
         # Save to memory
         return await memory_save(
@@ -624,6 +624,99 @@ async def memory_ingest_file(
 
 
 # ============================================================================
+# TOOL 6: memory_explore_entity - Explore entity in knowledge graph
+# ============================================================================
+
+@function_tool
+async def memory_explore_entity(
+    context: RunContextWrapper,
+    entity: str,
+    limit: int = 10
+) -> str:
+    """
+    Найти все записи с указанной сущностью через MemoryStore.get_entity_graph().
+
+    Вернуть форматированный список записей с summary, type, created_at для каждой записи.
+
+    Args:
+        entity: Сущность для поиска (e.g. "Python", "Даниил")
+        limit: Максимум записей (default: 10)
+    """
+    store = _get_memory_store(context)
+    if store is None:
+        return "❌ Memory store not available"
+
+    try:
+        session_id, user_id, agent_id = _get_context_ids(context)
+        records = store.get_entity_graph(entity=entity, user_id=user_id, limit=limit)
+
+        if not records:
+            return f"ℹ️ No records found for entity '{entity}'"
+
+        lines = [f"🔍 Records for entity '{entity}' ({len(records)}):", ""]
+        for rec in records:
+            summary = getattr(rec, 'summary', getattr(rec, 'content', 'N/A')[:100] + '...')
+            typ = getattr(rec, 'type', 'unknown')
+            created_at = getattr(rec, 'created_at', 'N/A')[:10] if getattr(rec, 'created_at', None) else 'N/A'
+            lines.append(f"[{typ}] {created_at}: {summary}")
+            lines.append("")
+
+        return '\\n'.join(lines)
+
+    except Exception as e:
+        logger.error(f"❌ Failed to explore entity: {e}")
+        return f"❌ Error exploring entity '{entity}': {e}"
+
+
+# ============================================================================
+# TOOL 7: memory_graph_path - Find path in knowledge graph
+# ============================================================================
+
+@function_tool
+async def memory_graph_path(
+    context: RunContextWrapper,
+    from_entity: str,
+    to_entity: str,
+    max_depth: int = 3
+) -> str:
+    """
+    Найти путь между двумя сущностями через MemoryStore.find_entity_connections().
+
+    Вернуть форматированное описание пути. Если не найден - сообщение.
+
+    Args:
+        from_entity: Начальная сущность
+        to_entity: Целевая сущность
+        max_depth: Максимальная глубина поиска (default: 3)
+    """
+    store = _get_memory_store(context)
+    if store is None:
+        return "❌ Memory store not available"
+
+    try:
+        session_id, user_id, agent_id = _get_context_ids(context)
+        path = store.find_entity_connections(from_entity=from_entity, to_entity=to_entity, user_id=user_id, max_depth=max_depth)
+
+        if not path:
+            return f"ℹ️ No path found between '{from_entity}' and '{to_entity}' (max_depth={max_depth})"
+
+        # Format path, assuming list of str or entities
+        if isinstance(path, list) and len(path) > 0:
+            if isinstance(path[0], str):
+                path_str = " → ".join(path)
+            else:
+                path_str = " → ".join([str(node) for node in path])
+        else:
+            path_str = str(path)
+
+        return f"✅ Path: {path_str}"
+
+    except Exception as e:
+        logger.error(f"❌ Failed to find graph path: {e}")
+        return f"❌ Error finding path from '{from_entity}' to '{to_entity}': {e}"
+
+
+# ============================================================================
 # TOOL REGISTRY
 # ============================================================================
 
@@ -633,6 +726,8 @@ MEMORY_TOOLS_V2 = {
     "memory_delete": memory_delete,
     "task_update": task_update,
     "memory_ingest_file": memory_ingest_file,
+    "memory_explore_entity": memory_explore_entity,
+    "memory_graph_path": memory_graph_path,
 }
 
 

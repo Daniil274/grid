@@ -28,7 +28,21 @@ settings:
     max_width: 1920
     max_height: 1080
     max_file_size_mb: 10
-    jpeg_quality: 85
+
+memory_optimizer:
+  consolidation_batch_size: 5
+  consolidation_trigger: "on_save"
+  consolidation_interval_seconds: 3600
+  min_short_term_age_hours: 1
+  default_long_term_ttl_days: 90
+  extend_ttl_on_access: true
+  ttl_cleanup_interval_seconds: 3600
+  # DB Size Management
+  max_db_size_mb: 100
+  cleanup_strategy: "balanced"  # aggressive | balanced | conservative
+  cleanup_on_startup: false
+  vacuum_after_cleanup: true
+
 isolation:
   enabled: true
   type: docker
