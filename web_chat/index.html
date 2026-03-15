@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grid Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell" id="shell">
+    <div class="sidebarBackdrop" id="sidebar-backdrop"></div>
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar__top">
+        <button class="sidebar__primary" id="new-chat-btn">
+          <span class="sidebar__primaryIcon">+</span>
+          <span>New chat</span>
+        </button>
+        <div class="sidebar__sectionLabel">Диалоги</div>
+      </div>
+      <div class="sidebar__scroll" id="conversations-list"></div>
+      <div class="sidebar__bottom">
+        <button class="sidebar__ghost" id="open-settings-btn">System config</button>
+        <a class="sidebar__ghost" href="/timeline" target="_blank" rel="noreferrer">Timeline</a>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="topbar__main">
+          <button class="iconBtn topbar__menuBtn" id="toggle-sidebar-btn" type="button" aria-label="Открыть список диалогов">☰</button>
+          <button class="agentButton" id="agent-button" type="button">
+            <span class="agentButton__eyebrow">Активный агент</span>
+            <span class="agentButton__title" id="active-agent-name">Загрузка...</span>
+            <span class="agentButton__meta" id="active-agent-meta"></span>
+          </button>
+        </div>
+        <div class="topbar__status">
+          <button class="secondaryBtn topbar__newChatBtn" id="topbar-new-chat-btn" type="button">New chat</button>
+          <span class="statusPill" id="runtime-pill">runtime</span>
+          <span class="statusText" id="workspace-pill"></span>
+        </div>
+      </header>
+
+      <section class="chatCanvas" id="messages-container">
+        <div class="welcome" id="empty-state">
+          <div class="welcome__eyebrow">Grid</div>
+          <h1>Чем заняться?</h1>
+          <p>Веб-чат теперь работает поверх того же runtime, что и `agent_chat`: с контекстом, агентами, инструментами и прозрачностью выполнения.</p>
+          <div class="welcome__actions">
+            <button class="promptChip" type="button" data-prompt="Проанализируй текущий проект и предложи ближайшие шаги.">Разобраться в проекте</button>
+            <button class="promptChip" type="button" data-prompt="Проведи ревью текущих изменений и найди риски.">Сделать ревью</button>
+            <button class="promptChip" type="button" data-prompt="Помоги улучшить UI/UX текущего интерфейса.">Улучшить UI/UX</button>
+          </div>
+        </div>
+      </section>
+      <button class="jumpToLatest hidden" id="jump-latest-btn" type="button">К последним сообщениям</button>
+
+      <footer class="composerWrap">
+        <div class="composerCard">
+          <textarea id="message-input" class="composerInput" rows="1" placeholder="Сообщение для Grid"></textarea>
+          <div class="composerActions">
+            <div class="composerHint">Enter - отправить, Shift+Enter - новая строка</div>
+            <div class="composerButtons">
+              <button class="secondaryBtn hidden" id="stop-btn" type="button">Stop</button>
+              <button class="primaryBtn" id="send-btn" type="button" disabled>Send</button>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <div class="popover hidden" id="agent-popover">
+    <div class="popover__header">
+      <div>
+        <div class="popover__eyebrow">Выбор агента</div>
+        <div class="popover__title">Кто отвечает на запрос</div>
+      </div>
+      <button class="iconBtn" id="close-agent-popover" type="button" aria-label="Закрыть выбор агента">&times;</button>
+    </div>
+    <div class="agentGrid" id="agent-grid"></div>
+  </div>
+
+  <div class="drawer hidden" id="settings-drawer">
+    <div class="drawer__backdrop" id="settings-backdrop"></div>
+    <div class="drawer__panel">
+      <div class="drawer__header">
+        <div>
+          <div class="drawer__eyebrow">System config</div>
+          <h2>Настройка системы</h2>
+          <p>Меняй агентов, инструменты, промпты и системные параметры без ручного редактирования YAML.</p>
+        </div>
+        <button class="iconBtn" id="close-settings-btn" type="button" aria-label="Закрыть настройки">&times;</button>
+      </div>
+
+      <div class="drawer__tabs" id="settings-tabs">
+        <button class="drawerTab active" data-tab="system" type="button">System</button>
+        <button class="drawerTab" data-tab="agents" type="button">Agents</button>
+        <button class="drawerTab" data-tab="tools" type="button">Tools</button>
+        <button class="drawerTab" data-tab="prompts" type="button">Prompts</button>
+        <button class="drawerTab" data-tab="advanced" type="button">YAML</button>
+      </div>
+
+      <div class="drawer__body">
+        <section class="settingsPane active" id="pane-system">
+          <div class="settingsCard">
+            <h3>Основные параметры</h3>
+            <div class="formGrid" id="system-form"></div>
+          </div>
+          <div class="settingsCard">
+            <h3>Runtime</h3>
+            <div class="runtimeFacts" id="runtime-facts"></div>
+          </div>
+        </section>
+
+        <section class="settingsPane" id="pane-agents">
+          <div class="editorLayout">
+            <div class="editorListWrap">
+              <div class="editorListHeader">
+                <h3>Агенты</h3>
+                <button class="secondaryBtn" id="add-agent-btn" type="button">Add agent</button>
+              </div>
+              <div class="editorList" id="agents-list"></div>
+            </div>
+            <div class="editorPanel" id="agent-editor"></div>
+          </div>
+        </section>
+
+        <section class="settingsPane" id="pane-tools">
+          <div class="editorLayout">
+            <div class="editorListWrap">
+              <div class="editorListHeader">
+                <h3>Инструменты</h3>
+                <button class="secondaryBtn" id="add-tool-btn" type="button">Add tool</button>
+              </div>
+              <div class="editorList" id="tools-list"></div>
+            </div>
+            <div class="editorPanel" id="tool-editor"></div>
+          </div>
+        </section>
+
+        <section class="settingsPane" id="pane-prompts">
+          <div class="editorLayout">
+            <div class="editorListWrap">
+              <div class="editorListHeader">
+                <h3>Промпты</h3>
+                <button class="secondaryBtn" id="add-prompt-btn" type="button">Add prompt</button>
+              </div>
+              <div class="editorList" id="prompts-list"></div>
+            </div>
+            <div class="editorPanel" id="prompt-editor"></div>
+          </div>
+        </section>
+
+        <section class="settingsPane" id="pane-advanced">
+          <div class="settingsCard settingsCard--full">
+            <h3>Raw YAML</h3>
+            <textarea id="yaml-editor" class="yamlEditor" spellcheck="false"></textarea>
+          </div>
+        </section>
+      </div>
+
+      <div class="drawer__footer">
+        <div class="drawer__status" id="settings-status"></div>
+        <div class="drawer__footerActions">
+          <button class="secondaryBtn" id="reload-settings-btn" type="button">Reload</button>
+          <button class="primaryBtn" id="save-settings-btn" type="button">Save changes</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

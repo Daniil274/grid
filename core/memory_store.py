@@ -11,13 +11,17 @@ Provides:
 - User and Agent isolation
 """
 
+import shutil
 import sqlite3
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from contextlib import contextmanager
+from difflib import SequenceMatcher
+import json
+from collections import deque, defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +30,7 @@ logger = logging.getLogger(__name__)
 class MemoryEntry:
     """Single memory entry."""
     id: int
-    type: str  # long_term | short_term | task | task_plan | skill
+    type: str  # long_term | short_term | task | task_plan | skill | insight
     content: str
     tags: str
     created_at: str
@@ -38,6 +42,12 @@ class MemoryEntry:
     status: Optional[str] = None  # active | completed | abandoned
     importance: float = 0.5
     is_archived: int = 0
+    summary: Optional[str] = None
+    entities: str = '[]'
+    connections: str = '[]'
+    source_ids: str = '[]'
+    ttl_days: Optional[int] = None
+    last_accessed_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -77,20 +87,27 @@ class MemoryStore:
         )
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 4
 
-    VALID_TYPES = {"long_term", "short_term", "task", "task_plan", "skill"}
+    VALID_TYPES = {"long_term", "short_term", "task", "task_plan", "skill", "insight"}
     VALID_STATUSES = {"active", "completed", "abandoned"}
 
-    def __init__(self, db_path: str):
+    # Дедупликация
+    DEFAULT_SIMILARITY_THRESHOLD = 0.8  # 80% = дубликат
+    MAX_FTS_CANDIDATES = 50  # Макс. кандидатов от FTS5
+    IMPORTANCE_BOOST_ON_UPDATE = 0.1  # Увеличение importance при обновлении
+
+    def __init__(self, db_path: str, config: Optional[Any] = None):
         """
         Initialize memory store.
 
         Args:
             db_path: Path to SQLite database file
+            config: Optional Config object for TTL defaults
         """
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config = config
 
         # Initialize database
         self._init_db()
@@ -98,8 +115,35 @@ class MemoryStore:
 
     def _init_db(self):
         """Initialize database schema with FTS5."""
+        # If DB file exists, check integrity first (handles "database disk image is malformed")
+        if self.db_path.exists():
+            try:
+                with sqlite3.connect(str(self.db_path)) as conn:
+                    cursor = conn.execute("PRAGMA integrity_check")
+                    row = cursor.fetchone()
+                    if row is None or (row[0] if isinstance(row, (tuple, list)) else row) != "ok":
+                        raise sqlite3.DatabaseError(
+                            "PRAGMA integrity_check failed: " + (str(row[0]) if row else "unknown")
+                        )
+            except sqlite3.DatabaseError as e:
+                logger.error(
+                    "❌ Memory database is corrupted (%s). Backing up and recreating. Backup: %s",
+                    e,
+                    self.db_path.with_suffix(self.db_path.suffix + ".corrupted"),
+                )
+                backup = self.db_path.with_suffix(self.db_path.suffix + ".corrupted")
+                try:
+                    shutil.copy2(str(self.db_path), str(backup))
+                    self.db_path.unlink()
+                except Exception as backup_err:
+                    logger.exception("Failed to backup/remove corrupted DB: %s", backup_err)
+                    raise
+                logger.info("🔄 Corrupted DB removed. A new database will be created.")
+            except Exception as e:
+                logger.warning("⚠️ Error checking integrity: %s", e)
+
         # Check if we need to reset the database (schema migration)
-        # We do this by checking if the 'user_id' column exists in the 'memory' table
+        # We do this by checking if the 'summary' column exists in the 'memory' table
         # if the table already exists.
         reset_needed = False
         if self.db_path.exists():
@@ -107,11 +151,11 @@ class MemoryStore:
                 with sqlite3.connect(str(self.db_path)) as conn:
                     cursor = conn.execute("PRAGMA table_info(memory)")
                     columns = [row[1] for row in cursor.fetchall()]
-                    if columns and "user_id" not in columns:
+                    if columns and "summary" not in columns:
                         reset_needed = True
-                        logger.info("🔄 Old schema detected (missing user_id). Resetting memory database as requested.")
+                        logger.info("🔄 Old schema detected (missing summary). Resetting memory database as requested.")
             except Exception as e:
-                logger.warning(f"⚠️ Error checking schema: {e}")
+                logger.warning("⚠️ Error checking schema: %s", e)
 
         if reset_needed:
             try:
@@ -137,7 +181,7 @@ class MemoryStore:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS memory (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    type        TEXT NOT NULL CHECK(type IN ('long_term','short_term','task','task_plan','skill')),
+                    type        TEXT NOT NULL CHECK(type IN ('long_term','short_term','task','task_plan','skill','insight')),
                     content     TEXT NOT NULL,
                     tags        TEXT DEFAULT '',
                     created_at  TEXT DEFAULT (datetime('now')),
@@ -148,7 +192,13 @@ class MemoryStore:
                     agent_id    TEXT,
                     status      TEXT CHECK(status IS NULL OR status IN ('active','completed','abandoned')),
                     importance  REAL DEFAULT 0.5 CHECK(importance >= 0 AND importance <= 1),
-                    is_archived INTEGER DEFAULT 0 CHECK(is_archived IN (0, 1))
+                    is_archived INTEGER DEFAULT 0 CHECK(is_archived IN (0, 1)),
+                    summary     TEXT,
+                    entities    TEXT DEFAULT '[]',
+                    connections TEXT DEFAULT '[]',
+                    source_ids  TEXT DEFAULT '[]',
+                    ttl_days     INTEGER,
+                    last_accessed_at TEXT
                 )
             """)
 
@@ -167,6 +217,8 @@ class MemoryStore:
                 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                     content,
                     tags,
+                    summary,
+                    entities,
                     content='memory',
                     content_rowid='id'
                 )
@@ -175,8 +227,8 @@ class MemoryStore:
             # Triggers to sync FTS5 with main table
             conn.execute("""
                 CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
-                    INSERT INTO memory_fts(rowid, content, tags)
-                    VALUES (new.id, new.content, new.tags);
+                    INSERT INTO memory_fts(rowid, content, tags, summary, entities)
+                    VALUES (new.id, new.content, new.tags, new.summary, new.entities);
                 END
             """)
 
@@ -188,7 +240,7 @@ class MemoryStore:
 
             conn.execute("""
                 CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
-                    UPDATE memory_fts SET content = new.content, tags = new.tags
+                    UPDATE memory_fts SET content = new.content, tags = new.tags, summary = new.summary, entities = new.entities
                     WHERE rowid = new.id;
                 END
             """)
@@ -219,6 +271,145 @@ class MemoryStore:
         finally:
             conn.close()
 
+    def _touch_entries(self, entry_ids: List[int]) -> None:
+        """
+        Update last_accessed_at for entries if extend_ttl_on_access is enabled.
+        
+        Args:
+            entry_ids: List of entry IDs to update
+        """
+        if not entry_ids:
+            return
+            
+        # Check if extend_ttl_on_access is enabled
+        extend = self.config.get('memory_optimizer.extend_ttl_on_access', True) if self.config else True
+        if not extend:
+            return
+            
+        with self._get_connection() as conn:
+            placeholders = ','.join('?' * len(entry_ids))
+            conn.execute(
+                f"UPDATE memory SET last_accessed_at = datetime('now') WHERE id IN ({placeholders})",
+                entry_ids
+            )
+            conn.commit()
+
+    # ==================== ДЕДУПЛИКАЦИЯ ====================
+
+    def _calculate_similarity(self, text1: str, text2: str) -> float:
+        """
+        Вычислить коэффициент схожести двух текстов.
+
+        Использует SequenceMatcher.ratio() — нормализованное расстояние Левенштейна.
+
+        Args:
+            text1: Первый текст
+            text2: Второй текст
+
+        Returns:
+            float от 0.0 (полностью разные) до 1.0 (идентичные)
+        """
+        # Нормализация: lowercase, удаление лишних пробелов
+        t1 = ' '.join(text1.lower().split())
+        t2 = ' '.join(text2.lower().split())
+
+        return SequenceMatcher(None, t1, t2).ratio()
+
+    def _fts_search_candidates(
+        self,
+        query: str,
+        max_candidates: int = 50,
+        type: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        exclude_ids: Optional[List[int]] = None
+    ) -> List[MemoryEntry]:
+        """
+        Быстрый FTS5 поиск кандидатов по ключевым словам.
+
+        Args:
+            query: Текст для поиска
+            max_candidates: Максимальное количество кандидатов
+            type: Фильтр по типу памяти
+            user_id: Фильтр по пользователю
+            agent_id: Фильтр по агенту
+            exclude_ids: ID записей для исключения
+
+        Returns:
+            Список кандидатов MemoryEntry
+        """
+        # Извлекаем значимые слова (длина > 3)
+        tokens = [t for t in query.lower().split() if len(t) > 3]
+        if not tokens:
+            return []
+
+        # Просто передаём слова через пробел (search превратит их в AND/implicit OR)
+        fts_query = ' '.join(tokens[:10])
+
+        return self.search(
+            query=fts_query,
+            type=type,
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=max_candidates
+        )
+
+    def find_similar(
+        self,
+        query: str,
+        threshold: float = 0.8,
+        limit: int = 5,
+        type: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        exclude_ids: Optional[List[int]] = None
+    ) -> List[Tuple[MemoryEntry, float]]:
+        """
+        Найти похожие записи в памяти.
+
+        Алгоритм:
+        1. FTS5 поиск кандидатов по ключевым словам
+        2. Вычисление similarity через SequenceMatcher для каждого кандидата
+        3. Фильтрация по threshold и сортировка по убыванию similarity
+
+        Args:
+            query: Текст для поиска похожих записей
+            threshold: Минимальный порог схожести (0.0-1.0), default 0.8
+            limit: Максимальное количество результатов
+            type: Фильтр по типу памяти
+            user_id: Фильтр по пользователю
+            agent_id: Фильтр по агенту
+            exclude_ids: ID записей для исключения из поиска
+
+        Returns:
+            List[Tuple[MemoryEntry, float]] — список (запись, similarity_score)
+            отсортированный по убыванию similarity
+        """
+        # Шаг 1: FTS5 для отбора кандидатов (быстро)
+        candidates = self._fts_search_candidates(
+            query=query,
+            max_candidates=self.MAX_FTS_CANDIDATES,
+            type=type,
+            user_id=user_id,
+            agent_id=agent_id,
+            exclude_ids=exclude_ids
+        )
+
+        # Фильтрация по exclude_ids
+        if exclude_ids:
+            candidates = [c for c in candidates if c.id not in exclude_ids]
+
+        # Шаг 2: Точный расчёт similarity (медленно, но только для кандидатов)
+        results: List[Tuple[MemoryEntry, float]] = []
+        for entry in candidates:
+            similarity = self._calculate_similarity(query, entry.content)
+            if similarity >= threshold:
+                results.append((entry, similarity))
+
+        # Шаг 3: Сортировка и лимит
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:limit]
+
     def save(
         self,
         content: str,
@@ -229,14 +420,23 @@ class MemoryStore:
         task_id: Optional[str] = None,
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
-        status: Optional[str] = None
+        status: Optional[str] = None,
+        summary: Optional[str] = None,
+        entities: str = '[]',
+        connections: str = '[]',
+        source_ids: str = '[]',
+        # TTL параметры:
+        ttl_days: Optional[int] = None,
+        # Параметры дедупликации:
+        update_if_exists: bool = False,
+        similarity_threshold: Optional[float] = None
     ) -> int:
         """
         Save a memory entry.
 
         Args:
             content: Memory content
-            type: long_term | short_term | task | task_plan | skill
+            type: long_term | short_term | task | task_plan | skill | insight
             tags: Comma-separated tags
             importance: 0.0 to 1.0 (higher = more important)
             session_id: Optional session identifier
@@ -244,9 +444,16 @@ class MemoryStore:
             user_id: Optional user identifier
             agent_id: Optional agent identifier
             status: active | completed | abandoned (for tasks)
+            summary: Optional short summary
+            entities: JSON array of entities
+            connections: JSON array of connections
+            source_ids: JSON array of source memory IDs
+            ttl_days: TTL в днях (None = бессрочно для long_term используется default_long_term_ttl_days из config)
+            update_if_exists: Если True, проверяет дубликаты и обновляет существующую запись
+            similarity_threshold: Порог схожести для дедупликации (default: DEFAULT_SIMILARITY_THRESHOLD)
 
         Returns:
-            ID of created entry
+            ID of created or updated entry
         """
         if type not in self.VALID_TYPES:
             raise ValueError(f"Invalid type: {type}. Must be one of {self.VALID_TYPES}")
@@ -257,13 +464,43 @@ class MemoryStore:
         if not 0 <= importance <= 1:
             raise ValueError(f"Invalid importance: {importance}. Must be 0.0 to 1.0")
 
+        # Дедупликация: поиск похожих записей
+        if update_if_exists:
+            threshold = similarity_threshold if similarity_threshold is not None else self.DEFAULT_SIMILARITY_THRESHOLD
+            similar = self.find_similar(
+                query=content,
+                threshold=threshold,
+                limit=1,
+                type=type,
+                user_id=user_id,
+                agent_id=agent_id
+            )
+
+            if similar:
+                existing_entry, score = similar[0]
+                logger.info(f"🔄 Found similar entry #{existing_entry.id} (similarity={score:.2f}), updating...")
+
+                # Стратегия: обновить content, увеличить importance
+                new_importance = min(1.0, existing_entry.importance + self.IMPORTANCE_BOOST_ON_UPDATE)
+                self.update(
+                    entry_id=existing_entry.id,
+                    content=content,
+                    importance=new_importance
+                )
+                return existing_entry.id
+
+        # TTL логика: default TTL для long_term если не указан
+        effective_ttl = ttl_days
+        if effective_ttl is None and type == "long_term" and self.config:
+            effective_ttl = self.config.get('memory_optimizer.default_long_term_ttl_days', 90)
+
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO memory (type, content, tags, importance, session_id, task_id, user_id, agent_id, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memory (type, content, tags, importance, session_id, task_id, user_id, agent_id, status, summary, entities, connections, source_ids, ttl_days, last_accessed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 """,
-                (type, content, tags, importance, session_id, task_id, user_id, agent_id, status)
+                (type, content, tags, importance, session_id, task_id, user_id, agent_id, status, summary, entities, connections, source_ids, effective_ttl)
             )
             conn.commit()
             entry_id = cursor.lastrowid
@@ -378,7 +615,36 @@ class MemoryStore:
                 cursor = conn.execute(sql, params)
 
             rows = cursor.fetchall()
-            return [MemoryEntry(**dict(row)) for row in rows]
+            entries = [MemoryEntry(**dict(row)) for row in rows]
+            
+            # Update last_accessed_at if extend_ttl_on_access enabled
+            if entries:
+                self._touch_entries([e.id for e in entries])
+            
+            return entries
+
+    def get_by_id(self, entry_id: int) -> Optional[MemoryEntry]:
+        """
+        Get a memory entry by ID.
+
+        Args:
+            entry_id: Entry ID
+
+        Returns:
+            MemoryEntry or None if not found
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM memory WHERE id = ?",
+                (entry_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                entry = MemoryEntry(**dict(row))
+                # Update last_accessed_at if extend_ttl_on_access enabled
+                self._touch_entries([entry.id])
+                return entry
+            return None
 
     def update(
         self,
@@ -386,7 +652,11 @@ class MemoryStore:
         content: Optional[str] = None,
         status: Optional[str] = None,
         importance: Optional[float] = None,
-        is_archived: Optional[bool] = None
+        is_archived: Optional[bool] = None,
+        summary: Optional[str] = None,
+        entities: Optional[str] = None,
+        connections: Optional[str] = None,
+        source_ids: Optional[str] = None
     ) -> bool:
         """
         Update an existing entry.
@@ -397,6 +667,10 @@ class MemoryStore:
             status: New status
             importance: New importance
             is_archived: Archive flag
+            summary: New summary
+            entities: New entities JSON
+            connections: New connections JSON
+            source_ids: New source_ids JSON
 
         Returns:
             True if updated, False if not found
@@ -424,22 +698,48 @@ class MemoryStore:
             updates.append("is_archived = ?")
             params.append(1 if is_archived else 0)
 
+        if summary is not None:
+            updates.append("summary = ?")
+            params.append(summary)
+
+        if entities is not None:
+            updates.append("entities = ?")
+            params.append(entities)
+
+        if connections is not None:
+            updates.append("connections = ?")
+            params.append(connections)
+
+        if source_ids is not None:
+            updates.append("source_ids = ?")
+            params.append(source_ids)
+
         if not updates:
             return False
 
         updates.append("updated_at = datetime('now')")
 
-        with self._get_connection() as conn:
-            sql = f"UPDATE memory SET {', '.join(updates)} WHERE id = ?"
-            params.append(entry_id)
+        try:
+            with self._get_connection() as conn:
+                sql = f"UPDATE memory SET {', '.join(updates)} WHERE id = ?"
+                params.append(entry_id)
 
-            cursor = conn.execute(sql, params)
-            conn.commit()
+                cursor = conn.execute(sql, params)
+                conn.commit()
 
-            success = cursor.rowcount > 0
-            if success:
-                logger.debug(f"✏️ Updated memory #{entry_id}")
-            return success
+                success = cursor.rowcount > 0
+                if success:
+                    logger.debug("✏️ Updated memory #%s", entry_id)
+                return success
+        except sqlite3.DatabaseError as e:
+            logger.error(
+                "❌ Memory database error on update (entry_id=%s): %s. "
+                "If you see 'database disk image is malformed', remove or replace %s (e.g. backup as .corrupted and restart).",
+                entry_id,
+                e,
+                self.db_path,
+            )
+            raise
 
     def delete(self, entry_id: int, hard: bool = False) -> bool:
         """
@@ -471,7 +771,8 @@ class MemoryStore:
 
     def get_preload_context(
         self,
-        max_long_term: int = 15,
+        max_insights: int = 5,
+        max_long_term: int = 10,
         max_short_term: int = 5,
         max_tasks: int = 3,
         session_id: Optional[str] = None,
@@ -482,6 +783,7 @@ class MemoryStore:
         Get memory entries for pre-loading into agent instructions.
 
         Args:
+            max_insights: Max insight entries
             max_long_term: Max long-term entries
             max_short_term: Max short-term entries
             max_tasks: Max active tasks
@@ -490,25 +792,35 @@ class MemoryStore:
             agent_id: Optional agent filter
 
         Returns:
-            Dict with 'long_term', 'short_term', 'tasks' lists
+            Dict with 'insights', 'long_term', 'short_term', 'tasks' lists
         """
         result = {
+            "insights": [],
             "long_term": [],
             "short_term": [],
             "tasks": []
         }
 
-        # Long-term: most important
+        # Insights: highest priority
+        result["insights"] = self.search(
+            type="insight",
+            session_id=None,
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=max_insights
+        )
+
+        # Long-term: important facts
         result["long_term"] = self.search(
             type="long_term",
-            session_id=session_id,
+            session_id=None,
             user_id=user_id,
             agent_id=agent_id,
             limit=max_long_term,
             min_importance=0.3  # Only meaningful entries
         )
 
-        # Short-term: recent
+        # Short-term: recent context
         result["short_term"] = self.search(
             type="short_term",
             session_id=session_id,
@@ -543,7 +855,7 @@ class MemoryStore:
 
         return result
 
-    def format_preload(self, preload: Dict[str, List[MemoryEntry]], max_chars: int = 2000) -> str:
+    def format_preload(self, preload: Dict[str, List[MemoryEntry]], max_chars: int = 2500) -> str:
         """
         Format pre-loaded memory for agent instructions.
 
@@ -557,11 +869,23 @@ class MemoryStore:
         lines = []
         char_count = 0
 
+        # Insights
+        if preload.get("insights"):
+            lines.append("=== КЛЮЧЕВЫЕ ИНСАЙТЫ ===")
+            for entry in preload["insights"]:
+                content = entry.summary if entry.summary else entry.content
+                line = f"💡 {content}"
+                if char_count + len(line) > max_chars:
+                    break
+                lines.append(line)
+                char_count += len(line)
+
         # Long-term memory
-        if preload.get("long_term"):
-            lines.append("=== ДОЛГОСРОЧНАЯ ПАМЯТЬ ===")
+        if preload.get("long_term") and char_count < max_chars:
+            lines.append("\n=== ДОЛГОСРОЧНАЯ ПАМЯТЬ ===")
             for entry in preload["long_term"]:
-                line = f"- {entry.content}"
+                content = entry.summary if entry.summary else entry.content
+                line = f"- {content}"
                 if char_count + len(line) > max_chars:
                     break
                 lines.append(line)
@@ -571,7 +895,8 @@ class MemoryStore:
         if preload.get("short_term") and char_count < max_chars:
             lines.append("\n=== НЕДАВНИЕ ЗАМЕТКИ ===")
             for entry in preload["short_term"]:
-                line = f"- [{entry.created_at[:10]}] {entry.content}"
+                content = entry.summary if entry.summary else entry.content
+                line = f"- [{entry.created_at[:10]}] {content}"
                 if char_count + len(line) > max_chars:
                     break
                 lines.append(line)
@@ -638,6 +963,33 @@ class MemoryStore:
             if cursor.rowcount > 0:
                 logger.info(f"🧹 Archived {cursor.rowcount} old short-term entries")
 
+    def cleanup_expired(self) -> int:
+        """
+        Archive memory entries with expired TTL.
+        
+        Entries are expired when:
+        - ttl_days IS NOT NULL (has TTL)
+        - datetime(last_accessed_at, '+' || ttl_days || ' days') < datetime('now')
+        
+        Returns:
+            Number of archived entries
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE memory 
+                SET is_archived = 1, updated_at = datetime('now')
+                WHERE is_archived = 0
+                  AND ttl_days IS NOT NULL
+                  AND last_accessed_at IS NOT NULL
+                  AND datetime(last_accessed_at, '+' || ttl_days || ' days') < datetime('now')
+            """)
+            conn.commit()
+            
+            count = cursor.rowcount
+            if count > 0:
+                logger.info(f"⏰ Archived {count} expired TTL entries")
+            return count
+
     def get_stats(self) -> Dict[str, Any]:
         """Get memory statistics."""
         with self._get_connection() as conn:
@@ -673,5 +1025,339 @@ class MemoryStore:
                 "by_type": by_type,
                 "by_status": by_status,
                 "db_path": str(self.db_path),
-                "db_size_mb": self.db_path.stat().st_size / (1024 * 1024) if self.db_path.exists() else 0
+                "db_size_mb": self.get_db_size_mb()
+            }
+
+    def get_db_size_mb(self) -> float:
+        """
+        Get database file size in megabytes.
+        
+        Returns:
+            Database file size in MB, or 0.0 if file doesn't exist
+        """
+        if self.db_path.exists():
+            return self.db_path.stat().st_size / (1024 * 1024)
+        return 0.0
+
+    def check_cleanup_needed(self, threshold_mb: float = 100.0) -> Dict[str, Any]:
+        """
+        Check if database cleanup is needed based on size threshold.
+        
+        Args:
+            threshold_mb: Maximum allowed database size in MB
+            
+        Returns:
+            Dict with keys:
+            - needed: bool - whether cleanup is required
+            - current_size_mb: float - current DB size
+            - threshold_mb: float - configured threshold
+            - archived_count: int - count of archived entries
+            - low_importance_count: int - entries with importance < 0.3
+            - expired_ttl_count: int - entries with expired TTL
+        """
+        current_size_mb = self.get_db_size_mb()
+        
+        with self._get_connection() as conn:
+            # Count archived entries (candidates for hard deletion)
+            cursor = conn.execute(
+                "SELECT COUNT(*) as count FROM memory WHERE is_archived = 1"
+            )
+            archived_count = cursor.fetchone()["count"]
+            
+            # Count low importance entries (candidates for cleanup)
+            cursor = conn.execute(
+                "SELECT COUNT(*) as count FROM memory WHERE importance < 0.3 AND is_archived = 0"
+            )
+            low_importance_count = cursor.fetchone()["count"]
+            
+            # Count expired TTL entries
+            cursor = conn.execute("""
+                SELECT COUNT(*) as count FROM memory 
+                WHERE is_archived = 0
+                  AND ttl_days IS NOT NULL
+                  AND last_accessed_at IS NOT NULL
+                  AND datetime(last_accessed_at, '+' || ttl_days || ' days') < datetime('now')
+            """)
+            expired_ttl_count = cursor.fetchone()["count"]
+        
+        return {
+            "needed": current_size_mb >= threshold_mb,
+            "current_size_mb": current_size_mb,
+            "threshold_mb": threshold_mb,
+            "archived_count": archived_count,
+            "low_importance_count": low_importance_count,
+            "expired_ttl_count": expired_ttl_count
+        }
+
+    def run_cleanup(
+        self,
+        strategy: str = "balanced",
+        max_age_days: Optional[int] = None,
+        min_importance: float = 0.3,
+        hard_delete_archived: bool = True
+    ) -> Dict[str, int]:
+        """
+        Run database cleanup based on specified strategy.
+        
+        Args:
+            strategy: Cleanup strategy - 'aggressive', 'balanced', or 'conservative'
+                - aggressive: delete archived + low importance + expired TTL
+                - balanced: delete archived + expired TTL (default)
+                - conservative: only hard delete archived entries
+            max_age_days: Optional max age for entries (not yet implemented)
+            min_importance: Minimum importance threshold (for aggressive strategy)
+            hard_delete_archived: Whether to hard-delete archived entries
+            
+        Returns:
+            Dict with counts of deleted entries by category:
+            - archived_deleted: int - hard-deleted archived entries
+            - expired_deleted: int - archived expired TTL entries
+            - low_importance_deleted: int - archived low importance entries
+        """
+        result = {
+            "archived_deleted": 0,
+            "expired_deleted": 0,
+            "low_importance_deleted": 0
+        }
+        
+        with self._get_connection() as conn:
+            # 1. Hard delete archived entries (if enabled)
+            if hard_delete_archived:
+                cursor = conn.execute("SELECT COUNT(*) as count FROM memory WHERE is_archived = 1")
+                archived_count = cursor.fetchone()["count"]
+                
+                if archived_count > 0:
+                    # Delete from FTS index first
+                    conn.execute("""
+                        DELETE FROM memory_fts WHERE rowid IN 
+                        (SELECT id FROM memory WHERE is_archived = 1)
+                    """)
+                    # Delete from main table
+                    conn.execute("DELETE FROM memory WHERE is_archived = 1")
+                    conn.commit()
+                    result["archived_deleted"] = archived_count
+                    logger.info(f"🗑️ Hard deleted {archived_count} archived entries")
+            
+            # 2. Handle expired TTL entries (balanced and aggressive strategies)
+            if strategy in ("balanced", "aggressive"):
+                expired_count = self.cleanup_expired()
+                result["expired_deleted"] = expired_count
+            
+            # 3. Handle low importance entries (aggressive strategy only)
+            if strategy == "aggressive":
+                cursor = conn.execute("""
+                    UPDATE memory 
+                    SET is_archived = 1, updated_at = datetime('now')
+                    WHERE is_archived = 0
+                      AND importance < ?
+                """, (min_importance,))
+                conn.commit()
+                low_importance_count = cursor.rowcount
+                if low_importance_count > 0:
+                    logger.info(f"📦 Archived {low_importance_count} low importance entries")
+                    result["low_importance_deleted"] = low_importance_count
+        
+        total = sum(result.values())
+        if total > 0:
+            logger.info(f"🧹 Cleanup complete: {result}")
+        
+        return result
+
+    def _get_entry_by_id(self, entry_id: int) -> Optional[MemoryEntry]:
+        """Get single entry by ID."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM memory WHERE id = ? AND is_archived = 0", (entry_id,))
+            row = cursor.fetchone()
+            if row:
+                return MemoryEntry(**dict(row))
+            return None
+
+    def _get_outgoing_connections(self, entry_id: int) -> List[Tuple[int, str]]:
+        """Get outgoing connections from entry."""
+        entry = self._get_entry_by_id(entry_id)
+        if not entry:
+            return []
+        try:
+            conns = json.loads(entry.connections or '[]')
+            return [(int(c['target_id']), c['relation']) for c in conns if c.get('target_id') and isinstance(c.get('target_id'), (int, str))]
+        except (json.JSONDecodeError, KeyError, ValueError):
+            return []
+
+    def _get_incoming_connections(self, target_id: int) -> List[Tuple[int, str]]:
+        """Get incoming connections to target."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(""
+                "SELECT m.id as source_id, json_extract(c.value, '$.relation') as relation "
+                "FROM memory m, json_each(m.connections) c "
+                "WHERE json_extract(c.value, '$.target_id') = ? "
+                "AND m.is_archived = 0"
+                "", (target_id,))
+            return [(int(row['source_id']), row['relation'] or '') for row in cursor.fetchall()]
+
+    def get_entity_graph(self, entity: str, limit: int = 20) -> List[MemoryEntry]:
+        """Find all records where entity is mentioned in entities. Uses JSON search."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(""
+                "SELECT * FROM memory "
+                "WHERE EXISTS ("
+                "    SELECT 1 FROM json_each(entities) "
+                "    WHERE json_extract(value, '$.name') = ?"
+                ") "
+                "AND is_archived = 0 "
+                "ORDER BY importance DESC, updated_at DESC "
+                "LIMIT ?"
+                "", (entity, limit))
+            entries = [MemoryEntry(**dict(row)) for row in cursor.fetchall()]
+            self._touch_entries([e.id for e in entries])
+            return entries
+
+    def get_connected_entries(self, entry_id: int, max_depth: int = 2) -> List[Tuple[MemoryEntry, str]]:
+        """BFS graph traversal from entry_id up to max_depth.\nBidirectional (outgoing + incoming)."""
+        start_entry = self._get_entry_by_id(entry_id)
+        if not start_entry:
+            return []
+
+        from collections import deque
+        visited = set()
+        queue = deque([(entry_id, 0, None)])
+        connected: List[Tuple[MemoryEntry, str]] = []
+
+        while queue:
+            cid, depth, rel = queue.popleft()
+            if cid in visited:
+                continue
+            visited.add(cid)
+
+            if rel is not None:
+                entry = self._get_entry_by_id(cid)
+                if entry:
+                    connected.append((entry, rel))
+
+            if depth >= max_depth:
+                continue
+
+            # Outgoing
+            for tid, r in self._get_outgoing_connections(cid):
+                if tid not in visited:
+                    queue.append((tid, depth + 1, r))
+
+            # Incoming
+            for sid, r in self._get_incoming_connections(cid):
+                if sid not in visited:
+                    queue.append((sid, depth + 1, r))
+
+        self._touch_entries([e.id for e, _ in connected])
+        return connected
+
+    def find_entity_connections(self, entity1: str, entity2: str, max_depth: int = 3) -> List[dict]:
+        """Find shortest path between entries containing entity1 and entity2 using BFS."""
+        starts = self.get_entity_graph(entity1, limit=50)
+        if not starts:
+            return []
+        start_ids = {e.id for e in starts}
+
+        targets_list = self.get_entity_graph(entity2, limit=50)
+        if not targets_list:
+            return []
+        target_ids = {e.id for e in targets_list}
+
+        if start_ids & target_ids:
+            return []  # Direct overlap
+
+        visited = set(start_ids)
+        queue = deque((sid, 0) for sid in start_ids)
+        parent: Dict[int, int] = {sid: None for sid in start_ids}
+        relation_to: Dict[int, str] = {sid: '' for sid in start_ids}
+
+        found_id = None
+        while queue:
+            cid, depth = queue.popleft()
+            if cid in target_ids:
+                found_id = cid
+                break
+            if depth >= max_depth:
+                continue
+
+            neighbors = self._get_outgoing_connections(cid) + self._get_incoming_connections(cid)
+            for nid, r in neighbors:
+                if nid not in visited:
+                    visited.add(nid)
+                    queue.append((nid, depth + 1))
+                    parent[nid] = cid
+                    relation_to[nid] = r
+
+        if not found_id:
+            return []
+
+        # Reconstruct path
+        path = []
+        current = found_id
+        while parent.get(current) is not None:
+            p = parent[current]
+            r = relation_to[current]
+            to_entry = self._get_entry_by_id(current)
+            entities = json.loads(to_entry.entities or '[]') if to_entry else []
+            entity_name = entities[0].get('name', '') if entities else ''
+            path.append({
+                "from_id": p,
+                "to_id": current,
+                "relation": r,
+                "entity": entity_name
+            })
+            current = p
+
+        path.reverse()
+        self._touch_entries(list(parent.keys()) + [found_id])
+        return path
+
+    def vacuum_db(self) -> Dict[str, Any]:
+        """
+        Run VACUUM on the database to reclaim space and optimize.
+        
+        VACUUM rebuilds the database file, which:
+        - Reclaims unused space from deleted rows
+        - Defragments the database
+        - Improves query performance
+        
+        Note: VACUUM requires exclusive lock and may take time on large databases.
+        
+        Returns:
+            Dict with:
+            - success: bool - whether vacuum succeeded
+            - size_before_mb: float - size before vacuum
+            - size_after_mb: float - size after vacuum (0 if failed)
+            - reclaimed_mb: float - space reclaimed (0 if failed)
+            - error: str - error message if failed
+        """
+        size_before_mb = self.get_db_size_mb()
+        
+        try:
+            # VACUUM requires a fresh connection without WAL mode active
+            with sqlite3.connect(str(self.db_path)) as conn:
+                conn.execute("PRAGMA journal_mode=DELETE")
+                conn.execute("VACUUM")
+                conn.execute("PRAGMA journal_mode=WAL")
+            
+            size_after_mb = self.get_db_size_mb()
+            reclaimed_mb = size_before_mb - size_after_mb
+            
+            logger.info(
+                f"✅ VACUUM complete: {size_before_mb:.2f}MB -> {size_after_mb:.2f}MB "
+                f"(reclaimed {reclaimed_mb:.2f}MB)"
+            )
+            
+            return {
+                "success": True,
+                "size_before_mb": round(size_before_mb, 2),
+                "size_after_mb": round(size_after_mb, 2),
+                "reclaimed_mb": round(reclaimed_mb, 2)
+            }
+        except Exception as e:
+            logger.error(f"❌ VACUUM failed: {e}")
+            return {
+                "success": False,
+                "size_before_mb": round(size_before_mb, 2),
+                "size_after_mb": 0.0,
+                "reclaimed_mb": 0.0,
+                "error": str(e)
             }

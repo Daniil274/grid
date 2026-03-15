@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "grid-agent-system"
+dynamic = ["version"]
+description = "Orchestration system for AI agents focused on engineering tasks"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Agents SDK Project", email = "info@agents-sdk.com"}]
+maintainers = [{name = "Agents SDK Project"}]
+keywords = [
+    "ai",
+    "agents",
+    "orchestration",
+    "llm",
+    "openai",
+    "engineering",
+    "automation",
+    "tools",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Distributed Computing",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "openai-agents>=0.2.6",
+    "httpx>=0.25.0",
+    "openai>=1.0.0",
+    "pydantic>=2.0.0",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0.0",
+    "click>=8.0.0",
+    "rich>=13.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "docker>=7.0.0",
+    "pyautogui>=0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-timeout>=2.3.1",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy",
+    "types-all",
+]
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+]
+
+[project.scripts]
+agent-chat = "agent_chat:main"
+
+[project.urls]
+Homepage = "https://github.com/AgentsSDK/grid"
+Repository = "https://github.com/AgentsSDK/grid.git"
+Documentation = "https://github.com/AgentsSDK/grid/blob/main/docs/index.md"
+
+[tool.hatch.version]
+path = "grid/__init__.py"  # Assume __init__.py will have __version__
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = "E203, W503"
+exclude = ".git,__pycache__,*.egg-info,.eggs,build,dist"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -2,7 +2,7 @@
 Skill Manager - Handles file-based skills with Database synchronization.
 
 Storage:
-    workspace/{user_id}/skills/{skill_name}/skill.md
+    workspace/{user_id}/agents/{agent_id}/skills/{skill_name}/skill.md
 
 Synchronization:
     - Filesystem is the source of truth for content.
@@ -34,22 +34,29 @@ class SkillManager:
         self.memory_store = memory_store
         self.workspace_root = Path(workspace_root)
 
-    def _get_user_skills_dir(self, user_id: str) -> Path:
-        """Get skills directory for a user."""
-        return self.workspace_root / user_id / "skills"
+    def _sanitize_path_component(self, value: str, fallback: str) -> str:
+        """Sanitize a path component for safe filesystem storage."""
+        safe_value = "".join(c for c in value if c.isalnum() or c in ('-', '_')).strip()
+        return safe_value or fallback
 
-    def _get_skill_path(self, user_id: str, skill_name: str) -> Path:
+    def _get_agent_skills_dir(self, user_id: str, agent_id: str) -> Path:
+        """Get skills directory for a user+agent pair."""
+        safe_user_id = self._sanitize_path_component(user_id, "default_user")
+        safe_agent_id = self._sanitize_path_component(agent_id, "default_agent")
+        return self.workspace_root / safe_user_id / "agents" / safe_agent_id / "skills"
+
+    def _get_skill_path(self, user_id: str, agent_id: str, skill_name: str) -> Path:
         """Get path to a specific skill file."""
-        # Sanitize skill name to be safe for filesystem
-        safe_name = "".join(c for c in skill_name if c.isalnum() or c in ('-', '_')).strip()
-        return self._get_user_skills_dir(user_id) / safe_name / "skill.md"
+        safe_name = self._sanitize_path_component(skill_name, "skill")
+        return self._get_agent_skills_dir(user_id, agent_id) / safe_name / "skill.md"
 
-    def create_skill(self, user_id: str, skill_name: str, content: str, tags: str = "") -> str:
+    def create_skill(self, user_id: str, agent_id: str, skill_name: str, content: str, tags: str = "") -> str:
         """
         Create a new skill.
 
         Args:
             user_id: User ID
+            agent_id: Agent ID
             skill_name: Name of the skill
             content: Markdown content
             tags: Comma-separated tags
@@ -57,10 +64,12 @@ class SkillManager:
         Returns:
             Skill name
         """
-        skill_path = self._get_skill_path(user_id, skill_name)
+        skill_path = self._get_skill_path(user_id, agent_id, skill_name)
         
         if skill_path.exists():
-            raise FileExistsError(f"Skill '{skill_name}' already exists for user {user_id}")
+            raise FileExistsError(
+                f"Skill '{skill_name}' already exists for user {user_id} and agent {agent_id}"
+            )
 
         # Create directory and file
         skill_path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,30 +81,28 @@ class SkillManager:
             content=content,
             type="skill",
             user_id=user_id,
-            # Store skill name in task_id or a separate metadata field? 
-            # Using task_id to store skill_name for easy retrieval/linking is a hack but works for now.
-            # Better: Put "Skill: {name}" in content or tags? 
-            # Let's put "skill:{name}" in tags.
+            agent_id=agent_id,
             tags=f"{tags},skill:{skill_name}".strip(","),
             importance=1.0 # Skills are high importance
         )
         
-        logger.info(f"✅ Created skill '{skill_name}' for user {user_id}")
+        logger.info(f"✅ Created skill '{skill_name}' for user {user_id} and agent {agent_id}")
         return skill_name
 
-    def update_skill(self, user_id: str, skill_name: str, content: str) -> bool:
+    def update_skill(self, user_id: str, agent_id: str, skill_name: str, content: str) -> bool:
         """
         Update an existing skill.
 
         Args:
             user_id: User ID
+            agent_id: Agent ID
             skill_name: Name of the skill
             content: New content
 
         Returns:
             True if updated
         """
-        skill_path = self._get_skill_path(user_id, skill_name)
+        skill_path = self._get_skill_path(user_id, agent_id, skill_name)
         
         if not skill_path.exists():
             return False
@@ -110,6 +117,7 @@ class SkillManager:
             query=f"skill:{skill_name}", # This might match content too if not careful
             type="skill",
             user_id=user_id,
+            agent_id=agent_id,
             limit=1
         )
         
@@ -129,24 +137,26 @@ class SkillManager:
                 type="skill",
                 tags=f"skill:{skill_name}",
                 user_id=user_id,
+                agent_id=agent_id,
                 importance=1.0
             )
 
-        logger.info(f"✏️ Updated skill '{skill_name}' for user {user_id}")
+        logger.info(f"✏️ Updated skill '{skill_name}' for user {user_id} and agent {agent_id}")
         return True
 
-    def delete_skill(self, user_id: str, skill_name: str) -> bool:
+    def delete_skill(self, user_id: str, agent_id: str, skill_name: str) -> bool:
         """
         Delete a skill.
 
         Args:
             user_id: User ID
+            agent_id: Agent ID
             skill_name: Name of the skill
 
         Returns:
             True if deleted
         """
-        skill_path = self._get_skill_path(user_id, skill_name)
+        skill_path = self._get_skill_path(user_id, agent_id, skill_name)
         
         if not skill_path.exists():
             return False
@@ -162,6 +172,7 @@ class SkillManager:
         entries = self.memory_store.search(
             type="skill",
             user_id=user_id,
+            agent_id=agent_id,
             limit=100 # Fetch potential matches
         )
         
@@ -169,21 +180,22 @@ class SkillManager:
             if f"skill:{skill_name}" in entry.tags:
                 self.memory_store.delete(entry.id, hard=True)
 
-        logger.info(f"🗑️ Deleted skill '{skill_name}' for user {user_id}")
+        logger.info(f"🗑️ Deleted skill '{skill_name}' for user {user_id} and agent {agent_id}")
         return True
 
-    def get_skill(self, user_id: str, skill_name: str) -> Optional[str]:
+    def get_skill(self, user_id: str, agent_id: str, skill_name: str) -> Optional[str]:
         """
         Get skill content.
 
         Args:
             user_id: User ID
+            agent_id: Agent ID
             skill_name: Name of the skill
 
         Returns:
             Content string or None
         """
-        skill_path = self._get_skill_path(user_id, skill_name)
+        skill_path = self._get_skill_path(user_id, agent_id, skill_name)
         
         if not skill_path.exists():
             return None
@@ -191,17 +203,18 @@ class SkillManager:
         with open(skill_path, 'r', encoding='utf-8') as f:
             return f.read()
 
-    def list_skills(self, user_id: str) -> List[str]:
+    def list_skills(self, user_id: str, agent_id: str) -> List[str]:
         """
         List all skills for a user.
 
         Args:
             user_id: User ID
+            agent_id: Agent ID
 
         Returns:
             List of skill names
         """
-        skills_dir = self._get_user_skills_dir(user_id)
+        skills_dir = self._get_agent_skills_dir(user_id, agent_id)
         if not skills_dir.exists():
             return []
 
@@ -212,21 +225,32 @@ class SkillManager:
         
         return sorted(skills)
 
-    def sync_skills_to_db(self, user_id: str):
+    def search_skills(self, user_id: str, agent_id: str, query: str, limit: int = 10) -> List[Any]:
+        """Search skills for a specific user+agent pair."""
+        return self.memory_store.search(
+            query=query,
+            type="skill",
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=limit,
+        )
+
+    def sync_skills_to_db(self, user_id: str, agent_id: str):
         """
         Sync filesystem skills to database.
         Should be called on agent startup or periodically.
         """
-        skills = self.list_skills(user_id)
+        skills = self.list_skills(user_id, agent_id)
         
         # 1. Index/Update existing files
         for skill_name in skills:
-            content = self.get_skill(user_id, skill_name)
+            content = self.get_skill(user_id, agent_id, skill_name)
             if content:
                 # Check DB
                 entries = self.memory_store.search(
                     type="skill",
                     user_id=user_id,
+                    agent_id=agent_id,
                     limit=100
                 )
                 
@@ -244,6 +268,7 @@ class SkillManager:
                         type="skill",
                         tags=f"skill:{skill_name}",
                         user_id=user_id,
+                        agent_id=agent_id,
                         importance=1.0
                     )
 
@@ -252,6 +277,7 @@ class SkillManager:
         db_skills = self.memory_store.search(
             type="skill",
             user_id=user_id,
+            agent_id=agent_id,
             limit=1000
         )
         
@@ -265,19 +291,26 @@ class SkillManager:
                     self.memory_store.delete(entry.id, hard=True)
                     logger.info(f"Removed orphaned DB entry for skill '{name}'")
 
-    def broadcast_skill(self, source_user_id: str, skill_name: str, target_user_ids: List[str]) -> Dict[str, bool]:
+    def broadcast_skill(
+        self,
+        source_user_id: str,
+        source_agent_id: str,
+        skill_name: str,
+        target_user_ids: List[str]
+    ) -> Dict[str, bool]:
         """
         Copy a skill to other users.
 
         Args:
             source_user_id: Source User ID
+            source_agent_id: Source Agent ID
             skill_name: Name of skill to copy
             target_user_ids: List of target User IDs
 
         Returns:
             Dict {user_id: success}
         """
-        content = self.get_skill(source_user_id, skill_name)
+        content = self.get_skill(source_user_id, source_agent_id, skill_name)
         if not content:
             return {uid: False for uid in target_user_ids}
 
@@ -285,10 +318,10 @@ class SkillManager:
         for target_uid in target_user_ids:
             try:
                 # Check if exists
-                if (self._get_skill_path(target_uid, skill_name)).exists():
-                    self.update_skill(target_uid, skill_name, content)
+                if (self._get_skill_path(target_uid, source_agent_id, skill_name)).exists():
+                    self.update_skill(target_uid, source_agent_id, skill_name, content)
                 else:
-                    self.create_skill(target_uid, skill_name, content)
+                    self.create_skill(target_uid, source_agent_id, skill_name, content)
                 results[target_uid] = True
             except Exception as e:
                 logger.error(f"Failed to broadcast skill to {target_uid}: {e}")

@@ -4,15 +4,18 @@ TelegramBridge - интеграция Telegram бота с OpenAI Agents SDK
 """
 
 import asyncio
+import json
 import logging
 import traceback
 import html
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
 from telegram import Update, BotCommand
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -22,6 +25,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
+import httpx
 
 from core.unified_memory import UnifiedMemory
 from core.memory_store import MemoryStore
@@ -98,6 +102,7 @@ class TelegramBridge:
         self.user_memories: Dict[int, UnifiedMemory] = {}  # user_id -> UnifiedMemory (deprecated)
         self.user_memory_stores: Dict[int, MemoryStore] = {}  # user_id -> MemoryStore (new SQLite)
         self.user_workspaces: Dict[int, Path] = {}  # user_id -> workspace_path
+        self.user_selected_agents: Dict[int, str] = {}  # user_id -> selected agent key
 
         # Состояние активных операций
         self.active_tasks: Dict[int, asyncio.Task] = {}  # chat_id -> task
@@ -156,7 +161,12 @@ class TelegramBridge:
         container_id = None
         if self.container_manager and self.container_manager.enabled:
             try:
-                container = self.container_manager.get_or_create_container(str(user_id))
+                # Передаем уже вычисленный user workspace, чтобы контейнер монтировал
+                # именно `workspace/user_<id>`, а не `working_directory/user_<id>`.
+                container = self.container_manager.get_or_create_container(
+                    str(user_id),
+                    workspace=user_workspace,
+                )
                 if container:
                     container_id = container.id
                     logger.info(f"🐳 Using container {container.name} ({container_id[:12]}) for user_{user_id}")
@@ -361,6 +371,7 @@ class TelegramBridge:
         self.app.add_handler(CommandHandler("clear", self.cmd_clear))
         self.app.add_handler(CommandHandler("memory", self.cmd_memory))
         self.app.add_handler(CommandHandler("skills", self.cmd_skills))
+        self.app.add_handler(CommandHandler("agent", self.cmd_agent))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("sendfile", self.cmd_sendfile))
 
@@ -388,6 +399,7 @@ class TelegramBridge:
             BotCommand("clear", "Очистить историю диалога"),
             BotCommand("memory", "Показать содержимое памяти"),
             BotCommand("skills", "Показать доступные навыки"),
+            BotCommand("agent", "Выбрать активного агента"),
             BotCommand("status", "Показать статус системы"),
             BotCommand("sendfile", "Отправить файл"),
         ]
@@ -400,6 +412,108 @@ class TelegramBridge:
             # Не прерываем инициализацию, бот может работать без команд в меню
 
     # ===== ОБРАБОТЧИКИ КОМАНД (Layer 2: Message processing resilience) =====
+
+    def _get_user_state_path(self, user_id: int) -> Path:
+        """Путь к файлу состояния Telegram-пользователя."""
+        user_persist = self.config.persist_path / f"user_{user_id}"
+        user_persist.mkdir(parents=True, exist_ok=True)
+        return user_persist / "telegram_state.json"
+
+    def _get_available_agents(self, user_id: int) -> Dict[str, str]:
+        """Список доступных агентов для пользователя."""
+        user_factory = self._get_user_agent_factory(user_id)
+        if not user_factory:
+            return {}
+        return user_factory.config.list_agents()
+
+    def _get_default_agent_key(self, user_id: int) -> Optional[str]:
+        """Получить default_agent из конфигурации."""
+        user_factory = self._get_user_agent_factory(user_id)
+        if not user_factory:
+            return None
+        return user_factory.config.get_default_agent()
+
+    def _persist_selected_agent(self, user_id: int, agent_key: str) -> None:
+        """Сохранить выбор агента на диск, чтобы пережить рестарт бота."""
+        state_path = self._get_user_state_path(user_id)
+        payload = {
+            "selected_agent": agent_key,
+            "updated_at": datetime.now().isoformat(),
+        }
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    def _get_selected_agent_key(self, user_id: int) -> Optional[str]:
+        """Получить активного агента пользователя с fallback на default_agent."""
+        available_agents = self._get_available_agents(user_id)
+        default_agent = self._get_default_agent_key(user_id)
+        if not available_agents:
+            return default_agent
+
+        cached = self.user_selected_agents.get(user_id)
+        if cached in available_agents:
+            return cached
+
+        state_path = self._get_user_state_path(user_id)
+        if state_path.exists():
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+                selected_agent = state.get("selected_agent")
+                if selected_agent in available_agents:
+                    self.user_selected_agents[user_id] = selected_agent
+                    return selected_agent
+            except Exception as e:
+                logger.warning(f"Не удалось прочитать состояние user_{user_id}: {e}")
+
+        if default_agent:
+            self.user_selected_agents[user_id] = default_agent
+        return default_agent
+
+    def _set_selected_agent_key(self, user_id: int, agent_key: str) -> None:
+        """Установить и сохранить выбранного агента."""
+        available_agents = self._get_available_agents(user_id)
+        if agent_key not in available_agents:
+            raise ValueError(f"Agent '{agent_key}' not found")
+
+        self.user_selected_agents[user_id] = agent_key
+        self._persist_selected_agent(user_id, agent_key)
+
+    def _format_agents_list_html(self, user_id: int) -> str:
+        """Сформировать HTML-список доступных агентов."""
+        available_agents = self._get_available_agents(user_id)
+        default_agent = self._get_default_agent_key(user_id)
+        current_agent = self._get_selected_agent_key(user_id)
+
+        if not available_agents:
+            return "⚠️ Список агентов недоступен"
+
+        lines = [
+            "🤖 <b>Доступные агенты</b>\n",
+            f"Текущий: <code>{self._escape_html(current_agent or 'unknown')}</code>",
+            f"По умолчанию: <code>{self._escape_html(default_agent or 'unknown')}</code>\n",
+        ]
+
+        for agent_key, description in available_agents.items():
+            markers = []
+            if agent_key == current_agent:
+                markers.append("активный")
+            if agent_key == default_agent:
+                markers.append("default")
+            suffix = f" <i>({', '.join(markers)})</i>" if markers else ""
+            lines.append(
+                f"• <code>{self._escape_html(agent_key)}</code>{suffix} - "
+                f"{self._escape_html(description)}"
+            )
+
+        lines.extend([
+            "",
+            "Использование:",
+            "• <code>/agent</code> - показать список",
+            "• <code>/agent &lt;agent_key&gt;</code> - переключить агента",
+            "• <code>/agent reset</code> - вернуться к агенту по умолчанию",
+        ])
+        return "\n".join(lines)
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /start"""
@@ -416,6 +530,7 @@ class TelegramBridge:
                 "Я объединяю систему агентов grid с памятью и навыками nanobot.\n\n"
                 "<b>Доступные команды:</b>\n"
                 "/help - справка\n"
+                "/agent - выбрать активного агента\n"
                 "/clear - очистить историю диалога\n"
                 "/memory - показать память\n"
                 "/skills - показать навыки\n"
@@ -444,6 +559,7 @@ class TelegramBridge:
                 "3. Все действия агента показываются в реальном времени\n"
                 "4. Детали скрыты под спойлерами (нажмите чтобы раскрыть)\n\n"
                 "<b>Команды:</b>\n"
+                "• /agent - показать список агентов и переключить активного\n"
                 "• /clear - очистить краткосрочную память (историю диалога)\n"
                 "• /memory - показать долгосрочную и краткосрочную память\n"
                 "• /skills - список доступных навыков агента\n"
@@ -473,6 +589,69 @@ class TelegramBridge:
         except Exception as e:
             logger.error(f"Ошибка в cmd_help: {e}")
             await self._send_error_message(update, "Ошибка при обработке команды /help")
+
+    async def cmd_agent(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /agent - показать и переключить активного агента."""
+        try:
+            user_id = update.effective_user.id
+            chat_id = update.effective_chat.id
+
+            if not self._check_access(user_id):
+                await update.message.reply_text("⛔ Доступ запрещен")
+                return
+
+            available_agents = self._get_available_agents(user_id)
+            default_agent = self._get_default_agent_key(user_id)
+            if not available_agents or not default_agent:
+                await update.message.reply_text("⚠️ Система агентов сейчас недоступна")
+                return
+
+            if not context.args:
+                await update.message.reply_text(
+                    self._format_agents_list_html(user_id),
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+            requested_agent = context.args[0].strip()
+            if requested_agent.lower() in {"reset", "default"}:
+                requested_agent = default_agent
+
+            if requested_agent not in available_agents:
+                await update.message.reply_text(
+                    "❌ Неизвестный агент.\n\n" + self._format_agents_list_html(user_id),
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+            current_agent = self._get_selected_agent_key(user_id)
+            if requested_agent == current_agent:
+                await update.message.reply_text(
+                    f"ℹ️ Агент <code>{self._escape_html(requested_agent)}</code> уже активен.\n\n"
+                    f"{self._format_agents_list_html(user_id)}",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+            self._set_selected_agent_key(user_id, requested_agent)
+
+            # При смене агента очищаем только краткосрочный контекст, чтобы не смешивать диалоги.
+            self.chat_contexts[chat_id] = []
+            user_memory = self._get_user_memory(user_id)
+            user_memory.context_manager.clear_history()
+
+            await update.message.reply_text(
+                "✅ <b>Агент переключен</b>\n\n"
+                f"Активный агент: <code>{self._escape_html(requested_agent)}</code>\n"
+                f"Описание: {self._escape_html(available_agents[requested_agent])}\n\n"
+                "Краткосрочный контекст очищен, долгосрочная память сохранена.",
+                parse_mode=ParseMode.HTML,
+            )
+
+        except Exception as e:
+            logger.error(f"Ошибка в cmd_agent: {e}")
+            logger.error(traceback.format_exc())
+            await self._send_error_message(update, "Ошибка при переключении агента")
 
     async def cmd_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /clear - очистить историю диалога"""
@@ -649,7 +828,10 @@ class TelegramBridge:
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /status - показать статус системы"""
         try:
+            user_id = update.effective_user.id
             uptime = datetime.now() - self.stats["start_time"]
+            current_agent = self._get_selected_agent_key(user_id)
+            default_agent = self._get_default_agent_key(user_id)
 
             status_text = (
                 "📊 <b>Статус системы</b>\n\n"
@@ -658,6 +840,9 @@ class TelegramBridge:
                 f"🤖 <b>Агентов запущено:</b> {self.stats['agents_launched']}\n"
                 f"⚠️ <b>Ошибок обработано:</b> {self.stats['errors_handled']}\n"
                 f"🔄 <b>Активных задач:</b> {len(self.active_tasks)}\n\n"
+                "<b>Агент:</b>\n"
+                f"• Активный: <code>{self._escape_html(current_agent or 'unknown')}</code>\n"
+                f"• По умолчанию: <code>{self._escape_html(default_agent or 'unknown')}</code>\n\n"
                 "<b>Компоненты:</b>\n"
                 f"{'✅' if self.broadcaster else '❌'} LiveTransparencyBroadcaster\n"
                 f"{'✅' if True else '❌'} UnifiedMemory (per-user)\n"
@@ -749,9 +934,10 @@ class TelegramBridge:
                 logger.debug(f"Не удалось установить voice_context: {e}")
 
             # Отправить одно простое сообщение о начале работы
+            selected_agent_key = self._get_selected_agent_key(user_id)
             status_message = await self.app.bot.send_message(
                 chat_id=chat_id,
-                text="🤖 Обрабатываю запрос..."
+                text=f"🤖 Обрабатываю запрос агентом {selected_agent_key or 'default'}..."
             )
 
             # Запустить агента
@@ -774,7 +960,13 @@ class TelegramBridge:
 
                 # Запуск агента через per-user AgentFactory (без переключений cwd)
                 try:
-                    default_agent_key = user_factory.config.get_default_agent()
+                    agent_key = selected_agent_key or user_factory.config.get_default_agent()
+                    if agent_key not in user_factory.config.list_agents():
+                        logger.warning(
+                            "⚠️ Selected agent '%s' is unavailable, fallback to default",
+                            agent_key,
+                        )
+                        agent_key = user_factory.config.get_default_agent()
 
                     chat_history = self.chat_contexts.get(chat_id, [])
                     if len(chat_history) > 1:
@@ -787,7 +979,7 @@ class TelegramBridge:
                         message_with_context = message_text
 
                     response = await user_factory.run_agent(
-                        agent_key=default_agent_key,
+                        agent_key=agent_key,
                         message=message_with_context,
                         use_active_context=False,
                         user_id=str(user_id),
@@ -845,53 +1037,188 @@ class TelegramBridge:
 
     def _markdown_to_html(self, text: str) -> str:
         """
-        Конвертирует Markdown агента в HTML-теги Telegram.
-        Порядок важен: сначала код (чтобы не трогать содержимое), потом остальное.
+        Конвертирует безопасное подмножество Markdown в HTML Telegram.
+        Сначала вырезаем код в плейсхолдеры, затем обрабатываем только обычный текст.
         """
-        import re
+        placeholders: dict[str, str] = {}
+
+        def store_placeholder(value: str) -> str:
+            key = f"@@TGPH{len(placeholders)}@@"
+            placeholders[key] = value
+            return key
 
         # 1. Код-блоки ```lang\n...\n``` → <pre><code>...</code></pre>
         def replace_code_block(m: re.Match) -> str:
             code = html.escape(m.group(2))
-            return f"<pre><code>{code}</code></pre>"
+            return store_placeholder(f"<pre><code>{code}</code></pre>")
+
         text = re.sub(r"```(\w*)\n?(.*?)```", replace_code_block, text, flags=re.DOTALL)
 
         # 2. Инлайн-код `...` → <code>...</code>
         def replace_inline_code(m: re.Match) -> str:
-            return f"<code>{html.escape(m.group(1))}</code>"
+            return store_placeholder(f"<code>{html.escape(m.group(1))}</code>")
+
         text = re.sub(r"`([^`\n]+)`", replace_inline_code, text)
 
-        # 3. Экранируем HTML в обычном тексте (вне тегов уже вставленных выше)
-        # Делаем это через замену: разбиваем на теги и не-теги
-        parts = re.split(r"(<(?:pre|code|/pre|/code)[^>]*>)", text)
-        escaped_parts = []
-        inside_tag = False
-        for part in parts:
-            if re.match(r"<(?:pre|code)[^>]*>", part):
-                inside_tag = True
-                escaped_parts.append(part)
-            elif re.match(r"</(?:pre|code)>", part):
-                inside_tag = False
-                escaped_parts.append(part)
-            elif inside_tag:
-                escaped_parts.append(part)  # внутри тега — уже escaped
-            else:
-                escaped_parts.append(html.escape(part))
-        text = "".join(escaped_parts)
+        # 3. Экранируем весь не-кодовый текст до разметки.
+        text = html.escape(text)
 
-        # 4. Жирный **text** или __text__ (bold)
+        # 4. Поддерживаем только безопасное подмножество Markdown.
+        # Умышленно не обрабатываем _italic_ и __bold__, чтобы не ломать snake_case / __init__.
+        text = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", r'<a href="\2">\1</a>', text)
         text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
-        # 5. Курсив *text* или _text_ (italic) — после bold чтобы ** не конфликтовал
         text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
-        text = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", text)
-        # 6. Перечёркнутый ~~text~~
         text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
-        # 7. Спойлер ||text||
         text = re.sub(r"\|\|(.+?)\|\|", r'<tg-spoiler>\1</tg-spoiler>', text)
-        # 8. Ссылки [text](url)
-        text = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r'<a href="\2">\1</a>', text)
+
+        for key, value in placeholders.items():
+            text = text.replace(key, value)
 
         return text
+
+    def _html_to_plain_text(self, text: str) -> str:
+        """Преобразует HTML Telegram в обычный текст для fallback-отправки."""
+        text = re.sub(r"</pre>", "\n", text)
+        text = re.sub(r"<br\s*/?>", "\n", text)
+        text = re.sub(r"</?(?:pre|code|b|i|s|tg-spoiler|a)(?:\s+[^>]+)?>", "", text)
+        return html.unescape(text)
+
+    def _find_safe_text_split(self, text: str, limit: int) -> int:
+        """Ищет безопасную границу разреза в текстовом сегменте."""
+        if len(text) <= limit:
+            return len(text)
+
+        split_at = max(1, limit)
+        newline_at = text.rfind("\n", 0, limit + 1)
+        space_at = text.rfind(" ", 0, limit + 1)
+        candidate = max(newline_at, space_at)
+        if candidate > 0:
+            split_at = candidate + (1 if text[candidate] == "\n" else 0)
+
+        # Не режем посреди HTML entity вроде &lt;
+        amp_at = text.rfind("&", 0, split_at)
+        semi_at = text.rfind(";", 0, split_at)
+        if amp_at > semi_at:
+            split_at = amp_at if amp_at > 0 else max(1, limit)
+
+        return max(1, split_at)
+
+    def _split_plain_text(self, text: str, max_len: int) -> list[str]:
+        """Делит обычный текст на куски без превышения лимита."""
+        chunks: list[str] = []
+        remaining = text
+        while remaining:
+            cut = self._find_safe_text_split(remaining, max_len)
+            chunks.append(remaining[:cut])
+            remaining = remaining[cut:]
+        return chunks or [""]
+
+    def _split_html_message(self, text: str, max_len: int) -> list[str]:
+        """
+        Делит HTML Telegram на валидные куски:
+        не рвёт теги, а при переносе временно закрывает и заново открывает стек тегов.
+        """
+        if len(text) <= max_len:
+            return [text]
+
+        token_pattern = re.compile(r"(<[^>]+>|[^<]+)", flags=re.DOTALL)
+        tag_name_pattern = re.compile(r"^</?([a-zA-Z0-9-]+)")
+        tokens = token_pattern.findall(text)
+        chunks: list[str] = []
+        current_parts: list[str] = []
+        current_len = 0
+        open_tags: list[tuple[str, str]] = []
+
+        def closing_suffix() -> str:
+            return "".join(f"</{tag_name}>" for tag_name, _ in reversed(open_tags))
+
+        def reopen_prefix() -> str:
+            return "".join(tag_text for _, tag_text in open_tags)
+
+        def flush_chunk() -> None:
+            nonlocal current_parts, current_len
+            if not current_parts:
+                return
+            chunk = "".join(current_parts) + closing_suffix()
+            chunks.append(chunk)
+            reopened = reopen_prefix()
+            current_parts = [reopened] if reopened else []
+            current_len = len(reopened)
+
+        for token in tokens:
+            if token.startswith("<") and token.endswith(">"):
+                match = tag_name_pattern.match(token)
+                tag_name = match.group(1) if match else ""
+                is_closing = token.startswith("</")
+                is_self_closing = token.endswith("/>")
+
+                extra_len = len(token)
+                if not is_closing and not is_self_closing and tag_name:
+                    extra_len += len(closing_suffix()) + len(f"</{tag_name}>")
+                if current_parts and current_len + extra_len > max_len:
+                    flush_chunk()
+
+                current_parts.append(token)
+                current_len += len(token)
+
+                if not is_closing and not is_self_closing and tag_name:
+                    open_tags.append((tag_name, token))
+                elif is_closing and tag_name:
+                    for index in range(len(open_tags) - 1, -1, -1):
+                        if open_tags[index][0] == tag_name:
+                            del open_tags[index]
+                            break
+                continue
+
+            remaining = token
+            while remaining:
+                available = max_len - current_len - len(closing_suffix())
+                if available <= 0:
+                    flush_chunk()
+                    available = max_len - current_len - len(closing_suffix())
+
+                if len(remaining) <= available:
+                    current_parts.append(remaining)
+                    current_len += len(remaining)
+                    remaining = ""
+                    continue
+
+                cut = self._find_safe_text_split(remaining, available)
+                current_parts.append(remaining[:cut])
+                current_len += cut
+                remaining = remaining[cut:]
+                flush_chunk()
+
+        if current_parts:
+            chunks.append("".join(current_parts) + closing_suffix())
+
+        return chunks or [text]
+
+    async def _send_message_with_fallback(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: Optional[str],
+    ) -> None:
+        """Отправляет сообщение и при проблемах с HTML деградирует до plain text."""
+        try:
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=parse_mode,
+            )
+            return
+        except BadRequest as exc:
+            if parse_mode != ParseMode.HTML:
+                raise
+
+            logger.warning("Telegram отклонил HTML, отправляем plain text fallback: %s", exc)
+            plain_text = self._html_to_plain_text(text)
+            for plain_chunk in self._split_plain_text(plain_text, TELEGRAM_MAX_MESSAGE_LENGTH):
+                await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=plain_chunk,
+                )
 
     async def _send_long_message(
         self,
@@ -904,30 +1231,30 @@ class TelegramBridge:
         if not text and not first_prefix:
             return
         if first_prefix and not text:
-            await self.app.bot.send_message(
+            await self._send_message_with_fallback(
                 chat_id=chat_id,
                 text=first_prefix,
                 parse_mode=parse_mode,
             )
             return
-        max_len = TELEGRAM_MAX_MESSAGE_LENGTH
-        first_max = max(1, max_len - len(first_prefix)) if first_prefix else max_len
 
-        offset = 0
-        is_first = True
-        while offset < len(text):
-            chunk_size = first_max if (is_first and first_prefix) else max_len
-            chunk = text[offset : offset + chunk_size]
-            offset += len(chunk)
-            if is_first and first_prefix:
+        max_len = TELEGRAM_MAX_MESSAGE_LENGTH
+        prefix_len = len(first_prefix) if first_prefix else 0
+        first_max = max(1, max_len - prefix_len) if first_prefix else max_len
+        split_chunks = (
+            self._split_html_message(text, first_max) if parse_mode == ParseMode.HTML
+            else self._split_plain_text(text, first_max)
+        )
+
+        for index, chunk in enumerate(split_chunks):
+            if index == 0 and first_prefix:
                 chunk = first_prefix + chunk
-                is_first = False
-            await self.app.bot.send_message(
+            await self._send_message_with_fallback(
                 chat_id=chat_id,
                 text=chunk,
                 parse_mode=parse_mode,
             )
-            if offset < len(text):
+            if index < len(split_chunks) - 1:
                 await asyncio.sleep(0.25)
 
     def _check_access(self, user_id: int) -> bool:
@@ -1756,12 +2083,44 @@ class TelegramBridge:
 
     # ===== УПРАВЛЕНИЕ ЖИЗНЕННЫМ ЦИКЛОМ =====
 
+    async def _check_proxy_reachable(self) -> bool:
+        """Проверка доступности прокси перед запросами к Telegram. Возвращает True если прокси ок или не задан."""
+        if not self.config.proxy_url:
+            return True
+        try:
+            async with httpx.AsyncClient(
+                proxy=self.config.proxy_url,
+                timeout=10.0,
+                follow_redirects=True,
+            ) as client:
+                r = await client.get("https://api.telegram.org")
+            # 200 или редирект (302 и т.д.) — прокси и Telegram доступны
+            if r.status_code < 400:
+                logger.info("Прокси доступен, соединение с Telegram API возможно")
+                return True
+            raise RuntimeError(f"api.telegram.org вернул HTTP {r.status_code}")
+        except Exception as e:
+            logger.error(
+                "Не удалось подключиться к Telegram через прокси %s: %s. "
+                "Проверьте: 1) Xray запущен и слушает на указанном порту (ss -tlnp | grep 10808); "
+                "2) для SOCKS5 установлен httpx[socks] (pip install httpx[socks]); "
+                "3) попробуйте HTTP-прокси Xray вместо SOCKS5 (например http://127.0.0.1:10809).",
+                self.config.proxy_url,
+                e,
+            )
+            return False
+
     async def start(self):
         """Запуск бота"""
         try:
             logger.info("🚀 Запуск TelegramBridge...")
 
             await self.initialize()
+
+            if not await self._check_proxy_reachable():
+                raise RuntimeError(
+                    "Прокси недоступен. Запустите Xray и проверьте порт в config (telegram.proxy)."
+                )
 
             logger.info("📡 Запуск Telegram polling...")
             await self.app.initialize()
@@ -1803,10 +2162,20 @@ class TelegramBridge:
             if self.app:
                 try:
                     await asyncio.wait_for(self.app.updater.stop(), timeout=shutdown_timeout)
+                except RuntimeError as re:
+                    if "not running" in str(re).lower():
+                        logger.debug("Updater не был запущен (инициализация не завершилась), пропуск stop")
+                    else:
+                        raise
                 except asyncio.TimeoutError:
                     logger.warning("updater.stop() по таймауту")
                 try:
                     await asyncio.wait_for(self.app.stop(), timeout=shutdown_timeout)
+                except RuntimeError as re:
+                    if "not running" in str(re).lower():
+                        logger.debug("Application не была запущена, пропуск app.stop()")
+                    else:
+                        raise
                 except asyncio.TimeoutError:
                     logger.warning("app.stop() по таймауту")
                 try:

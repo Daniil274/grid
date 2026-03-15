@@ -58,6 +58,20 @@ def _get_user_id(context: RunContextWrapper) -> str:
     return "default_user"
 
 
+def _get_agent_id(context: RunContextWrapper) -> str:
+    """Get agent_id from context."""
+    try:
+        raw = getattr(context, "context", None)
+        if raw:
+            agent_id = getattr(raw, "agent_id", None)
+            if agent_id:
+                return agent_id
+            return "default_agent"
+    except Exception:
+        pass
+    return "default_agent"
+
+
 @function_tool
 async def skill_create(
     context: RunContextWrapper,
@@ -85,6 +99,7 @@ async def skill_create(
         return "❌ Skill manager not available"
 
     user_id = _get_user_id(context)
+    agent_id = _get_agent_id(context)
 
     try:
         visible_path = display_agent_path(file_path, _get_factory(context))
@@ -95,7 +110,7 @@ async def skill_create(
         except Exception as e:
             return f"❌ Error reading skill file from '{visible_path}': {e}"
 
-        manager.create_skill(user_id, name, content, tags)
+        manager.create_skill(user_id, agent_id, name, content, tags)
         return f"✅ Skill '{name}' created/registered successfully from '{visible_path}'."
     except FileExistsError:
         return f"❌ Skill '{name}' already exists. Use skill_update to modify it."
@@ -124,9 +139,10 @@ async def skill_update(
         return "❌ Skill manager not available"
 
     user_id = _get_user_id(context)
+    agent_id = _get_agent_id(context)
 
     try:
-        success = manager.update_skill(user_id, name, content)
+        success = manager.update_skill(user_id, agent_id, name, content)
         if success:
             return f"✅ Skill '{name}' updated successfully."
         else:
@@ -154,9 +170,10 @@ async def skill_delete(
         return "❌ Skill manager not available"
 
     user_id = _get_user_id(context)
+    agent_id = _get_agent_id(context)
 
     try:
-        success = manager.delete_skill(user_id, name)
+        success = manager.delete_skill(user_id, agent_id, name)
         if success:
             return f"✅ Skill '{name}' deleted successfully."
         else:
@@ -184,9 +201,10 @@ async def skill_read(
         return "❌ Skill manager not available"
 
     user_id = _get_user_id(context)
+    agent_id = _get_agent_id(context)
 
     try:
-        content = manager.get_skill(user_id, name)
+        content = manager.get_skill(user_id, agent_id, name)
         if content:
             return f"📚 Skill: {name}\n\n{content}"
         else:
@@ -214,14 +232,10 @@ async def skill_search(
         return "❌ Skill manager not available"
 
     user_id = _get_user_id(context)
+    agent_id = _get_agent_id(context)
 
     try:
-        results = manager.memory_store.search(
-            query=query,
-            type="skill",
-            user_id=user_id,
-            limit=10
-        )
+        results = manager.search_skills(user_id, agent_id, query, limit=10)
 
         if not results:
             return f"ℹ️ No skills found for '{query}'"
@@ -260,9 +274,10 @@ async def skill_list(context: RunContextWrapper) -> str:
         return "❌ Skill manager not available"
 
     user_id = _get_user_id(context)
+    agent_id = _get_agent_id(context)
 
     try:
-        names = manager.list_skills(user_id)
+        names = manager.list_skills(user_id, agent_id)
         if not names:
             return "ℹ️ No skills available."
         return "📚 Available skills:\n" + "\n".join(f"- {n}" for n in names)
@@ -291,13 +306,14 @@ async def skill_broadcast(
         return "❌ Skill manager not available"
 
     user_id = _get_user_id(context)
+    agent_id = _get_agent_id(context)
     targets = [u.strip() for u in target_users.split(",") if u.strip()]
 
     if not targets:
         return "❌ No target users specified"
 
     try:
-        results = manager.broadcast_skill(user_id, name, targets)
+        results = manager.broadcast_skill(user_id, agent_id, name, targets)
 
         success_count = sum(1 for v in results.values() if v)
         fail_count = len(results) - success_count

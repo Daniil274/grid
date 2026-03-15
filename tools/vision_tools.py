@@ -57,8 +57,9 @@ async def _inject_image_for_analysis(
     if file_ext == '.pdf':
         return [ToolOutputText(
             text=f"❌ ОШИБКА: view_image не поддерживает PDF файлы!\n\n"
-                 f"Для анализа PDF используй инструмент pdf:\n"
-                 f'pdf(ctx, "{visible_path}", pages="1:1")'
+                 f"Для анализа PDF используй:\n"
+                 f'- pdf("{visible_path}", pages="1:1") для получения страниц как изображений\n'
+                 f'- pdf-ocr("{visible_path}", pages="1:1") для OCR'
         )]
 
     try:

@@ -8,6 +8,13 @@ Telegram Server - главная точка входа для Unified Agent Bot
 
 import sys
 import io
+from pathlib import Path
+
+# При прямом запуске (python telegram_server.py) корень проекта не в пакете — добавляем в path
+if __package__ is None:
+    _grid_root = Path(__file__).resolve().parent.parent.parent  # repo root (grid/)
+    if str(_grid_root) not in sys.path:
+        sys.path.insert(0, str(_grid_root))
 
 # Настроить stdout и stderr для UTF-8 СРАЗУ (fix для Windows эмодзи)
 if sys.platform == 'win32':
@@ -19,12 +26,14 @@ import argparse
 import logging
 import signal
 import os
-from pathlib import Path
 from typing import Optional
 import yaml
 from dotenv import load_dotenv
 
-from .telegram_bridge import TelegramBridge, BridgeConfig
+if __package__ is None:
+    from examples.telegram_bot.telegram_bridge import TelegramBridge, BridgeConfig
+else:
+    from .telegram_bridge import TelegramBridge, BridgeConfig
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -110,9 +119,15 @@ class TelegramServer:
             if not telegram_token:
                 raise ValueError(f"Telegram token не найден в переменной окружения {token_env}")
 
-            # Получить пути
+            # Получить пути. Относительные пути привязываем к директории config.yaml,
+            # а не к текущему cwd процесса.
+            config_dir = self.config_path.parent.resolve()
             workspace_path = Path(telegram_config.get('workspace_path', './workspace'))
             persist_path = Path(telegram_config.get('persist_path', './data'))
+            if not workspace_path.is_absolute():
+                workspace_path = config_dir / workspace_path
+            if not persist_path.is_absolute():
+                persist_path = config_dir / persist_path
 
             # Создать директории если не существуют
             workspace_path.mkdir(parents=True, exist_ok=True)

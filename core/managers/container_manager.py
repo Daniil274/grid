@@ -136,6 +136,21 @@ class ContainerManager:
                 # Keep default bridge networking for portability.
                 pass
 
+            container_env = {"BEADS_DAEMON": "0"}
+            for proxy_var in (
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "NO_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "no_proxy",
+                "all_proxy",
+            ):
+                proxy_val = os.environ.get(proxy_var)
+                if proxy_val:
+                    container_env[proxy_var] = proxy_val
+
             container = self.client.containers.run(
                 self.image,
                 name=container_name,
@@ -145,7 +160,7 @@ class ContainerManager:
                 volumes=volumes,
                 working_dir=CONTAINER_WORKDIR,
                 user="agent",
-                environment={"BEADS_DAEMON": "0"}, # Disable beads daemon in container
+                environment=container_env, # Disable beads daemon and forward proxy env vars
                 restart_policy={"Name": "unless-stopped"},
                 **run_kwargs,
             )

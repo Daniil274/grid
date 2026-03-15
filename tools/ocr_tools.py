@@ -1,24 +1,29 @@
 """
-OCR Tools для Grid agents - чистые технические инструменты без бизнес-логики.
-Использует DeepSeek-OCR-2 через subprocess wrapper с кэшированием по пользователям.
+PDF/OCR tools для Grid agents.
+
+- `pdf` рендерит страницы PDF в изображения и сохраняет их в рабочую директорию агента.
+- `pdf-ocr` / `pdf_to_markdown` выполняют OCR через DeepSeek-OCR-2.
 """
-import sys
 import json
 import logging
-import subprocess
 import os
+import subprocess
+import sys
 from pathlib import Path
-from typing import List, Union, Dict, Any, Optional
+from typing import Any, List, Union
 
 # Import from agents SDK
 from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputImage, ToolOutputText
 from utils.path_utils import display_agent_path_from_ctx, resolve_agent_path_from_ctx
+from .vision_tools import _image_path_to_data_url
 
 logger = logging.getLogger("tools.ocr")
 
 DEEPSEEK_OCR_DIR = Path(__file__).parent / "DeepSeek-OCR-2"
 WRAPPER_SCRIPT = DEEPSEEK_OCR_DIR / "ocr_wrapper.py"
+PDF_RENDER_DPI = 180
+MAX_PDF_PAGES_PER_CALL = 5
 
 
 def get_python_executable() -> str:
@@ -79,39 +84,100 @@ def get_workspace_root() -> Path:
     return Path(__file__).parent.parent
 
 
-@function_tool
-async def pdf_to_markdown(
+def _parse_pages_range(pages: str) -> tuple[int, int]:
+    """Парсит диапазон страниц вида start:end."""
+    raw_pages = (pages or "").strip()
+    if ":" not in raw_pages:
+        raise ValueError('pages должен быть в формате "start:end"')
+
+    start_raw, end_raw = raw_pages.split(":", 1)
+    start = int(start_raw)
+    end = int(end_raw)
+
+    if start < 1 or end < 1:
+        raise ValueError("Номера страниц должны быть >= 1")
+    if end < start:
+        raise ValueError("Конечная страница должна быть не меньше начальной")
+    if (end - start + 1) > MAX_PDF_PAGES_PER_CALL:
+        raise ValueError(f"За один вызов можно запросить не более {MAX_PDF_PAGES_PER_CALL} страниц")
+
+    return start, end
+
+
+def _get_pdf_page_count(pdf_path: str) -> int:
+    """Возвращает количество страниц PDF через pdfinfo."""
+    result = subprocess.run(
+        ["pdfinfo", pdf_path],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    if result.returncode != 0:
+        error_msg = result.stderr or result.stdout or "Unknown error"
+        raise RuntimeError(f"Не удалось получить информацию о PDF: {error_msg}")
+
+    for line in result.stdout.splitlines():
+        if line.startswith("Pages:"):
+            _, value = line.split(":", 1)
+            return int(value.strip())
+
+    raise RuntimeError("pdfinfo не вернул число страниц")
+
+
+def _get_output_root(ctx: RunContextWrapper[Any], pdf_file: Path) -> Path:
+    """Папка для вывода изображений страниц PDF."""
+    working_dir = Path(ctx.context.factory.config.get_working_directory()).resolve()
+    doc_name = pdf_file.stem or "document"
+    return working_dir / "pdf_output" / doc_name
+
+
+def _render_single_pdf_page(pdf_path: str, page_number: int, output_path_no_ext: Path) -> None:
+    """Рендерит одну страницу PDF в PNG с помощью pdftoppm."""
+    cmd = [
+        "pdftoppm",
+        "-f", str(page_number),
+        "-l", str(page_number),
+        "-r", str(PDF_RENDER_DPI),
+        "-png",
+        "-singlefile",
+        pdf_path,
+        str(output_path_no_ext),
+    ]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        error_msg = result.stderr or result.stdout or "Unknown error"
+        raise RuntimeError(f"Не удалось отрендерить страницу {page_number}: {error_msg}")
+
+
+async def _run_pdf_ocr(
     ctx: RunContextWrapper[Any],
     pdf_path: str,
-    pages: str = "1:5"
+    pages: str,
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
-    """
-    Конвертирует PDF в структурированный Markdown с изображениями через OCR.
-    Результаты кэшируются по пользователям для повторного использования.
-
-    Args:
-        pdf_path: Абсолютный путь к PDF файлу
-        pages: Диапазон страниц в формате "start:end" (например "1:5" или "10:20")
-
-    Returns:
-        Список блоков контента (текст и изображения) в порядке следования
-    """
+    """Общая реализация OCR для PDF."""
     python_exe = get_python_executable()
     visible_pdf_path = display_agent_path_from_ctx(pdf_path, ctx)
 
     if not WRAPPER_SCRIPT.exists():
         return [ToolOutputText(text="❌ OCR wrapper not found")]
 
-    # Получаем user_id и workspace
     user_id = get_user_id_from_context(ctx)
     workspace_root = get_workspace_root()
 
-    # Отладка: логируем что получили
     logger.info(f"OCR tool - user_id: {user_id}, workspace: {workspace_root}")
 
     try:
         resolved_pdf_path = resolve_agent_path_from_ctx(pdf_path, ctx)
-        # Команда для запуска wrapper
         cmd = [
             python_exe,
             str(WRAPPER_SCRIPT),
@@ -119,7 +185,7 @@ async def pdf_to_markdown(
             "--pages", pages,
             "--quality", "12gb",
             "--user-id", user_id,
-            "--workspace", str(workspace_root)
+            "--workspace", str(workspace_root),
         ]
 
         logger.info(f"Running OCR wrapper for user {user_id}: {visible_pdf_path} pages {pages}")
@@ -128,9 +194,9 @@ async def pdf_to_markdown(
             cmd,
             capture_output=True,
             text=True,
-            encoding='utf-8',
-            errors='replace',  # Заменяем непонятные символы вместо падения
-            check=False
+            encoding="utf-8",
+            errors="replace",
+            check=False,
         )
 
         if result.returncode != 0:
@@ -138,7 +204,6 @@ async def pdf_to_markdown(
             logger.error(f"OCR wrapper failed: {error_msg}")
             return [ToolOutputText(text=f"❌ OCR processing failed: {error_msg}")]
 
-        # Парсим JSON output
         try:
             if not result.stdout or not result.stdout.strip():
                 logger.error("OCR wrapper returned empty output")
@@ -150,11 +215,9 @@ async def pdf_to_markdown(
             logger.error(f"Failed to parse OCR output: {result.stdout[:200]}")
             return [ToolOutputText(text=f"❌ Invalid OCR output format: {str(e)}")]
 
-        # Проверка на ошибку
         if isinstance(output_data, dict) and "error" in output_data:
             return [ToolOutputText(text=f"❌ OCR Error: {output_data['error']}")]
 
-        # Конвертируем в ToolOutput объекты
         final_output = []
         if isinstance(output_data, list):
             for item in output_data:
@@ -180,8 +243,115 @@ async def pdf_to_markdown(
         return [ToolOutputText(text=f"❌ Error: {str(e)}")]
 
 
+@function_tool
+async def pdf(
+    ctx: RunContextWrapper[Any],
+    pdf_path: str,
+    pages: str = "1:1"
+) -> List[Union[ToolOutputText, ToolOutputImage]]:
+    """
+    Рендерит страницы PDF в изображения, сохраняет их в рабочую директорию агента
+    и возвращает эти страницы как визуальные входы для последующего анализа.
+
+    Args:
+        pdf_path: Путь к PDF файлу
+        pages: Диапазон страниц в формате "start:end" (например "1:2")
+
+    Returns:
+        Текстовая сводка и изображения страниц
+    """
+    visible_pdf_path = display_agent_path_from_ctx(pdf_path, ctx)
+
+    try:
+        resolved_pdf_path = resolve_agent_path_from_ctx(pdf_path, ctx)
+        pdf_file = Path(resolved_pdf_path)
+        if not pdf_file.exists():
+            return [ToolOutputText(text=f"❌ Файл не найден: {visible_pdf_path}")]
+
+        start_page, end_page = _parse_pages_range(pages)
+        total_pages = _get_pdf_page_count(resolved_pdf_path)
+        if end_page > total_pages:
+            return [ToolOutputText(
+                text=f"❌ В PDF только {total_pages} стр., запрошен диапазон {pages}"
+            )]
+
+        output_root = _get_output_root(ctx, pdf_file)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        saved_paths: list[Path] = []
+        for page_number in range(start_page, end_page + 1):
+            page_dir = output_root / f"page_{page_number}"
+            page_dir.mkdir(parents=True, exist_ok=True)
+            image_path = page_dir / "page.png"
+            _render_single_pdf_page(resolved_pdf_path, page_number, page_dir / "page")
+            if not image_path.exists():
+                raise RuntimeError(f"Файл страницы не создан: {image_path}")
+            saved_paths.append(image_path)
+
+        visible_output_root = display_agent_path_from_ctx(str(output_root), ctx)
+        visible_saved_paths = [
+            display_agent_path_from_ctx(str(path), ctx)
+            for path in saved_paths
+        ]
+
+        result_blocks: List[Union[ToolOutputText, ToolOutputImage]] = [
+            ToolOutputText(
+                text=(
+                    f"PDF страницы сохранены из `{visible_pdf_path}` в `{visible_output_root}`.\n"
+                    f"Диапазон: {start_page}:{end_page} из {total_pages}\n"
+                    f"Файлы:\n- " + "\n- ".join(visible_saved_paths)
+                )
+            )
+        ]
+
+        for page_number, image_path in zip(range(start_page, end_page + 1), saved_paths):
+            result_blocks.append(ToolOutputText(text=f"Страница {page_number}"))
+            result_blocks.append(
+                ToolOutputImage(
+                    image_url=_image_path_to_data_url(str(image_path)),
+                    detail="high",
+                )
+            )
+
+        return result_blocks
+
+    except Exception as e:
+        logger.error(f"PDF render tool error: {e}", exc_info=True)
+        return [ToolOutputText(text=f"❌ Error: {str(e)}")]
+
+
+@function_tool(name_override="pdf-ocr")
+async def pdf_ocr(
+    ctx: RunContextWrapper[Any],
+    pdf_path: str,
+    pages: str = "1:1"
+) -> List[Union[ToolOutputText, ToolOutputImage]]:
+    """
+    Выполняет OCR для PDF через DeepSeek-OCR-2 и возвращает структурированный текст/изображения.
+
+    Args:
+        pdf_path: Путь к PDF файлу
+        pages: Диапазон страниц в формате "start:end"
+    """
+    return await _run_pdf_ocr(ctx, pdf_path, pages)
+
+
+@function_tool(name_override="pdf_to_markdown")
+async def pdf_to_markdown(
+    ctx: RunContextWrapper[Any],
+    pdf_path: str,
+    pages: str = "1:1"
+) -> List[Union[ToolOutputText, ToolOutputImage]]:
+    """
+    Обратносуместимое имя для OCR-инструмента PDF.
+    """
+    return await _run_pdf_ocr(ctx, pdf_path, pages)
+
+
 # Экспортируемые инструменты
 OCR_TOOLS = {
+    "pdf": pdf,
+    "pdf-ocr": pdf_ocr,
     "pdf_to_markdown": pdf_to_markdown,
-    "pdf": pdf_to_markdown  # alias
+    "pdf_ocr": pdf_ocr,
 }
