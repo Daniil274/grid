@@ -366,7 +366,16 @@ class MCPManager:
         if container_id:
             # Forward proxy env vars from host so npm/npx can download packages inside container
             import os as _os
-            for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"):
+            for _proxy_var in (
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "NO_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "no_proxy",
+                "all_proxy",
+            ):
                 _proxy_val = _os.environ.get(_proxy_var)
                 if _proxy_val:
                     env.setdefault(_proxy_var, _proxy_val)

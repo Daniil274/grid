@@ -57,11 +57,15 @@ class ProjectToolsLoader:
 
         logger.info(f"Loading project tools from: {self.tools_dir}")
 
-        # Добавляем родительскую директорию в sys.path для правильного импорта
+        # Добавляем config_dir и саму директорию инструментов в sys.path для импортов
         parent_dir = str(self.config_dir)
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
             logger.debug(f"Added to sys.path: {parent_dir}")
+        tools_dir_str = str(self.tools_dir)
+        if tools_dir_str not in sys.path:
+            sys.path.insert(0, tools_dir_str)
+            logger.debug(f"Added to sys.path: {tools_dir_str}")
 
         # Сканируем .py файлы
         for file_path in self.tools_dir.glob("*.py"):

@@ -320,8 +320,18 @@ class AgentFactory:
             from core.memory_store import MemoryStore
             from pathlib import Path
             db_path = Path(self.config.get_working_directory()) / "data" / "memory.db"
-            self.memory_store = MemoryStore(db_path=str(db_path))
+            self.memory_store = MemoryStore(db_path=str(db_path), config=self.config)
             logger.info(f"✅ MemoryStore initialized: {db_path}")
+
+        # Initialize MemoryOptimizer
+        from core.memory_optimizer import MemoryOptimizer
+        
+        self.memory_optimizer = MemoryOptimizer(
+            memory_store=self.memory_store,
+            config=self.config,
+            agent_factory=self
+        )
+        logger.info("✅ MemoryOptimizer initialized")
 
         # Initialize SkillManager
         from pathlib import Path
@@ -1248,6 +1258,7 @@ class AgentFactory:
         use_active_context: bool = False,
         skip_input_add: bool = False,
         user_id: Optional[str] = None,
+        stream_observer: Optional[Any] = None,
         _retry_count: int = 0,
     ) -> str:
         """
@@ -1359,6 +1370,7 @@ class AgentFactory:
                         factory=self,
                         context_id=active_context_id or "run",
                         user_id=ctx_user_id,
+                        agent_id=agent_key,
                         container_id=self.container_id
                     )
                     agent_tools = getattr(agent, "tools", []) or []
@@ -1588,7 +1600,8 @@ class AgentFactory:
                         )
                         async for event in run_result_streaming.stream_events():
                             try:
-                                fragment = self._stream_observer.handle_event(event, agent_key=agent_key)
+                                obs = stream_observer or self._stream_observer
+                                fragment = obs.handle_event(event, agent_key=agent_key)
                                 if fragment:
                                     streaming_text_parts.append(fragment)
 
@@ -2606,7 +2619,16 @@ class AgentFactory:
             # docker exec -i -w <container workdir> [ENV] <container_id> <command> <args>
 
             # Forward proxy env vars from host so npm/npx can download packages inside container
-            for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"):
+            for _proxy_var in (
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "NO_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "no_proxy",
+                "all_proxy",
+            ):
                 _proxy_val = os.environ.get(_proxy_var)
                 if _proxy_val:
                     env.setdefault(_proxy_var, _proxy_val)

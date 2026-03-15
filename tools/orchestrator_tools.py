@@ -247,7 +247,11 @@ async def orchestrate(
         except Exception:
             pass
 
-        resolved_model_key = _coerce_optional_str(model_key) or default_model_key or factory.resolve_model_key(None)
+        effective_key = _coerce_optional_str(model_key)
+        # Строку "default" трактуем как "модель из конфига" (DEFAULT_MODEL или default_agent), а не как ключ модели
+        if effective_key and effective_key.strip().lower() == "default":
+            effective_key = None
+        resolved_model_key = effective_key or default_model_key or factory.resolve_model_key(None)
         coerced_executor_tools = _coerce_tool_list(executor_tools)
 
         base_instructions = _coerce_optional_str(agent_system_prompt)

@@ -91,6 +91,42 @@ class SpeechProcessor:
         )
         logger.info("Whisper загружен.")
 
+    def _wav_to_ogg(self, wav_path: str) -> Optional[str]:
+        """
+        Конвертирует WAV в OGG Opus для голосового сообщения в Telegram.
+        Сначала пробует pydub, при ошибке (например pyaudioop в Python 3.13) — ffmpeg.
+        """
+        ogg_path = wav_path.replace(".wav", ".ogg")
+        # 1) pydub
+        try:
+            from pydub import AudioSegment
+            seg = AudioSegment.from_wav(wav_path)
+            seg.export(ogg_path, format="ogg", codec="libopus")
+            try:
+                os.remove(wav_path)
+            except Exception:
+                pass
+            return ogg_path
+        except Exception as e:
+            logger.debug("pydub WAV→OGG не удался: %s", e)
+        # 2) ffmpeg (достаточно для голосового пузыря в Telegram)
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-i", wav_path, "-c:a", "libopus", "-b:a", "64k", ogg_path],
+                capture_output=True,
+                timeout=30,
+            )
+            if r.returncode == 0 and Path(ogg_path).exists():
+                try:
+                    os.remove(wav_path)
+                except Exception:
+                    pass
+                return ogg_path
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.debug("ffmpeg WAV→OGG: %s", e)
+        return None
+
     def _load_silero_model(self) -> None:
         """
         Загружает модель Silero TTS и прогревает JIT (idempotent).
@@ -251,18 +287,13 @@ class SpeechProcessor:
             import soundfile as sf
             sf.write(wav_path, audio, sample_rate)
 
-        # Попытка конвертировать в OGG Opus (для voice bubble в Telegram)
-        ogg_path = wav_path.replace(".wav", ".ogg")
-        try:
-            from pydub import AudioSegment
-            seg = AudioSegment.from_wav(wav_path)
-            seg.export(ogg_path, format="ogg", codec="libopus")
-            os.remove(wav_path)
+        # Конвертировать в OGG Opus (голосовое сообщение в Telegram)
+        ogg_path = self._wav_to_ogg(wav_path)
+        if ogg_path:
             logger.info(f"TTS синтез → OGG: {ogg_path}")
             return ogg_path
-        except Exception as e:
-            logger.warning(f"OGG конвертация недоступна ({e}), fallback → WAV")
-            return wav_path
+        logger.warning("OGG конвертация недоступна (pydub и ffmpeg), отправка WAV")
+        return wav_path
 
     # ── TTS SSML ─────────────────────────────────────────────────────────────
 
@@ -327,18 +358,13 @@ class SpeechProcessor:
 
         logger.info(f"SSML TTS синтез → WAV: {merged_wav}")
 
-        # Конвертировать в OGG Opus
-        ogg_path = merged_wav.replace(".wav", ".ogg")
-        try:
-            from pydub import AudioSegment
-            seg = AudioSegment.from_wav(merged_wav)
-            seg.export(ogg_path, format="ogg", codec="libopus")
-            os.remove(merged_wav)
+        # Конвертировать в OGG Opus (голосовое сообщение в Telegram)
+        ogg_path = self._wav_to_ogg(merged_wav)
+        if ogg_path:
             logger.info(f"SSML TTS → OGG: {ogg_path}")
             return ogg_path
-        except Exception as e:
-            logger.warning(f"OGG конвертация недоступна ({e}), fallback → WAV")
-            return merged_wav
+        logger.warning("OGG конвертация недоступна (pydub и ffmpeg), отправка WAV")
+        return merged_wav
 
     # ── Прогрев (warmup) ─────────────────────────────────────────────────────
 

@@ -5,13 +5,16 @@ Replaces 8 old tools with 3:
 - memory_save: Save information to memory
 - memory_search: Search memory
 - task_update: Update task state
-"""
+""" 
 
 import logging
 from typing import Any, Tuple, Optional
 from agents import function_tool, RunContextWrapper
 
 logger = logging.getLogger(__name__)
+
+GLOBAL_MEMORY_TYPES = {"long_term", "insight", "skill"}
+SESSION_MEMORY_TYPES = {"short_term", "task", "task_plan"}
 
 
 def _get_memory_store(context: RunContextWrapper) -> Any:
@@ -47,6 +50,22 @@ def _get_memory_store(context: RunContextWrapper) -> Any:
         logger.error(f"❌ Failed to get memory_store from context: {e}")
         return None
 
+def _get_memory_optimizer(context: RunContextWrapper) -> Any:
+    """
+    Get MemoryOptimizer from context.
+    """
+    try:
+        raw = getattr(context, "context", None)
+        if raw is None:
+            return None
+        factory = getattr(raw, "factory", None)
+        if factory is None:
+            return None
+        return getattr(factory, "memory_optimizer", None)
+    except Exception as e:
+        logger.error(f"❌ Failed to get memory_optimizer from context: {e}")
+        return None
+
 
 def _get_context_ids(context: RunContextWrapper) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
@@ -79,6 +98,29 @@ def _get_context_ids(context: RunContextWrapper) -> Tuple[Optional[str], Optiona
         pass
         
     return session_id, user_id, agent_id
+
+
+def _scope_session_for_type(memory_type: Optional[str], session_id: Optional[str]) -> Optional[str]:
+    """
+    Only session-scoped memory types should be tied to the current session.
+
+    Long-term memory and insights must remain visible across sessions.
+    """
+    if memory_type in SESSION_MEMORY_TYPES:
+        return session_id
+    return None
+
+
+def _scope_agent_for_type(memory_type: Optional[str], agent_id: Optional[str]) -> Optional[str]:
+    """
+    Shared memory must be visible across agents for the same user.
+
+    We still keep creator agent_id as metadata in storage, but do not use it
+    as a default filter for global memory reads.
+    """
+    if memory_type in SESSION_MEMORY_TYPES:
+        return agent_id
+    return None
 
 
 # ============================================================================
@@ -134,18 +176,33 @@ async def memory_save(
         # Get context IDs
         session_id, user_id, agent_id = _get_context_ids(context)
 
+        scoped_session_id = _scope_session_for_type(type, session_id)
+
         # Save to store
         entry_id = store.save(
             content=text,
             type=type,
             tags=tags,
             importance=importance,
-            session_id=session_id,
+            session_id=scoped_session_id,
             user_id=user_id,
             agent_id=agent_id
         )
 
         logger.info(f"💾 Saved memory #{entry_id} [{type}]: {text[:50]}...")
+
+        # Trigger async optimization
+        optimizer = _get_memory_optimizer(context)
+        if optimizer:
+            import asyncio
+            try:
+                # Use the running event loop to schedule the task
+                loop = asyncio.get_running_loop()
+                loop.create_task(optimizer.process_new_entry(entry_id))
+                logger.debug(f"⚡ Scheduled optimization for memory #{entry_id}")
+            except Exception as e:
+                logger.error(f"⚠️ Could not schedule memory optimization: {e}")
+
         return f"✅ Saved to {type} memory (ID: {entry_id})"
 
     except Exception as e:
@@ -190,19 +247,21 @@ async def memory_search(
 
     try:
         # Validate type if provided
-        if type and type not in {"long_term", "short_term", "task", "task_plan"}:
-            return f"❌ Invalid type '{type}'. Use: long_term, short_term, task, task_plan, or empty for all"
+        if type and type not in {"long_term", "short_term", "task", "task_plan", "insight"}:
+            return f"❌ Invalid type '{type}'. Use: long_term, short_term, task, task_plan, insight, or empty for all"
 
         # Get context IDs
         session_id, user_id, agent_id = _get_context_ids(context)
+        scoped_session_id = _scope_session_for_type(type or None, session_id)
+        scoped_agent_id = _scope_agent_for_type(type or None, agent_id)
 
         # Search
         results = store.search(
             query=query,
             type=type or None,
-            session_id=session_id,
+            session_id=scoped_session_id,
             user_id=user_id,
-            agent_id=agent_id,
+            agent_id=scoped_agent_id,
             limit=limit
         )
 
@@ -302,7 +361,7 @@ async def memory_delete(
         if query:
             results = store.search(
                 query=query,
-                session_id=session_id,
+                session_id=None,
                 user_id=user_id,
                 agent_id=agent_id,
                 limit=10
@@ -420,6 +479,17 @@ async def task_update(
                 status="active"
             )
             logger.info(f"📋 Added task entry #{entry_id}: {content[:50]}...")
+            
+            # Trigger async optimization
+            optimizer = _get_memory_optimizer(context)
+            if optimizer:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(optimizer.process_new_entry(entry_id))
+                except Exception as e:
+                    logger.error(f"⚠️ Could not schedule memory optimization: {e}")
+                    
             return f"✅ Added task entry (ID: {entry_id})"
 
         elif action == "plan":
@@ -491,6 +561,162 @@ async def task_update(
 
 
 # ============================================================================
+# TOOL 5: memory_ingest_file - Ingest file into memory
+# ============================================================================
+
+@function_tool
+async def memory_ingest_file(
+    context: RunContextWrapper,
+    filepath: str,
+    type: str = "long_term",
+    tags: str = "",
+    importance: float = 0.5
+) -> str:
+    """
+    Read a file and ingest its contents into memory.
+    
+    Use this to quickly remember the contents of a text file, log, or document.
+    The file will be read, saved to memory, and asynchronously optimized (summarized and entities extracted).
+
+    Args:
+        filepath: Path to the file to ingest
+        type: Memory type (default: long_term)
+        tags: Comma-separated tags
+        importance: 0.0 to 1.0
+
+    Returns:
+        Confirmation message
+    """
+    import os
+    from pathlib import Path
+    
+    # Try to read the file
+    try:
+        path = Path(filepath)
+        if not path.exists():
+            return f"❌ File not found: {filepath}"
+            
+        # Basic text reading
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        # Truncate if too large (e.g., > 100KB)
+        if len(content) > 100000:
+            content = content[:100000] + "\\n...[TRUNCATED]"
+            
+        # Format the memory content
+        memory_content = f"File: {path.name}\\nPath: {filepath}\\n\\nContent:\\n{content}"
+        
+        # Save to memory
+        return await memory_save(
+            context=context,
+            text=memory_content,
+            type=type,
+            tags=f"file,{tags}" if tags else "file",
+            importance=importance
+        )
+        
+    except UnicodeDecodeError:
+        return f"❌ Cannot read {filepath}: Not a text file or unsupported encoding."
+    except Exception as e:
+        logger.error(f"❌ Failed to ingest file {filepath}: {e}")
+        return f"❌ Error ingesting file: {e}"
+
+
+# ============================================================================
+# TOOL 6: memory_explore_entity - Explore entity in knowledge graph
+# ============================================================================
+
+@function_tool
+async def memory_explore_entity(
+    context: RunContextWrapper,
+    entity: str,
+    limit: int = 10
+) -> str:
+    """
+    Найти все записи с указанной сущностью через MemoryStore.get_entity_graph().
+
+    Вернуть форматированный список записей с summary, type, created_at для каждой записи.
+
+    Args:
+        entity: Сущность для поиска (e.g. "Python", "Даниил")
+        limit: Максимум записей (default: 10)
+    """
+    store = _get_memory_store(context)
+    if store is None:
+        return "❌ Memory store not available"
+
+    try:
+        session_id, user_id, agent_id = _get_context_ids(context)
+        records = store.get_entity_graph(entity=entity, user_id=user_id, limit=limit)
+
+        if not records:
+            return f"ℹ️ No records found for entity '{entity}'"
+
+        lines = [f"🔍 Records for entity '{entity}' ({len(records)}):", ""]
+        for rec in records:
+            summary = getattr(rec, 'summary', getattr(rec, 'content', 'N/A')[:100] + '...')
+            typ = getattr(rec, 'type', 'unknown')
+            created_at = getattr(rec, 'created_at', 'N/A')[:10] if getattr(rec, 'created_at', None) else 'N/A'
+            lines.append(f"[{typ}] {created_at}: {summary}")
+            lines.append("")
+
+        return '\\n'.join(lines)
+
+    except Exception as e:
+        logger.error(f"❌ Failed to explore entity: {e}")
+        return f"❌ Error exploring entity '{entity}': {e}"
+
+
+# ============================================================================
+# TOOL 7: memory_graph_path - Find path in knowledge graph
+# ============================================================================
+
+@function_tool
+async def memory_graph_path(
+    context: RunContextWrapper,
+    from_entity: str,
+    to_entity: str,
+    max_depth: int = 3
+) -> str:
+    """
+    Найти путь между двумя сущностями через MemoryStore.find_entity_connections().
+
+    Вернуть форматированное описание пути. Если не найден - сообщение.
+
+    Args:
+        from_entity: Начальная сущность
+        to_entity: Целевая сущность
+        max_depth: Максимальная глубина поиска (default: 3)
+    """
+    store = _get_memory_store(context)
+    if store is None:
+        return "❌ Memory store not available"
+
+    try:
+        session_id, user_id, agent_id = _get_context_ids(context)
+        path = store.find_entity_connections(from_entity=from_entity, to_entity=to_entity, user_id=user_id, max_depth=max_depth)
+
+        if not path:
+            return f"ℹ️ No path found between '{from_entity}' and '{to_entity}' (max_depth={max_depth})"
+
+        # Format path, assuming list of str or entities
+        if isinstance(path, list) and len(path) > 0:
+            if isinstance(path[0], str):
+                path_str = " → ".join(path)
+            else:
+                path_str = " → ".join([str(node) for node in path])
+        else:
+            path_str = str(path)
+
+        return f"✅ Path: {path_str}"
+
+    except Exception as e:
+        logger.error(f"❌ Failed to find graph path: {e}")
+        return f"❌ Error finding path from '{from_entity}' to '{to_entity}': {e}"
+
+
+# ============================================================================
 # TOOL REGISTRY
 # ============================================================================
 
@@ -499,6 +725,9 @@ MEMORY_TOOLS_V2 = {
     "memory_search": memory_search,
     "memory_delete": memory_delete,
     "task_update": task_update,
+    "memory_ingest_file": memory_ingest_file,
+    "memory_explore_entity": memory_explore_entity,
+    "memory_graph_path": memory_graph_path,
 }
 
 

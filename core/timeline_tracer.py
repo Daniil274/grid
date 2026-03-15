@@ -318,6 +318,11 @@ class ExecutionTracer(TracingExporter):
             output_data = {"to_agent": span_data.get("to_agent")}
             name = f"{span_data.get('from_agent')} → {span_data.get('to_agent')}"
 
+        elif span_type == "custom":
+            name = span_data.get("name") or "custom"
+            input_data = span_data.get("data")
+            output_data = None
+
         row = {
             "id": span_id,
             "trace_id": trace_id,

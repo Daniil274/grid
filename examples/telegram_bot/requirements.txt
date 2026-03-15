@@ -17,7 +17,10 @@ psutil>=5.9.0
 # loguru>=0.7.0
 
 # Голосовые сообщения (STT + TTS)
-faster-whisper>=1.0.0   # Whisper STT (нужен CUDA для GPU или CPU fallback)
-pydub>=0.25.0           # WAV→OGG Opus конвертация (нужен ffmpeg в PATH)
-scipy>=1.0.0            # wavfile.write для сохранения Silero TTS
-# torch + silero model.pt — устанавливается отдельно (см. speech-text/)
+torch>=2.0.0            # Silero TTS (на RPi/ARM: pip install torch после основного окружения)
+faster-whisper>=1.0.0   # Whisper STT (CUDA или CPU)
+pydub>=0.25.0           # WAV→OGG (нужен ffmpeg в PATH: apt install ffmpeg)
+scipy>=1.10.0           # wavfile для Silero TTS
+soundfile>=0.12.0       # аудио I/O
+transliterate>=1.10.0   # латиница → кириллица для Silero
+# Модель Silero: speech-text/model.pt (скачать отдельно, см. README/docs)
