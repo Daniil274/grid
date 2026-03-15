@@ -107,6 +107,14 @@ class ProjectToolsConfig(BaseModel):
     base_tools: List[str] = Field(default_factory=list)
 
 
+class SerialConfig(BaseModel):
+    """Configuration for ISKOR serial communication (retries and delay after command)."""
+    retries: int = Field(default=3, ge=1, le=50, description="Количество попыток на команду (ISKOR_RETRIES)")
+    command_timeout_sec: float = Field(default=0.5, ge=0.0, le=60.0, description="Пауза в секундах после выполнения команды (ISKOR_COMMAND_TIMEOUT)")
+    # Доп. поля из проектной конфигурации (baud, timeout и т.д.) допускаются через model_config
+    model_config = {"extra": "ignore"}
+
+
 class Settings(BaseModel):
     """Global system settings."""
     default_agent: str = "assistant"
@@ -139,6 +147,10 @@ class Settings(BaseModel):
     proxy: Optional[str] = Field(
         default=None,
         description="Прокси для всех исходящих запросов (API, Telegram). Пример: http://127.0.0.1:10809"
+    )
+    serial: Optional[SerialConfig] = Field(
+        default=None,
+        description="Настройки serial для ISKOR: количество попыток на команду и таймаут после команды"
     )
 
 
