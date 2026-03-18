@@ -223,6 +223,22 @@ models:
     description: Mistral Large модель
     streaming_enabled: true
 
+  mistral-small-2603:
+    name: mistralai/mistral-small-2603
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 8000
+    description: Mistral Small 2603 модель
+    streaming_enabled: true
+
+  gpt-5.4-nano:
+    name: openai/gpt-5.4-nano
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 8000
+    description: GPT-5.4 Nano модель
+    streaming_enabled: true
+
 checkers:
   default_audit:
     model: qwen3
@@ -265,6 +281,14 @@ tools:
   pdf:
     type: function
     description: Рендерит страницы PDF в PNG, сохраняет их в pdf_output и возвращает как изображения
+    prompt_addition: |
+      КРИТИЧЕСКИ ВАЖНО: НИКОГДА НЕ ЧИТАЙ ДОКУМЕНТЫ ПОЛНОСТЬЮ.
+      Всегда работай фрагментами и уточняй, какой именно раздел/страницы нужны.
+      Правила для PDF:
+      - Всегда начинай с первых страниц: pages="1:1" или pages="1:2"
+      - Никогда не читай больше 3 страниц за раз: максимум pages="1:3"
+      - Не используй большие диапазоны (например "1:20", "1:50")
+      - Если нужно больше — делай несколько запросов небольшими кусками (2–3 страницы)
   pdf-ocr:
     type: function
     description: Выполняет OCR по страницам PDF и возвращает структурированный текст/изображения
@@ -301,18 +325,12 @@ tools:
   skill_create:
     type: function
     description: Create a new skill (knowledge base entry)
-  skill_update:
-    type: function
-    description: Update an existing skill
   skill_delete:
     type: function
     description: Delete a skill
   skill_read:
     type: function
     description: Read the content of a skill
-  skill_search:
-    type: function
-    description: Search for skills by keywords
   keyboard_type:
     type: function
     description: Печатает текст как на клавиатуре
@@ -391,7 +409,7 @@ tools:
     server_command: [npx, '@dillip285/mcp-terminal']
     add_working_directory: true
     description: MCP сервер для выполнения команд терминала
-    prompt_addition: Используй execute_command для выполнения команд в терминале.
+    prompt_addition: Используй execute_command для выполнения команд в терминале. Рабочая директория для терминала /workspace. 
   filesystem:
     type: mcp
     server_command: [npx, '@modelcontextprotocol/server-filesystem']
@@ -439,13 +457,14 @@ tools:
       Сначала ужми контекст до короткого handoff packet, и только потом вызывай call_coordinator.
       Не вызывай call_coordinator для атомарных задач, которые можно решить прямым orchestrate() или рабочим инструментом.
       Не создавай бесконечную цепочку координаторов: если подзадача уже достаточно узкая, дочерний координатор должен запускать исполнителей или инструменты, а не нового координатора.
-  doc_analyzer:
+  doc_agent:
     type: agent
-    name: call_doc_analyzer
-    description: Вызывает анализатора документов и изображений.
+    name: call_doc_agent
+    description: Агент для работы с документами и изображениями.
     prompt_addition: |
-      Используй call_doc_analyzer(task) для анализа изображений, PDF и markdown документов.
-      task - это задача с указанием пути файла и что нужно найти/проанализировать.
+      Используй call_doc_agent(task) для работы с документами и изображениями.
+      task должно содержать текст задачи с её контекстом.
+
   context_wrapper:
     type: agent
     name: call_context_wrapper
@@ -467,7 +486,7 @@ tools:
     name: orchestrate
     description: Запускает динамический пайплайн (создает агента на лету)
     env_vars:
-      DEFAULT_MODEL: grok-4.1-fast
+      DEFAULT_MODEL: gpt-5.4-nano
     prompt_addition: |
       Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
       task: четкая задача для выполнения (строка).
@@ -593,7 +612,7 @@ agents:
   coordinator:
     name: Координатор
     model: qwen-3.5-plus
-    tools: ["filesystem", "terminal", "orchestrate", "memory_save", "memory_search", "memory_delete", "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep", "beads_init", "beads_log_append", "beads_log_read", "skill_create", "skill_list", "skill_update", "skill_read", "skill_delete"]
+    tools: ["filesystem", "terminal", "orchestrate", "memory_save", "memory_search", "memory_delete", "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep", "beads_init", "beads_log_append", "beads_log_read", "skill_create", "skill_list", "skill_read", "skill_delete"]
     auto_run_tools:
     - name: beads_init
       parameters:
@@ -833,25 +852,23 @@ agents:
       ✗ Передавать дочернему координатору сырые длинные рассуждения вместо handoff packet
       ✗ Давать задачу без указания пути к файлу и директории
       
-  doc_analyzer:
-    name: Анализатор документов
-    model: healer-alpha
-    tools: [pdf, list_files, file_read, view_image, crop_image, get_file_info]
+  doc_agent:
+    name: "Doc Agent"
+    model: gpt-5.4-nano
+    tools: [pdf, list_files, file_read, terminal, view_image, crop_image, get_file_info, skill_list, skill_read,  skill_create, skill_delete, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep]
+    auto_run_tools:
+    - name: beads_ready
+      parameters:
+        directory: ${working_directory}
+    - name: skill_list
+      parameters: {}
     base_prompt: base
-    description: Агент для анализа, конвертации и создания отчетов из документов
+    description: Агент для работы с документами
     custom_prompt: |
-      Ты специалист по работе с документами.
-      ⚠️ КРИТИЧЕСКИ ВАЖНО - НИКОГДА НЕ ЧИТАЙ ДОКУМЕНТЫ ПОЛНОСТЬЮ!
-      Обязательная стратегия работы с PDF:
-      1. ВСЕГДА начинай с первых страниц: pdf(path, pages="1:1") или pages="1:2"
-      2. НИКОГДА не читай больше 3 страниц за раз: pages="1:3" максимум
-      3. Сначала используй pdf(...) чтобы получить страницы как изображения
-      4. Если нужно больше - делай несколько запросов по 2-5 страниц
-
-      Жесткие правила:
-      1. list_files ПЕРЕД любой работой с файлами
-      2. PDF: ТОЛЬКО pages="1:1" или "1:2" для начала
-      3. НИКОГДА не используй большие диапазоны типа "1:20" или "1:50"
+      Ты агент для работы с документами.
+      Действуй кратко и по делу: извлекай только релевантные фрагменты, делай выжимку/ответ по вопросу.
+      Перед чтением файлов всегда уточняй путь и используй list_files при необходимости.
+      Используй скиллы.
 
   memory_optimizer:
     name: Оптимизатор памяти
@@ -888,8 +905,8 @@ agents:
       Отвечай на русском языке.
   chat_agent:
     name: Чат-агент
-    model: glm-4.7-flash
-    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_list, skill_read, skill_search, skill_create, skill_update, skill_delete]
+    model: nemotron-3
+    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_agent, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_list, skill_read,  skill_create, skill_delete]
     auto_run_tools:
 
     - name: beads_init
@@ -923,31 +940,30 @@ agents:
       Исключение: если в памяти пользователя сохранён другой предпочтительный формат ответов.
       Стратегия работы:
       1. Анализируй запрос пользователя
-      2. Для планирования и комплексных задач используй beads (beads_ready, beads_show и т.д.)
-      3. Для анализа изображений и документов - делегируй doc_analyzer
-      4. Для комплексных задач - делегируй coordinator
-      5. Сохраняй всю полученную информацию в память.
+      2. Для планирования и комплексных задач используй трекер
+      3. Для работы с документами - делегируй doc_agent
+      4. Работу с программами, кодом и терминалом - делегируй coordinator.
+      6. Сохраняй всю полученную информацию в память.
       Правила работы с памятью:
       1. Используй memory_search как основной способ вспомнить предпочтения пользователя, прошлые решения, ограничения и релевантный контекст.
-      2. Сначала ищи в памяти, потом действуй. Не делегируй memory_agent, если достаточно memory_search.
-      3. Для записи, обновления, удаления и очистки памяти делегируй memory_agent.
-      4. Не вызывай memory_optimizer напрямую. Оптимизация памяти запускается автоматически после сохранения.
-      5. Сохраняй только знания, полезные в будущих сессиях:
+      2. Сначала ищи в памяти, потом действуй.
+      3. Для записи, обновления, удаления и очистки памяти делегируй через memory_agent.
+      4. Сохраняй только знания, полезные в будущих сессиях:
         - предпочтения пользователя
         - проектные договоренности
         - повторяющиеся ограничения среды
         - важные выводы и итоги задач
-      6. Не сохраняй одноразовый шум, длинные промежуточные рассуждения и то, что уже надежно отражено в beads.
-      7. Если память противоречит текущему сообщению пользователя, доверяй текущему сообщению пользователя и при необходимости инициируй обновление памяти через memory_agent.
-      8. Для сложных задач сначала извлеки память, затем кратко передай релевантные факты в coordinator или другому агенту.
-      9. Если запрос пользователя явно связан с его прошлым поведением, предпочтениями или ранее выполненной работой, memory_search обязателен.
-      10. Если пользователь просит “запомнить”, “забыть”, “что ты обо мне помнишь” или “обнови это в памяти”, сразу используй memory_agent.
+      5. Не сохраняй одноразовый шум, длинные промежуточные рассуждения и то, что уже надежно отражено в beads.
+      6. Если память противоречит текущему сообщению пользователя, доверяй текущему сообщению пользователя и при необходимости инициируй обновление памяти через memory_agent.
+      7. Для сложных задач сначала извлеки память, затем кратко передай релевантные факты в coordinator или другому агенту.
+      8. Если запрос пользователя явно связан с его прошлым поведением, предпочтениями или ранее выполненной работой, memory_search обязателен.
+      9. Если пользователь просит “запомнить”, “забыть”, “что ты обо мне помнишь” или “обнови это в памяти”, сразу используй memory_agent.
       Всегда:
       - Отвечай на русском языке
       - Перед передачей задачи агенту сделай запись в трекере.
       - Допустимо в одном ответе использовать несколько инструментов и/или агентов. При одновременном вызове они будут выполняться последовательно.
-      - Не рассчитывай на промежуточное мышление между уже запущенными шагами; передавай зависимости через beads и другие внешние артефакты.
+      - Не рассчитывай на промежуточное мышление между уже запущенными шагами; передавай зависимости через трекер и другие внешние артефакты.
       - Если контекст запроса непонятен - уточни у пользователя
-      - Делая запросы к агентам передавай им весь контекст задачи.
+      - Делая запросы к агентам передавай им весь контекст задачи и идентефикатор задачи в трекере.
       Запрещено:
       - Использовать в финальном ответе таблицы, md разметку и другие тэги, коды и т.п.

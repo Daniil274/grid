@@ -2488,6 +2488,46 @@ class AgentFactory:
                 execution_mode="serial_subtree" if parent_pipeline_id else None,
             )
 
+            # Execute auto_run_tools for sub-agent (mirrors logic in run_agent())
+            sub_agent_config = self.config.get_agent(agent_key)
+            if getattr(sub_agent_config, "auto_run_tools", None):
+                sub_agent_tools = getattr(sub_agent, "tools", []) or []
+                working_dir = "/" if self.container_id else self.config.get_working_directory()
+                init_key = f"{agent_key}:{parent_user_id or 'default'}"
+
+                # One-time tools: run once per user/agent session
+                if init_key not in self._initialized_agents:
+                    try:
+                        auto_run_info = await self._execute_auto_run_tools(
+                            agent_key, sub_agent_config, sub_agent_tools, working_dir, sub_run_ctx,
+                            every_run=False, user_message=enhanced_input if isinstance(enhanced_input, str) else ""
+                        )
+                        if auto_run_info:
+                            enhanced_input = (
+                                auto_run_info
+                                + "\n\n[Текущий запрос пользователя]\n\n"
+                                + (enhanced_input if isinstance(enhanced_input, str) else "")
+                            )
+                        self._initialized_agents.add(init_key)
+                        logger.info(f"✅ One-time auto-run tools executed for sub-agent {init_key}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to run one-time auto_run_tools for sub-agent {agent_key}: {e}")
+
+                # Per-message tools: run on every call
+                try:
+                    every_run_info = await self._execute_auto_run_tools(
+                        agent_key, sub_agent_config, sub_agent_tools, working_dir, sub_run_ctx,
+                        every_run=True, user_message=enhanced_input if isinstance(enhanced_input, str) else ""
+                    )
+                    if every_run_info:
+                        enhanced_input = (
+                            every_run_info
+                            + "\n\n[Текущий запрос пользователя]\n\n"
+                            + (enhanced_input if isinstance(enhanced_input, str) else "")
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to run per-message auto_run_tools for sub-agent {agent_key}: {e}")
+
             # Run the sub-agent with enhanced input and session
             # Use streaming to capture tool calls for logging
             set_current_factory(self)
