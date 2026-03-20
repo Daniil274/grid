@@ -776,6 +776,18 @@ class AgentFactory:
             error_msg = f"Failed to create agent '{agent_key}': {e}"
             raise AgentError(error_msg, details={"agent_key": agent_key}) from e
 
+    def _substitute_tool_params(self, tool_params: dict, working_dir: str, user_message: str = "") -> dict:
+        """Substitute template variables in tool parameters."""
+        result = {}
+        for k, v in tool_params.items():
+            if v == "${working_directory}":
+                result[k] = working_dir
+            elif v == "${user_message}":
+                result[k] = user_message
+            else:
+                result[k] = v
+        return result
+
     async def _execute_auto_run_tools(
         self,
         agent_key: str,
@@ -783,18 +795,27 @@ class AgentFactory:
         tools: list,
         working_dir: str,
         run_context: GridRunContext,
+        every_run: bool = False,
+        user_message: str = "",
     ) -> str:
-        """Run auto_run_tools with given working_dir; return combined result string to inject."""
+        """Run auto_run_tools with given working_dir; return combined result string to inject.
+
+        Args:
+            every_run: If True, only run tools marked every_run=True.
+                       If False, only run one-time tools (every_run not set or False).
+        """
         result_parts: List[str] = []
         for auto_tool in agent_config.auto_run_tools or []:
+            tool_every_run = bool(auto_tool.get("every_run", False))
+            if tool_every_run != every_run:
+                continue
             tool_name = auto_tool.get("name")
-            tool_params = dict(auto_tool.get("parameters", {}))
-            for k, v in list(tool_params.items()):
-                if v == "${working_directory}":
-                    tool_params[k] = working_dir
+            tool_params = self._substitute_tool_params(
+                dict(auto_tool.get("parameters", {})), working_dir, user_message
+            )
             target_tool = next((t for t in tools if getattr(t, "name", "") == tool_name), None)
             if target_tool and hasattr(target_tool, "on_invoke_tool"):
-                logger.info(f"Auto-running tool '{tool_name}' for agent '{agent_key}' (cwd={working_dir})")
+                logger.info(f"Auto-running tool '{tool_name}' for agent '{agent_key}' (cwd={working_dir}, every_run={every_run})")
                 try:
                     tool_ctx_wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
                     tool_result = await target_tool.on_invoke_tool(
@@ -1014,21 +1035,6 @@ class AgentFactory:
         """
         # Комбинируем части
         parts = [base_instructions]
-
-        # Pre-load memory from SQLite (NEW)
-        if hasattr(self, 'memory_store') and self.memory_store:
-            try:
-                preload = self.memory_store.get_preload_context(
-                    max_long_term=15,
-                    max_short_term=5,
-                    max_tasks=3
-                )
-                memory_text = self.memory_store.format_preload(preload, max_chars=2000)
-                if memory_text:
-                    parts.append(memory_text)
-                    logger.debug(f"✅ Pre-loaded memory for dynamic agent ({len(memory_text)} chars)")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to pre-load memory: {e}")
 
         if not tool_names:
             return "\n\n".join(parts)
@@ -1357,39 +1363,55 @@ class AgentFactory:
                 # Not JSON, keep as string
                 parsed_message = message
 
-            # Run auto_run_tools with current working_dir ONLY ONCE per user/agent session.
-            # This avoids running initialization tools (like beads_init) on every request.
+            # Run auto_run_tools with current working_dir.
             run_agent_config = self.config.get_agent(agent_key)
             init_key = f"{agent_key}:{user_id or 'default'}"
-            
-            if init_key not in self._initialized_agents and getattr(run_agent_config, "auto_run_tools", None):
+            working_dir = "/" if self.container_id else self.config.get_working_directory()
+            ctx_user_id = user_id or (self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, "get_metadata") else None)
+
+            if getattr(run_agent_config, "auto_run_tools", None):
+                agent_tools = getattr(agent, "tools", []) or []
+                temp_run_ctx = GridRunContext(
+                    factory=self,
+                    context_id=active_context_id or "run",
+                    user_id=ctx_user_id,
+                    agent_id=agent_key,
+                    container_id=self.container_id
+                )
+                raw_message = message if isinstance(parsed_message, str) else ""
+
+                # One-time tools (every_run=False): run ONCE per user/agent session.
+                if init_key not in self._initialized_agents:
+                    try:
+                        auto_run_info = await self._execute_auto_run_tools(
+                            agent_key, run_agent_config, agent_tools, working_dir, temp_run_ctx,
+                            every_run=False, user_message=raw_message
+                        )
+                        if auto_run_info and isinstance(parsed_message, str):
+                            parsed_message = (
+                                auto_run_info
+                                + "\n\n[Текущий запрос пользователя]\n\n"
+                                + parsed_message
+                            )
+                        self._initialized_agents.add(init_key)
+                        logger.info(f"✅ One-time auto-run tools executed for {init_key}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to run one-time auto_run_tools: {e}")
+
+                # Per-message tools (every_run=True): run on EVERY request.
                 try:
-                    working_dir = "/" if self.container_id else self.config.get_working_directory()
-                    ctx_user_id = self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, "get_metadata") else None
-                    temp_run_ctx = GridRunContext(
-                        factory=self,
-                        context_id=active_context_id or "run",
-                        user_id=ctx_user_id,
-                        agent_id=agent_key,
-                        container_id=self.container_id
+                    every_run_info = await self._execute_auto_run_tools(
+                        agent_key, run_agent_config, agent_tools, working_dir, temp_run_ctx,
+                        every_run=True, user_message=raw_message
                     )
-                    agent_tools = getattr(agent, "tools", []) or []
-                    auto_run_info = await self._execute_auto_run_tools(
-                        agent_key, run_agent_config, agent_tools, working_dir, temp_run_ctx
-                    )
-                    if auto_run_info and isinstance(parsed_message, str):
+                    if every_run_info and isinstance(parsed_message, str):
                         parsed_message = (
-                            auto_run_info
+                            every_run_info
                             + "\n\n[Текущий запрос пользователя]\n\n"
                             + parsed_message
                         )
-                    
-                    # Mark as initialized
-                    self._initialized_agents.add(init_key)
-                    logger.info(f"✅ Auto-run tools executed for {init_key}")
-
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to run auto_run_tools at run time: {e}")
+                    logger.warning(f"⚠️ Failed to run per-message auto_run_tools: {e}")
 
             # Определяем, нужно ли включать контекст диалога
             # Контекст включается если:
@@ -2465,6 +2487,46 @@ class AgentFactory:
                 parent_step_id=parent_step_id,
                 execution_mode="serial_subtree" if parent_pipeline_id else None,
             )
+
+            # Execute auto_run_tools for sub-agent (mirrors logic in run_agent())
+            sub_agent_config = self.config.get_agent(agent_key)
+            if getattr(sub_agent_config, "auto_run_tools", None):
+                sub_agent_tools = getattr(sub_agent, "tools", []) or []
+                working_dir = "/" if self.container_id else self.config.get_working_directory()
+                init_key = f"{agent_key}:{parent_user_id or 'default'}"
+
+                # One-time tools: run once per user/agent session
+                if init_key not in self._initialized_agents:
+                    try:
+                        auto_run_info = await self._execute_auto_run_tools(
+                            agent_key, sub_agent_config, sub_agent_tools, working_dir, sub_run_ctx,
+                            every_run=False, user_message=enhanced_input if isinstance(enhanced_input, str) else ""
+                        )
+                        if auto_run_info:
+                            enhanced_input = (
+                                auto_run_info
+                                + "\n\n[Текущий запрос пользователя]\n\n"
+                                + (enhanced_input if isinstance(enhanced_input, str) else "")
+                            )
+                        self._initialized_agents.add(init_key)
+                        logger.info(f"✅ One-time auto-run tools executed for sub-agent {init_key}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to run one-time auto_run_tools for sub-agent {agent_key}: {e}")
+
+                # Per-message tools: run on every call
+                try:
+                    every_run_info = await self._execute_auto_run_tools(
+                        agent_key, sub_agent_config, sub_agent_tools, working_dir, sub_run_ctx,
+                        every_run=True, user_message=enhanced_input if isinstance(enhanced_input, str) else ""
+                    )
+                    if every_run_info:
+                        enhanced_input = (
+                            every_run_info
+                            + "\n\n[Текущий запрос пользователя]\n\n"
+                            + (enhanced_input if isinstance(enhanced_input, str) else "")
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to run per-message auto_run_tools for sub-agent {agent_key}: {e}")
 
             # Run the sub-agent with enhanced input and session
             # Use streaming to capture tool calls for logging
