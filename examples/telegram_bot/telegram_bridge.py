@@ -728,8 +728,8 @@ class TelegramBridge:
                 for entry in long_term:
                     date = entry.created_at[:10] if entry.created_at else "N/A"
                     importance_stars = "⭐" * int(entry.importance * 3)
-                    tags_str = f" [{entry.tags}]" if entry.tags else ""
-                    lt_text += f"• {date} {importance_stars}{tags_str}\n  {entry.content}\n\n"
+                    tags_str = f" [{html.escape(entry.tags)}]" if entry.tags else ""
+                    lt_text += f"• {date} {importance_stars}{tags_str}\n  {html.escape(entry.content)}\n\n"
                 output_parts.append(lt_text)
 
             # Краткосрочная память
@@ -738,8 +738,8 @@ class TelegramBridge:
                 st_text = "📝 <b>КРАТКОСРОЧНАЯ ПАМЯТЬ</b> (недавние заметки):\n\n"
                 for entry in short_term:
                     date = entry.created_at[:10] if entry.created_at else "N/A"
-                    tags_str = f" [{entry.tags}]" if entry.tags else ""
-                    st_text += f"• {date}{tags_str}\n  {entry.content}\n\n"
+                    tags_str = f" [{html.escape(entry.tags)}]" if entry.tags else ""
+                    st_text += f"• {date}{tags_str}\n  {html.escape(entry.content)}\n\n"
                 output_parts.append(st_text)
 
             # Активные задачи
@@ -748,13 +748,13 @@ class TelegramBridge:
                 task_text = "📋 <b>АКТИВНЫЕ ЗАДАЧИ</b>:\n\n"
                 for task in active_tasks:
                     date = task.created_at[:10] if task.created_at else "N/A"
-                    task_text += f"• {date} - {task.content}\n"
+                    task_text += f"• {date} - {html.escape(task.content)}\n"
 
                     # Найти план задачи
                     if task.task_id:
                         plans = memory_store.search(type="task_plan", task_id=task.task_id, limit=1)
                         if plans:
-                            task_text += f"  └─ План: {plans[0].content}\n"
+                            task_text += f"  └─ План: {html.escape(plans[0].content)}\n"
                     task_text += "\n"
                 output_parts.append(task_text)
 
@@ -764,26 +764,21 @@ class TelegramBridge:
                 ct_text = "✅ <b>ЗАВЕРШЕННЫЕ ЗАДАЧИ</b> (последние 5):\n\n"
                 for task in completed_tasks:
                     date = task.created_at[:10] if task.created_at else "N/A"
-                    ct_text += f"• {date} - {task.content}\n"
+                    ct_text += f"• {date} - {html.escape(task.content)}\n"
                 output_parts.append(ct_text)
 
-            # Объединить все части и отправить
-            full_output = "".join(output_parts)
-
-            # Разбить на части если слишком длинное (Telegram limit ~4096)
+            # Отправить секции по частям (каждая секция — цельный HTML-блок)
             max_length = 4000
-            if len(full_output) <= max_length:
-                await update.message.reply_text(full_output, parse_mode=ParseMode.HTML)
-            else:
-                # Отправить по частям
-                parts = [full_output[i:i+max_length] for i in range(0, len(full_output), max_length)]
-                await update.message.reply_text(
-                    f"💾 <b>Содержимое памяти ({len(parts)} частей):</b>",
-                    parse_mode=ParseMode.HTML
-                )
-                for i, part in enumerate(parts, 1):
-                    message = f"<b>Часть {i}/{len(parts)}:</b>\n\n{part}"
-                    await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+            current_chunk = ""
+            for part in output_parts:
+                if len(current_chunk) + len(part) > max_length:
+                    if current_chunk:
+                        await update.message.reply_text(current_chunk, parse_mode=ParseMode.HTML)
+                    current_chunk = part
+                else:
+                    current_chunk += part
+            if current_chunk:
+                await update.message.reply_text(current_chunk, parse_mode=ParseMode.HTML)
 
         except Exception as e:
             logger.error(f"Ошибка в cmd_memory: {e}")

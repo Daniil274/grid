@@ -87,7 +87,7 @@ class MemoryStore:
         )
     """
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     VALID_TYPES = {"long_term", "short_term", "task", "task_plan", "skill", "insight"}
     VALID_STATUSES = {"active", "completed", "abandoned"}
@@ -113,8 +113,24 @@ class MemoryStore:
         self._init_db()
         logger.info(f"✅ MemoryStore initialized: {self.db_path}")
 
+    def _cleanup_wal_files(self):
+        """Remove stale WAL/SHM files that could corrupt a new database."""
+        for suffix in ["-wal", "-shm"]:
+            wal = Path(str(self.db_path) + suffix)
+            if wal.exists():
+                try:
+                    wal.unlink()
+                    logger.info("🗑️ Removed stale %s file", wal.name)
+                except Exception as e:
+                    logger.warning("⚠️ Could not remove %s: %s", wal.name, e)
+
     def _init_db(self):
         """Initialize database schema with FTS5."""
+        # If DB does not exist, clean up any stale WAL/SHM files from a previous crash
+        # to prevent them from corrupting the new database.
+        if not self.db_path.exists():
+            self._cleanup_wal_files()
+
         # If DB file exists, check integrity first (handles "database disk image is malformed")
         if self.db_path.exists():
             try:
@@ -135,6 +151,7 @@ class MemoryStore:
                 try:
                     shutil.copy2(str(self.db_path), str(backup))
                     self.db_path.unlink()
+                    self._cleanup_wal_files()
                 except Exception as backup_err:
                     logger.exception("Failed to backup/remove corrupted DB: %s", backup_err)
                     raise
@@ -224,24 +241,34 @@ class MemoryStore:
                 )
             """)
 
-            # Triggers to sync FTS5 with main table
+            # Triggers to sync FTS5 with main table.
+            # FTS5 external content tables require special insert/delete syntax — plain
+            # UPDATE/DELETE on the FTS table corrupts the inverted index (SQLITE_CORRUPT).
+            # Always drop and recreate so existing DBs with wrong triggers get fixed.
+            conn.execute("DROP TRIGGER IF EXISTS memory_ai")
+            conn.execute("DROP TRIGGER IF EXISTS memory_ad")
+            conn.execute("DROP TRIGGER IF EXISTS memory_au")
+
             conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
+                CREATE TRIGGER memory_ai AFTER INSERT ON memory BEGIN
                     INSERT INTO memory_fts(rowid, content, tags, summary, entities)
                     VALUES (new.id, new.content, new.tags, new.summary, new.entities);
                 END
             """)
 
             conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN
-                    DELETE FROM memory_fts WHERE rowid = old.id;
+                CREATE TRIGGER memory_ad AFTER DELETE ON memory BEGIN
+                    INSERT INTO memory_fts(memory_fts, rowid, content, tags, summary, entities)
+                    VALUES ('delete', old.id, old.content, old.tags, old.summary, old.entities);
                 END
             """)
 
             conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
-                    UPDATE memory_fts SET content = new.content, tags = new.tags, summary = new.summary, entities = new.entities
-                    WHERE rowid = new.id;
+                CREATE TRIGGER memory_au AFTER UPDATE ON memory BEGIN
+                    INSERT INTO memory_fts(memory_fts, rowid, content, tags, summary, entities)
+                    VALUES ('delete', old.id, old.content, old.tags, old.summary, old.entities);
+                    INSERT INTO memory_fts(rowid, content, tags, summary, entities)
+                    VALUES (new.id, new.content, new.tags, new.summary, new.entities);
                 END
             """)
 
@@ -252,6 +279,19 @@ class MemoryStore:
                     value TEXT
                 )
             """)
+
+            # Rebuild FTS5 index when upgrading from schema < 5 (fixes corrupted index
+            # caused by the old wrong UPDATE trigger on the external content FTS5 table).
+            try:
+                cur = conn.execute("SELECT value FROM metadata WHERE key = 'schema_version'")
+                row = cur.fetchone()
+                stored_version = int(row[0]) if row else 0
+            except Exception:
+                stored_version = 0
+
+            if stored_version < 5:
+                logger.info("🔄 Schema v%s→5: rebuilding FTS5 index to fix trigger corruption...", stored_version)
+                conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
 
             # Store schema version
             conn.execute(

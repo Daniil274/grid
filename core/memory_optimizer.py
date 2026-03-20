@@ -269,8 +269,12 @@ class MemoryOptimizer:
         seen_ids = set()
         
         for entity in entities[:10]:  # Limit to 10 entities to avoid overload
+            # Handle both string and dict entities (e.g. {"name": "...", "category": "..."})
+            entity_name = entity if isinstance(entity, str) else entity.get("name", "") if isinstance(entity, dict) else str(entity)
+            if not entity_name:
+                continue
             try:
-                entries = self.store.get_entity_graph(entity, limit=limit_per_entity)
+                entries = self.store.get_entity_graph(entity_name, limit=limit_per_entity)
                 for entry in entries:
                     if entry.id not in seen_ids:
                         seen_ids.add(entry.id)
@@ -279,7 +283,7 @@ class MemoryOptimizer:
                             "content": entry.content[:200] + ("..." if len(entry.content) > 200 else ""),
                             "summary": entry.summary or "",
                             "entities": json.loads(entry.entities or "[]"),
-                            "matching_entity": entity
+                            "matching_entity": entity_name
                         })
             except Exception as e:
                 logger.warning("find_related_entries error for entity '%s': %s", entity, e)
@@ -340,14 +344,14 @@ Relationships can be:
 - "caused_by" - new memory is a result of existing one
 
 Respond ONLY with a JSON object:
-{
+{{
     "connections": [
-        {"target_id": <existing_memory_id>, "relation": "<relationship_type>"},
+        {{"target_id": <existing_memory_id>, "relation": "<relationship_type>"}},
         ...
     ]
-}
+}}
 
-If no meaningful connections found, respond with {"connections": []}"""
+If no meaningful connections found, respond with {{"connections": []}}"""
             
             prompt_template = self._get_prompt("memory_connection_prompt", default_connection_prompt)
             prompt = prompt_template.format(
@@ -365,9 +369,20 @@ If no meaningful connections found, respond with {"connections": []}"""
             )
             duration_conn_ms = (time.monotonic() - t_conn) * 1000
             
-            result = json.loads(response.choices[0].message.content)
+            raw = response.choices[0].message.content
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError as e:
+                logger.warning("Failed to parse connections JSON for entry_id=%s: %s | raw=%r", entry_id, e, raw[:200])
+                return
+            if not isinstance(result, dict):
+                logger.warning("Unexpected connections response type %s for entry_id=%s", type(result).__name__, entry_id)
+                return
             connections = result.get("connections", [])
-            
+            if not isinstance(connections, list):
+                logger.warning("Unexpected connections list type %s for entry_id=%s", type(connections).__name__, entry_id)
+                return
+
             # Validate and filter connections
             valid_connections = []
             valid_ids = {r['entry_id'] for r in related_entries}
