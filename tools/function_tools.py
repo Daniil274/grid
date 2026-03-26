@@ -17,6 +17,7 @@ from .voice_tools import VOICE_TOOLS  # Voice synthesis and sending tools
 from .input_tools import INPUT_TOOLS  # Keyboard and input tools
 from .screen_tools import SCREEN_TOOLS  # Screen capture tools
 from .emergency_tools import EMERGENCY_TOOLS  # Emergency shutdown and pipeline status tools
+from .system_tools import SYSTEM_TOOLS  # System introspection and meta-information tools
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -46,6 +47,7 @@ AVAILABLE_TOOLS = {
     **INPUT_TOOLS,  # Keyboard and input tools (3 tools)
     **SCREEN_TOOLS,  # Screen capture tools (1 tool)
     **EMERGENCY_TOOLS,  # Emergency shutdown and pipeline status tools (2 tools)
+    **SYSTEM_TOOLS,  # System introspection tools (7 tools)
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -127,6 +129,15 @@ TOOL_ALIASES = {
     "keyboard_hotkey": "keyboard_hotkey",
     "take_screenshot": "take_screenshot",
     "crop_image": "crop_image",
+
+    # System introspection tools
+    "list_agents": "system_list_agents",
+    "get_agent_info": "system_get_agent_info",
+    "list_tools": "system_list_tools",
+    "get_tool_info": "system_get_tool_info",
+    "get_skills": "system_get_skills",
+    "help": "system_help",
+    "get_context": "system_get_context",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:
