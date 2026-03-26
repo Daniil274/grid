@@ -16,6 +16,10 @@ from .beads_tools import BEADS_TOOLS  # Beads issue tracker tools
 from .input_tools import INPUT_TOOLS  # Keyboard and input tools
 from .screen_tools import SCREEN_TOOLS  # Screen capture tools
 from .emergency_tools import EMERGENCY_TOOLS  # Emergency shutdown and pipeline status tools
+from .search_tools import SEARCH_TOOLS  # Discovery tools: search_tools, search_skills
+from .semantic_tools import SEMANTIC_TOOLS  # Semantic search: semantic_search_code, index_codebase
+from .history_tools import HISTORY_TOOLS  # Claude.ai chat history search
+from .semantic_memory_tools import SEMANTIC_MEMORY_TOOLS  # Hybrid semantic memory search
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -37,13 +41,17 @@ AVAILABLE_TOOLS = {
     **OCR_TOOLS,
     **MARKDOWN_TOOLS,
     **MEMORY_TOOLS_V2,  # New SQLite-based memory tools (3 tools)
-    **SKILL_TOOLS,  # New file-based skill tools (6 tools)
+    **SKILL_TOOLS,  # SQL-only skill tools (5 tools)
     **VISION_TOOLS,  # Vision tools for image viewing (2 tools)
     **DOCUMENT_TOOLS,  # Document conversion and export tools (4 tools)
     **BEADS_TOOLS,  # Beads issue tracker tools (7 tools)
     **INPUT_TOOLS,  # Keyboard and input tools (3 tools)
     **SCREEN_TOOLS,  # Screen capture tools (1 tool)
     **EMERGENCY_TOOLS,  # Emergency shutdown and pipeline status tools (2 tools)
+    **SEARCH_TOOLS,  # Discovery tools: search_tools, search_skills (2 tools)
+    **SEMANTIC_TOOLS,  # Semantic search tools: semantic_search_code, index_codebase (2 tools)
+    **HISTORY_TOOLS,  # Claude.ai chat history search (1 tool)
+    **SEMANTIC_MEMORY_TOOLS,  # Hybrid semantic memory search (1 tool)
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 

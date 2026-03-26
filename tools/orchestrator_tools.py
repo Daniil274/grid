@@ -182,14 +182,19 @@ async def orchestrate(
     model_key: Optional[str] = None,
     executor_tools: Optional[Union[List[str], str]] = None,
     context_id: Optional[str] = None,
+    init_tools: Optional[str] = None,
 ) -> str:
     """
     Мета-инструмент: запускает динамического исполнителя для решения задачи.
     Аргументы:
     - task: Задача, которую должен выполнить агент
     - agent_system_prompt: Системный промпт (роль и инструкции) для агента.
-    - executor_tools: Список инструментов для агента 
-    
+    - executor_tools: Список инструментов для агента
+    - init_tools: JSON-строка со списком инструментов для сбора контекста перед
+      запуском агента. Формат: '[{"name": "tool_name", "parameters": {...}}]'.
+      Результаты этих инструментов будут добавлены в инструкции агента.
+      Пример: '[{"name":"file_list","parameters":{"directory":"."}}]'
+
     Примечание: Вызовы orchestrate выполняются последовательно (не параллельно)
     для предотвращения конфликтов и обеспечения предсказуемости выполнения.
     """
@@ -254,6 +259,18 @@ async def orchestrate(
         resolved_model_key = effective_key or default_model_key or factory.resolve_model_key(None)
         coerced_executor_tools = _coerce_tool_list(executor_tools)
 
+        # Parse init_tools JSON (optional context-gathering tools)
+        parsed_init_tools = None
+        if init_tools:
+            try:
+                parsed = json.loads(init_tools)
+                if isinstance(parsed, list):
+                    parsed_init_tools = parsed
+                else:
+                    logger.warning(f"orchestrate: init_tools must be a JSON array, got {type(parsed).__name__}")
+            except Exception as e:
+                logger.warning(f"orchestrate: cannot parse init_tools JSON: {e} — value: {init_tools[:200]}")
+
         base_instructions = _coerce_optional_str(agent_system_prompt)
 
         executor = await factory.create_dynamic_agent(
@@ -261,6 +278,7 @@ async def orchestrate(
             instructions=base_instructions,
             model_key=resolved_model_key,
             tool_names=coerced_executor_tools,
+            init_tools=parsed_init_tools,
         )
 
         # Execute with emergency shutdown handling

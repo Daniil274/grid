@@ -35,3 +35,6 @@ docker>=7.0.0
 
 #tools
 pyautogui>=0.9.0     # Управление мышью и клавиатурой
+
+# ChromaDB for vector storage and similarity search
+chromadb>=0.4.0

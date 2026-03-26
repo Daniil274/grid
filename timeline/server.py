@@ -26,7 +26,7 @@ from pydantic import BaseModel
 logger = logging.getLogger("grid.timeline.server")
 
 ROOT = Path(__file__).resolve().parent.parent
-DASHBOARD_HTML = ROOT / "timeline_dashboard.html"
+DASHBOARD_HTML = ROOT / "scripts" / "timeline_dashboard.html"
 
 
 # ─── Pydantic models ──────────────────────────────────────────────────────────

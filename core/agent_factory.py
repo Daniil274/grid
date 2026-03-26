@@ -36,7 +36,32 @@ from agents.exceptions import (
 )
 from core.vision_model import VisionChatCompletionsModel
 from agents.mcp import MCPServerStdio
+from agents.mcp.util import MCPUtil as _MCPUtil
 from core.managers.mcp_manager import ResilientMCPServerStdio
+
+# --- Patch: MCP tools must return errors to the agent, not crash the run ---
+# Unlike function_tool() which has failure_error_function wrapper,
+# MCPUtil.invoke_mcp_tool raises ModelBehaviorError (e.g. invalid JSON) directly,
+# which kills the entire run. We wrap it so errors are returned as tool output.
+_original_invoke_mcp_tool = _MCPUtil.__dict__["invoke_mcp_tool"].__func__
+
+@classmethod  # type: ignore[misc]
+async def _invoke_mcp_tool_safe(cls, server, tool, context, input_json):  # type: ignore[override]
+    try:
+        return await _original_invoke_mcp_tool(cls, server, tool, context, input_json)
+    except ModelBehaviorError as e:
+        msg = str(e)
+        # Try to extract the underlying JSON decode error for a clearer hint
+        cause = getattr(e, "__cause__", None)
+        if cause and hasattr(cause, "msg"):
+            msg = f"Invalid JSON for tool '{tool.name}': {cause.msg} (input was: {input_json!r})"
+        else:
+            msg = f"Invalid JSON for tool '{tool.name}': {msg}"
+        logger.warning("MCP tool '%s' got invalid JSON from model — returning error to agent: %s", tool.name, msg)
+        return msg
+
+_MCPUtil.invoke_mcp_tool = _invoke_mcp_tool_safe
+# -------------------------------------------------------------------------
 
 from .config import Config
 from .context import ContextManager, safe_lock
@@ -294,6 +319,14 @@ class AgentFactory:
         self.container_id = container_id
         if working_directory:
             self.config.set_working_directory(working_directory)
+
+        # Propagate the fully-configured Config instance to semantic tools
+        # so they use the correct working directory and model settings
+        try:
+            from tools.semantic_tools import set_semantic_config
+            set_semantic_config(self.config)
+        except ImportError:
+            pass
 
         # Initialize image processing config
         from utils.image_utils import ImageUtils
@@ -829,6 +862,50 @@ class AgentFactory:
                     logger.warning(f"⚠️ Error in auto-run tool '{tool_name}': {tool_err}")
         return "".join(result_parts)
 
+    async def _execute_init_tools(
+        self,
+        init_tools: List[Dict[str, Any]],
+        tools: list,
+        run_context: "GridRunContext",
+    ) -> str:
+        """
+        Run a list of raw tool-spec dicts and return concatenated results.
+
+        Mirrors _execute_auto_run_tools() but accepts plain dicts instead of
+        an AgentConfig, making it suitable for dynamic (orchestrated) agents.
+
+        Args:
+            init_tools: List of {"name": "tool_name", "parameters": {...}}.
+            tools:      Resolved tool objects the agent has access to.
+            run_context: GridRunContext used for tool invocation.
+
+        Returns:
+            Combined result string ready to be prepended to agent instructions.
+        """
+        result_parts: List[str] = []
+        working_dir = "/" if getattr(self, "container_id", None) else self.config.get_working_directory()
+        for spec in init_tools:
+            tool_name = spec.get("name")
+            tool_params = self._substitute_tool_params(
+                dict(spec.get("parameters", {})), working_dir, ""
+            )
+            target_tool = next(
+                (t for t in tools if getattr(t, "name", "") == tool_name), None
+            )
+            if target_tool and hasattr(target_tool, "on_invoke_tool"):
+                logger.info(f"init_tool: running '{tool_name}' for dynamic agent")
+                try:
+                    wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
+                    result = await target_tool.on_invoke_tool(wrapper, json.dumps(tool_params))
+                    result_parts.append(
+                        f"\n\n=== КОНТЕКСТ [{tool_name}] ===\n{result}\n"
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ init_tool '{tool_name}' error: {e}")
+            else:
+                logger.warning(f"⚠️ init_tool '{tool_name}' not found in agent's tool list")
+        return "".join(result_parts)
+
     # ---------------------------------------------------------------------
     # Dynamic agents (not declared in config.yaml)
     # ---------------------------------------------------------------------
@@ -840,6 +917,7 @@ class AgentFactory:
         model_key: Optional[str] = None,
         tool_names: Optional[List[str]] = None,
         mcp_tool_names: Optional[List[str]] = None,
+        init_tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Agent:
         """
         Create an ad-hoc Agent instance not backed by config.yaml.
@@ -958,6 +1036,22 @@ class AgentFactory:
 
         # Добавляем prompt_addition из конфигурации инструментов к инструкциям
         enhanced_instructions = self._build_dynamic_agent_instructions(instructions, all_tool_names)
+
+        # Run init_tools and prepend results to instructions
+        if init_tools:
+            try:
+                temp_ctx = GridRunContext(
+                    factory=self,
+                    context_id=self.get_active_context_id() or "init",
+                    user_id=None,
+                    container_id=getattr(self, "container_id", None),
+                )
+                init_info = await self._execute_init_tools(init_tools, tools, temp_ctx)
+                if init_info:
+                    enhanced_instructions = init_info + "\n\n" + enhanced_instructions
+                    logger.info(f"init_tools: injected {len(init_tools)} context result(s) into '{name}'")
+            except Exception as e:
+                logger.warning(f"⚠️ init_tools failed for agent '{name}': {e}")
 
         # Log final tool configuration
         function_tool_names = [getattr(t, '__name__', str(t)) for t in tools]

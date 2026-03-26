@@ -95,15 +95,19 @@ class ProjectToolsLoader:
 
             logger.debug(f"Loading module: {full_module_name} from {file_path}")
 
-            # Импортируем модуль
-            spec = importlib.util.spec_from_file_location(full_module_name, file_path)
-            if spec is None or spec.loader is None:
-                logger.error(f"Failed to create spec for {full_module_name}")
-                return
+            # Импортируем модуль (переиспользуем из sys.modules чтобы не выполнять
+            # module-level код дважды — это ломает stderr/stdout wrappers на Windows)
+            if full_module_name in sys.modules:
+                module = sys.modules[full_module_name]
+            else:
+                spec = importlib.util.spec_from_file_location(full_module_name, file_path)
+                if spec is None or spec.loader is None:
+                    logger.error(f"Failed to create spec for {full_module_name}")
+                    return
 
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[full_module_name] = module
-            spec.loader.exec_module(module)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[full_module_name] = module
+                spec.loader.exec_module(module)
 
             self._module_cache[module_name] = module
 

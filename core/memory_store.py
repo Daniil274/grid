@@ -23,6 +23,13 @@ from difflib import SequenceMatcher
 import json
 from collections import deque, defaultdict
 
+# Optional semantic search support via OpenRouter embeddings
+try:
+    from core.embeddings import EmbeddingsManager, create_embeddings_manager
+    _EMBEDDINGS_MODULE_AVAILABLE = True
+except ImportError:
+    _EMBEDDINGS_MODULE_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,6 +59,20 @@ class MemoryEntry:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return asdict(self)
+
+
+@dataclass
+class SkillEntry:
+    """Single skill entry stored in the dedicated skills table."""
+    id: int
+    name: str
+    content: str
+    tags: str
+    user_id: str
+    agent_id: str
+    summary: str
+    created_at: str
+    updated_at: str
 
 
 class MemoryStore:
@@ -97,13 +118,21 @@ class MemoryStore:
     MAX_FTS_CANDIDATES = 50  # Макс. кандидатов от FTS5
     IMPORTANCE_BOOST_ON_UPDATE = 0.1  # Увеличение importance при обновлении
 
-    def __init__(self, db_path: str, config: Optional[Any] = None):
+    def __init__(
+        self,
+        db_path: str,
+        config: Optional[Any] = None,
+        enable_embeddings: bool = True,
+        embeddings_persist_directory: Optional[str] = None,
+    ):
         """
         Initialize memory store.
 
         Args:
             db_path: Path to SQLite database file
             config: Optional Config object for TTL defaults
+            enable_embeddings: Enable semantic search via OpenRouter embeddings
+            embeddings_persist_directory: Persist ChromaDB vectors here (None = in-memory)
         """
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,6 +140,29 @@ class MemoryStore:
 
         # Initialize database
         self._init_db()
+
+        # Optional semantic search (requires OPENROUTER_API_KEY + chromadb)
+        self._embeddings: Optional[EmbeddingsManager] = None
+        if enable_embeddings and _EMBEDDINGS_MODULE_AVAILABLE:
+            persist_dir = embeddings_persist_directory
+            if persist_dir is None:
+                # Default: store vectors next to the SQLite DB
+                persist_dir = str(self.db_path.parent / "embeddings")
+            try:
+                self._embeddings = create_embeddings_manager(
+                    config=self.config,
+                    persist_directory=persist_dir,
+                    collection_name="memory_semantic",
+                )
+                if self._embeddings:
+                    logger.info(
+                        "✅ MemoryStore: semantic search enabled (persist=%s)", persist_dir
+                    )
+                else:
+                    logger.info("ℹ️ MemoryStore: semantic search unavailable (check OPENROUTER_API_KEY)")
+            except Exception as exc:
+                logger.warning("MemoryStore: embeddings init failed: %s", exc)
+
         logger.info(f"✅ MemoryStore initialized: {self.db_path}")
 
     def _cleanup_wal_files(self):
@@ -280,6 +332,54 @@ class MemoryStore:
                 )
             """)
 
+            # ── Skills table (SQL-only, no filesystem) ────────────────────────
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS skills (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT NOT NULL,
+                    content     TEXT NOT NULL,
+                    tags        TEXT DEFAULT '',
+                    user_id     TEXT DEFAULT 'default_user',
+                    agent_id    TEXT DEFAULT 'default_agent',
+                    summary     TEXT DEFAULT '',
+                    created_at  DATETIME DEFAULT (datetime('now')),
+                    updated_at  DATETIME DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS skills_name_user_agent
+                    ON skills(name, user_id, agent_id)
+            """)
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(
+                    name, content, tags, summary,
+                    content='skills', content_rowid='id'
+                )
+            """)
+            conn.execute("DROP TRIGGER IF EXISTS skills_ai")
+            conn.execute("DROP TRIGGER IF EXISTS skills_ad")
+            conn.execute("DROP TRIGGER IF EXISTS skills_au")
+            conn.execute("""
+                CREATE TRIGGER skills_ai AFTER INSERT ON skills BEGIN
+                    INSERT INTO skills_fts(rowid, name, content, tags, summary)
+                    VALUES (new.id, new.name, new.content, new.tags, new.summary);
+                END
+            """)
+            conn.execute("""
+                CREATE TRIGGER skills_ad AFTER DELETE ON skills BEGIN
+                    INSERT INTO skills_fts(skills_fts, rowid, name, content, tags, summary)
+                    VALUES ('delete', old.id, old.name, old.content, old.tags, old.summary);
+                END
+            """)
+            conn.execute("""
+                CREATE TRIGGER skills_au AFTER UPDATE ON skills BEGIN
+                    INSERT INTO skills_fts(skills_fts, rowid, name, content, tags, summary)
+                    VALUES ('delete', old.id, old.name, old.content, old.tags, old.summary);
+                    INSERT INTO skills_fts(rowid, name, content, tags, summary)
+                    VALUES (new.id, new.name, new.content, new.tags, new.summary);
+                END
+            """)
+
             # Rebuild FTS5 index when upgrading from schema < 5 (fixes corrupted index
             # caused by the old wrong UPDATE trigger on the external content FTS5 table).
             try:
@@ -439,12 +539,52 @@ class MemoryStore:
         if exclude_ids:
             candidates = [c for c in candidates if c.id not in exclude_ids]
 
-        # Шаг 2: Точный расчёт similarity (медленно, но только для кандидатов)
+        # Шаг 2: Re-ranking — embeddings (если доступны) или SequenceMatcher
         results: List[Tuple[MemoryEntry, float]] = []
-        for entry in candidates:
-            similarity = self._calculate_similarity(query, entry.content)
-            if similarity >= threshold:
-                results.append((entry, similarity))
+
+        if self._embeddings and candidates:
+            # Семантический re-ranking: одним батч-запросом вычисляем сходство
+            try:
+                query_vec = self._embeddings.embed_text(query)
+                if query_vec:
+                    candidate_texts = [e.content for e in candidates]
+                    candidate_vecs = self._embeddings.embed_texts(candidate_texts)
+
+                    def _cosine(v1: List[float], v2: List[float]) -> float:
+                        if not v1 or not v2:
+                            return 0.0
+                        dot = sum(a * b for a, b in zip(v1, v2))
+                        n1 = sum(a * a for a in v1) ** 0.5
+                        n2 = sum(b * b for b in v2) ** 0.5
+                        return dot / (n1 * n2) if n1 and n2 else 0.0
+
+                    for entry, vec in zip(candidates, candidate_vecs):
+                        sim = _cosine(query_vec, vec)
+                        if sim >= threshold:
+                            results.append((entry, sim))
+
+                    logger.debug(
+                        "find_similar: embedding re-rank %d candidates → %d above threshold",
+                        len(candidates), len(results),
+                    )
+                else:
+                    raise ValueError("empty query embedding")
+            except Exception as exc:
+                logger.warning(
+                    "find_similar: embedding re-rank failed (%s), falling back to SequenceMatcher",
+                    exc,
+                )
+                results = []
+                for entry in candidates:
+                    sim = self._calculate_similarity(query, entry.content)
+                    if sim >= threshold:
+                        results.append((entry, sim))
+        else:
+            # Fallback: SequenceMatcher (без embeddings)
+            for entry in candidates:
+                similarity = self._calculate_similarity(query, entry.content)
+                if similarity >= threshold:
+                    results.append((entry, similarity))
 
         # Шаг 3: Сортировка и лимит
         results.sort(key=lambda x: x[1], reverse=True)
@@ -545,7 +685,26 @@ class MemoryStore:
             conn.commit()
             entry_id = cursor.lastrowid
             logger.debug(f"💾 Saved memory #{entry_id} [{type}]: {content[:50]}...")
-            return entry_id
+
+        # Index in ChromaDB for semantic search (non-blocking: errors are logged only)
+        if self._embeddings:
+            try:
+                self._embeddings.upsert_text(
+                    text=content,
+                    doc_id=f"mem_{entry_id}",
+                    metadata={
+                        "entry_id": entry_id,
+                        "type": type or "",
+                        "tags": tags or "",
+                        "user_id": user_id or "",
+                        "agent_id": agent_id or "",
+                        "importance": importance,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("save: embedding index failed for #%s: %s", entry_id, exc)
+
+        return entry_id
 
     def search(
         self,
@@ -662,6 +821,83 @@ class MemoryStore:
                 self._touch_entries([e.id for e in entries])
             
             return entries
+
+    def search_semantic(
+        self,
+        query: str,
+        n_results: int = 10,
+        type: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        min_similarity: float = 0.0,
+    ) -> List[Tuple["MemoryEntry", float]]:
+        """
+        Pure semantic search via OpenRouter embeddings + ChromaDB.
+
+        Falls back to an empty list (with a warning) when embeddings are unavailable.
+
+        Args:
+            query: Natural-language search query
+            n_results: Maximum number of results
+            type: Filter by memory type
+            user_id: Filter by user
+            agent_id: Filter by agent
+            min_similarity: Minimum cosine similarity (0.0–1.0)
+
+        Returns:
+            List of (MemoryEntry, similarity_score) sorted by descending similarity
+        """
+        if not self._embeddings:
+            logger.warning(
+                "search_semantic: embeddings unavailable; "
+                "set OPENROUTER_API_KEY and install chromadb to enable"
+            )
+            return []
+
+        # Build ChromaDB metadata filter
+        # ChromaDB requires $and when combining multiple conditions
+        conditions: List[Dict[str, Any]] = []
+        if type:
+            conditions.append({"type": {"$eq": type}})
+        if user_id:
+            conditions.append({"user_id": {"$eq": user_id}})
+        if agent_id:
+            conditions.append({"agent_id": {"$eq": agent_id}})
+
+        if len(conditions) == 0:
+            where: Optional[Dict[str, Any]] = None
+        elif len(conditions) == 1:
+            where = conditions[0]
+        else:
+            where = {"$and": conditions}
+
+        try:
+            hits = self._embeddings.search(
+                query=query,
+                n_results=n_results,
+                where=where,
+            )
+        except Exception as exc:
+            logger.error("search_semantic: ChromaDB query failed: %s", exc)
+            return []
+
+        results: List[Tuple[MemoryEntry, float]] = []
+        for hit in hits:
+            similarity = hit.get("similarity", 0.0)
+            if similarity < min_similarity:
+                continue
+            meta = hit.get("metadata", {})
+            entry_id = meta.get("entry_id")
+            if entry_id is None:
+                continue
+            entry = self.get_by_id(int(entry_id))
+            if entry:
+                results.append((entry, similarity))
+
+        logger.info(
+            "search_semantic: query='%s...' → %d results", query[:50], len(results)
+        )
+        return results
 
     def get_by_id(self, entry_id: int) -> Optional[MemoryEntry]:
         """
@@ -1401,3 +1637,166 @@ class MemoryStore:
                 "reclaimed_mb": 0.0,
                 "error": str(e)
             }
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SKILLS — SQL-only storage (no filesystem)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _extract_summary(self, content: str) -> str:
+        """Return first non-empty line stripped of leading # chars (max 200 chars)."""
+        for line in content.splitlines():
+            line = line.strip().lstrip("#").strip()
+            if line:
+                return line[:200]
+        return ""
+
+    def save_skill(
+        self,
+        name: str,
+        content: str,
+        tags: str = "",
+        user_id: str = "default_user",
+        agent_id: str = "default_agent",
+    ) -> int:
+        """
+        Upsert a skill.  If (name, user_id, agent_id) already exists the
+        content / tags / summary are updated and the existing id is returned.
+        """
+        summary = self._extract_summary(content)
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO skills (name, content, tags, user_id, agent_id, summary)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name, user_id, agent_id) DO UPDATE SET
+                    content  = excluded.content,
+                    tags     = excluded.tags,
+                    summary  = excluded.summary,
+                    updated_at = datetime('now')
+                """,
+                (name, content, tags, user_id, agent_id, summary),
+            )
+            conn.commit()
+            # lastrowid is 0 on UPDATE — fetch real id
+            row = conn.execute(
+                "SELECT id FROM skills WHERE name=? AND user_id=? AND agent_id=?",
+                (name, user_id, agent_id),
+            ).fetchone()
+            return row["id"] if row else (cursor.lastrowid or 0)
+
+    def get_skill(
+        self,
+        name: str,
+        user_id: str = "default_user",
+        agent_id: str = "default_agent",
+    ) -> Optional["SkillEntry"]:
+        """Return a SkillEntry by exact name, or None if not found."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM skills WHERE name=? AND user_id=? AND agent_id=?",
+                (name, user_id, agent_id),
+            ).fetchone()
+            return SkillEntry(**dict(row)) if row else None
+
+    def search_skills(
+        self,
+        query: str = "",
+        tags: str = "",
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List["SkillEntry"]:
+        """
+        Search skills.
+
+        Args:
+            query: FTS5 full-text query (name + content + tags + summary).
+                   Empty = return recent entries.
+            tags:  Comma-separated tag filter (LIKE match, all must match).
+            user_id:  Optional user filter.
+            agent_id: Optional agent filter (omit for cross-agent search).
+            limit:    Max results.
+        """
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        if user_id:
+            conditions.append("s.user_id = ?")
+            params.append(user_id)
+        if agent_id:
+            conditions.append("s.agent_id = ?")
+            params.append(agent_id)
+        if tags:
+            for tag in (t.strip() for t in tags.split(",") if t.strip()):
+                conditions.append("s.tags LIKE ?")
+                params.append(f"%{tag}%")
+
+        with self._get_connection() as conn:
+            if query.strip():
+                fts_tokens = " ".join(
+                    f'"{t.replace(chr(34), "")}"' for t in query.split()
+                )
+                extra_where = (" AND " + " AND ".join(conditions)) if conditions else ""
+                sql = f"""
+                    SELECT s.* FROM skills s
+                    JOIN skills_fts f ON s.id = f.rowid
+                    WHERE skills_fts MATCH ?{extra_where}
+                    ORDER BY rank
+                    LIMIT ?
+                """
+                rows = conn.execute(sql, [fts_tokens] + params + [limit]).fetchall()
+            else:
+                where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+                sql = f"SELECT * FROM skills s {where} ORDER BY s.updated_at DESC LIMIT ?"
+                rows = conn.execute(sql, params + [limit]).fetchall()
+
+            return [SkillEntry(**dict(r)) for r in rows]
+
+    def update_skill(
+        self,
+        skill_id: int,
+        name: Optional[str] = None,
+        content: Optional[str] = None,
+        tags: Optional[str] = None,
+    ) -> bool:
+        """
+        Update skill fields by id.
+
+        Returns True if the row was found and updated, False otherwise.
+        At least one of name / content / tags must be provided.
+        """
+        updates: List[str] = []
+        params: List[Any] = []
+
+        if name is not None:
+            updates.append("name = ?")
+            params.append(name)
+        if content is not None:
+            updates.append("content = ?")
+            params.append(content)
+            updates.append("summary = ?")
+            params.append(self._extract_summary(content))
+        if tags is not None:
+            updates.append("tags = ?")
+            params.append(tags)
+
+        if not updates:
+            return False
+
+        updates.append("updated_at = datetime('now')")
+        params.append(skill_id)
+
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                f"UPDATE skills SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def delete_skill(self, skill_id: int) -> bool:
+        """Delete skill by id. Returns True if a row was deleted."""
+        with self._get_connection() as conn:
+            cur = conn.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
+            conn.commit()
+            return cur.rowcount > 0
