@@ -1,259 +1,199 @@
 """
-Skill Tools - Manage agent skills following the Anthropic standard.
-
-Each skill is a folder with a SKILL.md file and optional companion files:
-    {skill_name}/
-        SKILL.md          - Main instructions (required)
-        scripts/          - Helper scripts (optional)
-        templates/        - Template files (optional)
-        reference/        - Reference documentation (optional)
-        examples/         - Example files (optional)
+Skill Tools — SQL-only skill management (no filesystem).
 
 Tools:
-- skill_list:   List all available skills
-- skill_read:   Read skill's SKILL.md + directory path (for accessing companion files)
-- skill_create: Register a new skill from a SKILL.md file + optional companion files dir
-- skill_delete: Delete a skill and all its files
+- skill_save:   Create or update a skill (upsert by name)
+- skill_read:   Read skill content by name
+- skill_search: Search skills by FTS query and/or tags
+- skill_update: Update name / content / tags of an existing skill
+- skill_delete: Delete a skill by name
 """
 
+import json
 import logging
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
+
 from agents import function_tool, RunContextWrapper
-from utils.path_utils import display_agent_path, resolve_agent_path
 
 logger = logging.getLogger(__name__)
 
 
-def _get_skill_manager(context: RunContextWrapper) -> Any:
-    """Get SkillManager from context."""
+# ── context helpers ──────────────────────────────────────────────────────────
+
+def _get_skill_manager(context: RunContextWrapper):
     try:
-        raw = getattr(context, "context", None)
-        if raw is None:
-            return None
-        factory = getattr(raw, "factory", None)
-        if factory is None:
-            return None
-        return getattr(factory, "skill_manager", None)
-    except Exception as e:
-        logger.error(f"❌ Failed to get skill_manager: {e}")
+        return context.context.factory.skill_manager
+    except AttributeError:
         return None
 
 
-def _get_factory(context: RunContextWrapper) -> Any:
-    """Get AgentFactory from context."""
-    try:
-        raw = getattr(context, "context", None)
-        if raw is None:
-            return None
-        return getattr(raw, "factory", None)
-    except Exception:
-        return None
+def _get_user_agent(context: RunContextWrapper):
+    raw = getattr(context, "context", None)
+    user_id = getattr(raw, "user_id", None) or "default_user"
+    agent_id = getattr(raw, "agent_id", None) or "default_agent"
+    return user_id, agent_id
 
 
-def _get_user_id(context: RunContextWrapper) -> str:
-    """Get user_id from context."""
-    try:
-        raw = getattr(context, "context", None)
-        if raw:
-            uid = getattr(raw, "user_id", None)
-            if uid:
-                return uid
-    except Exception:
-        pass
-    return "default_user"
-
-
-def _get_agent_id(context: RunContextWrapper) -> str:
-    """Get agent_id from context."""
-    try:
-        raw = getattr(context, "context", None)
-        if raw:
-            agent_id = getattr(raw, "agent_id", None)
-            if agent_id:
-                return agent_id
-    except Exception:
-        pass
-    return "default_agent"
-
+# ── tools ────────────────────────────────────────────────────────────────────
 
 @function_tool
-async def skill_list(context: RunContextWrapper) -> str:
+async def skill_save(
+    context: RunContextWrapper,
+    name: str,
+    content: str,
+    tags: str = "",
+) -> str:
     """
-    List all available skill names for the current user.
+    Save (create or update) a skill in the database.
 
-    Returns only names. Use skill_read(name) to get full content and directory path.
+    Args:
+        name:    Unique skill name for this user + agent.
+        content: Full skill text (markdown instructions).
+        tags:    Comma-separated tags for search filtering (e.g. "python,git,code").
 
     Returns:
-        List of skill names, or a message if no skills exist.
+        JSON with skill id and name.
     """
-    manager = _get_skill_manager(context)
-    if not manager:
-        return "❌ Skill manager not available"
-
-    user_id = _get_user_id(context)
-    agent_id = _get_agent_id(context)
-
-    try:
-        names = manager.list_skills(user_id, agent_id)
-        if not names:
-            return "ℹ️ No skills available."
-        return "📚 Available skills:\n" + "\n".join(f"- {n}" for n in names)
-    except Exception as e:
-        return f"❌ Error listing skills: {e}"
+    sm = _get_skill_manager(context)
+    if not sm:
+        return json.dumps({"error": "skill_manager not available"})
+    user_id, agent_id = _get_user_agent(context)
+    skill_id = sm.save(name, content, tags=tags, user_id=user_id, agent_id=agent_id)
+    return json.dumps({"ok": True, "id": skill_id, "name": name}, ensure_ascii=False)
 
 
 @function_tool
 async def skill_read(
     context: RunContextWrapper,
-    name: str
+    name: str,
 ) -> str:
     """
-    Read a skill's SKILL.md content and get its directory path.
-
-    The directory path allows the agent to access companion files (scripts,
-    templates, references, etc.) directly using file tools.
+    Read the content of a skill by name.
 
     Args:
-        name: Skill name
+        name: Skill name.
 
     Returns:
-        Skill directory path, followed by SKILL.md content.
+        Skill content string, or error JSON if not found.
     """
-    manager = _get_skill_manager(context)
-    if not manager:
-        return "❌ Skill manager not available"
-
-    user_id = _get_user_id(context)
-    agent_id = _get_agent_id(context)
-
-    try:
-        content = manager.get_skill(user_id, agent_id, name)
-        if not content:
-            return f"❌ Skill '{name}' not found."
-
-        skill_dir = manager.get_skill_dir_path(user_id, agent_id, name)
-        dir_line = ""
-        if skill_dir:
-            rel = display_agent_path(str(skill_dir), _get_factory(context))
-            dir_line = f"📁 Skill directory: {rel}"
-
-        parts = [f"📚 Skill: {name}"]
-        if dir_line:
-            parts.append(dir_line)
-        parts.append("")
-        parts.append(content)
-        return "\n".join(parts)
-    except Exception as e:
-        return f"❌ Error reading skill: {e}"
+    sm = _get_skill_manager(context)
+    if not sm:
+        return json.dumps({"error": "skill_manager not available"})
+    user_id, agent_id = _get_user_agent(context)
+    entry = sm.get(name, user_id, agent_id)
+    if not entry:
+        return json.dumps({"error": f"Skill '{name}' not found"})
+    return entry.content
 
 
 @function_tool
-async def skill_create(
+async def skill_search(
     context: RunContextWrapper,
-    name: str,
-    file_path: str,
-    companion_files: str = "",
-    tags: str = ""
+    query: str = "",
+    tags: str = "",
+    limit: int = 10,
 ) -> str:
     """
-    Register a new skill from a SKILL.md file, following the Anthropic standard.
+    Search skills in the database.
 
-    The agent should first create the SKILL.md file (using write_file), then call
-    this tool to register it. The content is copied to standard skill storage.
-
-    Companion files (scripts, templates, references, etc.) can be provided as a
-    directory. Its contents are copied into the skill folder alongside SKILL.md:
-        {name}/
-            SKILL.md
-            scripts/     <- from companion_files dir
-            templates/   <- from companion_files dir
+    Searches the current user's skills across all their agents.
 
     Args:
-        name: Skill name (e.g., "python-best-practices", "deployment-guide")
-        file_path: Path to the SKILL.md file
-        companion_files: Optional path to a directory of companion files to bundle
-        tags: Comma-separated tags (e.g., "python,coding,guide")
+        query: Full-text search terms (name, content, tags, summary).
+               Leave empty to list recent skills.
+        tags:  Comma-separated tag filter (e.g. "python,git").
+               All specified tags must match.
+        limit: Maximum number of results (default 10).
 
     Returns:
-        Confirmation message with the skill's directory path.
+        JSON list of {id, name, summary, tags, agent_id, updated_at}.
     """
-    manager = _get_skill_manager(context)
-    if not manager:
-        return "❌ Skill manager not available"
+    sm = _get_skill_manager(context)
+    if not sm:
+        return json.dumps({"error": "skill_manager not available"})
+    user_id, _ = _get_user_agent(context)
+    entries = sm.search(query=query, tags=tags, user_id=user_id, limit=limit)
+    return json.dumps(
+        [
+            {
+                "id": e.id,
+                "name": e.name,
+                "summary": e.summary,
+                "tags": e.tags,
+                "agent_id": e.agent_id,
+                "updated_at": e.updated_at,
+            }
+            for e in entries
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
 
-    user_id = _get_user_id(context)
-    agent_id = _get_agent_id(context)
-    factory = _get_factory(context)
 
-    try:
-        visible_path = display_agent_path(file_path, factory)
-        resolved_path = resolve_agent_path(file_path, factory)
-        try:
-            with open(resolved_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except Exception as e:
-            return f"❌ Error reading skill file from '{visible_path}': {e}"
+@function_tool
+async def skill_update(
+    context: RunContextWrapper,
+    name: str,
+    new_name: Optional[str] = None,
+    content: Optional[str] = None,
+    tags: Optional[str] = None,
+) -> str:
+    """
+    Update an existing skill's name, content, or tags.
 
-        companion_dir: Optional[Path] = None
-        if companion_files and companion_files.strip():
-            resolved_companion = resolve_agent_path(companion_files.strip(), factory)
-            companion_dir = Path(resolved_companion)
-            if not companion_dir.is_dir():
-                return f"❌ companion_files '{display_agent_path(companion_files.strip(), factory)}' is not a directory"
+    At least one of new_name / content / tags must be provided.
 
-        manager.create_skill(user_id, agent_id, name, content, tags, companion_files_dir=companion_dir)
+    Args:
+        name:     Current skill name (used to find the skill).
+        new_name: New name for the skill (optional).
+        content:  New content (optional).
+        tags:     New comma-separated tags (optional, replaces existing tags).
 
-        skill_dir = manager.get_skill_dir_path(user_id, agent_id, name)
-        rel_dir = display_agent_path(str(skill_dir), factory) if skill_dir else name
-        msg = f"✅ Skill '{name}' registered.\n📁 Skill directory: {rel_dir}"
-        if companion_dir:
-            msg += f"\n   Companion files bundled from: {display_agent_path(companion_files.strip(), factory)}"
-        return msg
-
-    except FileExistsError:
-        return f"❌ Skill '{name}' already exists."
-    except Exception as e:
-        return f"❌ Error creating skill: {e}"
+    Returns:
+        JSON with ok flag and skill id.
+    """
+    sm = _get_skill_manager(context)
+    if not sm:
+        return json.dumps({"error": "skill_manager not available"})
+    user_id, agent_id = _get_user_agent(context)
+    entry = sm.get(name, user_id, agent_id)
+    if not entry:
+        return json.dumps({"error": f"Skill '{name}' not found"})
+    ok = sm.update(entry.id, name=new_name, content=content, tags=tags)
+    return json.dumps({"ok": ok, "id": entry.id}, ensure_ascii=False)
 
 
 @function_tool
 async def skill_delete(
     context: RunContextWrapper,
-    name: str
+    name: str,
 ) -> str:
     """
-    Delete a skill and all its files permanently.
+    Delete a skill by name.
 
     Args:
-        name: Skill name to delete
+        name: Skill name to delete.
 
     Returns:
-        Confirmation message or error.
+        JSON with ok flag.
     """
-    manager = _get_skill_manager(context)
-    if not manager:
-        return "❌ Skill manager not available"
-
-    user_id = _get_user_id(context)
-    agent_id = _get_agent_id(context)
-
-    try:
-        deleted = manager.delete_skill(user_id, agent_id, name)
-        if deleted:
-            return f"✅ Skill '{name}' deleted."
-        return f"❌ Skill '{name}' not found."
-    except Exception as e:
-        return f"❌ Error deleting skill: {e}"
+    sm = _get_skill_manager(context)
+    if not sm:
+        return json.dumps({"error": "skill_manager not available"})
+    user_id, agent_id = _get_user_agent(context)
+    entry = sm.get(name, user_id, agent_id)
+    if not entry:
+        return json.dumps({"error": f"Skill '{name}' not found"})
+    ok = sm.delete(entry.id)
+    return json.dumps({"ok": ok, "name": name}, ensure_ascii=False)
 
 
-# ============================================================================
-# TOOL REGISTRY
-# ============================================================================
+# ── registry ─────────────────────────────────────────────────────────────────
 
 SKILL_TOOLS = {
-    "skill_list": skill_list,
+    "skill_save": skill_save,
     "skill_read": skill_read,
-    "skill_create": skill_create,
+    "skill_search": skill_search,
+    "skill_update": skill_update,
     "skill_delete": skill_delete,
 }

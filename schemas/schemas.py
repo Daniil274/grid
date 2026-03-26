@@ -38,6 +38,11 @@ class ModelConfig(BaseModel):
       reasoning: {effort: "none"}     — SDK-native (OpenAI reasoning_effort param)
       reasoning: {enabled: false}     — via extra_body (OpenRouter / any provider)
     """
+    capabilities: List[str] = Field(default_factory=list)
+    """Model capability flags used for modality-aware tool filtering.
+    Examples: ["vision", "text", "code", "audio", "reasoning"]
+    Models without this field are treated as ["text"] only.
+    """
 
 
 class ToolConfig(BaseModel):
@@ -162,6 +167,21 @@ class MemoryOptimizerConfig(BaseModel):
     min_short_term_age_hours: float = Field(default=1.0, ge=0.0)
 
 
+class EmbeddingsConfig(BaseModel):
+    """Configuration for semantic search / embeddings."""
+    model: str = Field(
+        description="Key from models: section that points to an embedding model on OpenRouter"
+    )
+    request_timeout: float = Field(
+        default=30.0, ge=1.0, le=300.0,
+        description="Timeout in seconds for each embedding API call"
+    )
+    persist: bool = Field(
+        default=True,
+        description="Persist ChromaDB vector index to disk (next to the SQLite memory DB)"
+    )
+
+
 class GridConfig(BaseModel):
     """Complete Grid system configuration."""
     settings: Settings = Field(default_factory=Settings)
@@ -174,6 +194,7 @@ class GridConfig(BaseModel):
     scenarios: Optional[Dict[str, Any]] = None
     telegram: Optional[Dict[str, Any]] = None  # telegram bot config, incl. proxy for API requests
     memory_optimizer: Optional[MemoryOptimizerConfig] = Field(default=None, description="Memory optimizer configuration")
+    embeddings: Optional[EmbeddingsConfig] = Field(default=None, description="Semantic search / embeddings configuration")
     
     @field_validator('agents')
     @classmethod
