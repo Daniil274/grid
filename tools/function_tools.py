@@ -16,6 +16,7 @@ from .beads_tools import BEADS_TOOLS  # Beads issue tracker tools
 from .input_tools import INPUT_TOOLS  # Keyboard and input tools
 from .screen_tools import SCREEN_TOOLS  # Screen capture tools
 from .emergency_tools import EMERGENCY_TOOLS  # Emergency shutdown and pipeline status tools
+from .system_tools import SYSTEM_TOOLS  # System introspection and meta-information tools
 from .search_tools import SEARCH_TOOLS  # Discovery tools: search_tools, search_skills
 from .semantic_tools import SEMANTIC_TOOLS  # Semantic search: semantic_search_code, index_codebase
 from .history_tools import HISTORY_TOOLS  # Claude.ai chat history search
@@ -52,6 +53,7 @@ AVAILABLE_TOOLS = {
     **SEMANTIC_TOOLS,  # Semantic search tools: semantic_search_code, index_codebase (2 tools)
     **HISTORY_TOOLS,  # Claude.ai chat history search (1 tool)
     **SEMANTIC_MEMORY_TOOLS,  # Hybrid semantic memory search (1 tool)
+    **SYSTEM_TOOLS,  # System introspection tools (7 tools)
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -130,6 +132,15 @@ TOOL_ALIASES = {
     "keyboard_hotkey": "keyboard_hotkey",
     "take_screenshot": "take_screenshot",
     "crop_image": "crop_image",
+
+    # System introspection tools
+    "list_agents": "system_list_agents",
+    "get_agent_info": "system_get_agent_info",
+    "list_tools": "system_list_tools",
+    "get_tool_info": "system_get_tool_info",
+    "get_skills": "system_get_skills",
+    "help": "system_help",
+    "get_context": "system_get_context",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:
