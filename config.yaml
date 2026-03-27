@@ -393,8 +393,45 @@ tools:
     type: function
     description: Нажимает комбинацию клавиш одновременно
   take_screenshot:
-    type: function
-    description: Делает скриншот всего экрана и сохраняет в файл
+    type: "function"
+    description: "Делает скриншот всего экрана и сохраняет в файл"
+
+# ============================================================================
+  # System Introspection Tools - мета-информация о системе
+  # ============================================================================
+
+  system_list_agents:
+    type: "function"
+    description: "Список всех агентов системы с их описаниями и возможностями"
+
+  system_get_agent_info:
+    type: "function"
+    description: "Детальная информация об агенте: модель, инструменты, промпт"
+
+  system_list_tools:
+    type: "function"
+    description: "Список всех инструментов системы по категориям"
+
+  system_get_tool_info:
+    type: "function"
+    description: "Детальная информация об инструменте: параметры, описание"
+
+  system_get_skills:
+    type: "function"
+    description: "Список доступных скиллов (баз знаний)"
+
+  system_help:
+    type: "function"
+    description: "Справка по системе: архитектура, агенты, инструменты, память"
+
+  system_get_context:
+    type: "function"
+    description: "Информация о текущем контексте выполнения"
+
+# ============================================================================
+  # Vision Tools - инструменты для просмотра и анализа изображений
+  # ============================================================================
+
   view_image:
     type: function
     description: View and analyze an image with vision model
@@ -697,9 +734,15 @@ agents:
       - Итог: коротко что сделано/решено.
       - Детали: ключевые решения и почему.
   coordinator:
-    name: Координатор
-    model: minimax-m2.7
-    tools: ["filesystem", "terminal", "orchestrate", "memory_save", "memory_search", "memory_delete", "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep", "beads_init", "beads_log_append", "beads_log_read", "skill_save", "skill_search", "skill_read", "skill_update", "skill_delete", "search_tools", "search_skills"]
+    name: "Координатор"
+    model: "qwen-3.5-397b"
+    tools: [
+      "filesystem", "terminal", "orchestrate",
+      "memory_save", "memory_search", "memory_delete",
+      "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
+      "beads_log_append", "beads_log_read",
+      "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context",
+    ]
     auto_run_tools:
     - name: beads_init
       parameters:
@@ -826,7 +869,24 @@ agents:
     description: Главный агент для общения с пользователем
     custom_prompt: |-
       Ты главный чат-агент системы - первая точка контакта с пользователем.
-      # Твоя задача: понимать запросы пользователя и эффективно решать их, используя память, инструменты или агентов.
+      Твоя задача: понимать запросы пользователя и эффективно решать их, используя подагентов.
+
+      У тебя есть доступ к:
+      - beads (beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep): трекер задач для планирования и отслеживания работы
+      - shared log (beads_log_append, beads_log_read): единый append-only лог (удобно для игр/чатов, чтение только новых записей)
+      - coordinator: для выполнения комплексных задач и работы с файлами и проектами
+      - filesystem: для базовых операций с файлами
+      - doc_analyzer: для анализа PDF, Markdown документов и изображений
+      - send_voice_reply(text, speaker): синтез речи и отправка голосового сообщения
+      - send_voice_ssml(ssml_text, speaker): синтез речи с SSML (темп, тон, паузы) и отправка
+      - skill_read(name), skill_search(query): чтение и поиск скиллов из базы знаний
+      - skill_create(name, file_path, tags), skill_update(name, content), skill_delete(name): управление скиллами
+      - system_list_agents(): список всех агентов системы с их возможностями
+      - system_get_agent_info(agent_key): детальная информация об агенте (промпт, инструменты)
+      - system_list_tools(category): все инструменты системы по категориям
+      - system_get_tool_info(tool_name): детальная информация об инструменте
+      - system_help(topic): справка по системе (overview, agents, tools, memory, orchestration)
+
       ## Скиллы
       Скиллы — это твои знания о специальных задачах и процедурах.
       После запроса пользователя прочитай скилл который можно использовать для решения задачи из списка доступных скиллов.
