@@ -80,6 +80,22 @@ providers:
     timeout: 300
     max_retries: 3
     streaming_enabled: true
+  hf:
+    name: hf
+    base_url: https://router.huggingface.co/v1
+    api_key_env: HF_API_KEY
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+
+  github:
+    name: github
+    base_url: https://models.github.ai/inference
+    api_key_env: GH_API_KEY
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+
 models:
   "perplexity/pplx-embed-v1-0.6b":
     name: perplexity/pplx-embed-v1-0.6b
@@ -160,6 +176,7 @@ models:
     temperature: 0.7
     max_tokens: 8192
     description: OpenAI GPT-5.4 Nano
+
   openai-oss-120b:
     name: openai/gpt-oss-120b
     provider: openrouter
@@ -180,6 +197,23 @@ models:
     temperature: 0.3
     max_tokens: 8000
     description: qwen3.5-9b
+    streaming_enabled: true
+
+  
+  qwen3.5-9b-hf:
+    name: meta-llama/Llama-3.2-3B-Instruct:hf-inference
+    provider: hf
+    temperature: 0.3
+    max_tokens: 8000
+    description: qwen3.5-9b
+    streaming_enabled: true
+
+  o4-mini:
+    name: openai/o4-mini
+    provider: github
+    temperature: 1
+    max_tokens: 4000
+    description: o4-mini
     streaming_enabled: true
 
   mercury-2:
@@ -247,6 +281,14 @@ models:
     temperature: 0.5
     max_tokens: 4000
     description: Xiaomi модель
+    streaming_enabled: true
+
+  glm-5-hf:
+    name: zai-org/GLM-5
+    provider: hf
+    temperature: 1
+    max_tokens: 8000
+    description: Z-AI GLM-5
     streaming_enabled: true
 
   embed-default:
@@ -383,19 +425,6 @@ tools:
       from the user's previous Claude.ai conversations. Useful when the user references
       something they've worked on before or when domain context is needed.
 
-  keyboard_type:
-    type: function
-    description: Печатает текст как на клавиатуре
-  keyboard_press:
-    type: function
-    description: Нажимает одну или несколько клавиш (hotkey)
-  keyboard_hotkey:
-    type: function
-    description: Нажимает комбинацию клавиш одновременно
-  take_screenshot:
-    type: "function"
-    description: "Делает скриншот всего экрана и сохраняет в файл"
-
 # ============================================================================
   # System Introspection Tools - мета-информация о системе
   # ============================================================================
@@ -428,10 +457,18 @@ tools:
     type: "function"
     description: "Информация о текущем контексте выполнения"
 
-# ============================================================================
-  # Vision Tools - инструменты для просмотра и анализа изображений
-  # ============================================================================
-
+  keyboard_type:
+    type: function
+    description: Печатает текст как на клавиатуре
+  keyboard_press:
+    type: function
+    description: Нажимает одну или несколько клавиш (hotkey)
+  keyboard_hotkey:
+    type: function
+    description: Нажимает комбинацию клавиш одновременно
+  take_screenshot:
+    type: function
+    description: Делает скриншот всего экрана и сохраняет в файл
   view_image:
     type: function
     description: View and analyze an image with vision model
@@ -734,15 +771,9 @@ agents:
       - Итог: коротко что сделано/решено.
       - Детали: ключевые решения и почему.
   coordinator:
-    name: "Координатор"
-    model: "qwen-3.5-397b"
-    tools: [
-      "filesystem", "terminal", "orchestrate",
-      "memory_save", "memory_search", "memory_delete",
-      "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep",
-      "beads_log_append", "beads_log_read",
-      "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context",
-    ]
+    name: Координатор
+    model: minimax-m2.7
+    tools: ["filesystem", "terminal", "orchestrate", "memory_save", "memory_search", "memory_delete", "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep", "beads_init", "beads_log_append", "beads_log_read", "skill_save", "skill_search", "skill_read", "skill_update", "skill_delete", "search_tools", "search_skills"]
     auto_run_tools:
     - name: beads_init
       parameters:
@@ -844,8 +875,8 @@ agents:
       Отвечай на русском языке.
   chat_agent:
     name: Чат-агент
-    model: mercury-2
-    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, skill_update, skill_delete, search_tools, search_skills, claude_history_search, semantic_memory_search]
+    model: o4-mini
+    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, skill_update, skill_delete, search_tools, search_skills, claude_history_search, semantic_memory_search,  "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context",]
     auto_run_tools:
 
     - name: beads_init
@@ -861,32 +892,10 @@ agents:
         query: ""
         limit: 20
 
-    - name: memory_search
-      parameters:
-        query: ${user_message}
-        limit: 10
-
     description: Главный агент для общения с пользователем
     custom_prompt: |-
       Ты главный чат-агент системы - первая точка контакта с пользователем.
-      Твоя задача: понимать запросы пользователя и эффективно решать их, используя подагентов.
-
-      У тебя есть доступ к:
-      - beads (beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep): трекер задач для планирования и отслеживания работы
-      - shared log (beads_log_append, beads_log_read): единый append-only лог (удобно для игр/чатов, чтение только новых записей)
-      - coordinator: для выполнения комплексных задач и работы с файлами и проектами
-      - filesystem: для базовых операций с файлами
-      - doc_analyzer: для анализа PDF, Markdown документов и изображений
-      - send_voice_reply(text, speaker): синтез речи и отправка голосового сообщения
-      - send_voice_ssml(ssml_text, speaker): синтез речи с SSML (темп, тон, паузы) и отправка
-      - skill_read(name), skill_search(query): чтение и поиск скиллов из базы знаний
-      - skill_create(name, file_path, tags), skill_update(name, content), skill_delete(name): управление скиллами
-      - system_list_agents(): список всех агентов системы с их возможностями
-      - system_get_agent_info(agent_key): детальная информация об агенте (промпт, инструменты)
-      - system_list_tools(category): все инструменты системы по категориям
-      - system_get_tool_info(tool_name): детальная информация об инструменте
-      - system_help(topic): справка по системе (overview, agents, tools, memory, orchestration)
-
+      # Твоя задача: понимать запросы пользователя и эффективно решать их, используя память, инструменты или агентов.
       ## Скиллы
       Скиллы — это твои знания о специальных задачах и процедурах.
       После запроса пользователя прочитай скилл который можно использовать для решения задачи из списка доступных скиллов.
