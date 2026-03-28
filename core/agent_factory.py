@@ -39,6 +39,16 @@ from agents.mcp import MCPServerStdio
 from agents.mcp.util import MCPUtil as _MCPUtil
 from core.managers.mcp_manager import ResilientMCPServerStdio
 
+from .config import Config
+from .context import ContextManager, safe_lock
+from schemas import AgentConfig, AgentExecution
+from tools import get_tools_by_names
+from utils.exceptions import AgentError, ConfigError, ContextError
+from utils.logger import Logger
+from utils.path_utils import set_current_factory, reset_current_factory
+from core.tracing_config import get_tracing_config, ImmediateTraceProcessor
+from core.managers.skill_manager import SkillManager
+
 # --- Patch: MCP tools must return errors to the agent, not crash the run ---
 # Unlike function_tool() which has failure_error_function wrapper,
 # MCPUtil.invoke_mcp_tool raises ModelBehaviorError (e.g. invalid JSON) directly,
@@ -48,7 +58,13 @@ _original_invoke_mcp_tool = _MCPUtil.__dict__["invoke_mcp_tool"].__func__
 @classmethod  # type: ignore[misc]
 async def _invoke_mcp_tool_safe(cls, server, tool, context, input_json):  # type: ignore[override]
     try:
-        return await _original_invoke_mcp_tool(cls, server, tool, context, input_json)
+        result = await _original_invoke_mcp_tool(cls, server, tool, context, input_json)
+        # Логируем полный результат вызова MCP инструмента в verbose режиме
+        Logger("agent_factory").log_verbose(
+            f"MCP TOOL RESULT: {tool.name}",
+            result if isinstance(result, str) else str(result)
+        )
+        return result
     except ModelBehaviorError as e:
         msg = str(e)
         # Try to extract the underlying JSON decode error for a clearer hint
@@ -62,16 +78,6 @@ async def _invoke_mcp_tool_safe(cls, server, tool, context, input_json):  # type
 
 _MCPUtil.invoke_mcp_tool = _invoke_mcp_tool_safe
 # -------------------------------------------------------------------------
-
-from .config import Config
-from .context import ContextManager, safe_lock
-from schemas import AgentConfig, AgentExecution
-from tools import get_tools_by_names
-from utils.exceptions import AgentError, ConfigError, ContextError
-from utils.logger import Logger
-from utils.path_utils import set_current_factory, reset_current_factory
-from core.tracing_config import get_tracing_config, ImmediateTraceProcessor
-from core.managers.skill_manager import SkillManager
 
 import os
 import re
@@ -854,6 +860,11 @@ class AgentFactory:
                     tool_result = await target_tool.on_invoke_tool(
                         tool_ctx_wrapper, json.dumps(tool_params)
                     )
+                    # Логируем полный результат вызова авто-запуска инструмента в verbose режиме
+                    Logger("agent_factory").log_verbose(
+                        f"AUTO-RUN TOOL RESULT: {tool_name}",
+                        tool_result if isinstance(tool_result, str) else str(tool_result)
+                    )
                     result_parts.append(
                         f"\n\n=== РЕЗУЛЬТАТ АВТО-ЗАПУСКА ИНСТРУМЕНТА '{tool_name}' ===\n{tool_result}\n"
                     )
@@ -897,6 +908,11 @@ class AgentFactory:
                 try:
                     wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
                     result = await target_tool.on_invoke_tool(wrapper, json.dumps(tool_params))
+                    # Логируем полный результат вызова init инструмента в verbose режиме
+                    Logger("agent_factory").log_verbose(
+                        f"INIT TOOL RESULT: {tool_name}",
+                        result if isinstance(result, str) else str(result)
+                    )
                     result_parts.append(
                         f"\n\n=== КОНТЕКСТ [{tool_name}] ===\n{result}\n"
                     )
@@ -2481,10 +2497,16 @@ class AgentFactory:
                     result_text_for_history = result_text
 
                 execution.output = result_text_for_history
-                
+
                 duration = execution.end_time - execution.start_time
-                
+
                 self.context_manager.add_execution(execution)
+
+                # Логируем полный результат вызова инструмента в verbose режиме
+                Logger("agent_factory").log_verbose(
+                    f"TOOL RESULT: {tool_display_name}",
+                    result if isinstance(result, str) else str(result)
+                )
 
                 result = self._truncate_tool_output(result, tool_display_name)
                 return result
