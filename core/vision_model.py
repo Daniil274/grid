@@ -51,6 +51,15 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
     by vision models).
     """
 
+    def __init__(
+        self,
+        model: str,
+        openai_client: Any,
+        preserve_reasoning_content: bool = False,
+    ) -> None:
+        super().__init__(model=model, openai_client=openai_client)
+        self._preserve_reasoning_content = preserve_reasoning_content
+
     @staticmethod
     def _normalize_tool_content_to_parts(content: Any) -> list[dict] | None:
         """
@@ -153,6 +162,87 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
 
         return result
 
+    @staticmethod
+    def _extract_reasoning_by_call_id(items: list) -> dict[str, str]:
+        """Scan response items and map each tool call_id to its preceding reasoning text.
+
+        A reasoning item applies to all function_call items that immediately follow it
+        (before any other non-function-call item resets the context).
+        """
+        result: dict[str, str] = {}
+        pending: str | None = None
+        for item in items:
+            itype = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+            if itype == "reasoning":
+                summaries = (
+                    item.get("summary", []) if isinstance(item, dict)
+                    else getattr(item, "summary", [])
+                )
+                texts = [
+                    (s.get("text", "") if isinstance(s, dict) else getattr(s, "text", ""))
+                    for s in summaries
+                ]
+                summary_text = "\n".join(t for t in texts if t).strip()
+                direct_reasoning = (
+                    item.get("reasoning_content", "") if isinstance(item, dict)
+                    else getattr(item, "reasoning_content", "")
+                ) or (
+                    item.get("content", "") if isinstance(item, dict)
+                    else getattr(item, "content", "")
+                )
+                if isinstance(direct_reasoning, list):
+                    direct_reasoning = "\n".join(
+                        p.get("text", "") if isinstance(p, dict) else str(p)
+                        for p in direct_reasoning
+                    )
+                pending = (summary_text or str(direct_reasoning or "").strip()) or None
+            elif itype == "function_call":
+                if pending:
+                    call_id = (
+                        item.get("call_id") if isinstance(item, dict)
+                        else getattr(item, "call_id", None)
+                    )
+                    if not call_id:
+                        call_id = (
+                            item.get("id") if isinstance(item, dict)
+                            else getattr(item, "id", None)
+                        )
+                    if call_id:
+                        result[call_id] = pending
+                    # keep pending — applies to all consecutive parallel tool calls
+            elif itype in ("function_call_output", "computer_call_output"):
+                # Tool results mark end of reasoning scope — reset
+                pending = None
+            elif itype is None:
+                # User input messages have no "type" field — reset
+                pending = None
+            # "message" (assistant ResponseOutputMessage) does NOT reset pending:
+            # the SDK emits reasoning → message → function_call in one turn
+        return result
+
+    @staticmethod
+    def _inject_reasoning_content(items: list, messages: list[dict]) -> None:
+        """Inject reasoning_content into assistant messages that contain tool_calls.
+
+        Some providers (e.g. Moonshot AI / kimi) require reasoning_content in every
+        assistant message that has tool_calls when thinking is enabled.  The SDK's
+        Converter.items_to_messages only does this for DeepSeek; this method handles
+        it independently for any model flagged with preserve_reasoning_content.
+        """
+        call_id_to_reasoning = VisionChatCompletionsModel._extract_reasoning_by_call_id(items)
+        for msg in messages:
+            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+                continue
+            if msg.get("reasoning_content"):
+                continue  # already present
+            for tc in msg["tool_calls"]:
+                tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                if tc_id and tc_id in call_id_to_reasoning:
+                    msg["reasoning_content"] = call_id_to_reasoning[tc_id]
+                    break
+            if not msg.get("reasoning_content"):
+                msg["reasoning_content"] = "[reasoning unavailable]"
+
     async def _fetch_response(
         self,
         system_instructions: str | None,
@@ -166,10 +256,11 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
-        # Preserve images so we can extract them in post-processing
         converted_messages = Converter.items_to_messages(
             input, model=self.model, preserve_tool_output_all_content=True
         )
+        if self._preserve_reasoning_content and not isinstance(input, str):
+            self._inject_reasoning_content(input, converted_messages)
 
         if system_instructions:
             converted_messages.insert(

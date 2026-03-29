@@ -43,6 +43,12 @@ class ModelConfig(BaseModel):
     Examples: ["vision", "text", "code", "audio", "reasoning"]
     Models without this field are treated as ["text"] only.
     """
+    preserve_reasoning_content: bool = False
+    """When True, reasoning_content from thinking-enabled models is preserved in
+    assistant messages that contain tool_calls. Required for providers like
+    Moonshot AI (kimi) that enable thinking by default and reject requests where
+    reasoning_content is missing from the conversation history.
+    """
 
 
 class ToolConfig(BaseModel):

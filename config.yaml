@@ -96,6 +96,14 @@ providers:
     max_retries: 3
     streaming_enabled: true
 
+  opencode:
+    name: opencode
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: "OPENCODE_API_KEY"    
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+
 models:
   "perplexity/pplx-embed-v1-0.6b":
     name: perplexity/pplx-embed-v1-0.6b
@@ -199,6 +207,13 @@ models:
     description: qwen3.5-9b
     streaming_enabled: true
 
+  qwen3.5-4b:
+    name: qwen_qwen3.5-4b
+    provider: lm-studio
+    temperature: 0.3
+    max_tokens: 8000
+    description: qwen3.5-4b
+    streaming_enabled: true
   
   qwen3.5-9b-hf:
     name: meta-llama/Llama-3.2-3B-Instruct:hf-inference
@@ -295,6 +310,15 @@ models:
     name: perplexity/pplx-embed-v1-4b
     provider: openrouter
     description: embedding модель
+
+  kimi-k2.5-opencode:
+    name: kimi-k2.5
+    provider: opencode
+    temperature: 0.5
+    max_tokens: 8000
+    description: kimi-k2.5 модель
+    streaming_enabled: true
+    preserve_reasoning_content: true
 
 embeddings:
   model: perplexity/pplx-embed-v1-0.6b
@@ -675,7 +699,7 @@ prompt_templates:
 agents:
   code_agent:
     name: Кодовый агент
-    model: mimo
+    model: kimi-k2.5-opencode
     tools:
       - file_read
       - file_write
@@ -875,7 +899,7 @@ agents:
       Отвечай на русском языке.
   chat_agent:
     name: Чат-агент
-    model: o4-mini
+    model: kimi-k2.5-opencode
     tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, skill_update, skill_delete, search_tools, search_skills, claude_history_search, semantic_memory_search,  "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context",]
     auto_run_tools:
 

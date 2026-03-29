@@ -772,7 +772,8 @@ class AgentFactory:
             if model is None:
                 model = VisionChatCompletionsModel(
                     model=model_config.name,
-                    openai_client=client
+                    openai_client=client,
+                    preserve_reasoning_content=getattr(model_config, "preserve_reasoning_content", False),
                 )
             
             # Build instructions with context (включаем контекст диалога для агентов)
