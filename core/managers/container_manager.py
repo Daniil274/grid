@@ -7,9 +7,21 @@ import os
 import sys
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
-import docker
-from docker.errors import NotFound, DockerException
-from docker.models.containers import Container
+try:
+    import docker
+    from docker.errors import NotFound, DockerException
+    from docker.models.containers import Container
+except ImportError:  # pragma: no cover - environment-dependent
+    docker = None
+
+    class DockerException(Exception):
+        """Fallback docker exception when docker-py is unavailable."""
+
+    class NotFound(DockerException):
+        """Fallback not-found exception when docker-py is unavailable."""
+
+    class Container:  # type: ignore[override]
+        """Fallback container type used only for typing when docker is absent."""
 
 logger = logging.getLogger("grid.container_manager")
 
@@ -41,6 +53,10 @@ class ContainerManager:
             # Handle both dict and Pydantic model
             enabled = getattr(isolation_config, "enabled", False) if not isinstance(isolation_config, dict) else isolation_config.get("enabled", False)
             if enabled:
+                if docker is None:
+                    logger.warning("Docker isolation requested but docker SDK is not installed; disabling isolation")
+                    self.enabled = False
+                    return
                 self.enabled = True
                 self.image = getattr(isolation_config, "image", "grid-agent:latest") if not isinstance(isolation_config, dict) else isolation_config.get("image", "grid-agent:latest")
                 try:

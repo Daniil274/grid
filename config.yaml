@@ -325,6 +325,37 @@ embeddings:
   request_timeout: 30
   persist: true
 
+improvement:
+  enabled: true
+  registry_path: data/improvement_registry.json
+  plans_directory: plans
+  require_human_requirements_review: true
+  require_human_final_review: true
+  auto_promote_safe_changes: false
+  auto_evaluate_proposed_experiments: true
+  require_benchmark_before_promotion: true
+  promotion_threshold: 0.0
+  rollback_threshold: -0.03
+  canary_window_minutes: 30
+  allowed_change_types: ["tests", "logging", "refactor", "diagnostics"]
+  allowed_paths:
+    - core/
+    - tools/
+    - schemas/
+    - tests/
+    - docs/
+    - plans/
+  allowed_config_keys:
+    - settings.default_agent
+    - settings.max_history
+    - settings.max_turns
+    - settings.agent_timeout
+    - agents.chat_agent.model
+    - agents.chat_agent.tools
+    - agents.coordinator.model
+    - agents.coordinator.tools
+    - providers.hf.base_url
+
 checkers:
   default_audit:
     model: qwen3
@@ -480,6 +511,50 @@ tools:
   system_get_context:
     type: "function"
     description: "Информация о текущем контексте выполнения"
+
+  create_improvement_problem:
+    type: function
+    description: Register an observed problem for the improvement backlog
+
+  list_improvement_problems:
+    type: function
+    description: List tracked problems in the staged self-improvement backlog
+
+  create_improvement_experiment:
+    type: function
+    description: Create a controlled experiment for an approved improvement problem
+
+  propose_config_experiment:
+    type: function
+    description: Create a bounded config-diff experiment from an observed improvement problem
+
+  evaluate_improvement_experiment:
+    type: function
+    description: Run benchmark evaluation for an improvement experiment and store scorecards
+
+  run_improvement_canary:
+    type: function
+    description: Run canary benchmark for an experiment and promote or roll back automatically
+
+  monitor_promoted_improvement:
+    type: function
+    description: Run post-promotion benchmark and roll back automatically on regression
+
+  record_requirement_review:
+    type: function
+    description: Record requirements review for an improvement problem
+
+  record_final_review:
+    type: function
+    description: Record final review for an improvement experiment
+
+  promote_improvement_experiment:
+    type: function
+    description: Promote an experiment only after the required review gates pass
+
+  reject_improvement_experiment:
+    type: function
+    description: Reject an experiment and preserve the rejection reason
 
   keyboard_type:
     type: function
@@ -900,7 +975,7 @@ agents:
   chat_agent:
     name: Чат-агент
     model: kimi-k2.5-opencode
-    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, skill_update, skill_delete, search_tools, search_skills, claude_history_search, semantic_memory_search,  "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context",]
+    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, skill_update, skill_delete, search_tools, search_skills, claude_history_search, semantic_memory_search, "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context", "create_improvement_problem", "list_improvement_problems", "create_improvement_experiment", "propose_config_experiment", "evaluate_improvement_experiment", "run_improvement_canary", "monitor_promoted_improvement", "record_requirement_review", "record_final_review", "promote_improvement_experiment", "reject_improvement_experiment"]
     auto_run_tools:
 
     - name: beads_init

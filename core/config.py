@@ -358,6 +358,10 @@ class Config:
     def get_max_turns(self) -> int:
         """Get maximum turns limit for agents."""
         return self.config.settings.max_turns
+
+    def get_improvement_config(self):
+        """Get controlled self-improvement configuration."""
+        return self.config.improvement
     
     def get_agent_timeout(self) -> int:
         """Get agent execution timeout in seconds."""

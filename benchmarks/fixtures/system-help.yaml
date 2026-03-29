@@ -1,0 +1,9 @@
+id: system-help
+agent: chat_agent
+owner: system
+source: manual-stage1
+tags: [introspection, help]
+prompt: "Дай краткую справку по системе и её архитектуре."
+required_tools: ["system_help"]
+forbidden_substrings: ["ERROR:"]
+max_latency_ms: 120000

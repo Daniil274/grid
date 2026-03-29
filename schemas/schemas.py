@@ -188,6 +188,28 @@ class EmbeddingsConfig(BaseModel):
     )
 
 
+class ImprovementConfig(BaseModel):
+    """Configuration for the staged self-improvement loop."""
+
+    enabled: bool = False
+    registry_path: str = "data/improvement_registry.json"
+    plans_directory: str = "plans"
+    require_human_requirements_review: bool = True
+    require_human_final_review: bool = True
+    auto_promote_safe_changes: bool = False
+    auto_evaluate_proposed_experiments: bool = False
+    allowed_change_types: List[str] = Field(
+        default_factory=lambda: ["tests", "logging", "refactor", "diagnostics"]
+    )
+    allowed_paths: List[str] = Field(default_factory=list)
+    allowed_config_keys: List[str] = Field(default_factory=list)
+    max_open_experiments: int = Field(default=5, ge=1, le=100)
+    require_benchmark_before_promotion: bool = False
+    promotion_threshold: float = Field(default=0.0, ge=-1.0, le=1.0)
+    rollback_threshold: float = Field(default=-0.03, ge=-1.0, le=1.0)
+    canary_window_minutes: int = Field(default=30, ge=1, le=1440)
+
+
 class GridConfig(BaseModel):
     """Complete Grid system configuration."""
     settings: Settings = Field(default_factory=Settings)
@@ -201,6 +223,7 @@ class GridConfig(BaseModel):
     telegram: Optional[Dict[str, Any]] = None  # telegram bot config, incl. proxy for API requests
     memory_optimizer: Optional[MemoryOptimizerConfig] = Field(default=None, description="Memory optimizer configuration")
     embeddings: Optional[EmbeddingsConfig] = Field(default=None, description="Semantic search / embeddings configuration")
+    improvement: ImprovementConfig = Field(default_factory=ImprovementConfig, description="Controlled self-improvement loop configuration")
     
     @field_validator('agents')
     @classmethod

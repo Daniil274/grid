@@ -1,0 +1,10 @@
+id: list-agents
+agent: chat_agent
+owner: system
+source: manual-stage1
+tags: [introspection, agents]
+prompt: "Какие агенты доступны в системе? Назови их кратко."
+required_tools: ["system_list_agents"]
+required_substrings: ["chat", "agent"]
+forbidden_substrings: ["ERROR:"]
+max_latency_ms: 120000

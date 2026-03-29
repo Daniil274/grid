@@ -1,0 +1,9 @@
+id: get-context
+agent: chat_agent
+owner: system
+source: manual-stage1
+tags: [introspection, context]
+prompt: "Покажи текущий контекст выполнения и скажи, в каком окружении ты работаешь."
+required_tools: ["system_get_context"]
+forbidden_substrings: ["ERROR:"]
+max_latency_ms: 120000
