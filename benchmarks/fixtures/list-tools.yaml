@@ -1,0 +1,10 @@
+id: list-tools
+agent: chat_agent
+owner: system
+source: manual-stage1
+tags: [introspection, tools]
+prompt: "Какие инструменты вообще есть в системе? Кратко перечисли основные категории."
+required_tools: ["system_list_tools"]
+required_substrings: ["инструмент"]
+forbidden_substrings: ["ERROR:"]
+max_latency_ms: 120000

@@ -1,0 +1,961 @@
+settings:
+  default_agent: chat_agent
+  max_history: 50
+  max_turns: 100
+  agent_timeout: 600
+  debug: false
+  max_tool_output_tokens: 8000
+  mcp_enabled: true
+  working_directory: .
+  config_directory: .
+  logs_directory: D:/Work/repo/agents_portable/logs
+  allow_path_override: true
+  agent_logging:
+    enabled: true
+    level: full
+    save_prompts: true
+    save_conversations: true
+    save_executions: true
+    tools_common_rules: |
+      Всегда выполняй операции с файлами через инструменты и возвращай их результаты.
+      Запрещено утверждать создание/изменение файла без вызова инструмента.
+  project_tools:
+    enabled: true
+    tools_directory: examples/telegram_bot
+  image_processing:
+    enabled: true
+    auto_resize: true
+    max_width: 1920
+    max_height: 1080
+    max_file_size_mb: 10
+    jpeg_quality: 85
+isolation:
+  enabled: true
+  type: docker
+  image: grid-agent:latest
+telegram:
+  token_env: TELEGRAM_BOT_TOKEN
+  # Прокси для запросов к Telegram API (например Xray: http или socks5 на localhost)
+  # proxy: "http://127.0.0.1:10809"
+  # proxy: "socks5://127.0.0.1:10808"
+  polling_timeout: 30
+  workspace_path: ./workspace
+  persist_path: ./data
+  max_message_history: 15
+  memory_commands_enabled: true
+  enable_transparency: false
+  show_tool_calls: false
+  allowed_users: null
+  max_concurrent_tasks_per_user: 1
+  progress_update_interval: 2.0
+voice:
+  enabled: true
+  stt:
+    model_size: base
+    device: cpu
+    compute_type: int8
+  tts:
+    model_path: speech-text/model.pt
+    speaker: xenia
+    sample_rate: 48000
+  reply_with_voice: true
+providers:
+  lm-studio:
+    name: lm-studio
+    base_url: http://192.168.3.2:1234/v1
+    api_key: lm-studio
+    timeout: 300
+    max_retries: 3
+  openrouter:
+    name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+  anthropic:
+    name: anthropic
+    base_url: https://api.anthropic.com/v1/
+    api_key_env: ANTHROPIC_API_KEY
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+  hf:
+    name: hf
+    base_url: https://router.huggingface.co/v1
+    api_key_env: HF_API_KEY
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+
+  github:
+    name: github
+    base_url: https://models.github.ai/inference
+    api_key_env: GH_API_KEY
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+
+  opencode:
+    name: opencode
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: "OPENCODE_API_KEY"    
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+
+models:
+  "perplexity/pplx-embed-v1-0.6b":
+    name: perplexity/pplx-embed-v1-0.6b
+    provider: openrouter
+    description: Perplexity embedding model for semantic search
+
+  gemini-3.1-lite:
+    name: google/gemini-3.1-flash-lite-preview
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8192
+    description: Gemini 3.1 Lite модель
+    streaming_enabled: true
+    capabilities: ["vision", "text", "code"]
+
+  kimi-k2.5:
+    name: moonshotai/kimi-k2.5
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8192
+    description: Kimi K2.5 модель
+    streaming_enabled: true
+
+  qwen-3.5-plus:
+    name: qwen/qwen3.5-plus-02-15
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8192
+    description: Qwen 3.5 397b модель
+    streaming_enabled: true
+
+  mistral-large:
+    name: mistralai/mistral-large-2512
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8192
+    description: Mistral Large 2512 модель
+    streaming_enabled: true
+
+  grok-4.1-fast:
+    name: x-ai/grok-4.1-fast
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8000
+    description: Grok 4.1 Fast модель
+    streaming_enabled: true
+
+  glm-4.7-flash:
+    name: z-ai/glm-4.7-flash:turbo
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8000
+    description: GLM 4.7 Flash модель
+    streaming_enabled: true
+    capabilities: ["vision", "text", "code"]
+
+  glm-4.7-flash-local:
+    name: z-ai/glm-4.7-flash:turbo
+    provider: lm-studio
+    temperature: 0.7
+    max_tokens: 8000
+    description: GLM 4.7 Flash модель
+    streaming_enabled: true
+    capabilities: ["vision", "text", "code"]
+
+  glm-5:
+    name: z-ai/glm-5:friendli
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8000
+    description: GLM 5 модель
+    streaming_enabled: true
+    capabilities: ["vision", "text", "code"]
+    
+  gpt-5.4-nano:
+    name: openai/gpt-5.4-nano
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8192
+    description: OpenAI GPT-5.4 Nano
+
+  openai-oss-120b:
+    name: openai/gpt-oss-120b
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8192
+    description: OpenAI OSS 120b модель
+
+  minimax-m2.7:
+    name: minimax/minimax-m2.7
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 8000
+    description: Minimax M2.5 модель
+
+  qwen3.5-9b:
+    name: qwen_qwen3.5-9b
+    provider: lm-studio
+    temperature: 0.3
+    max_tokens: 8000
+    description: qwen3.5-9b
+    streaming_enabled: true
+
+  qwen3.5-4b:
+    name: qwen_qwen3.5-4b
+    provider: lm-studio
+    temperature: 0.3
+    max_tokens: 8000
+    description: qwen3.5-4b
+    streaming_enabled: true
+  
+  qwen3.5-9b-hf:
+    name: meta-llama/Llama-3.2-3B-Instruct:hf-inference
+    provider: hf
+    temperature: 0.3
+    max_tokens: 8000
+    description: qwen3.5-9b
+    streaming_enabled: true
+
+  o4-mini:
+    name: openai/o4-mini
+    provider: github
+    temperature: 1
+    max_tokens: 4000
+    description: o4-mini
+    streaming_enabled: true
+
+  mercury-2:
+    name: inception/mercury-2
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 8000
+    description: Mercury 2 - диффузионная модель
+    streaming_enabled: true
+
+  gpt-5.4:
+    name: openai/gpt-5.4
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 8000
+    description: GPT-5.4 модель
+    streaming_enabled: true
+    capabilities: ["vision", "text", "code"]
+
+  sonnet:
+    name: claude-sonnet-4-6
+    provider: anthropic
+    temperature: 0.5
+    max_tokens: 4000
+    description: Sonnet модель
+    streaming_enabled: true
+    capabilities: ["vision", "text", "code"]
+
+  hunter-alpha:
+    name: openrouter/hunter-alpha
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 8000
+    description: Hunter Alpha модель
+    streaming_enabled: true
+
+  grok-4.20-beta:
+    name: x-ai/grok-4.20-beta
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 4000
+    description: Grok 4.20 Beta модель
+    streaming_enabled: true
+
+  healer-alpha:
+    name: openrouter/healer-alpha
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 4000
+    description: Healer Alpha модель
+    streaming_enabled: true
+    capabilities: ["vision", "text", "code"]
+
+  nemotron-3:
+    name: nvidia/nemotron-3-super-120b-a12b
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 4000
+    description: Mistral Large модель
+    streaming_enabled: true
+
+  mimo:
+    name: xiaomi/mimo-v2-pro
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 4000
+    description: Xiaomi модель
+    streaming_enabled: true
+
+  glm-5-hf:
+    name: zai-org/GLM-5
+    provider: hf
+    temperature: 1
+    max_tokens: 8000
+    description: Z-AI GLM-5
+    streaming_enabled: true
+
+  embed-default:
+    name: perplexity/pplx-embed-v1-4b
+    provider: openrouter
+    description: embedding модель
+
+  kimi-k2.5-opencode:
+    name: kimi-k2.5
+    provider: opencode
+    temperature: 0.5
+    max_tokens: 8000
+    description: kimi-k2.5 модель
+    streaming_enabled: true
+    preserve_reasoning_content: true
+
+embeddings:
+  model: perplexity/pplx-embed-v1-0.6b
+  request_timeout: 30
+  persist: true
+
+checkers:
+  default_audit:
+    model: qwen3
+    purpose: output_audit
+    prompt: |
+      Ты проверяющий агент. Тебе предоставляется контекст задачи агента, вывод агента и список использованных инструментов.
+      Проверь что агент использует оптимальный инструмент для выполнения задачи и его действия соответствуют контексту и цели задачи.
+      Вход: одна строка JSON с полями task_text, tools_used, agent_output.
+      Верни строго JSON: {"status":"ok|failed","reason":"...", "details":"..."}.
+    tool_prompt: |
+      Ты проверяющий агент вызовов инструментов. Оцени, корректен ли вызов инструмента с учётом цели задачи.
+      Не блокируй вызовы инструментов, проверяющих доступ.
+      Вход: JSON {task_text, tools_used, tool_name, tool_arguments}.
+      Верни строго JSON: {"status":"ok|failed","reason":"...","details":"..."}.
+tools:
+  file_read:
+    type: function
+    description: Читает содержимое файла.
+  file_write:
+    type: function
+    description: Записывает содержимое в файл.
+  file_append:
+    type: function
+    description: Добавляет текст в конец файла.
+  file_edit_patch:
+    type: function
+    description: Редактирует файл с помощью патча в формате unified diff.
+  file_list:
+    type: function
+    description: Список файлов в директории (без дерева).
+  get_file_info:
+    type: function
+    description: Информация о файле.
+  file_info:
+    type: function
+    description: Информация о файле (размер, строки, расширение).
+  list_files:
+    type: function
+    description: Инструмент для получения списка файлов в директории.
+  pdf:
+    type: function
+    description: Рендерит страницы PDF в PNG, сохраняет их в pdf_output и возвращает как изображения
+  pdf-ocr:
+    type: function
+    description: Выполняет OCR по страницам PDF и возвращает структурированный текст/изображения
+  get_screenshot_ocr:
+    type: function
+    description: Извлекает текст из скриншота монитора
+  read_markdown:
+    type: function
+    description: Читает Markdown файлы с изображениями
+  markdown_to_html:
+    type: function
+    description: Конвертирует Markdown в HTML файл
+  markdown_to_pdf:
+    type: function
+    description: Конвертирует Markdown в PDF файл
+  save_report:
+    type: function
+    description: Сохраняет отчет в указанном формате
+  merge_reports:
+    type: function
+    description: Объединяет несколько отчетов в один
+  memory_save:
+    type: function
+    description: Save information to memory
+  memory_search:
+    type: function
+    description: Search memory by keywords
+  memory_delete:
+    type: function
+    description: Delete memory entry
+  skill_save:
+    type: function
+    description: Сохранить или обновить навык в БД (upsert по имени)
+  skill_read:
+    type: function
+    description: Прочитать содержимое навыка по имени
+  skill_search:
+    type: function
+    description: Поиск навыков по тексту и/или тегам (FTS)
+  skill_update:
+    type: function
+    description: Обновить имя, содержимое или теги существующего навыка
+  skill_delete:
+    type: function
+    description: Удалить навык по имени
+  search_tools:
+    type: function
+    description: Найти доступные инструменты по имени/описанию с учётом модальностей модели
+  search_skills:
+    type: function
+    description: Поиск навыков в БД по тексту и тегам (кросс-агентный)
+  semantic_search:
+    type: function
+    description: Семантический поиск по кодовой базе (по смыслу, не по ключевым словам)
+    prompt_addition: |
+      Используй semantic_search_code(query, directory) для поиска кода по смыслу запроса.
+      Если индекс пустой — сначала вызови index_codebase(directory).
+      После индексации повторная индексация не нужна до значительного изменения кода.
+  index_codebase:
+    type: function
+    description: Индексирует файлы кодовой базы в векторное хранилище для semantic_search
+    prompt_addition: |
+      Используй index_codebase(directory, file_extensions) перед первым semantic_search.
+      file_extensions по умолчанию покрывает .py, .js, .ts и другие языки.
+  semantic_memory_search:
+    type: function
+    description: Hybrid vector+keyword search over memory by MEANING, not just keywords
+    prompt_addition: |
+      Use semantic_memory_search(query) instead of memory_search when searching by CONCEPT:
+      - When exact keywords are unknown ("how did I solve the audio issue")
+      - Cross-language queries (Russian query > English memory entries)
+      - Fuzzy recall: "something about charging algorithm" > finds BQ25890 entries
+      Always try semantic_memory_search first for recall tasks.
+
+  claude_history_search:
+    type: function
+    description: Search personal Claude.ai chat history for past discussions and solutions
+    prompt_addition: |
+      Use claude_history_search(query) to recall past decisions, solutions, or context
+      from the user's previous Claude.ai conversations. Useful when the user references
+      something they've worked on before or when domain context is needed.
+
+# ============================================================================
+  # System Introspection Tools - мета-информация о системе
+  # ============================================================================
+
+  system_list_agents:
+    type: "function"
+    description: "Список всех агентов системы с их описаниями и возможностями"
+
+  system_get_agent_info:
+    type: "function"
+    description: "Детальная информация об агенте: модель, инструменты, промпт"
+
+  system_list_tools:
+    type: "function"
+    description: "Список всех инструментов системы по категориям"
+
+  system_get_tool_info:
+    type: "function"
+    description: "Детальная информация об инструменте: параметры, описание"
+
+  system_get_skills:
+    type: "function"
+    description: "Список доступных скиллов (баз знаний)"
+
+  system_help:
+    type: "function"
+    description: "Справка по системе: архитектура, агенты, инструменты, память"
+
+  system_get_context:
+    type: "function"
+    description: "Информация о текущем контексте выполнения"
+
+  keyboard_type:
+    type: function
+    description: Печатает текст как на клавиатуре
+  keyboard_press:
+    type: function
+    description: Нажимает одну или несколько клавиш (hotkey)
+  keyboard_hotkey:
+    type: function
+    description: Нажимает комбинацию клавиш одновременно
+  take_screenshot:
+    type: function
+    description: Делает скриншот всего экрана и сохраняет в файл
+  view_image:
+    type: function
+    description: View and analyze an image with vision model
+  analyze_screenshot:
+    type: function
+    description: Analyze UI screenshot
+  crop_image:
+    type: function
+    description: Crop an image to a specific region
+  beads_init:
+    type: function
+    description: Initialize beads (bd) in the given directory. Idempotent; safe if already initialized.
+  beads_ready:
+    type: function
+    description: List beads tasks that are ready to be worked on (no open blockers)
+  beads_list:
+    type: function
+    description: List beads tasks with optional filters and pagination
+  beads_create:
+    type: function
+    description: Create a new bead (task, epic, message, etc.)
+  beads_show:
+    type: function
+    description: Show detailed information about a specific bead
+  beads_update:
+    type: function
+    description: Update an existing bead
+  beads_close:
+    type: function
+    description: Close a bead
+  beads_sync:
+    type: function
+    description: Sync beads with the remote repository
+  beads_dep:
+    type: function
+    description: Manage dependencies between beads
+  beads_log_append:
+    type: function
+    description: Append a single entry to a shared, append-only JSONL log (inside .beads/shared_log/).
+  beads_log_read:
+    type: function
+    description: Read ONLY new log data for (channel, reader) since the last read (cursor-based).
+  send_voice_reply:
+    type: function
+    description: Синтезирует речь из текста и отправляет голосовое сообщение пользователю в Telegram
+    prompt_addition: |
+      Используй send_voice_reply(text, speaker) чтобы ответить пользователю голосом.
+      По умолчанию отвечай в том же формате, в каком пользователь написал тебе:
+      - Если пользователь прислал голосовое сообщение — ответь голосом через send_voice_reply().
+      - Если пользователь написал текстом — отвечай текстом.
+      Исключение: если в памяти пользователя указан другой предпочтительный формат ответов.
+      Голоса: xenia (женский, по умолч.), aidar, kseniya, baya, eugene.
+  send_voice_ssml:
+    type: function
+    description: Синтезирует речь из SSML-разметки и отправляет голосовое сообщение в Telegram
+    prompt_addition: |
+      Используй send_voice_ssml(ssml_text, speaker) для выразительного голосового ответа с SSML.
+      SSML позволяет управлять темпом, тоном и паузами:
+        <speak><p><prosody rate="slow">медленно</prosody></p><break time="500ms"/>текст</speak>
+      Теги: <speak>, <p>, <s>, <break time="Xms"/>, <prosody rate="slow|fast">, <prosody pitch="high|low">
+      Голоса: xenia (по умолч.), aidar, kseniya, baya, eugene.
+  terminal:
+    type: mcp
+    server_command: [npx, '@dillip285/mcp-terminal']
+    add_working_directory: true
+    description: MCP сервер для выполнения команд терминала
+    prompt_addition: Используй execute_command для выполнения команд в терминале.
+  filesystem:
+    type: mcp
+    server_command: [npx, '@modelcontextprotocol/server-filesystem']
+    add_working_directory: true
+    description: MCP сервер для работы с файловой системой (ограничен рабочей директорией)
+    prompt_addition: Используй filesystem для доступа к файловой системе.
+  sequentialthinking:
+    type: mcp
+    server_command: [npx, '@modelcontextprotocol/server-sequential-thinking']
+    description: MCP сервер для последовательного мышления
+    prompt_addition: ВАЖНО!!! ВСЕГДА Используй sequential thinking для анализа, планирования задачи. Вызывай его перед выполнением любой задачи.
+  file_agent:
+    type: agent
+    name: call_file_agent
+    description: Вызывает файлового агента для работы с файлами
+    prompt_addition: Используй call_file_agent(task) для задач по работе с файлами, где task - это задача, которую должен выполнить файловый агент.  Используй unified diff для редактирования файлов.
+    context_strategy: conversation
+    context_depth: 5
+    include_tool_history: true
+  task_analyst:
+    type: agent
+    name: call_task_analyst
+    description: Вызывает аналитика задач для анализа задач и составления плана действий.
+    prompt_addition: ВСЕГДА ВЫЗЫВАЙ call_code_agent(task) для помощи в составлении плана действий. task - это задача, которую нужно решить с полным контекстом и списком досткупных тебе инструментов. БЕЗ ПРЕДОСТАВЛЕНИЯ ПОЛНОГО КОНТЕКСТА И СПИСКА ДОСТУПНЫХ ИНСТРУМЕНТОВ АНАЛИТИК НЕ ПОМОЖЕТ!!! НЕ вызывай другие инструменты до вызова аналитика.
+    context_strategy: full
+  code_agent:
+    type: agent
+    name: call_code_agent
+    description: Вызывает кодового агента для работы с кодом и программированием.
+    prompt_addition: Всегда call_code_agent(task) для задач, связанных с кодом или с файлами кода. task - это задача, которую должен решить кодовый агент с путем к файлу, директории или репозиторию и подробным описанием задачи.
+  coordinator:
+    type: agent
+    name: call_coordinator
+    description: Вызывает координатора для планирования и решения задачи.
+    prompt_addition: |
+      Вызывай call_coordinator(task) для планирования и решения комплексных задач.
+      Где task - это задача, которую нужно решить и контекст задачи.
+      Используй call_coordinator как координатора подзадачи, а не как способ просто переслать текст дальше.
+      Перед вызовом подготовь для него четкую область ответственности:
+      - какая именно подзадача ему поручена;
+      - какой bead_id или набор bead_id он должен использовать;
+      - формат отчета который он должен вернуть ТЕБЕ в ответе после исполнения задачи;
+      - какой минимальный релевантный контекст ему действительно нужен.
+      Сначала оцени стоимость контекста. Если дочернему координатору нужен почти весь контекст родителя, такое делегирование плохое.
+      Сначала ужми контекст до короткого handoff packet, и только потом вызывай call_coordinator.
+      Не вызывай call_coordinator для атомарных задач, которые можно решить прямым orchestrate() или рабочим инструментом.
+      Не создавай бесконечную цепочку координаторов: если подзадача уже достаточно узкая, дочерний координатор должен запускать исполнителей или инструменты, а не нового координатора.
+  doc_analyzer:
+    type: agent
+    name: call_doc_analyzer
+    description: Вызывает анализатора документов и изображений.
+    prompt_addition: |
+      Используй call_doc_analyzer(task) для анализа изображений, PDF и markdown документов.
+      task - это задача с указанием пути файла и что нужно найти/проанализировать.
+  context_wrapper:
+    type: agent
+    name: call_context_wrapper
+    description: Вызывает сборщика контекста для управления контекстом и взаимодействия с агентами.
+    prompt_addition: Используй call_context_wrapper(task) для получения контекста по кодовой базе. task - это задача для которой требуется контекст.
+  debugger:
+    type: agent
+    name: call_debugger
+    description: Вызывает отладчика для отладки кода
+    prompt_addition: Используй call_debugger(task) для запуска программ и отладки кода.
+  orchestrator:
+    type: agent
+    name: orchestrator
+    description: Запускает динамический пайплайн.
+    prompt_addition: |
+      Используй orchestrator(task) когда нужно создать агента на лету для решения задачи.
+  orchestrate:
+    type: function
+    name: orchestrate
+    description: Запускает динамический пайплайн (создает агента на лету)
+    env_vars:
+      DEFAULT_MODEL: gpt-5.4-nano
+    prompt_addition: |
+      Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
+      task: четкая задача для выполнения (строка).
+      agent_system_prompt: системный промпт для агента. Опиши роль, стиль и правила поведения. Набор инструментов и как ими пользоваться.
+      executor_tools: список инструментов (например ["terminal", "beads_show", "beads_update"]).
+      Пример: orchestrate(task="Напиши скрипт...", agent_system_prompt="Ты Senior Python Developer...", executor_tools=["terminal", "beads_show", "beads_update"])
+  memory_agent:
+    type: agent
+    name: call_memory_agent
+    description: Вызывает агента памяти для работы с долгосрочной памятью
+    prompt_addition: 'Используй call_memory_agent(task) для работы с памятью: сохранение важной информации, поиск в памяти, работа с дневными заметками. task - это задача для агента памяти.'
+    context_strategy: conversation
+    context_depth: 544
+
+prompt_templates:
+  memory_extract_prompt: |
+    Analyze the following memory entry and extract a concise summary and key entities.
+    Also, classify the entities into categories like Person, Organization, Technology, Concept, etc.
+
+    Memory Content:
+    {content}
+
+    Respond ONLY with a JSON object in the following format:
+    {
+        "summary": "1-2 sentence summary of the core fact",
+        "entities": ["Entity1", "Entity2", "Entity3"]
+    }
+  memory_consolidate_prompt: |
+    Analyze the following recent memory entries and synthesize them into a single high-level insight or pattern.
+    If they are unrelated, respond with {"insight": null}.
+    Otherwise, provide a consolidated insight and list the source IDs.
+
+    Memories:
+    {content}
+
+    Respond ONLY with a JSON object in the following format:
+    {
+        "insight": "High-level summary or pattern discovered across these memories",
+        "entities": ["Entity1", "Entity2"],
+        "connections": [{"from_id": 1, "to_id": 2, "relationship": "depends on"}]
+    }
+  task_analyst_prompt: |
+    Ты аналитик задач. Твоя задача — анализировать задачи и составлять план действий.
+    Всегда используй полный контекст задачи, включая файлы и репозитории.
+    Не начинай выполнять задачу до вызова кодового агента или файлового агента.
+    Не используй конкретные команды и не пытайся их выполнять.
+  with_files: |
+    Ты агент с инструментами для работы с файлами. Можешь читать, редактировать и анализировать файлы.
+    НИКОГДА НЕ ДАВАЙ АНАЛИЗ СОДЕРЖИМОГО, ДАЖЕ ЕСЛИ ЭТО УКАЗАНО В ЗАДАНИИ.
+  with_web: |
+    Ты помощник с доступом к интернету. Можешь искать актуальную информацию и новости.
+    Всегда указывай источники информации.
+  code_agent_prompt: |
+    Ты старший инженер-программист. Пишешь надёжный, читаемый, хорошо структурированный код.
+    Не используется напрямую — промпт агента задан в agents.code_agent.custom_prompt.
+  coordinator_prompt: |
+    Не используется. Промпт координатора задан в agents.coordinator.custom_prompt.
+  debugger_prompt: |
+    Ты отладчик. Твоя задача — отлаживать код и выполнять задачи связанные с запуском программ.
+    Перед каждым шагом и вызовом инструмента используй sequential thinking для анализа и планирования.
+agents:
+  code_agent:
+    name: Кодовый агент
+    model: kimi-k2.5-opencode
+    tools:
+      - file_read
+      - file_write
+      - file_edit_patch
+      - file_list
+      - get_file_info
+      - memory_save
+      - memory_search
+      - memory_delete
+      - semantic_search
+      - index_codebase
+      - skill_save
+      - skill_read
+      - skill_search
+    description: Специалист по программированию, анализу и рефакторингу кода
+    mcp_enabled: false
+    verifier: default_audit
+    custom_prompt: |
+      Ты старший инженер-программист. Пишешь надёжный, читаемый и хорошо структурированный код.
+      Работаешь автономно от постановки задачи до верификации результата.
+
+      # Протокол старта задачи
+      Перед любой работой с кодом выполни три шага:
+      1. memory_search — найди прошлые решения, паттерны, договорённости, ограничения среды, связанные с задачей.
+      2. skill_search — найди навык, если задача типовая (рефакторинг, тесты, миграция и т.д.).
+      3. Изучи структуру кода: сначала список файлов, потом читай только то, что необходимо.
+         Не читай файлы целиком без причины.
+
+      # Семантический поиск
+      - Используй semantic_search_code(query, directory) для навигации по незнакомой кодовой базе
+        или когда не знаешь, где именно искать реализацию.
+      - Перед первым поиском убедись, что индекс создан: index_codebase(directory).
+      - Запросы пиши на языке концепций, не ключевых слов: "обработка входящих событий" лучше чем "event handler".
+
+      # Рабочий цикл (Read > Understand > Plan > Implement > Verify)
+      1. Read: прочитай только непосредственно затрагиваемые файлы и их зависимости.
+      2. Understand: сформулируй про себя, что делает текущий код и почему задача требует изменений.
+      3. Plan: реши, какие файлы и как изменить. Для нетривиальных задач изложи план явно.
+      4. Implement: вноси минимально необходимые изменения. Не рефакторь код вне скоупа задачи.
+      5. Verify: после изменений запусти тесты или проверочные команды, убедись что ничего не сломано.
+
+      # Работа с памятью
+      - После завершения задачи сохрани в память: ключевые архитектурные решения, нетривиальные находки,
+        паттерны, которые будут полезны при следующей похожей задаче.
+      - Сохраняй конкретные факты, а не пересказ — одна запись = одна чёткая мысль.
+      - Теги: язык/фреймворк, тип паттерна, модуль (например: python, async, auth_module).
+      - Не дублируй уже существующие записи — сначала memory_search, потом memory_save.
+
+      # Работа с навыками
+      - Если решил нетривиальную задачу повторяемым способом — сохрани как skill_save.
+      - Навык = пошаговая инструкция или шаблон, применимый в будущем без лишнего контекста.
+
+      # Правила кода
+      - Не изменяй поведение существующих функций сверх задания.
+      - Не добавляй зависимости без необходимости.
+      - Не оставляй закомментированный код и отладочный вывод.
+      - Если задача неоднозначна — уточни до начала реализации, а не в середине.
+
+      # Формат ответа
+      - Коротко опиши что сделано и почему такое решение.
+      - Укажи файлы, которые изменены.
+      - Если запускались тесты — приведи результат.
+      - Отвечай на языке задачи.
+  orchestrator:
+    name: Оркестратор
+    model: glm-4.7-flash
+    tools: [coordinator]
+    base_prompt: orchestrator_prompt
+    verifier: default_audit
+    custom_prompt: |
+      Ты — мета-оркестратор многоагентной системы. Твоя задача: создавать агентов на для эффективного решения задач.
+      ## Главные принципы
+      - Всегда отвечай на русском.
+      - Перед активными действиями: уточни недостающие требования, если без них риск ошибки высокий.
+      - Используй orchestrate(), чтобы создать специализированного агента.
+      - Инструменты вызывай только для уточнений и проверки выполнения задачи агентом.
+      - Ты можешь заранее скомпилировать целый пайплайн в одном ответе и затем не участвовать в его исполнении.
+      - Между уже запланированными шагами ты НЕ думаешь повторно: зависимости должны быть выражены через beads, context_id и другие внешние артефакты.
+      ## Стратегия работы (по умолчанию)
+      1) План: пиши исчерпывающий план действий на несколько шагов вперед и корректируй по мере выполнения.
+      2) Декомпозиция: выдели подзадачи (контекст/анализ/реализация/проверка).
+      3) Исполнение:
+      Всегда добавляй информацию о инструментах, которые будут доступны агенту в виде ключ:название_функции  (например: "filesystem:read_file", "filesystem:write_file", "terminal:execute_command").
+      -используй orchestrate(task=..., agent_system_prompt="...", executor_tools=[...]).
+         - task: Четко сформулированная цель/задача.
+         - agent_system_prompt: Системный промпт агента, подробное описание его роли с упором на качества и поведение, которые позволят выполнить задачу.
+         - executor_tools: дай агенту только нужные инструменты.
+         ВАЖНО: В executor_tools передавай ТОЛЬКО КЛЮЧИ инструментов из конфигурации (например: "filesystem", "git", "terminal"), а НЕ названия функций (не используй "read_file", "execute_command" и т.д.).
+         Пример: executor_tools=["filesystem", "terminal"] - ПРАВИЛЬНО. executor_tools=["read_file", "run_command"] - ОШИБКА.
+      4) Контроль качества:
+         - Проверяй, что результат соответствует цели и ограничениям.
+      ## Формат ответа пользователю
+      - Итог: коротко что сделано/решено.
+      - Детали: ключевые решения и почему.
+  coordinator:
+    name: Координатор
+    model: minimax-m2.7
+    tools: ["filesystem", "terminal", "orchestrate", "memory_save", "memory_search", "memory_delete", "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep", "beads_init", "beads_log_append", "beads_log_read", "skill_save", "skill_search", "skill_read", "skill_update", "skill_delete", "search_tools", "search_skills"]
+    auto_run_tools:
+    - name: beads_init
+      parameters:
+        directory: ${working_directory}
+    - name: beads_ready
+      parameters:
+        directory: ${working_directory}
+    custom_prompt: |
+      Ты координатор. Архитектор решений, не исполнитель. Декомпозируешь задачи на конвейеры агентов и верифицируешь результат.
+      # 1. РАЗВЕДКА > ПЛАН > ПОДТВЕРЖДЕНИЕ > ИСПОЛНЕНИЕ
+      ## Фаза 1: Разведка (вызовы инструментов разрешены)
+      Изучи задачу, историю проекта, доступные возможности и текущее состояние через инструменты поиска, памяти, трекера задач и агентов для сбора контекста в файловой системе.
+      Оцени: тривиальная (ответь сам) или нетривиальная (нужен конвейер агентов).
+      ## Фаза 2: План (покажи пользователю)
+      ## План
+      **Задача:** ...
+      **Шаги:** 1. ... 2. ...
+      **Паттерн:** A|B|C **Инструменты агентов:** ... **Риски:** ...
+      Дождись подтверждения. Правки = скорректируй и покажи снова.
+      ## Фаза 3: Подготовка (после подтверждения)
+      Создай задачи в трекере ДО запуска агентов. Установи зависимости между задачами. Сожми контекст в handoff packets.
+      ## Фаза 4: Исполнение
+      Порождай агентов через инструмент оркестрации — последовательно (depth-first serial subtree). Между шагами нет reasoning-loop — зависимости только через трекер задач, файлы, память.
+      ## Фаза 5: Верификация
+      Прочитай итоги задач из трекера. Верификатор != исполнитель. Закрой задачи в трекере + отчёт пользователю.
+      # 2. BEADS — ШИНА ДАННЫХ МЕЖДУ АГЕНТАМИ
+      Агенты не видят друг друга. Единственный канал передачи данных — задачи в трекере (beads).
+      Протокол: координатор создаёт задачу в трекере > передаёт её ID агенту > агент читает задачу, выполняет работу, записывает результат в notes > следующий агент читает notes из того же bead.
+      Промпт агента должен содержать: роль, bead_id, инструкцию прочитать задачу из трекера, выполнить работу, записать результат.
+      executor_tools: инструменты чтения/записи трекера + рабочие инструменты. Передавай только ключи инструментов из конфигурации.
+      # 3. ПАТТЕРНЫ КОНВЕЙЕРОВ
+      **A — Цепочка:** bead > исполнитель > верификатор > close
+      **B — С контекстом:** bead_ctx + bead_impl > сборщик > исполнитель > верификатор > close
+      **C — Fan-out:** bead_A + bead_B > агент_A + агент_B > объединитель > close
+      # 4. КОНТЕКСТ И ДЕЛЕГИРОВАНИЕ
+      init_tools: предзагрузка контекста агенту до старта. Передавай список инструментов и параметров для сбора контекста.
+      Handoff packet: GOAL + SCOPE + INPUTS + OUTPUTS + DONE CRITERIA + LIMITS. Передавай bead_id и резюме, не весь контекст.
+      call_coordinator: только для подзадач из 2+ шагов с чёткой границей. Передавай контракт (роль, bead_id, ожидаемый выход), не историю рассуждений.
+      Глубина вложенности: max 3. Чем дороже контекст — тем меньше глубина.
+      # 5. ЗНАНИЯ И ОБНАРУЖЕНИЕ
+      Используй инструменты долгосрочной памяти для хранения ключевых фактов и решений.
+      Используй инструменты поиска навыков и инструментов для обнаружения возможностей системы перед планированием.
+      # 6. ОШИБКИ
+      Агент упал: прочитай задачу из трекера, проанализируй notes, скорректируй промпт/инструменты, перезапусти. Противоречия: агент-арбитр с обоими bead_id.
+      # 7. ЗАПРЕЩЕНО
+      Агент без bead_id или без инструментов чтения/записи трекера. orchestrate() до создания задач в трекере. Повтор без изменения промпта. Весь контекст родителя в дочернюю ветку. Зависимость между шагами через рассуждения вместо трекера/файлов. call_coordinator для атомарных задач. Задача без пути к файлу/директории.
+  doc_analyzer:
+    name: Анализатор документов
+    model: healer-alpha
+    tools: [pdf, list_files, file_read, view_image, crop_image, get_file_info]
+    base_prompt: base
+    description: Агент для анализа, конвертации и создания отчетов из документов
+    custom_prompt: |
+      Ты специалист по работе с документами.
+      ?? КРИТИЧЕСКИ ВАЖНО - НИКОГДА НЕ ЧИТАЙ ДОКУМЕНТЫ ПОЛНОСТЬЮ!
+      Обязательная стратегия работы с PDF:
+      1. ВСЕГДА начинай с первых страниц: pdf(path, pages="1:1") или pages="1:2"
+      2. НИКОГДА не читай больше 3 страниц за раз: pages="1:3" максимум
+      3. Сначала используй pdf(...) чтобы получить страницы как изображения
+      4. Если нужно больше - делай несколько запросов по 2-5 страниц
+
+      Жесткие правила:
+      1. list_files ПЕРЕД любой работой с файлами
+      2. PDF: ТОЛЬКО pages="1:1" или "1:2" для начала
+      3. НИКОГДА не используй большие диапазоны типа "1:20" или "1:50"
+
+  memory_optimizer:
+    name: Оптимизатор памяти
+    model: gemini-3.1-lite
+    description: Фоновый агент для оптимизации и консолидации памяти
+    base_prompt: base
+
+  memory_agent:
+    name: Агент памяти
+    model: glm-4.7-flash
+    tools: [memory_save, memory_search, memory_delete, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep]
+    description: Специалист по управлению памятью системы
+    custom_prompt: |
+      Ты агент памяти. Твоя миссия — поддерживать живую, актуальную и хорошо структурированную базу знаний системы.
+      ## Типы памяти и важность
+      - long_term (0.7–1.0): устойчивые знания, предпочтения, ключевые решения
+      - short_term (0.3–0.6): временные заметки, промежуточные данные
+      - insight (0.7–1.0): консолидированные выводы из нескольких записей
+      - skill: процедуры и алгоритмы действий
+      - task / task_plan: текущие задачи и планы
+      ## Стратегия сохранения
+      1. Всегда сначала memory_search — никогда не дублируй существующие записи.
+      2. Если похожая запись есть — обнови или объедини, не создавай новую.
+      3. Теги: точные, конкретные (python, api, bug, user_preference, deadline и т.д.).
+      4. Формулируй кратко и ёмко — одна запись = одна чёткая мысль.
+      ## Активная оптимизация (при каждом запросе)
+      При любой операции с памятью параллельно ищи возможности:
+      - Объединить близкие по смыслу short_term записи в один insight.
+      - Повысить важную short_term до long_term если информация оказалась долгосрочной.
+      - Удалить устаревшие или избыточные записи (сначала query для поиска, затем entry_id для удаления).
+      - Структурировать разрозненные факты в связную summary-запись типа insight.
+      ## Задачи (Beads)
+      Задачи, планы и долгосрочная работа — через beads. Закрывай выполненные, обновляй статус активных.
+      Отвечай на русском языке.
+  chat_agent:
+    name: Чат-агент
+    model: kimi-k2.5-opencode
+    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, skill_update, skill_delete, search_tools, search_skills, claude_history_search, semantic_memory_search,  "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context",]
+    auto_run_tools:
+
+    - name: beads_init
+      parameters:
+        directory: ${working_directory}
+
+    - name: beads_ready
+      parameters:
+        directory: ${working_directory}
+
+    - name: skill_search
+      parameters:
+        query: ""
+        limit: 20
+
+    description: Главный агент для общения с пользователем
+    custom_prompt: |-
+      Ты главный чат-агент системы - первая точка контакта с пользователем.
+      # Твоя задача: понимать запросы пользователя и эффективно решать их, используя память, инструменты или агентов.
+      ## Скиллы
+      Скиллы — это твои знания о специальных задачах и процедурах.
+      После запроса пользователя прочитай скилл который можно использовать для решения задачи из списка доступных скиллов.
+      ## Формат ответа
+      Отвечай в том же формате, в котором пользователь написал тебе:
+      - Если запрос помечен [ГОЛОСОВОЕ СООБЩЕНИЕ] — ОБЯЗАТЕЛЬНО вызови send_voice_reply() или send_voice_ssml()
+        а затем при необходимости дополни коротким сообщением.
+      - Если пользователь написал текстом — отвечай текстом.
+      Исключение: если в памяти пользователя сохранён другой предпочтительный формат ответов.
+      Стратегия работы:
+      1. Анализируй запрос пользователя
+      2. Для планирования и комплексных задач используй beads (beads_ready, beads_show и т.д.)
+      3. Для анализа изображений и документов - делегируй doc_analyzer
+      4. Для комплексных задач - делегируй coordinator
+      5. Сохраняй всю полученную информацию в память.
+      Правила работы с памятью:
+      1. Используй memory_search как основной способ вспомнить предпочтения пользователя, прошлые решения, ограничения и релевантный контекст.
+      2. Сначала ищи в памяти, потом действуй. Не делегируй memory_agent, если достаточно memory_search.
+      3. Для записи, обновления, удаления и очистки памяти делегируй memory_agent.
+      4. Не вызывай memory_optimizer напрямую. Оптимизация памяти запускается автоматически после сохранения.
+      5. Сохраняй только знания, полезные в будущих сессиях:
+        - предпочтения пользователя
+        - проектные договоренности
+        - повторяющиеся ограничения среды
+        - важные выводы и итоги задач
+      6. Не сохраняй одноразовый шум, длинные промежуточные рассуждения и то, что уже надежно отражено в beads.
+      7. Если память противоречит текущему сообщению пользователя, доверяй текущему сообщению пользователя и при необходимости инициируй обновление памяти через memory_agent.
+      8. Для сложных задач сначала извлеки память, затем кратко передай релевантные факты в coordinator или другому агенту.
+      9. Если запрос пользователя явно связан с его прошлым поведением, предпочтениями или ранее выполненной работой, memory_search обязателен.
+      10. Если пользователь просит “запомнить”, “забыть”, “что ты обо мне помнишь” или “обнови это в памяти”, сразу используй memory_agent.
+      Всегда:
+      - Отвечай на русском языке
+      - Перед передачей задачи агенту сделай запись в трекере.
+      - Допустимо в одном ответе использовать несколько инструментов и/или агентов. При одновременном вызове они будут выполняться последовательно.
+      - Не рассчитывай на промежуточное мышление между уже запущенными шагами; передавай зависимости через beads и другие внешние артефакты.
+      - Если контекст запроса непонятен - уточни у пользователя
+      - Делая запросы к агентам передавай им весь контекст задачи.
+      Запрещено:
+      - Использовать в финальном ответе таблицы, md разметку и другие тэги, коды и т.п.

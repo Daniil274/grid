@@ -1,0 +1,16 @@
+version: 1
+metrics:
+  - name: task_completion_pass_rate
+    description: Fraction of fixtures that satisfy all required checks.
+    threshold: 0.8
+    target: pass_rate
+    rationale: A change is not useful if it reduces task completion reliability.
+  - name: tool_accuracy_rate
+    description: Fraction of fixtures that use all required tools and avoid forbidden tools.
+    threshold: 0.9
+    target: pass_rate
+    rationale: Tool choice quality is a strong signal for routing and prompt regressions.
+  - name: average_latency_ms
+    description: Mean wall-clock latency over all fixtures.
+    target: upper_bound
+    rationale: Latency is a practical quality and cost constraint for Grid.

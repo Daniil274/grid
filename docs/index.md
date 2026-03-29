@@ -1,34 +1,38 @@
-# Документация Grid
+# Grid Documentation
 
-## Оглавление
-1. [Введение в проект](#введение-в-проект)
+## Contents
+
+1. [Overview](#overview)
 2. [Agent Factory](agent_factory.md)
-3. [Конфигурация](config.md)
-4. [Архитектура системы](architecture.md)
-5. [Обзор инструментов](tools_overview.md)
-6. [Каналы интеграции](channels.md)
+3. [Configuration](config.md)
+4. [Architecture](architecture.md)
+5. [Tools Overview](tools_overview.md)
+6. [Channels](channels.md)
 7. [Emergency Shutdown](emergency_shutdown.md)
+8. [Module Self-Improvement](improvement_module.md)
 
 ---
 
-## Введение в проект
+## Overview
 
-**Grid** — фреймворк для создания и управления автономными агентами на базе OpenAI Agents SDK с поддержкой:
-- MCP (Model Context Protocol) инструментов
-- Docker-изоляции
-- Telegram-интеграции
-- Голосового ввода/вывода
-- Расширенной памяти (SQLite)
-- Трассировки и прозрачности выполнения
+Grid is a framework for running autonomous agents on top of the OpenAI Agents SDK
+with support for:
 
-**Основные компоненты:**
-- **Core**: AgentFactory, Config, MemoryStore
-- **Tools**: Функциональные и агентские инструменты (filesystem, git, vision и др.)
-- **Channels**: Telegram Bridge, Live Transparency
-- **Skills**: Интеграция навыков из Markdown
+- function tools and MCP tools;
+- agent orchestration;
+- memory and context persistence;
+- Telegram and voice integrations;
+- runtime transparency and tracing;
+- staged self-improvement workflows.
 
-**Репозиторий:** [GitHub](https://github.com/your-org/grid) (гипотетическая ссылка)
+Core areas of the repository:
 
----
+- `core/` for runtime, orchestration, registry, memory, evaluation;
+- `tools/` for function tools and agent tool bindings;
+- `schemas/` for typed configuration and runtime models;
+- `benchmarks/` for replay and scorecard evaluation;
+- `plans/` for staged roadmap documents;
+- `docs/` for operational and architectural documentation.
 
-*Документация автоматически сгенерирована Technical Writer.*
+Use [improvement_module.md](improvement_module.md) as the main entry point for
+the self-improvement subsystem.

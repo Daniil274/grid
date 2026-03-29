@@ -21,6 +21,7 @@ from .search_tools import SEARCH_TOOLS  # Discovery tools: search_tools, search_
 from .semantic_tools import SEMANTIC_TOOLS  # Semantic search: semantic_search_code, index_codebase
 from .history_tools import HISTORY_TOOLS  # Claude.ai chat history search
 from .semantic_memory_tools import SEMANTIC_MEMORY_TOOLS  # Hybrid semantic memory search
+from .evolution_tools import EVOLUTION_TOOLS  # Controlled self-improvement registry tools
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -54,6 +55,7 @@ AVAILABLE_TOOLS = {
     **HISTORY_TOOLS,  # Claude.ai chat history search (1 tool)
     **SEMANTIC_MEMORY_TOOLS,  # Hybrid semantic memory search (1 tool)
     **SYSTEM_TOOLS,  # System introspection tools (7 tools)
+    **EVOLUTION_TOOLS,  # Controlled self-improvement tools
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -141,6 +143,19 @@ TOOL_ALIASES = {
     "get_skills": "system_get_skills",
     "help": "system_help",
     "get_context": "system_get_context",
+
+    # Evolution tools
+    "improvement_create_problem": "create_improvement_problem",
+    "improvement_list_problems": "list_improvement_problems",
+    "improvement_create_experiment": "create_improvement_experiment",
+    "improvement_propose_config": "propose_config_experiment",
+    "improvement_evaluate": "evaluate_improvement_experiment",
+    "improvement_review_requirements": "record_requirement_review",
+    "improvement_review_final": "record_final_review",
+    "improvement_promote": "promote_improvement_experiment",
+    "improvement_reject": "reject_improvement_experiment",
+    "improvement_canary": "run_improvement_canary",
+    "improvement_monitor": "monitor_promoted_improvement",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:

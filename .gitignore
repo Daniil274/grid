@@ -115,3 +115,5 @@ data/
 # Dolt database files (added by bd init)
 .dolt/
 scripts/
+*.bak
+plans/
