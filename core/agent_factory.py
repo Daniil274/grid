@@ -41,13 +41,25 @@ from core.managers.mcp_manager import ResilientMCPServerStdio
 
 from .config import Config
 from .context import ContextManager, safe_lock
-from schemas import AgentConfig, AgentExecution
+from schemas import AgentConfig, AgentExecution, ContextMessage
 from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
 from utils.path_utils import set_current_factory, reset_current_factory
 from core.tracing_config import get_tracing_config, ImmediateTraceProcessor
 from core.managers.skill_manager import SkillManager
+
+# Compact system integration
+from core.compact import (
+    calculate_token_warning_state,
+    auto_compact_if_needed,
+    AutoCompactTrackingState,
+    reactive_compact_on_prompt_too_long,
+    get_post_compact_state,
+    run_post_compact_cleanup,
+    CompactMessage,
+    estimate_messages_tokens,
+)
 
 # --- Patch: MCP tools must return errors to the agent, not crash the run ---
 # Unlike function_tool() which has failure_error_function wrapper,
@@ -83,6 +95,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 load_dotenv()
@@ -406,6 +419,9 @@ class AgentFactory:
 
         # Track initialized agents (auto_run_tools executed) per user
         self._initialized_agents: set[str] = set()
+
+        # Per-session compact tracking state (circuit breaker lives here)
+        self._compact_tracking = AutoCompactTrackingState()
 
         # Initialize pipeline registry for emergency shutdown
         from core.pipeline_registry import PipelineRegistry
@@ -805,6 +821,8 @@ class AgentFactory:
                 tools=tools,
                 mcp_servers=mcp_servers_list,
             )
+            setattr(agent, "_grid_agent_key", agent_key)
+            setattr(agent, "_grid_model_key", agent_config.model)
             # Auto-run tools (beads_init, beads_ready, etc.) run only once per user/agent
             # in run_agent() when handling the first request — see _initialized_agents.
 
@@ -1086,7 +1104,7 @@ class AgentFactory:
             f"{'='*80}\n"
         )
 
-        return Agent(
+        agent = Agent(
             name=name,
             instructions=enhanced_instructions,
             model=model,
@@ -1094,6 +1112,8 @@ class AgentFactory:
             tools=tools,
             mcp_servers=mcp_servers_list,
         )
+        setattr(agent, "_grid_model_key", resolved_model_key)
+        return agent
 
     async def _resolve_tools_for_names(self, tool_names: List[str]) -> tuple[List[Any], List[str]]:
         """
@@ -1178,12 +1198,244 @@ class AgentFactory:
 
         return "\n\n".join(parts)
 
+    def _context_to_compact_messages(self, messages: List[Any]) -> List[CompactMessage]:
+        """Convert context messages into CompactMessage objects."""
+        compact_messages: List[CompactMessage] = []
+        for msg in messages:
+            metadata = msg.metadata or {}
+            timestamp = None
+            raw_timestamp = getattr(msg, "timestamp", None)
+            if raw_timestamp:
+                try:
+                    timestamp = datetime.fromisoformat(raw_timestamp)
+                except Exception:
+                    timestamp = None
+
+            compact_messages.append(
+                CompactMessage(
+                    role=msg.role,
+                    content=msg.content,
+                    message_id=metadata.get("message_id"),
+                    uuid=metadata.get("uuid"),
+                    timestamp=timestamp,
+                    metadata=metadata.copy(),
+                    is_compact_summary=bool(metadata.get("is_compact_summary")),
+                    is_compact_boundary=bool(metadata.get("is_compact_boundary")),
+                )
+            )
+        return compact_messages
+
+    def _compact_to_context_messages(self, messages: List[CompactMessage]) -> List[ContextMessage]:
+        """Convert CompactMessage objects back into persisted context messages."""
+        context_messages: List[ContextMessage] = []
+        for msg in messages:
+            metadata = (msg.metadata or {}).copy()
+            if msg.message_id:
+                metadata.setdefault("message_id", msg.message_id)
+            if msg.uuid:
+                metadata.setdefault("uuid", msg.uuid)
+            if msg.is_compact_summary:
+                metadata["is_compact_summary"] = True
+            if msg.is_compact_boundary:
+                metadata["is_compact_boundary"] = True
+
+            timestamp = msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat()
+            context_messages.append(
+                ContextMessage(
+                    role=msg.role,
+                    content=msg.content,
+                    timestamp=timestamp,
+                    metadata=metadata or None,
+                )
+            )
+        return context_messages
+
+    def _replace_context_with_compact_messages(self, messages: List[CompactMessage]) -> None:
+        """Persist compacted/truncated history into the active context."""
+        self.context_manager.replace_conversation_history(
+            self._compact_to_context_messages(messages)
+        )
+
+    def _get_compact_client_and_model(self, key: Optional[str]) -> tuple[Optional[AsyncOpenAI], Optional[str]]:
+        """Resolve the client/model to use for full compact."""
+        compact_cfg = self.config.config.compact
+        summary_model_key = getattr(compact_cfg, "summary_model", None)
+        if summary_model_key:
+            try:
+                return self.get_openai_client_for_model(summary_model_key)
+            except Exception:
+                logger.warning(
+                    "Configured compact.summary_model '%s' is unavailable; falling back to resolved model",
+                    summary_model_key,
+                )
+        if key:
+            return self.get_openai_client_for_model(self.resolve_model_key(key))
+        return None, None
+
     async def run_agent_object_simple(
         self,
-        agent: Agent,
-        message: str,
-        *,
+        agent: Any,
+        input_message: str,
         context_id: Optional[str] = None,
+        pipeline_id: Optional[str] = None,
+        init_tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """Run agent and return simple text output (for subagents)."""
+        # Compact integration: check token usage before running
+        try:
+            # Get current context messages for token check
+            current_context_id = context_id or self.context_manager.get_current_context_id()
+            messages = self.context_manager._conversation_history
+            
+            # Estimate current token usage
+            compact_messages = self._context_to_compact_messages(messages)
+            current_tokens = estimate_messages_tokens(compact_messages) if compact_messages else 0
+            
+            # Get model context window and compact config from config.yaml
+            agent_model_key = getattr(agent, "_grid_model_key", None)
+            if not agent_model_key:
+                agent_identifier = getattr(agent, "_grid_agent_key", None) or (agent.name if hasattr(agent, 'name') else None)
+                agent_model_key = self.resolve_model_key(agent_identifier)
+            model_config = self.config.get_model(agent_model_key) if agent_model_key else None
+            max_tokens = getattr(model_config, 'context_window', 128000) if model_config else 128000
+            compact_cfg = self.config.config.compact
+
+            # Check if auto-compact is needed
+            warning_state = calculate_token_warning_state(current_tokens, max_tokens, compact_cfg)
+            if warning_state.is_above_auto_compact_threshold:
+                logger.info(
+                    f"Auto-compact triggered: {current_tokens}/{max_tokens} tokens "
+                    f"(threshold: {warning_state.percent_left}% remaining)"
+                )
+                # Get LLM client and model for full compact fallback
+                try:
+                    compact_client, compact_model = self._get_compact_client_and_model(agent_model_key)
+                except Exception:
+                    compact_client, compact_model = None, None
+
+                compact_outcome = await auto_compact_if_needed(
+                    messages=compact_messages,
+                    context_window=max_tokens,
+                    llm_client=compact_client,
+                    model=compact_model,
+                    tracking=self._compact_tracking,
+                    compact_cfg=compact_cfg,
+                )
+                # Update circuit-breaker counter from outcome
+                self._compact_tracking.consecutive_failures = compact_outcome.get(
+                    "consecutive_failures", self._compact_tracking.consecutive_failures
+                )
+                if compact_outcome.get("was_compacted"):
+                    compact_result = compact_outcome.get("compaction_result")
+                    if compact_result and compact_result.compacted_messages:
+                        self._replace_context_with_compact_messages(compact_result.compacted_messages)
+                    logger.info(
+                        "Auto-compact complete"
+                        + (
+                            f": tokens {compact_result.tokens_before} -> {compact_result.tokens_after} "
+                            f"(saved {compact_result.tokens_saved})"
+                            if compact_result
+                            else ""
+                        )
+                    )
+                    run_post_compact_cleanup(context_id=current_context_id)
+        except Exception as compact_error:
+            # Don't fail if compact fails - log and continue
+            logger.warning(f"Auto-compact check failed: {compact_error}")
+        
+        # Create session for this agent/context pair
+        session = self._get_agent_session(
+            agent.name if hasattr(agent, 'name') else 'default',
+            context_id or self.context_manager.get_current_context_id()
+        )
+        
+        # Original implementation continues here...
+        agent._session = session
+        
+        # Create GridRunContext
+        run_ctx = GridRunContext(
+            factory=self,
+            context_id=context_id or self.context_manager.get_current_context_id(),
+            session=session,
+            pipeline_id=pipeline_id,
+        )
+        
+        # Execute init_tools if provided
+        if init_tools:
+            # ... existing init_tools code ...
+            pass
+        
+        # Run the agent
+        set_current_factory(self)
+        try:
+            run_result = await _get_runner().run(
+                starting_agent=agent,
+                input=input_message,
+                context=run_ctx,
+                session=session,
+                max_turns=self.config.get_max_turns(),
+            )
+            
+            # Extract output
+            if hasattr(run_result, 'final_output') and run_result.final_output:
+                return run_result.final_output
+            elif hasattr(run_result, 'output') and run_result.output:
+                return run_result.output
+            else:
+                return str(run_result)
+        
+        except Exception as e:
+            # Reactive compact: handle context_length_exceeded errors
+            error_str = str(e).lower()
+            if 'context_length_exceeded' in error_str or 'prompt_too_long' in error_str or 'max_tokens' in error_str:
+                logger.warning(f"Context overflow detected, attempting reactive compact: {e}")
+                try:
+                    # Get messages for reactive compact
+                    messages = self.context_manager._conversation_history
+                    compact_messages = self._context_to_compact_messages(messages)
+
+                    # Try reactive compact (synchronous truncation, no LLM call)
+                    reactive_result = await reactive_compact_on_prompt_too_long(
+                        messages=compact_messages,
+                        error=e,
+                    )
+
+                    if reactive_result.status.value in ('trimmed', 'success'):
+                        self._replace_context_with_compact_messages(reactive_result.messages)
+                        run_post_compact_cleanup(context_id=current_context_id)
+                        logger.info(
+                            f"Reactive compact: trimmed to {len(reactive_result.messages)} messages "
+                            f"(tokens {reactive_result.tokens_before} -> {reactive_result.tokens_after}, "
+                            f"saved ~{reactive_result.tokens_saved}), retrying"
+                        )
+                        # Retry the agent run with truncated messages injected
+                        # via a fresh runner call — the truncated messages are
+                        # returned in reactive_result.messages for the caller to use.
+                        set_current_factory(self)
+                        try:
+                            run_result = await _get_runner().run(
+                                starting_agent=agent,
+                                input=input_message,
+                                context=run_ctx,
+                                session=session,
+                                max_turns=self.config.get_max_turns(),
+                            )
+                            if hasattr(run_result, 'final_output') and run_result.final_output:
+                                return run_result.final_output
+                            elif hasattr(run_result, 'output') and run_result.output:
+                                return run_result.output
+                            else:
+                                return str(run_result)
+                        finally:
+                            reset_current_factory()
+                except Exception as reactive_error:
+                    logger.error(f"Reactive compact failed: {reactive_error}")
+            
+            raise
+        finally:
+            reset_current_factory()
+
+    async def run_agent_object_simple_original(
         max_turns: Optional[int] = None,
         session: Optional[SQLiteSession] = None,
         pipeline_id: Optional[str] = None,

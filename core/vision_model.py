@@ -116,10 +116,30 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
         messages: list[dict],
     ) -> list[dict]:
         """Move image_url parts from tool messages into follow-up user messages.
-        Handles both list content (function tools) and JSON-string content (MCP tools)."""
+        Handles both list content (function tools) and JSON-string content (MCP tools).
+
+        IMPORTANT: When an assistant message has multiple tool_calls (parallel),
+        all tool messages must remain consecutive before any user messages are
+        inserted. Providers like Moonshot AI reject messages where tool messages
+        for the same assistant turn are separated by user messages.
+
+        Strategy: process messages in groups. When we encounter a run of tool
+        messages (consecutive), collect all their images and flush a single user
+        message AFTER the entire run — not after each individual tool message.
+        """
         result: list[dict] = []
+        pending_images: list[dict] = []  # images accumulated across current tool-message run
+
         for msg in messages:
             if msg.get("role") != "tool":
+                # Leaving a run of tool messages — flush collected images first
+                if pending_images:
+                    user_content: list[dict] = [
+                        {"type": "text", "text": "[Tool result image]"},
+                        *pending_images,
+                    ]
+                    result.append({"role": "user", "content": user_content})
+                    pending_images = []
                 result.append(msg)
                 continue
 
@@ -153,10 +173,14 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
                 tool_msg["content"] = "[Image provided below]"
             result.append(tool_msg)
 
-            # Separate user message with the image(s)
-            user_content: list[dict] = [
+            # Accumulate images — will be flushed after the entire tool-message run
+            pending_images.extend(image_parts)
+
+        # Flush any remaining images at the end
+        if pending_images:
+            user_content = [
                 {"type": "text", "text": "[Tool result image]"},
-                *image_parts,
+                *pending_images,
             ]
             result.append({"role": "user", "content": user_content})
 

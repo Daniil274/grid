@@ -174,6 +174,19 @@ class Config:
             if "ISKOR_COMMAND_TIMEOUT" not in os.environ:
                 os.environ.setdefault("ISKOR_COMMAND_TIMEOUT", "0.5")
 
+            # Set ISKOR window automation settings for project tools (get_screen, key_press via xdotool)
+            window_cfg = getattr(self.config.settings, "window", None)
+            if window_cfg is not None:
+                if getattr(window_cfg, "title_pattern", None) is not None:
+                    os.environ["ISKOR_WINDOW_TITLE"] = str(window_cfg.title_pattern)
+                    logger.debug(f"ISKOR_WINDOW_TITLE set to {window_cfg.title_pattern} from config")
+                if getattr(window_cfg, "key_delay_sec", None) is not None:
+                    os.environ["ISKOR_KEY_DELAY"] = str(window_cfg.key_delay_sec)
+                    logger.debug(f"ISKOR_KEY_DELAY set to {window_cfg.key_delay_sec} from config")
+                if getattr(window_cfg, "screenshot_delay_sec", None) is not None:
+                    os.environ["ISKOR_SCREEN_DELAY"] = str(window_cfg.screenshot_delay_sec)
+                    logger.debug(f"ISKOR_SCREEN_DELAY set to {window_cfg.screenshot_delay_sec} from config")
+
             # Get tools directory
             tools_directory = project_tools_config.tools_directory
             config_dir = str(self.config_path.parent.resolve())

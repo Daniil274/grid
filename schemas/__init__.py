@@ -2,7 +2,10 @@
 from .schemas import (
     ToolType, GridConfig, ProviderConfig, ModelConfig, AgentConfig, ToolConfig,
     Settings, AgentLoggingConfig, ProjectToolsConfig, ContextMessage, AgentExecution, TextContent, ImageContent, ImageUrl, FileImageContent,
-    ImprovementConfig
+    ImprovementConfig,
+    # Compact system
+    CompactConfig, CompactSessionMemoryConfig, CompactMicroConfig, CompactAutoConfig,
+    CompactRestoreConfig, CompactRestoreFilesConfig, CompactRestoreSkillsConfig,
 )
 from .improvement import (
     ImprovementProblemStatus, ImprovementExperimentStatus, ImprovementReviewType,
@@ -23,5 +26,8 @@ __all__ = [
     'ImprovementReview', 'ImprovementProblem', 'ImprovementExperiment',
     'ImprovementRegistryState', 'BenchmarkMetricDefinition', 'BenchmarkMetricsDocument',
     'BenchmarkFixture', 'BenchmarkAdapterResult', 'BenchmarkFixtureResult',
-    'BenchmarkScorecard'
+    'BenchmarkScorecard',
+    # Compact system
+    'CompactConfig', 'CompactSessionMemoryConfig', 'CompactMicroConfig', 'CompactAutoConfig',
+    'CompactRestoreConfig', 'CompactRestoreFilesConfig', 'CompactRestoreSkillsConfig',
 ]
