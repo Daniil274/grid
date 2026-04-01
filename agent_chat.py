@@ -11,6 +11,7 @@ import time
 import logging
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +30,8 @@ if sys.platform == "win32":
 
 from core.config import Config
 from core.agent_factory import AgentFactory
+from core.compact import compact_conversation, CompactMessage, estimate_messages_tokens
+from schemas import ContextMessage
 try:
     # Optional: only available when Docker SDK is installed and Docker is running
     from core.managers.container_manager import ContainerManager
@@ -142,6 +145,54 @@ def prepare_agent_message(text: str, image_paths: list[str]) -> str:
             "content": content
         }
         return json.dumps(message_dict)
+
+
+def _context_to_compact_messages(messages) -> list[CompactMessage]:
+    compact_messages: list[CompactMessage] = []
+    for msg in messages:
+        metadata = msg.metadata or {}
+        timestamp = None
+        if getattr(msg, "timestamp", None):
+            try:
+                timestamp = datetime.fromisoformat(msg.timestamp)
+            except Exception:
+                timestamp = None
+        compact_messages.append(
+            CompactMessage(
+                role=msg.role,
+                content=msg.content,
+                message_id=metadata.get("message_id"),
+                uuid=metadata.get("uuid"),
+                timestamp=timestamp,
+                metadata=metadata.copy(),
+                is_compact_summary=bool(metadata.get("is_compact_summary")),
+                is_compact_boundary=bool(metadata.get("is_compact_boundary")),
+            )
+        )
+    return compact_messages
+
+
+def _compact_to_context_messages(messages: list[CompactMessage]) -> list[ContextMessage]:
+    context_messages: list[ContextMessage] = []
+    for msg in messages:
+        metadata = (msg.metadata or {}).copy()
+        if msg.message_id:
+            metadata.setdefault("message_id", msg.message_id)
+        if msg.uuid:
+            metadata.setdefault("uuid", msg.uuid)
+        if msg.is_compact_summary:
+            metadata["is_compact_summary"] = True
+        if msg.is_compact_boundary:
+            metadata["is_compact_boundary"] = True
+        context_messages.append(
+            ContextMessage(
+                role=msg.role,
+                content=msg.content,
+                timestamp=msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
+                metadata=metadata or None,
+            )
+        )
+    return context_messages
 
 
 async def main():
@@ -260,6 +311,9 @@ async def main():
             match = re.search(r"ctx-[0-9a-f]{8}", text)
             return match.group(0) if match else None
 
+        def is_context_id(value: Optional[str]) -> bool:
+            return bool(value and re.fullmatch(r"ctx-[0-9a-f]{8}", value))
+
         # Start timeline dashboard server in background (with factory for rerun support)
         try:
             from timeline.integration import run_timeline_server
@@ -272,10 +326,21 @@ async def main():
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
 
+        activated_existing_context = False
+        if is_context_id(args.context_path):
+            try:
+                selected_context_id = factory.activate_context(args.context_path)
+                last_context_id = selected_context_id
+                activated_existing_context = True
+                print(f"Context - Активирован сохранённый контекст: {selected_context_id}")
+            except Exception as exc:
+                print(f"⚠️ Не удалось активировать контекст {args.context_path}: {exc}")
+
         # Context is automatically managed by ContextManager
         # - New clean context is created on each startup
         # - Old contexts are preserved and accessible via Context ID
-        print("Context - Новая сессия создана, старые контексты доступны по ID")
+        if not activated_existing_context:
+            print("Context - Новая сессия создана, старые контексты доступны по ID")
         
         print("Grid Agent System готов к работе")
         
@@ -367,9 +432,10 @@ async def main():
             print("\nCommands:")
             print("  'exit' or 'quit' - Exit")
             print("  'clear' - Start new context (old contexts saved)")
-            print("  'context' - Show current context info")
-            print("  'contexts' - List all saved context IDs")
+            print("  'context' или '/context' - Show current context info")
+            print("  'contexts' или '/contexts' - List all saved context IDs")
             print("  'use <context_id>' - Switch to a saved context")
+            print("  'compact' или '/compact' - Принудительная компактизация контекста (LLM саммари)")
             print("  'help' - Show this help")
             print("\nContext IDs:")
             print("  Use context ID in message: 'ctx-abc12345 your message'")
@@ -405,15 +471,34 @@ async def main():
                         print(f"New context ID: {cleared_id}")
                         print("Старые контексты сохранены и доступны по ID")
                         continue
-                    elif user_input.lower() == 'context':
+                    elif user_input.lower() in {'context', '/context'}:
                         print("Get Context")
                         context_info = factory.get_context_info()
                         print("Get Context - Информация о контексте получена")
+
+                        current_messages = factory.context_manager._conversation_history
+                        compact_messages = _context_to_compact_messages(current_messages)
+                        estimated_tokens = estimate_messages_tokens(compact_messages) if compact_messages else 0
+
+                        context_window = None
+                        context_pct = None
+                        try:
+                            agent_config = config.get_agent(agent_key)
+                            model_cfg = config.get_model(agent_config.model)
+                            context_window = getattr(model_cfg, "context_window", None)
+                            if context_window:
+                                context_pct = round((estimated_tokens / max(1, context_window)) * 100, 1)
+                        except Exception:
+                            pass
                         
                         print(f"\n📋 Информация о контексте:")
                         print(f"   Сообщений: {context_info.get('conversation_messages', 0)}")
                         print(f"   История выполнения: {context_info.get('execution_history', 0)}")
                         print(f"   Использование памяти: {context_info.get('memory_usage_mb', 0):.2f} МБ")
+                        print(f"   Примерно токенов: {estimated_tokens}")
+                        if context_window:
+                            print(f"   Окно модели: {context_window} токенов")
+                            print(f"   Заполнено: {context_pct}%")
                         active_id = context_info.get('current_context_id')
                         if active_id:
                             print(f"   Active context ID: {active_id}")
@@ -428,7 +513,7 @@ async def main():
                             last_msg = context_info['last_user_message']
                             print(f"   Последнее сообщение: {last_msg}")
                         continue
-                    elif user_input.lower() == 'contexts':
+                    elif user_input.lower() in {'contexts', '/contexts'}:
                         ids = factory.list_context_ids()
                         if not ids:
                             print('No saved contexts yet.')
@@ -450,13 +535,62 @@ async def main():
                         except Exception as exc:
                             print(f'Failed to switch context: {exc}')
                         continue
+                    elif user_input.lower() in {'/compact', 'compact'}:
+                        print("Компактизация контекста...")
+                        try:
+                            messages = factory.context_manager._conversation_history
+                            if not messages:
+                                print("Контекст пуст — компактизация не нужна.")
+                                continue
+
+                            compact_cfg = factory.config.config.compact
+                            compact_messages = _context_to_compact_messages(messages)
+
+                            tokens_before = estimate_messages_tokens(compact_messages)
+
+                            # Получаем клиент и модель для текущего агента
+                            compact_client, compact_model = factory._get_compact_client_and_model(agent_key)
+
+                            result = await compact_conversation(
+                                messages=compact_messages,
+                                llm_client=compact_client,
+                                model=compact_model,
+                                suppress_followup_questions=False,
+                                is_auto_compact=False,
+                                compact_cfg=compact_cfg,
+                            )
+
+                            if not result.success():
+                                print(
+                                    result.user_display_message
+                                    or "Компактизация пропущена: результат не уменьшает контекст."
+                                )
+                                continue
+
+                            from core.compact import run_post_compact_cleanup
+                            factory.context_manager.replace_conversation_history(
+                                _compact_to_context_messages(result.compacted_messages)
+                            )
+                            run_post_compact_cleanup()
+                            factory._compact_tracking.consecutive_failures = 0
+
+                            tokens_after = getattr(result, 'tokens_after', 0)
+                            tokens_saved = getattr(result, 'tokens_saved', tokens_before - tokens_after)
+                            print(
+                                f"Компакт завершён: ~{tokens_before} -> ~{tokens_after} токенов, "
+                                f"сохранено ~{tokens_saved}."
+                            )
+                        except Exception as ce:
+                            print(f"Ошибка компактизации: {ce}")
+                        continue
                     elif user_input.lower() == 'help':
                         print("\nAvailable commands:")
                         print("  exit, quit - Exit the chat")
                         print("  clear - Start new context (old contexts saved)")
-                        print("  context - Show current context information")
-                        print("  contexts - List all saved context IDs")
+                        print("  context, /context - Show current context information")
+                        print("  contexts, /contexts - List all saved context IDs")
                         print("  use <context_id> - Switch to a saved context")
+                        print("  compact, /compact - Принудительная компактизация (LLM саммари)")
                         print("  help - Show this help message")
                         print("\nContext IDs:")
                         print("  Use in message: 'ctx-abc12345 your message'")

@@ -31,6 +31,10 @@ class ModelConfig(BaseModel):
     provider: str
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4000, ge=1, le=100000)
+    context_window: int = Field(
+        default=128000, ge=1024,
+        description="Размер контекстного окна модели в токенах. Используется для авто-компакта."
+    )
     description: str = ""
     use_responses_api: bool = False
     reasoning: Optional[Dict[str, Any]] = None
@@ -126,6 +130,14 @@ class SerialConfig(BaseModel):
     model_config = {"extra": "ignore"}
 
 
+class WindowConfig(BaseModel):
+    """Configuration for GUI window automation (xdotool + mss)."""
+    title_pattern: str = Field(default="ISKOR", description="Паттерн поиска окна по заголовку (ISKOR_WINDOW_TITLE)")
+    key_delay_sec: float = Field(default=0.3, ge=0.0, le=10.0, description="Пауза после нажатия кнопки (ISKOR_KEY_DELAY)")
+    screenshot_delay_sec: float = Field(default=0.2, ge=0.0, le=10.0, description="Дополнительная пауза перед скриншотом (ISKOR_SCREEN_DELAY)")
+    model_config = {"extra": "ignore"}
+
+
 class Settings(BaseModel):
     """Global system settings."""
     default_agent: str = "assistant"
@@ -162,6 +174,10 @@ class Settings(BaseModel):
     serial: Optional[SerialConfig] = Field(
         default=None,
         description="Настройки serial для ISKOR: количество попыток на команду и таймаут после команды"
+    )
+    window: Optional[WindowConfig] = Field(
+        default=None,
+        description="Настройки GUI-автоматизации: поиск окна по заголовку, задержки"
     )
 
 
@@ -214,6 +230,7 @@ class GridConfig(BaseModel):
     """Complete Grid system configuration."""
     settings: Settings = Field(default_factory=Settings)
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
+    compact: "CompactConfig" = Field(default_factory=lambda: CompactConfig())
     providers: Dict[str, ProviderConfig] = Field(default_factory=dict)
     models: Dict[str, ModelConfig] = Field(default_factory=dict)
     tools: Dict[str, ToolConfig] = Field(default_factory=dict)
@@ -482,3 +499,91 @@ class OrchestrateResultSchema(BaseModel):
     validation: Optional[ValidationResultSchema] = None
     committee: Optional[Dict[str, Any]] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+# =============================================================================
+# COMPACT SYSTEM CONFIGURATION
+# =============================================================================
+
+class CompactSessionMemoryConfig(BaseModel):
+    """Configuration for session memory compaction."""
+    enabled: bool = True
+    min_tokens: int = Field(default=10000, ge=1000, description="Minimum tokens to preserve")
+    max_tokens: int = Field(default=40000, ge=5000, description="Maximum tokens after compact")
+    trigger_threshold: float = Field(default=0.75, ge=0.5, le=1.0, description="Trigger at % of context")
+
+
+class CompactMicroConfig(BaseModel):
+    """Configuration for microcompact (tool result clearing)."""
+    enabled: bool = True
+    max_age_hours: float = Field(default=1.0, ge=0.1, description="Clear results older than this")
+    gap_threshold_minutes: float = Field(
+        default=60.0, ge=1.0,
+        description="Минимальный разрыв (мин) с последнего ответа ассистента для time-based microcompact"
+    )
+    preserve_last_n: int = Field(default=5, ge=1, description="Keep last N tool results")
+    compactable_tools: List[str] = Field(
+        default_factory=lambda: [
+            "read_file", "read_text_file", "read_media_file",
+            "list_directory", "list_directory_with_sizes", "directory_tree",
+            "search_files", "execute_command",
+            "web_fetch", "web_search",
+            "git_diff", "git_log"
+        ],
+        description="Tools whose results can be cleared"
+    )
+
+
+class CompactAutoConfig(BaseModel):
+    """Configuration for automatic compaction trigger."""
+    enabled: bool = True
+    buffer_tokens: int = Field(default=13000, ge=1000, description="Запас токенов до порога авто-компакта")
+    warning_buffer_tokens: int = Field(default=20000, ge=1000, description="Буфер до порога предупреждения")
+    error_buffer_tokens: int = Field(default=20000, ge=1000, description="Буфер до порога ошибки")
+    manual_buffer_tokens: int = Field(default=3000, ge=100, description="Буфер до жёсткой блокировки (ручной компакт)")
+    max_output_tokens_for_summary: int = Field(default=20000, ge=1000, description="Резерв токенов под саммари LLM")
+    max_consecutive_failures: int = Field(default=3, ge=1, description="Circuit breaker: максимум ошибок подряд")
+
+
+class CompactRestoreFilesConfig(BaseModel):
+    """Configuration for file restoration after compact."""
+    enabled: bool = True
+    max_files: int = Field(default=5, ge=1)
+    max_tokens_per_file: int = Field(default=5000, ge=500)
+    token_budget: int = Field(default=50000, ge=10000)
+
+
+class CompactRestoreSkillsConfig(BaseModel):
+    """Configuration for skill restoration after compact."""
+    enabled: bool = True
+    token_budget: int = Field(default=25000, ge=5000)
+    max_tokens_per_skill: int = Field(default=5000, ge=1000)
+
+
+class CompactRestoreConfig(BaseModel):
+    """Configuration for post-compact restoration."""
+    files: CompactRestoreFilesConfig = Field(default_factory=CompactRestoreFilesConfig)
+    skills: CompactRestoreSkillsConfig = Field(default_factory=CompactRestoreSkillsConfig)
+
+
+class CompactConfig(BaseModel):
+    """Complete configuration for the compact system.
+    
+    Compact manages context window limits through intelligent compaction:
+    - Session Memory Compact: LLM-based conversation summarization
+    - Microcompact: Tool result clearing for token efficiency
+    - Auto Compact: Automatic triggering on threshold
+    - Reactive Compact: Handle context_length_exceeded errors
+    """
+    enabled: bool = True
+    session_memory: CompactSessionMemoryConfig = Field(default_factory=CompactSessionMemoryConfig)
+    micro: CompactMicroConfig = Field(default_factory=CompactMicroConfig)
+    auto: CompactAutoConfig = Field(default_factory=CompactAutoConfig)
+    restore: CompactRestoreConfig = Field(default_factory=CompactRestoreConfig)
+    
+    # Model for summarization (optional, uses default if None)
+    summary_model: Optional[str] = None
+    summary_max_output_tokens: int = Field(default=20000, ge=1000)
+
+
+GridConfig.model_rebuild()

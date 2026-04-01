@@ -1,0 +1,11 @@
+# ISKOR-window-autotest requirements
+# GUI automation without physical device
+
+# Fast cross-platform screen capture (pure Python + X11)
+mss>=9.0.0
+
+# Image processing (already used in main project)
+Pillow>=10.0.0
+
+# System dependency (not pip): xdotool
+# Install on Debian/Ubuntu: sudo apt install xdotool

@@ -167,6 +167,23 @@ class ContextManager:
         except ContextError as exc:
             logger.error("Lock timeout in add_message", exc_info=exc)
             raise
+
+    def replace_conversation_history(self, messages: List[ContextMessage]) -> None:
+        """Replace the active conversation history with a new message list."""
+        try:
+            with safe_lock(self._lock, timeout=5.0):
+                self._conversation_history.clear()
+                self._conversation_history.extend(messages[-self.max_history:])
+
+                active_bucket = self._contexts.get(self._current_context_id)
+                if active_bucket is not None:
+                    active_bucket["updated_at"] = datetime.now().isoformat()
+
+                if self.persist_path:
+                    self._save_to_file()
+        except ContextError as exc:
+            logger.error("Lock timeout in replace_conversation_history", exc_info=exc)
+            raise
     
     def add_execution(self, execution: AgentExecution) -> None:
         """Add agent execution to history."""
