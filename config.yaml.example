@@ -394,3 +394,65 @@ agents:
     base_prompt: "with_files"
     description: "Специалист по работе с файлами."
     mcp_enabled: true
+
+# =============================================================================
+# COMPACT SYSTEM CONFIGURATION
+# =============================================================================
+# Controls context management and compaction to manage token limits.
+# Inspired by Claude Code's compact system.
+
+compact:
+  enabled: true
+
+  # Session memory compact - LLM-based summarization
+  session_memory:
+    enabled: true
+    min_tokens: 10000        # Minimum tokens to preserve after compact
+    max_tokens: 40000        # Maximum tokens after compact
+    trigger_threshold: 0.75 # Trigger compact at 75% of context window
+  
+  # Microcompact - tool result clearing for token efficiency
+  micro:
+    enabled: true
+    max_age_hours: 1.0      # Clear tool results older than 1 hour
+    gap_threshold_minutes: 60.0
+    preserve_last_n: 5       # Keep last N tool results
+    compactable_tools:       # Tools whose results can be cleared
+      - read_file
+      - read_text_file
+      - read_media_file
+      - list_directory
+      - list_directory_with_sizes
+      - directory_tree
+      - search_files
+      - execute_command
+      - web_fetch
+      - web_search
+      - git_diff
+      - git_log
+  
+  # Auto-compact trigger - automatic compaction on threshold
+  auto:
+    enabled: true
+    buffer_tokens: 13000           # Tokens to keep as buffer before limit
+    warning_buffer_tokens: 20000   # Tokens for warning threshold
+    error_buffer_tokens: 20000
+    manual_buffer_tokens: 3000
+    max_output_tokens_for_summary: 20000
+    max_consecutive_failures: 3    # Circuit breaker for failures
+  
+  # Post-compact restoration - restore important context
+  restore:
+    files:
+      enabled: true
+      max_files: 5
+      max_tokens_per_file: 5000
+      token_budget: 50000
+    skills:
+      enabled: true
+      token_budget: 25000
+      max_tokens_per_skill: 5000
+
+  # Optional: force compaction to use a dedicated model key from `models:`
+  # summary_model: "gpt-5-nano"
+  summary_max_output_tokens: 20000

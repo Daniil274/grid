@@ -8,6 +8,8 @@ from agents.stream_events import RawResponsesStreamEvent
 
 from core.agent_factory import AgentFactory
 from core.config import Config
+from core import agent_factory as agent_factory_module
+from core.agent_factory import ConsoleStreamObserver
 
 
 class DummyRawDelta:
@@ -26,6 +28,15 @@ class DummyStream:
         for e in self._events:
             await asyncio.sleep(0)  # yield control
             yield e
+
+
+def _writer_collector():
+    calls = []
+
+    def writer(message, end="\n", flush=False):
+        calls.append((message, end, flush))
+
+    return calls, writer
 
 
 @pytest.mark.asyncio
@@ -148,3 +159,38 @@ agents:
             result = await factory.run_agent("test_agent", "hi", stream=True)
             assert result.startswith("FINAL")
             assert "ctx-" in result
+
+
+def test_console_stream_observer_can_buffer_text_without_printing():
+    calls, writer = _writer_collector()
+    observer = ConsoleStreamObserver(output_writer=writer, render_text_deltas=False)
+
+    event = RawResponsesStreamEvent(data=DummyRawDelta("Hello buffered world"))
+    fragment = observer.handle_event(event)
+
+    assert fragment == "Hello buffered world"
+    assert calls == []
+
+
+def test_console_stream_observer_formats_tool_calls(monkeypatch):
+    calls, writer = _writer_collector()
+    observer = ConsoleStreamObserver(output_writer=writer)
+
+    class DummyRunItemStreamEvent:
+        def __init__(self, name, item):
+            self.name = name
+            self.item = item
+
+    monkeypatch.setattr(agent_factory_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
+
+    raw_item = SimpleNamespace(
+        name="search_code",
+        arguments={"query": "todo", "limit": 3},
+        server_label="fs",
+    )
+    item = SimpleNamespace(raw_item=raw_item)
+    observer.handle_event(DummyRunItemStreamEvent("tool_called", item))
+
+    rendered = "".join(message for message, _, _ in calls)
+    assert "[tool] fs.search_code" in rendered
+    assert "query=todo" in rendered

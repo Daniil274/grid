@@ -9,6 +9,7 @@ from pathlib import Path
 
 from core.agent_factory import AgentFactory
 from core.config import Config
+from core.prompt_sections import ModelContextAssembly
 from utils.exceptions import AgentError, ConfigError
 from schemas import AgentExecution
 
@@ -362,6 +363,46 @@ class TestAgentFactory:
             assert "ctx-" in response
             assert "Агент выполнил задачу, но не предоставил текстовый ответ" in response
     
+    @pytest.mark.asyncio
+    async def test_run_agent_refreshes_cached_agent_instructions(self, config_file):
+        """Test that run_agent applies freshly assembled instructions to a cached agent."""
+        config = Config(str(config_file))
+        factory = AgentFactory(config)
+
+        mock_agent = Mock()
+        mock_agent.name = "Test Agent"
+        mock_agent.instructions = "stale instructions"
+
+        assembly_calls = [
+            ModelContextAssembly(
+                instructions="Initial instructions",
+                sections=[],
+                context_id="ctx-test",
+                history_strategy="none",
+            ),
+            ModelContextAssembly(
+                instructions="Final instructions",
+                sections=[],
+                context_id="ctx-test",
+                history_strategy="prompt",
+            ),
+        ]
+        factory.instructions_builder.assemble_model_context = Mock(
+            side_effect=assembly_calls
+        )
+
+        with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
+             patch.object(factory, '_build_agent_instructions', side_effect=["Initial instructions", "Final instructions"]), \
+             patch('asyncio.wait_for', new_callable=AsyncMock) as mock_wait_for:
+            mock_create.return_value = mock_agent
+            mock_wait_for.return_value = "done"
+
+            response = await factory.run_agent("test_agent", "test message")
+
+        assert "done" in response
+        assert mock_agent.instructions == "Final instructions"
+        assert factory.instructions_builder.assemble_model_context.call_count == 2
+
     def test_build_agent_instructions_basic(self, config_file):
         """Test building basic agent instructions."""
         config = Config(str(config_file))

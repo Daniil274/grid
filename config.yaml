@@ -33,6 +33,20 @@ isolation:
   enabled: true
   type: docker
   image: grid-agent:latest
+compact:
+  enabled: true
+  micro:
+    enabled: true
+    gap_threshold_minutes: 60.0
+    preserve_last_n: 5
+  auto:
+    enabled: true
+    buffer_tokens: 13000
+    warning_buffer_tokens: 20000
+    error_buffer_tokens: 20000
+    manual_buffer_tokens: 3000
+    max_output_tokens_for_summary: 20000
+    max_consecutive_failures: 3
 telegram:
   token_env: TELEGRAM_BOT_TOKEN
   # Прокси для запросов к Telegram API (например Xray: http или socks5 на localhost)
@@ -119,6 +133,26 @@ models:
     streaming_enabled: true
     capabilities: ["vision", "text", "code"]
 
+  gemma-4-e4b-it:
+    name: gemma-4-e4b-it
+    provider: lm-studio
+    temperature: 0.7
+    max_tokens: 8192
+    context_window: 22000
+    description: Gemma 4 E4B IT модель
+    streaming_enabled: true
+    capabilities: ["vision", "text", "code"]
+
+  gemma-4-31b-it:
+    name: google/gemma-4-31b-it
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8192
+    context_window: 22000
+    description: Gemma 4 31B IT модель
+    streaming_enabled: true
+    capabilities: ["vision", "text", "code"]
+
   kimi-k2.5:
     name: moonshotai/kimi-k2.5
     provider: openrouter
@@ -127,8 +161,8 @@ models:
     description: Kimi K2.5 модель
     streaming_enabled: true
 
-  qwen-3.5-plus:
-    name: qwen/qwen3.5-plus-02-15
+  qwen-3.6-plus:
+    name: qwen/qwen3.6-plus-preview:free
     provider: openrouter
     temperature: 0.7
     max_tokens: 8192
@@ -318,8 +352,17 @@ models:
     max_tokens: 8000
     description: kimi-k2.5 модель
     streaming_enabled: true
+    context_window: 22000
     preserve_reasoning_content: true
 
+  glm-5-opencode:
+    name: glm-5
+    provider: opencode
+    temperature: 0.5
+    max_tokens: 8000
+    description: kimi-k2.5 модель
+    streaming_enabled: true
+    preserve_reasoning_content: true
 embeddings:
   model: perplexity/pplx-embed-v1-0.6b
   request_timeout: 30
@@ -871,7 +914,7 @@ agents:
       - Детали: ключевые решения и почему.
   coordinator:
     name: Координатор
-    model: minimax-m2.7
+    model: kimi-k2.5-opencode
     tools: ["filesystem", "terminal", "orchestrate", "memory_save", "memory_search", "memory_delete", "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep", "beads_init", "beads_log_append", "beads_log_read", "skill_save", "skill_search", "skill_read", "skill_update", "skill_delete", "search_tools", "search_skills"]
     auto_run_tools:
     - name: beads_init
@@ -974,7 +1017,7 @@ agents:
       Отвечай на русском языке.
   chat_agent:
     name: Чат-агент
-    model: kimi-k2.5-opencode
+    model: gemma-4-e4b-it
     tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, skill_update, skill_delete, search_tools, search_skills, claude_history_search, semantic_memory_search, "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context", "create_improvement_problem", "list_improvement_problems", "create_improvement_experiment", "propose_config_experiment", "evaluate_improvement_experiment", "run_improvement_canary", "monitor_promoted_improvement", "record_requirement_review", "record_final_review", "promote_improvement_experiment", "reject_improvement_experiment"]
     auto_run_tools:
 

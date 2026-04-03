@@ -4,7 +4,7 @@ Enterprise-grade configuration management for Grid system.
 
 import os
 import yaml
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from pathlib import Path
 from functools import lru_cache
 import logging
@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from schemas import GridConfig, ProviderConfig, ModelConfig, AgentConfig, ToolConfig
 from utils.exceptions import ConfigError
 from core.tracing_config import get_tracing_config
+from core.prompt_sections import PromptSection
 
 tracing_config = get_tracing_config()
 logger = logging.getLogger("grid.config")
@@ -321,8 +322,54 @@ class Config:
         if template_key not in self.config.prompt_templates:
             raise ConfigError(f"Prompt template '{template_key}' not found")
         return self.config.prompt_templates[template_key]
+
+    def build_agent_prompt_sections(self, agent_key: str) -> List[PromptSection]:
+        """Build structured prompt sections for an agent."""
+        agent_config = self.get_agent(agent_key)
+
+        if agent_config.custom_prompt:
+            base_prompt = agent_config.custom_prompt
+        else:
+            base_prompt = self.get_prompt_template(agent_config.base_prompt)
+
+        sections = [
+            PromptSection(
+                key="base_prompt",
+                content=base_prompt,
+                scope="static",
+            )
+        ]
+
+        tool_descriptions = []
+        for tool_name in agent_config.tools:
+            try:
+                tool_config = self.get_tool(tool_name)
+                if tool_config.prompt_addition:
+                    tool_descriptions.append(tool_config.prompt_addition)
+            except ConfigError:
+                logger.warning(f"Tool '{tool_name}' not found for agent '{agent_key}'")
+
+        common_rules = getattr(self.config.settings, 'tools_common_rules', None)
+        if common_rules:
+            sections.append(
+                PromptSection(
+                    key="tools_common_rules",
+                    content="\nПравила использования инструментов (общие):\n" + str(common_rules),
+                    scope="static",
+                )
+            )
+        if tool_descriptions:
+            sections.append(
+                PromptSection(
+                    key="tool_capabilities",
+                    content="\n".join(["\nДоступные инструменты:", *tool_descriptions]),
+                    scope="static",
+                )
+            )
+
+        return sections
     
-    def build_agent_prompt(self, agent_key: str) -> str:
+    def _legacy_build_agent_prompt(self, agent_key: str) -> str:
         """Build complete prompt for agent including tool descriptions."""
         agent_config = self.get_agent(agent_key)
         
@@ -355,6 +402,14 @@ class Config:
         
         return "\n".join(parts)
     
+    def build_agent_prompt(self, agent_key: str) -> str:
+        """Build complete prompt for agent including tool descriptions."""
+        return "\n".join(
+            section.content
+            for section in self.build_agent_prompt_sections(agent_key)
+            if section.content
+        )
+
     # Settings methods
     def is_debug(self) -> bool:
         """Check if debug mode is enabled."""
