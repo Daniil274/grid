@@ -1,15 +1,13 @@
 """
-Instructions Builder for agent instructions.
-
-Builds complete instructions for agents by combining:
-- Base prompts from configuration
-- Path context information
-- Conversation context
-- Context identifiers
+Structured model-context assembly for agents.
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import Optional
+
+from core.prompt_sections import ModelContextAssembly, PromptSection
 from core.protocols import IConfig, IContextManager
 
 logger = logging.getLogger("grid.instructions_builder")
@@ -17,14 +15,10 @@ logger = logging.getLogger("grid.instructions_builder")
 
 class InstructionsBuilder:
     """
-    Builds instructions for agents with context and configuration.
+    Build agent instructions from structured prompt sections.
 
-    This class is responsible for constructing the complete
-    instruction text that agents receive, including:
-    - Base prompts from configuration
-    - Working directory and path information
-    - Conversation history (if requested)
-    - Context identifiers for resuming conversations
+    The context store remains the source of truth, while this builder controls
+    how that state is projected into model-facing instructions.
     """
 
     def __init__(
@@ -33,118 +27,103 @@ class InstructionsBuilder:
         context_manager: IContextManager,
         container_id: Optional[str] = None,
     ) -> None:
-        """
-        Initialize InstructionsBuilder.
-
-        Args:
-            config: Configuration instance
-            context_manager: Context manager instance
-            container_id: Optional Docker container ID
-        """
         self.config = config
         self.context_manager = context_manager
         self.container_id = container_id
+
+    def assemble_model_context(
+        self,
+        agent_key: str,
+        context_path: Optional[str] = None,
+        *,
+        include_conversation_context: bool = True,
+        include_path_context: bool = True,
+    ) -> ModelContextAssembly:
+        """Assemble the full model-facing prompt context for an agent."""
+        sections = list(self._get_base_sections(agent_key))
+        context_id = self.context_manager.get_current_context_id()
+
+        if include_path_context:
+            path_context = self.build_path_context(context_path)
+            if path_context:
+                sections.append(
+                    PromptSection(
+                        key="path_context",
+                        content=path_context,
+                        scope="dynamic",
+                    )
+                )
+
+        context_reference = self._build_context_reference(context_id)
+        if context_reference:
+            sections.append(
+                PromptSection(
+                    key="context_reference",
+                    content=context_reference,
+                    scope="dynamic",
+                )
+            )
+
+        history_strategy = "none"
+        if include_conversation_context:
+            conversation_context = self.context_manager.get_conversation_context()
+            if conversation_context:
+                sections.append(
+                    PromptSection(
+                        key="conversation_context",
+                        content=conversation_context,
+                        scope="dynamic",
+                    )
+                )
+                history_strategy = "prompt"
+
+        instructions = "\n\n".join(
+            section.content.strip()
+            for section in sections
+            if section.content and section.content.strip()
+        )
+
+        assembly = ModelContextAssembly(
+            instructions=instructions,
+            sections=sections,
+            context_id=context_id,
+            history_strategy=history_strategy,
+            metadata={
+                "agent_key": agent_key,
+                "context_path": context_path,
+                "include_conversation_context": include_conversation_context,
+                "include_path_context": include_path_context,
+            },
+        )
+
+        logger.debug(
+            "Assembled model context",
+            extra={
+                "agent_key": agent_key,
+                "context_id": context_id,
+                "history_strategy": history_strategy,
+                "section_count": len(sections),
+                "instructions_length": len(instructions),
+            },
+        )
+        return assembly
 
     def build_agent_instructions(
         self,
         agent_key: str,
         context_path: Optional[str] = None,
-        include_conversation_context: bool = True
+        include_conversation_context: bool = True,
     ) -> str:
-        """
-        Build complete agent instructions with context.
-
-        Args:
-            agent_key: Agent configuration key
-            context_path: Optional context path for agent
-            include_conversation_context: Whether to include conversation history
-
-        Returns:
-            Complete instructions string with all context information
-
-        Example:
-            >>> builder = InstructionsBuilder(config, context_manager)
-            >>> instructions = builder.build_agent_instructions(
-            ...     "my_agent",
-            ...     context_path="/path/to/project",
-            ...     include_conversation_context=True
-            ... )
-        """
-        # Get base instructions from configuration
-        base_instructions = self.config.build_agent_prompt(agent_key)
-
-        # Build path context
-        path_context = self.build_path_context(context_path)
-
-        # Start building parts
-        parts = [base_instructions]
-
-        if path_context:
-            parts.append(path_context)
-
-        # Add context identifier instructions
-        context_identifier = self.context_manager.get_current_context_id()
-        if context_identifier:
-            context_instruction = (
-                f"Context reference: {context_identifier}. "
-                f"Always append the line \"Контекст ID: {context_identifier}\" "
-                "to every reply so humans or agents can return to this dialogue via that identifier."
-            )
-            parts.append(context_instruction)
-
-        # Add conversation context if requested
-        if include_conversation_context:
-            conversation_context = self.context_manager.get_conversation_context()
-            if conversation_context:
-                parts.append(conversation_context)
-                logger.debug(
-                    "Including conversation context in instructions",
-                    extra={
-                        "agent_key": agent_key,
-                        "context_id": context_identifier,
-                        "context_length": len(conversation_context),
-                    },
-                )
-
-        instructions = "\n\n".join(parts)
-
-        logger.debug(
-            "Built agent instructions",
-            extra={
-                "agent_key": agent_key,
-                "context_path": context_path,
-                "include_conversation_context": include_conversation_context,
-                "instructions_length": len(instructions),
-            },
-        )
-
-        return instructions
+        """Compatibility helper returning the joined instruction text."""
+        return self.assemble_model_context(
+            agent_key,
+            context_path,
+            include_conversation_context=include_conversation_context,
+            include_path_context=True,
+        ).instructions
 
     def build_path_context(self, context_path: Optional[str] = None) -> str:
-        """
-        Build path context information.
-
-        This creates a structured description of the working directories
-        and paths that the agent should use for file operations.
-
-        Args:
-            context_path: Optional context path to include
-
-        Returns:
-            Formatted path context string
-
-        Example:
-            >>> builder = InstructionsBuilder(config, context_manager)
-            >>> path_context = builder.build_path_context("/path/to/project")
-            >>> print(path_context)
-            Информация о путях:
-            Рабочая директория: /workspace
-            Контекстный путь: project
-            Абсолютный контекстный путь: /workspace/project
-
-            Используй эти пути для работы с файлами и директориями.
-        """
-        # In container mode the agent sees "/" as its root.
+        """Build path context information for the agent."""
         working_dir = "/" if self.container_id else self.config.get_working_directory()
         config_dir = self.config.get_config_directory()
 
@@ -152,17 +131,12 @@ class InstructionsBuilder:
             "Информация о путях:",
             f"Рабочая директория: {working_dir}",
         ]
-        
-        # Only add config dir if not in container
+
         if not self.container_id:
             context_parts.append(f"Директория конфигурации: {config_dir}")
 
         if context_path:
-            # If in container, we try to make the path relative to the workspace
             if self.container_id:
-                import os
-                from pathlib import Path
-                # If it's already relative, keep it. If absolute host path, try to convert.
                 if os.path.isabs(context_path):
                     host_wd = self.config.get_working_directory()
                     if context_path.startswith(host_wd):
@@ -170,31 +144,48 @@ class InstructionsBuilder:
                         absolute_path = (Path("/") / rel_path).as_posix()
                         context_path = rel_path
                     else:
-                        # Outside host workspace — strip leading slash to avoid leaking container paths
                         absolute_path = context_path.lstrip("/") or "/"
                         context_path = absolute_path
                 else:
                     absolute_path = (Path("/") / context_path).as_posix()
             else:
-                # Get absolute path if available (some configs may implement this)
                 absolute_path = context_path
-                if hasattr(self.config, 'get_absolute_path'):
-                    try:
-                        absolute_path = self.config.get_absolute_path(context_path)
-                    except Exception as e:
-                        logger.debug(
-                            "Failed to get absolute path",
-                            extra={"context_path": context_path, "error": str(e)},
-                        )
+                if hasattr(self.config, "get_absolute_path"):
+                    absolute_path = self.config.get_absolute_path(context_path)
 
-            context_parts.extend([
-                f"Контекстный путь: {context_path}",
-                f"Абсолютный контекстный путь: {absolute_path}"
-            ])
+            context_parts.extend(
+                [
+                    f"Контекстный путь: {context_path}",
+                    f"Абсолютный контекстный путь: {absolute_path}",
+                ]
+            )
 
-        context_parts.extend([
-            "",
-            "Используй эти пути для работы с файлами и директориями."
-        ])
+        context_parts.extend(
+            [
+                "",
+                "Используй эти пути для работы с файлами и директориями.",
+            ]
+        )
 
         return "\n".join(context_parts)
+
+    def _build_context_reference(self, context_id: Optional[str]) -> Optional[str]:
+        if not context_id:
+            return None
+        return (
+            f"Context reference: {context_id}. "
+            f'Always append the line "Контекст ID: {context_id}" '
+            "to every reply so humans or agents can return to this dialogue via that identifier."
+        )
+
+    def _get_base_sections(self, agent_key: str) -> list[PromptSection]:
+        if hasattr(self.config, "build_agent_prompt_sections"):
+            return list(self.config.build_agent_prompt_sections(agent_key))
+
+        return [
+            PromptSection(
+                key="base_prompt",
+                content=self.config.build_agent_prompt(agent_key),
+                scope="static",
+            )
+        ]

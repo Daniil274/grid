@@ -8,7 +8,7 @@ import logging
 import threading
 import sys
 import json
-from typing import List, Dict, Any, Optional, Protocol
+from typing import Callable, List, Dict, Any, Optional, Protocol
 from dotenv import load_dotenv
 import httpx
 from openai import AsyncOpenAI
@@ -43,10 +43,12 @@ from .config import Config
 from .context import ContextManager, safe_lock
 from schemas import AgentConfig, AgentExecution, ContextMessage
 from tools import get_tools_by_names
+from utils.cli_chat import CliChatRenderer
 from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
 from utils.path_utils import set_current_factory, reset_current_factory
 from core.tracing_config import get_tracing_config, ImmediateTraceProcessor
+from core.managers.instructions_builder import InstructionsBuilder
 from core.managers.skill_manager import SkillManager
 
 # Compact system integration
@@ -164,12 +166,40 @@ class AutoRunToolContext:
 class ConsoleStreamObserver:
     """Default stream observer that mirrors legacy console output."""
 
-    def __init__(self, output_writer=None) -> None:
+    def __init__(
+        self,
+        output_writer=None,
+        *,
+        render_text_deltas: bool = True,
+        text_callback: Optional[Callable[[str], None]] = None,
+        renderer: Optional[CliChatRenderer] = None,
+    ) -> None:
         self._write = output_writer or print
         self._logger = logging.getLogger("grid.agent_factory.stream")
+        self._render_text_deltas = render_text_deltas
+        self._text_callback = text_callback
+        self._renderer = renderer
 
     def _emit(self, message: str, *, end: str = "\n", flush: bool = False) -> None:
         self._write(message, end=end, flush=flush)
+
+    @staticmethod
+    def _format_args(arguments: Any) -> str:
+        if isinstance(arguments, str):
+            return arguments
+        if isinstance(arguments, dict):
+            parts = []
+            for key, value in arguments.items():
+                if isinstance(value, str) and len(value) > 60:
+                    parts.append(f"{key}=...({len(value)} chars)")
+                elif isinstance(value, (dict, list)):
+                    parts.append(f"{key}={type(value).__name__}({len(value)})")
+                else:
+                    parts.append(f"{key}={value}")
+            return " | ".join(parts)
+        if arguments is not None:
+            return str(arguments)
+        return ""
 
     def handle_event(self, event: Any, *, agent_key: Optional[str] = None) -> Optional[str]:
         try:
@@ -180,30 +210,15 @@ class ConsoleStreamObserver:
                     raw_item = getattr(item, "raw_item", None)
                     tool_name = getattr(raw_item, "name", None) or getattr(raw_item, "type", None) or "tool"
                     arguments = getattr(raw_item, "arguments", None)
-                    args_str = ""
-                    if isinstance(arguments, str):
-                        args_str = arguments
-                    elif isinstance(arguments, dict):
-                        parts = []
-                        for key, value in arguments.items():
-                            if isinstance(value, str) and len(value) > 60:
-                                parts.append(f"{key}=...({len(value)} символов)")
-                            elif isinstance(value, (dict, list)):
-                                parts.append(f"{key}={type(value).__name__}({len(value)})")
-                            else:
-                                parts.append(f"{key}={value}")
-                        args_str = " | ".join(parts)
-                    elif arguments is not None:
-                        args_str = str(arguments)
-
+                    args_str = self._format_args(arguments)
                     server_label = getattr(raw_item, "server_label", None)
                     tool_display_name = f"{server_label}.{tool_name}" if server_label else tool_name
-                    if args_str:
-                        self._emit(f"\n🔧 {tool_display_name} · {args_str}")
+                    if self._renderer:
+                        self._renderer.print_tool_call(tool_display_name, args_str)
+                    elif args_str:
+                        self._emit(f"\n[tool] {tool_display_name} | {args_str}")
                     else:
-                        self._emit(f"\n🔧 {tool_display_name}")
-                    
-                    # Log full tool call to verbose log
+                        self._emit(f"\n[tool] {tool_display_name}")
                     Logger("stream").log_verbose(f"STREAM TOOL CALL: {tool_display_name}", arguments)
 
                 elif name == "tool_output" and item is not None:
@@ -214,10 +229,11 @@ class ConsoleStreamObserver:
                     tool_display_name = f"{server_label}.{tool_name}" if server_label else tool_name
                     output_str = str(output_val)
                     if len(output_str) > 200:
-                        output_str = output_str[:200] + "…"
-                    self._emit(f"✅ {tool_display_name} → {output_str}")
-                    
-                    # Log full tool output to verbose log
+                        output_str = output_str[:200] + "..."
+                    if self._renderer:
+                        self._renderer.print_tool_output(tool_display_name, output_str)
+                    else:
+                        self._emit(f"[tool-result] {tool_display_name} -> {output_str}")
                     Logger("stream").log_verbose(f"STREAM TOOL OUTPUT: {tool_display_name}", output_val)
 
                 elif name == "handoff_requested" and item is not None:
@@ -225,19 +241,31 @@ class ConsoleStreamObserver:
                     src_name = getattr(src, "name", None) or agent_key or "agent"
                     raw_item = getattr(item, "raw_item", None)
                     target = getattr(raw_item, "name", None) or "agent"
-                    self._emit(f"\n🔀 {src_name} → {target}")
+                    if self._renderer:
+                        self._renderer.print_handoff(src_name, target)
+                    else:
+                        self._emit(f"\n[handoff] {src_name} -> {target}")
                 elif name == "handoff_occured" and item is not None:
                     src_agent = getattr(item, "source_agent", None)
                     dst_agent = getattr(item, "target_agent", None)
                     src_name = getattr(src_agent, "name", None) or "agent"
                     dst_name = getattr(dst_agent, "name", None) or "agent"
-                    self._emit(f"🔁 {src_name} ⇒ {dst_name}")
+                    if self._renderer:
+                        self._renderer.print_handoff(src_name, dst_name, completed=True)
+                    else:
+                        self._emit(f"[handoff-complete] {src_name} => {dst_name}")
                 elif name == "mcp_list_tools" and item is not None:
                     raw_item = getattr(item, "raw_item", None)
                     server_label = getattr(raw_item, "server_label", None) or "mcp"
                     tools = getattr(raw_item, "tools", None)
                     count = len(tools) if tools is not None else "?"
-                    self._emit(f"🧩 MCP {server_label}: {count} tool(s)")
+                    if self._renderer:
+                        self._renderer.print_status(
+                            f"MCP {server_label}: {count} tool(s)",
+                            style="bright_black",
+                        )
+                    else:
+                        self._emit(f"[mcp] {server_label}: {count} tool(s)")
             elif isinstance(event, RawResponsesStreamEvent):
                 content: Optional[str] = None
                 if hasattr(event, "content") and event.content:
@@ -258,7 +286,10 @@ class ConsoleStreamObserver:
                         content = data.get("content") or data.get("delta") or data.get("text")
 
                 if content and isinstance(content, str) and content.strip():
-                    self._emit(content, end="", flush=True)
+                    if self._text_callback:
+                        self._text_callback(content)
+                    if self._render_text_deltas:
+                        self._emit(content, end="", flush=True)
                     return content
         except Exception:
             self._logger.exception("Failed to render streaming event")
@@ -363,6 +394,12 @@ class AgentFactory:
                 persist_path="logs/context.json"  # Сохраняем контекст в файл для persistence
             )
             self.unified_memory = None
+
+        self.instructions_builder = InstructionsBuilder(
+            config=self.config,
+            context_manager=self.context_manager,
+            container_id=self.container_id,
+        )
 
         # Initialize SQLite-based memory store
         if memory_store is not None:
@@ -793,7 +830,11 @@ class AgentFactory:
                 )
             
             # Build instructions with context (включаем контекст диалога для агентов)
-            instructions = self._build_agent_instructions(agent_key, context_path, include_conversation_context=True)
+            instructions = self._build_agent_instructions(
+                agent_key,
+                context_path,
+                include_conversation_context=False,
+            )
             
             # Get tools (function and agent tools only; MCP tools handled via mcp_servers)
             tools = await self._get_agent_tools(agent_config)
@@ -1820,8 +1861,37 @@ class AgentFactory:
             
             # Не добавляем инструкции агента в диалог; сохраняем в metadata для служебного использования
             if not self.context_manager.get_conversation_context():
-                agent_instructions = self._build_agent_instructions(agent_key, context_path, include_conversation_context=False)
-                self.context_manager.set_metadata("agent_instructions", agent_instructions)
+                initial_instructions = self._build_agent_instructions(
+                    agent_key,
+                    context_path,
+                    include_conversation_context=False,
+                )
+                self.context_manager.set_metadata("agent_instructions", initial_instructions)
+                try:
+                    initial_context = self.instructions_builder.assemble_model_context(
+                        agent_key,
+                        context_path,
+                        include_conversation_context=False,
+                        include_path_context=True,
+                    )
+                    initial_payload = initial_context.to_debug_payload()
+                except Exception:
+                    initial_payload = {
+                        "context_id": active_context_id,
+                        "history_strategy": "none",
+                        "instruction_length": len(initial_instructions),
+                        "sections": [],
+                        "metadata": {
+                            "agent_key": agent_key,
+                            "context_path": context_path,
+                            "include_conversation_context": False,
+                            "include_path_context": True,
+                        },
+                    }
+                self.context_manager.set_metadata(
+                    "last_context_assembly",
+                    initial_payload,
+                )
             
             # For messages that need list format, get history BEFORE adding current message
             # (so we can prepend it to the input list)
@@ -1915,7 +1985,37 @@ class AgentFactory:
                  parsed_message = []
             
 
-            agent_instructions = self._build_agent_instructions(agent_key, context_path, include_conversation_context)
+            agent_instructions = self._build_agent_instructions(
+                agent_key,
+                context_path,
+                include_conversation_context=include_conversation_context,
+            )
+            try:
+                assembled_context = self.instructions_builder.assemble_model_context(
+                    agent_key,
+                    context_path,
+                    include_conversation_context=include_conversation_context,
+                    include_path_context=True,
+                )
+                context_payload = assembled_context.to_debug_payload()
+            except Exception:
+                context_payload = {
+                    "context_id": active_context_id,
+                    "history_strategy": "prompt" if include_conversation_context else "none",
+                    "instruction_length": len(agent_instructions),
+                    "sections": [],
+                    "metadata": {
+                        "agent_key": agent_key,
+                        "context_path": context_path,
+                        "include_conversation_context": include_conversation_context,
+                        "include_path_context": True,
+                    },
+                }
+            self.context_manager.set_metadata(
+                "last_context_assembly",
+                context_payload,
+            )
+            agent.instructions = agent_instructions
             
             # Log full prompt at startup (only once per agent per session)
             if agent_key not in self._logged_agents:
@@ -2366,6 +2466,18 @@ class AgentFactory:
         ])
         
         return "\n".join(context_parts)
+
+    def _legacy_build_agent_instructions(self, agent_key: str, context_path: Optional[str] = None, include_conversation_context: bool = True) -> str:
+        """Build complete agent instructions with context."""
+        return self.instructions_builder.build_agent_instructions(
+            agent_key,
+            context_path,
+            include_conversation_context=include_conversation_context,
+        )
+
+    def _legacy_build_path_context(self, context_path: Optional[str] = None) -> str:
+        """Build path context information."""
+        return self.instructions_builder.build_path_context(context_path)
 
     # ------------------------------------------------------------------
     # SDK exception helpers

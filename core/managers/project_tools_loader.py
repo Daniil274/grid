@@ -96,9 +96,29 @@ class ProjectToolsLoader:
             logger.debug(f"Loading module: {full_module_name} from {file_path}")
 
             # Импортируем модуль (переиспользуем из sys.modules чтобы не выполнять
-            # module-level код дважды — это ломает stderr/stdout wrappers на Windows)
-            if full_module_name in sys.modules:
-                module = sys.modules[full_module_name]
+            # module-level код дважды — это ломает stderr/stdout wrappers на Windows).
+            # НО: если в sys.modules уже лежит другой модуль с таким же именем
+            # (например Grid's own tools/file_tools.py vs example's tools/file_tools.py),
+            # используем уникальное имя чтобы избежать коллизии.
+            cached = sys.modules.get(full_module_name)
+            if cached is not None:
+                cached_file = getattr(cached, '__file__', None)
+                if cached_file and Path(cached_file).resolve() == file_path.resolve():
+                    module = cached  # Тот же файл — безопасно переиспользовать
+                else:
+                    # Коллизия с другим модулем — используем уникальное имя
+                    full_module_name = f"_project_tools_.{full_module_name}"
+                    cached = sys.modules.get(full_module_name)
+                    if cached is not None:
+                        module = cached
+                    else:
+                        spec = importlib.util.spec_from_file_location(full_module_name, file_path)
+                        if spec is None or spec.loader is None:
+                            logger.error(f"Failed to create spec for {full_module_name}")
+                            return
+                        module = importlib.util.module_from_spec(spec)
+                        sys.modules[full_module_name] = module
+                        spec.loader.exec_module(module)
             else:
                 spec = importlib.util.spec_from_file_location(full_module_name, file_path)
                 if spec is None or spec.loader is None:

@@ -263,6 +263,31 @@ class TestConfig:
         assert "Can write files." in prompt
         assert "Доступные инструменты:" in prompt
     
+    def test_build_agent_prompt_sections(self, config_file, sample_config):
+        """Test building structured prompt sections."""
+        sample_config["prompt_templates"] = {
+            "test_prompt": "Base prompt for test agent."
+        }
+        sample_config["tools"]["file_read"]["prompt_addition"] = "Can read files."
+        sample_config["tools"]["file_write"]["prompt_addition"] = "Can write files."
+
+        modified_config_file = config_file.parent / "sectioned_config.yaml"
+        with open(modified_config_file, 'w') as f:
+            yaml.dump(sample_config, f)
+
+        config = Config(str(modified_config_file))
+
+        sections = config.build_agent_prompt_sections("test_agent")
+
+        assert [section.key for section in sections] == [
+            "base_prompt",
+            "tool_capabilities",
+        ]
+        assert sections[0].scope == "static"
+        assert "Base prompt for test agent." in sections[0].content
+        assert "Can read files." in sections[1].content
+        assert "Can write files." in sections[1].content
+
     def test_build_agent_prompt_with_custom_prompt(self, config_file, sample_config):
         """Test building agent prompt with custom prompt."""
         sample_config["agents"]["test_agent"]["custom_prompt"] = "Custom prompt for agent."

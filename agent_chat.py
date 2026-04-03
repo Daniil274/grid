@@ -29,7 +29,7 @@ if sys.platform == "win32":
         pass
 
 from core.config import Config
-from core.agent_factory import AgentFactory
+from core.agent_factory import AgentFactory, ConsoleStreamObserver
 from core.compact import compact_conversation, CompactMessage, estimate_messages_tokens
 from schemas import ContextMessage
 try:
@@ -39,6 +39,7 @@ except Exception:
     ContainerManager = None
 from core.tracing_config import configure_tracing_from_env
 from utils.exceptions import GridError
+from utils.cli_chat import CliChatRenderer
 from utils.logger import Logger
 from utils.multimodal_converter import MultimodalConverter
 from utils.image_utils import ImageUtils
@@ -50,8 +51,8 @@ configure_tracing_from_env()
 Logger.configure(
     level="INFO",
     log_dir=str(Path(__file__).parent / "logs"),
-    enable_console=True,
-    enable_json=True,
+    enable_console=False,
+    enable_json=False,
     enable_legacy_logs=True,
     force_reconfigure=True,
 )
@@ -292,15 +293,26 @@ async def main():
         Logger.configure(
             level="INFO",
             log_dir=str(Path(__file__).parent / "logs"),
-            enable_console=agent_logging.enabled,
-            enable_json=True,
+            enable_console=False,
+            enable_json=False,
             enable_legacy_logs=agent_logging.enabled,
             force_reconfigure=True,
         )
 
+        chat_ui = CliChatRenderer(enabled=True)
+        stream_observer = ConsoleStreamObserver(
+            render_text_deltas=False,
+            renderer=chat_ui,
+        )
+
         # Create factory
         print("Initialize SecurityAwareAgentFactory")
-        factory = AgentFactory(config=config, working_directory=config.get_working_directory(), container_id=container_id)
+        factory = AgentFactory(
+            config=config,
+            working_directory=config.get_working_directory(),
+            container_id=container_id,
+            stream_observer=stream_observer,
+        )
         print("Initialize SecurityAwareAgentFactory - Фабрика агентов инициализирована")
         selected_context_id: Optional[str] = None
         last_context_id: Optional[str] = None
@@ -344,14 +356,11 @@ async def main():
         
         print("Grid Agent System готов к работе")
         
-        print("\n" + "="*60)
-        print("Grid Agent System")
-        print("="*60)
-        print(f"Агент: {agent_key}")
-        print(f"Рабочая директория: {config.get_working_directory()}")
-        if args.context_path:
-            print(f"Контекстный путь: {args.context_path}")
-        print("="*60)
+        chat_ui.print_banner(
+            agent_key=agent_key,
+            working_directory=config.get_working_directory(),
+            context_path=args.context_path,
+        )
         
         if args.message:
             # Single message mode
@@ -375,22 +384,20 @@ async def main():
                 # Prepare message for agent
                 agent_message = prepare_agent_message(text, image_paths)
 
-                # Track agent execution
-                print(f"Agent {agent_key} (agent: {agent_key})")
+                chat_ui.print_rule("Running")
+                chat_ui.print_user_message(text)
+                chat_ui.print_status(f"Agent: {agent_key}", style="cyan")
 
                 start_time = time.time()
-                use_streaming = True  # Включаем стриминг для режима одного сообщения
+                use_streaming = True
                 inline_context_id = extract_context_id_from_text(text)
                 request_context_id = inline_context_id or selected_context_id
-
-                # Если пользователь явно указал context_id, не используем use_active_context
                 use_active_context = request_context_id is None
 
-                # Отладочная информация
                 if request_context_id:
-                    print(f"Используем контекст: {request_context_id}")
+                    chat_ui.print_status(f"Context: {request_context_id}", style="bright_black")
                 else:
-                    print("Используем активный контекст")
+                    chat_ui.print_status("Context: active session", style="bright_black")
 
                 response = await factory.run_agent(
                     agent_key,
@@ -399,30 +406,16 @@ async def main():
                     context_id=request_context_id,
                     stream=use_streaming,
                     use_active_context=use_active_context,
-                    user_id=args.user_id if hasattr(args, 'user_id') else None
+                    user_id=args.user_id if hasattr(args, "user_id") else None
                 )
                 last_context_id = factory.get_active_context_id()
                 duration = time.time() - start_time
-                
-                # Try to get token usage information
-                token_usage = None
-                try:
-                    # Estimate token usage (approximation since we don't have direct access)
-                    # This is a rough estimate - in production you'd want to capture real usage
-                    estimated_prompt_tokens = len(args.message.split()) * 1.3  # rough estimate
-                    estimated_completion_tokens = len(response.split()) * 1.3
-                    
-                    # Try to get model from agent config
-                    agent_config = config.get_agent(agent_key)
-                    model_name = getattr(agent_config, 'model', 'unknown')
-                    
-                    # Token calculation removed
-                except Exception as e:
-                    pass  # Ignore token calculation errors
-                
-                print(f"\nОтвет сгенерирован ({duration:.2f}с, {len(response)} символов)")
 
-                print("Success")
+                chat_ui.print_rule(f"Response in {duration:.2f}s")
+                chat_ui.print_assistant_message(response, agent_name=agent_key)
+                if last_context_id:
+                    chat_ui.print_status(f"Context ID: {last_context_id}", style="bright_black")
+                    selected_context_id = last_context_id
                 
             except Exception as e:
                 print("Operation completed")
@@ -622,22 +615,18 @@ async def main():
 
                     # Process user message with beautiful logging
                     try:
-                        # Track execution with token counting
-                        print(f"Agent {agent_key} (agent: {agent_key})")
-
+                        chat_ui.print_rule("Running")
+                        chat_ui.print_user_message(text)
                         start_time = time.time()
-                        use_streaming = True  # Включаем стриминг для интерактивного режима
+                        use_streaming = True
                         inline_context_id = extract_context_id_from_text(text)
                         request_context_id = inline_context_id or selected_context_id
-
-                        # Если пользователь явно указал context_id, не используем use_active_context
                         use_active_context = request_context_id is None
 
-                        # Отладочная информация
                         if request_context_id:
-                            print(f"Используем контекст: {request_context_id}")
+                            chat_ui.print_status(f"Context: {request_context_id}", style="bright_black")
                         else:
-                            print("Используем активный контекст")
+                            chat_ui.print_status("Context: active session", style="bright_black")
 
                         response = await factory.run_agent(
                             agent_key,
@@ -646,33 +635,15 @@ async def main():
                             context_id=request_context_id,
                             stream=use_streaming,
                             use_active_context=use_active_context,
-                            user_id=args.user_id if hasattr(args, 'user_id') else None
+                            user_id=args.user_id if hasattr(args, "user_id") else None
                         )
                         last_context_id = factory.get_active_context_id()
                         duration = time.time() - start_time
-                        
-                        # Try to get token usage information
-                        token_usage = None
-                        try:
-                            estimated_prompt_tokens = len(user_input.split()) * 1.3
-                            estimated_completion_tokens = len(response.split()) * 1.3
-                            
-                            agent_config = config.get_agent(agent_key)
-                            model_name = getattr(agent_config, 'model', 'unknown')
-                            # Token calculation removed
-                        except Exception:
-                            pass
-                        
-                        print(f"\nОтвет получен ({duration:.2f}с, {len(response)} символов)")
-                        
-                        # При стриминге ответ уже выведен в реальном времени, добавляем только новую строку
-                        if use_streaming:
-                            print(f"\n")  # Добавляем новую строку после стримингового вывода
-                        else:
-                            print(f"\n{agent_key}: {response}")
+
+                        chat_ui.print_rule(f"Response in {duration:.2f}s")
+                        chat_ui.print_assistant_message(response, agent_name=agent_key)
                         if last_context_id:
-                            print(f"Context ID: {last_context_id}")
-                            # Обновляем selected_context_id для следующего вызова
+                            chat_ui.print_status(f"Context ID: {last_context_id}", style="bright_black")
                             selected_context_id = last_context_id
                         
                     except Exception as e:
