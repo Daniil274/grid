@@ -416,7 +416,25 @@ async def main():
                 if last_context_id:
                     chat_ui.print_status(f"Context ID: {last_context_id}", style="bright_black")
                     selected_context_id = last_context_id
-                
+
+                # Show token count in context
+                try:
+                    _msgs = factory.context_manager._conversation_history
+                    _tokens = estimate_messages_tokens(_context_to_compact_messages(_msgs)) if _msgs else 0
+                    try:
+                        _agent_cfg = config.get_agent(agent_key)
+                        _model_cfg = config.get_model(_agent_cfg.model)
+                        _ctx_window = getattr(_model_cfg, "context_window", None)
+                    except Exception:
+                        _ctx_window = None
+                    if _ctx_window:
+                        _pct = round(_tokens / max(1, _ctx_window) * 100, 1)
+                        chat_ui.print_status(f"Tokens: ~{_tokens:,} / {_ctx_window:,} ({_pct}%)", style="bright_black")
+                    else:
+                        chat_ui.print_status(f"Tokens: ~{_tokens:,}", style="bright_black")
+                except Exception:
+                    pass
+
             except Exception as e:
                 print("Operation completed")
                 print(f"Ошибка: {e}")
@@ -645,7 +663,25 @@ async def main():
                         if last_context_id:
                             chat_ui.print_status(f"Context ID: {last_context_id}", style="bright_black")
                             selected_context_id = last_context_id
-                        
+
+                        # Show token count in context
+                        try:
+                            _msgs = factory.context_manager._conversation_history
+                            _tokens = estimate_messages_tokens(_context_to_compact_messages(_msgs)) if _msgs else 0
+                            try:
+                                _agent_cfg = config.get_agent(agent_key)
+                                _model_cfg = config.get_model(_agent_cfg.model)
+                                _ctx_window = getattr(_model_cfg, "context_window", None)
+                            except Exception:
+                                _ctx_window = None
+                            if _ctx_window:
+                                _pct = round(_tokens / max(1, _ctx_window) * 100, 1)
+                                chat_ui.print_status(f"Tokens: ~{_tokens:,} / {_ctx_window:,} ({_pct}%)", style="bright_black")
+                            else:
+                                chat_ui.print_status(f"Tokens: ~{_tokens:,}", style="bright_black")
+                        except Exception:
+                            pass
+
                     except Exception as e:
                         print("Operation completed")
                         print(f"Ошибка: {e}")

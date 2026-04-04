@@ -59,7 +59,7 @@ class TestConfig:
         
         # Test get_working_directory
         working_dir = config.get_working_directory()
-        assert working_dir == "/tmp/test"
+        assert working_dir == os.path.abspath("/tmp/test")
         
         # Test set_working_directory (when allowed)
         new_dir = "/tmp/new_test"
@@ -89,18 +89,45 @@ class TestConfig:
         # Test with relative path
         relative_path = "test/file.txt"
         absolute_path = config.get_absolute_path(relative_path)
-        assert absolute_path == "/tmp/test/test/file.txt"
+        expected_path = (Path(config.get_working_directory()) / relative_path).as_posix()
+        assert absolute_path == expected_path
         
         # Test with already absolute path
-        abs_path = "/already/absolute/path.txt"
+        abs_path = str((Path(config.get_working_directory()) / "already_absolute_path.txt").resolve())
         result = config.get_absolute_path(abs_path)
-        assert result == abs_path
+        assert result == abs_path.replace('\\', '/')
     
     def test_get_config_directory(self, config_file):
         """Test get_config_directory method."""
         config = Config(str(config_file))
         config_dir = config.get_config_directory()
-        assert config_dir == "/tmp/config"
+        assert config_dir == os.path.abspath("/tmp/config")
+
+    def test_relative_working_directory_is_resolved_from_config_location(self, temp_dir, sample_config):
+        """Relative settings.working_directory should resolve from config.yaml directory."""
+        workspace_dir = temp_dir / "workspace"
+        workspace_dir.mkdir()
+        sample_config["settings"]["working_directory"] = "./workspace"
+        config_path = temp_dir / "relative_config.yaml"
+        with open(config_path, 'w') as f:
+            yaml.dump(sample_config, f)
+
+        config = Config(str(config_path))
+
+        assert config.get_working_directory() == str(workspace_dir.resolve())
+
+    def test_relative_config_directory_is_resolved_from_config_location(self, temp_dir, sample_config):
+        """Relative settings.config_directory should resolve from config.yaml directory."""
+        conf_dir = temp_dir / "conf"
+        conf_dir.mkdir()
+        sample_config["settings"]["config_directory"] = "./conf"
+        config_path = temp_dir / "relative_config_dir.yaml"
+        with open(config_path, 'w') as f:
+            yaml.dump(sample_config, f)
+
+        config = Config(str(config_path))
+
+        assert config.get_config_directory() == str(conf_dir.resolve())
     
     def test_provider_methods(self, config_file):
         """Test provider-related methods."""

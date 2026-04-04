@@ -36,6 +36,17 @@ class Config:
         self._cli_working_directory = working_directory
         self._working_directory = working_directory or os.getcwd()
         self._load_config()
+
+    def _resolve_config_relative_path(self, path: Optional[str]) -> Optional[str]:
+        """Resolve a config-defined path relative to the config file directory."""
+        if not path:
+            return path
+
+        raw_path = Path(path).expanduser()
+        if raw_path.is_absolute():
+            return str(raw_path.resolve(strict=False))
+
+        return str((self.config_path.parent.resolve() / raw_path).resolve(strict=False))
     
     def _load_config(self) -> None:
         """Load and validate configuration from YAML file."""
@@ -109,7 +120,7 @@ class Config:
             self._config = GridConfig(**raw_config)
 
             # Determine effective working directory
-            config_wd = self.config.settings.working_directory
+            config_wd = self._resolve_config_relative_path(self.config.settings.working_directory)
             allow_override = self.config.settings.allow_path_override
 
             if self._cli_working_directory:
@@ -240,7 +251,8 @@ class Config:
     
     def get_config_directory(self) -> str:
         """Get configuration directory."""
-        return self.config.settings.config_directory or str(self.config_path.parent)
+        config_dir = self._resolve_config_relative_path(self.config.settings.config_directory)
+        return config_dir or str(self.config_path.parent.resolve())
     
     def set_working_directory(self, path: str) -> None:
         """Set working directory if allowed."""
