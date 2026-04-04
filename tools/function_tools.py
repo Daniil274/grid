@@ -22,6 +22,8 @@ from .semantic_tools import SEMANTIC_TOOLS  # Semantic search: semantic_search_c
 from .history_tools import HISTORY_TOOLS  # Claude.ai chat history search
 from .semantic_memory_tools import SEMANTIC_MEMORY_TOOLS  # Hybrid semantic memory search
 from .evolution_tools import EVOLUTION_TOOLS  # Controlled self-improvement registry tools
+from .system_platform_tools import SYSTEM_PLATFORM_TOOLS  # System platform registry/runtime tools
+from .system_builder_tools import SYSTEM_BUILDER_TOOLS  # Live system-builder tools
 
 # ============================================================================
 # COMBINED TOOLS REGISTRY
@@ -56,6 +58,8 @@ AVAILABLE_TOOLS = {
     **SEMANTIC_MEMORY_TOOLS,  # Hybrid semantic memory search (1 tool)
     **SYSTEM_TOOLS,  # System introspection tools (7 tools)
     **EVOLUTION_TOOLS,  # Controlled self-improvement tools
+    **SYSTEM_PLATFORM_TOOLS,  # Self-organizing platform tools
+    **SYSTEM_BUILDER_TOOLS,  # Live builder loop tools
     **MOCK_TOOLS,  # Добавляем мок инструменты
 }
 
@@ -156,6 +160,19 @@ TOOL_ALIASES = {
     "improvement_reject": "reject_improvement_experiment",
     "improvement_canary": "run_improvement_canary",
     "improvement_monitor": "monitor_promoted_improvement",
+
+    # System platform tools
+    "list_systems": "system_list_systems",
+    "get_system_info": "system_get_system_info",
+    "get_system_versions": "system_get_system_versions",
+    "invoke_system": "system_invoke_system",
+    "create_system_version": "system_create_version",
+    "clone_system_version": "system_clone_version",
+    "mutate_system_version": "system_apply_mutations",
+    "promote_system_version": "system_promote_version",
+    "reject_system_version": "system_reject_version",
+    "rollback_system_stable": "system_rollback_stable",
+    "build_system_bundle": "system_build_bundle",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:

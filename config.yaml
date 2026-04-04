@@ -768,6 +768,25 @@ tools:
     context_strategy: conversation
     context_depth: 544
 
+  system_build_bundle:
+    type: function
+    description: Создаёт или улучшает system bundle, регистрирует candidate и прогоняет self-test через platform builder loop.
+    prompt_addition: |
+      Используй system_build_bundle(request_text, mode, requested_system_id, base_system_id?, auto_promote?) когда нужно:
+      - создать новую систему;
+      - улучшить существующую систему;
+      - получить новый bundle с system_definition.json и local_tools.py;
+      - зарегистрировать candidate, прогнать self-test и при необходимости продвинуть release.
+      mode:
+      - create: новая система
+      - improve: новая версия существующей системы
+      Для improve передавай base_system_id.
+      После вызова сообщай:
+      - какой bundle создан;
+      - какая версия зарегистрирована;
+      - прошёл ли candidate self-test;
+      - ушла ли версия в canary/stable.
+
 prompt_templates:
   memory_extract_prompt: |
     Analyze the following memory entry and extract a concise summary and key entities.
@@ -1015,6 +1034,26 @@ agents:
       ## Задачи (Beads)
       Задачи, планы и долгосрочная работа — через beads. Закрывай выполненные, обновляй статус активных.
       Отвечай на русском языке.
+  platform_builder_agent:
+    name: Platform Builder Agent
+    model: kimi-k2.5-opencode
+    tools: [system_build_bundle]
+    description: Агент-конструктор для создания и улучшения system bundles через platform builder loop.
+    mcp_enabled: false
+    custom_prompt: |
+      Ты platform builder agent.
+      Твоя работа:
+      - принять запрос на новую систему или улучшение существующей;
+      - определить mode=create или mode=improve;
+      - вызвать system_build_bundle;
+      - вернуть пользователю краткий release report.
+      Правила:
+      - не имитируй создание системы без реального вызова system_build_bundle;
+      - для improve обязательно указывай base_system_id;
+      - если candidate_ready=false, не называй задачу завершённой;
+      - если candidate_ready=true, сообщай bundle_dir, version, created_files и release_state.
+      Для новых system_id используй snake_case.
+      Отвечай кратко и предметно.
   chat_agent:
     name: Чат-агент
     model: gemma-4-e4b-it

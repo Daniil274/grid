@@ -7,6 +7,19 @@ from .file_tools import *
 from .git_tools import *
 from .markdown_tools import *
 from .orchestrator_tools import *
+from .system_platform_tools import (
+    system_list_systems,
+    system_get_system_info,
+    system_get_system_versions,
+    system_invoke_system,
+    system_create_version,
+    system_clone_version,
+    system_apply_mutations,
+    system_promote_version,
+    system_reject_version,
+    system_rollback_stable,
+)
+from .system_builder_tools import system_build_bundle
 from .input_tools import keyboard_type, keyboard_press, keyboard_hotkey
 from .screen_tools import take_screenshot
 from .emergency_tools import emergency_shutdown, get_pipeline_status
@@ -38,4 +51,9 @@ __all__ = [
     "read_markdown",
     # Orchestration tools
     "orchestrate",
+    # System platform tools
+    "system_list_systems", "system_get_system_info", "system_get_system_versions", "system_invoke_system",
+    "system_create_version", "system_clone_version", "system_apply_mutations",
+    "system_promote_version", "system_reject_version", "system_rollback_stable",
+    "system_build_bundle",
 ]
