@@ -10,6 +10,7 @@
 6. [Channels](channels.md)
 7. [Emergency Shutdown](emergency_shutdown.md)
 8. [Module Self-Improvement](improvement_module.md)
+9. [Platform Architecture](platform/index.md)
 
 ---
 
@@ -36,3 +37,5 @@ Core areas of the repository:
 
 Use [improvement_module.md](improvement_module.md) as the main entry point for
 the self-improvement subsystem.
+Use [platform/index.md](platform/index.md) as the main entry point for the new
+self-organizing system platform layer.

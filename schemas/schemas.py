@@ -138,6 +138,14 @@ class WindowConfig(BaseModel):
     model_config = {"extra": "ignore"}
 
 
+class PlatformConfig(BaseModel):
+    """Configuration for the self-organizing system platform."""
+    enabled: bool = False
+    registry_path: str = "data/system_registry.json"
+    pattern_registry_path: str = "data/pattern_registry.json"
+    default_actor_role: str = "builder_agent"
+
+
 class Settings(BaseModel):
     """Global system settings."""
     default_agent: str = "assistant"
@@ -171,6 +179,7 @@ class Settings(BaseModel):
         default=None,
         description="Прокси для всех исходящих запросов (API, Telegram). Пример: http://127.0.0.1:10809"
     )
+    platform: PlatformConfig = Field(default_factory=PlatformConfig)
     serial: Optional[SerialConfig] = Field(
         default=None,
         description="Настройки serial для ISKOR: количество попыток на команду и таймаут после команды"
