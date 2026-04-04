@@ -29,6 +29,10 @@ import httpx
 
 from core.unified_memory import UnifiedMemory
 from core.memory_store import MemoryStore
+from examples.telegram_bot.telegram_progress_observer import (
+    CompositeStreamObserver,
+    TelegramProgressObserver,
+)
 
 # Опциональные импорты
 try:
@@ -61,6 +65,7 @@ TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 @dataclass
 class BridgeConfig:
     """Конфигурация TelegramBridge"""
+    config_path: Path
     telegram_token: str
     workspace_path: Path
     persist_path: Path
@@ -127,7 +132,7 @@ class TelegramBridge:
             try:
                 from core.config import Config
                 # Load global config to check isolation settings
-                cfg = Config(config_path="config.yaml")
+                cfg = Config(config_path=str(self.config.config_path))
                 self.container_manager = ContainerManager(cfg)
                 if self.container_manager.enabled:
                     logger.info("🐳 Container isolation enabled")
@@ -180,7 +185,10 @@ class TelegramBridge:
             from core.config import Config
 
             # Загружаем config.yaml, но жёстко переопределяем working_directory на user workspace.
-            cfg = Config(config_path="config.yaml", working_directory=str(user_workspace))
+            cfg = Config(
+                config_path=str(self.config.config_path),
+                working_directory=str(user_workspace),
+            )
             factory = AgentFactory(
                 config=cfg,
                 working_directory=str(user_workspace),
@@ -271,7 +279,7 @@ class TelegramBridge:
 
         try:
             import yaml
-            with open("config.yaml", "r", encoding="utf-8") as f:
+            with open(self.config.config_path, "r", encoding="utf-8") as f:
                 cfg_data = yaml.safe_load(f)
             voice_cfg = cfg_data.get("voice", {})
             if not voice_cfg.get("enabled", False):
@@ -937,6 +945,7 @@ class TelegramBridge:
 
             # Запустить агента
             user_factory = self._get_user_agent_factory(user_id)
+            progress_observer = None
             if not user_factory:
                 response = "⚠️ AgentFactory недоступен. Система работает в ограниченном режиме."
             else:
@@ -973,16 +982,39 @@ class TelegramBridge:
                     else:
                         message_with_context = message_text
 
+                    stream_observer = None
+                    if self.config.enable_transparency:
+                        progress_observer = TelegramProgressObserver(
+                            bot=self.app.bot,
+                            chat_id=chat_id,
+                            message_id=status_message.message_id,
+                            agent_label=agent_key,
+                            update_interval=self.config.progress_update_interval,
+                            show_tool_calls=self.config.show_tool_calls,
+                        )
+                        stream_observer = CompositeStreamObserver(
+                            getattr(user_factory, "_stream_observer", None),
+                            progress_observer,
+                        )
+
                     response = await user_factory.run_agent(
                         agent_key=agent_key,
                         message=message_with_context,
                         use_active_context=False,
                         user_id=str(user_id),
                         stream=True,
+                        stream_observer=stream_observer,
                     )
                 except Exception as agent_error:
                     logger.error(f"Ошибка запуска агента: {agent_error}")
                     logger.error(traceback.format_exc())
+                    if progress_observer:
+                        try:
+                            await progress_observer.close(final_status="failed")
+                        except Exception as finalize_error:
+                            logger.debug(
+                                f"Failed to finalize Telegram progress observer after agent error: {finalize_error}"
+                            )
                     response = f"❌ Ошибка при выполнении запроса:\n\n{str(agent_error)}"
 
             # Сохранить ответ в контекст чата
@@ -995,9 +1027,18 @@ class TelegramBridge:
             # Сохранить ответ в память пользователя
             user_memory.add_message("assistant", response)
 
+            if progress_observer:
+                try:
+                    await progress_observer.close(final_status="completed")
+                except Exception as finalize_error:
+                    logger.debug(
+                        f"Failed to finalize Telegram progress observer after success: {finalize_error}"
+                    )
+
             # Удалить сообщение о статусе
             try:
-                await self.app.bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
+                if not progress_observer:
+                    await self.app.bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
             except Exception as e:
                 logger.debug(f"Не удалось удалить статусное сообщение: {e}")
 

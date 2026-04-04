@@ -56,7 +56,7 @@ def _resolve_inside_working_dir(file_path: str, working_dir: Path, container_id:
     point inside the working directory (a leaked host path).
     """
     normalized = (file_path or ".").replace("\\", "/")
-    if normalized in ("", ".", "/", "/workspace"):
+    if normalized in ("", ".", "/"):
         return working_dir
 
     # Accept leaked absolute host paths only if they still point inside working_dir.
@@ -65,10 +65,7 @@ def _resolve_inside_working_dir(file_path: str, working_dir: Path, container_id:
         if _is_within(working_dir, host_candidate):
             return host_candidate
 
-        if container_id and normalized.startswith("/workspace/"):
-            relative_part = normalized[len("/workspace/"):]
-        else:
-            relative_part = normalized.lstrip("/")
+        relative_part = normalized.lstrip("/")
         candidate = (working_dir / relative_part).resolve()
     else:
         candidate = (working_dir / file_path).resolve()
@@ -194,8 +191,6 @@ def sanitize_text_for_agent(text: str, factory: Any) -> str:
         sanitized = sanitized.replace(variant + "/", "./")
         sanitized = sanitized.replace(variant, ".")
 
-    sanitized = sanitized.replace("/workspace/", "./")
-    sanitized = sanitized.replace("/workspace", ".")
     return sanitized
 
 

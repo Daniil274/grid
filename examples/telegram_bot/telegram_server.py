@@ -91,11 +91,28 @@ logger = setup_logging()
 class TelegramServer:
     """Главный сервер для Telegram бота"""
 
-    def __init__(self, config_path: Path):
+    def __init__(self, config_path: Path, working_directory_override: Optional[str] = None):
         self.config_path = config_path
+        self.working_directory_override = working_directory_override
         self.bridge: Optional[TelegramBridge] = None
         self.shutdown_event = asyncio.Event()
         self._shutdown_requested = False
+
+    @staticmethod
+    def _resolve_cli_path(path_value: str) -> Path:
+        """Resolve a CLI path relative to the current shell working directory."""
+        path = Path(path_value).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path.resolve(strict=False)
+
+    @staticmethod
+    def _resolve_config_path_value(path_value: str, config_dir: Path) -> Path:
+        """Resolve a config-defined path relative to config.yaml."""
+        path = Path(path_value).expanduser()
+        if not path.is_absolute():
+            path = config_dir / path
+        return path.resolve(strict=False)
 
     def load_config(self) -> BridgeConfig:
         """Загрузка конфигурации из YAML файла"""
@@ -110,6 +127,7 @@ class TelegramServer:
 
             # Извлечь параметры telegram
             telegram_config = config_data.get('telegram', {})
+            settings_config = config_data.get('settings', {}) or {}
             if not telegram_config:
                 raise ValueError("Секция 'telegram' не найдена в конфигурации")
 
@@ -122,12 +140,34 @@ class TelegramServer:
             # Получить пути. Относительные пути привязываем к директории config.yaml,
             # а не к текущему cwd процесса.
             config_dir = self.config_path.parent.resolve()
-            workspace_path = Path(telegram_config.get('workspace_path', './workspace'))
-            persist_path = Path(telegram_config.get('persist_path', './data'))
-            if not workspace_path.is_absolute():
-                workspace_path = config_dir / workspace_path
-            if not persist_path.is_absolute():
-                persist_path = config_dir / persist_path
+            configured_working_directory = settings_config.get('working_directory') if 'working_directory' in settings_config else None
+            configured_workspace_path = telegram_config.get('workspace_path')
+
+            if self.working_directory_override:
+                workspace_path = self._resolve_cli_path(self.working_directory_override)
+                workspace_source = '--working-directory'
+            elif configured_working_directory:
+                workspace_path = self._resolve_config_path_value(configured_working_directory, config_dir)
+                workspace_source = 'settings.working_directory'
+            else:
+                workspace_path = self._resolve_config_path_value(
+                    configured_workspace_path or './workspace',
+                    config_dir,
+                )
+                workspace_source = 'telegram.workspace_path'
+
+            persist_path = self._resolve_config_path_value(
+                telegram_config.get('persist_path', './data'),
+                config_dir,
+            )
+
+            if configured_working_directory and configured_workspace_path:
+                resolved_telegram_workspace = self._resolve_config_path_value(configured_workspace_path, config_dir)
+                if resolved_telegram_workspace != workspace_path and workspace_source == 'settings.working_directory':
+                    logger.info(
+                        "Telegram workspace_path differs from settings.working_directory; "
+                        "using settings.working_directory for agent workspace base"
+                    )
 
             # Создать директории если не существуют
             workspace_path.mkdir(parents=True, exist_ok=True)
@@ -148,6 +188,7 @@ class TelegramServer:
 
             # Создать BridgeConfig
             bridge_config = BridgeConfig(
+                config_path=self.config_path.resolve(),
                 telegram_token=telegram_token,
                 workspace_path=workspace_path,
                 persist_path=persist_path,
@@ -162,6 +203,7 @@ class TelegramServer:
 
             logger.info("✅ Конфигурация успешно загружена")
             logger.info(f"   Workspace: {workspace_path}")
+            logger.info(f"   Workspace source: {workspace_source}")
             logger.info(f"   Persist: {persist_path}")
             logger.info(f"   Transparency: {'enabled' if bridge_config.enable_transparency else 'disabled'}")
             logger.info(f"   Tool calls logging: {'enabled' if bridge_config.show_tool_calls else 'disabled'}")
@@ -248,6 +290,12 @@ def main():
         help='Уровень логирования (по умолчанию: INFO)'
     )
 
+    parser.add_argument(
+        '--working-directory',
+        type=str,
+        help='Переопределить базовую рабочую директорию для Telegram user workspaces'
+    )
+
     args = parser.parse_args()
 
     # Установить уровень логирования
@@ -255,7 +303,7 @@ def main():
 
     # Создать сервер
     config_path = Path(args.config)
-    server = TelegramServer(config_path)
+    server = TelegramServer(config_path, working_directory_override=args.working_directory)
 
     # Регистрация обработчиков сигналов для graceful shutdown
     signal.signal(signal.SIGINT, server.handle_shutdown_signal)
