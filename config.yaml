@@ -5,10 +5,10 @@ settings:
   agent_timeout: 600
   debug: false
   max_tool_output_tokens: 8000
-  mcp_enabled: true
+  mcp_enabled: false
   working_directory: .
   config_directory: .
-  logs_directory: D:/Work/repo/agents_portable/logs
+  logs_directory: logs
   allow_path_override: true
   agent_logging:
     enabled: true
@@ -16,11 +16,8 @@ settings:
     save_prompts: true
     save_conversations: true
     save_executions: true
-    tools_common_rules: |
-      Всегда выполняй операции с файлами через инструменты и возвращай их результаты.
-      Запрещено утверждать создание/изменение файла без вызова инструмента.
   project_tools:
-    enabled: true
+    enabled: false
     tools_directory: examples/telegram_bot
   image_processing:
     enabled: true
@@ -30,7 +27,7 @@ settings:
     max_file_size_mb: 10
     jpeg_quality: 85
 isolation:
-  enabled: true
+  enabled: false
   type: docker
   image: grid-agent:latest
 compact:
@@ -59,7 +56,7 @@ telegram:
   memory_commands_enabled: true
   enable_transparency: false
   show_tool_calls: false
-  allowed_users: null
+  allowed_users:
   max_concurrent_tasks_per_user: 1
   progress_update_interval: 2.0
 voice:
@@ -74,12 +71,6 @@ voice:
     sample_rate: 48000
   reply_with_voice: true
 providers:
-  lm-studio:
-    name: lm-studio
-    base_url: http://192.168.3.2:1234/v1
-    api_key: lm-studio
-    timeout: 300
-    max_retries: 3
   openrouter:
     name: openrouter
     base_url: https://openrouter.ai/api/v1
@@ -87,33 +78,10 @@ providers:
     timeout: 300
     max_retries: 3
     streaming_enabled: true
-  anthropic:
-    name: anthropic
-    base_url: https://api.anthropic.com/v1/
-    api_key_env: ANTHROPIC_API_KEY
-    timeout: 300
-    max_retries: 3
-    streaming_enabled: true
-  hf:
-    name: hf
-    base_url: https://router.huggingface.co/v1
-    api_key_env: HF_API_KEY
-    timeout: 300
-    max_retries: 3
-    streaming_enabled: true
-
-  github:
-    name: github
-    base_url: https://models.github.ai/inference
-    api_key_env: GH_API_KEY
-    timeout: 300
-    max_retries: 3
-    streaming_enabled: true
-
   opencode:
     name: opencode
     base_url: https://opencode.ai/zen/go/v1
-    api_key_env: "OPENCODE_API_KEY"    
+    api_key_env: "OPENCODE_API_KEY"
     timeout: 300
     max_retries: 3
     streaming_enabled: true
@@ -132,59 +100,6 @@ models:
     description: Gemini 3.1 Lite модель
     streaming_enabled: true
     capabilities: ["vision", "text", "code"]
-
-  gemma-4-e4b-it:
-    name: gemma-4-e4b-it
-    provider: lm-studio
-    temperature: 0.7
-    max_tokens: 8192
-    context_window: 22000
-    description: Gemma 4 E4B IT модель
-    streaming_enabled: true
-    capabilities: ["vision", "text", "code"]
-
-  gemma-4-31b-it:
-    name: google/gemma-4-31b-it
-    provider: openrouter
-    temperature: 0.7
-    max_tokens: 8192
-    context_window: 22000
-    description: Gemma 4 31B IT модель
-    streaming_enabled: true
-    capabilities: ["vision", "text", "code"]
-
-  kimi-k2.5:
-    name: moonshotai/kimi-k2.5
-    provider: openrouter
-    temperature: 0.7
-    max_tokens: 8192
-    description: Kimi K2.5 модель
-    streaming_enabled: true
-
-  qwen-3.6-plus:
-    name: qwen/qwen3.6-plus-preview:free
-    provider: openrouter
-    temperature: 0.7
-    max_tokens: 8192
-    description: Qwen 3.5 397b модель
-    streaming_enabled: true
-
-  mistral-large:
-    name: mistralai/mistral-large-2512
-    provider: openrouter
-    temperature: 0.7
-    max_tokens: 8192
-    description: Mistral Large 2512 модель
-    streaming_enabled: true
-
-  grok-4.1-fast:
-    name: x-ai/grok-4.1-fast
-    provider: openrouter
-    temperature: 0.7
-    max_tokens: 8000
-    description: Grok 4.1 Fast модель
-    streaming_enabled: true
-
   glm-4.7-flash:
     name: z-ai/glm-4.7-flash:turbo
     provider: openrouter
@@ -193,119 +108,12 @@ models:
     description: GLM 4.7 Flash модель
     streaming_enabled: true
     capabilities: ["vision", "text", "code"]
-
-  glm-4.7-flash-local:
-    name: z-ai/glm-4.7-flash:turbo
-    provider: lm-studio
-    temperature: 0.7
-    max_tokens: 8000
-    description: GLM 4.7 Flash модель
-    streaming_enabled: true
-    capabilities: ["vision", "text", "code"]
-
-  glm-5:
-    name: z-ai/glm-5:friendli
-    provider: openrouter
-    temperature: 0.7
-    max_tokens: 8000
-    description: GLM 5 модель
-    streaming_enabled: true
-    capabilities: ["vision", "text", "code"]
-    
   gpt-5.4-nano:
     name: openai/gpt-5.4-nano
     provider: openrouter
     temperature: 0.7
     max_tokens: 8192
     description: OpenAI GPT-5.4 Nano
-
-  openai-oss-120b:
-    name: openai/gpt-oss-120b
-    provider: openrouter
-    temperature: 0.7
-    max_tokens: 8192
-    description: OpenAI OSS 120b модель
-
-  minimax-m2.7:
-    name: minimax/minimax-m2.7
-    provider: openrouter
-    temperature: 0.5
-    max_tokens: 8000
-    description: Minimax M2.5 модель
-
-  qwen3.5-9b:
-    name: qwen_qwen3.5-9b
-    provider: lm-studio
-    temperature: 0.3
-    max_tokens: 8000
-    description: qwen3.5-9b
-    streaming_enabled: true
-
-  qwen3.5-4b:
-    name: qwen_qwen3.5-4b
-    provider: lm-studio
-    temperature: 0.3
-    max_tokens: 8000
-    description: qwen3.5-4b
-    streaming_enabled: true
-  
-  qwen3.5-9b-hf:
-    name: meta-llama/Llama-3.2-3B-Instruct:hf-inference
-    provider: hf
-    temperature: 0.3
-    max_tokens: 8000
-    description: qwen3.5-9b
-    streaming_enabled: true
-
-  o4-mini:
-    name: openai/o4-mini
-    provider: github
-    temperature: 1
-    max_tokens: 4000
-    description: o4-mini
-    streaming_enabled: true
-
-  mercury-2:
-    name: inception/mercury-2
-    provider: openrouter
-    temperature: 0.5
-    max_tokens: 8000
-    description: Mercury 2 - диффузионная модель
-    streaming_enabled: true
-
-  gpt-5.4:
-    name: openai/gpt-5.4
-    provider: openrouter
-    temperature: 0.5
-    max_tokens: 8000
-    description: GPT-5.4 модель
-    streaming_enabled: true
-    capabilities: ["vision", "text", "code"]
-
-  sonnet:
-    name: claude-sonnet-4-6
-    provider: anthropic
-    temperature: 0.5
-    max_tokens: 4000
-    description: Sonnet модель
-    streaming_enabled: true
-    capabilities: ["vision", "text", "code"]
-
-  hunter-alpha:
-    name: openrouter/hunter-alpha
-    provider: openrouter
-    temperature: 0.5
-    max_tokens: 8000
-    description: Hunter Alpha модель
-    streaming_enabled: true
-
-  grok-4.20-beta:
-    name: x-ai/grok-4.20-beta
-    provider: openrouter
-    temperature: 0.5
-    max_tokens: 4000
-    description: Grok 4.20 Beta модель
-    streaming_enabled: true
 
   healer-alpha:
     name: openrouter/healer-alpha
@@ -315,36 +123,6 @@ models:
     description: Healer Alpha модель
     streaming_enabled: true
     capabilities: ["vision", "text", "code"]
-
-  nemotron-3:
-    name: nvidia/nemotron-3-super-120b-a12b
-    provider: openrouter
-    temperature: 0.5
-    max_tokens: 4000
-    description: Mistral Large модель
-    streaming_enabled: true
-
-  mimo:
-    name: xiaomi/mimo-v2-pro
-    provider: openrouter
-    temperature: 0.5
-    max_tokens: 4000
-    description: Xiaomi модель
-    streaming_enabled: true
-
-  glm-5-hf:
-    name: zai-org/GLM-5
-    provider: hf
-    temperature: 1
-    max_tokens: 8000
-    description: Z-AI GLM-5
-    streaming_enabled: true
-
-  embed-default:
-    name: perplexity/pplx-embed-v1-4b
-    provider: openrouter
-    description: embedding модель
-
   kimi-k2.5-opencode:
     name: kimi-k2.5
     provider: opencode
@@ -382,22 +160,18 @@ improvement:
   canary_window_minutes: 30
   allowed_change_types: ["tests", "logging", "refactor", "diagnostics"]
   allowed_paths:
-    - core/
-    - tools/
-    - schemas/
-    - tests/
-    - docs/
-    - plans/
+  - core/
+  - tools/
+  - schemas/
+  - tests/
+  - docs/
+  - plans/
   allowed_config_keys:
-    - settings.default_agent
-    - settings.max_history
-    - settings.max_turns
-    - settings.agent_timeout
-    - agents.chat_agent.model
-    - agents.chat_agent.tools
-    - agents.coordinator.model
-    - agents.coordinator.tools
-    - providers.hf.base_url
+  - settings.default_agent
+  - agents.chat_agent.model
+  - agents.chat_agent.tools
+  - agents.coordinator.model
+  - agents.coordinator.tools
 
 checkers:
   default_audit:
@@ -420,9 +194,6 @@ tools:
   file_write:
     type: function
     description: Записывает содержимое в файл.
-  file_append:
-    type: function
-    description: Добавляет текст в конец файла.
   file_edit_patch:
     type: function
     description: Редактирует файл с помощью патча в формате unified diff.
@@ -432,36 +203,13 @@ tools:
   get_file_info:
     type: function
     description: Информация о файле.
-  file_info:
-    type: function
-    description: Информация о файле (размер, строки, расширение).
   list_files:
     type: function
     description: Инструмент для получения списка файлов в директории.
   pdf:
     type: function
-    description: Рендерит страницы PDF в PNG, сохраняет их в pdf_output и возвращает как изображения
-  pdf-ocr:
-    type: function
-    description: Выполняет OCR по страницам PDF и возвращает структурированный текст/изображения
-  get_screenshot_ocr:
-    type: function
-    description: Извлекает текст из скриншота монитора
-  read_markdown:
-    type: function
-    description: Читает Markdown файлы с изображениями
-  markdown_to_html:
-    type: function
-    description: Конвертирует Markdown в HTML файл
-  markdown_to_pdf:
-    type: function
-    description: Конвертирует Markdown в PDF файл
-  save_report:
-    type: function
-    description: Сохраняет отчет в указанном формате
-  merge_reports:
-    type: function
-    description: Объединяет несколько отчетов в один
+    description: Рендерит страницы PDF в PNG, сохраняет их в pdf_output и 
+      возвращает как изображения
   memory_save:
     type: function
     description: Save information to memory
@@ -488,26 +236,30 @@ tools:
     description: Удалить навык по имени
   search_tools:
     type: function
-    description: Найти доступные инструменты по имени/описанию с учётом модальностей модели
+    description: Найти доступные инструменты по имени/описанию с учётом 
+      модальностей модели
   search_skills:
     type: function
     description: Поиск навыков в БД по тексту и тегам (кросс-агентный)
   semantic_search:
     type: function
-    description: Семантический поиск по кодовой базе (по смыслу, не по ключевым словам)
+    description: Семантический поиск по кодовой базе (по смыслу, не по ключевым 
+      словам)
     prompt_addition: |
       Используй semantic_search_code(query, directory) для поиска кода по смыслу запроса.
       Если индекс пустой — сначала вызови index_codebase(directory).
       После индексации повторная индексация не нужна до значительного изменения кода.
   index_codebase:
     type: function
-    description: Индексирует файлы кодовой базы в векторное хранилище для semantic_search
+    description: Индексирует файлы кодовой базы в векторное хранилище для 
+      semantic_search
     prompt_addition: |
       Используй index_codebase(directory, file_extensions) перед первым semantic_search.
       file_extensions по умолчанию покрывает .py, .js, .ts и другие языки.
   semantic_memory_search:
     type: function
-    description: Hybrid vector+keyword search over memory by MEANING, not just keywords
+    description: Hybrid vector+keyword search over memory by MEANING, not just 
+      keywords
     prompt_addition: |
       Use semantic_memory_search(query) instead of memory_search when searching by CONCEPT:
       - When exact keywords are unknown ("how did I solve the audio issue")
@@ -517,7 +269,8 @@ tools:
 
   claude_history_search:
     type: function
-    description: Search personal Claude.ai chat history for past discussions and solutions
+    description: Search personal Claude.ai chat history for past discussions and
+      solutions
     prompt_addition: |
       Use claude_history_search(query) to recall past decisions, solutions, or context
       from the user's previous Claude.ai conversations. Useful when the user references
@@ -543,10 +296,6 @@ tools:
     type: "function"
     description: "Детальная информация об инструменте: параметры, описание"
 
-  system_get_skills:
-    type: "function"
-    description: "Список доступных скиллов (баз знаний)"
-
   system_help:
     type: "function"
     description: "Справка по системе: архитектура, агенты, инструменты, память"
@@ -565,23 +314,28 @@ tools:
 
   create_improvement_experiment:
     type: function
-    description: Create a controlled experiment for an approved improvement problem
+    description: Create a controlled experiment for an approved improvement 
+      problem
 
   propose_config_experiment:
     type: function
-    description: Create a bounded config-diff experiment from an observed improvement problem
+    description: Create a bounded config-diff experiment from an observed 
+      improvement problem
 
   evaluate_improvement_experiment:
     type: function
-    description: Run benchmark evaluation for an improvement experiment and store scorecards
+    description: Run benchmark evaluation for an improvement experiment and 
+      store scorecards
 
   run_improvement_canary:
     type: function
-    description: Run canary benchmark for an experiment and promote or roll back automatically
+    description: Run canary benchmark for an experiment and promote or roll back
+      automatically
 
   monitor_promoted_improvement:
     type: function
-    description: Run post-promotion benchmark and roll back automatically on regression
+    description: Run post-promotion benchmark and roll back automatically on 
+      regression
 
   record_requirement_review:
     type: function
@@ -599,33 +353,20 @@ tools:
     type: function
     description: Reject an experiment and preserve the rejection reason
 
-  keyboard_type:
-    type: function
-    description: Печатает текст как на клавиатуре
-  keyboard_press:
-    type: function
-    description: Нажимает одну или несколько клавиш (hotkey)
-  keyboard_hotkey:
-    type: function
-    description: Нажимает комбинацию клавиш одновременно
-  take_screenshot:
-    type: function
-    description: Делает скриншот всего экрана и сохраняет в файл
   view_image:
     type: function
     description: View and analyze an image with vision model
-  analyze_screenshot:
-    type: function
-    description: Analyze UI screenshot
   crop_image:
     type: function
     description: Crop an image to a specific region
   beads_init:
     type: function
-    description: Initialize beads (bd) in the given directory. Idempotent; safe if already initialized.
+    description: Initialize beads (bd) in the given directory. Idempotent; safe 
+      if already initialized.
   beads_ready:
     type: function
-    description: List beads tasks that are ready to be worked on (no open blockers)
+    description: List beads tasks that are ready to be worked on (no open 
+      blockers)
   beads_list:
     type: function
     description: List beads tasks with optional filters and pagination
@@ -647,15 +388,10 @@ tools:
   beads_dep:
     type: function
     description: Manage dependencies between beads
-  beads_log_append:
-    type: function
-    description: Append a single entry to a shared, append-only JSONL log (inside .beads/shared_log/).
-  beads_log_read:
-    type: function
-    description: Read ONLY new log data for (channel, reader) since the last read (cursor-based).
   send_voice_reply:
     type: function
-    description: Синтезирует речь из текста и отправляет голосовое сообщение пользователю в Telegram
+    description: Синтезирует речь из текста и отправляет голосовое сообщение 
+      пользователю в Telegram
     prompt_addition: |
       Используй send_voice_reply(text, speaker) чтобы ответить пользователю голосом.
       По умолчанию отвечай в том же формате, в каком пользователь написал тебе:
@@ -665,49 +401,22 @@ tools:
       Голоса: xenia (женский, по умолч.), aidar, kseniya, baya, eugene.
   send_voice_ssml:
     type: function
-    description: Синтезирует речь из SSML-разметки и отправляет голосовое сообщение в Telegram
+    description: Синтезирует речь из SSML-разметки и отправляет голосовое 
+      сообщение в Telegram
     prompt_addition: |
       Используй send_voice_ssml(ssml_text, speaker) для выразительного голосового ответа с SSML.
       SSML позволяет управлять темпом, тоном и паузами:
         <speak><p><prosody rate="slow">медленно</prosody></p><break time="500ms"/>текст</speak>
       Теги: <speak>, <p>, <s>, <break time="Xms"/>, <prosody rate="slow|fast">, <prosody pitch="high|low">
       Голоса: xenia (по умолч.), aidar, kseniya, baya, eugene.
-  terminal:
-    type: mcp
-    server_command: [npx, '@dillip285/mcp-terminal']
-    add_working_directory: true
-    description: MCP сервер для выполнения команд терминала
-    prompt_addition: Используй execute_command для выполнения команд в терминале.
-  filesystem:
-    type: mcp
-    server_command: [npx, '@modelcontextprotocol/server-filesystem']
-    add_working_directory: true
-    description: MCP сервер для работы с файловой системой (ограничен рабочей директорией)
-    prompt_addition: Используй filesystem для доступа к файловой системе.
-  sequentialthinking:
-    type: mcp
-    server_command: [npx, '@modelcontextprotocol/server-sequential-thinking']
-    description: MCP сервер для последовательного мышления
-    prompt_addition: ВАЖНО!!! ВСЕГДА Используй sequential thinking для анализа, планирования задачи. Вызывай его перед выполнением любой задачи.
-  file_agent:
-    type: agent
-    name: call_file_agent
-    description: Вызывает файлового агента для работы с файлами
-    prompt_addition: Используй call_file_agent(task) для задач по работе с файлами, где task - это задача, которую должен выполнить файловый агент.  Используй unified diff для редактирования файлов.
-    context_strategy: conversation
-    context_depth: 5
-    include_tool_history: true
-  task_analyst:
-    type: agent
-    name: call_task_analyst
-    description: Вызывает аналитика задач для анализа задач и составления плана действий.
-    prompt_addition: ВСЕГДА ВЫЗЫВАЙ call_code_agent(task) для помощи в составлении плана действий. task - это задача, которую нужно решить с полным контекстом и списком досткупных тебе инструментов. БЕЗ ПРЕДОСТАВЛЕНИЯ ПОЛНОГО КОНТЕКСТА И СПИСКА ДОСТУПНЫХ ИНСТРУМЕНТОВ АНАЛИТИК НЕ ПОМОЖЕТ!!! НЕ вызывай другие инструменты до вызова аналитика.
-    context_strategy: full
   code_agent:
     type: agent
     name: call_code_agent
-    description: Вызывает кодового агента для работы с кодом и программированием.
-    prompt_addition: Всегда call_code_agent(task) для задач, связанных с кодом или с файлами кода. task - это задача, которую должен решить кодовый агент с путем к файлу, директории или репозиторию и подробным описанием задачи.
+    description: Вызывает кодового агента для работы с кодом и 
+      программированием.
+    prompt_addition: Всегда call_code_agent(task) для задач, связанных с кодом 
+      или с файлами кода. task - это задача, которую должен решить кодовый агент
+      с путем к файлу, директории или репозиторию и подробным описанием задачи.
   system_agent:
     type: agent
     name: call_system_agent
@@ -716,23 +425,6 @@ tools:
       Use call_system_agent(task) when the task is about system versions, candidate releases,
       cross-system discovery, platform registry access, or promotion gates.
       Include the target system id, expected validation flow, and the exact release outcome you need.
-  coordinator:
-    type: agent
-    name: call_coordinator
-    description: Вызывает координатора для планирования и решения задачи.
-    prompt_addition: |
-      Вызывай call_coordinator(task) для планирования и решения комплексных задач.
-      Где task - это задача, которую нужно решить и контекст задачи.
-      Используй call_coordinator как координатора подзадачи, а не как способ просто переслать текст дальше.
-      Перед вызовом подготовь для него четкую область ответственности:
-      - какая именно подзадача ему поручена;
-      - какой bead_id или набор bead_id он должен использовать;
-      - формат отчета который он должен вернуть ТЕБЕ в ответе после исполнения задачи;
-      - какой минимальный релевантный контекст ему действительно нужен.
-      Сначала оцени стоимость контекста. Если дочернему координатору нужен почти весь контекст родителя, такое делегирование плохое.
-      Сначала ужми контекст до короткого handoff packet, и только потом вызывай call_coordinator.
-      Не вызывай call_coordinator для атомарных задач, которые можно решить прямым orchestrate() или рабочим инструментом.
-      Не создавай бесконечную цепочку координаторов: если подзадача уже достаточно узкая, дочерний координатор должен запускать исполнителей или инструменты, а не нового координатора.
   doc_analyzer:
     type: agent
     name: call_doc_analyzer
@@ -740,97 +432,85 @@ tools:
     prompt_addition: |
       Используй call_doc_analyzer(task) для анализа изображений, PDF и markdown документов.
       task - это задача с указанием пути файла и что нужно найти/проанализировать.
-  context_wrapper:
-    type: agent
-    name: call_context_wrapper
-    description: Вызывает сборщика контекста для управления контекстом и взаимодействия с агентами.
-    prompt_addition: Используй call_context_wrapper(task) для получения контекста по кодовой базе. task - это задача для которой требуется контекст.
-  debugger:
-    type: agent
-    name: call_debugger
-    description: Вызывает отладчика для отладки кода
-    prompt_addition: Используй call_debugger(task) для запуска программ и отладки кода.
-  orchestrator:
-    type: agent
-    name: orchestrator
-    description: Запускает динамический пайплайн.
-    prompt_addition: |
-      Используй orchestrator(task) когда нужно создать агента на лету для решения задачи.
-  orchestrate:
-    type: function
-    name: orchestrate
-    description: Запускает динамический пайплайн (создает агента на лету)
-    env_vars:
-      DEFAULT_MODEL: gpt-5.4-nano
-    prompt_addition: |
-      Используй orchestrate(task, agent_system_prompt, executor_tools) когда нужно создать агента на лету для решения задачи.
-      task: четкая задача для выполнения (строка).
-      agent_system_prompt: системный промпт для агента. Опиши роль, стиль и правила поведения. Набор инструментов и как ими пользоваться.
-      executor_tools: список инструментов (например ["terminal", "beads_show", "beads_update"]).
-      Пример: orchestrate(task="Напиши скрипт...", agent_system_prompt="Ты Senior Python Developer...", executor_tools=["terminal", "beads_show", "beads_update"])
   memory_agent:
     type: agent
     name: call_memory_agent
     description: Вызывает агента памяти для работы с долгосрочной памятью
-    prompt_addition: 'Используй call_memory_agent(task) для работы с памятью: сохранение важной информации, поиск в памяти, работа с дневными заметками. task - это задача для агента памяти.'
+    prompt_addition: 'Используй call_memory_agent(task) для работы с памятью: сохранение
+      важной информации, поиск в памяти, работа с дневными заметками. task - это задача
+      для агента памяти.'
     context_strategy: conversation
     context_depth: 544
 
-  system_build_bundle:
+  system_create_version:
     type: function
-    description: Создаёт или улучшает system bundle, регистрирует candidate и прогоняет self-test через platform builder loop.
+    description: Регистрирует новую версию системы из полного JSON-определения SystemDefinition.
     prompt_addition: |
-      Используй system_build_bundle(request_text, mode, requested_system_id, base_system_id?, auto_promote?) когда нужно:
-      - создать новую систему;
-      - улучшить существующую систему;
-      - получить новый bundle с system_definition.json и local_tools.py;
-      - зарегистрировать candidate, прогнать self-test и при необходимости продвинуть release.
-      mode:
-      - create: новая система
-      - improve: новая версия существующей системы
-      Для improve передавай base_system_id.
-      После вызова сообщай:
-      - какой bundle создан;
-      - какая версия зарегистрирована;
-      - прошёл ли candidate self-test;
-      - ушла ли версия в canary/stable.
+      Используй system_create_version(definition_json, status?, actor_role?, created_by?) чтобы:
+      - зарегистрировать новую систему или новую version существующей;
+      - definition_json — полный JSON объект SystemDefinition:
+          {
+            "system_id": "my-system",
+            "version": "1.0.0",
+            "entrypoint": "имя_узла",
+            "interface": {"input_schema": "...", "output_schema": "..."},
+            "nodes": {
+              "узел1": {"type": "agent_node", "agent_ref": "agents.chat_agent", "title": "..."},
+              "узел2": {"type": "tool_node", "tool_ref": "tools.beads_init", "title": "..."}
+            },
+            "edges": [{"from": "узел1", "to": "узел2"}]
+          }
+      - status по умолчанию="candidate"; после валидации вызови system_promote_version.
+      Не делегируй создание определения другому агенту — составляй definition_json сам на основе
+      прочитанных файлов (file_read, file_list) и задачи пользователя.
 
   system_list_systems:
     type: function
     description: Lists registered systems in the platform registry.
-    prompt_addition: Use system_list_systems() before choosing a target system or dependency.
+    prompt_addition: Use system_list_systems() before choosing a target system 
+      or dependency.
   system_get_system_info:
     type: function
-    description: Reads manifest and optional definition details for a registered system.
-    prompt_addition: Use system_get_system_info(system_id, include_definition?) before planning mutations or integrations.
+    description: Reads manifest and optional definition details for a registered
+      system.
+    prompt_addition: Use system_get_system_info(system_id, include_definition?) 
+      before planning mutations or integrations.
   system_get_system_versions:
     type: function
     description: Lists all known versions for a registered system.
-    prompt_addition: Use system_get_system_versions(system_id) to inspect candidate, canary, and stable history.
+    prompt_addition: Use system_get_system_versions(system_id) to inspect 
+      candidate, canary, and stable history.
   system_invoke_system:
     type: function
     description: Invokes another registered system through the platform runtime.
-    prompt_addition: Use system_invoke_system(system_id, input_payload_json, channel?, version?) to call peer systems by contract.
+    prompt_addition: Use system_invoke_system(system_id, input_payload_json, 
+      channel?, version?) to call peer systems by contract.
   system_clone_version:
     type: function
     description: Clones an existing system version into a new candidate version.
-    prompt_addition: Use system_clone_version(system_id, new_version, source_version?, source_channel?) to start immutable version changes.
+    prompt_addition: Use system_clone_version(system_id, new_version, 
+      source_version?, source_channel?) to start immutable version changes.
   system_apply_mutations:
     type: function
     description: Applies bounded system mutations and registers a new version.
-    prompt_addition: Use system_apply_mutations(system_id, mutations_json, new_version, source_version?, source_channel?) instead of editing raw config text.
+    prompt_addition: Use system_apply_mutations(system_id, mutations_json, 
+      new_version, source_version?, source_channel?) instead of editing raw 
+      config text.
   system_promote_version:
     type: function
     description: Moves a system version into canary or stable.
-    prompt_addition: Use system_promote_version(system_id, version, target_channel, expected_current?) only after validation passes.
+    prompt_addition: Use system_promote_version(system_id, version, 
+      target_channel, expected_current?) only after validation passes.
   system_reject_version:
     type: function
     description: Rejects a candidate or canary system version.
-    prompt_addition: Use system_reject_version(system_id, version) when a candidate fails validation.
+    prompt_addition: Use system_reject_version(system_id, version) when a 
+      candidate fails validation.
   system_rollback_stable:
     type: function
     description: Rolls back the stable channel to a previous version.
-    prompt_addition: Use system_rollback_stable(system_id, rollback_to_version) if a promoted version regresses.
+    prompt_addition: Use system_rollback_stable(system_id, rollback_to_version) 
+      if a promoted version regresses.
 
 prompt_templates:
   memory_extract_prompt: |
@@ -873,8 +553,6 @@ prompt_templates:
   code_agent_prompt: |
     Ты старший инженер-программист. Пишешь надёжный, читаемый, хорошо структурированный код.
     Не используется напрямую — промпт агента задан в agents.code_agent.custom_prompt.
-  coordinator_prompt: |
-    Не используется. Промпт координатора задан в agents.coordinator.custom_prompt.
   debugger_prompt: |
     Ты отладчик. Твоя задача — отлаживать код и выполнять задачи связанные с запуском программ.
     Перед каждым шагом и вызовом инструмента используй sequential thinking для анализа и планирования.
@@ -883,22 +561,22 @@ agents:
     name: Кодовый агент
     model: kimi-k2.5-opencode
     tools:
-      - file_read
-      - file_write
-      - file_edit_patch
-      - file_list
-      - get_file_info
-      - memory_save
-      - memory_search
-      - memory_delete
-      - semantic_search
-      - index_codebase
-      - skill_save
-      - skill_read
-      - skill_search
-      - system_get_system_info
-      - system_get_system_versions
-      - system_agent
+    - file_read
+    - file_write
+    - file_edit_patch
+    - file_list
+    - get_file_info
+    - memory_save
+    - memory_search
+    - memory_delete
+    - semantic_search
+    - index_codebase
+    - skill_save
+    - skill_read
+    - skill_search
+    - system_get_system_info
+    - system_get_system_versions
+    - system_agent
     description: Специалист по программированию, анализу и рефакторингу кода
     mcp_enabled: false
     verifier: default_audit
@@ -950,117 +628,51 @@ agents:
       - Отвечай на языке задачи.
   system_agent:
     name: System Agent
-    model: gpt-5.4-nano
-    tools: [system_list_systems, system_get_system_info, system_get_system_versions, system_invoke_system, system_clone_version, system_apply_mutations, system_build_bundle, system_promote_version, system_reject_version, system_rollback_stable, code_agent, memory_search, skill_search]
+    model: kimi-k2.5-opencode
+    tools: [file_read, file_write, file_edit_patch, file_list, get_file_info, 
+        system_list_systems, system_get_system_info, system_get_system_versions, 
+        system_invoke_system, system_clone_version, system_apply_mutations, 
+        system_create_version, system_promote_version, system_reject_version, 
+        system_rollback_stable, code_agent, memory_search, skill_search]
     base_prompt: base
-    description: Агент платформенного самоулучшения, работающий только через системные и агентские инструменты.
+    description: Агент платформенного самоулучшения, работающий только через 
+      системные и агентские инструменты.
     custom_prompt: |
       Ты system-agent платформы.
       Твоя роль:
-      - анализировать текстовый запрос пользователя на изменение системы;
-      - находить существующие системы и их версии через platform tools;
-      - готовить candidate-изменения только через инструменты платформы;
-      - вызывать code_agent только как инструмент для изменений кода, тестов и анализа реализации;
-      - вызывать другие системы только через system_invoke_system;
-      - не придумывать скрытые каналы связи между системами и агентами.
+      - анализировать запрос пользователя и самостоятельно собирать контекст через file_read и file_list;
+      - проектировать SystemDefinition (граф узлов) и регистрировать её через system_create_version;
+      - находить существующие системы через system_list_systems, system_get_system_info;
+      - вызывать code_agent только для изменений кода/тестов в реализации;
+      - вызывать другие системы только через system_invoke_system.
 
       Жесткие правила:
-      1. Не реализуй логику системы внутри ответа. Все действия над системами выполняй только через system_* tools.
-      2. Не считай, что тебе доступны внутренности другой системы. Для доступа используй только system_get_system_info, system_get_system_versions и system_invoke_system.
-      3. Для выпуска новой версии используй immutable flow: inspect -> clone/apply/build -> validate -> promote/reject.
-      4. Если нужно менять код агентской платформы или инструменты, формулируй четкую задачу и делегируй ее в code_agent.
-      5. Перед promotion обязательно фиксируй, что пользователь должен протестировать candidate до финального закрепления.
-      6. Если в запросе не указан target system, сначала определи его через registry tools и только потом планируй изменения.
+      1. НЕ делегируй создание SystemDefinition внутрь инструментов или вложенных агентов — составляй
+         definition_json САМА на основе прочитанных файлов и задачи пользователя.
+      2. Для создания новой системы:
+         а) Прочти нужные файлы-примеры (file_read, file_list);
+         б) Составь definition_json самостоятельно;
+         в) Вызови system_create_version(definition_json, status="candidate");
+         г) После проверки вызови system_promote_version(system_id, version, "stable").
+      3. Для изменения существующей системы используй immutable flow:
+         system_clone_version → system_apply_mutations → system_create_version → promote/reject.
+      4. Не считай, что тебе доступны внутренности другой системы без явного чтения.
+      5. Не придумывай скрытые каналы — только system_invoke_system для вызова других систем.
+
+      Структура SystemDefinition (nodes — граф, edges — поток):
+      - agent_node: {"type": "agent_node", "agent_ref": "agents.<key>", "title": "..."}
+      - tool_node:  {"type": "tool_node",  "tool_ref": "tools.<name>",  "title": "..."}
+      entrypoint должен быть одним из ключей nodes.
 
       Ожидаемый результат:
       - краткий план изменений;
-      - какие инструменты и системы были задействованы;
+      - какие инструменты задействованы;
       - какая candidate-версия выпущена;
-      - что именно должен проверить пользователь перед stable promotion.
-  orchestrator:
-    name: Оркестратор
-    model: glm-4.7-flash
-    tools: [coordinator]
-    base_prompt: orchestrator_prompt
-    verifier: default_audit
-    custom_prompt: |
-      Ты — мета-оркестратор многоагентной системы. Твоя задача: создавать агентов на для эффективного решения задач.
-      ## Главные принципы
-      - Всегда отвечай на русском.
-      - Перед активными действиями: уточни недостающие требования, если без них риск ошибки высокий.
-      - Используй orchestrate(), чтобы создать специализированного агента.
-      - Инструменты вызывай только для уточнений и проверки выполнения задачи агентом.
-      - Ты можешь заранее скомпилировать целый пайплайн в одном ответе и затем не участвовать в его исполнении.
-      - Между уже запланированными шагами ты НЕ думаешь повторно: зависимости должны быть выражены через beads, context_id и другие внешние артефакты.
-      ## Стратегия работы (по умолчанию)
-      1) План: пиши исчерпывающий план действий на несколько шагов вперед и корректируй по мере выполнения.
-      2) Декомпозиция: выдели подзадачи (контекст/анализ/реализация/проверка).
-      3) Исполнение:
-      Всегда добавляй информацию о инструментах, которые будут доступны агенту в виде ключ:название_функции  (например: "filesystem:read_file", "filesystem:write_file", "terminal:execute_command").
-      -используй orchestrate(task=..., agent_system_prompt="...", executor_tools=[...]).
-         - task: Четко сформулированная цель/задача.
-         - agent_system_prompt: Системный промпт агента, подробное описание его роли с упором на качества и поведение, которые позволят выполнить задачу.
-         - executor_tools: дай агенту только нужные инструменты.
-         ВАЖНО: В executor_tools передавай ТОЛЬКО КЛЮЧИ инструментов из конфигурации (например: "filesystem", "git", "terminal"), а НЕ названия функций (не используй "read_file", "execute_command" и т.д.).
-         Пример: executor_tools=["filesystem", "terminal"] - ПРАВИЛЬНО. executor_tools=["read_file", "run_command"] - ОШИБКА.
-      4) Контроль качества:
-         - Проверяй, что результат соответствует цели и ограничениям.
-      ## Формат ответа пользователю
-      - Итог: коротко что сделано/решено.
-      - Детали: ключевые решения и почему.
-  coordinator:
-    name: Координатор
-    model: kimi-k2.5-opencode
-    tools: ["filesystem", "terminal", "orchestrate", "memory_save", "memory_search", "memory_delete", "beads_ready", "beads_list", "beads_create", "beads_show", "beads_update", "beads_close", "beads_sync", "beads_dep", "beads_init", "beads_log_append", "beads_log_read", "skill_save", "skill_search", "skill_read", "skill_update", "skill_delete", "search_tools", "search_skills"]
-    auto_run_tools:
-    - name: beads_init
-      parameters:
-        directory: ${working_directory}
-    - name: beads_ready
-      parameters:
-        directory: ${working_directory}
-    custom_prompt: |
-      Ты координатор. Архитектор решений, не исполнитель. Декомпозируешь задачи на конвейеры агентов и верифицируешь результат.
-      # 1. РАЗВЕДКА > ПЛАН > ПОДТВЕРЖДЕНИЕ > ИСПОЛНЕНИЕ
-      ## Фаза 1: Разведка (вызовы инструментов разрешены)
-      Изучи задачу, историю проекта, доступные возможности и текущее состояние через инструменты поиска, памяти, трекера задач и агентов для сбора контекста в файловой системе.
-      Оцени: тривиальная (ответь сам) или нетривиальная (нужен конвейер агентов).
-      ## Фаза 2: План (покажи пользователю)
-      ## План
-      **Задача:** ...
-      **Шаги:** 1. ... 2. ...
-      **Паттерн:** A|B|C **Инструменты агентов:** ... **Риски:** ...
-      Дождись подтверждения. Правки = скорректируй и покажи снова.
-      ## Фаза 3: Подготовка (после подтверждения)
-      Создай задачи в трекере ДО запуска агентов. Установи зависимости между задачами. Сожми контекст в handoff packets.
-      ## Фаза 4: Исполнение
-      Порождай агентов через инструмент оркестрации — последовательно (depth-first serial subtree). Между шагами нет reasoning-loop — зависимости только через трекер задач, файлы, память.
-      ## Фаза 5: Верификация
-      Прочитай итоги задач из трекера. Верификатор != исполнитель. Закрой задачи в трекере + отчёт пользователю.
-      # 2. BEADS — ШИНА ДАННЫХ МЕЖДУ АГЕНТАМИ
-      Агенты не видят друг друга. Единственный канал передачи данных — задачи в трекере (beads).
-      Протокол: координатор создаёт задачу в трекере > передаёт её ID агенту > агент читает задачу, выполняет работу, записывает результат в notes > следующий агент читает notes из того же bead.
-      Промпт агента должен содержать: роль, bead_id, инструкцию прочитать задачу из трекера, выполнить работу, записать результат.
-      executor_tools: инструменты чтения/записи трекера + рабочие инструменты. Передавай только ключи инструментов из конфигурации.
-      # 3. ПАТТЕРНЫ КОНВЕЙЕРОВ
-      **A — Цепочка:** bead > исполнитель > верификатор > close
-      **B — С контекстом:** bead_ctx + bead_impl > сборщик > исполнитель > верификатор > close
-      **C — Fan-out:** bead_A + bead_B > агент_A + агент_B > объединитель > close
-      # 4. КОНТЕКСТ И ДЕЛЕГИРОВАНИЕ
-      init_tools: предзагрузка контекста агенту до старта. Передавай список инструментов и параметров для сбора контекста.
-      Handoff packet: GOAL + SCOPE + INPUTS + OUTPUTS + DONE CRITERIA + LIMITS. Передавай bead_id и резюме, не весь контекст.
-      call_coordinator: только для подзадач из 2+ шагов с чёткой границей. Передавай контракт (роль, bead_id, ожидаемый выход), не историю рассуждений.
-      Глубина вложенности: max 3. Чем дороже контекст — тем меньше глубина.
-      # 5. ЗНАНИЯ И ОБНАРУЖЕНИЕ
-      Используй инструменты долгосрочной памяти для хранения ключевых фактов и решений.
-      Используй инструменты поиска навыков и инструментов для обнаружения возможностей системы перед планированием.
-      # 6. ОШИБКИ
-      Агент упал: прочитай задачу из трекера, проанализируй notes, скорректируй промпт/инструменты, перезапусти. Противоречия: агент-арбитр с обоими bead_id.
-      # 7. ЗАПРЕЩЕНО
-      Агент без bead_id или без инструментов чтения/записи трекера. orchestrate() до создания задач в трекере. Повтор без изменения промпта. Весь контекст родителя в дочернюю ветку. Зависимость между шагами через рассуждения вместо трекера/файлов. call_coordinator для атомарных задач. Задача без пути к файлу/директории.
+      - что проверить перед stable promotion.
+
   doc_analyzer:
     name: Анализатор документов
-    model: healer-alpha
+    model: kimi-k2.5-opencode
     tools: [pdf, list_files, file_read, view_image, crop_image, get_file_info]
     base_prompt: base
     description: Агент для анализа, конвертации и создания отчетов из документов
@@ -1087,7 +699,9 @@ agents:
   memory_agent:
     name: Агент памяти
     model: glm-4.7-flash
-    tools: [memory_save, memory_search, memory_delete, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep]
+    tools: [memory_save, memory_search, memory_delete, beads_ready, beads_list, 
+        beads_create, beads_show, beads_update, beads_close, beads_sync, 
+        beads_dep]
     description: Специалист по управлению памятью системы
     custom_prompt: |
       Ты агент памяти. Твоя миссия — поддерживать живую, актуальную и хорошо структурированную базу знаний системы.
@@ -1111,30 +725,20 @@ agents:
       ## Задачи (Beads)
       Задачи, планы и долгосрочная работа — через beads. Закрывай выполненные, обновляй статус активных.
       Отвечай на русском языке.
-  platform_builder_agent:
-    name: Platform Builder Agent
-    model: kimi-k2.5-opencode
-    tools: [system_build_bundle]
-    description: Агент-конструктор для создания и улучшения system bundles через platform builder loop.
-    mcp_enabled: false
-    custom_prompt: |
-      Ты platform builder agent.
-      Твоя работа:
-      - принять запрос на новую систему или улучшение существующей;
-      - определить mode=create или mode=improve;
-      - вызвать system_build_bundle;
-      - вернуть пользователю краткий release report.
-      Правила:
-      - не имитируй создание системы без реального вызова system_build_bundle;
-      - для improve обязательно указывай base_system_id;
-      - если candidate_ready=false, не называй задачу завершённой;
-      - если candidate_ready=true, сообщай bundle_dir, version, created_files и release_state.
-      Для новых system_id используй snake_case.
-      Отвечай кратко и предметно.
   chat_agent:
     name: Чат-агент
-    model: glm-5-opencode
-    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, skill_update, skill_delete, search_tools, search_skills, claude_history_search, semantic_memory_search, system_agent, "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context", "create_improvement_problem", "list_improvement_problems", "create_improvement_experiment", "propose_config_experiment", "evaluate_improvement_experiment", "run_improvement_canary", "monitor_promoted_improvement", "record_requirement_review", "record_final_review", "promote_improvement_experiment", "reject_improvement_experiment"]
+    model: kimi-k2.5-opencode
+    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, 
+        doc_analyzer, beads_init, beads_ready, beads_list, beads_create, 
+        beads_show, beads_update, beads_close, beads_sync, beads_dep, 
+        send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, 
+        skill_update, skill_delete, search_tools, search_skills, 
+        claude_history_search, semantic_memory_search, system_agent, "system_list_agents",
+      "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help",
+      "system_get_context", "create_improvement_problem", "list_improvement_problems",
+      "create_improvement_experiment", "propose_config_experiment", "evaluate_improvement_experiment",
+      "run_improvement_canary", "monitor_promoted_improvement", "record_requirement_review",
+      "record_final_review", "promote_improvement_experiment", "reject_improvement_experiment"]
     auto_run_tools:
 
     - name: beads_init
@@ -1167,8 +771,7 @@ agents:
       1. Анализируй запрос пользователя
       2. Для планирования и комплексных задач используй beads (beads_ready, beads_show и т.д.)
       3. Для анализа изображений и документов - делегируй doc_analyzer
-      4. Для комплексных задач - делегируй coordinator
-      5. Сохраняй всю полученную информацию в память.
+      4. Сохраняй всю полученную информацию в память.
       Правила работы с памятью:
       1. Используй memory_search как основной способ вспомнить предпочтения пользователя, прошлые решения, ограничения и релевантный контекст.
       2. Сначала ищи в памяти, потом действуй. Не делегируй memory_agent, если достаточно memory_search.
