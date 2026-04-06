@@ -117,3 +117,4 @@ data/
 scripts/
 *.bak
 plans/
+.beads/

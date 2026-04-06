@@ -708,6 +708,14 @@ tools:
     name: call_code_agent
     description: Вызывает кодового агента для работы с кодом и программированием.
     prompt_addition: Всегда call_code_agent(task) для задач, связанных с кодом или с файлами кода. task - это задача, которую должен решить кодовый агент с путем к файлу, директории или репозиторию и подробным описанием задачи.
+  system_agent:
+    type: agent
+    name: call_system_agent
+    description: Delegates platform-system lifecycle work to the system agent.
+    prompt_addition: |
+      Use call_system_agent(task) when the task is about system versions, candidate releases,
+      cross-system discovery, platform registry access, or promotion gates.
+      Include the target system id, expected validation flow, and the exact release outcome you need.
   coordinator:
     type: agent
     name: call_coordinator
@@ -787,6 +795,43 @@ tools:
       - прошёл ли candidate self-test;
       - ушла ли версия в canary/stable.
 
+  system_list_systems:
+    type: function
+    description: Lists registered systems in the platform registry.
+    prompt_addition: Use system_list_systems() before choosing a target system or dependency.
+  system_get_system_info:
+    type: function
+    description: Reads manifest and optional definition details for a registered system.
+    prompt_addition: Use system_get_system_info(system_id, include_definition?) before planning mutations or integrations.
+  system_get_system_versions:
+    type: function
+    description: Lists all known versions for a registered system.
+    prompt_addition: Use system_get_system_versions(system_id) to inspect candidate, canary, and stable history.
+  system_invoke_system:
+    type: function
+    description: Invokes another registered system through the platform runtime.
+    prompt_addition: Use system_invoke_system(system_id, input_payload_json, channel?, version?) to call peer systems by contract.
+  system_clone_version:
+    type: function
+    description: Clones an existing system version into a new candidate version.
+    prompt_addition: Use system_clone_version(system_id, new_version, source_version?, source_channel?) to start immutable version changes.
+  system_apply_mutations:
+    type: function
+    description: Applies bounded system mutations and registers a new version.
+    prompt_addition: Use system_apply_mutations(system_id, mutations_json, new_version, source_version?, source_channel?) instead of editing raw config text.
+  system_promote_version:
+    type: function
+    description: Moves a system version into canary or stable.
+    prompt_addition: Use system_promote_version(system_id, version, target_channel, expected_current?) only after validation passes.
+  system_reject_version:
+    type: function
+    description: Rejects a candidate or canary system version.
+    prompt_addition: Use system_reject_version(system_id, version) when a candidate fails validation.
+  system_rollback_stable:
+    type: function
+    description: Rolls back the stable channel to a previous version.
+    prompt_addition: Use system_rollback_stable(system_id, rollback_to_version) if a promoted version regresses.
+
 prompt_templates:
   memory_extract_prompt: |
     Analyze the following memory entry and extract a concise summary and key entities.
@@ -851,6 +896,9 @@ agents:
       - skill_save
       - skill_read
       - skill_search
+      - system_get_system_info
+      - system_get_system_versions
+      - system_agent
     description: Специалист по программированию, анализу и рефакторингу кода
     mcp_enabled: false
     verifier: default_audit
@@ -900,6 +948,35 @@ agents:
       - Укажи файлы, которые изменены.
       - Если запускались тесты — приведи результат.
       - Отвечай на языке задачи.
+  system_agent:
+    name: System Agent
+    model: gpt-5.4-nano
+    tools: [system_list_systems, system_get_system_info, system_get_system_versions, system_invoke_system, system_clone_version, system_apply_mutations, system_build_bundle, system_promote_version, system_reject_version, system_rollback_stable, code_agent, memory_search, skill_search]
+    base_prompt: base
+    description: Агент платформенного самоулучшения, работающий только через системные и агентские инструменты.
+    custom_prompt: |
+      Ты system-agent платформы.
+      Твоя роль:
+      - анализировать текстовый запрос пользователя на изменение системы;
+      - находить существующие системы и их версии через platform tools;
+      - готовить candidate-изменения только через инструменты платформы;
+      - вызывать code_agent только как инструмент для изменений кода, тестов и анализа реализации;
+      - вызывать другие системы только через system_invoke_system;
+      - не придумывать скрытые каналы связи между системами и агентами.
+
+      Жесткие правила:
+      1. Не реализуй логику системы внутри ответа. Все действия над системами выполняй только через system_* tools.
+      2. Не считай, что тебе доступны внутренности другой системы. Для доступа используй только system_get_system_info, system_get_system_versions и system_invoke_system.
+      3. Для выпуска новой версии используй immutable flow: inspect -> clone/apply/build -> validate -> promote/reject.
+      4. Если нужно менять код агентской платформы или инструменты, формулируй четкую задачу и делегируй ее в code_agent.
+      5. Перед promotion обязательно фиксируй, что пользователь должен протестировать candidate до финального закрепления.
+      6. Если в запросе не указан target system, сначала определи его через registry tools и только потом планируй изменения.
+
+      Ожидаемый результат:
+      - краткий план изменений;
+      - какие инструменты и системы были задействованы;
+      - какая candidate-версия выпущена;
+      - что именно должен проверить пользователь перед stable promotion.
   orchestrator:
     name: Оркестратор
     model: glm-4.7-flash
@@ -1056,8 +1133,8 @@ agents:
       Отвечай кратко и предметно.
   chat_agent:
     name: Чат-агент
-    model: gemma-4-e4b-it
-    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, skill_update, skill_delete, search_tools, search_skills, claude_history_search, semantic_memory_search, "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context", "create_improvement_problem", "list_improvement_problems", "create_improvement_experiment", "propose_config_experiment", "evaluate_improvement_experiment", "run_improvement_canary", "monitor_promoted_improvement", "record_requirement_review", "record_final_review", "promote_improvement_experiment", "reject_improvement_experiment"]
+    model: glm-5-opencode
+    tools: [file_list, file_read, get_file_info, memory_search, memory_agent, coordinator, doc_analyzer, beads_init, beads_ready, beads_list, beads_create, beads_show, beads_update, beads_close, beads_sync, beads_dep, send_voice_reply, send_voice_ssml, skill_save, skill_read, skill_search, skill_update, skill_delete, search_tools, search_skills, claude_history_search, semantic_memory_search, system_agent, "system_list_agents", "system_get_agent_info", "system_list_tools", "system_get_tool_info", "system_help", "system_get_context", "create_improvement_problem", "list_improvement_problems", "create_improvement_experiment", "propose_config_experiment", "evaluate_improvement_experiment", "run_improvement_canary", "monitor_promoted_improvement", "record_requirement_review", "record_final_review", "promote_improvement_experiment", "reject_improvement_experiment"]
     auto_run_tools:
 
     - name: beads_init
