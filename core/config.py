@@ -118,6 +118,9 @@ class Config:
 
             # Validate using Pydantic
             self._config = GridConfig(**raw_config)
+            
+            # Validate system correctness (agents, tools, models integration) immediately after parsing
+            self._validate_consistency()
 
             # Determine effective working directory
             config_wd = self._resolve_config_relative_path(self.config.settings.working_directory)
@@ -215,6 +218,35 @@ class Config:
 
         except Exception as exc:
             logger.error(f"[ERROR] Failed to initialize project tools: {exc}", exc_info=True)
+            
+    def _validate_consistency(self) -> None:
+        """Validate structural consistency of agents, tools, models, and providers to ensure no unseen references exist."""
+        # 1. Models and Providers
+        if getattr(self.config, 'models', None):
+            for model_key, model_config in self.config.models.items():
+                if model_config.provider and model_config.provider not in self.config.providers:
+                    raise ConfigError(f"System validation failed: Model '{model_key}' references unknown provider '{model_config.provider}'")
+
+        # 2. Agents
+        if getattr(self.config, 'agents', None):
+            for agent_key, agent_config in self.config.agents.items():
+                if getattr(agent_config, 'model', None) and agent_config.model not in self.config.models:
+                    raise ConfigError(f"System validation failed: Agent '{agent_key}' references unknown model '{agent_config.model}'")
+                
+                if getattr(agent_config, 'tools', None):
+                    for tool in agent_config.tools:
+                        if tool not in self.config.tools:
+                            raise ConfigError(f"System validation failed: Agent '{agent_key}' references unknown tool '{tool}'")
+
+        # 3. Checkers
+        if getattr(self.config, 'checkers', None):
+            for checker_key, checker_config in self.config.checkers.items():
+                try: # handle dict vs Pydantic model representation
+                    model_ref = checker_config.model if hasattr(checker_config, 'model') else checker_config.get('model')
+                    if model_ref and model_ref not in self.config.models:
+                        raise ConfigError(f"System validation failed: Checker '{checker_key}' references unknown model '{model_ref}'")
+                except Exception:
+                    pass
     
     def reload(self) -> None:
         """Reload configuration from file."""
