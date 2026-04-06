@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import yaml
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
@@ -85,8 +86,8 @@ class LiveSystemBuilder:
         bundle_dir = output_root / definition.system_id / definition.version
         bundle_dir.mkdir(parents=True, exist_ok=True)
 
-        created_files = self._write_bundle_files(bundle_dir, request_text, spec, definition)
-        local_tools = self._load_local_tool_executors(bundle_dir / "local_tools.py")
+        created_files, bundle_artifacts = self._write_bundle_files(bundle_dir, request_text, spec, definition)
+        local_tools = self._load_local_tool_executors(bundle_dir)
 
         record = workbench.create_version(
             definition,
@@ -563,31 +564,271 @@ Required JSON shape:
         definition: SystemDefinition,
     ) -> list[str]:
         created_files: list[str] = []
+        agent_snapshots = self._build_agent_snapshots(definition)
+        tool_snapshots = self._build_tool_snapshots(agent_snapshots, spec.local_tools)
+        prompt_snapshots = self._build_prompt_snapshots(agent_snapshots)
+        bundle_manifest = {
+            "request_text": request_text,
+            "mode": spec.mode,
+            "title": spec.title,
+            "description": spec.description,
+            "system_id": definition.system_id,
+            "version": definition.version,
+            "entrypoint": definition.entrypoint,
+            "default_agent": self._resolve_default_agent_key(definition),
+            "source_of_truth": "config_yaml_and_tools",
+            "agent_snapshots": agent_snapshots,
+            "tool_snapshots": tool_snapshots,
+            "prompt_snapshots": prompt_snapshots,
+            "test_payload": spec.test_payload,
+            "review_instructions": spec.review_instructions,
+            "notes": spec.notes,
+        }
+        bundle_config = self._build_bundle_config(definition, agent_snapshots, tool_snapshots, prompt_snapshots)
 
         request_path = bundle_dir / "request.txt"
+        spec_path = bundle_dir / "builder_bundle.json"
+        bundle_manifest_path = bundle_dir / "bundle_manifest.yaml"
+        definition_path = bundle_dir / "system_definition.json"
+        definition_yaml_path = bundle_dir / "system_definition.yaml"
+        agents_yaml_path = bundle_dir / "agents.yaml"
+        prompts_yaml_path = bundle_dir / "prompts.yaml"
+        tools_yaml_path = bundle_dir / "tools.yaml"
+        review_path = bundle_dir / "review_instructions.md"
+        tools_dir = bundle_dir / "tools"
+        local_tools_path = bundle_dir / "local_tools.py"
+
+        bundle_artifacts = {
+            "request_txt": str(request_path.resolve()),
+            "config_yaml": str((bundle_dir / "config.yaml").resolve()),
+            "builder_bundle_json": str(spec_path.resolve()),
+            "bundle_manifest_yaml": str(bundle_manifest_path.resolve()),
+            "system_definition_json": str(definition_path.resolve()),
+            "system_definition_yaml": str(definition_yaml_path.resolve()),
+            "agents_yaml": str(agents_yaml_path.resolve()),
+            "prompts_yaml": str(prompts_yaml_path.resolve()),
+            "tools_yaml": str(tools_yaml_path.resolve()),
+            "review_instructions_md": str(review_path.resolve()),
+            "tools_package_dir": str(tools_dir.resolve()),
+            "local_tools_py": str(local_tools_path.resolve()),
+        }
+        definition.metadata = {
+            **definition.metadata,
+            "bundle_artifacts": bundle_artifacts,
+            "agent_snapshots": agent_snapshots,
+            "tool_snapshots": tool_snapshots,
+            "prompt_snapshots": prompt_snapshots,
+            "source_of_truth": "config_yaml_and_tools",
+            "runtime_entry_strategy": "default_agent_response",
+            "default_agent_key": self._resolve_default_agent_key(definition),
+        }
+
         request_path.write_text(request_text, encoding="utf-8")
         created_files.append(str(request_path.resolve()))
 
-        spec_path = bundle_dir / "builder_bundle.json"
         spec_path.write_text(json.dumps(spec.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
         created_files.append(str(spec_path.resolve()))
 
-        definition_path = bundle_dir / "system_definition.json"
+        config_yaml_path = bundle_dir / "config.yaml"
+        config_yaml_path.write_text(
+            yaml.safe_dump(bundle_config, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        created_files.append(str(config_yaml_path.resolve()))
+
+        bundle_manifest_path.write_text(yaml.safe_dump(bundle_manifest, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        created_files.append(str(bundle_manifest_path.resolve()))
+
         definition_path.write_text(
             json.dumps(definition.model_dump(mode="json", by_alias=True), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         created_files.append(str(definition_path.resolve()))
 
-        review_path = bundle_dir / "review_instructions.md"
+        definition_yaml_path.write_text(
+            yaml.safe_dump(definition.model_dump(mode="json", by_alias=True), allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        created_files.append(str(definition_yaml_path.resolve()))
+
+        agents_yaml_path.write_text(yaml.safe_dump(agent_snapshots, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        created_files.append(str(agents_yaml_path.resolve()))
+
+        prompts_yaml_path.write_text(yaml.safe_dump(prompt_snapshots, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        created_files.append(str(prompts_yaml_path.resolve()))
+
+        tools_yaml_path.write_text(yaml.safe_dump(tool_snapshots, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        created_files.append(str(tools_yaml_path.resolve()))
+
         review_path.write_text(spec.review_instructions.strip() + "\n", encoding="utf-8")
         created_files.append(str(review_path.resolve()))
 
-        local_tools_path = bundle_dir / "local_tools.py"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        created_files.extend(self._write_tools_package(tools_dir, spec.local_tools))
+
         local_tools_source = self._compose_local_tools_source(spec.local_tools)
         compile(local_tools_source, str(local_tools_path), "exec")
         local_tools_path.write_text(local_tools_source, encoding="utf-8")
         created_files.append(str(local_tools_path.resolve()))
+        return created_files, bundle_artifacts
+
+    def _build_agent_snapshots(self, definition: SystemDefinition) -> Dict[str, Any]:
+        snapshots: Dict[str, Any] = {}
+        config_agents = self.config.config.agents
+        for node in definition.graph.values():
+            if not isinstance(node, AgentNodeDefinition):
+                continue
+            if not node.agent_ref.startswith("agents."):
+                continue
+            agent_key = node.agent_ref.split(".", 1)[1]
+            agent_config = config_agents.get(agent_key)
+            snapshots[agent_key] = (
+                agent_config.model_dump(mode="json")
+                if agent_config is not None
+                else {"missing_in_main_config": True, "agent_ref": node.agent_ref}
+            )
+        return snapshots
+
+    def _build_tool_snapshots(
+        self,
+        agent_snapshots: Dict[str, Any],
+        local_tools: list[GeneratedToolSpec],
+    ) -> Dict[str, Any]:
+        snapshots: Dict[str, Any] = {}
+        config_tools = self.config.config.tools
+        referenced_tools = {
+            tool_name
+            for agent_payload in agent_snapshots.values()
+            if isinstance(agent_payload, dict)
+            for tool_name in agent_payload.get("tools", [])
+        }
+        for tool_name in sorted(referenced_tools):
+            tool_config = config_tools.get(tool_name)
+            snapshots[tool_name] = (
+                tool_config.model_dump(mode="json")
+                if tool_config is not None
+                else {"missing_in_main_config": True, "tool_name": tool_name}
+            )
+        snapshots["generated_system_tools"] = [
+            {
+                "tool_ref": tool.tool_ref,
+                "function_name": tool.function_name,
+                "description": tool.description,
+            }
+            for tool in local_tools
+        ]
+        return snapshots
+
+    def _build_prompt_snapshots(self, agent_snapshots: Dict[str, Any]) -> Dict[str, Any]:
+        prompt_templates = self.config.config.prompt_templates
+        referenced_templates = set()
+        for agent_payload in agent_snapshots.values():
+            if isinstance(agent_payload, dict):
+                base_prompt = agent_payload.get("base_prompt")
+                if isinstance(base_prompt, str) and base_prompt:
+                    referenced_templates.add(base_prompt)
+        return {
+            "agent_prompts": {
+                agent_key: {
+                    "base_prompt": agent_payload.get("base_prompt"),
+                    "custom_prompt": agent_payload.get("custom_prompt"),
+                }
+                for agent_key, agent_payload in agent_snapshots.items()
+                if isinstance(agent_payload, dict)
+            },
+            "prompt_templates": {
+                template_key: prompt_templates.get(template_key)
+                for template_key in sorted(referenced_templates)
+                if template_key in prompt_templates
+            },
+        }
+
+    def _build_bundle_config(
+        self,
+        definition: SystemDefinition,
+        agent_snapshots: Dict[str, Any],
+        tool_snapshots: Dict[str, Any],
+        prompt_snapshots: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        default_agent = self._resolve_default_agent_key(definition)
+        used_models = {
+            agent_payload.get("model")
+            for agent_payload in agent_snapshots.values()
+            if isinstance(agent_payload, dict) and agent_payload.get("model")
+        }
+        tools_section = {
+            tool_name: tool_payload
+            for tool_name, tool_payload in tool_snapshots.items()
+            if tool_name != "generated_system_tools" and isinstance(tool_payload, dict)
+        }
+        for generated_tool in tool_snapshots.get("generated_system_tools", []):
+            tool_name = str(generated_tool.get("function_name") or generated_tool.get("tool_ref"))
+            tools_section[tool_name] = {
+                "type": "function",
+                "description": generated_tool.get("description") or "",
+            }
+
+        return {
+            "settings": {
+                "default_agent": default_agent or "",
+                "working_directory": str(self.config.get_working_directory()),
+                "config_directory": str(definition.system_id),
+                "allow_path_override": True,
+                "mcp_enabled": False,
+                "project_tools": {
+                    "enabled": True,
+                    "tools_directory": "tools",
+                },
+            },
+            "models": {
+                model_key: self.config.config.models[model_key].model_dump(mode="json")
+                for model_key in sorted(used_models)
+                if model_key in self.config.config.models
+            },
+            "tools": tools_section,
+            "agents": {
+                agent_key: agent_payload
+                for agent_key, agent_payload in agent_snapshots.items()
+                if isinstance(agent_payload, dict) and not agent_payload.get("missing_in_main_config")
+            },
+            "prompt_templates": prompt_snapshots.get("prompt_templates", {}),
+            "system_runtime": {
+                "source_of_truth": "config_yaml_and_tools",
+                "default_agent_response_is_output": True,
+                "system_definition_ref": "system_definition.yaml",
+            },
+        }
+
+    @staticmethod
+    def _resolve_default_agent_key(definition: SystemDefinition) -> Optional[str]:
+        if definition.default_agent:
+            return definition.default_agent
+        entry_node = definition.graph.get(definition.entrypoint)
+        if isinstance(entry_node, AgentNodeDefinition) and entry_node.agent_ref.startswith("agents."):
+            return entry_node.agent_ref.split(".", 1)[1]
+        return None
+
+    @staticmethod
+    def _write_tools_package(tools_dir: Path, local_tools: list[GeneratedToolSpec]) -> list[str]:
+        created_files: list[str] = []
+        module_path = tools_dir / "generated_tools.py"
+        module_source = LiveSystemBuilder._compose_local_tools_source(local_tools)
+        compile(module_source, str(module_path), "exec")
+        module_path.write_text(module_source, encoding="utf-8")
+        created_files.append(str(module_path.resolve()))
+        init_source = '\n'.join(
+            [
+                '"""Generated system tool package."""',
+                "",
+                "from .generated_tools import LOCAL_TOOL_EXECUTORS",
+                "",
+                "__all__ = ['LOCAL_TOOL_EXECUTORS']",
+                "",
+            ]
+        )
+        init_path = tools_dir / "__init__.py"
+        init_path.write_text(init_source, encoding="utf-8")
+        created_files.append(str(init_path.resolve()))
         return created_files
 
     @staticmethod
@@ -611,8 +852,16 @@ Required JSON shape:
         return "\n".join([*header, *body]).strip() + "\n"
 
     @staticmethod
-    def _load_local_tool_executors(local_tools_path: Path) -> Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]:
-        module_name = f"generated_bundle_{local_tools_path.parent.parent.name}_{local_tools_path.parent.name}"
+    def _load_local_tool_executors(bundle_dir: Path) -> Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]:
+        candidate_paths = [
+            bundle_dir / "tools" / "generated_tools.py",
+            bundle_dir / "tools" / "__init__.py",
+            bundle_dir / "local_tools.py",
+        ]
+        local_tools_path = next((path for path in candidate_paths if path.exists()), None)
+        if local_tools_path is None:
+            raise SystemBuilderError(f"Cannot find generated tool module in {bundle_dir}")
+        module_name = f"generated_bundle_{bundle_dir.parent.name}_{bundle_dir.name}_{local_tools_path.stem}"
         spec = importlib.util.spec_from_file_location(module_name, local_tools_path)
         if spec is None or spec.loader is None:
             raise SystemBuilderError(f"Cannot load local tools module from {local_tools_path}")
