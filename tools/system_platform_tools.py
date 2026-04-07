@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 from pathlib import Path
@@ -12,6 +11,7 @@ import yaml
 from agents import RunContextWrapper, function_tool
 
 from core.event_bus import DomainEventBus
+from core.managers.project_tools_loader import ProjectToolsLoader
 from core.system_registry import SystemRegistry
 from core.system_runtime import SystemRuntime
 from core.system_mutation import MutationSet
@@ -62,27 +62,37 @@ def _resolve_preferred_definition(registry: SystemRegistry, system_id: str) -> S
     return latest.definition
 
 
-def _candidate_local_tool_paths(base_dir: Path, system_id: str, version: str) -> list[Path]:
+def _candidate_tools_dirs(base_dir: Path, system_id: str, version: str) -> list[Path]:
+    """Return candidate tools/ directories for the config-based bundle layout."""
     return [
-        base_dir / "workspace" / "generated_systems_live" / system_id / version / "tools" / "generated_tools.py",
-        base_dir / "workspace" / "generated_systems_live" / system_id / version / "tools" / "__init__.py",
-        base_dir / "workspace" / "generated_systems_live" / system_id / version / "local_tools.py",
-        base_dir / "workspace" / "generated_systems_from_agent" / system_id / version / "tools" / "generated_tools.py",
-        base_dir / "workspace" / "generated_systems_from_agent" / system_id / version / "tools" / "__init__.py",
-        base_dir / "workspace" / "generated_systems_from_agent" / system_id / version / "local_tools.py",
+        base_dir / "workspace" / "generated_systems_from_agent" / system_id / version / "tools",
+        base_dir / "workspace" / "generated_systems_live" / system_id / version / "tools",
     ]
 
 
-def _load_local_tool_module(local_tools_path: Path) -> Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]:
-    module_name = f"system_local_tools_{local_tools_path.parent.parent.name}_{local_tools_path.parent.name}"
-    spec = importlib.util.spec_from_file_location(module_name, local_tools_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load local tools module from {local_tools_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    executors = getattr(module, "LOCAL_TOOL_EXECUTORS", None)
-    if not isinstance(executors, dict):
-        raise RuntimeError(f"LOCAL_TOOL_EXECUTORS is missing in {local_tools_path}")
+def _load_tools_dir(tools_dir: Path, system_id: str) -> Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]:
+    """Load @function_tool callables from tools/ dir and wrap them as plain dict->dict executors."""
+    bundle_dir = tools_dir.parent
+    loader = ProjectToolsLoader(str(bundle_dir), "tools")
+    function_tools = loader.load_project_tools()
+    executors: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
+    for name, obj in function_tools.items():
+        # Support both "tool_name" and "system_id.tool_name" refs
+        def _make_executor(fn: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
+            def executor(payload: Dict[str, Any]) -> Dict[str, Any]:
+                try:
+                    # FunctionTool from agents SDK — call its underlying function
+                    inner = getattr(fn, "__wrapped__", None) or getattr(fn, "fn", None)
+                    if inner is not None and callable(inner):
+                        return inner(payload) or {}  # type: ignore[arg-type]
+                    if callable(fn):
+                        return fn(payload) or {}  # type: ignore[arg-type]
+                except Exception as exc:  # noqa: BLE001
+                    return {"error": str(exc), "tool": name}
+                return {}
+            return executor
+        executors[name] = _make_executor(obj)
+        executors[f"{system_id}.{name}"] = executors[name]
     return executors
 
 
@@ -164,9 +174,9 @@ def _build_dynamic_tool_executor(
         cache_key = f"{system_id}:{version}"
         executors = cache.get(cache_key)
         if executors is None:
-            for local_tools_path in _candidate_local_tool_paths(base_dir, system_id, version):
-                if local_tools_path.exists():
-                    executors = _load_local_tool_module(local_tools_path)
+            for tools_dir in _candidate_tools_dirs(base_dir, system_id, version):
+                if tools_dir.exists() and tools_dir.is_dir() and any(tools_dir.glob("*.py")):
+                    executors = _load_tools_dir(tools_dir, system_id)
                     cache[cache_key] = executors
                     break
         if not executors:
@@ -176,6 +186,43 @@ def _build_dynamic_tool_executor(
         if executor is None:
             return {"tool_ref": tool_ref, "input": payload}
         return executor(payload)
+
+    return execute
+
+
+def _build_real_agent_executor(
+    context: RunContextWrapper,
+) -> Callable[[str, Dict[str, Any]], Dict[str, Any]]:
+    """Return an agent executor that routes calls through AgentFactory when available."""
+    factory = _get_factory(context)
+    if factory is None:
+        return _default_agent_executor
+
+    def execute(agent_ref: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        # "agents.chat_agent" → "chat_agent"
+        agent_key = agent_ref.split(".", 1)[-1] if "." in agent_ref else agent_ref
+        task = str(
+            payload.get("task")
+            or payload.get("request_text")
+            or payload.get("goal")
+            or json.dumps(payload, ensure_ascii=False)
+        )
+        try:
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(asyncio.run, factory.run_agent(agent_key, task))
+                    response = future.result(timeout=300)
+            else:
+                response = loop.run_until_complete(factory.run_agent(agent_key, task))
+            return {"agent_ref": agent_ref, "response": response}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("_build_real_agent_executor: agent_ref=%s error=%s", agent_ref, exc)
+            return {"agent_ref": agent_ref, "error": str(exc), "fallback": True}
 
     return execute
 
@@ -309,7 +356,7 @@ def system_invoke_system(
     )
     runtime = SystemRuntime(
         registry,
-        agent_executor=_default_agent_executor,
+        agent_executor=_build_real_agent_executor(context),
         tool_executor=_build_dynamic_tool_executor(registry, _resolve_registry_path(context).parent.parent),
     )
     result = runtime.invoke(
