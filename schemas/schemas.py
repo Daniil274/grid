@@ -81,6 +81,7 @@ class AgentConfig(BaseModel):
     tools: List[str] = Field(default_factory=list)
     base_prompt: str = "base"
     custom_prompt: Optional[str] = None
+    custom_prompt_skill: Optional[str] = None
     description: str = ""
     mcp_enabled: bool = False
     auto_run_tools: Optional[List[Dict[str, Any]]] = Field(
@@ -160,6 +161,7 @@ class Settings(BaseModel):
     allow_path_override: bool = True
     agent_logging: AgentLoggingConfig = Field(default_factory=AgentLoggingConfig)
     image_processing: ImageProcessingConfig = Field(default_factory=ImageProcessingConfig)
+    skills_directory: str = "skills"
     tools_common_rules: Optional[str] = None
     allowed_models: Optional[List[str]] = Field(
         default=None,
