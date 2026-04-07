@@ -81,6 +81,7 @@ class AgentConfig(BaseModel):
     tools: List[str] = Field(default_factory=list)
     base_prompt: str = "base"
     custom_prompt: Optional[str] = None
+    system_skills: List[str] = Field(default_factory=list)
     description: str = ""
     mcp_enabled: bool = False
     auto_run_tools: Optional[List[Dict[str, Any]]] = Field(
