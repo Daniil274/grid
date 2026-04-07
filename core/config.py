@@ -367,28 +367,11 @@ class Config:
             raise ConfigError(f"Prompt template '{template_key}' not found")
         return self.config.prompt_templates[template_key]
 
-    def _load_skill_file(self, skill_name: str) -> Optional[str]:
-        """Load a system skill from the skills directory."""
-        skills_dir_name = getattr(self.config.settings, "skills_directory", "skills")
-        skills_dir = self.config_path.parent / skills_dir_name
-        for ext in (".md", ".txt"):
-            skill_path = skills_dir / f"{skill_name}{ext}"
-            if skill_path.exists():
-                try:
-                    return skill_path.read_text(encoding="utf-8")
-                except Exception as exc:
-                    logger.warning(f"Failed to read skill file {skill_path}: {exc}")
-        logger.warning(f"System skill '{skill_name}' not found in {skills_dir}")
-        return None
-
     def build_agent_prompt_sections(self, agent_key: str) -> List[PromptSection]:
         """Build structured prompt sections for an agent."""
         agent_config = self.get_agent(agent_key)
 
-        if agent_config.custom_prompt_skill:
-            skill_content = self._load_skill_file(agent_config.custom_prompt_skill)
-            base_prompt = skill_content if skill_content is not None else self.get_prompt_template(agent_config.base_prompt)
-        elif agent_config.custom_prompt:
+        if agent_config.custom_prompt:
             base_prompt = agent_config.custom_prompt
         else:
             base_prompt = self.get_prompt_template(agent_config.base_prompt)
