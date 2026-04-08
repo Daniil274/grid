@@ -1,67 +1,121 @@
 """
 Function tools for Grid agents - integration layer for file and git tools.
+
+Tool modules are discovered automatically from the tools/ directory.
+Each *_tools.py file that exports a dict named *_TOOLS is registered.
+Modules are imported lazily — only when a specific tool is first requested.
 """
 
+import importlib
+import pkgutil
+import sys
+from pathlib import Path
 from typing import List, Any, Dict
-from .file_tools import FILE_TOOLS, get_file_tools, get_file_tools_by_names
-from .git_tools import GIT_TOOLS, get_git_tools, get_git_tools_by_names
-from .orchestrator_tools import ORCHESTRATOR_TOOLS
-from .ocr_tools import OCR_TOOLS
-from .markdown_tools import MARKDOWN_TOOLS
-from .memory_tools_v2 import MEMORY_TOOLS_V2  # SQLite-based memory tools
-from .skill_tools import SKILL_TOOLS  # New file-based skill tools
-from .vision_tools import VISION_TOOLS  # Vision tools for image viewing
-from .document_tools import DOCUMENT_TOOLS  # Document conversion and export tools
-from .beads_tools import BEADS_TOOLS  # Beads issue tracker tools
-from .input_tools import INPUT_TOOLS  # Keyboard and input tools
-from .screen_tools import SCREEN_TOOLS  # Screen capture tools
-from .emergency_tools import EMERGENCY_TOOLS  # Emergency shutdown and pipeline status tools
-from .system_tools import SYSTEM_TOOLS  # System introspection and meta-information tools
-from .search_tools import SEARCH_TOOLS  # Discovery tools: search_tools, search_skills
-from .semantic_tools import SEMANTIC_TOOLS  # Semantic search: semantic_search_code, index_codebase
-from .history_tools import HISTORY_TOOLS  # Claude.ai chat history search
-from .semantic_memory_tools import SEMANTIC_MEMORY_TOOLS  # Hybrid semantic memory search
-from .evolution_tools import EVOLUTION_TOOLS  # Controlled self-improvement registry tools
-from .system_platform_tools import SYSTEM_PLATFORM_TOOLS  # System platform registry/runtime tools
-from .system_builder_tools import SYSTEM_BUILDER_TOOLS  # Live system-builder tools
+from .file_tools import FILE_TOOLS, get_file_tools
+from .git_tools import GIT_TOOLS, get_git_tools
 
 # ============================================================================
-# COMBINED TOOLS REGISTRY
+# AUTO-DISCOVERY: find all *_tools.py in this package (tools/)
+# Maps module_name -> list of *_TOOLS dict names to try
 # ============================================================================
 
-# Импортируем мок инструменты для тестов
-try:
-    from tests.mock_tools import MOCK_TOOLS
-    HAS_MOCK_TOOLS = True
-except ImportError:
-    MOCK_TOOLS = {}
-    HAS_MOCK_TOOLS = False
+def _discover_tool_modules() -> Dict[str, str]:
+    """
+    Scan the tools/ package for *_tools.py files.
+    Returns {dotted_module_path: dict_attr_name} for each candidate.
+    Skips file_tools and git_tools (already loaded eagerly above).
+    """
+    skip = {"tools.file_tools", "tools.git_tools", "tools.function_tools"}
+    result = {}
+    tools_path = Path(__file__).parent
+    for finder, mod_name, _ in pkgutil.iter_modules([str(tools_path)]):
+        if not mod_name.endswith("_tools"):
+            continue
+        full_name = f"tools.{mod_name}"
+        if full_name in skip:
+            continue
+        # Convention: FOO_tools.py → FOO_TOOLS dict
+        dict_attr = mod_name.upper()
+        result[full_name] = dict_attr
+    return result
 
-# Объединяем все инструменты
-AVAILABLE_TOOLS = {
-    **FILE_TOOLS,
-    **GIT_TOOLS,
-    **ORCHESTRATOR_TOOLS,
-    **OCR_TOOLS,
-    **MARKDOWN_TOOLS,
-    **MEMORY_TOOLS_V2,  # New SQLite-based memory tools (3 tools)
-    **SKILL_TOOLS,  # SQL-only skill tools (5 tools)
-    **VISION_TOOLS,  # Vision tools for image viewing (2 tools)
-    **DOCUMENT_TOOLS,  # Document conversion and export tools (4 tools)
-    **BEADS_TOOLS,  # Beads issue tracker tools (7 tools)
-    **INPUT_TOOLS,  # Keyboard and input tools (3 tools)
-    **SCREEN_TOOLS,  # Screen capture tools (1 tool)
-    **EMERGENCY_TOOLS,  # Emergency shutdown and pipeline status tools (2 tools)
-    **SEARCH_TOOLS,  # Discovery tools: search_tools, search_skills (2 tools)
-    **SEMANTIC_TOOLS,  # Semantic search tools: semantic_search_code, index_codebase (2 tools)
-    **HISTORY_TOOLS,  # Claude.ai chat history search (1 tool)
-    **SEMANTIC_MEMORY_TOOLS,  # Hybrid semantic memory search (1 tool)
-    **SYSTEM_TOOLS,  # System introspection tools (7 tools)
-    **EVOLUTION_TOOLS,  # Controlled self-improvement tools
-    **SYSTEM_PLATFORM_TOOLS,  # Self-organizing platform tools
-    **SYSTEM_BUILDER_TOOLS,  # Live builder loop tools
-    **MOCK_TOOLS,  # Добавляем мок инструменты
-}
+
+_MODULE_MAP: Dict[str, str] = _discover_tool_modules()  # {mod_path: dict_attr}
+_loaded_modules: Dict[str, Dict] = {}  # {mod_path: tool_dict}
+_all_loaded = False
+
+
+def _load_module(mod_path: str) -> Dict:
+    if mod_path not in _loaded_modules:
+        dict_attr = _MODULE_MAP[mod_path]
+        try:
+            mod = importlib.import_module(mod_path)
+            _loaded_modules[mod_path] = getattr(mod, dict_attr, {})
+        except Exception:
+            _loaded_modules[mod_path] = {}
+    return _loaded_modules[mod_path]
+
+
+def _load_all_modules() -> None:
+    global _all_loaded
+    if not _all_loaded:
+        for mod_path in _MODULE_MAP:
+            _load_module(mod_path)
+        try:
+            from tests.mock_tools import MOCK_TOOLS
+            _loaded_modules["tests.mock_tools"] = MOCK_TOOLS
+        except ImportError:
+            pass
+        _all_loaded = True
+
+
+class _LazyToolsDict:
+    """Dict-like proxy that auto-discovers and loads tool modules on demand."""
+
+    def __contains__(self, name: str) -> bool:
+        if name in FILE_TOOLS or name in GIT_TOOLS:
+            return True
+        for mod_path in _MODULE_MAP:
+            if name in _load_module(mod_path):
+                return True
+        return False
+
+    def __getitem__(self, name: str) -> Any:
+        if name in FILE_TOOLS:
+            return FILE_TOOLS[name]
+        if name in GIT_TOOLS:
+            return GIT_TOOLS[name]
+        for mod_path in _MODULE_MAP:
+            mod = _load_module(mod_path)
+            if name in mod:
+                return mod[name]
+        raise KeyError(name)
+
+    def keys(self):
+        _load_all_modules()
+        seen = set()
+        for d in [FILE_TOOLS, GIT_TOOLS] + list(_loaded_modules.values()):
+            for k in d:
+                if k not in seen:
+                    seen.add(k)
+                    yield k
+
+    def values(self):
+        for k in self.keys():
+            yield self[k]
+
+    def items(self):
+        for k in self.keys():
+            yield k, self[k]
+
+    def get(self, name: str, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+
+AVAILABLE_TOOLS = _LazyToolsDict()
 
 # Добавляем дополнительные инструменты для совместимости
 TOOL_ALIASES = {
@@ -202,28 +256,16 @@ def get_tools_by_names(tool_names: List[str]) -> List[Any]:
                 tools.append(tool)
                 continue
 
-        # 2. Проверяем прямое совпадение в системных инструментах
-        if name in AVAILABLE_TOOLS:
-            tools.append(AVAILABLE_TOOLS[name])
-        # 3. Проверяем алиасы
-        elif name in TOOL_ALIASES:
-            actual_name = TOOL_ALIASES[name]
-            if actual_name in AVAILABLE_TOOLS:
-                tools.append(AVAILABLE_TOOLS[actual_name])
-            else:
-                from utils.logger import Logger
-                Logger(__name__).warning(f"Инструмент '{actual_name}' (алиас для '{name}') не найден")
-        # 4. Попробуем найти в отдельных модулях
+        # 2. Разрешаем алиас (до обхода lazy-модулей, чтобы не грузить лишнее)
+        lookup_name = TOOL_ALIASES.get(name, name)
+
+        # 3. Ищем в системных инструментах
+        tool = AVAILABLE_TOOLS.get(lookup_name)
+        if tool is not None:
+            tools.append(tool)
         else:
-            if name.startswith('file_') or name in ['read_file', 'write_file', 'list_files', 'get_file_info', 'search_files', 'edit_file_patch', 'append_to_file']:
-                file_tools = get_file_tools_by_names([name])
-                tools.extend(file_tools)
-            elif name.startswith('git_') or name in ['git_status', 'git_log', 'git_diff', 'git_branch_list', 'git_add_file', 'git_commit', 'git_checkout_branch', 'git_pull', 'git_remote_info']:
-                git_tools = get_git_tools_by_names([name])
-                tools.extend(git_tools)
-            else:
-                from utils.logger import Logger
-                Logger(__name__).warning(f"Инструмент '{name}' не найден ни в проектных, ни в системных инструментах")
+            from utils.logger import Logger
+            Logger(__name__).warning(f"Инструмент '{name}' не найден ни в проектных, ни в системных инструментах")
 
     return tools
 
