@@ -3,8 +3,8 @@ import json
 import pytest
 
 from core.config import Config
-from core.config_proposer import ConfigProposer
-from core.improvement_registry import ImprovementRegistry
+from core.improvement.proposer import ConfigProposer
+from core.improvement.registry import ImprovementRegistry
 
 
 def _build_config(config_file, temp_dir, sample_config):

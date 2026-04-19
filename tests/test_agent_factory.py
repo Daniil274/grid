@@ -9,7 +9,7 @@ from pathlib import Path
 
 from core.agent_factory import AgentFactory
 from core.config import Config
-from core.prompt_sections import ModelContextAssembly
+from core.config.prompt_sections import ModelContextAssembly
 from utils.exceptions import AgentError, ConfigError
 from schemas import AgentExecution
 

@@ -3,7 +3,7 @@ import uuid
 
 import pytest
 
-from core.pipeline_registry import PipelineRegistry
+from core.tracing.pipeline_registry import PipelineRegistry
 
 
 @pytest.mark.asyncio

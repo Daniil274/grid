@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
-from core.events import ProgressEvent
+from core.tracing.events import ProgressEvent
 
 logger = logging.getLogger(__name__)
 

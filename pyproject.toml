@@ -73,7 +73,7 @@ Repository = "https://github.com/AgentsSDK/grid.git"
 Documentation = "https://github.com/AgentsSDK/grid/blob/main/docs/index.md"
 
 [tool.hatch.version]
-path = "grid/__init__.py"  # Assume __init__.py will have __version__
+path = "core/__init__.py"
 
 [tool.black]
 line-length = 88

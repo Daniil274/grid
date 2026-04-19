@@ -13,7 +13,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from core.memory_store import MemoryStore
+from core.memory.store import MemoryStore
 
 logger = logging.getLogger(__name__)
 

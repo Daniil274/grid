@@ -10,12 +10,12 @@ import yaml
 
 from agents import RunContextWrapper, function_tool
 
-from core.event_bus import DomainEventBus
+from core.platform.events import DomainEventBus
 from core.managers.project_tools_loader import ProjectToolsLoader
-from core.system_registry import SystemRegistry
-from core.system_runtime import SystemRuntime
-from core.system_mutation import MutationSet
-from core.system_workbench import SystemWorkbench
+from core.platform.registry import SystemRegistry
+from core.platform.runtime import SystemRuntime
+from core.platform.mutation import MutationSet
+from core.platform.workbench import SystemWorkbench
 from schemas.system_platform import SystemDefinition, SystemVersionStatus
 
 logger = logging.getLogger("grid.system_platform_tools")

@@ -39,7 +39,7 @@ from agents.mcp import MCPServerStdio
 from agents.mcp.util import MCPUtil as _MCPUtil
 from core.managers.mcp_manager import ResilientMCPServerStdio
 
-from .config import Config
+from core.config.config import Config
 from .context import ContextManager, safe_lock
 from schemas import AgentConfig, AgentExecution, ContextMessage
 from tools import get_tools_by_names
@@ -47,9 +47,9 @@ from utils.cli_chat import CliChatRenderer
 from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
 from utils.path_utils import set_current_factory, reset_current_factory
-from core.tracing_config import get_tracing_config, ImmediateTraceProcessor
-from core.managers.instructions_builder import InstructionsBuilder
+from core.tracing.config import get_tracing_config, ImmediateTraceProcessor
 from core.managers.skill_manager import SkillManager
+from core.application.agent_runtime_support import AgentRuntimeSupport
 
 # Compact system integration
 from core.compact import (
@@ -395,32 +395,34 @@ class AgentFactory:
             )
             self.unified_memory = None
 
-        self.instructions_builder = InstructionsBuilder(
+        self._runtime_support = AgentRuntimeSupport(
             config=self.config,
             context_manager=self.context_manager,
             container_id=self.container_id,
+            session_factory=lambda session_id: SQLiteSession(session_id),
         )
+        self.instructions_builder = self._runtime_support.instructions_builder
 
         # Initialize SQLite-based memory store
         if memory_store is not None:
             self.memory_store = memory_store
         else:
             # Create default memory store
-            from core.memory_store import MemoryStore
+            from core.memory.store import MemoryStore
             from pathlib import Path
             db_path = Path(self.config.get_working_directory()) / "data" / "memory.db"
             self.memory_store = MemoryStore(db_path=str(db_path), config=self.config)
-            logger.info(f"✅ MemoryStore initialized: {db_path}")
+            logger.info("MemoryStore initialized: %s", db_path)
 
         # Initialize MemoryOptimizer
-        from core.memory_optimizer import MemoryOptimizer
+        from core.memory.optimizer import MemoryOptimizer
         
         self.memory_optimizer = MemoryOptimizer(
             memory_store=self.memory_store,
             config=self.config,
             agent_factory=self
         )
-        logger.info("✅ MemoryOptimizer initialized")
+        logger.info("MemoryOptimizer initialized")
 
         # Initialize SkillManager
         from pathlib import Path
@@ -428,14 +430,14 @@ class AgentFactory:
             memory_store=self.memory_store,
             workspace_root=Path(self.config.get_working_directory())
         )
-        logger.info("✅ SkillManager initialized")
+        logger.info("SkillManager initialized")
 
         # Initialize ContainerManager
         from core.managers.container_manager import ContainerManager, CONTAINER_WORKDIR
         self.container_manager = ContainerManager(self.config)
         self._container_workdir = CONTAINER_WORKDIR
         if self.container_id:
-            logger.info(f"✅ AgentFactory initialized with container isolation: {self.container_id}")
+            logger.info("AgentFactory initialized with container isolation: %s", self.container_id)
 
         # Telegram integration components
         self.broadcaster = broadcaster
@@ -446,7 +448,7 @@ class AgentFactory:
         self._mcp_servers: Dict[str, Any] = {}
         
         # Session management for agent memory (per agent/context pair)
-        self._agent_sessions: Dict[tuple[str, str], SQLiteSession] = {}
+        self._agent_sessions = self._runtime_support.agent_sessions
         # Track emitted warnings to avoid log spam (e.g., Responses API fallbacks)
         self._responses_warning_keys: set[str] = set()
         self._stream_observer: StreamObserver = stream_observer or ConsoleStreamObserver()
@@ -461,11 +463,11 @@ class AgentFactory:
         self._compact_tracking = AutoCompactTrackingState()
 
         # Initialize pipeline registry for emergency shutdown
-        from core.pipeline_registry import PipelineRegistry
+        from core.tracing.pipeline_registry import PipelineRegistry
         self._pipeline_registry = PipelineRegistry()
         # Link memory_store to registry for persistence
         self._pipeline_registry._memory_store = self.memory_store
-        logger.info("✅ PipelineRegistry initialized")
+        logger.info("PipelineRegistry initialized")
 
     @staticmethod
     def _configure_tracing_once(level: str) -> None:
@@ -479,7 +481,7 @@ class AgentFactory:
             # Timeline tracer: тот же путь к БД, что и у serve_timeline / configure_tracing_from_env
             if os.getenv("GRID_TIMELINE_ENABLED", "true").lower() not in ("0", "false", "no"):
                 try:
-                    from core.timeline_tracer import get_tracer
+                    from core.tracing.tracer import get_tracer
                     timeline_exporter = get_tracer()
                     timeline_processor = ImmediateTraceProcessor(timeline_exporter, export_span_start=True)
                     tracing_config._processors.append(timeline_processor)
@@ -515,7 +517,7 @@ class AgentFactory:
             return
 
         try:
-            from core.events import ProgressEvent
+            from core.tracing.events import ProgressEvent
             from datetime import datetime
 
             event = ProgressEvent(
@@ -581,42 +583,8 @@ class AgentFactory:
             return True
 
     def resolve_model_key(self, key: Optional[str]) -> str:
-        """
-        Resolve input key into a model key using configuration.
-        - If key is None: use default agent's model
-        - If key is a model key: return it
-        - If key is an agent key: return that agent's model
-        - Otherwise: fallback to default agent's model
-        """
-        try:
-            if not key:
-                default_agent_key = self.config.get_default_agent()
-                resolved = self.config.get_agent(default_agent_key).model
-                logger.debug(f"Model key resolution: input=None → default_agent={default_agent_key} → model={resolved}")
-                return resolved
-            # Try as model key
-            try:
-                _ = self.config.get_model(key)
-                logger.debug(f"Model key resolution: input='{key}' → direct model key → '{key}'")
-                return key
-            except Exception:
-                # Try as agent key
-                try:
-                    resolved = self.config.get_agent(key).model
-                    logger.debug(f"Model key resolution: input='{key}' → agent key → model={resolved}")
-                    return resolved
-                except Exception:
-                    # Fallback
-                    default_agent_key = self.config.get_default_agent()
-                    resolved = self.config.get_agent(default_agent_key).model
-                    logger.debug(f"Model key resolution: input='{key}' → fallback to default_agent={default_agent_key} → model={resolved}")
-                    return resolved
-        except Exception as e:
-            # Hard fallback
-            default_agent_key = self.config.get_default_agent()
-            resolved = self.config.get_agent(default_agent_key).model
-            logger.warning(f"Model key resolution failed: {e}, using hard fallback: default_agent={default_agent_key} → model={resolved}")
-            return resolved
+        """Resolve an input key into a model key using runtime support services."""
+        return self._runtime_support.resolve_model_key(key)
 
     def _make_openai_client(
         self,
@@ -650,46 +618,16 @@ class AgentFactory:
         return AsyncOpenAI(**kwargs)
 
     def get_openai_client_for_model(self, model_key: str) -> tuple[AsyncOpenAI, str]:
-        """
-        Create OpenAI client and return (client, model_name) using configuration.
-        """
-        model_cfg = self.config.get_model(model_key)
-        provider_cfg = self.config.get_provider(model_cfg.provider)
-        api_key = self.config.get_api_key(model_cfg.provider)
-        if not api_key:
-            raise AgentError(
-                f"API key not found for provider '{model_cfg.provider}'",
-                details={"provider": model_cfg.provider, "env_var": provider_cfg.api_key_env},
-            )
-        client = self._make_openai_client(
-            api_key=api_key,
-            base_url=provider_cfg.base_url,
-            timeout=provider_cfg.timeout,
-            max_retries=provider_cfg.max_retries,
-            provider_key=model_cfg.provider,
-        )
-        return client, model_cfg.name
+        """Create OpenAI client and return (client, model_name) using configuration."""
+        return self._runtime_support.get_openai_client_for_model(model_key)
     
     def _get_agent_session(self, agent_key: str, context_id: str) -> SQLiteSession:
         """Get or create a session scoped to an agent/context pair."""
-        session_key = (agent_key, context_id)
-        if session_key not in self._agent_sessions:
-            session_id = f"agent_{agent_key}_{context_id}"
-            self._agent_sessions[session_key] = SQLiteSession(session_id)
-
-        return self._agent_sessions[session_key]
+        return self._runtime_support.get_agent_session(agent_key, context_id)
     
     def _is_reasoning_model_name(self, model_name: str) -> bool:
         """Heuristic check for reasoning-style models requiring Responses API."""
-        name = (model_name or "").lower()
-        reasoning_markers = [
-            "o3",            # OpenAI o3 family
-            "o4-mini-high",  # speculative advanced modes
-            "r1",            # deepseek-r1 / other r1 models
-            "reason",        # contains 'reason' or 'reasoning'
-            "thinking",      # thinking-style models
-        ]
-        return any(marker in name for marker in reasoning_markers)
+        return self._runtime_support.is_reasoning_model_name(model_name)
 
     def _build_model_settings(self, model_config: Any) -> ModelSettings:
         """Build ModelSettings from model config, applying reasoning overrides if configured.
@@ -1080,7 +1018,7 @@ class AgentFactory:
             context_id = self.get_active_context_id()
             if context_id:
                 pipeline = await self._pipeline_registry.get_pipeline_by_context(context_id)
-                from core.pipeline_registry import PipelineStatus
+                from core.tracing.pipeline_registry import PipelineStatus
                 if pipeline and pipeline.status == PipelineStatus.RUNNING:
                     if "emergency_shutdown" not in effective_tool_names:
                         effective_tool_names.append("emergency_shutdown")
@@ -2564,7 +2502,7 @@ class AgentFactory:
         orchestrator_name: str,
     ) -> tuple[Any, str, str]:
         """Attach the current execution tree to a shared serial pipeline."""
-        from core.pipeline_registry import PipelineRegistry
+        from core.tracing.pipeline_registry import PipelineRegistry
 
         raw_ctx = getattr(run_context_obj, "context", run_context_obj)
         if raw_ctx is None:
@@ -3313,13 +3251,7 @@ class AgentFactory:
                 )
         
         # Clear agent sessions
-        for session in self._agent_sessions.values():
-            try:
-                await session.clear_session()
-            except asyncio.CancelledError:
-                logger.debug("Agent session cleanup cancelled", exc_info=True)
-            except Exception as e:
-                logger.warning("Failed to cleanup agent session: %s", e, exc_info=e)
+        await self._runtime_support.cleanup_sessions()
         
         # Kill stale dolt server started by beads inside the container (network_mode=host
         # makes container ports visible on the host, so orphaned dolt processes persist).

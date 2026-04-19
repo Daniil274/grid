@@ -11,31 +11,30 @@ This page maps the self-organizing platform design to concrete code locations.
   permissions, budgets, runtime results, and governance decisions.
 - `schemas/platform/__init__.py`
   Structured schema exports for platform-facing imports.
-- `core/system_compiler.py`
+- `core/platform/compiler.py`
   Minimal compiler for graph validation, predicate validation, and dependency cycle
   checks.
-- `core/system_registry.py`
+- `core/platform/registry.py`
   Versioned registry, manifests, release channels, and registry persistence.
-- `core/system_release_manager.py`
+- `core/platform/release.py`
   Lifecycle transitions, canary flow, and stable promotion logic.
-- `core/system_runtime.py`
+- `core/platform/runtime.py`
   Proxy mode and basic graph mode execution.
-- `core/system_governance.py`
+- `core/platform/governance.py`
   Permission checks, budget tracking, and governance helpers.
-- `core/condition_evaluator.py`
+- `core/platform/conditions.py`
   Safe predicate AST evaluation without string `eval`.
-- `core/system_mutation.py`
+- `core/platform/mutation.py`
   Domain mutations for draft and candidate system construction.
-- `core/event_bus.py`
+- `core/platform/events.py`
   Domain event transport used by registry and future derived indexes.
 
 ### Structured platform entrypoints
 
 - `core/platform/__init__.py`
   Stable import surface for execution/control services.
-- `core/platform/*.py`
-  Thin wrappers that keep the new structure discoverable without breaking the
-  earlier flat imports.
+- `core/system_*.py`, `core/condition_evaluator.py`, `core/event_bus.py`
+  Backward-compatible aliases for older flat imports.
 
 ### Knowledge and meta-cognition
 
@@ -75,6 +74,9 @@ This page maps the self-organizing platform design to concrete code locations.
 - `core/` holds implementations and orchestration services.
 - `core/platform/` and `core/cognition/` are the preferred structured import
   surfaces for new code.
+- `core/application/` is the target home for use-case orchestration extracted
+  from large service objects.
+- `core/ports/` is the target home for infrastructure-independent interfaces.
 - `tools/` exposes only bounded APIs; agents should not mutate platform state by
   editing raw registry files.
 - `docs/platform/` is the navigation hub for platform-specific documentation.

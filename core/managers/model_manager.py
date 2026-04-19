@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 from openai import AsyncOpenAI
 
-from core.config import Config
+from core.config.config import Config
 from utils.exceptions import AgentError
 
 logger = logging.getLogger("grid.managers.model")

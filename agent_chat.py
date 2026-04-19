@@ -37,7 +37,7 @@ try:
     from core.managers.container_manager import ContainerManager
 except Exception:
     ContainerManager = None
-from core.tracing_config import configure_tracing_from_env
+from core.tracing.config import configure_tracing_from_env
 from utils.exceptions import GridError
 from utils.cli_chat import CliChatRenderer
 from utils.logger import Logger

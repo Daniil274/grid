@@ -207,7 +207,7 @@ def _skill_backfill(store: Any, emb: Any, user_id: Optional[str]) -> None:
     _SKILL_BACKFILL_DONE = True  # set early — errors are non-fatal
 
     try:
-        from core.embeddings import EmbeddingsManager
+        from core.memory.embeddings import EmbeddingsManager
         all_skills = store.search_skills(query="", tags="", user_id=user_id, agent_id=None, limit=5000)
     except Exception as exc:
         logger.warning("skill backfill: fetch failed: %s", exc)

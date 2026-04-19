@@ -80,7 +80,9 @@ def _coerce_optional_str(val: Any) -> Optional[str]:
         if v == "" or v.lower() in ("none", "null"):
             return None
         return v
-    return str(val)
+    if isinstance(val, (int, float, bool)):
+        return str(val)
+    return None
 
 
 def _coerce_tool_list(val: Any) -> Optional[List[str]]:
@@ -214,16 +216,17 @@ async def orchestrate(
             return "❌ orchestrate: нет доступа к AgentFactory (ожидается context.context.factory)."
 
         # Import pipeline registry (inside function to avoid circular import)
-        from core.pipeline_registry import PipelineRegistry, PipelineStatus
+        from core.tracing.pipeline_registry import PipelineRegistry, PipelineStatus
 
         # Register or reuse a shared serial pipeline
         registry = PipelineRegistry()
         raw_ctx = getattr(context, "context", None)
-        active_context_id = context_id or getattr(raw_ctx, "context_id", None) or factory.get_active_context_id()
+        inherited_context_id = _coerce_optional_str(getattr(raw_ctx, "context_id", None))
+        active_context_id = _coerce_optional_str(context_id) or inherited_context_id or factory.get_active_context_id()
         if not active_context_id:
             active_context_id = factory.context_manager.start_new_context()
         ctx_user_id = getattr(raw_ctx, "user_id", None)
-        inherited_pipeline_id = getattr(raw_ctx, "pipeline_id", None)
+        inherited_pipeline_id = _coerce_optional_str(getattr(raw_ctx, "pipeline_id", None))
 
         pipeline_id = inherited_pipeline_id or await registry.get_or_create_pipeline(
             orchestrator_name="orchestrate",

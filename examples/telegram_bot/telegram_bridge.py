@@ -27,8 +27,8 @@ from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
 import httpx
 
-from core.unified_memory import UnifiedMemory
-from core.memory_store import MemoryStore
+from core.memory.unified import UnifiedMemory
+from core.memory.store import MemoryStore
 from examples.telegram_bot.telegram_progress_observer import (
     CompositeStreamObserver,
     TelegramProgressObserver,

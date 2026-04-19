@@ -1,8 +1,8 @@
 import json
 
 from core.config import Config
-from core.improvement_registry import ImprovementRegistry
-from core.log_observer import LogObserver
+from core.improvement.registry import ImprovementRegistry
+from core.improvement.log_observer import LogObserver
 
 
 def _write_context_log(base_dir, contexts):

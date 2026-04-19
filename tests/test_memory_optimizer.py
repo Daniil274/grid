@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 from pathlib import Path
 
-from core.memory_optimizer import MemoryOptimizer
-from core.memory_store import MemoryStore
+from core.memory.optimizer import MemoryOptimizer
+from core.memory.store import MemoryStore
 from core.config import Config
 
 

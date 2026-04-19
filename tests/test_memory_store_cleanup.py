@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from grid.core.memory_store import MemoryStore, MemoryEntry
+from core.memory.store import MemoryStore, MemoryEntry
 
 
 class TestGetDbSizeMb:

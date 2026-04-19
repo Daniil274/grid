@@ -86,7 +86,7 @@ async def emergency_shutdown(
         ```
     """
     # Import inside function to avoid circular import
-    from core.pipeline_registry import PipelineRegistry
+    from core.tracing.pipeline_registry import PipelineRegistry
 
     # Validate severity
     valid_severities = {"warning", "error", "critical"}
@@ -223,7 +223,7 @@ async def get_pipeline_status(
         ```
     """
     # Import inside function to avoid circular import
-    from core.pipeline_registry import PipelineRegistry
+    from core.tracing.pipeline_registry import PipelineRegistry
 
     # Get factory and context_id
     factory = _get_factory_from_context(context)

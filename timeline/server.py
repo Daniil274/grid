@@ -26,7 +26,18 @@ from pydantic import BaseModel
 logger = logging.getLogger("grid.timeline.server")
 
 ROOT = Path(__file__).resolve().parent.parent
-DASHBOARD_HTML = ROOT / "scripts" / "timeline_dashboard.html"
+_TIMELINE_DIR = Path(__file__).resolve().parent
+_DASHBOARD_CANDIDATES = (
+    _TIMELINE_DIR / "timeline_dashboard.html",
+    ROOT / "scripts" / "timeline_dashboard.html",
+)
+
+
+def _resolve_dashboard_html() -> Path:
+    for candidate in _DASHBOARD_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return _DASHBOARD_CANDIDATES[0]
 
 
 # ─── Pydantic models ──────────────────────────────────────────────────────────
@@ -77,7 +88,7 @@ def create_app(
     db_path: str | Path | None = None,
     factory: Optional[Any] = None,
 ) -> FastAPI:
-    from core.timeline_tracer import get_tracer, ExecutionTracer
+    from core.tracing.tracer import get_tracer, ExecutionTracer
 
     tracer: ExecutionTracer = get_tracer(db_path) if db_path else get_tracer()
 
@@ -105,9 +116,10 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
-        if not DASHBOARD_HTML.exists():
+        dashboard_html = _resolve_dashboard_html()
+        if not dashboard_html.exists():
             return HTMLResponse("<h1>timeline_dashboard.html not found</h1>", status_code=503)
-        return HTMLResponse(DASHBOARD_HTML.read_text(encoding="utf-8"))
+        return HTMLResponse(dashboard_html.read_text(encoding="utf-8"))
 
     @app.get("/api/traces")
     async def list_traces(limit: int = 100, offset: int = 0) -> JSONResponse:

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, MagicMock
 import yaml
 import os
+import time
 
 
 @pytest.fixture
@@ -20,7 +21,6 @@ def temp_dir():
     # Fix readonly permissions before cleanup on Windows
     def handle_remove_readonly(func, path, exc):
         import stat
-        import time
         if os.path.exists(path):
             # First try to change permissions
             try:
@@ -37,7 +37,13 @@ def temp_dir():
                     pass
     
     if os.name == 'nt':  # Windows
-        shutil.rmtree(temp_path, onerror=handle_remove_readonly)
+        for _ in range(5):
+            try:
+                shutil.rmtree(temp_path, onerror=handle_remove_readonly)
+                return
+            except OSError:
+                time.sleep(0.2)
+        return
     else:
         shutil.rmtree(temp_path)
 
