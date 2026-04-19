@@ -7,7 +7,7 @@ per agent/context pair.
 
 import asyncio
 import logging
-from typing import Dict, Tuple
+from typing import Callable, Dict, Optional, Tuple
 from agents import SQLiteSession
 
 logger = logging.getLogger("grid.session_manager")
@@ -22,10 +22,11 @@ class SessionManager:
     different conversations and contexts.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, session_factory: Optional[Callable[[str], SQLiteSession]] = None) -> None:
         """Initialize SessionManager with empty session cache."""
         # Session management for agent memory (per agent/context pair)
         self._agent_sessions: Dict[Tuple[str, str], SQLiteSession] = {}
+        self._session_factory = session_factory or SQLiteSession
 
     def get_agent_session(self, agent_key: str, context_id: str) -> SQLiteSession:
         """
@@ -48,7 +49,7 @@ class SessionManager:
         session_key = (agent_key, context_id)
         if session_key not in self._agent_sessions:
             session_id = f"agent_{agent_key}_{context_id}"
-            self._agent_sessions[session_key] = SQLiteSession(session_id)
+            self._agent_sessions[session_key] = self._session_factory(session_id)
             logger.debug(
                 "Created new session",
                 extra={

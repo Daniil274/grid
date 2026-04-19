@@ -12,7 +12,7 @@ import tempfile
 import os
 from pathlib import Path
 
-from core.memory_store import MemoryStore, MemoryEntry
+from core.memory.store import MemoryStore, MemoryEntry
 
 
 @pytest.fixture

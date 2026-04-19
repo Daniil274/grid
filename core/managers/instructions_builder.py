@@ -7,8 +7,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from core.prompt_sections import ModelContextAssembly, PromptSection
-from core.protocols import IConfig, IContextManager
+from core.config.prompt_sections import ModelContextAssembly, PromptSection
+from core.config.protocols import IConfig, IContextManager
 
 logger = logging.getLogger("grid.instructions_builder")
 

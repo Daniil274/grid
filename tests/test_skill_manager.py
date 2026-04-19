@@ -3,7 +3,7 @@ Unit tests for per-agent skill isolation.
 """
 
 from core.managers.skill_manager import SkillManager
-from core.memory_store import MemoryStore
+from core.memory.store import MemoryStore
 
 
 def _create_manager(tmp_path):

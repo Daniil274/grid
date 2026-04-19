@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from collections.abc import MutableMapping
 from pathlib import Path
@@ -57,6 +58,69 @@ def _write_yaml_atomic(path: Path, payload: Dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def _serialize_inline_yaml_value(value: Any) -> str:
+    dumped = yaml.safe_dump(
+        value,
+        allow_unicode=True,
+        default_flow_style=True,
+        sort_keys=False,
+    ).strip()
+    if dumped.endswith("\n..."):
+        dumped = dumped[:-4].rstrip()
+    return dumped
+
+
+def _replace_existing_yaml_scalar(text: str, dotted_path: str, value: Any) -> str | None:
+    lines = text.splitlines()
+    parts = dotted_path.split(".")
+    parent_indent = -1
+    search_start = 0
+
+    def _match_key(line: str, key: str, *, exact_indent: int | None) -> re.Match[str] | None:
+        pattern = r"^(?P<indent>\s*)" + re.escape(key) + r":(?P<suffix>.*)$"
+        match = re.match(pattern, line)
+        if not match:
+            return None
+        if exact_indent is not None and len(match.group("indent")) != exact_indent:
+            return None
+        return match
+
+    for part in parts[:-1]:
+        found = False
+        for index in range(search_start, len(lines)):
+            line = lines[index]
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            current_indent = len(line) - len(line.lstrip(" "))
+            if parent_indent >= 0 and current_indent <= parent_indent:
+                return None
+            match = _match_key(line, part, exact_indent=None if parent_indent < 0 else parent_indent + 2)
+            if match:
+                parent_indent = len(match.group("indent"))
+                search_start = index + 1
+                found = True
+                break
+        if not found:
+            return None
+
+    leaf = parts[-1]
+    replacement = _serialize_inline_yaml_value(value)
+    for index in range(search_start, len(lines)):
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        current_indent = len(line) - len(line.lstrip(" "))
+        if parent_indent >= 0 and current_indent <= parent_indent:
+            break
+        expected_indent = None if parent_indent < 0 else parent_indent + 2
+        match = _match_key(line, leaf, exact_indent=expected_indent)
+        if match:
+            lines[index] = f"{match.group('indent')}{leaf}: {replacement}"
+            trailing_newline = "\n" if text.endswith("\n") else ""
+            return "\n".join(lines) + trailing_newline
+    return None
+
+
 def _new_mapping_like(container: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
     try:
         return type(container)()
@@ -93,6 +157,21 @@ def _coerce_diff_entry(entry: ImprovementConfigDiff | Dict[str, Any]) -> Improve
 
 def apply_config_diff(config_path: str, diff: List[ImprovementConfigDiff | Dict[str, Any]]) -> Dict[str, Any]:
     path = Path(config_path)
+    if YAML is None and path.exists():
+        original_text = path.read_text(encoding="utf-8")
+        updated_text = original_text
+        applied: List[str] = []
+        for raw_entry in diff:
+            entry = _coerce_diff_entry(raw_entry)
+            replaced = _replace_existing_yaml_scalar(updated_text, entry.path, entry.new)
+            if replaced is None:
+                break
+            updated_text = replaced
+            applied.append(entry.path)
+        else:
+            path.write_text(updated_text, encoding="utf-8", newline="\n")
+            return {"success": True, "applied_paths": applied, "config_path": str(path)}
+
     document = _load_yaml(path)
     applied: List[str] = []
     for raw_entry in diff:
@@ -106,6 +185,21 @@ def apply_config_diff(config_path: str, diff: List[ImprovementConfigDiff | Dict[
 
 def revert_config_diff(config_path: str, diff: List[ImprovementConfigDiff | Dict[str, Any]]) -> Dict[str, Any]:
     path = Path(config_path)
+    if YAML is None and path.exists():
+        original_text = path.read_text(encoding="utf-8")
+        updated_text = original_text
+        reverted: List[str] = []
+        for raw_entry in diff:
+            entry = _coerce_diff_entry(raw_entry)
+            replaced = _replace_existing_yaml_scalar(updated_text, entry.path, entry.old)
+            if replaced is None:
+                break
+            updated_text = replaced
+            reverted.append(entry.path)
+        else:
+            path.write_text(updated_text, encoding="utf-8", newline="\n")
+            return {"success": True, "reverted_paths": reverted, "config_path": str(path)}
+
     document = _load_yaml(path)
     reverted: List[str] = []
     for raw_entry in diff:

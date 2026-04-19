@@ -14,8 +14,9 @@ import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 from unittest.mock import Mock
+import time
 
-from core.memory_store import MemoryStore, MemoryEntry
+from core.memory.store import MemoryStore, MemoryEntry
 
 
 class MockConfig:
@@ -39,28 +40,39 @@ def temp_db():
     with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
         db_path = f.name
     yield db_path
-    # Cleanup
-    Path(db_path).unlink(missing_ok=True)
+    for candidate in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
+        for _ in range(5):
+            try:
+                Path(candidate).unlink(missing_ok=True)
+                break
+            except PermissionError:
+                time.sleep(0.2)
 
 
 @pytest.fixture
 def store(temp_db):
     """Create a MemoryStore without config."""
-    return MemoryStore(db_path=temp_db)
+    store = MemoryStore(db_path=temp_db)
+    yield store
+    store.close()
 
 
 @pytest.fixture
 def store_with_config(temp_db):
     """Create a MemoryStore with TTL config."""
     config = MockConfig(default_ttl=30, extend_on_access=True)
-    return MemoryStore(db_path=temp_db, config=config)
+    store = MemoryStore(db_path=temp_db, config=config)
+    yield store
+    store.close()
 
 
 @pytest.fixture
 def store_no_extend(temp_db):
     """Create a MemoryStore with extend_ttl_on_access=False."""
     config = MockConfig(default_ttl=30, extend_on_access=False)
-    return MemoryStore(db_path=temp_db, config=config)
+    store = MemoryStore(db_path=temp_db, config=config)
+    yield store
+    store.close()
 
 
 class TestSaveWithTTL:

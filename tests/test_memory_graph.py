@@ -15,7 +15,7 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime
 
-from core.memory_store import MemoryStore, MemoryEntry
+from core.memory.store import MemoryStore, MemoryEntry
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def store(temp_db_path):
     """Create a MemoryStore instance with temporary database."""
     store = MemoryStore(temp_db_path)
     yield store
-    # Cleanup handled by temp_dir fixture
+    store.close()
 
 
 def _update_entities(store, entry_id, entities):

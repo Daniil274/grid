@@ -15,7 +15,7 @@ user goal:
 
 The builder prototype lives in:
 
-- [system_builder.py](/c:/Users/danii/grid/core/system_builder.py)
+- [builder.py](/c:/Users/danii/grid/core/platform/builder.py)
 - [platform_system_builder_live.py](/c:/Users/danii/grid/examples/platform_system_builder_live.py)
 - [system_builder_tools.py](/c:/Users/danii/grid/tools/system_builder_tools.py)
 

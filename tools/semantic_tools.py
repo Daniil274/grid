@@ -16,7 +16,7 @@ from agents import function_tool
 from utils.logger import Logger
 
 try:
-    from core.embeddings import CodeSearchManager, create_code_search_manager
+    from core.memory.embeddings import CodeSearchManager, create_code_search_manager
     EMBEDDINGS_AVAILABLE = True
 except ImportError:
     CodeSearchManager = None  # type: ignore[assignment,misc]

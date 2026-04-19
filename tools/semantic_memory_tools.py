@@ -69,7 +69,7 @@ def _index_entry(emb: Any, entry: Any) -> None:
     Long entries are split with _split_markdown so each chunk gets its own vector.
     All chunks share the same entry_id in metadata, enabling dedup at retrieval time.
     """
-    from core.embeddings import EmbeddingsManager
+    from core.memory.embeddings import EmbeddingsManager
 
     base_meta = {
         "entry_id":   entry.id,

@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 from agents import RunContextWrapper, function_tool
 
 from core.config import Config
-from core.system_builder import LiveSystemBuilder
+from core.platform.builder import LiveSystemBuilder
 
 
 def _get_factory(context: RunContextWrapper) -> Any:

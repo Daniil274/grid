@@ -10,8 +10,8 @@ import yaml
 
 from core.agent_factory import AgentFactory
 from core.config import Config
-from core.memory_store import MemoryStore
-from core.unified_memory import UnifiedMemory
+from core.memory.store import MemoryStore
+from core.memory.unified import UnifiedMemory
 from core.managers.container_manager import ContainerManager
 
 logger = logging.getLogger("grid.web_chat.runtime")

@@ -1,7 +1,7 @@
 import pytest
 
-from core.condition_evaluator import ConditionEvaluator, ConditionEvaluationError
-from core.event_bus import DomainEventBus
+from core.platform.conditions import ConditionEvaluator, ConditionEvaluationError
+from core.platform.events import DomainEventBus
 from core.meta_cognitive import (
     CapabilityRegistry,
     CoverageIndex,
@@ -12,12 +12,12 @@ from core.meta_cognitive import (
     TaskOntology,
     TemplateInstantiator,
 )
-from core.system_compiler import SystemCompileError
-from core.system_registry import ChannelConflictError, SystemRegistry
-from core.system_release_manager import CandidatePromotionFlow
-from core.system_mutation import DraftSystemBuilder, MutationKind, MutationSet, SystemMutator
-from core.system_workbench import SystemWorkbench
-from core.system_runtime import SystemRuntime
+from core.platform.compiler import SystemCompileError
+from core.platform.registry import ChannelConflictError, SystemRegistry
+from core.platform.release import CandidatePromotionFlow
+from core.platform.mutation import DraftSystemBuilder, MutationKind, MutationSet, SystemMutator
+from core.platform.workbench import SystemWorkbench
+from core.platform.runtime import SystemRuntime
 from core.config import Config
 from examples.platform_systems.build_case_examples import build_registry, run_examples
 from schemas import (

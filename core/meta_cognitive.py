@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Dict, List, Optional
 
-from core.event_bus import DomainEvent, DomainEventBus
+from core.platform.events import DomainEvent, DomainEventBus
 from schemas.meta_cognitive import (
     AntiPattern,
     Capability,

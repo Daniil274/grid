@@ -1,8 +1,8 @@
 import json
 
 from core.config import Config
-from core.evaluator import ExperimentEvaluator
-from core.improvement_registry import ImprovementRegistry
+from core.improvement.evaluator import ExperimentEvaluator
+from core.improvement.registry import ImprovementRegistry
 from schemas.benchmarking import BenchmarkAdapterResult
 
 

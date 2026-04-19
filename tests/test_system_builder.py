@@ -3,9 +3,9 @@ import json
 from pathlib import Path
 
 from core.config import Config
-from core.system_builder import LiveSystemBuilder
-from core.system_registry import SystemRegistry
-from core.system_workbench import SystemWorkbench
+from core.platform.builder import LiveSystemBuilder
+from core.platform.registry import SystemRegistry
+from core.platform.workbench import SystemWorkbench
 from schemas import (
     AgentNodeDefinition,
     BuilderBundleSpec,

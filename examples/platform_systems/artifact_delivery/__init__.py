@@ -1,0 +1,1 @@
+"""Artifact delivery example bundle."""

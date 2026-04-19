@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 
 from core.config import Config
-from core.evaluator import ExperimentEvaluator
-from core.improvement_monitor import ImprovementMonitor
-from core.config_proposer import ConfigProposer
-from core.improvement_registry import ImprovementRegistry
-from core.log_observer import run_observer_command
+from core.improvement.evaluator import ExperimentEvaluator
+from core.improvement.monitor import ImprovementMonitor
+from core.improvement.proposer import ConfigProposer
+from core.improvement.registry import ImprovementRegistry
+from core.improvement.log_observer import run_observer_command
 
 
 def main() -> int:

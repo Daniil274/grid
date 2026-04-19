@@ -3,9 +3,9 @@ import json
 import pytest
 import yaml
 
-from core.config_apply import apply_config_diff, revert_config_diff
+from core.improvement.config_apply import apply_config_diff, revert_config_diff
 from core.config import Config
-from core.improvement_registry import ImprovementRegistry
+from core.improvement.registry import ImprovementRegistry
 from schemas import GridConfig
 
 

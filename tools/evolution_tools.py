@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Optional
 
 from agents import RunContextWrapper, function_tool
 
-from core.evaluator import ExperimentEvaluator
-from core.improvement_monitor import ImprovementMonitor
-from core.config_proposer import ConfigProposer
-from core.improvement_registry import ImprovementRegistry
+from core.improvement.evaluator import ExperimentEvaluator
+from core.improvement.monitor import ImprovementMonitor
+from core.improvement.proposer import ConfigProposer
+from core.improvement.registry import ImprovementRegistry
 
 
 def _get_factory_from_context(context: RunContextWrapper) -> Any:

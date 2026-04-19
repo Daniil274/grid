@@ -77,7 +77,7 @@ class TestConfig:
         config = Config(str(modified_config_file))
         original_working_dir = config._working_directory
         
-        with patch('core.config.logger') as mock_logger:
+        with patch('core.config.config.logger') as mock_logger:
             config.set_working_directory("/new/path")
             mock_logger.warning.assert_called_with("Path override is disabled in configuration")
             assert config._working_directory == original_working_dir
@@ -154,7 +154,7 @@ class TestConfig:
         config = Config(str(config_file))
         
         with patch.dict(os.environ, {}, clear=True):
-            with patch('core.config.logger') as mock_logger:
+            with patch('core.config.config.logger') as mock_logger:
                 api_key = config.get_api_key("openai")
                 assert api_key is None
                 mock_logger.warning.assert_called_with("No API key found for provider 'openai'")

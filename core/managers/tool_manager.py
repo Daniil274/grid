@@ -4,10 +4,10 @@ Tool Manager for handling agent tools.
 
 import logging
 from typing import List, Any, TYPE_CHECKING
-from core.protocols import IToolManager
+from core.config.protocols import IToolManager
 
 if TYPE_CHECKING:
-    from core.config import Config
+    from core.config.config import Config
     from core.agent_factory import AgentFactory
 
 logger = logging.getLogger("grid.managers.tool")
