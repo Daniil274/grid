@@ -196,6 +196,53 @@ def _compact_to_context_messages(messages: list[CompactMessage]) -> list[Context
     return context_messages
 
 
+def get_agent_skill_status(config: Config, agent_key: str) -> tuple[list[tuple[str, Path]], list[str]]:
+    """Return declared system skills split into found and missing."""
+    found: list[tuple[str, Path]] = []
+    missing: list[str] = []
+
+    try:
+        agent_cfg = config.get_agent(agent_key)
+    except Exception:
+        return found, missing
+
+    skills_dir = Path(config.config_path).parent / "skills"
+    for skill_name in agent_cfg.system_skills:
+        skill_path = None
+        for ext in (".md", ".txt"):
+            candidate = skills_dir / f"{skill_name}{ext}"
+            if candidate.exists():
+                skill_path = candidate
+                break
+        if skill_path is not None:
+            found.append((skill_name, skill_path))
+        else:
+            missing.append(skill_name)
+
+    return found, missing
+
+
+def print_agent_skill_status(config: Config, agent_key: str) -> None:
+    """Print startup summary of system skills for the selected agent."""
+    found, missing = get_agent_skill_status(config, agent_key)
+    declared_total = len(found) + len(missing)
+
+    print("Skills")
+    if declared_total == 0:
+        print(f"Skills - Для агента '{agent_key}' system_skills не заданы")
+        return
+
+    print(f"Skills - Для агента '{agent_key}' заявлено навыков: {declared_total}")
+    if found:
+        print("  Найдены:")
+        for skill_name, skill_path in found:
+            print(f"    - {skill_name}: {skill_path}")
+    if missing:
+        print("  Не найдены:")
+        for skill_name in missing:
+            print(f"    - {skill_name}")
+
+
 async def main():
     """Главная функция."""
     parser = argparse.ArgumentParser(description="Legacy Grid agent chat interface")
@@ -337,6 +384,7 @@ async def main():
 
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
+        print_agent_skill_status(config, agent_key)
 
         activated_existing_context = False
         if is_context_id(args.context_path):
