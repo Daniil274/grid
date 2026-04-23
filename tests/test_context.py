@@ -237,6 +237,54 @@ class TestContextManager:
         
         assert len(recent) == 2
         assert all(ex.agent_name == "target_agent" for ex in recent)
+
+    def test_get_incomplete_run_summary_includes_recent_tool_events(self):
+        """Test unfinished runs are summarized for the next attempt."""
+        cm = ContextManager()
+        cm.set_metadata(
+            "pending_agent_run",
+            {
+                "agent": "test_agent",
+                "status": "retrying",
+                "retry_count": 3,
+                "last_error": "Connection error while reading response",
+                "input_preview": "compile and verify fix",
+                "tool_events": [
+                    {
+                        "event_type": "tool_called",
+                        "tool_name": "bash_tool",
+                        "arguments": "{\"command\": \"make test\"}",
+                    },
+                    {
+                        "event_type": "tool_output",
+                        "tool_name": "bash_tool",
+                        "output": "ok",
+                    },
+                ],
+            },
+        )
+
+        summary = cm.get_incomplete_run_summary()
+
+        assert "Незавершённая предыдущая попытка выполнения" in summary
+        assert "Агент: test_agent" in summary
+        assert "Последняя ошибка: Connection error while reading response" in summary
+        assert "tool_called: bash_tool" in summary
+        assert "tool_output: bash_tool | output=ok" in summary
+
+    def test_get_incomplete_run_summary_ignores_completed_runs(self):
+        """Test completed runs are not injected back into the next prompt."""
+        cm = ContextManager()
+        cm.set_metadata(
+            "pending_agent_run",
+            {
+                "agent": "test_agent",
+                "status": "completed",
+                "tool_events": [{"event_type": "tool_output", "tool_name": "bash_tool"}],
+            },
+        )
+
+        assert cm.get_incomplete_run_summary() == ""
     
     def test_clear_history(self):
         """Test clearing all history."""

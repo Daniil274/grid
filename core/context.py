@@ -431,6 +431,113 @@ class ContextManager:
         with safe_lock(self._lock, timeout=5.0):
             return self._metadata.copy()
 
+    def append_metadata_event(
+        self,
+        key: str,
+        event: Dict[str, Any],
+        *,
+        max_items: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Append an event dict to a metadata list and persist it."""
+        with safe_lock(self._lock, timeout=5.0):
+            current = self._metadata.get(key)
+            items: List[Dict[str, Any]]
+            if isinstance(current, list):
+                items = [item for item in current if isinstance(item, dict)]
+            else:
+                items = []
+
+            items.append(event)
+            if max_items > 0 and len(items) > max_items:
+                items = items[-max_items:]
+
+            self._metadata[key] = items
+            bucket = self._contexts.get(self._current_context_id)
+            if bucket is not None:
+                bucket["updated_at"] = datetime.now().isoformat()
+            if self.persist_path:
+                self._save_to_file()
+            return list(items)
+
+    def get_incomplete_run_summary(
+        self,
+        *,
+        max_events: int = 8,
+        max_field_length: int = 300,
+    ) -> str:
+        """Build a compact prompt-safe summary for an unfinished previous run."""
+        with safe_lock(self._lock, timeout=5.0):
+            payload = self._metadata.get("pending_agent_run")
+            if not isinstance(payload, dict):
+                return ""
+
+            status = str(payload.get("status") or "").strip() or "unknown"
+            if status == "completed":
+                return ""
+
+            lines = [
+                "Незавершённая предыдущая попытка выполнения:",
+            ]
+
+            agent = payload.get("agent")
+            if agent:
+                lines.append(f"Агент: {agent}")
+
+            last_error = payload.get("last_error")
+            if isinstance(last_error, str) and last_error.strip():
+                err = last_error.strip()
+                if len(err) > max_field_length:
+                    err = err[:max_field_length] + "…"
+                lines.append(f"Последняя ошибка: {err}")
+
+            retries = payload.get("retry_count")
+            if retries is not None:
+                lines.append(f"Число повторов: {retries}")
+
+            input_preview = payload.get("input_preview")
+            if isinstance(input_preview, str) and input_preview.strip():
+                preview = input_preview.strip()
+                if len(preview) > max_field_length:
+                    preview = preview[:max_field_length] + "…"
+                lines.append(f"Исходный запрос: {preview}")
+
+            tool_events = payload.get("tool_events")
+            if isinstance(tool_events, list):
+                compact_events = [item for item in tool_events if isinstance(item, dict)][-max_events:]
+            else:
+                compact_events = []
+
+            if compact_events:
+                lines.append("Последние события выполнения:")
+                for item in compact_events:
+                    event_type = str(item.get("event_type") or "event")
+                    tool_name = str(item.get("tool_name") or "").strip()
+                    details = []
+                    if tool_name:
+                        details.append(tool_name)
+                    arguments = item.get("arguments")
+                    if arguments is not None and event_type == "tool_called":
+                        arg_text = str(arguments).strip()
+                        if len(arg_text) > max_field_length:
+                            arg_text = arg_text[:max_field_length] + "…"
+                        details.append(f"args={arg_text}")
+                    output = item.get("output")
+                    if output is not None and event_type == "tool_output":
+                        output_text = str(output).strip()
+                        if len(output_text) > max_field_length:
+                            output_text = output_text[:max_field_length] + "…"
+                        details.append(f"output={output_text}")
+                    suffix = " | ".join(part for part in details if part)
+                    if suffix:
+                        lines.append(f"- {event_type}: {suffix}")
+                    else:
+                        lines.append(f"- {event_type}")
+
+            lines.append(
+                "Если это уместно, продолжай с учётом уже выполненных шагов и не повторяй завершённые операции без необходимости."
+            )
+            return "\n".join(lines)
+
     def _normalize_message_content(self, content: Union[str, List[Any]]) -> Union[str, List[Any]]:
         """
         Normalize message content by converting file images to base64.

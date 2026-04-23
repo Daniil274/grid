@@ -118,7 +118,10 @@ class TestAgentFactory:
             
             assert session is mock_session
             assert ("test_agent", "test_context") in factory._agent_sessions
-            mock_session_class.assert_called_once_with("agent_test_agent_test_context")
+            mock_session_class.assert_called_once_with(
+                session_id="agent_test_agent_test_context",
+                db_path=factory._agent_session_db_path,
+            )
     
     def test_get_agent_session_reuses_existing(self, config_file):
         """Test that _get_agent_session reuses existing session."""
@@ -135,6 +138,23 @@ class TestAgentFactory:
             
             assert session1 is session2
             mock_session_class.assert_called_once()  # Only called once
+
+    def test_persistent_session_db_path_lives_under_logs(self, config_file):
+        """Test durable session DB path is created in the workspace logs directory."""
+        config = Config(str(config_file))
+        factory = AgentFactory(config)
+
+        assert factory._agent_session_db_path.endswith("logs/agent_sessions.db")
+        assert Path(factory._agent_session_db_path).parent.exists()
+
+    def test_is_retriable_agent_exception_detects_transient_errors(self, config_file):
+        """Test transient provider/network failures are treated as retriable."""
+        config = Config(str(config_file))
+        factory = AgentFactory(config)
+
+        assert factory._is_retriable_agent_exception(Exception("Connection error while streaming response"))
+        assert factory._is_retriable_agent_exception(AgentError("rate limit exceeded by provider"))
+        assert not factory._is_retriable_agent_exception(Exception("tool arguments are invalid"))
     
     def test_is_reasoning_model_name(self, config_file):
         """Test reasoning model detection."""
@@ -308,21 +328,41 @@ class TestAgentFactory:
             mock_create.assert_called_once_with("test_agent", "/test/path")
     
     @pytest.mark.asyncio
-    async def test_run_agent_timeout(self, config_file):
-        """Test agent run timeout."""
+    async def test_run_agent_retries_transient_timeout(self, config_file):
+        """Test agent retries transient timeout errors and eventually succeeds."""
         config = Config(str(config_file))
         factory = AgentFactory(config)
         
         with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
-             patch('asyncio.wait_for', side_effect=asyncio.TimeoutError), \
-             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"):
+             patch('core.agent_factory.Runner') as mock_runner, \
+             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
+             patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
             
             mock_agent = Mock()
             mock_agent.name = "Test Agent"
             mock_create.return_value = mock_agent
-            
-            with pytest.raises(AgentError, match="Agent execution timed out"):
-                await factory.run_agent("test_agent", "test message")
+
+            mock_result = Mock()
+            mock_result.final_output = "Recovered response"
+            mock_runner.run = AsyncMock(return_value=mock_result)
+
+            attempts = {"count": 0}
+
+            async def fake_wait_for(coro, timeout):
+                attempts["count"] += 1
+                if attempts["count"] == 1:
+                    coro.close()
+                    raise asyncio.TimeoutError()
+                coro.close()
+                return mock_result
+
+            with patch('asyncio.wait_for', side_effect=fake_wait_for) as mock_wait_for:
+                response = await factory.run_agent("test_agent", "test message")
+
+            assert response.startswith("Recovered response")
+            assert attempts["count"] == 2
+            assert mock_wait_for.call_count == 2
+            mock_sleep.assert_awaited_once()
     
     @pytest.mark.asyncio
     async def test_run_agent_streaming(self, config_file, capsys):

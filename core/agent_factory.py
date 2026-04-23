@@ -12,6 +12,13 @@ from typing import Callable, List, Dict, Any, Optional, Protocol
 from dotenv import load_dotenv
 import httpx
 from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    APIStatusError,
+    InternalServerError,
+    RateLimitError,
+)
 
 # OpenAI Agents SDK imports
 import agents
@@ -395,11 +402,13 @@ class AgentFactory:
             )
             self.unified_memory = None
 
+        self._agent_session_db_path = self._build_agent_session_db_path()
+
         self._runtime_support = AgentRuntimeSupport(
             config=self.config,
             context_manager=self.context_manager,
             container_id=self.container_id,
-            session_factory=lambda session_id: SQLiteSession(session_id),
+            session_factory=self._create_persistent_sqlite_session,
         )
         self.instructions_builder = self._runtime_support.instructions_builder
 
@@ -469,6 +478,161 @@ class AgentFactory:
         self._pipeline_registry._memory_store = self.memory_store
         logger.info("PipelineRegistry initialized")
 
+    def _build_agent_session_db_path(self) -> str:
+        """Return durable SQLite path for agent sessions."""
+        base_dir = Path(self.config.get_working_directory()) / "logs"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return str(base_dir / "agent_sessions.db")
+
+    def _create_persistent_sqlite_session(self, session_id: str) -> SQLiteSession:
+        """Create a file-backed SDK session so history survives process restarts."""
+        return SQLiteSession(session_id=session_id, db_path=self._agent_session_db_path)
+
+    @staticmethod
+    def _safe_preview(value: Any, max_length: int = 500) -> str:
+        """Convert arbitrary runtime data to a compact preview string."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, ensure_ascii=False, default=str)
+            except Exception:
+                text = str(value)
+        text = text.strip()
+        if len(text) > max_length:
+            return text[:max_length] + "..."
+        return text
+
+    def _update_pending_agent_run(
+        self,
+        *,
+        agent_key: str,
+        active_context_id: Optional[str],
+        input_preview: str,
+        status: str,
+        retry_count: int = 0,
+        last_error: Optional[str] = None,
+        clear_tool_events: bool = False,
+    ) -> Dict[str, Any]:
+        """Persist durable state for the currently running agent attempt."""
+        existing = self.context_manager.get_metadata("pending_agent_run")
+        payload: Dict[str, Any] = existing.copy() if isinstance(existing, dict) else {}
+        if clear_tool_events or not isinstance(payload.get("tool_events"), list):
+            payload["tool_events"] = []
+
+        payload.update(
+            {
+                "agent": agent_key,
+                "context_id": active_context_id,
+                "status": status,
+                "retry_count": retry_count,
+                "updated_at": datetime.now().isoformat(),
+            }
+        )
+        if input_preview:
+            payload["input_preview"] = input_preview
+        if last_error is not None:
+            payload["last_error"] = last_error
+        elif status in {"completed", "running"}:
+            payload.pop("last_error", None)
+
+        self.context_manager.set_metadata("pending_agent_run", payload)
+        return payload
+
+    def _record_runtime_event(
+        self,
+        *,
+        event_type: str,
+        tool_name: Optional[str] = None,
+        arguments: Any = None,
+        output: Any = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append a compact runtime event to durable context metadata."""
+        event: Dict[str, Any] = {
+            "event_type": event_type,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if tool_name:
+            event["tool_name"] = tool_name
+        if arguments is not None:
+            event["arguments"] = self._safe_preview(arguments, max_length=700)
+        if output is not None:
+            event["output"] = self._safe_preview(output, max_length=700)
+        if extra:
+            for key, value in extra.items():
+                if value is not None:
+                    event[key] = self._safe_preview(value, max_length=300)
+        pending = self.context_manager.get_metadata("pending_agent_run")
+        if not isinstance(pending, dict):
+            pending = {}
+        tool_events = pending.get("tool_events")
+        if not isinstance(tool_events, list):
+            tool_events = []
+        tool_events = [item for item in tool_events if isinstance(item, dict)]
+        tool_events.append(event)
+        pending["tool_events"] = tool_events[-100:]
+        pending["updated_at"] = datetime.now().isoformat()
+        self.context_manager.set_metadata("pending_agent_run", pending)
+
+    @staticmethod
+    def _message_looks_transient_provider_error(message: str) -> bool:
+        text = (message or "").lower()
+        transient_markers = (
+            "connection error",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "remote protocol error",
+            "server disconnected",
+            "connection reset",
+            "network",
+            "rate limit",
+            "overloaded",
+            "stream closed",
+            "incomplete chunked read",
+        )
+        return any(marker in text for marker in transient_markers)
+
+    def _is_retriable_agent_exception(self, exc: Exception) -> bool:
+        """Decide whether agent execution should be retried indefinitely."""
+        if isinstance(
+            exc,
+            (
+                asyncio.TimeoutError,
+                httpx.TimeoutException,
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.RemoteProtocolError,
+                APIConnectionError,
+                APITimeoutError,
+                InternalServerError,
+                RateLimitError,
+            ),
+        ):
+            return True
+        if isinstance(exc, APIStatusError):
+            status_code = getattr(exc, "status_code", None)
+            return status_code in {408, 409, 425, 429, 500, 502, 503, 504}
+        if isinstance(exc, AgentError):
+            return self._message_looks_transient_provider_error(str(exc))
+        if isinstance(exc, Exception):
+            return self._message_looks_transient_provider_error(str(exc))
+        return False
+
+    @staticmethod
+    def _retry_backoff_seconds(retry_count: int) -> float:
+        """Backoff that rises quickly but stays bounded for endless retries."""
+        schedule = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 30.0, 45.0, 60.0]
+        if retry_count <= 0:
+            return schedule[0]
+        return schedule[min(retry_count, len(schedule) - 1)]
+
     @staticmethod
     def _configure_tracing_once(level: str) -> None:
         global _TRACING_CONFIGURED
@@ -534,6 +698,25 @@ class AgentFactory:
 
         except Exception as e:
             logger.warning(f"Failed to emit progress event: {e}")
+
+    async def emit_progress_event(
+        self,
+        event_type: str,
+        agent_name: str,
+        content: str,
+        parent_id: Optional[str] = None,
+        status: str = "running",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Backward-compatible wrapper for older call sites."""
+        await self.emit_progress(
+            event_type=event_type,
+            agent_name=agent_name,
+            content=content,
+            parent_id=parent_id,
+            status=status,
+            details=details,
+        )
 
     async def initialize(self) -> None:
         """Async init hook for compatibility with API lifespan."""
@@ -2007,30 +2190,77 @@ class AgentFactory:
                 container_id=self.container_id
             )
 
+            input_preview = self._safe_preview(parsed_message, max_length=700)
+            self._update_pending_agent_run(
+                agent_key=agent_key,
+                active_context_id=active_context_id,
+                input_preview=input_preview,
+                status="running",
+                retry_count=0,
+                clear_tool_events=True,
+            )
+
+            retry_count = 0
+            result = None
             set_current_factory(self)
             try:
-                if stream:
-                    # Streaming режим: прозрачная подсветка tool/MCP вызовов через наблюдателя
-                    result_output: Optional[str] = None
-                    streaming_text_parts: List[str] = []
+                while True:
+                    self._update_pending_agent_run(
+                        agent_key=agent_key,
+                        active_context_id=active_context_id,
+                        input_preview=input_preview,
+                        status="running",
+                        retry_count=retry_count,
+                    )
+                    self._record_runtime_event(
+                        event_type="attempt_started",
+                        extra={"retry_count": retry_count},
+                    )
                     try:
-                        run_result_streaming = _get_runner().run_streamed(
-                            agent,
-                            parsed_message,  # Use parsed message (dict/list or string) with history prepended
-                            context=run_ctx,
-                            max_turns=max_turns,
-                            session=session,
-                        )
-                        async for event in run_result_streaming.stream_events():
-                            try:
-                                obs = stream_observer or self._stream_observer
-                                fragment = obs.handle_event(event, agent_key=agent_key)
-                                if fragment:
-                                    streaming_text_parts.append(fragment)
-
-                                # Отправить события инструментов в broadcaster
-                                if self.broadcaster:
+                        if stream:
+                            # Streaming режим: прозрачная подсветка tool/MCP вызовов через наблюдателя
+                            result_output: Optional[str] = None
+                            streaming_text_parts: List[str] = []
+                            run_result_streaming = _get_runner().run_streamed(
+                                agent,
+                                parsed_message,
+                                context=run_ctx,
+                                max_turns=max_turns,
+                                session=session,
+                            )
+                            async for event in run_result_streaming.stream_events():
+                                try:
                                     if isinstance(event, RunItemStreamEvent):
+                                        event_name = getattr(event, "name", "")
+                                        item = getattr(event, "item", None)
+                                        if item is not None and event_name in {"tool_called", "tool_output"}:
+                                            raw_item = getattr(item, "raw_item", None)
+                                            tool_name = getattr(raw_item, "name", None) or getattr(raw_item, "type", None) or "tool"
+                                            if event_name == "tool_called":
+                                                arguments = getattr(raw_item, "arguments", None)
+                                                self._record_runtime_event(
+                                                    event_type="tool_called",
+                                                    tool_name=tool_name,
+                                                    arguments=arguments,
+                                                    extra={"retry_count": retry_count},
+                                                )
+                                            else:
+                                                tool_output = getattr(item, "output", None)
+                                                if tool_output is None:
+                                                    tool_output = getattr(raw_item, "output", None)
+                                                self._record_runtime_event(
+                                                    event_type="tool_output",
+                                                    tool_name=tool_name,
+                                                    output=tool_output,
+                                                    extra={"retry_count": retry_count},
+                                                )
+
+                                    obs = stream_observer or self._stream_observer
+                                    fragment = obs.handle_event(event, agent_key=agent_key)
+                                    if fragment:
+                                        streaming_text_parts.append(fragment)
+
+                                    if self.broadcaster and isinstance(event, RunItemStreamEvent):
                                         event_name = getattr(event, "name", "")
                                         item = getattr(event, "item", None)
 
@@ -2064,73 +2294,40 @@ class AgentFactory:
                                                     "output": str(output)[:500] if output else ""
                                                 }
                                             )
-                            except Exception:
-                                logger.exception(
-                                    "Stream observer failed for %s", type(event).__name__
-                                )
+                                except Exception:
+                                    logger.exception(
+                                        "Stream observer failed for %s", type(event).__name__
+                                    )
 
-                        result_output = (
-                            run_result_streaming.final_output
-                            if run_result_streaming.final_output is not None
-                            else ""
-                        )
-                        if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
-                            try:
-                                buffered_text = "".join(streaming_text_parts).strip()
-                                if buffered_text:
-                                    result_output = buffered_text
-                            except Exception:
-                                logger.exception("Failed to merge streaming text fragments")
-
-                    except asyncio.TimeoutError:
-                        logger.error(f"Agent execution timed out after {timeout_seconds} seconds")
-                        raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
-                    except MaxTurnsExceeded as e:
-                        # Return partial output if available, otherwise best-effort from streaming buffer
-                        partial = self._extract_partial_output(e) or (
-                            "".join(streaming_text_parts).strip() if streaming_text_parts else None
-                        )
-                        if partial:
-                            logger.warning(
-                                "Agent reached max turns; returning partial output (%d chars)", len(partial)
+                            result_output = (
+                                run_result_streaming.final_output
+                                if run_result_streaming.final_output is not None
+                                else ""
                             )
-                            result_output = partial
+                            if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
+                                try:
+                                    buffered_text = "".join(streaming_text_parts).strip()
+                                    if buffered_text:
+                                        result_output = buffered_text
+                                except Exception:
+                                    logger.exception("Failed to merge streaming text fragments")
+                            result = result_output
                         else:
-                            result_output = f"⚠️ Agent reached max turns limit ({max_turns}). No final output produced."
-                            logger.warning("Agent reached max turns with no partial output")
-                    except ModelBehaviorError as e:
-                        logger.error("Model behavior error during streaming: %s", e)
-                        result_output = (
-                            f"ERROR: Model produced an invalid response — {e}. "
-                            f"Please retry the request."
-                        )
-                    except AgentsUserError as e:
-                        logger.error("SDK user error during streaming: %s", e)
-                        result_output = (
-                            f"ERROR: Tool execution failed — {e}. "
-                            f"Please check tool call arguments and retry."
-                        )
-                    except Exception as e:
-                        raise AgentError(f"Agent execution failed: {e}") from e
-                    result = result_output
-                else:
-                    try:
-                        # Запускаем агента и получаем RunResult объект
-                        result = await asyncio.wait_for(
-                            _get_runner().run(
-                                agent,
-                                parsed_message,  # Use parsed message (dict/list or string) with history prepended
-                                context=run_ctx,
-                                max_turns=max_turns,
-                                session=session
-                            ),
-                            timeout=timeout_seconds
-                        )
-
-                    except asyncio.TimeoutError:
-                        raise AgentError(f"Agent execution timed out after {timeout_seconds} seconds")
+                            result = await asyncio.wait_for(
+                                _get_runner().run(
+                                    agent,
+                                    parsed_message,
+                                    context=run_ctx,
+                                    max_turns=max_turns,
+                                    session=session
+                                ),
+                                timeout=timeout_seconds
+                            )
+                        break
                     except MaxTurnsExceeded as e:
                         partial = self._extract_partial_output(e)
+                        if stream and not partial:
+                            partial = "".join(streaming_text_parts).strip() if streaming_text_parts else None
                         if partial:
                             logger.warning(
                                 "Agent reached max turns; returning partial output (%d chars)", len(partial)
@@ -2139,20 +2336,65 @@ class AgentFactory:
                         else:
                             result = f"⚠️ Agent reached max turns limit ({max_turns}). No final output produced."
                             logger.warning("Agent reached max turns with no partial output")
+                        break
                     except ModelBehaviorError as e:
-                        logger.error("Model behavior error (non-streaming): %s", e)
+                        logger.error("Model behavior error during agent run: %s", e)
                         result = (
                             f"ERROR: Model produced an invalid response — {e}. "
                             f"Please retry the request."
                         )
+                        break
                     except AgentsUserError as e:
-                        logger.error("SDK user error (non-streaming): %s", e)
+                        logger.error("SDK user error during agent run: %s", e)
                         result = (
                             f"ERROR: Tool execution failed — {e}. "
                             f"Please check tool call arguments and retry."
                         )
+                        break
                     except Exception as e:
-                        raise AgentError(f"Agent execution failed: {e}") from e
+                        retriable = self._is_retriable_agent_exception(e)
+                        error_text = self._safe_preview(str(e), max_length=700)
+                        self._update_pending_agent_run(
+                            agent_key=agent_key,
+                            active_context_id=active_context_id,
+                            input_preview=input_preview,
+                            status="retrying" if retriable else "failed",
+                            retry_count=retry_count,
+                            last_error=error_text,
+                        )
+                        self._record_runtime_event(
+                            event_type="attempt_error",
+                            output=error_text,
+                            extra={
+                                "retry_count": retry_count,
+                                "retriable": retriable,
+                                "exception_type": type(e).__name__,
+                            },
+                        )
+                        if not retriable:
+                            raise AgentError(f"Agent execution failed: {e}") from e
+
+                        retry_count += 1
+                        delay = self._retry_backoff_seconds(retry_count)
+                        logger.warning(
+                            "Retriable agent failure for %s (attempt %d, retry in %.1fs): %s",
+                            agent_key,
+                            retry_count,
+                            delay,
+                            e,
+                            exc_info=e,
+                        )
+                        await self.emit_progress_event(
+                            event_type="agent_retry",
+                            agent_name=agent_key,
+                            content=f"Временная ошибка провайдера, повтор через {delay:.1f}с",
+                            status="retrying",
+                            details={
+                                "retry_count": retry_count,
+                                "error": error_text,
+                            },
+                        )
+                        await asyncio.sleep(delay)
             finally:
                 reset_current_factory()
 
@@ -2264,6 +2506,14 @@ class AgentFactory:
                 # Retry with same context (use_active_context=True to preserve history)
                 # Skip adding new input since we already added correction prompt
                 logger.info(f"Retrying agent execution with correction (attempt {_retry_count + 2}/{MAX_RETRY_COUNT + 1})")
+                self._update_pending_agent_run(
+                    agent_key=agent_key,
+                    active_context_id=active_context_id,
+                    input_preview=input_preview,
+                    status="retrying",
+                    retry_count=retry_count,
+                    last_error="Malformed manual tool call detected; retrying with correction prompt.",
+                )
                 return await self.run_agent(
                     agent_key=agent_key,
                     message="",  # Empty message - we added correction prompt already
@@ -2318,6 +2568,18 @@ class AgentFactory:
             duration = execution.end_time - start_time
             
             self.context_manager.add_execution(execution)
+            self._record_runtime_event(
+                event_type="attempt_completed",
+                output=output,
+                extra={"retry_count": retry_count},
+            )
+            self._update_pending_agent_run(
+                agent_key=agent_key,
+                active_context_id=active_context_id,
+                input_preview=input_preview,
+                status="completed",
+                retry_count=retry_count,
+            )
             
             # Ensure we log the final output for debugging
             if not output:
@@ -2334,6 +2596,22 @@ class AgentFactory:
         except Exception as e:
             execution.end_time = time.time()
             execution.error = str(e)
+            try:
+                self._update_pending_agent_run(
+                    agent_key=agent_key,
+                    active_context_id=locals().get("active_context_id"),
+                    input_preview=locals().get("input_preview", self._safe_preview(message, max_length=700)),
+                    status="failed",
+                    retry_count=locals().get("retry_count", 0),
+                    last_error=self._safe_preview(str(e), max_length=700),
+                )
+                self._record_runtime_event(
+                    event_type="execution_failed",
+                    output=str(e),
+                    extra={"exception_type": type(e).__name__},
+                )
+            except Exception:
+                logger.debug("Failed to persist pending run failure state", exc_info=True)
             
             self.context_manager.add_execution(execution)
             

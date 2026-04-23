@@ -77,6 +77,27 @@ class InstructionsBuilder:
                 )
                 history_strategy = "prompt"
 
+        incomplete_run_summary = ""
+        get_incomplete_run_summary = getattr(
+            self.context_manager,
+            "get_incomplete_run_summary",
+            None,
+        )
+        if callable(get_incomplete_run_summary):
+            try:
+                incomplete_run_summary = get_incomplete_run_summary()
+            except Exception:
+                logger.debug("Failed to get incomplete run summary", exc_info=True)
+
+        if incomplete_run_summary:
+            sections.append(
+                PromptSection(
+                    key="incomplete_run_summary",
+                    content=incomplete_run_summary,
+                    scope="dynamic",
+                )
+            )
+
         instructions = "\n\n".join(
             section.content.strip()
             for section in sections
