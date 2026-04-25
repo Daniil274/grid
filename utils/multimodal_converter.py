@@ -207,14 +207,14 @@ class MultimodalConverter:
 
         for part in message.content:
             if isinstance(part, TextContent):
-                # SDK совместимый формат input_text
+                # SDK-compatible input_text format
                 content_parts.append({
                     "type": "input_text",
                     "text": part.text
                 })
 
             elif isinstance(part, ImageContent):
-                # Нормализуем путь/URL и возвращаем input_image (SDK формат)
+                # Normalize path/URL and return input_image (SDK format)
                 image_url = part.image_url
                 if isinstance(image_url, ImageUrl):
                     url = image_url.url
@@ -228,7 +228,7 @@ class MultimodalConverter:
                 else:
                     continue
 
-                # Преобразуем локальные файлы в base64, http оставляем как есть
+                # Convert local files to base64, leave http as-is
                 if ImageUtils.is_base64_image(url):
                     pass
                 elif ImageUtils.is_local_path(url):
@@ -248,7 +248,7 @@ class MultimodalConverter:
                 content_parts.append(image_part)
 
             elif isinstance(part, FileImageContent):
-                # Convert file to base64 и вернуть input_image
+                # Convert file to base64 and return input_image
                 base64_url = ImageUtils.file_to_base64(part.file_path)
                 if base64_url:
                     image_part: Dict[str, Any] = {
@@ -262,7 +262,7 @@ class MultimodalConverter:
                     logger.warning(f"Failed to convert image file: {part.file_path}")
 
             elif isinstance(part, dict):
-                # Dict-парт: приводим к формату input_text/input_image (SDK)
+                # Dict part: convert to input_text/input_image format (SDK)
                 part_type = part.get("type")
                 if part_type == "image_url":
                     image_url_data = part.get("image_url")
@@ -293,7 +293,7 @@ class MultimodalConverter:
                             image_part["detail"] = detail
                         content_parts.append(image_part)
                 elif part_type == "input_image":
-                    # Оставляем как input_image, но нормализуем локальные пути
+                    # Keep as input_image, but normalize local paths
                     url = part.get("image_url", "")
                     detail = part.get("detail", "auto")
                     if url:
@@ -312,13 +312,13 @@ class MultimodalConverter:
                             image_part["detail"] = detail
                         content_parts.append(image_part)
                 elif part_type == "text":
-                    # Конвертируем text -> input_text
+                    # Convert text -> input_text
                     content_parts.append({
                         "type": "input_text",
                         "text": part.get("text", "")
                     })
                 elif part_type == "input_text":
-                    # Оставляем input_text
+                    # Keep as input_text
                     content_parts.append({
                         "type": "input_text",
                         "text": part.get("text", "")
@@ -450,10 +450,10 @@ class MultimodalConverter:
     @staticmethod
     def tool_output_to_content_parts(output: Union[List[Any], Dict[str, Any], Any]) -> List[ContentPart]:
         """
-        Normalize мультимодальный вывод инструмента к списку ContentPart.
+        Normalize multimodal tool output to a list of ContentPart.
 
-        Поддерживает словари формата input_text/input_image/image_url и
-        готовые Pydantic-модели TextContent/ImageContent/FileImageContent.
+        Supports dictionaries in input_text/input_image/image_url format and
+        ready-made Pydantic models TextContent/ImageContent/FileImageContent.
         """
         if output is None:
             return []
@@ -515,11 +515,11 @@ class MultimodalConverter:
                         )
                     continue
 
-                # Неизвестный тип — оставляем как есть
+                # Unknown type — keep as-is
                 parts.append(item)  # type: ignore[arg-type]
                 continue
 
-            # Fallback — превращаем в текст
+            # Fallback — convert to text
             try:
                 parts.append(TextContent(type="text", text=str(item)))
             except Exception:
@@ -537,17 +537,17 @@ class MultimodalConverter:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
-        Сохраняет мультимодальный вывод инструмента в контекст вместо возврата пользователю.
+        Saves multimodal tool output to context instead of returning to the user.
 
         Args:
-            ctx: RunContextWrapper, полученный в инструменте (ctx.context.factory/context_id)
-            tool_name: имя инструмента
-            output: вывод инструмента (строка/список/словарь)
-            role: роль сообщения в контексте
-            metadata: дополнительные метаданные
+            ctx: RunContextWrapper obtained in the tool (ctx.context.factory/context_id)
+            tool_name: tool name
+            output: tool output (string/list/dict)
+            role: message role in the context
+            metadata: additional metadata
 
         Returns:
-            Использованный context_id или None, если сохранить не удалось.
+            Used context_id or None if saving failed.
         """
         try:
             parts = MultimodalConverter.tool_output_to_content_parts(output)
@@ -559,7 +559,7 @@ class MultimodalConverter:
             context_id = getattr(context_obj, "context_id", None)
 
             if not factory or not hasattr(factory, "context_manager"):
-                logger.debug("store_tool_multimodal_output: нет доступа к factory.context_manager")
+                logger.debug("store_tool_multimodal_output: no access to factory.context_manager")
                 return None
 
             meta = {"source": "tool", "tool_name": tool_name}
@@ -574,7 +574,7 @@ class MultimodalConverter:
                 return context_id
         except Exception as exc:
             logger.warning(
-                "Не удалось сохранить мультимодальный вывод инструмента %s в контекст: %s",
+                "Failed to save multimodal output of tool %s to context: %s",
                 tool_name,
                 exc,
                 exc_info=exc,

@@ -1,5 +1,5 @@
 """
-Vision Tools for Grid agents - просмотр и анализ изображений.
+Vision Tools for Grid agents - viewing and analyzing images.
 """
 import io
 import logging
@@ -16,8 +16,8 @@ logger = logging.getLogger("tools.vision")
 
 def _image_path_to_data_url(image_path: str) -> str:
     """
-    Конвертировать путь к изображению в data URL (base64).
-    Принимает абсолютный хост-путь.
+    Convert image path to data URL (base64).
+    Accepts absolute host path.
     """
     img_file = Path(image_path).resolve()
 
@@ -48,7 +48,7 @@ async def _inject_image_for_analysis(
     question: str,
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
-    Загрузка изображения и возврат как ToolOutputImage для анализа агентом.
+    Load image and return as ToolOutputImage for agent analysis.
     """
     visible_path = display_agent_path_from_ctx(image_path, ctx)
     logger.info(f"Processing image: {visible_path}")
@@ -56,21 +56,21 @@ async def _inject_image_for_analysis(
     file_ext = Path(image_path).suffix.lower()
     if file_ext == '.pdf':
         return [ToolOutputText(
-            text=f"❌ ОШИБКА: view_image не поддерживает PDF файлы!\n\n"
-                 f"Для анализа PDF используй:\n"
-                 f'- pdf("{visible_path}", pages="1:1") для получения страниц как изображений\n'
-                 f'- pdf-ocr("{visible_path}", pages="1:1") для OCR'
+            text=f"❌ ERROR: view_image does not support PDF files!\n\n"
+                 f"To analyze PDF use:\n"
+                 f'- pdf("{visible_path}", pages="1:1") to get pages as images\n'
+                 f'- pdf-ocr("{visible_path}", pages="1:1") for OCR'
         )]
 
     try:
         resolved = resolve_agent_path_from_ctx(image_path, ctx)
         data_url = _image_path_to_data_url(resolved)
     except Exception as e:
-        return [ToolOutputText(text=f"❌ Ошибка при загрузке изображения: {str(e)}")]
+        return [ToolOutputText(text=f"❌ Error loading image: {str(e)}")]
 
     logger.info(f"✅ Returning ToolOutputImage for {visible_path}")
     return [
-        ToolOutputText(text=f"📷 Изображение: {visible_path}\n\nВопрос: {question}"),
+        ToolOutputText(text=f"📷 Image: {visible_path}\n\nQuestion: {question}"),
         ToolOutputImage(image_url=data_url, detail="high"),
     ]
 
@@ -79,20 +79,20 @@ async def _inject_image_for_analysis(
 async def view_image(
     ctx: RunContextWrapper[Any],
     image_path: str,
-    question: str = "Опиши подробно что изображено на этой картинке"
+    question: str = "Describe in detail what is shown in this picture"
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
-    Показывает изображение агенту для анализа. Только для jpg, png, gif, webp, bmp — не для PDF.
+    Shows an image to the agent for analysis. Only for jpg, png, gif, webp, bmp — not for PDF.
 
     Args:
-        image_path: Путь к файлу изображения
-        question: Что нужно найти или описать на изображении
+        image_path: Path to the image file
+        question: What to find or describe in the image
     """
     try:
         return await _inject_image_for_analysis(ctx, image_path, question)
     except Exception as e:
         logger.error(f"Error in view_image tool: {e}", exc_info=True)
-        return [ToolOutputText(text=f"❌ Ошибка при обработке изображения: {str(e)}")]
+        return [ToolOutputText(text=f"❌ Error processing image: {str(e)}")]
 
 
 @function_tool
@@ -101,13 +101,13 @@ async def analyze_screenshot(
     screenshot_path: str
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
-    Анализ скриншота UI/интерфейса. Специализированная версия view_image для скриншотов.
+    Analyze a UI/screenshot. Specialized version of view_image for screenshots.
 
     Args:
-        screenshot_path: Путь к скриншоту
+        screenshot_path: Path to the screenshot
 
     Returns:
-        Список с результатом анализа скриншота
+        List with screenshot analysis results
 
     Example:
         analyze_screenshot(ctx, "/path/to/screenshot.png")
@@ -115,7 +115,7 @@ async def analyze_screenshot(
     return await _inject_image_for_analysis(
         ctx,
         screenshot_path,
-        "Проанализируй этот скриншот: определи тип интерфейса, найди все элементы UI (кнопки, поля, меню), опиши что отображается на экране."
+        "Analyze this screenshot: determine the interface type, find all UI elements (buttons, fields, menus), describe what is displayed on the screen."
     )
 
 
@@ -129,37 +129,37 @@ async def crop_image(
     image_path: Optional[str] = None,
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
-    Вырезает фрагмент изображения по пиксельным координатам для детального zoom-in.
+    Cuts an image fragment by pixel coordinates for detailed zoom-in.
 
-    Координаты в пикселях (берутся из размера скриншота, который возвращает take_screenshot).
+    Coordinates in pixels (taken from the screenshot size returned by take_screenshot).
 
     Args:
-        left: X левого края (пиксели)
-        top: Y верхнего края (пиксели)
-        right: X правого края (пиксели)
-        bottom: Y нижнего края (пиксели)
-        image_path: Путь к изображению (None = последний скриншот)
+        left: X of left edge (pixels)
+        top: Y of top edge (pixels)
+        right: X of right edge (pixels)
+        bottom: Y of bottom edge (pixels)
+        image_path: Path to the image (None = last screenshot)
     """
     try:
         from PIL import Image
     except ImportError:
-        return [ToolOutputText(text="❌ Pillow не установлен. Установи: pip install Pillow")]
+        return [ToolOutputText(text="❌ Pillow is not installed. Install with: pip install Pillow")]
 
     if image_path is None:
         wd = Path(ctx.context.factory.config.get_working_directory())
         img_file = wd / "screenshots" / "last_screenshot.png"
         if not img_file.exists():
             return [ToolOutputText(
-                text="❌ Нет последнего скриншота. Сначала вызови take_screenshot()."
+                text="❌ No last screenshot. Call take_screenshot() first."
             )]
     else:
         try:
             img_file = Path(resolve_agent_path_from_ctx(image_path, ctx)).resolve()
         except Exception as e:
-            return [ToolOutputText(text=f"❌ Ошибка при загрузке изображения: {str(e)}")]
+            return [ToolOutputText(text=f"❌ Error loading image: {str(e)}")]
         if not img_file.exists():
             visible_path = display_agent_path_from_ctx(image_path, ctx)
-            return [ToolOutputText(text=f"❌ Файл не найден: {visible_path}")]
+            return [ToolOutputText(text=f"❌ File not found: {visible_path}")]
 
     try:
         with Image.open(img_file) as img:
@@ -167,7 +167,7 @@ async def crop_image(
 
             if left >= right or top >= bottom:
                 return [ToolOutputText(
-                    text=f"❌ Некорректные координаты: left={left}, top={top}, right={right}, bottom={bottom}."
+                    text=f"❌ Invalid coordinates: left={left}, top={top}, right={right}, bottom={bottom}."
                 )]
 
             cropped = img.crop((left, top, right, bottom))
@@ -189,10 +189,10 @@ async def crop_image(
 
     except Exception as e:
         logger.error(f"Error in crop_image: {e}", exc_info=True)
-        return [ToolOutputText(text=f"❌ Ошибка при кропе: {e}")]
+        return [ToolOutputText(text=f"❌ Error during crop: {e}")]
 
 
-# Экспорт инструментов
+# Export tools
 VISION_TOOLS = {
     "view_image": view_image,
     "analyze_screenshot": analyze_screenshot,

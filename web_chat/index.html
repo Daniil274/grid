@@ -19,7 +19,7 @@
           <span class="sidebar__primaryIcon">+</span>
           <span>New chat</span>
         </button>
-        <div class="sidebar__sectionLabel">Диалоги</div>
+        <div class="sidebar__sectionLabel">Conversations</div>
       </div>
       <div class="sidebar__scroll" id="conversations-list"></div>
       <div class="sidebar__bottom">
@@ -31,10 +31,10 @@
     <main class="workspace">
       <header class="topbar">
         <div class="topbar__main">
-          <button class="iconBtn topbar__menuBtn" id="toggle-sidebar-btn" type="button" aria-label="Открыть список диалогов">☰</button>
+          <button class="iconBtn topbar__menuBtn" id="toggle-sidebar-btn" type="button" aria-label="Open conversation list">☰</button>
           <button class="agentButton" id="agent-button" type="button">
-            <span class="agentButton__eyebrow">Активный агент</span>
-            <span class="agentButton__title" id="active-agent-name">Загрузка...</span>
+            <span class="agentButton__eyebrow">Active agent</span>
+            <span class="agentButton__title" id="active-agent-name">Loading...</span>
             <span class="agentButton__meta" id="active-agent-meta"></span>
           </button>
         </div>
@@ -48,22 +48,21 @@
       <section class="chatCanvas" id="messages-container">
         <div class="welcome" id="empty-state">
           <div class="welcome__eyebrow">Grid</div>
-          <h1>Чем заняться?</h1>
-          <p>Веб-чат теперь работает поверх того же runtime, что и `agent_chat`: с контекстом, агентами, инструментами и прозрачностью выполнения.</p>
+          <h1>What to do?</h1>
+          <p>The web chat now runs on the same runtime as `agent_chat`: with context, agents, tools, and execution transparency.</p>
           <div class="welcome__actions">
-            <button class="promptChip" type="button" data-prompt="Проанализируй текущий проект и предложи ближайшие шаги.">Разобраться в проекте</button>
-            <button class="promptChip" type="button" data-prompt="Проведи ревью текущих изменений и найди риски.">Сделать ревью</button>
-            <button class="promptChip" type="button" data-prompt="Помоги улучшить UI/UX текущего интерфейса.">Улучшить UI/UX</button>
+            <button class="promptChip" type="button" data-prompt="Analyze the current project and suggest next steps.">Explore project</button>
+            <button class="promptChip" type="button" data-prompt="Review current changes and find risks.">Do a review</button>
+            <button class="promptChip" type="button" data-prompt="Help improve the UI/UX of the current interface.">Improve UI/UX</button>
           </div>
         </div>
       </section>
-      <button class="jumpToLatest hidden" id="jump-latest-btn" type="button">К последним сообщениям</button>
 
       <footer class="composerWrap">
         <div class="composerCard">
-          <textarea id="message-input" class="composerInput" rows="1" placeholder="Сообщение для Grid"></textarea>
+          <textarea id="message-input" class="composerInput" rows="1" placeholder="Message for Grid"></textarea>
           <div class="composerActions">
-            <div class="composerHint">Enter - отправить, Shift+Enter - новая строка</div>
+            <div class="composerHint">Enter - send, Shift+Enter - new line</div>
             <div class="composerButtons">
               <button class="secondaryBtn hidden" id="stop-btn" type="button">Stop</button>
               <button class="primaryBtn" id="send-btn" type="button" disabled>Send</button>
@@ -77,10 +76,10 @@
   <div class="popover hidden" id="agent-popover">
     <div class="popover__header">
       <div>
-        <div class="popover__eyebrow">Выбор агента</div>
-        <div class="popover__title">Кто отвечает на запрос</div>
+        <div class="popover__eyebrow">Agent selection</div>
+        <div class="popover__title">Who responds to the request</div>
       </div>
-      <button class="iconBtn" id="close-agent-popover" type="button" aria-label="Закрыть выбор агента">&times;</button>
+      <button class="iconBtn" id="close-agent-popover" type="button" aria-label="Close agent selection">&times;</button>
     </div>
     <div class="agentGrid" id="agent-grid"></div>
   </div>
@@ -91,10 +90,10 @@
       <div class="drawer__header">
         <div>
           <div class="drawer__eyebrow">System config</div>
-          <h2>Настройка системы</h2>
-          <p>Меняй агентов, инструменты, промпты и системные параметры без ручного редактирования YAML.</p>
+          <h2>System Configuration</h2>
+          <p>Modify agents, tools, prompts, and system settings without manual YAML editing.</p>
         </div>
-        <button class="iconBtn" id="close-settings-btn" type="button" aria-label="Закрыть настройки">&times;</button>
+        <button class="iconBtn" id="close-settings-btn" type="button" aria-label="Close settings">&times;</button>
       </div>
 
       <div class="drawer__tabs" id="settings-tabs">
@@ -108,7 +107,7 @@
       <div class="drawer__body">
         <section class="settingsPane active" id="pane-system">
           <div class="settingsCard">
-            <h3>Основные параметры</h3>
+            <h3>General Settings</h3>
             <div class="formGrid" id="system-form"></div>
           </div>
           <div class="settingsCard">
@@ -121,7 +120,7 @@
           <div class="editorLayout">
             <div class="editorListWrap">
               <div class="editorListHeader">
-                <h3>Агенты</h3>
+                <h3>Agents</h3>
                 <button class="secondaryBtn" id="add-agent-btn" type="button">Add agent</button>
               </div>
               <div class="editorList" id="agents-list"></div>
@@ -134,7 +133,7 @@
           <div class="editorLayout">
             <div class="editorListWrap">
               <div class="editorListHeader">
-                <h3>Инструменты</h3>
+                <h3>Tools</h3>
                 <button class="secondaryBtn" id="add-tool-btn" type="button">Add tool</button>
               </div>
               <div class="editorList" id="tools-list"></div>
@@ -147,7 +146,7 @@
           <div class="editorLayout">
             <div class="editorListWrap">
               <div class="editorListHeader">
-                <h3>Промпты</h3>
+                <h3>Prompts</h3>
                 <button class="secondaryBtn" id="add-prompt-btn" type="button">Add prompt</button>
               </div>
               <div class="editorList" id="prompts-list"></div>

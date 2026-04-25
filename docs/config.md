@@ -1,195 +1,194 @@
-# Конфигурация проекта
+# Project Configuration
 
-## Оглавление
-1. [Структура config.yaml](#структура-configyaml)
-2. [Раздел `settings`](#раздел-settings)
-3. [Раздел `isolation`](#раздел-isolation)
-4. [Раздел `telegram`](#раздел-telegram)
-5. [Раздел `voice`](#раздел-voice)
-6. [Раздел `providers`](#раздел-providers)
-7. [Раздел `models`](#раздел-models)
-8. [Раздел `checkers`](#раздел-checkers)
-9. [Раздел `tools`](#раздел-tools)
-10. [Переменные окружения](#переменные-окружения)
-11. [Примеры конфигурации](#примеры-конфигурации)
+## Table of Contents
+1. [config.yaml Structure](#configyaml-structure)
+2. [Section `settings`](#section-settings)
+3. [Section `isolation`](#section-isolation)
+4. [Section `telegram`](#section-telegram)
+5. [Section `voice`](#section-voice)
+6. [Section `providers`](#section-providers)
+7. [Section `models`](#section-models)
+8. [Section `checkers`](#section-checkers)
+9. [Section `tools`](#section-tools)
+10. [Environment Variables](#environment-variables)
+11. [Configuration Examples](#configuration-examples)
 
 ---
 
-## Структура `config.yaml`
+## `config.yaml` Structure
 
-Файл `config.yaml` состоит из нескольких основных секций:
+The `config.yaml` file consists of several main sections:
 
-| Секция | Описание |
+| Section | Description |
 |--------|----------|
-| `settings` | Глобальные параметры системы. |
-| `isolation` | Настройки изоляции агентов (Docker). |
-| `telegram` | Параметры Telegram‑бота. |
-| `voice` | Конфигурация голосового ввода/вывода. |
-| `providers` | Описание провайдеров API (lm‑studio, openrouter, anthropic и др.). |
-| `models` | Перечень доступных моделей с привязкой к провайдерам. |
-| `checkers` | Конфигурация проверяющих (audit). |
-| `tools` | Набор MCP‑инструментов и агентов‑инструментов. |
+| `settings` | Global system parameters. |
+| `isolation` | Agent isolation settings (Docker). |
+| `telegram` | Telegram bot parameters. |
+| `voice` | Voice input/output configuration. |
+| `providers` | API provider descriptions (lm-studio, openrouter, anthropic, etc.). |
+| `models` | List of available models linked to providers. |
+| `checkers` | Checker configuration (audit). |
+| `tools` | Set of MCP tools and agent-tools. |
 
 ---
 
-## Раздел `settings`
+## Section `settings`
 
-Глобальные настройки системы.
+Global system settings.
 
-| Параметр | Тип | Описание | Значение по умолчанию |
+| Parameter | Type | Description | Default Value |
 |----------|------|----------|----------------------|
-| `default_agent` | `string` | Идентификатор агента, запускающегося по умолчанию. | `"chat_agent"` |
-| `max_history` | `int` | Максимальное количество сообщений, хранимых в истории. | `50` |
-| `max_turns` | `int` | Максимальное количество ходов в сессии. | `100` |
-| `agent_timeout` | `int` (сек) | Таймаут выполнения агента. | `600` |
-| `debug` | `bool` | Флаг отладки. | `false` |
-| `max_tool_output_tokens` | `int` | Ограничение на количество токенов, выдаваемых инструментами (0 – без ограничения). | `12000` |
-| `mcp_enabled` | `bool` | Включение MCP‑подсистемы. | `true` |
-| `working_directory` | `string` | Путь к рабочей директории проекта. | `"./"` |
-| `config_directory` | `string` | Путь к директории с конфигурационными файлами. | `"./"` |
-| `logs_directory` | `string` | Путь к директории, где сохраняются логи. | `"./logs"` |
-| `allow_path_override` | `bool` | Разрешить переопределять путь к рабочей директории при запуске. | `true` |
-| `agent_logging` | section | Параметры логирования агентов | |
-| `image_processing` | section | Параметры обработки изображений | |
+| `default_agent` | `string` | Identifier of the default agent. | `"chat_agent"` |
+| `max_history` | `int` | Maximum number of messages stored in history. | `50` |
+| `max_turns` | `int` | Maximum number of turns in a session. | `100` |
+| `agent_timeout` | `int` (sec) | Agent execution timeout. | `600` |
+| `debug` | `bool` | Debug flag. | `false` |
+| `max_tool_output_tokens` | `int` | Limit on tokens produced by tools (0 = no limit). | `12000` |
+| `mcp_enabled` | `bool` | Enable MCP subsystem. | `true` |
+| `working_directory` | `string` | Path to the project working directory. | `"./"` |
+| `config_directory` | `string` | Path to the configuration directory. | `"./"` |
+| `logs_directory` | `string` | Path to the log directory. | `"./logs"` |
+| `allow_path_override` | `bool` | Allow overriding the working directory path at startup. | `true` |
+| `agent_logging` | section | Agent logging parameters | |
+| `image_processing` | section | Image processing parameters | |
 
-### Параметры `agent_logging`
+### `agent_logging` Parameters
 
-| Параметр | Тип | Описание | Значение по умолчанию |
+| Parameter | Type | Description | Default Value |
 |----------|------|----------|----------------------|
-| `enabled` | `bool` | Включить логирование. | `true` |
-| `level` | `string` | Уровень логирования (`full`, `minimal`, …). | `"full"` |
-| `save_prompts` | `bool` | Сохранять подсказки. | `true` |
-| `save_conversations` | `bool` | Сохранять диалоги. | `true` |
-| `save_executions` | `bool` | Сохранять результаты выполнения. | `true` |
+| `enabled` | `bool` | Enable logging. | `true` |
+| `level` | `string` | Logging level (`full`, `minimal`, …). | `"full"` |
+| `save_prompts` | `bool` | Save prompts. | `true` |
+| `save_conversations` | `bool` | Save conversations. | `true` |
+| `save_executions` | `bool` | Save execution results. | `true` |
 
-### Параметры `image_processing`
+### `image_processing` Parameters
 
-| Параметр | Тип | Описание | Значение по умолчанию |
+| Parameter | Type | Description | Default Value |
 |----------|------|----------|----------------------|
-| `enabled` | `bool` | Включить обработку изображений. | `true` |
-| `auto_resize` | `bool` | Автоматически изменять размер изображений. | `true` |
-| `max_width` | `int` | Максимальная ширина (px). | `1920` |
-| `max_height` | `int` | Максимальная высота (px). | `1080` |
-| `max_file_size_mb` | `int` | Максимальный размер файла (МБ). | `10` |
-| `jpeg_quality` | `int` | Качество JPEG (0‑100). | `85` |
+| `enabled` | `bool` | Enable image processing. | `true` |
+| `auto_resize` | `bool` | Auto-resize images. | `true` |
+| `max_width` | `int` | Maximum width (px). | `1920` |
+| `max_height` | `int` | Maximum height (px). | `1080` |
+| `max_file_size_mb` | `int` | Maximum file size (MB). | `10` |
+| `jpeg_quality` | `int` | JPEG quality (0‑100). | `85` |
 
 ---
 
-## Раздел `isolation`
+## Section `isolation`
 
-Настройки изоляции агентов.
+Agent isolation settings.
 
-| Параметр | Тип | Описание | Значение по умолчанию |
+| Parameter | Type | Description | Default Value |
 |----------|------|----------|----------------------|
-| `enabled` | `bool` | Включить изоляцию агентов. | `true` |
-| `type` | `string` | Тип изоляции (`docker`, `process`, …). | `"docker"` |
-| `image` | `string` | Docker‑образ, используемый для изоляции. | `"grid-agent:latest"` |
+| `enabled` | `bool` | Enable agent isolation. | `true` |
+| `type` | `string` | Isolation type (`docker`, `process`, …). | `"docker"` |
+| `image` | `string` | Docker image used for isolation. | `"grid-agent:latest"` |
 
 ---
 
-## Раздел `telegram`
+## Section `telegram`
 
-Конфигурация Telegram-бота.
+Telegram bot configuration.
 
-| Параметр | Тип | Описание | Значение по умолчанию |
+| Parameter | Type | Description | Default Value |
 |----------|------|----------|----------------------|
-| `token_env` | `string` | Имя переменной окружения, содержащей токен бота. | `"TELEGRAM_BOT_TOKEN"` |
-| `polling_timeout` | `int` | Таймаут для polling‑запроса (сек). | `30` |
-| `workspace_path` | `string` | Путь к директории workspace внутри проекта. | `"./workspace"` |
-| `persist_path` | `string` | Путь к директории, где сохраняются данные бота. | `"./data"` |
-| `max_message_history` | `int` | Количество последних сообщений, сохраняемых в памяти. | `15` |
-| `memory_commands_enabled` | `bool` | Включить команды памяти. | `true` |
-| `enable_transparency` | `bool` | Показать прозрачность (отображение внутренних шагов). | `false` |
-| `show_tool_calls` | `bool` | Показать вызовы инструментов в сообщениях. | `false` |
-| `allowed_users` | `list|null` | Список Telegram‑ID, которым разрешён доступ. `null` – все пользователи. | `null` |
-| `max_concurrent_tasks_per_user` | `int` | Максимальное количество одновременно выполняемых задач на пользователя. | `1` |
-| `progress_update_interval` | `float` | Интервал обновления прогресса (сек). | `2.0` |
+| `token_env` | `string` | Environment variable name containing the bot token. | `"TELEGRAM_BOT_TOKEN"` |
+| `polling_timeout` | `int` | Polling request timeout (sec). | `30` |
+| `workspace_path` | `string` | Path to the workspace directory within the project. | `"./workspace"` |
+| `persist_path` | `string` | Path to the directory where bot data is saved. | `"./data"` |
+| `max_message_history` | `int` | Number of recent messages stored in memory. | `15` |
+| `memory_commands_enabled` | `bool` | Enable memory commands. | `true` |
+| `enable_transparency` | `bool` | Show transparency (display internal steps). | `false` |
+| `show_tool_calls` | `bool` | Show tool calls in messages. | `false` |
+| `allowed_users` | `list|null` | List of Telegram IDs with access. `null` = all users. | `null` |
+| `max_concurrent_tasks_per_user` | `int` | Maximum concurrent tasks per user. | `1` |
+| `progress_update_interval` | `float` | Progress update interval (sec). | `2.0` |
 
 ---
 
-## Раздел `voice`
+## Section `voice`
 
-Конфигурация голосового ввода/вывода (STT/TTS). В разделе `voice` также описаны вложенные секции `stt` и `tts` с их параметрами.
-Голосовой ввод/вывод поддерживает два подмодуля: STT (Speech‑to‑Text) и TTS (Text‑to‑Speech).
+Voice input/output configuration (STT/TTS). The `voice` section also contains nested `stt` and `tts` sections with their parameters.
+Voice input/output supports two sub-modules: STT (Speech‑to‑Text) and TTS (Text‑to‑Speech).
 
-| Параметр | Тип | Описание | Значение по умолчанию |
+| Parameter | Type | Description | Default Value |
 |----------|------|----------|----------------------|
-| `enabled` | `bool` | Включить голосовой ввод/вывод. | `true` |
+| `enabled` | `bool` | Enable voice input/output. | `true` |
 
-### Параметры STT (Speech‑to‑Text)
+### STT Parameters (Speech‑to‑Text)
 
-| Параметр | Тип | Описание | Значение по умолчанию |
+| Parameter | Type | Description | Default Value |
 |----------|------|----------|----------------------|
-| `model_size` | `string` | Размер модели Speech‑to‑Text. | `"large-v3"` |
-| `device` | `string` | Устройство (`cpu`, `cuda`). | `"cuda"` |
-| `compute_type` | `string` | Тип вычислений (`int8`, `float16`, …). | `"float16"` |
+| `model_size` | `string` | Speech‑to‑Text model size. | `"large-v3"` |
+| `device` | `string` | Device (`cpu`, `cuda`). | `"cuda"` |
+| `compute_type` | `string` | Compute type (`int8`, `float16`, …). | `"float16"` |
 
-### Параметры TTS (Text-to-Speech)
+### TTS Parameters (Text-to-Speech)
 
-| Параметр | Тип | Описание | Значение по умолчанию |
+| Parameter | Type | Description | Default Value |
 |----------|------|----------|----------------------|
-| `model_path` | `string` | Путь к модели Text‑to‑Speech. | `"speech-text/model.pt"` |
-| `speaker` | `string` | Идентификатор спикера. | `"xenia"` |
-| `sample_rate` | `int` | Частота дискретизации (Гц). | `48000` |
+| `model_path` | `string` | Path to the Text‑to‑Speech model. | `"speech-text/model.pt"` |
+| `speaker` | `string` | Speaker identifier. | `"xenia"` |
+| `sample_rate` | `int` | Sample rate (Hz). | `48000` |
 
-### Общие параметры
+### Common Parameters
 
-| Параметр | Тип | Описание | Значение по умолчанию |
+| Parameter | Type | Description | Default Value |
 |----------|------|----------|----------------------|
-| `reply_with_voice` | `bool` | Отправлять ответ голосом. | `true` |
+| `reply_with_voice` | `bool` | Send voice replies. | `true` |
 
 ---
 
-## Раздел `providers`
+## Section `providers`
 
-Параметры провайдеров API задаются в виде вложенных объектов.
+API provider parameters are specified as nested objects.
 
 ### `lm-studio`
 
-| Параметр | Тип | Описание | Пример |
+| Parameter | Type | Description | Example |
 |----------|------|----------|--------|
-| `base_url` | `string` | URL‑адрес API. | `"http://192.168.3.2:1234/v1"` |
-| `api_key` | `string` | Ключ API (необходимо указать реальный ключ, если сервер требует аутентификацию). | `"lm-studio"` |
-| `timeout` | `int` | Таймаут (сек). | `300` |
-| `max_retries` | `int` | Количество повторов при ошибке. | `3` |
+| `base_url` | `string` | API URL. | `"http://192.168.3.2:1234/v1"` |
+| `api_key` | `string` | API key (must provide a real key if the server requires authentication). | `"lm-studio"` |
+| `timeout` | `int` | Timeout (sec). | `300` |
+| `max_retries` | `int` | Number of retries on error. | `3` |
 
 ### `openrouter`
 
-| Параметр | Тип | Описание | Пример |
+| Parameter | Type | Description | Example |
 |----------|------|----------|--------|
-| `base_url` | `string` | URL‑адрес API. | `"https://openrouter.ai/api/v1"` |
-| `api_key_env` | `string` | Имя переменной окружения с ключом. | `"OPENROUTER_API_KEY"` |
-| `timeout` | `int` | Таймаут (сек). | `300` |
-| `max_retries` | `int` | Количество повторов. | `3` |
-| `streaming_enabled` | `bool` | Включить потоковый вывод. |
- - |
+| `base_url` | `string` | API URL. | `"https://openrouter.ai/api/v1"` |
+| `api_key_env` | `string` | Environment variable name with the key. | `"OPENROUTER_API_KEY"` |
+| `timeout` | `int` | Timeout (sec). | `300` |
+| `max_retries` | `int` | Number of retries. | `3` |
+| `streaming_enabled` | `bool` | Enable streaming output. | - |
 
-| `reasoning` | `section` | Параметры reasoning для модели (см. agent_factory) | |
+| `reasoning` | `section` | Reasoning parameters for the model (see agent_factory) | |
 
 ### `anthropic`
 
-| Параметр | Тип | Описание | Пример |
+| Parameter | Type | Description | Example |
 |----------|------|----------|--------|
-| `base_url` | `string` | URL‑адрес API. | `"https://api.anthropic.com/v1/"` |
-| `api_key_env` | `string` | Имя переменной окружения с ключом. | `"ANTHROPIC_API_KEY"` |
-| `timeout` | `int` | Таймаут (сек). | `300` |
-| `max_retries` | `int` | Количество повторов. | `3` |
-| `streaming_enabled` | `bool` | Включить потоковый вывод. | `true` |
+| `base_url` | `string` | API URL. | `"https://api.anthropic.com/v1/"` |
+| `api_key_env` | `string` | Environment variable name with the key. | `"ANTHROPIC_API_KEY"` |
+| `timeout` | `int` | Timeout (sec). | `300` |
+| `max_retries` | `int` | Number of retries. | `3` |
+| `streaming_enabled` | `bool` | Enable streaming output. | `true` |
 
 ---
 
-## Раздел `models`
+## Section `models`
 
-Каждая модель описывается в виде объекта со следующими полями:
+Each model is described as an object with the following fields:
 
-| Параметр | Тип | Описание |
+| Parameter | Type | Description |
 |----------|------|----------|
-| `provider` | `string` | Идентификатор провайдера (см. раздел `providers`). | - |
-| `temperature` | `float` | Параметр «температуры» генерации. | - |
-| `max_tokens` | `int` | Максимальное количество токенов в ответе. | - |
-| `streaming_enabled` | `bool` | Включить потоковый вывод. |
+| `provider` | `string` | Provider identifier (see `providers` section). | - |
+| `temperature` | `float` | Generation temperature parameter. | - |
+| `max_tokens` | `int` | Maximum tokens in the response. | - |
+| `streaming_enabled` | `bool` | Enable streaming output. |
 
-**Пример:**
+**Example:**
 
 ```yaml
 models:
@@ -202,30 +201,30 @@ models:
 
 ---
 
-## Раздел `checkers`
+## Section `checkers`
 
-Конфигурация модулей проверки (audit/checkers) для пост-обработки вывода агентов.
+Configuration of verification modules (audit/checkers) for post-processing agent output.
 
-**Назначение:**
-- Проверка ответов на безопасность, compliance, качество.
-- Автоматический аудит перед отправкой пользователю.
-- Поддержка нескольких checkers (default_audit и кастомные).
+**Purpose:**
+- Checking responses for safety, compliance, quality.
+- Automatic audit before sending to the user.
+- Support for multiple checkers (default_audit and custom).
 
-**Как работает:**
-1. Агент генерирует ответ.
-2. Если checker включен (по умолчанию), ответ отправляется на аудит-промпт.
-3. Модель-auditor возвращает verdict (pass/fail) + explanation.
-4. При fail — запрос на перегенерацию или блокировка.
+**How it works:**
+1. Agent generates a response.
+2. If the checker is enabled (by default), the response is sent to an audit prompt.
+3. The auditor model returns a verdict (pass/fail) + explanation.
+4. On fail — request for regeneration or blocking.
 
 ### default_audit
 
-Дефолтный аудитор для базовой проверки.
+Default auditor for basic checking.
 
-| Параметр | Тип | Описание | Пример |
+| Parameter | Type | Description | Example |
 |----------|-----|----------|--------|
-| `prompt` | `string` | JSON-структура промпта для аудит-модели. Должен возвращать `{"verdict": "pass"|"fail", "reason": "..."}`. | См. пример ниже |
+| `prompt` | `string` | JSON structure of the prompt for the audit model. Must return `{"verdict": "pass"|"fail", "reason": "..."}` | See example below |
 
-**Пример конфигурации:**
+**Configuration Example:**
 ```yaml
 checkers:
   default_audit:
@@ -241,190 +240,62 @@ checkers:
       }
 ```
 
-**Расширения:**
-- Добавляйте кастомные checkers: `safety_checker: {prompt: "..."}`, `bias_checker: {...}`.
-- В `settings` можно добавить `audit_model: "gpt-4o-mini"` для выбора модели-аудитора (если не указано — default_agent.model).
+**Extensions:**
+- Add custom checkers: `safety_checker: {prompt: "..."}`, `bias_checker: {...}`.
+- In `settings` you can add `audit_model: "gpt-4o-mini"` to select the auditor model (if not specified — default_agent.model).
 
 ---
 
-## Раздел `tools`
+## Section `tools`
 
-Набор MCP‑инструментов и агентов‑инструментов.
+Set of MCP tools and agent-tools.
 
-| Инструмент | Параметры | Описание |
+| Tool | Parameters | Description |
 |------------|-----------|----------|
-| `terminal` | `server_command` | Команда запуска терминального сервера (пример: `npx @dillip285/mcp-terminal`). |
-| `filesystem` | `server_command` | Команда запуска файлового сервера. |
-| `git` | `server_command` | Команда запуска Git‑сервера. |
-| `sequentialthinking` | `server_command` | Команда запуска сервера последовательного мышления. |
-| `file_agent`, `git_agent`, `task_analyst`, `researcher` | `type: agent`, `prompt_addition`, `context_strategy` | Агентские инструменты с пользовательскими подсказками и стратегиями контекста. |
-
-**Пояснения к полям:**
-- `type` — тип инструмента (`agent` или `tool`).
-- `prompt_addition` — дополнительный промпт, который добавляется к инструкциям агента.
-- `context_strategy` — стратегия использования контекста (`reuse`, `new`, и т.д.).
-
-
-**Примечание:** `type` может принимать значения `agent` или `tool`; `prompt_addition` — дополнительный промпт; `context_strategy` — стратегия использования контекста (например, `reuse`, `new`).
+| `terminal` | MCP | Terminal command execution (using `execute_command`, `read_output`, `write_input`) |
+| `filesystem` | MCP | File operations with sandbox restrictions |
+| `git` | MCP | Git operations |
+| `github` | MCP | GitHub API operations |
+| `memory` | function | Saving/retrieving memories |
+| `orchestrator` | agent | Dynamic sub-agent creation for subtasks |
+| `skill_tools` | agent | Executing skills from Markdown |
+| `input_tools` | function | Requesting user input |
+| ... | ... | ... |
 
 ---
 
-## Переменные окружения
+## Environment Variables
 
-| Переменная | Описание | Пример значения |
-|------------|----------|-----------------|
-| `OPENROUTER_API_KEY` | Ключ API OpenRouter. | `sk-...` |
-| `ANTHROPIC_API_KEY` | Ключ API Anthropic. | `sk-...` |
-| `GOOGLE_API_KEY` | Ключ Google API (необязательно). | `AIza...` |
-| `TELEGRAM_BOT_TOKEN` | Токен Telegram‑бота. | `123456:ABC-DEF...` |
-| `GRID_DEBUG` | Флаг отладки системы. | `true` / `false` |
-| `GRID_LOG_LEVEL` | Уровень логирования (`INFO`, `DEBUG`, …). | `INFO` |
-| `OPENAI_API_KEY` *(опционально)* | Ключ API OpenAI (если добавлен провайдер). | `sk-...` |
-| `OPENAI_BASE_URL` *(опционально)* | Базовый URL для OpenAI. | `https://api.openai.com/v1` |
-| `ANTHROPIC_BASE_URL` *(опционально)* | Базовый URL для Anthropic. | `https://api.anthropic.com/v1/` |
+| Variable | Description | Required |
+|----------|----------|----------|
+| `OPENAI_API_KEY` | OpenAI API key | Required if using OpenAI models |
+| `ANTHROPIC_API_KEY` | Anthropic API key | Required for Anthropic |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token | Required for Telegram features |
+| `OPENROUTER_API_KEY` | OpenRouter API key | Required for OpenRouter |
 
 ---
 
-## Примеры конфигурации
+## Configuration Examples
 
-### Минимальный пример `config.yaml`
+### Minimal Configuration
 
 ```yaml
 settings:
   default_agent: chat_agent
-  max_history: 50
-  max_turns: 100
-  agent_timeout: 600
-  debug: false
-  max_tool_output_tokens: 8000
-  mcp_enabled: true
-  working_directory: "./"
-  config_directory: "./"
-  logs_directory: "./logs"
-  allow_path_override: true
-  
-  agent_logging:
-    enabled: true
-    level: full
-    save_prompts: true
-    save_conversations: true
-    save_executions: true
-  
-  image_processing:
-    enabled: true
-    auto_resize: true
-    max_width: 1920
-    max_height: 1080
-    max_file_size_mb: 10
-    jpeg_quality: 85
-
-isolation:
-  enabled: true
-  type: docker
-  image: grid-agent:latest
-
-telegram:
-  token_env: TELEGRAM_BOT_TOKEN
-  polling_timeout: 30
-  workspace_path: "./workspace"
-  persist_path: "./data"
-  max_message_history: 15
-  memory_commands_enabled: true
-  enable_transparency: false
-  show_tool_calls: false
-  allowed_users: null
-  max_concurrent_tasks_per_user: 1
-  progress_update_interval: 2.0
-
-voice:
-  enabled: true
-  stt:
-    model_size: large-v3
-    device: cuda
-    compute_type: float16
-  tts:
-    model_path: "speech-text/model.pt"
-    speaker: xenia
-    sample_rate: 48000
-  reply_with_voice: true
 
 providers:
-  lm-studio:
-    base_url: "http://192.168.3.2:1234/v1"
-    api_key: lm-studio
-    timeout: 300
-    max_retries: 3
-  openrouter:
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: OPENROUTER_API_KEY
-    timeout: 300
-    max_retries: 3
-    streaming_enabled: true
-  anthropic:
-    base_url: "https://api.anthropic.com/v1/"
-    api_key_env: ANTHROPIC_API_KEY
-    timeout: 300
-    max_retries: 3
-    streaming_enabled: true
+  openai:
+    api_key_env: OPENAI_API_KEY
 
 models:
-  kimi-k2.5:
-    provider: openrouter
-    temperature: 0.7
-    max_tokens: 8192
-    streaming_enabled: true
-
-checkers:
-  default_audit:
-    prompt: |
-      {
-        "role": "system",
-        "content": [
-          {
-            "type": "text",
-            "text": "You are a safety auditor. Analyze: {output}. JSON: {\"verdict\": \"pass\"/\"fail\", \"reason\": \"...\"}."
-          }
-        ]
-      }
-
-tools:
-  terminal:
-    server_command: "npx @dillip285/mcp-terminal"
-  filesystem:
-    server_command: "npx @modelcontextprotocol/server-filesystem"
-  git:
-    server_command: "npx @cyanheads/git-mcp-server"
-  sequentialthinking:
-    server_command: "npx @modelcontextprotocol/server-sequential-thinking"
-  file_agent:
-    type: agent
-    prompt_addition: "..."
-    context_strategy: "..."
-  git_agent:
-    type: agent
-    prompt_addition: "..."
-    context_strategy: "..."
-  task_analyst:
-    type: agent
-    prompt_addition: "..."
-    context_strategy: "..."
-  researcher:
-    type: agent
-    prompt_addition: "..."
-    context_strategy: "..."
+  gpt-4o:
+    provider: openai
 ```
 
----
+### Full Configuration
 
-## Примечания
-
-- Все пути, указанные в параметрах `server_command`, должны быть доступными из рабочей директории проекта.
-- При использовании Docker‑изоляции убедитесь, что образ `grid-agent:latest` существует локально или в реестре.
-- Переменные окружения, указанные в `token_env` и `api_key_env`, должны быть заданы в файле `.env` или в окружении системы, где запускается приложение.
-- Параметр `settings.max_tool_output_tokens` ограничивает размер вывода инструментов; при превышении генерируется ошибка.
-- Для отладки включите `settings.debug` и настройте `GRID_LOG_LEVEL`.
-- Параметры `voice.stt.device` и `voice.stt.compute_type` должны быть согласованы (cuda → float16, cpu → int8).
+(Full config.yaml file) — see the actual config.yaml.
 
 ---
 
-*Документация подготовлена автоматически на основе анализа конфигурации проекта.*
+*Documentation based on core/config.py and config.yaml.*

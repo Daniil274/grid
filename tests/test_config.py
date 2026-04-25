@@ -288,7 +288,7 @@ class TestConfig:
         assert "Base prompt for test agent." in prompt
         assert "Can read files." in prompt
         assert "Can write files." in prompt
-        assert "Доступные инструменты:" in prompt
+        assert "Available tools:" in prompt
     
     def test_build_agent_prompt_sections(self, config_file, sample_config):
         """Test building structured prompt sections."""

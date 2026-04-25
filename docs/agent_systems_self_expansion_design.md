@@ -1,37 +1,37 @@
-# Дизайн самоулучшения и саморасширения через системы-нодЫ
+# Design of Self-Improvement and Self-Expansion Through System Nodes
 
-## Цель
+## Goal
 
-Нужен такой дизайн, при котором агент может:
+We need a design where an agent can:
 
-- улучшать существующие системы;
-- создавать новые системы;
-- подключать их в общий реестр;
-- вызывать их как обычные исполняемые объекты;
-- безопасно тестировать версии до публикации;
-- не ломать runtime и не плодить special-case логику.
+- improve existing systems;
+- create new systems;
+- connect them to the common registry;
+- call them as regular executable objects;
+- safely test versions before publication;
+- not break the runtime and not proliferate special-case logic.
 
-Ключевое требование: всё должно быть логично, просто и однообразно.
+The key requirement: everything should be logical, simple and uniform.
 
-Поэтому основная идея такая:
+Therefore, the main idea is:
 
-- всё исполняемое в платформе представляется как `node`;
-- всё композиционное представляется как `system`;
-- все изменения происходят через создание новой `version`;
-- всё подключение идёт через `registry` и `release channels`;
-- самоулучшение и саморасширение используют один и тот же lifecycle.
+- everything executable in the platform is represented as `node`;
+- everything compositional is represented as `system`;
+- all changes happen through creating a new `version`;
+- all connections go through `registry` and `release channels`;
+- self-improvement and self-expansion use the same lifecycle.
 
 ---
 
-## 1. Единая ментальная модель
+## 1. Unified Mental Model
 
-### Главные сущности
+### Main Entities
 
 #### `Node`
 
-Минимальная исполняемая единица.
+Minimal executable unit.
 
-Типы:
+Types:
 
 - `agent`
 - `tool`
@@ -42,22 +42,22 @@
 
 #### `System`
 
-Композиция из нод с:
+Composition of nodes with:
 
-- входной точкой;
-- интерфейсом;
-- графом исполнения;
-- зависимостями;
+- entry point;
+- interface;
+- execution graph;
+- dependencies;
 - policy;
-- версиями.
+- versions.
 
 #### `Version`
 
-Неизменяемый снимок определения системы.
+Immutable snapshot of a system definition.
 
 #### `Release Channel`
 
-Указатель на активную версию:
+Pointer to an active version:
 
 - `stable`
 - `candidate`
@@ -67,101 +67,101 @@
 
 #### `Registry`
 
-Реестр, который отвечает на вопросы:
+A registry that answers the questions:
 
-- какие системы существуют;
-- какие версии у них есть;
-- какая версия активна в каком канале;
-- кто от кого зависит;
-- какие интерфейсы экспортируются.
+- what systems exist;
+- what versions they have;
+- which version is active in which channel;
+- who depends on whom;
+- what interfaces are exported.
 
 ---
 
-## 2. Один lifecycle для улучшения и расширения
+## 2. One Lifecycle for Improvement and Expansion
 
-Самоулучшение и саморасширение не должны быть двумя разными подсистемами.
+Self-improvement and self-expansion should not be two different subsystems.
 
-Они отличаются только базовой операцией:
+They differ only in the base operation:
 
-- self-improvement: создать новую версию существующей системы;
-- self-expansion: создать новую систему и зарегистрировать её.
+- self-improvement: create a new version of an existing system;
+- self-expansion: create a new system and register it.
 
-Дальше lifecycle одинаковый:
+The lifecycle is the same afterwards:
 
-1. Инициатива
-2. Проектирование
-3. Сборка definition
-4. Регистрация candidate version
-5. Проверка интерфейса
+1. Initiative
+2. Design
+3. Build definition
+4. Register candidate version
+5. Interface verification
 6. Benchmark / simulation
 7. Canary
 8. Promotion
-9. Наблюдение
+9. Monitoring
 
-Это важно: если self-expansion не проходит тот же pipeline, он очень быстро превратится в хаотическую генерацию новых YAML-файлов.
-
----
-
-## 3. Три уровня изменений
-
-Чтобы система была логичной, надо явно разделить виды изменений.
-
-### Уровень A. `Tune`
-
-Малые изменения внутри существующей системы:
-
-- поменять модель ноды;
-- поменять prompt;
-- поменять набор tools;
-- поменять routing rule;
-- поменять policy;
-- поменять default agent.
-
-Это self-improvement.
-
-### Уровень B. `Extend`
-
-Добавление новых внутренних возможностей:
-
-- новая нода в существующую систему;
-- новый subworkflow;
-- новый evaluator;
-- новая ветка маршрутизации.
-
-Это уже частично self-expansion, но внутри существующей системы.
-
-### Уровень C. `Create`
-
-Создание новой системы:
-
-- новый `system_id`;
-- новый интерфейс;
-- новый граф;
-- новый lifecycle;
-- публикация в registry.
-
-Это полноценное self-expansion.
-
-Все три уровня должны использовать одинаковые доменные операции.
+This is important: if self-expansion does not go through the same pipeline, it will very quickly turn into chaotic generation of new YAML files.
 
 ---
 
-## 4. Архитектурный принцип простоты
+## 3. Three Levels of Changes
 
-Самая опасная ошибка здесь: дать агенту доступ к редактированию произвольного конфига.
+To make the system logical, we need to explicitly separate the types of changes.
 
-Правильный дизайн:
+### Level A. `Tune`
 
-- агент не редактирует структуру платформы напрямую;
-- агент вызывает доменные операции;
-- доменные операции строят валидный definition;
-- runtime исполняет только зарегистрированные версии.
+Small changes within an existing system:
 
-То есть вместо:
+- change a node's model;
+- change a prompt;
+- change the set of tools;
+- change a routing rule;
+- change a policy;
+- change default agent.
 
-- "открой YAML и впиши что-то"
+This is self-improvement.
 
-должно быть:
+### Level B. `Extend`
+
+Adding new internal capabilities:
+
+- a new node in an existing system;
+- a new subworkflow;
+- a new evaluator;
+- a new routing branch.
+
+This is partially self-expansion, but within an existing system.
+
+### Level C. `Create`
+
+Creating a new system:
+
+- new `system_id`;
+- new interface;
+- new graph;
+- new lifecycle;
+- publication in registry.
+
+This is full self-expansion.
+
+All three levels should use the same domain operations.
+
+---
+
+## 4. Architectural Principle of Simplicity
+
+The most dangerous mistake here: giving an agent access to arbitrary config editing.
+
+The correct design:
+
+- the agent does not edit the platform structure directly;
+- the agent calls domain operations;
+- domain operations build a valid definition;
+- the runtime executes only registered versions.
+
+That is, instead of:
+
+- "open YAML and write something"
+
+it should be:
 
 - `create_system(...)`
 - `fork_system_version(...)`
@@ -170,18 +170,18 @@
 - `set_entrypoint(...)`
 - `publish_candidate(...)`
 
-Это и есть главный признак некостыльной архитектуры.
+This is the main sign of a non-hacky architecture.
 
 ---
 
-## 5. Целевая структура данных
+## 5. Target Data Structure
 
 ## 5.1 `SystemDefinition`
 
 ```yaml
 id: coding_assistant
 title: Coding Assistant
-description: Система для инженерных задач
+description: System for engineering tasks
 kind: system
 entrypoint: main
 default_agent: chat_agent
@@ -218,13 +218,13 @@ metadata:
   owner: system
 ```
 
-### Что важно
+### What's Important
 
-- `ref` указывает на уже существующие сущности;
-- `nodes` и `edges` задают graph;
-- `interfaces` делают систему вызываемой извне;
-- `exports.capabilities` дают механизмы discovery;
-- `dependencies` позволяют строить сеть систем.
+- `ref` points to already existing entities;
+- `nodes` and `edges` define a graph;
+- `interfaces` make the system callable from outside;
+- `exports.capabilities` provide discovery mechanisms;
+- `dependencies` allow building a network of systems.
 
 ## 5.2 `SystemVersion`
 
@@ -260,12 +260,12 @@ channels:
 
 ## 5.4 `SystemManifest`
 
-Нужен короткий индекс для интроспекции и discovery.
+A short index is needed for introspection and discovery.
 
 ```yaml
 system_id: coding_assistant
 title: Coding Assistant
-description: Система для инженерных задач
+description: System for engineering tasks
 latest_stable: 1.2.0
 capabilities: [code, planning, refactor]
 entrypoint: main
@@ -277,82 +277,82 @@ invokable: true
 
 ---
 
-## 6. Как агент должен создавать новую систему
+## 6. How an Agent Should Create a New System
 
-Self-expansion должно быть операцией первого класса.
+Self-expansion should be a first-class operation.
 
-### Pipeline создания новой системы
+### Pipeline for Creating a New System
 
-1. Агент формулирует потребность
-2. Агент проверяет, нет ли уже похожей системы
-3. Агент проектирует интерфейс
-4. Агент проектирует граф
-5. Агент собирает definition
-6. Система валидируется
-7. Создаётся версия `0.1.0-candidate`
-8. Прогоняются smoke tests
-9. Система регистрируется как discoverable
-10. После оценки публикуется в `stable`
+1. Agent identifies a need
+2. Agent checks if a similar system already exists
+3. Agent designs the interface
+4. Agent designs the graph
+5. Agent assembles the definition
+6. System is validated
+7. Version `0.1.0-candidate` is created
+8. Smoke tests are run
+9. System is registered as discoverable
+10. After evaluation, published to `stable`
 
-### Что именно должен решить агент до создания
+### What Exactly the Agent Should Decide Before Creation
 
-- какова цель новой системы;
-- какой у неё входной контракт;
-- какой ожидается выход;
-- какие capabilities она экспортирует;
-- является ли она leaf-системой или orchestration-системой;
-- может ли она вызывать другие системы;
-- какие policies ей нужны.
+- what is the goal of the new system;
+- what is its input contract;
+- what is the expected output;
+- what capabilities does it export;
+- is it a leaf-system or orchestration system;
+- can it call other systems;
+- what policies does it need.
 
-### Что нельзя разрешать
+### What Should Not Be Allowed
 
-Агент не должен:
+An agent should not:
 
-- сразу писать в `stable`;
-- переписывать чужие stable-версии;
-- подменять channel без evaluation;
-- создавать систему без интерфейса и capabilities;
-- создавать циклические зависимости без явного разрешения.
+- immediately write to `stable`;
+- overwrite others' stable versions;
+- replace a channel without evaluation;
+- create a system without an interface and capabilities;
+- create circular dependencies without explicit permission.
 
 ---
 
-## 7. Self-expansion как сетевое расширение платформы
+## 7. Self-Expansion as Network Expansion of the Platform
 
-Новая система полезна только если её можно обнаружить и вызвать.
+A new system is useful only if it can be discovered and called.
 
-Поэтому после создания должны происходить две вещи:
+Therefore, after creation, two things must happen:
 
 ### 1. `Registration`
 
-Система попадает в `SystemRegistry` и становится видимой через discovery tools.
+The system enters `SystemRegistry` and becomes visible through discovery tools.
 
 ### 2. `Capability Export`
 
-Система объявляет:
+The system declares:
 
-- что она умеет;
-- какой контракт у вызова;
-- какие ограничения у исполнения.
+- what it can do;
+- what its call contract is;
+- what execution constraints exist.
 
-Тогда другие агенты и системы могут находить её по capability, а не только по имени.
+Then other agents and systems can find it by capability, not just by name.
 
-Пример:
+Example:
 
-- агент ищет `capability=browser_automation`;
-- registry возвращает `web_operator_system`;
-- агент вызывает её по контракту.
+- agent searches `capability=browser_automation`;
+- registry returns `web_operator_system`;
+- agent calls it by contract.
 
-Это сильно лучше, чем жёстко прошивать знание о новых системах в prompts.
+This is much better than hardcoding knowledge about new systems in prompts.
 
 ---
 
-## 8. Discovery и вызов
+## 8. Discovery and Invocation
 
-Чтобы всё оставалось простым, нужен стандартный внешний API.
+To keep everything simple, a standard external API is needed.
 
 ## 8.1 Discovery API
 
-Инструменты:
+Tools:
 
 - `system_list_systems`
 - `system_search_systems`
@@ -362,25 +362,25 @@ Self-expansion должно быть операцией первого клас�
 
 ## 8.2 Invocation API
 
-Инструменты:
+Tools:
 
 - `system_invoke`
 - `system_invoke_version`
 - `system_invoke_capability`
 
-### Пример вызова по ID
+### Example Call by ID
 
 ```json
 {
   "system_id": "coding_assistant",
   "channel": "stable",
   "input": {
-    "task": "Найди причину flaky test"
+    "task": "Find the cause of flaky test"
   }
 }
 ```
 
-### Пример вызова по capability
+### Example Call by Capability
 
 ```json
 {
@@ -388,88 +388,88 @@ Self-expansion должно быть операцией первого клас�
   "channel": "stable",
   "input": {
     "file_path": "docs/spec.pdf",
-    "goal": "извлечь требования"
+    "goal": "extract requirements"
   }
 }
 ```
 
-### Что делает runtime
+### What the Runtime Does
 
-1. резолвит систему;
-2. резолвит канал в версию;
-3. загружает definition;
-4. компилирует в graph IR;
-5. исполняет entrypoint;
-6. возвращает структурированный result.
-
----
-
-## 9. Два режима исполнения системы
-
-Чтобы не усложнять внедрение, система должна поддерживать два режима.
-
-### Режим 1. `Proxy Mode`
-
-Для раннего этапа.
-
-Система просто проксируется на `default_agent`.
-
-Плюсы:
-
-- легко внедрить;
-- обратная совместимость;
-- можно быстро подключить `systems:` без переписывания runtime.
-
-### Режим 2. `Graph Mode`
-
-Полноценный runtime.
-
-Система исполняется как граф нод.
-
-Плюсы:
-
-- настоящая композиция;
-- self-expansion может строить внутренние структуры;
-- evaluator видит реальное поведение системы;
-- dependency management становится чистым.
-
-Правильный путь: сначала Proxy Mode, потом Graph Mode.
+1. resolves the system;
+2. resolves the channel to a version;
+3. loads the definition;
+4. compiles to graph IR;
+5. executes the entrypoint;
+6. returns a structured result.
 
 ---
 
-## 10. Дизайн self-improvement
+## 9. Two Execution Modes for a System
 
-Self-improvement должен опираться не на "diff файла", а на "diff definition".
+To avoid complicating the implementation, the system should support two modes.
 
-### Улучшение системы выглядит так
+### Mode 1. `Proxy Mode`
 
-1. выбрать `target_system`;
-2. выбрать `base_version`;
-3. создать fork candidate version;
-4. применить change-set к definition;
-5. прогнать validation;
-6. прогнать benchmark;
-7. записать результаты;
-8. переключить candidate/stable channel при успехе.
+For the early stage.
 
-### Типы улучшений
+The system simply proxies to `default_agent`.
 
-- заменить модель ноды;
-- переписать prompt ноды;
-- сменить edge conditions;
-- добавить evaluator;
-- сузить или расширить tools;
-- изменить default entry behavior.
+Pros:
 
-### Change-set лучше хранить как доменные мутации
+- easy to implement;
+- backward compatible;
+- can quickly connect `systems:` without rewriting runtime.
 
-Не так:
+### Mode 2. `Graph Mode`
+
+Full runtime.
+
+The system executes as a graph of nodes.
+
+Pros:
+
+- real composition;
+- self-expansion can build internal structures;
+- evaluator sees real system behavior;
+- dependency management becomes clean.
+
+The right path: first Proxy Mode, then Graph Mode.
+
+---
+
+## 10. Self-Improvement Design
+
+Self-improvement should rely not on "file diff", but on "definition diff".
+
+### System Improvement Looks Like This
+
+1. select `target_system`;
+2. select `base_version`;
+3. create a fork candidate version;
+4. apply change-set to definition;
+5. run validation;
+6. run benchmark;
+7. record results;
+8. switch candidate/stable channel on success.
+
+### Types of Improvements
+
+- replace a node's model;
+- rewrite a node's prompt;
+- change edge conditions;
+- add an evaluator;
+- narrow or expand tools;
+- change default entry behavior.
+
+### Change-set Should Be Stored as Domain Mutations
+
+Not like this:
 
 ```json
 {"path":"agents.chat_agent.model","new":"x"}
 ```
 
-А так:
+But like this:
 
 ```json
 {
@@ -479,7 +479,7 @@ Self-improvement должен опираться не на "diff файла", а
 }
 ```
 
-Или:
+Or:
 
 ```json
 {
@@ -492,317 +492,230 @@ Self-improvement должен опираться не на "diff файла", а
 }
 ```
 
-Это намного устойчивее к будущим изменениям структуры.
+This is much more resilient to future structural changes.
 
 ---
 
-## 11. Дизайн self-expansion
+## 11. Self-Expansion Design
 
-Self-expansion должен быть ограниченным конструктором новых систем.
+Self-expansion should be a constrained constructor of new systems.
 
-### Базовый workflow
+### Basic Workflow
 
-1. Агент обнаруживает unmet capability
-2. Проверяет существующие системы
-3. Формирует proposal новой системы
-4. Создаёт draft definition
-5. Запускает sandbox validation
-6. Регистрирует candidate system
-7. Запускает smoke/evaluation
-8. Делает систему discoverable
-9. Подключает её как dependency в нужные системы
+1. Agent discovers an unmet capability
+2. Checks existing systems
+3. If no suitable system exists:
+   - designs interface;
+   - designs graph;
+   - proposes definition;
+   - registers candidate;
+   - runs validation;
+   - runs smoke tests;
+   - publishes to `candidate` channel;
+   - after evaluation, promotes to `stable`.
 
-### Self-expansion может происходить в двух формах
+### Constraints
 
-#### `Standalone creation`
-
-Новая независимая система.
-
-Пример:
-
-- `research_system`
-- `browser_operator_system`
-- `test_repair_system`
-
-#### `Inline extraction`
-
-Агент выделяет повторяющийся кусок логики из большой системы в новую специализированную систему.
-
-Пример:
-
-- из большого `coding_assistant` выделяется `test_debugger_system`;
-- потом `coding_assistant` начинает вызывать его как dependency.
-
-Это очень важный механизм нормального роста архитектуры.
+- max systems per day (budget);
+- mandatory interface and capability declaration;
+- no self-approval for `stable`;
+- no circular dependencies;
+- observable lifecycle.
 
 ---
 
-## 12. Саморасширение без бардака: правила
+## 12. Rules for Self-Expansion
 
-Чтобы платформа не утонула в системах-клонах, нужны жёсткие правила.
+### 12.1 Interface First
 
-### Правило 1. Capability-first
+A system without an interface cannot be registered.
 
-Новая система должна иметь новую или существенно улучшенную capability.
+### 12.2 Capability Declaration
 
-### Правило 2. Interface-first
+Every system must declare its capabilities.
 
-Нельзя регистрировать систему без формального входного и выходного контракта.
+### 12.3 Discoverability
 
-### Правило 3. Discoverability
+A system must be discoverable by capability and interface contract.
 
-Новая система обязана публиковать `title`, `description`, `capabilities`, `constraints`.
+### 12.4 Dependency Hygiene
 
-### Правило 4. Evaluation-first
+A system cannot have unregistered dependencies.
 
-Нельзя публиковать в `stable` без smoke tests и минимального benchmark.
+### 12.5 Traceability
 
-### Правило 5. Ownership
+Every version must be traceable to its source.
 
-У каждой системы есть owner:
+### 12.6 Promotion Gate
 
-- `human`
-- `system`
-- `shared`
+Promotion to `stable` requires evaluation.
 
-### Правило 6. Dependency hygiene
+### 12.7 No Silent Overwrites
 
-Нельзя создавать циклические зависимости без специального флага policy.
+Channel aliases are changed explicitly.
 
-### Правило 7. Budget
+### 12.8 Audit Log
 
-У self-expansion должен быть бюджет:
-
-- максимум новых систем за период;
-- максимум candidate-версий;
-- максимум одновременно активных canary.
+Mutations are logged.
 
 ---
 
-## 13. Какие новые инструменты нужны агенту
+## 13. System-Level Tool Surface
 
-## 13.1 Registry tools
+For agents to manage systems, tools are needed.
 
-- `system_list_systems`
-- `system_search_systems`
-- `system_get_system_info`
-- `system_get_system_versions`
-- `system_get_release_channels`
+### `system_list_systems`
 
-## 13.2 Design tools
+- Returns all registered systems with their status.
 
-- `system_create_draft`
-- `system_clone_version`
-- `system_validate_definition`
-- `system_diff_versions`
-- `system_estimate_dependencies`
+### `system_get_system_info`
 
-## 13.3 Mutation tools
+- Returns full system definition for a given ID.
 
-- `system_add_node`
-- `system_remove_node`
-- `system_update_node`
-- `system_connect_nodes`
-- `system_disconnect_nodes`
-- `system_set_entrypoint`
-- `system_set_interface`
-- `system_set_policy`
-- `system_add_dependency`
+### `system_get_system_versions`
 
-## 13.4 Publication tools
+- Returns version history of a system.
 
-- `system_register_candidate`
-- `system_run_smoke_test`
-- `system_run_benchmark`
-- `system_promote_channel`
-- `system_archive_version`
+### `system_invoke_system`
 
-## 13.5 Invocation tools
+- Invokes a system by ID+channel.
 
-- `system_invoke`
-- `system_invoke_version`
-- `system_invoke_capability`
+### `system_create_candidate_version`
 
-Это и есть тот bounded API, через который агент сможет строить и использовать новые системы.
+- Creates a new version from a definition change-set.
+
+### `system_run_benchmark`
+
+- Runs benchmark on a specific version.
+
+### `system_promote_version`
+
+- Moves a channel alias to a new version.
+
+### `system_archive_version`
+
+- Marks a version as archived.
 
 ---
 
-## 14. Что должен делать компилятор
+## 14. Environment and Security
 
-Между definition и runtime нужен `SystemCompiler`.
+### Sandbox
 
-### Его задачи
+Candidate systems run in a sandbox:
 
-1. нормализовать refs;
-2. проверить, что все ноды существуют;
-3. проверить, что entrypoint валиден;
-4. проверить интерфейсы;
-5. проверить policies;
-6. обнаружить циклы и некорректные зависимости;
-7. построить graph IR.
+- no access to `stable` data;
+- no access to production channels;
+- limited resources;
+- isolated execution.
 
-### Результат компиляции
+### Permissions
 
-Примерный IR:
+Not all agents can create systems.
 
-```json
-{
-  "system_id": "coding_assistant",
-  "version": "1.3.0",
-  "entrypoint": "main",
-  "nodes": {
-    "main": {"runtime_type": "agent", "target": "chat_agent"},
-    "planner": {"runtime_type": "agent", "target": "coordinator"}
-  },
-  "edges": [...],
-  "policies": {...}
-}
-```
+### Audit
 
-Runtime потом работает только с IR.
+All mutations are logged:
 
-Это позволяет:
-
-- менять формат хранения definitions;
-- не усложнять runtime YAML-логикой;
-- кэшировать compiled systems.
+- who created;
+- when;
+- what changed;
+- what was the result.
 
 ---
 
-## 15. Что должен делать runtime
+## 15. Evaluation and Quality Gates
 
-`SystemRuntime` должен иметь один главный метод:
+### Minimum Quality Gates
 
-```python
-invoke(system_ref, input_payload, context, execution_policy) -> SystemRunResult
-```
+1. **Definition validation**: syntax, schema, completeness.
+2. **Interface compatibility**: contract compliance.
+3. **Smoke tests**: basic operability.
+4. **Benchmark**: regression measurement.
+5. **Canary**: limited rollout.
+6. **Manual gate** (optional): for high-risk changes.
 
-### Он обязан уметь
+### Quality Metrics
 
-- запускать систему по `system_id + channel`;
-- запускать по `system_id + version`;
-- запускать dependency systems;
-- наследовать execution context;
-- ограничивать глубину вложенности;
-- логировать run на уровне system/version/node.
-
-### Что важно логировать
-
-- `system_id`
-- `version`
-- `channel`
-- `run_id`
-- `parent_run_id`
-- `node_path`
-- `status`
-- `latency`
-- `tool_cost`
-- `errors`
-
-Без version-aware наблюдаемости self-improvement будет слепым.
+- benchmark score;
+- regression delta;
+- success rate;
+- error rate;
+- response time.
 
 ---
 
-## 16. Как подключать новую систему в другие системы
+## 16. Version Naming and Channel Semantics
 
-Новая система должна быть доступна как dependency node.
+### Version Format
 
-Пример:
+`MAJOR.MINOR.PATCH[-channel]`
 
-```yaml
-nodes:
-  test_repair:
-    type: system
-    ref: systems.test_repair_system
-```
+Examples:
+- `1.0.0`
+- `1.1.0-candidate.3`
+- `1.2.0-canary`
 
-или version-pinned:
+### Channel Semantics
 
-```yaml
-nodes:
-  test_repair:
-    type: system
-    ref: systems.test_repair_system@1.1.0
-```
-
-### Политика использования
-
-- по умолчанию dependency идёт на `stable`;
-- в candidate-версиях можно пинить на candidate dependency;
-- stable не должна зависеть от candidate без специального policy.
-
-Это защищает от лавинообразной нестабильности.
+- `stable` — production, only from evaluated versions;
+- `candidate` — ready for evaluation;
+- `canary` — limited real traffic;
+- `dev` — development, unstable;
+- `archived` — not in use.
 
 ---
 
-## 17. Версионирование и совместимость
+## 17. System Composition Rules
 
-Чтобы всё было просто, правила версионирования должны быть короткими.
+### Allowed Compositions
 
-### Версии систем
+- `agent_node` — regular agent node;
+- `system_ref_node` — reference to another system (nesting);
+- `router_node` — decision node;
+- `workflow_node` — structured workflow;
+- `evaluator_node` — evaluation node;
 
-- `MAJOR`: ломается интерфейс
-- `MINOR`: новые возможности без ломки интерфейса
-- `PATCH`: внутренняя настройка/фиксы
+### Prohibited
 
-### Совместимость
-
-Каждая система должна объявлять:
-
-- `input_schema_version`
-- `output_schema_version`
-
-### Правило
-
-Если входной или выходной контракт несовместим, нельзя автоматически двигать `stable`.
+- circular composition;
+- self-reference without explicit permission;
+- untyped nodes.
 
 ---
 
-## 18. Что делать с текущим improvement loop
+## 18. Registry and Indexing
 
-Его не надо выкидывать. Его надо переосмыслить.
+`SystemRegistry` stores:
 
-Сейчас он работает вокруг `problem -> experiment -> config_diff -> evaluation`.
+- list of systems;
+- version tree;
+- release channels;
+- dependencies;
+- interface schemas;
+- capability index.
 
-Новая форма:
+### Indexes
 
-- `problem -> target_system -> candidate_version -> evaluation -> promotion`
-
-### Что можно сохранить
-
-- backlog проблем;
-- reviews;
-- benchmark evaluation;
-- canary;
-- rollback.
-
-### Что надо заменить
-
-- вместо `config_diff` использовать `system_mutation_set`;
-- вместо применения diff к live config делать `candidate version build`;
-- вместо promotion диффа двигать release channel.
+- `systems_by_capability`;
+- `systems_by_task_type`;
+- `dependency_graph`;
+- `channel_versions`.
 
 ---
 
-## 19. Минимальная простая структура файлов
+## 19. Directory Structure
 
-Чтобы агент мог сам создавать системы, хранение должно быть прозрачным.
-
-### Рекомендуемая структура
+For working with systems, a clear file structure is needed.
 
 ```text
-config/
-  agents/
-    chat_agent.yaml
-    code_agent.yaml
-    coordinator.yaml
-  systems/
-    coding_assistant/
-      manifest.yaml
-      releases.yaml
-      versions/
-        1.0.0.yaml
-        1.1.0.yaml
+systems/
+  coding_assistant/
+    manifest.yaml
+    releases.yaml
+    versions/
+      1.0.0.yaml
+      1.1.0.yaml
     document_analysis/
       manifest.yaml
       releases.yaml
@@ -815,19 +728,19 @@ data/
   improvement_registry.json
 ```
 
-### Почему это удобно
+### Why This Is Convenient
 
-- агенту легко создавать новую систему как новую директорию;
-- версия — это отдельный файл;
-- release channels не смешаны с definition;
-- сравнение и аудит просты;
-- rollback тривиален.
+- an agent can easily create a new system as a new directory;
+- a version is a separate file;
+- release channels are not mixed with definition;
+- comparison and audit are simple;
+- rollback is trivial.
 
 ---
 
-## 20. Минимальные классы для реализации
+## 20. Minimal Classes for Implementation
 
-### В `schemas/`
+### In `schemas/`
 
 - `SystemDefinition`
 - `SystemNode`
@@ -838,7 +751,7 @@ data/
 - `SystemMutation`
 - `SystemRunResult`
 
-### В `core/`
+### In `core/`
 
 - `system_registry.py`
 - `system_compiler.py`
@@ -847,7 +760,7 @@ data/
 - `system_release_manager.py`
 - `system_discovery.py`
 
-### В `tools/`
+### In `tools/`
 
 - `system_registry_tools.py`
 - `system_design_tools.py`
@@ -856,11 +769,11 @@ data/
 
 ---
 
-## 21. Поэтапное внедрение без перегруза
+## 21. Phased Implementation Without Overload
 
-## Этап 1. Registry-first
+## Stage 1. Registry-first
 
-Сделать:
+Create:
 
 - `SystemDefinition`
 - `SystemVersion`
@@ -868,106 +781,106 @@ data/
 - `system_list_systems`
 - `system_get_system_info`
 
-Пока без сложного runtime.
+No complex runtime yet.
 
-## Этап 2. Proxy invocation
+## Stage 2. Proxy invocation
 
-Сделать:
+Create:
 
 - `system_invoke`
 - `system_create_draft`
 - `system_register_candidate`
 
-Система вызывается через `default_agent`.
+System is invoked through `default_agent`.
 
-## Этап 3. Mutation API
+## Stage 3. Mutation API
 
-Сделать:
+Create:
 
-- операции изменения system definition;
+- operations for changing system definition;
 - candidate version lifecycle;
 - version-aware validation.
 
-## Этап 4. Graph runtime
+## Stage 4. Graph runtime
 
-Сделать:
+Create:
 
 - compiler;
 - graph IR;
-- execution engine для system nodes.
+- execution engine for system nodes.
 
-## Этап 5. Improvement migration
+## Stage 5. Improvement migration
 
-Перевести current improvement loop на system versions.
+Migrate current improvement loop to system versions.
 
-## Этап 6. Self-expansion
+## Stage 6. Self-expansion
 
-Разрешить агентам:
+Allow agents to:
 
-- создавать новые системы;
-- публиковать candidate;
-- подключать dependency;
-- использовать capability discovery.
-
----
-
-## 22. Самое важное упрощение
-
-Если нужно удержать всё простым, надо помнить одно правило:
-
-### Агент не управляет конфигом.
-
-### Агент управляет реестром систем и версиями систем через доменные операции.
-
-Это центральный принцип.
-
-Пока он соблюдается:
-
-- self-improvement остаётся контролируемым;
-- self-expansion остаётся осмысленным;
-- архитектура не превращается в набор хакающих YAML агентов;
-- новые системы становятся частью платформы, а не мусором в проекте.
+- create new systems;
+- publish candidate;
+- connect dependencies;
+- use capability discovery.
 
 ---
 
-## 23. Итоговая формула
+## 22. The Most Important Simplification
 
-Правильная платформа должна мыслиться так:
+If you need to keep everything simple, remember one rule:
 
-- `agent` решает задачи;
-- `system` композиционирует capability;
-- `registry` делает системы обнаружимыми;
-- `version` делает изменения безопасными;
-- `channels` делают релиз управляемым;
-- `evaluation` делает рост проверяемым;
-- `mutation API` делает самоизменение структурным;
-- `self-expansion` — это создание новых систем через тот же lifecycle.
+### The agent does not manage the config.
 
-Тогда агент действительно сможет:
+### The agent manages the system registry and system versions through domain operations.
 
-- придумать новую систему;
-- спроектировать интерфейс;
-- собрать graph;
-- зарегистрировать candidate;
-- протестировать;
-- подключить её как dependency;
-- начать использовать;
+This is the central principle.
 
-и всё это будет не костылём, а естественным поведением платформы.
+As long as it is followed:
+
+- self-improvement remains controlled;
+- self-expansion remains meaningful;
+- the architecture does not turn into a bunch of YAML-hacking agents;
+- new systems become part of the platform, not project clutter.
 
 ---
 
-## 24. Архитектурные коррекции
+## 23. Final Formula
 
-Этот раздел уточняет и ужесточает дизайн там, где в базовой версии документа были допущены неоднозначности.
+The correct platform should be thought of as:
 
-## 24.1 Терминология и рекурсия
+- `agent` solves problems;
+- `system` composes capabilities;
+- `registry` makes systems discoverable;
+- `version` makes changes safe;
+- `channels` make releases manageable;
+- `evaluation` makes growth verifiable;
+- `mutation API` makes self-change structural;
+- `self-expansion` is creating new systems through the same lifecycle.
 
-Чтобы убрать петлю между `system` как типом ноды и `System` как верхнеуровневой сущностью, вводятся три разных термина.
+Then an agent can truly:
+
+- conceive a new system;
+- design an interface;
+- assemble a graph;
+- register a candidate;
+- test it;
+- connect it as a dependency;
+- start using it;
+
+and all of this will not be a hack, but a natural behavior of the platform.
+
+---
+
+## 24. Architectural Corrections
+
+This section clarifies and tightens the design where ambiguities were present in the base version of the document.
+
+## 24.1 Terminology and Recursion
+
+To eliminate the loop between `system` as a node type and `System` as a top-level entity, three different terms are introduced.
 
 ### `ExecutableNode`
 
-Типы исполняемых нод runtime:
+Types of executable runtime nodes:
 
 - `agent_node`
 - `tool_node`
@@ -978,9 +891,9 @@ data/
 
 ### `SystemDefinition`
 
-Это не node type, а versioned graph artifact.
+This is not a node type, but a versioned graph artifact.
 
-У `SystemDefinition` есть:
+`SystemDefinition` has:
 
 - `entrypoint`
 - `interface`
@@ -990,9 +903,9 @@ data/
 
 ### `SystemRefNode`
 
-Единственный допустимый способ вложить систему в систему.
+The only allowed way to nest a system within a system.
 
-Пример:
+Example:
 
 ```yaml
 nodes:
@@ -1002,33 +915,33 @@ nodes:
     target_channel: stable
 ```
 
-### Ограничение глубины
+### Depth Limit
 
-Рекурсия допускается только как nested invocation через `system_ref_node`.
+Recursion is only allowed as nested invocation via `system_ref_node`.
 
-Должен существовать явный лимит:
+There must be an explicit limit:
 
 ```yaml
 runtime_limits:
   max_system_call_depth: 3
 ```
 
-Проверки:
+Checks:
 
-- compiler отклоняет статически обнаруживаемые циклы;
-- runtime отклоняет превышение `max_system_call_depth`.
+- compiler rejects statically detectable cycles;
+- runtime rejects exceeding `max_system_call_depth`.
 
-## 24.2 Edge conditions без eval
+## 24.2 Edge Conditions Without eval
 
-Свободные строковые выражения для `when:` запрещены.
+Free-form string expressions for `when:` are prohibited.
 
-Плохо:
+Bad:
 
 ```yaml
 when: input.task_complexity == "high"
 ```
 
-Правильно:
+Correct:
 
 ```yaml
 when:
@@ -1039,7 +952,7 @@ when:
     value: high
 ```
 
-Или:
+Or:
 
 ```yaml
 when:
@@ -1053,18 +966,18 @@ when:
       right: { value: [high, urgent] }
 ```
 
-### Кто вычисляет
+### Who Evaluates
 
-`ConditionEvaluator`, а не `eval`.
+`ConditionEvaluator`, not `eval`.
 
 `ConditionEvaluator`:
 
-- понимает только allowlisted операции;
-- работает только с типизированным runtime context;
-- не умеет выполнять код;
-- не имеет доступа к imports, FS, network и Python objects.
+- only understands allowlisted operations;
+- works only with a typed runtime context;
+- cannot execute code;
+- has no access to imports, FS, network and Python objects.
 
-Допустимые операции:
+Allowed operations:
 
 - `eq`
 - `neq`
@@ -1079,7 +992,7 @@ when:
 - `or`
 - `not`
 
-Допустимые источники значений:
+Allowed value sources:
 
 - `input.*`
 - `state.*`
@@ -1088,30 +1001,30 @@ when:
 
 Enforcement:
 
-- compiler валидирует shape predicate и допустимость операторов;
-- runtime валидирует типы и наличие данных.
+- compiler validates predicate shape and operator applicability;
+- runtime validates types and data availability.
 
-## 24.3 Правила должны быть enforceable
+## 24.3 Rules Must Be Enforceable
 
-Правила из раздела 12 не являются пожеланиями. Они должны принуждаться тремя слоями.
+The rules from section 12 are not wishes. They must be enforced by three layers.
 
 ### `Compiler Enforcement`
 
-Проверяет:
+Checks:
 
 - interface-first;
 - dependency hygiene;
 - schema compatibility;
-- корректность graph;
-- корректность `system_ref_node`;
-- допустимость predicates.
+- graph correctness;
+- `system_ref_node` correctness;
+- predicate validity.
 
 ### `Registry Enforcement`
 
-Проверяет:
+Checks:
 
 - lifecycle transitions;
-- uniqueness versions;
+- version uniqueness;
 - channel move preconditions;
 - budget limits;
 - ownership and permissions;
@@ -1119,7 +1032,7 @@ Enforcement:
 
 ### `Runtime Enforcement`
 
-Проверяет:
+Checks:
 
 - max depth;
 - invocation permissions;
@@ -1128,15 +1041,15 @@ Enforcement:
 - failure policy;
 - side-effect policy.
 
-Итог:
+Result:
 
-- каждое архитектурное правило должно быть представлено как compile-time, registry-time или runtime invariant.
+- every architectural rule must be represented as a compile-time, registry-time or runtime invariant.
 
-## 24.4 Budget как подсистема
+## 24.4 Budget as a Subsystem
 
-Budget должен быть формализован как policy и храниться в control state store.
+Budget must be formalized as a policy and stored in a control state store.
 
-Пример:
+Example:
 
 ```yaml
 budgets:
@@ -1149,20 +1062,20 @@ budgets:
     hard_fail_on_exceed: true
 ```
 
-### Счётчики
+### Counters
 
-Минимально нужны:
+Minimum needed:
 
 - `new_systems_created_today`
 - `candidate_versions_open[system_id]`
 - `active_canaries`
 - `promotions_today`
 
-### Где хранятся
+### Where Stored
 
-Не в памяти runtime, а в registry backend или связанном control store.
+Not in runtime memory, but in registry backend or associated control store.
 
-### Кто обновляет
+### Who Updates
 
 - `create_system`
 - `register_candidate`
@@ -1171,49 +1084,49 @@ budgets:
 - `archive_candidate`
 - `reject_candidate`
 
-### Кто сбрасывает
+### Who Resets
 
 - windowed scheduler;
-- или rolling-window evaluator.
+- or rolling-window evaluator.
 
-### Поведение при превышении
+### Behavior on Exceed
 
-- `hard_fail` в production;
-- `soft_warning` допустим только в dev/test.
+- `hard_fail` in production;
+- `soft_warning` allowed only in dev/test.
 
-Все budget checks должны выполняться атомарно внутри registry transaction.
+All budget checks must be performed atomically within a registry transaction.
 
-## 24.5 Lifecycle ранних стадий внедрения
+## 24.5 Lifecycle of Early Implementation Stages
 
-На Этапах 1-2 итоговый production lifecycle ещё недоступен.
+At Stages 1-2, the final production lifecycle is not yet available.
 
-Поэтому lifecycle нужно описывать как staged.
+Therefore, the lifecycle must be described as staged.
 
 ### Stage A. Registry-first
 
-Есть:
+Has:
 
 - draft;
 - schema validation;
 - registry entry;
 - manual review.
 
-Нет:
+Does not have:
 
 - canary;
 - graph runtime;
-- полноценного benchmark orchestration.
+- full benchmark orchestration.
 
 ### Stage B. Proxy invocation
 
-Есть:
+Has:
 
-- invocation через `default_agent`;
+- invocation via `default_agent`;
 - smoke tests;
 - candidate channel;
 - manual promotion gate.
 
-Нет:
+Does not have:
 
 - node-level failure semantics;
 - nested system runtime;
@@ -1221,7 +1134,7 @@ budgets:
 
 ### Stage C. Full graph runtime
 
-Есть:
+Has:
 
 - graph execution;
 - canary;
@@ -1229,82 +1142,82 @@ budgets:
 - budget enforcement;
 - release channel controls.
 
-Следовательно, lifecycle из раздела 2 является целевой production-моделью, а не literal-моделью для Stage A-B.
+Consequently, the lifecycle from section 2 is the target production model, not a literal model for Stage A-B.
 
-## 24.6 Benchmark governance и ground truth
+## 24.6 Benchmark Governance and Ground Truth
 
-Если агент сам строит систему и сам пишет benchmark, это недостаточно для stable promotion.
+If an agent itself builds a system and itself writes the benchmark, this is insufficient for stable promotion.
 
-Нужно явно различать provenance benchmark suite.
+Provenance of benchmark suites must be explicitly distinguished.
 
-### Источники suites
+### Suite Sources
 
 - `human_curated`
 - `production_trace_curated`
 - `agent_proposed_pending_review`
 - `synthetic_low_confidence`
 
-### Уровни доверия
+### Trust Levels
 
 - `gold`
 - `silver`
 - `bronze`
 
-### Правило promotion
+### Promotion Rule
 
-- `stable` promotion опирается только на `gold` и `silver`;
-- `bronze` допустим только для раннего screening candidate;
-- cold-start systems не могут auto-promote в `stable` только по synthetic benchmarks.
+- `stable` promotion relies only on `gold` and `silver`;
+- `bronze` is allowed only for early candidate screening;
+- cold-start systems cannot auto-promote to `stable` based only on synthetic benchmarks.
 
-### Кто курирует benchmark
+### Who Curates Benchmarks
 
-- человек;
-- или trusted governance process, отделённый от builder-agent.
+- a human;
+- or a trusted governance process, separated from the builder-agent.
 
-## 24.7 Concurrency и write contention
+## 24.7 Concurrency and Write Contention
 
-Многоагентная среда требует явной модели конкурентных мутаций.
+A multi-agent environment requires an explicit model of concurrent mutations.
 
-### Конфликты
+### Conflicts
 
-- два candidate для одной системы;
-- одновременная запись в release channels;
-- параллельные promotions;
-- запись в системный индекс;
-- обновление budget counters.
+- two candidates for one system;
+- simultaneous writes to release channels;
+- parallel promotions;
+- writes to system index;
+- budget counter updates.
 
-### Минимальные требования
+### Minimum Requirements
 
 - transactional registry backend;
-- revision number у system state;
+- revision number on system state;
 - per-system lock;
-- compare-and-swap для channel promotion.
+- compare-and-swap for channel promotion.
 
 ### Promotion
 
-Promotion должен работать так:
+Promotion must work like this:
 
-1. прочитать current channel version;
-2. попытаться обновить только если version всё ещё ожидаемая;
-3. при расхождении вернуть `channel_conflict`.
+1. read current channel version;
+2. attempt to update only if the version is still the expected one;
+3. on mismatch, return `channel_conflict`.
 
-### Замечание по backend
+### Note on Backend
 
-Для write-heavy сценариев JSON-файлы плохая основа.
+For write-heavy scenarios, JSON files are a poor foundation.
 
-Если на старте остаётся JSON:
+If JSON remains at the start:
 
-- нужен lock manager или single writer process.
+- a lock manager or single writer process is needed.
 
-Целевой вариант:
+Target option:
 
-- SQLite или другой transactional store.
+- SQLite or another transactional store.
 
-## 24.8 Security model
+## 24.8 Security Model
 
-Self-expansion без security model недопустим.
+Self-expansion without a security model is unacceptable.
 
-### Субъекты
+### Subjects
 
 - `human_admin`
 - `human_reviewer`
@@ -1313,7 +1226,7 @@ Self-expansion без security model недопустим.
 - `runtime_agent`
 - `observer_agent`
 
-### Действия
+### Actions
 
 - `create_system`
 - `create_candidate`
@@ -1324,11 +1237,11 @@ Self-expansion без security model недопустим.
 - `invoke_system`
 - `add_dependency`
 
-### Модель прав
+### Rights Model
 
 Capability-based access control.
 
-Пример:
+Example:
 
 ```yaml
 permissions:
@@ -1350,21 +1263,21 @@ permissions:
         - "*"
 ```
 
-### Базовые ограничения
+### Basic Restrictions
 
-- не любой агент может создавать системы;
-- не любой агент может двигать `stable`;
-- candidate systems исполняются только в sandbox profile;
-- stable system не зависит от untrusted candidate без explicit policy exception;
-- cross-system invocation проходит permission check.
+- not every agent can create systems;
+- not every agent can move `stable`;
+- candidate systems run only in sandbox profile;
+- stable system does not depend on untrusted candidate without explicit policy exception;
+- cross-system invocation passes permission check.
 
-## 24.9 Failure propagation и rollback
+## 24.9 Failure Propagation and Rollback
 
-В Graph Mode failure semantics должны быть частью модели.
+In Graph Mode, failure semantics must be part of the model.
 
-У каждой ноды должен быть `failure_policy`.
+Each node must have a `failure_policy`.
 
-Пример:
+Example:
 
 ```yaml
 nodes:
@@ -1386,14 +1299,14 @@ nodes:
         backoff_ms: 500
 ```
 
-Допустимые режимы:
+Allowed modes:
 
 - `fail_run`
 - `continue_with_warning`
 - `skip_node`
 - `fallback_to_node`
 
-`SystemRunResult` должен содержать:
+`SystemRunResult` must contain:
 
 - `status`
 - `final_output`
@@ -1403,34 +1316,34 @@ nodes:
 - `retry_trace[]`
 - `side_effects[]`
 
-### Что такое rollback
+### What Is Rollback
 
-Нужно разделять:
+We need to distinguish:
 
 - `release rollback`
-  Сдвиг канала на предыдущую версию.
+  Channel shift to a previous version.
 - `state rollback`
-  Откат только reversible side effects.
+  Rollback only of reversible side effects.
 - `no rollback possible`
-  Для необратимых внешних эффектов.
+  For irreversible external effects.
 
-Поэтому каждый side effect должен быть размечен:
+Therefore, each side effect must be labeled:
 
 - `reversible`
 - `irreversible`
 - `compensation_handler`
 
-Без этого rollback нельзя называть тривиальным.
+Without this, rollback cannot be called trivial.
 
-## 24.10 Cold-start режим для self-expansion
+## 24.10 Cold-Start Mode for Self-Expansion
 
-Структурно self-improvement и self-expansion используют похожий lifecycle, но epistemic situation у них разная.
+Structurally, self-improvement and self-expansion use a similar lifecycle, but their epistemic situation is different.
 
-Для новых систем нужен отдельный режим:
+A separate mode is needed for new systems:
 
 ### `cold_start_expansion`
 
-Шаги:
+Steps:
 
 1. `proposal`
 2. `interface review`
@@ -1441,15 +1354,15 @@ nodes:
 7. `human or trusted-policy review`
 8. `stable publication`
 
-Особенности:
+Special features:
 
-- нет baseline;
-- нет regression history;
-- нет production confidence;
-- выше требования к interface review и sandbox trial;
-- auto-promotion в `stable` по умолчанию запрещён.
+- no baseline;
+- no regression history;
+- no production confidence;
+- higher requirements for interface review and sandbox trial;
+- auto-promotion to `stable` is prohibited by default.
 
-Итого:
+Summary:
 
-- lifecycle framework один;
-- validation regime разный.
+- one lifecycle framework;
+- different validation regime.

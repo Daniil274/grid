@@ -3,7 +3,7 @@ agent: chat_agent
 owner: system
 source: manual-stage1
 tags: [introspection, agent-info]
-prompt: "Расскажи про агента code_agent: какая у него модель и для чего он нужен?"
+prompt: "Tell me about the code_agent: what model does it use and what is it for?"
 required_tools: ["system_get_agent_info"]
 required_substrings: ["code_agent"]
 forbidden_substrings: ["ERROR:"]

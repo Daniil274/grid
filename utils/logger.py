@@ -319,7 +319,7 @@ class Logger:
     def log_tool_call(self, tool_name: str, args: Dict[str, Any]) -> None:
         """Log tool call."""
         # Legacy format logging (without emojis for compatibility)
-        # Не печатаем сырые аргументы, только краткую сводку
+        # Don't print raw arguments, only a brief summary
         try:
             summary = ", ".join(f"{k}={('<json>' if isinstance(v, str) and v.strip().startswith('{') else (str(v)[:30] + ('...' if len(str(v))>30 else '')))}" for k, v in list(args.items())[:5])
         except Exception:

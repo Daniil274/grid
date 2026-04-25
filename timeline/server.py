@@ -1,14 +1,14 @@
 """
-Timeline API Server — FastAPI + WebSocket для визуализации выполнения агентов.
+Timeline API Server — FastAPI + WebSocket for visualizing agent execution.
 
 Endpoints:
   GET  /                                        — dashboard HTML
-  GET  /api/traces                              — список трейсов
-  GET  /api/traces/{id}                         — дерево трейса
-  GET  /api/traces/{id}/nodes/{nid}/messages    — снимок messages из generation-ноды
-  POST /api/traces/{id}/nodes/{nid}/edit        — редактировать вывод ноды
-  POST /api/traces/{id}/nodes/{nid}/rerun       — перезапуск из снимка (требует factory)
-  WS   /ws                                      — live-обновления
+  GET  /api/traces                              — trace list
+  GET  /api/traces/{id}                         — trace tree
+  GET  /api/traces/{id}/nodes/{nid}/messages    — message snapshot from generation node
+  POST /api/traces/{id}/nodes/{nid}/edit        — edit node output
+  POST /api/traces/{id}/nodes/{nid}/rerun       — rerun from snapshot (requires factory)
+  WS   /ws                                      — live updates
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ class EditRequest(BaseModel):
 
 
 class RerunRequest(BaseModel):
-    messages: list[dict]          # изменённые messages из generation-снимка
+    messages: list[dict]          # modified messages from generation snapshot
     user_id: str = "default_user"
 
 
@@ -149,7 +149,7 @@ def create_app(
 
     @app.get("/api/traces/{trace_id}/nodes/{node_id}/messages")
     async def get_node_messages(trace_id: str, node_id: str) -> JSONResponse:
-        """Вернуть снимок messages из generation-спана для редактирования."""
+        """Return message snapshot from generation span for editing."""
         node = tracer.get_node(node_id)
         if not node or node.get("trace_id") != trace_id:
             raise HTTPException(status_code=404, detail="Node not found")
@@ -181,8 +181,8 @@ def create_app(
     @app.post("/api/traces/{trace_id}/nodes/{node_id}/rerun")
     async def rerun_node(trace_id: str, node_id: str, body: RerunRequest) -> JSONResponse:
         """
-        Перезапустить агента из снимка generation-спана с возможно изменёнными messages.
-        Требует что factory был передан в create_app().
+        Restart the agent from a generation span snapshot with possibly modified messages.
+        Requires that factory was passed to create_app().
         """
         if factory is None:
             raise HTTPException(

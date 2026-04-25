@@ -10,17 +10,17 @@ import os
 from pathlib import Path
 from typing import Any
 
-# Текущая AgentFactory в контексте выполнения (устанавливается раннером при запуске агента).
+# Current AgentFactory in the execution context (set by runner when starting agent).
 _current_factory: contextvars.ContextVar[Any] = contextvars.ContextVar("current_agent_factory", default=None)
 
 
 def set_current_factory(factory: Any) -> None:
-    """Установить фабрику для резолва путей в инструментах (вызывается из раннера)."""
+    """Set the factory for path resolution in tools (called from runner)."""
     _current_factory.set(factory)
 
 
 def reset_current_factory() -> None:
-    """Сбросить фабрику (вызывается после завершения запуска агента)."""
+    """Reset the factory (called after agent startup completes)."""
     try:
         _current_factory.set(None)
     except LookupError:
@@ -28,7 +28,7 @@ def reset_current_factory() -> None:
 
 
 def get_current_factory() -> Any:
-    """Получить текущую фабрику из контекста (для инструментов)."""
+    """Get the current factory from the context (for tools)."""
     return _current_factory.get(None)
 
 

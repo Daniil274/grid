@@ -1,6 +1,6 @@
 """
-Search Tools — поиск файлов (glob) и текста в файлах (grep).
-Все пути ограничены рабочей директорией агента.
+Search Tools — file search (glob) and text search in files (grep).
+All paths are restricted to the agent's working directory.
 """
 
 import concurrent.futures
@@ -35,9 +35,9 @@ def _resolve_dir(directory: str) -> tuple:
     resolved = resolve_agent_path_auto(directory)  # raises ValueError on escape
     path = Path(resolved)
     if not path.exists():
-        raise FileNotFoundError(f"❌ Директория не найдена: {visible}")
+        raise FileNotFoundError(f"❌ Directory not found: {visible}")
     if not path.is_dir():
-        raise NotADirectoryError(f"❌ Не является директорией: {visible}")
+        raise NotADirectoryError(f"❌ Not a directory: {visible}")
     return visible, path
 
 
@@ -52,20 +52,20 @@ def glob_tool(
     max_results: int = MAX_RESULTS,
 ) -> str:
     """
-    Поиск файлов по glob-шаблону внутри рабочей директории.
+    Searches for files by glob pattern within the working directory.
 
-    Поддерживает:
-      *.py              — Python-файлы в корне директории
-      src/**/*.js       — все JS-файлы в src рекурсивно
-      **/test_*.py      — все тестовые файлы рекурсивно
+    Supports:
+      *.py              — Python files in the root of the directory
+      src/**/*.js       — all JS files in src recursively
+      **/test_*.py      — all test files recursively
 
     Args:
-        pattern:     Glob-шаблон
-        directory:   Директория поиска (по умолчанию текущая)
-        max_results: Максимальное количество результатов
+        pattern:     Glob pattern
+        directory:   Search directory (default current)
+        max_results: Maximum number of results
 
     Returns:
-        Список найденных файлов
+        List of found files
     """
     try:
         visible, base_path = _resolve_dir(directory)
@@ -90,7 +90,7 @@ def glob_tool(
 
             walk_root = (base_path / dir_prefix) if dir_prefix else base_path
             if not walk_root.exists():
-                return f"❌ Поддиректория не найдена: {dir_prefix or '.'}"
+                return f"❌ Subdirectory not found: {dir_prefix or '.'}"
 
             for root, dirs, files in os.walk(walk_root):
                 dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
@@ -118,22 +118,22 @@ def glob_tool(
                     break
 
         if not results:
-            return f"🔍 По шаблону '{pattern}' в '{visible}' ничего не найдено"
+            return f"🔍 Nothing found for pattern '{pattern}' in '{visible}'"
 
         results.sort()
-        header = f"🔍 Найдено {len(results)} результатов по шаблону '{pattern}':"
+        header = f"🔍 Found {len(results)} results for pattern '{pattern}':"
         if len(results) >= max_results:
-            header += f" (показаны первые {max_results})"
+            header += f" (showing first {max_results})"
 
         displayed = results[:MAX_OUTPUT_LINES]
         output = "\n".join(displayed)
         if len(results) > MAX_OUTPUT_LINES:
-            output += f"\n\n... и ещё {len(results) - MAX_OUTPUT_LINES} результатов ..."
+            output += f"\n\n... and {len(results) - MAX_OUTPUT_LINES} more results ..."
 
         return f"{header}\n\n{output}"
 
     except Exception as exc:
-        return f"❌ Ошибка поиска: {exc}"
+        return f"❌ Search error: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ def _safe_compile(pattern: str, flags: int) -> tuple:
     try:
         return re.compile(pattern, flags), None
     except re.error as exc:
-        return None, f"❌ Некорректное регулярное выражение: {exc}"
+        return None, f"❌ Invalid regular expression: {exc}"
 
 
 def _search_file(filepath: Path, regex, max_per_file: int = 5, per_file_timeout: float = 10.0):
@@ -249,11 +249,11 @@ def _grep_with_ripgrep(
             break
 
     if not results:
-        return f"🔍 По паттерну '{pattern}' ничего не найдено"
+        return f"🔍 Nothing found for pattern '{pattern}'"
 
-    header = f"🔍 Найдено {len(results)} совпадений по '{pattern}'"
+    header = f"🔍 Found {len(results)} matches for '{pattern}'"
     if len(results) >= max_results:
-        header += f" (показаны первые {max_results})"
+        header += f" (showing first {max_results})"
     return f"{header}\n\n" + "\n".join(results)
 
 
@@ -308,11 +308,11 @@ def _grep_with_python(
             break
 
     if not results:
-        return f"🔍 По паттерну '{pattern}' ничего не найдено"
+        return f"🔍 Nothing found for pattern '{pattern}'"
 
-    header = f"🔍 Найдено {len(results)} совпадений по '{pattern}'"
+    header = f"🔍 Found {len(results)} matches for '{pattern}'"
     if len(results) >= max_results:
-        header += f" (показаны первые {max_results})"
+        header += f" (showing first {max_results})"
     return f"{header}\n\n" + "\n".join(results)
 
 
@@ -326,18 +326,18 @@ def grep_tool(
     max_results: int = MAX_RESULTS,
 ) -> str:
     """
-    Поиск текста в файлах внутри рабочей директории.
+    Searches for text in files within the working directory.
 
     Args:
-        pattern:        Текст или регулярное выражение для поиска
-        directory:      Директория для поиска
-        file_extensions: Расширения через запятую (например: "py,js,ts")
-        case_sensitive: Учитывать регистр
-        use_regex:      Использовать регулярное выражение
-        max_results:    Максимальное количество совпадений
+        pattern:        Text or regular expression to search
+        directory:      Directory to search
+        file_extensions: Comma-separated extensions (e.g. "py,js,ts")
+        case_sensitive: Case sensitive matching
+        use_regex:      Use regular expression
+        max_results:    Maximum number of matches
 
     Returns:
-        Найденные строки с именами файлов и номерами строк
+        Found lines with file names and line numbers
     """
     try:
         visible, base_path = _resolve_dir(directory)

@@ -3,7 +3,7 @@ agent: chat_agent
 owner: system
 source: manual-stage1
 tags: [introspection, agents]
-prompt: "Какие агенты доступны в системе? Назови их кратко."
+prompt: "Which agents are available in the system? Name them briefly."
 required_tools: ["system_list_agents"]
 required_substrings: ["chat", "agent"]
 forbidden_substrings: ["ERROR:"]

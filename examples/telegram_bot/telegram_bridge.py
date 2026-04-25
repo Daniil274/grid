@@ -883,25 +883,6 @@ class TelegramBridge:
             logger.info(f"Получено сообщение от {user_id}: {message_text[:100]}")
             self.stats["messages_processed"] += 1
 
-            # Инициализировать контекст чата если его нет
-            if chat_id not in self.chat_contexts:
-                self.chat_contexts[chat_id] = []
-
-            # Добавить сообщение пользователя в контекст чата
-            self.chat_contexts[chat_id].append({
-                "role": "user",
-                "content": message_text
-            })
-
-            # Ограничить размер контекста
-            max_context = self.config.max_message_history * 2  # user + assistant пары
-            if len(self.chat_contexts[chat_id]) > max_context:
-                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
-
-            # Сохранить в память пользователя
-            user_memory = self._get_user_memory(user_id)
-            user_memory.add_message("user", message_text)
-
             # Запустить обработку в отдельной задаче
             task = asyncio.create_task(
                 self._process_user_message(chat_id, user_id, message_text)
@@ -920,12 +901,6 @@ class TelegramBridge:
     async def _process_user_message(self, chat_id: int, user_id: int, message_text: str):
         """Обработка сообщения пользователя с запуском агента (Layer 3: Agent resilience)"""
         try:
-            # Получить память пользователя (deprecated - для обратной совместимости)
-            user_memory = self._get_user_memory(user_id)
-
-            # Получить SQLite MemoryStore пользователя (new)
-            user_memory_store = self._get_user_memory_store(user_id)
-
             # Получить рабочую директорию пользователя
             user_workspace = self._get_user_workspace(user_id)
 
@@ -972,16 +947,6 @@ class TelegramBridge:
                         )
                         agent_key = user_factory.config.get_default_agent()
 
-                    chat_history = self.chat_contexts.get(chat_id, [])
-                    if len(chat_history) > 1:
-                        context_text = "\n".join([
-                            f"{'Пользователь' if msg['role'] == 'user' else 'Ассистент'}: {msg['content']}"
-                            for msg in chat_history[:-1]
-                        ])
-                        message_with_context = f"[Контекст диалога]\n{context_text}\n\n[Текущий вопрос]\n{message_text}"
-                    else:
-                        message_with_context = message_text
-
                     stream_observer = None
                     if self.config.enable_transparency:
                         progress_observer = TelegramProgressObserver(
@@ -999,8 +964,8 @@ class TelegramBridge:
 
                     response = await user_factory.run_agent(
                         agent_key=agent_key,
-                        message=message_with_context,
-                        use_active_context=False,
+                        message=message_text,
+                        use_active_context=True,
                         user_id=str(user_id),
                         stream=True,
                         stream_observer=stream_observer,
@@ -1017,16 +982,6 @@ class TelegramBridge:
                             )
                     response = f"❌ Ошибка при выполнении запроса:\n\n{str(agent_error)}"
 
-            # Сохранить ответ в контекст чата
-            if chat_id in self.chat_contexts:
-                self.chat_contexts[chat_id].append({
-                    "role": "assistant",
-                    "content": response
-                })
-
-            # Сохранить ответ в память пользователя
-            user_memory.add_message("assistant", response)
-
             if progress_observer:
                 try:
                     await progress_observer.close(final_status="completed")
@@ -1037,8 +992,7 @@ class TelegramBridge:
 
             # Удалить сообщение о статусе
             try:
-                if not progress_observer:
-                    await self.app.bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
+                await self.app.bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
             except Exception as e:
                 logger.debug(f"Не удалось удалить статусное сообщение: {e}")
 
@@ -1448,17 +1402,6 @@ class TelegramBridge:
             except Exception as e:
                 logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
-            # Добавить информацию о файле в память пользователя (путь — относительно workspace агента)
-            user_memory = self._get_user_memory(user_id)
-            user_memory.add_message(
-                "system",
-                f"Пользователь отправил файл: {original_name} (путь: {path_for_agent_str})"
-            )
-
-            # Инициализировать контекст чата если его нет
-            if chat_id not in self.chat_contexts:
-                self.chat_contexts[chat_id] = []
-
             # Сообщение для агента: путь относительно его рабочей директории (агент в изоляции)
             file_info_message = (
                 f"Пользователь отправил файл:\n"
@@ -1473,17 +1416,6 @@ class TelegramBridge:
                 file_info_message += "Обработай запрос пользователя, используя прикрепленный файл."
             else:
                 file_info_message += "\nОпредели тип файла и предложи что можно с ним сделать."
-
-            # Добавить сообщение о файле в контекст чата
-            self.chat_contexts[chat_id].append({
-                "role": "user",
-                "content": file_info_message
-            })
-
-            # Ограничить размер контекста
-            max_context = self.config.max_message_history * 2
-            if len(self.chat_contexts[chat_id]) > max_context:
-                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
 
             # Запустить обработку агентом в отдельной задаче
             task = asyncio.create_task(
@@ -1565,17 +1497,6 @@ class TelegramBridge:
             except Exception as e:
                 logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
-            # Добавить в память (путь — относительно workspace агента)
-            user_memory = self._get_user_memory(user_id)
-            user_memory.add_message(
-                "system",
-                f"Пользователь отправил фото (путь: {path_for_agent_str})"
-            )
-
-            # Инициализировать контекст чата если его нет
-            if chat_id not in self.chat_contexts:
-                self.chat_contexts[chat_id] = []
-
             # Сообщение для агента: путь относительно его рабочей директории
             file_info_message = (
                 f"Пользователь отправил фото:\n"
@@ -1590,17 +1511,6 @@ class TelegramBridge:
                 file_info_message += "Обработай запрос пользователя, используя прикрепленное изображение."
             else:
                 file_info_message += "\nПроанализируй изображение и опиши что на нём изображено."
-
-            # Добавить сообщение о файле в контекст чата
-            self.chat_contexts[chat_id].append({
-                "role": "user",
-                "content": file_info_message
-            })
-
-            # Ограничить размер контекста
-            max_context = self.config.max_message_history * 2
-            if len(self.chat_contexts[chat_id]) > max_context:
-                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
 
             # Запустить обработку агентом в отдельной задаче
             task = asyncio.create_task(
@@ -1679,13 +1589,6 @@ class TelegramBridge:
             except Exception as e:
                 logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
-            user_memory = self._get_user_memory(user_id)
-            user_memory.add_message("system", f"Пользователь отправил аудио: {original_name} (путь: {path_for_agent_str})")
-
-            # Инициализировать контекст чата если его нет
-            if chat_id not in self.chat_contexts:
-                self.chat_contexts[chat_id] = []
-
             # Сообщение для агента: путь относительно workspace
             file_info_message = (
                 f"Пользователь отправил аудио файл:\n"
@@ -1700,17 +1603,6 @@ class TelegramBridge:
                 file_info_message += "Обработай запрос пользователя, используя прикрепленный аудио файл."
             else:
                 file_info_message += "\nПредложи что можно сделать с этим аудио файлом."
-
-            # Добавить сообщение о файле в контекст чата
-            self.chat_contexts[chat_id].append({
-                "role": "user",
-                "content": file_info_message
-            })
-
-            # Ограничить размер контекста
-            max_context = self.config.max_message_history * 2
-            if len(self.chat_contexts[chat_id]) > max_context:
-                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
 
             # Запустить обработку агентом
             task = asyncio.create_task(
@@ -1796,13 +1688,6 @@ class TelegramBridge:
             except Exception as e:
                 logger.warning(f"Не удалось обновить статус (timeout): {e}")
 
-            user_memory = self._get_user_memory(user_id)
-            user_memory.add_message("system", f"Пользователь отправил видео: {original_name} (путь: {path_for_agent_str})")
-
-            # Инициализировать контекст чата если его нет
-            if chat_id not in self.chat_contexts:
-                self.chat_contexts[chat_id] = []
-
             # Сообщение для агента: путь относительно workspace
             file_info_message = (
                 f"Пользователь отправил видео файл:\n"
@@ -1817,17 +1702,6 @@ class TelegramBridge:
                 file_info_message += "Обработай запрос пользователя, используя прикрепленное видео."
             else:
                 file_info_message += "\nПредложи что можно сделать с этим видео файлом."
-
-            # Добавить сообщение о файле в контекст чата
-            self.chat_contexts[chat_id].append({
-                "role": "user",
-                "content": file_info_message
-            })
-
-            # Ограничить размер контекста
-            max_context = self.config.max_message_history * 2
-            if len(self.chat_contexts[chat_id]) > max_context:
-                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
 
             # Запустить обработку агентом
             task = asyncio.create_task(
@@ -1962,24 +1836,6 @@ class TelegramBridge:
                     user_message += caption
                 else:
                     user_message += "Распознавание речи недоступно. Предложи варианты работы с файлом."
-
-            user_memory = self._get_user_memory(user_id)
-            user_memory.add_message("system", "Пользователь отправил голосовое сообщение")
-
-            # Инициализировать контекст чата если его нет
-            if chat_id not in self.chat_contexts:
-                self.chat_contexts[chat_id] = []
-
-            # Добавить сообщение в контекст чата
-            self.chat_contexts[chat_id].append({
-                "role": "user",
-                "content": user_message
-            })
-
-            # Ограничить размер контекста
-            max_context = self.config.max_message_history * 2
-            if len(self.chat_contexts[chat_id]) > max_context:
-                self.chat_contexts[chat_id] = self.chat_contexts[chat_id][-max_context:]
 
             # Запустить обработку агентом
             task = asyncio.create_task(

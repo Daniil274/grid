@@ -1,155 +1,155 @@
-# Координация слоёв, роли агентов и единый roadmap
+# Cross-Layer Coordination, Agent Roles and Unified Roadmap
 
-## Зачем нужен этот документ
+## Why This Document Is Needed
 
-После трёх предыдущих документов архитектура стала концептуально полной, но остались четыре практических вопроса:
+After the three previous documents, the architecture became conceptually complete, but four practical questions remained:
 
-1. Кто именно выполняет мета-когнитивные операции.
-2. Как координируются Execution, Control, Knowledge и Meta-Cognitive слои.
-3. Как формализовать `DesignTemplate` до уровня реального инстанцирования.
-4. Как свести roadmap инфраструктуры и roadmap мета-когнитивного слоя в один план внедрения.
+1. Who exactly performs meta-cognitive operations.
+2. How the Execution, Control, Knowledge and Meta-Cognitive layers coordinate.
+3. How to formalize `DesignTemplate` to the level of actual instantiation.
+4. How to merge the infrastructure roadmap and the meta-cognitive layer roadmap into one implementation plan.
 
-Этот документ закрывает именно эти вопросы.
+This document addresses exactly these questions.
 
 ---
 
-## 1. Модель агентов по ролям
+## 1. Agent Model by Roles
 
-Мета-когнитивные операции не должны выполняться "каким-то общим агентом".
+Meta-cognitive operations should not be performed by "some generic agent".
 
-Нужна ролевая специализация.
+Role-based specialization is needed.
 
-## 1.1 Базовые роли
+## 1.1 Base Roles
 
 ### `runtime_agent`
 
-Отвечает только за исполнение конкретной задачи.
+Responsible only for executing a specific task.
 
-Может:
+Can:
 
-- вызывать systems;
-- вызывать capabilities;
-- собирать execution traces;
-- возвращать output.
+- call systems;
+- call capabilities;
+- collect execution traces;
+- return output.
 
-Не может:
+Cannot:
 
-- публиковать системы;
-- менять trusted patterns;
-- двигать stable channels.
+- publish systems;
+- change trusted patterns;
+- move stable channels.
 
 ### `builder_agent`
 
-Отвечает за проектирование и сборку candidate systems.
+Responsible for designing and assembling candidate systems.
 
-Может:
+Can:
 
-- анализировать capability gaps;
-- проектировать draft systems;
-- создавать candidate versions;
-- запускать candidate evaluation;
-- предлагать dependency changes.
+- analyze capability gaps;
+- design draft systems;
+- create candidate versions;
+- run candidate evaluation;
+- propose dependency changes.
 
-Не может:
+Cannot:
 
-- самостоятельно продвигать stable;
-- публиковать trusted patterns;
-- утверждать benchmark governance.
+- independently promote stable;
+- publish trusted patterns;
+- approve benchmark governance.
 
 ### `reflection_agent`
 
-Отвечает за разбор завершённых runs и candidate versions.
+Responsible for analyzing completed runs and candidate versions.
 
-Может:
+Can:
 
-- создавать `ReflectionRecord`;
-- формировать lessons learned;
-- выявлять anti-pattern signals;
-- прикреплять rationale к version history.
+- create `ReflectionRecord`;
+- formulate lessons learned;
+- identify anti-pattern signals;
+- attach rationale to version history.
 
-Не может:
+Cannot:
 
-- менять systems напрямую;
-- утверждать pattern promotion;
-- изменять release channels.
+- change systems directly;
+- approve pattern promotion;
+- modify release channels.
 
 ### `pattern_extraction_agent`
 
-Отвечает за выделение candidate patterns из исторических данных.
+Responsible for extracting candidate patterns from historical data.
 
-Может:
+Can:
 
-- читать reflection records;
-- читать successful case clusters;
-- строить `StrategyPattern` draft;
-- строить `CapabilityCompositionHypothesis`;
-- предлагать design templates.
+- read reflection records;
+- read successful case clusters;
+- build `StrategyPattern` draft;
+- build `CapabilityCompositionHypothesis`;
+- propose design templates.
 
-Не может:
+Cannot:
 
-- публиковать pattern как trusted без review;
-- менять systems напрямую;
-- редактировать benchmark suites.
+- publish a pattern as trusted without review;
+- change systems directly;
+- edit benchmark suites.
 
 ### `governance_agent`
 
-Отвечает за cross-layer policy checks и подготовку promotion recommendations.
+Responsible for cross-layer policy checks and preparing promotion recommendations.
 
-Может:
+Can:
 
-- проверять budget conflicts;
-- проверять semantic drift;
-- проверять policy compatibility;
-- готовить решение для promotion/rejection.
+- check budget conflicts;
+- check semantic drift;
+- check policy compatibility;
+- prepare decision for promotion/rejection.
 
-Не может:
+Cannot:
 
-- обходить human gates;
-- переписывать history;
-- изменять system definition без builder flow.
+- bypass human gates;
+- rewrite history;
+- change system definition without builder flow.
 
 ### `human_reviewer`
 
-Нужен не везде, но обязателен в высокорисковых точках.
+Not needed everywhere, but mandatory at high-risk points.
 
-Участвует в:
+Participates in:
 
-- promotion trusted patterns;
-- approval benchmark suites высокого доверия;
-- stable promotion при cold-start systems;
+- promotion of trusted patterns;
+- approval of high-trust benchmark suites;
+- stable promotion for cold-start systems;
 - major semantic shifts.
 
 ---
 
-## 1.2 Почему роли должны быть разделены
+## 1.2 Why Roles Should Be Separate
 
-Если `builder_agent` сам:
+If `builder_agent` itself:
 
-- проектирует систему;
-- сам её оценивает;
-- сам рефлексирует;
-- сам извлекает паттерн;
-- сам утверждает паттерн;
+- designs the system;
+- evaluates it itself;
+- reflects on it itself;
+- extracts the pattern itself;
+- approves the pattern itself;
 
-то возникает замкнутый контур самооценки.
+then a closed self-assessment loop emerges.
 
-Это мета-версия benchmark gaming.
+This is a meta-version of benchmark gaming.
 
-Поэтому минимальное разделение ответственности должно быть таким:
+Therefore, the minimum separation of responsibilities should be:
 
-- `runtime_agent` делает;
-- `reflection_agent` разбирает;
-- `pattern_extraction_agent` абстрагирует;
-- `governance_agent` проверяет;
-- `human_reviewer` утверждает доверенные переходы.
+- `runtime_agent` does;
+- `reflection_agent` analyzes;
+- `pattern_extraction_agent` abstracts;
+- `governance_agent` checks;
+- `human_reviewer` approves trusted transitions.
 
 ---
 
-## 1.3 Связь ролей с security model
+## 1.3 Relationship of Roles to Security Model
 
-Роли должны быть встроены в permission model, а не существовать только как концепция.
+Roles must be embedded in the permission model, not exist only as a concept.
 
-Пример:
+Example:
 
 ```yaml
 permissions:
@@ -192,29 +192,29 @@ permissions:
 
 ---
 
-## 2. Coordination protocol между слоями
+## 2. Coordination Protocol Between Layers
 
-Пять-шесть реестров без протокола координации быстро разойдутся по смыслу.
+Five to six registries without a coordination protocol will quickly diverge in meaning.
 
-Нужен единый coordination mechanism.
+A unified coordination mechanism is needed.
 
-## 2.1 Базовая идея
+## 2.1 Basic Idea
 
-Каждый значимый переход в системе должен порождать доменное событие.
+Every significant transition in the system should generate a domain event.
 
-Слои не должны синхронизироваться через "ручное перечитывание всего".
+Layers should not synchronize via "manual re-reading of everything".
 
-Правильная модель:
+The correct model:
 
-- source of truth хранится в реестрах;
-- изменения публикуют events;
-- подписчики обновляют производные индексы и представления.
+- source of truth is stored in registries;
+- changes publish events;
+- subscribers update derived indexes and views.
 
 ---
 
-## 2.2 Нужен `Domain Event Bus`
+## 2.2 A `Domain Event Bus` Is Needed
 
-Минимальные типы событий:
+Minimum event types:
 
 - `system_created`
 - `system_version_created`
@@ -231,7 +231,7 @@ permissions:
 - `budget_exceeded`
 - `candidate_rejected`
 
-### Кто публикует события
+### Who Publishes Events
 
 - `SystemRegistry`
 - `PatternRegistry`
@@ -239,7 +239,7 @@ permissions:
 - `CoverageAnalyzer`
 - `GovernanceLayer`
 
-### Кто подписывается
+### Who Subscribes
 
 - `CoverageIndex`
 - `SemanticDriftMonitor`
@@ -250,11 +250,11 @@ permissions:
 
 ---
 
-## 2.3 Источники истины и производные представления
+## 2.3 Sources of Truth and Derived Views
 
-Очень важно не спутать их.
+It is very important not to confuse them.
 
-### Sources of truth
+### Sources of Truth
 
 - `SystemRegistry`
 - `TaskRegistry`
@@ -262,7 +262,7 @@ permissions:
 - `PatternRegistry`
 - `ReflectionStore`
 
-### Derived indexes
+### Derived Indexes
 
 - `CoverageIndex`
 - `SystemLifecycleHealthIndex`
@@ -270,35 +270,35 @@ permissions:
 - `SemanticDriftReport`
 - `CapabilityGapView`
 
-Правило:
+Rule:
 
-derived indexes можно пересчитать из sources of truth.
+derived indexes can be recalculated from sources of truth.
 
-Это защищает от накопления мусора и рассинхрона.
+This protects against accumulation of garbage and desynchronization.
 
 ---
 
-## 2.4 Конфликты между слоями
+## 2.4 Conflicts Between Layers
 
-Конфликты неизбежны.
+Conflicts are inevitable.
 
-Примеры:
+Examples:
 
-- Coverage говорит "нужна новая система";
-- Budget говорит "лимит исчерпан".
+- Coverage says "a new system is needed";
+- Budget says "limit exhausted".
 
-Или:
+Or:
 
-- Builder предлагает сильное расширение;
-- SemanticDriftMonitor говорит "система теряет идентичность".
+- Builder proposes a strong expansion;
+- SemanticDriftMonitor says "the system is losing identity".
 
-### Нужна единая модель разрешения
+### A Unified Conflict Resolution Model Is Needed
 
-Решение не должно приниматься произвольно.
+The decision should not be made arbitrarily.
 
-Нужен `GovernanceDecision`.
+A `GovernanceDecision` is needed.
 
-Пример:
+Example:
 
 ```yaml
 decision_id: gov-1
@@ -315,7 +315,7 @@ next_action:
   - queue_for_next_window
 ```
 
-### Возможные решения
+### Possible Decisions
 
 - `approve`
 - `approve_with_constraints`
@@ -325,9 +325,9 @@ next_action:
 
 ---
 
-## 2.5 Минимальный протокол координации
+## 2.5 Minimum Coordination Protocol
 
-Для начала достаточно такого pipeline:
+For a start, this pipeline is sufficient:
 
 1. Registry mutation
 2. Event emission
@@ -335,29 +335,29 @@ next_action:
 4. Governance checks
 5. Final state transition or rollback
 
-### Пример
+### Example
 
-`builder_agent` создаёт candidate system:
+`builder_agent` creates a candidate system:
 
 1. `SystemRegistry.create_candidate`
-2. публикуется `system_version_created`
-3. `CoverageIndex` обновляет coverage graph
-4. `BudgetTracker` обновляет счётчики
-5. `GovernanceAgent` проверяет conflicts
-6. если ok — version остаётся active candidate
-7. если conflict — candidate переводится в `blocked` или `deferred`
+2. `system_version_created` is published
+3. `CoverageIndex` updates coverage graph
+4. `BudgetTracker` updates counters
+5. `GovernanceAgent` checks conflicts
+6. if ok — version remains active candidate
+7. if conflict — candidate is moved to `blocked` or `deferred`
 
 ---
 
-## 3. Формализация `DesignTemplate`
+## 3. Formalizing `DesignTemplate`
 
-Текущая форма templates слишком абстрактна.
+The current form of templates is too abstract.
 
-Нужен template не в виде "analyzer -> executor -> validator", а в виде parameterized graph schema.
+A template is needed not as "analyzer -> executor -> validator", but as a parameterized graph schema.
 
-## 3.1 Новый формат template
+## 3.1 New Template Format
 
-Пример:
+Example:
 
 ```yaml
 template_id: analyzer_executor_validator
@@ -413,17 +413,17 @@ instantiation_rules:
 
 ---
 
-## 3.2 Что значит инстанцировать template
+## 3.2 What It Means to Instantiate a Template
 
-Инстанцирование — это не "агент сам догадается".
+Instantiation is not "the agent figures it out on its own".
 
-Это операция:
+It is an operation:
 
 `DesignTemplate + CapabilityBindings + TaskContext -> DraftSystemDefinition`
 
 ### `CapabilityBindings`
 
-Пример:
+Example:
 
 ```yaml
 bindings:
@@ -435,60 +435,60 @@ bindings:
     bind_to: systems.test_validation_system
 ```
 
-### Что проверяет инстанциатор
+### What the Instantiator Checks
 
-- все required slots заполнены;
-- bound entity реально реализует capability;
-- node type допустим для слота;
-- edge templates могут быть материализованы;
-- interface согласован с task type.
+- all required slots are filled;
+- bound entity actually implements the capability;
+- node type is allowed for the slot;
+- edge templates can be materialized;
+- interface is consistent with task type.
 
-Это уже почти deterministic construction step.
+This is already almost a deterministic construction step.
 
 ---
 
-## 3.3 Кто инстанцирует template
+## 3.3 Who Instantiates a Template
 
-Для этого нужен отдельный компонент:
+A separate component is needed for this:
 
 - `TemplateInstantiator`
 
-Он не "творит", а делает структурную работу:
+It does not "create", but does structural work:
 
-- берёт template;
-- проверяет bindings;
-- строит draft definition;
-- возвращает список unresolved constraints.
+- takes a template;
+- checks bindings;
+- builds a draft definition;
+- returns a list of unresolved constraints.
 
-### Если чего-то не хватает
+### If Something Is Missing
 
-`TemplateInstantiator` не должен молча фантазировать.
+`TemplateInstantiator` should not silently invent things.
 
-Он должен вернуть:
+It should return:
 
 - `missing_capability_binding`
 - `invalid_slot_binding`
 - `interface_conflict`
 
-Тогда builder-agent решает, как закрыть пробел.
+Then the builder-agent decides how to close the gap.
 
 ---
 
-## 4. Pattern extraction pipeline в реалистичной форме
+## 4. Pattern Extraction Pipeline in a Realistic Form
 
-Наивный текст "найти повторяющиеся decision sequences" действительно слишком оптимистичен.
+The naive text "find recurring decision sequences" is indeed too optimistic.
 
-Нужен более приземлённый pipeline.
+A more practical pipeline is needed.
 
-## 4.1 Какие данные реально нужны
+## 4.1 What Data Is Actually Needed
 
-Нужно хранить не только outcome, но и decision traces.
+Not only the outcome but also decision traces need to be stored.
 
-Новая сущность:
+New entity:
 
 - `DecisionTrace`
 
-Пример:
+Example:
 
 ```yaml
 trace_id: dt-1
@@ -504,15 +504,15 @@ outcome_link:
   system_version: test_repair_system@0.3.0
 ```
 
-Без `DecisionTrace` pattern extraction почти нечем кормить.
+Without `DecisionTrace`, pattern extraction has almost nothing to feed on.
 
 ---
 
-## 4.2 Как кластеризовать cases
+## 4.2 How to Cluster Cases
 
-Кластеры должны строиться не по одному признаку.
+Clusters should not be built by a single criterion.
 
-Минимально использовать:
+At minimum, use:
 
 - `task_type`
 - `selected_pattern`
@@ -520,34 +520,34 @@ outcome_link:
 - `outcome_quality_bucket`
 - `human_feedback_bucket`
 
-### Outcome buckets
+### Outcome Buckets
 
 - `high_success`
 - `mixed_success`
 - `failure`
 
-### Human feedback buckets
+### Human Feedback Buckets
 
 - `positive`
 - `neutral`
 - `negative`
 - `missing`
 
-То есть candidate patterns извлекаются не из "всех хороших кейсов вообще", а из структурно похожих решений.
+That is, candidate patterns are extracted not from "all good cases in general", but from structurally similar solutions.
 
 ---
 
-## 4.3 Кто валидирует pattern draft
+## 4.3 Who Validates a Pattern Draft
 
-Нужен явный lifecycle pattern promotion.
+An explicit lifecycle pattern promotion is needed.
 
-### Роли
+### Roles
 
-- `pattern_extraction_agent` создаёт draft;
-- `governance_agent` проверяет consistency;
-- `human_reviewer` утверждает trusted promotion.
+- `pattern_extraction_agent` creates a draft;
+- `governance_agent` checks consistency;
+- `human_reviewer` approves trusted promotion.
 
-### Статусы паттерна
+### Pattern Statuses
 
 - `draft`
 - `candidate`
@@ -555,35 +555,35 @@ outcome_link:
 - `deprecated`
 - `rejected`
 
-### Правило
+### Rule
 
-Ни один автоматически извлечённый паттерн не становится `trusted` без review.
+No automatically extracted pattern becomes `trusted` without review.
 
-Это особенно важно, потому что trusted patterns будут влиять на будущее проектирование систем.
+This is especially important because trusted patterns will influence future system design.
 
 ---
 
-## 5. Единый roadmap
+## 5. Unified Roadmap
 
-Теперь нужно свести infrastructure roadmap и meta-cognitive roadmap в один.
+Now we need to merge the infrastructure roadmap and the meta-cognitive roadmap into one.
 
 ## Phase 1. System Foundation
 
-Зависимости:
+Dependencies:
 
-- schemas для systems;
+- schemas for systems;
 - `SystemRegistry`;
 - `SystemVersion`;
 - `SystemRelease`;
-- basic invoke через proxy mode.
+- basic invoke via proxy mode.
 
-Результат:
+Result:
 
-- платформа умеет хранить и вызывать versioned systems.
+- the platform can store and invoke versioned systems.
 
 ## Phase 2. Controlled Evolution
 
-Зависимости:
+Dependencies:
 
 - candidate lifecycle;
 - evaluation;
@@ -592,26 +592,26 @@ outcome_link:
 - release channels;
 - basic governance.
 
-Результат:
+Result:
 
-- платформа умеет безопасно улучшать и публиковать systems.
+- the platform can safely improve and publish systems.
 
 ## Phase 3. Knowledge Foundation
 
-Зависимости:
+Dependencies:
 
 - `TaskRegistry`;
 - `CapabilityRegistry`;
 - `SemanticContract`;
 - linking systems to capabilities and task types.
 
-Результат:
+Result:
 
-- платформа понимает, что за задачи и capabilities у неё есть.
+- the platform understands what tasks and capabilities it has.
 
 ## Phase 4. Pattern Foundation
 
-Зависимости:
+Dependencies:
 
 - `PatternRegistry`;
 - `StrategyPattern`;
@@ -619,77 +619,77 @@ outcome_link:
 - `AntiPattern`;
 - `TemplateInstantiator`.
 
-Результат:
+Result:
 
-- платформа получает reusable cognitive structures.
+- the platform gains reusable cognitive structures.
 
 ## Phase 5. Reflection and Traceability
 
-Зависимости:
+Dependencies:
 
 - `ReflectionStore`;
 - `DecisionTrace`;
 - `reflection_agent`;
 - version/pattern reflection flows.
 
-Результат:
+Result:
 
-- платформа начинает учиться на процессе, а не только на результате.
+- the platform starts learning from the process, not just the outcome.
 
 ## Phase 6. Coverage and Gap Analysis
 
-Зависимости:
+Dependencies:
 
 - `CoverageIndex`;
 - capability-to-task mapping;
 - gap detection;
 - expansion proposal flow.
 
-Результат:
+Result:
 
-- self-expansion запускается по обнаруженному разрыву покрытия.
+- self-expansion is triggered by detected coverage gaps.
 
 ## Phase 7. Pattern Extraction and Composition
 
-Зависимости:
+Dependencies:
 
 - `pattern_extraction_agent`;
 - `CapabilityCompositionHypothesis`;
 - clustering of successful cases;
 - governance flow for pattern drafts.
 
-Результат:
+Result:
 
-- платформа начинает извлекать и комбинировать паттерны.
+- the platform starts extracting and combining patterns.
 
 ## Phase 8. Drift and Consolidation
 
-Зависимости:
+Dependencies:
 
 - `SemanticDriftMonitor`;
 - `SystemLifecycleHealth`;
 - `ConsolidationManager`.
 
-Результат:
+Result:
 
-- платформа умеет не только расти, но и удерживать смысловую целостность.
-
----
-
-## 5.1 Матрица зависимостей
-
-Коротко:
-
-- нельзя делать `CoverageIndex` до `SystemRegistry` и `CapabilityRegistry`;
-- нельзя делать `PatternExtraction` до `ReflectionStore` и `DecisionTrace`;
-- нельзя делать `TemplateInstantiator` до `DesignTemplate` и capability bindings;
-- нельзя делать полноценный trusted pattern flow до governance + human review hooks.
+- the platform can not only grow, but also maintain semantic integrity.
 
 ---
 
-## 6. Что является MVP
+## 5.1 Dependency Matrix
 
-Если делать реально и без перегруза, MVP должен быть таким:
+In short:
+
+- cannot do `CoverageIndex` before `SystemRegistry` and `CapabilityRegistry`;
+- cannot do `PatternExtraction` before `ReflectionStore` and `DecisionTrace`;
+- cannot do `TemplateInstantiator` before `DesignTemplate` and capability bindings;
+- cannot do full trusted pattern flow before governance + human review hooks.
+
+---
+
+## 6. What Is MVP
+
+If doing it realistically and without overload, the MVP should be:
 
 1. `SystemRegistry` + versioned systems
 2. proxy invocation
@@ -699,27 +699,27 @@ outcome_link:
 6. `TemplateInstantiator`
 7. `ReflectionRecord`
 
-Это уже даст:
+This already provides:
 
-- безопасные systems;
-- первичные когнитивные паттерны;
-- минимальную рефлексию;
-- основу для будущего self-expansion.
+- safe systems;
+- primary cognitive patterns;
+- minimal reflection;
+- foundation for future self-expansion.
 
-А вот автоматический pattern extraction и full consolidation можно делать позже.
+Automatic pattern extraction and full consolidation can be done later.
 
 ---
 
-## 7. Итог
+## 7. Summary
 
-Оставшиеся открытые вопросы действительно уже лежат в implementation design, а не в базовой архитектуре.
+The remaining open questions indeed lie in implementation design, not in basic architecture.
 
-Чтобы закрыть их корректно, нужны:
+To close them correctly, we need:
 
-- ролевая модель агентов;
-- event-driven coordination protocol;
-- инстанцируемые templates;
-- реалистичный pattern extraction pipeline;
-- единый dependency-aware roadmap.
+- a role model for agents;
+- an event-driven coordination protocol;
+- instantiable templates;
+- a realistic pattern extraction pipeline;
+- a unified dependency-aware roadmap.
 
-Только после этого платформу можно будет не просто описывать как самоорганизующуюся, а реально поэтапно строить.
+Only then can the platform be not just described as self-organizing, but actually built in stages.

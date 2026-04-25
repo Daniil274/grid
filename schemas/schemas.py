@@ -33,7 +33,7 @@ class ModelConfig(BaseModel):
     max_tokens: int = Field(default=4000, ge=1, le=100000)
     context_window: int = Field(
         default=128000, ge=1024,
-        description="Размер контекстного окна модели в токенах. Используется для авто-компакта."
+        description="Model context window size in tokens. Used for auto-compact."
     )
     description: str = ""
     use_responses_api: bool = False
@@ -124,18 +124,18 @@ class ProjectToolsConfig(BaseModel):
 
 
 class SerialConfig(BaseModel):
-    """Configuration for ISKOR serial communication (retries and delay after command)."""
-    retries: int = Field(default=3, ge=1, le=50, description="Количество попыток на команду (ISKOR_RETRIES)")
-    command_timeout_sec: float = Field(default=0.5, ge=0.0, le=60.0, description="Пауза в секундах после выполнения команды (ISKOR_COMMAND_TIMEOUT)")
-    # Доп. поля из проектной конфигурации (baud, timeout и т.д.) допускаются через model_config
+    """Configuration for serial communication (retries and delay after command)."""
+    retries: int = Field(default=3, ge=1, le=50, description="Number of retries per command (ISKOR_RETRIES)")
+    command_timeout_sec: float = Field(default=0.5, ge=0.0, le=60.0, description="Pause in seconds after executing command (ISKOR_COMMAND_TIMEOUT)")
+    # Extra fields from project config (baud, timeout, etc.) are allowed via model_config
     model_config = {"extra": "ignore"}
 
 
 class WindowConfig(BaseModel):
-    """Configuration for GUI window automation (xdotool + mss)."""
-    title_pattern: str = Field(default="ISKOR", description="Паттерн поиска окна по заголовку (ISKOR_WINDOW_TITLE)")
-    key_delay_sec: float = Field(default=0.3, ge=0.0, le=10.0, description="Пауза после нажатия кнопки (ISKOR_KEY_DELAY)")
-    screenshot_delay_sec: float = Field(default=0.2, ge=0.0, le=10.0, description="Дополнительная пауза перед скриншотом (ISKOR_SCREEN_DELAY)")
+    """Configuration for GUI window automation."""
+    title_pattern: str = Field(default="ISKOR", description="Window title search pattern (ISKOR_WINDOW_TITLE)")
+    key_delay_sec: float = Field(default=0.3, ge=0.0, le=10.0, description="Pause after key press (ISKOR_KEY_DELAY)")
+    screenshot_delay_sec: float = Field(default=0.2, ge=0.0, le=10.0, description="Additional pause before screenshot (ISKOR_SCREEN_DELAY)")
     model_config = {"extra": "ignore"}
 
 
@@ -169,25 +169,25 @@ class Settings(BaseModel):
     max_tool_output: Optional[int] = Field(
         default=None,
         ge=100,
-        description="Максимальная длина вывода инструмента в символах. None = без ограничения."
+        description="Maximum tool output length in characters. None = no limit."
     )
     max_tool_output_tokens: Optional[int] = Field(
         default=None,
         ge=100,
-        description="Максимальное количество токенов в выводе инструмента. При превышении агент получает ошибку. None = без ограничения."
+        description="Maximum number of tokens in tool output. If exceeded, agent gets an error. None = no limit."
     )
     proxy: Optional[str] = Field(
         default=None,
-        description="Прокси для всех исходящих запросов (API, Telegram). Пример: http://127.0.0.1:10809"
+        description="Proxy for all outgoing requests (API, Telegram). Example: http://127.0.0.1:10809"
     )
     platform: PlatformConfig = Field(default_factory=PlatformConfig)
     serial: Optional[SerialConfig] = Field(
         default=None,
-        description="Настройки serial для ISKOR: количество попыток на команду и таймаут после команды"
+        description="Serial settings for ISKOR: number of retries per command and command timeout"
     )
     window: Optional[WindowConfig] = Field(
         default=None,
-        description="Настройки GUI-автоматизации: поиск окна по заголовку, задержки"
+        description="GUI automation settings: window title search, delays"
     )
 
 
@@ -529,7 +529,7 @@ class CompactMicroConfig(BaseModel):
     max_age_hours: float = Field(default=1.0, ge=0.1, description="Clear results older than this")
     gap_threshold_minutes: float = Field(
         default=60.0, ge=1.0,
-        description="Минимальный разрыв (мин) с последнего ответа ассистента для time-based microcompact"
+        description="Minimum gap (min) since last assistant response for time-based microcompact"
     )
     preserve_last_n: int = Field(default=5, ge=1, description="Keep last N tool results")
     compactable_tools: List[str] = Field(
@@ -547,12 +547,12 @@ class CompactMicroConfig(BaseModel):
 class CompactAutoConfig(BaseModel):
     """Configuration for automatic compaction trigger."""
     enabled: bool = True
-    buffer_tokens: int = Field(default=13000, ge=1000, description="Запас токенов до порога авто-компакта")
-    warning_buffer_tokens: int = Field(default=20000, ge=1000, description="Буфер до порога предупреждения")
-    error_buffer_tokens: int = Field(default=20000, ge=1000, description="Буфер до порога ошибки")
-    manual_buffer_tokens: int = Field(default=3000, ge=100, description="Буфер до жёсткой блокировки (ручной компакт)")
-    max_output_tokens_for_summary: int = Field(default=20000, ge=1000, description="Резерв токенов под саммари LLM")
-    max_consecutive_failures: int = Field(default=3, ge=1, description="Circuit breaker: максимум ошибок подряд")
+    buffer_tokens: int = Field(default=13000, ge=1000, description="Token buffer before auto-compact threshold")
+    warning_buffer_tokens: int = Field(default=20000, ge=1000, description="Buffer before warning threshold")
+    error_buffer_tokens: int = Field(default=20000, ge=1000, description="Buffer before error threshold")
+    manual_buffer_tokens: int = Field(default=3000, ge=100, description="Buffer before hard lock (manual compact)")
+    max_output_tokens_for_summary: int = Field(default=20000, ge=1000, description="Reserve tokens for LLM summary")
+    max_consecutive_failures: int = Field(default=3, ge=1, description="Circuit breaker: max consecutive errors")
 
 
 class CompactRestoreFilesConfig(BaseModel):

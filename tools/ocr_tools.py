@@ -1,8 +1,7 @@
 """
-PDF/OCR tools для Grid agents.
+PDF/OCR tools for Grid agents.
 
-- `pdf` рендерит страницы PDF в изображения и сохраняет их в рабочую директорию агента.
-- `pdf-ocr` / `pdf_to_markdown` выполняют OCR через DeepSeek-OCR-2.
+- `pdf-ocr` / `pdf_to_markdown` perform OCR via DeepSeek-OCR-2.
 """
 import json
 import logging
@@ -27,7 +26,7 @@ MAX_PDF_PAGES_PER_CALL = 5
 
 
 def get_python_executable() -> str:
-    """Находит python executable для DeepSeek-OCR."""
+    """Finds the python executable for DeepSeek-OCR."""
     venv_python = DEEPSEEK_OCR_DIR / ".venv" / "Scripts" / "python.exe"
     if venv_python.exists():
         return str(venv_python)
@@ -40,18 +39,18 @@ def get_python_executable() -> str:
 
 
 def get_user_id_from_context(ctx: RunContextWrapper[Any]) -> str:
-    """Извлекает user_id из контекста агента."""
-    # Отладка: логируем структуру контекста
+    """Extracts user_id from the agent context."""
+    # Debug: log context structure
     logger.debug(f"Context type: {type(ctx)}")
     logger.debug(f"Has user_id attr: {hasattr(ctx, 'user_id')}")
     logger.debug(f"Has context attr: {hasattr(ctx, 'context')}")
 
-    # Пытаемся получить user_id из различных мест
+    # Try to get user_id from various places
     if hasattr(ctx, 'user_id') and ctx.user_id:
         logger.info(f"Found user_id directly on ctx: {ctx.user_id}")
         return str(ctx.user_id)
 
-    # Проверяем GridRunContext (новый способ)
+    # Check GridRunContext (new way)
     if hasattr(ctx, 'context'):
         logger.debug(f"Context.context type: {type(ctx.context)}")
         logger.debug(f"Context.context attrs: {dir(ctx.context)}")
@@ -60,7 +59,7 @@ def get_user_id_from_context(ctx: RunContextWrapper[Any]) -> str:
             logger.info(f"Found user_id in GridRunContext: {ctx.context.user_id}")
             return str(ctx.context.user_id)
 
-        # Проверяем metadata в GridRunContext
+        # Check metadata in GridRunContext
         if hasattr(ctx.context, 'metadata') and ctx.context.metadata:
             metadata = ctx.context.metadata
             logger.debug(f"Metadata: {metadata}")
@@ -74,38 +73,38 @@ def get_user_id_from_context(ctx: RunContextWrapper[Any]) -> str:
 
 
 def get_workspace_root() -> Path:
-    """Возвращает корневую директорию workspace."""
-    # Проверяем переменные окружения
+    """Returns the root workspace directory."""
+    # Check environment variables
     workspace_env = os.environ.get("WORKSPACE_ROOT")
     if workspace_env:
         return Path(workspace_env).resolve()
 
-    # Fallback на корень проекта
+    # Fallback to project root
     return Path(__file__).parent.parent
 
 
 def _parse_pages_range(pages: str) -> tuple[int, int]:
-    """Парсит диапазон страниц вида start:end."""
+    """Parses page range in format start:end."""
     raw_pages = (pages or "").strip()
     if ":" not in raw_pages:
-        raise ValueError('pages должен быть в формате "start:end"')
+        raise ValueError('pages must be in format "start:end"')
 
     start_raw, end_raw = raw_pages.split(":", 1)
     start = int(start_raw)
     end = int(end_raw)
 
     if start < 1 or end < 1:
-        raise ValueError("Номера страниц должны быть >= 1")
+        raise ValueError("Page numbers must be >= 1")
     if end < start:
-        raise ValueError("Конечная страница должна быть не меньше начальной")
+        raise ValueError("End page must not be less than start page")
     if (end - start + 1) > MAX_PDF_PAGES_PER_CALL:
-        raise ValueError(f"За один вызов можно запросить не более {MAX_PDF_PAGES_PER_CALL} страниц")
+        raise ValueError(f"Cannot request more than {MAX_PDF_PAGES_PER_CALL} pages in one call")
 
     return start, end
 
 
 def _get_pdf_page_count(pdf_path: str) -> int:
-    """Возвращает количество страниц PDF через pdfinfo."""
+    """Returns the number of PDF pages via pdfinfo."""
     result = subprocess.run(
         ["pdfinfo", pdf_path],
         capture_output=True,
@@ -117,25 +116,25 @@ def _get_pdf_page_count(pdf_path: str) -> int:
 
     if result.returncode != 0:
         error_msg = result.stderr or result.stdout or "Unknown error"
-        raise RuntimeError(f"Не удалось получить информацию о PDF: {error_msg}")
+        raise RuntimeError(f"Failed to get PDF information: {error_msg}")
 
     for line in result.stdout.splitlines():
         if line.startswith("Pages:"):
             _, value = line.split(":", 1)
             return int(value.strip())
 
-    raise RuntimeError("pdfinfo не вернул число страниц")
+    raise RuntimeError("pdfinfo did not return a page count")
 
 
 def _get_output_root(ctx: RunContextWrapper[Any], pdf_file: Path) -> Path:
-    """Папка для вывода изображений страниц PDF."""
+    """Output folder for PDF page images."""
     working_dir = Path(ctx.context.factory.config.get_working_directory()).resolve()
     doc_name = pdf_file.stem or "document"
     return working_dir / "pdf_output" / doc_name
 
 
 def _render_single_pdf_page(pdf_path: str, page_number: int, output_path_no_ext: Path) -> None:
-    """Рендерит одну страницу PDF в PNG с помощью pdftoppm."""
+    """Renders one PDF page to PNG via pdftoppm."""
     cmd = [
         "pdftoppm",
         "-f", str(page_number),
@@ -156,7 +155,7 @@ def _render_single_pdf_page(pdf_path: str, page_number: int, output_path_no_ext:
     )
     if result.returncode != 0:
         error_msg = result.stderr or result.stdout or "Unknown error"
-        raise RuntimeError(f"Не удалось отрендерить страницу {page_number}: {error_msg}")
+        raise RuntimeError(f"Failed to render page {page_number}: {error_msg}")
 
 
 async def _run_pdf_ocr(
@@ -164,7 +163,7 @@ async def _run_pdf_ocr(
     pdf_path: str,
     pages: str,
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
-    """Общая реализация OCR для PDF."""
+    """Generic OCR implementation for PDF."""
     python_exe = get_python_executable()
     visible_pdf_path = display_agent_path_from_ctx(pdf_path, ctx)
 
@@ -250,15 +249,15 @@ async def pdf(
     pages: str = "1:1"
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
-    Рендерит страницы PDF в изображения, сохраняет их в рабочую директорию агента
-    и возвращает эти страницы как визуальные входы для последующего анализа.
+    Renders PDF pages to images, saves them to the agent's working directory,
+    and returns those pages as visual inputs for further analysis.
 
     Args:
-        pdf_path: Путь к PDF файлу
-        pages: Диапазон страниц в формате "start:end" (например "1:2")
+        pdf_path: Path to the PDF file
+        pages: Page range in "start:end" format (e.g. "1:2")
 
     Returns:
-        Текстовая сводка и изображения страниц
+        Text summary and page images
     """
     visible_pdf_path = display_agent_path_from_ctx(pdf_path, ctx)
 
@@ -266,13 +265,13 @@ async def pdf(
         resolved_pdf_path = resolve_agent_path_from_ctx(pdf_path, ctx)
         pdf_file = Path(resolved_pdf_path)
         if not pdf_file.exists():
-            return [ToolOutputText(text=f"❌ Файл не найден: {visible_pdf_path}")]
+            return [ToolOutputText(text=f"❌ File not found: {visible_pdf_path}")]
 
         start_page, end_page = _parse_pages_range(pages)
         total_pages = _get_pdf_page_count(resolved_pdf_path)
         if end_page > total_pages:
             return [ToolOutputText(
-                text=f"❌ В PDF только {total_pages} стр., запрошен диапазон {pages}"
+                text=f"❌ PDF has only {total_pages} pages, requested range {pages}"
             )]
 
         output_root = _get_output_root(ctx, pdf_file)
@@ -285,7 +284,7 @@ async def pdf(
             image_path = page_dir / "page.png"
             _render_single_pdf_page(resolved_pdf_path, page_number, page_dir / "page")
             if not image_path.exists():
-                raise RuntimeError(f"Файл страницы не создан: {image_path}")
+                raise RuntimeError(f"Page file was not created: {image_path}")
             saved_paths.append(image_path)
 
         visible_output_root = display_agent_path_from_ctx(str(output_root), ctx)
@@ -297,15 +296,15 @@ async def pdf(
         result_blocks: List[Union[ToolOutputText, ToolOutputImage]] = [
             ToolOutputText(
                 text=(
-                    f"PDF страницы сохранены из `{visible_pdf_path}` в `{visible_output_root}`.\n"
-                    f"Диапазон: {start_page}:{end_page} из {total_pages}\n"
-                    f"Файлы:\n- " + "\n- ".join(visible_saved_paths)
+                    f"PDF pages saved from `{visible_pdf_path}` to `{visible_output_root}`.\n"
+                    f"Range: {start_page}:{end_page} of {total_pages}\n"
+                    f"Files:\n- " + "\n- ".join(visible_saved_paths)
                 )
             )
         ]
 
         for page_number, image_path in zip(range(start_page, end_page + 1), saved_paths):
-            result_blocks.append(ToolOutputText(text=f"Страница {page_number}"))
+            result_blocks.append(ToolOutputText(text=f"Page {page_number}"))
             result_blocks.append(
                 ToolOutputImage(
                     image_url=_image_path_to_data_url(str(image_path)),
@@ -327,11 +326,11 @@ async def pdf_ocr(
     pages: str = "1:1"
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
-    Выполняет OCR для PDF через DeepSeek-OCR-2 и возвращает структурированный текст/изображения.
+    Performs OCR on a PDF via DeepSeek-OCR-2 and returns structured text/images.
 
     Args:
-        pdf_path: Путь к PDF файлу
-        pages: Диапазон страниц в формате "start:end"
+        pdf_path: Path to the PDF file
+        pages: Page range in "start:end" format
     """
     return await _run_pdf_ocr(ctx, pdf_path, pages)
 
@@ -343,12 +342,12 @@ async def pdf_to_markdown(
     pages: str = "1:1"
 ) -> List[Union[ToolOutputText, ToolOutputImage]]:
     """
-    Обратносуместимое имя для OCR-инструмента PDF.
+    Backwards-compatible name for the PDF OCR tool.
     """
     return await _run_pdf_ocr(ctx, pdf_path, pages)
 
 
-# Экспортируемые инструменты
+# Exported tools
 OCR_TOOLS = {
     "pdf": pdf,
     "pdf-ocr": pdf_ocr,

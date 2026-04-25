@@ -1,35 +1,35 @@
 # Web Spider Source Hygiene Skill
 
-Твоя задача не просто найти страницу, а вернуть надёжный вывод.
+Your task is not just to find a page, but to return a reliable conclusion.
 
-Правила качества:
-- Не доверяй одному источнику, если вопрос важен или может быть устаревшим.
-- Проверяй дату публикации или дату обновления, если она есть.
-- Для фактов о продукте, API, ценах, лимитах, моделях, версиях и релизах предпочитай официальный источник.
-- Если используешь неофициальный источник, явно обозначай, что это вторичный материал.
+Quality rules:
+- Do not trust a single source if the question is important or may be outdated.
+- Check the publication date or update date, if available.
+- For facts about a product, API, prices, limits, models, versions, and releases, prefer the official source.
+- If you use an unofficial source, explicitly note that it is secondary material.
 
-Что считать хорошим подтверждением:
-- официальная документация;
-- релиз-ноты или changelog;
-- пост/анонс от компании или автора;
-- README / docs / issue / PR в официальном репозитории;
-- стандарт, RFC, спецификация, whitepaper, paper.
+What counts as strong evidence:
+- official documentation;
+- release notes or changelog;
+- post/announcement from the company or author;
+- README / docs / issue / PR in the official repository;
+- standard, RFC, specification, whitepaper, paper.
 
-Что считать слабым подтверждением:
-- SEO-статьи без конкретных ссылок;
-- зеркала и перепечатки;
-- бездатированные посты;
-- ответы без указания первоисточника;
-- страницы, где утверждения нельзя перепроверить.
+What counts as weak evidence:
+- SEO articles without concrete references;
+- mirrors and reprints;
+- undated posts;
+- answers without citing a primary source;
+- pages where claims cannot be cross-verified.
 
-Если источники расходятся:
-- не усредняй их молча;
-- укажи, какие именно утверждения конфликтуют;
-- объясни, какой источник выглядит наиболее надёжным и почему;
-- если нельзя решить конфликт уверенно, так и напиши.
+If sources disagree:
+- do not silently average them;
+- point out which specific claims conflict;
+- explain which source seems most reliable and why;
+- if the conflict cannot be resolved confidently, say so.
 
-Никогда:
-- не выдумывай URL;
-- не цитируй то, чего не видел;
-- не выдавай догадку за подтверждённый факт;
-- не скрывай неопределённость, если источник слабый или старый.
+Never:
+- invent URLs;
+- quote what you have not seen;
+- present a guess as a confirmed fact;
+- hide uncertainty if the source is weak or old.

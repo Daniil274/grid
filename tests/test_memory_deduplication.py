@@ -2,9 +2,9 @@
 Unit tests for MemoryStore deduplication functionality.
 
 Tests:
-- _calculate_similarity() - граничные значения
-- find_similar() - поиск кандидатов
-- save(update_if_exists=True) - дедупликация при сохранении
+- _calculate_similarity() - boundary values
+- find_similar() - search for candidates
+- save(update_if_exists=True) - deduplication on save
 """
 
 import pytest
@@ -30,73 +30,73 @@ def memory_store(temp_db_path):
 
 
 class TestCalculateSimilarity:
-    """Test _calculate_similarity() method - граничные значения."""
+    """Test _calculate_similarity() method - boundary values."""
 
     def test_identical_texts(self, memory_store):
-        """Тождественные тексты должны иметь similarity = 1.0."""
+        """Identical texts should have similarity = 1.0."""
         text = "User prefers Python programming language"
         similarity = memory_store._calculate_similarity(text, text)
         assert similarity == 1.0
 
     def test_identical_texts_different_case(self, memory_store):
-        """Тексты с разным регистром должны иметь similarity = 1.0."""
+        """Texts with different case should have similarity = 1.0."""
         text1 = "User prefers Python"
         text2 = "USER PREFERS PYTHON"
         similarity = memory_store._calculate_similarity(text1, text2)
         assert similarity == 1.0
 
     def test_identical_texts_different_whitespace(self, memory_store):
-        """Тексты с разными пробелами должны иметь similarity = 1.0."""
+        """Texts with different whitespace should have similarity = 1.0."""
         text1 = "User    prefers   Python"
         text2 = "User prefers Python"
         similarity = memory_store._calculate_similarity(text1, text2)
         assert similarity == 1.0
 
     def test_completely_different_texts(self, memory_store):
-        """Совершенно разные тексты должны иметь низкий similarity."""
+        """Completely different texts should have low similarity."""
         text1 = "abcdefghij"
         text2 = "klmnopqrst"
         similarity = memory_store._calculate_similarity(text1, text2)
         assert similarity == 0.0
 
     def test_empty_texts(self, memory_store):
-        """Пустые тексты должны иметь similarity = 1.0."""
+        """Empty texts should have similarity = 1.0."""
         similarity = memory_store._calculate_similarity("", "")
         assert similarity == 1.0
 
     def test_one_empty_text(self, memory_store):
-        """Один пустой текст должен давать similarity = 0.0."""
+        """One empty text should give similarity = 0.0."""
         similarity = memory_store._calculate_similarity("Some text", "")
         assert similarity == 0.0
 
     def test_partially_similar_texts(self, memory_store):
-        """Частично похожие тексты должны давать промежуточный similarity."""
+        """Partially similar texts should give intermediate similarity."""
         text1 = "User prefers Python programming"
         text2 = "User prefers JavaScript programming"
         similarity = memory_store._calculate_similarity(text1, text2)
-        # Должно быть около 0.75-0.85
+        # Should be around 0.75-0.85
         assert 0.6 < similarity < 0.9
 
     def test_threshold_boundary_80_percent(self, memory_store):
-        """Тест на граничном значении порога 80%."""
-        # Создаём тексты, которые должны быть около 80% похожи
+        """Test at the threshold boundary of 80%."""
+        # Create texts that should be around 80% similar
         text1 = "This is a test message about Python"
         text2 = "This is a test message about JavaScript"
         similarity = memory_store._calculate_similarity(text1, text2)
-        # Python vs JavaScript - разница в одном слове
-        # Длина одинаковая, отличие только в последнем слове
+        # Python vs JavaScript - difference in one word
+        # Length is the same, difference only in the last word
         assert isinstance(similarity, float)
         assert 0.0 <= similarity <= 1.0
 
     def test_unicode_texts(self, memory_store):
-        """Тексты с Unicode символами должны корректно сравниваться."""
-        text1 = "Пользователь предпочитает Python"
-        text2 = "Пользователь предпочитает JavaScript"
+        """Texts with Unicode characters should compare correctly."""
+        text1 = "User prefers Python"
+        text2 = "User prefers JavaScript"
         similarity = memory_store._calculate_similarity(text1, text2)
         assert 0.5 < similarity < 1.0
 
     def test_special_characters(self, memory_store):
-        """Тексты со спецсимволами должны корректно сравниваться."""
+        """Texts with special characters should compare correctly."""
         text1 = "Email: user@example.com, Phone: +1-234-567-8900"
         text2 = "Email: admin@test.org, Phone: +1-234-567-8900"
         similarity = memory_store._calculate_similarity(text1, text2)
@@ -104,11 +104,11 @@ class TestCalculateSimilarity:
 
 
 class TestFindSimilar:
-    """Test find_similar() method - поиск кандидатов."""
+    """Test find_similar() method - search for candidates."""
 
     def test_find_exact_match(self, memory_store):
-        """Поиск должен находить точное совпадение."""
-        # Используем слова длиной > 3 символов для FTS5
+        """Search should find exact match."""
+        # Use words longer than 3 characters for FTS5
         content = "User prefers Python programming language"
         memory_store.save(content, type="long_term", tags="preference")
 
@@ -120,7 +120,7 @@ class TestFindSimilar:
         assert entry.content == content
 
     def test_find_similar_above_threshold(self, memory_store):
-        """Поиск должен находить похожие записи выше порога."""
+        """Search should find similar entries above threshold."""
         memory_store.save("User prefers Python for backend development", type="long_term")
         memory_store.save("User prefers JavaScript for frontend development", type="long_term")
         memory_store.save("Weather is sunny today", type="short_term")
@@ -131,29 +131,29 @@ class TestFindSimilar:
             limit=5
         )
 
-        # Должен найти только Python-related запись
+        # Should find only Python-related entry
         assert len(results) >= 1
         entry, similarity = results[0]
         assert "Python" in entry.content
         assert similarity >= 0.7
 
     def test_find_similar_below_threshold(self, memory_store):
-        """Поиск не должен возвращать записи ниже порога."""
+        """Search should not return entries below threshold."""
         memory_store.save("Completely unrelated content about weather", type="long_term")
         memory_store.save("Another unrelated topic about cooking", type="long_term")
 
         results = memory_store.find_similar(
             "User prefers Python programming",
-            threshold=0.9,  # Высокий порог
+            threshold=0.9,  # High threshold
             limit=5
         )
 
-        # Ничего не должно найтись с таким высоким порогом
+        # Nothing should be found with such a high threshold
         for entry, similarity in results:
             assert similarity >= 0.9
 
     def test_find_similar_with_type_filter(self, memory_store):
-        """Поиск должен фильтровать по типу памяти."""
+        """Search should filter by memory type."""
         memory_store.save("User likes Python", type="long_term", user_id="user1")
         memory_store.save("User likes Python", type="short_term", user_id="user1")
 
@@ -168,7 +168,7 @@ class TestFindSimilar:
             assert entry.type == "long_term"
 
     def test_find_similar_with_user_filter(self, memory_store):
-        """Поиск должен фильтровать по user_id."""
+        """Search should filter by user_id."""
         memory_store.save("User likes Python", type="long_term", user_id="user1")
         memory_store.save("User likes Python", type="long_term", user_id="user2")
 
@@ -183,7 +183,7 @@ class TestFindSimilar:
             assert entry.user_id == "user1"
 
     def test_find_similar_with_agent_filter(self, memory_store):
-        """Поиск должен фильтровать по agent_id."""
+        """Search should filter by agent_id."""
         memory_store.save("Important fact", type="long_term", agent_id="agent1")
         memory_store.save("Important fact", type="long_term", agent_id="agent2")
 
@@ -198,7 +198,7 @@ class TestFindSimilar:
             assert entry.agent_id == "agent1"
 
     def test_find_similar_with_exclude_ids(self, memory_store):
-        """Поиск должен исключать указанные ID."""
+        """Search should exclude specified IDs."""
         id1 = memory_store.save("User likes Python", type="long_term")
         memory_store.save("User likes Python programming", type="long_term")
 
@@ -212,8 +212,8 @@ class TestFindSimilar:
             assert entry.id != id1
 
     def test_find_similar_respects_limit(self, memory_store):
-        """Поиск должен возвращать не более limit результатов."""
-        # Создаём несколько похожих записей
+        """Search should return at most limit results."""
+        # Create several similar entries
         for i in range(10):
             memory_store.save(f"User prefers Python programming {i}", type="long_term")
 
@@ -226,7 +226,7 @@ class TestFindSimilar:
         assert len(results) <= 3
 
     def test_find_similar_returns_sorted_by_similarity(self, memory_store):
-        """Результаты должны быть отсортированы по убыванию similarity."""
+        """Results should be sorted by similarity descending."""
         memory_store.save("User likes Python programming", type="long_term")
         memory_store.save("User likes Python", type="long_term")
         memory_store.save("User likes", type="long_term")
@@ -243,80 +243,80 @@ class TestFindSimilar:
 
 
 class TestSaveDeduplication:
-    """Test save(update_if_exists=True) - дедупликация при сохранении."""
+    """Test save(update_if_exists=True) - deduplication on save."""
 
     def test_save_creates_new_entry_by_default(self, memory_store):
-        """По умолчанию save должен создавать новую запись."""
+        """By default save should create a new entry."""
         content = "User prefers Python"
         id1 = memory_store.save(content, type="long_term")
         id2 = memory_store.save(content, type="long_term")
 
-        # Без update_if_exists должны создаться две записи
+        # Without update_if_exists, two entries should be created
         assert id1 != id2
 
     def test_save_updates_existing_with_update_if_exists(self, memory_store):
-        """С update_if_exists=True похожая запись должна обновляться."""
+        """With update_if_exists=True, similar entry should be updated."""
         content = "User prefers Python programming language"
         id1 = memory_store.save(content, type="long_term")
 
-        # Немного изменённый контент, но всё ещё похожий
+        # Slightly changed content, but still similar
         new_content = "User prefers Python programming language!"
         id2 = memory_store.save(new_content, type="long_term", update_if_exists=True)
 
-        # Должен вернуть тот же ID, т.к. контент почти идентичен
+        # Should return the same ID since content is almost identical
         assert id1 == id2
 
     def test_save_updates_importance_on_duplicate(self, memory_store):
-        """При обновлении дубликата importance должен увеличиваться."""
+        """When updating a duplicate, importance should increase."""
         content = "User prefers Python"
         id1 = memory_store.save(content, type="long_term", importance=0.5)
 
-        # Сохраняем похожий контент с update_if_exists
+        # Save similar content with update_if_exists
         memory_store.save(content, type="long_term", update_if_exists=True)
 
-        # Проверяем, что importance увеличился
+        # Verify that importance increased
         entry = memory_store.get_by_id(id1)
         assert entry.importance > 0.5
         assert entry.importance <= 1.0
 
     def test_save_creates_new_if_no_similar_found(self, memory_store):
-        """Если похожих записей нет, должна создаться новая."""
+        """If no similar entries exist, a new one should be created."""
         memory_store.save("User likes Python", type="long_term")
 
-        # Совершенно другой контент
+        # Completely different content
         new_id = memory_store.save(
             "Weather forecast for tomorrow",
             type="long_term",
             update_if_exists=True
         )
 
-        # Должна создаться новая запись
+        # A new entry should be created
         entry = memory_store.get_by_id(new_id)
         assert entry.content == "Weather forecast for tomorrow"
 
     def test_save_with_custom_similarity_threshold(self, memory_store):
-        """Тест кастомного порога схожести."""
+        """Test custom similarity threshold."""
         content = "User prefers Python programming"
         id1 = memory_store.save(content, type="long_term")
 
-        # Немного отличающийся контент
+        # Slightly different content
         new_content = "User prefers JavaScript programming"
         id2 = memory_store.save(
             new_content,
             type="long_term",
             update_if_exists=True,
-            similarity_threshold=0.99  # Очень высокий порог
+            similarity_threshold=0.99  # Very high threshold
         )
 
-        # С высоким порогом должна создаться новая запись
+        # With a high threshold, a new entry should be created
         assert id1 != id2
 
     def test_save_dedup_respects_user_filter(self, memory_store):
-        """Дедупликация должна учитывать user_id."""
+        """Deduplication should respect user_id."""
         content = "User likes Python"
         id1 = memory_store.save(content, type="long_term", user_id="user1")
 
-        # Тот же контент, но другой пользователь
+        # Same content, but different user
         id2 = memory_store.save(
             content,
             type="long_term",
@@ -324,15 +324,15 @@ class TestSaveDeduplication:
             update_if_exists=True
         )
 
-        # Должна создаться новая запись для другого пользователя
+        # A new entry should be created for the different user
         assert id1 != id2
 
     def test_save_dedup_respects_agent_filter(self, memory_store):
-        """Дедупликация должна учитывать agent_id."""
+        """Deduplication should respect agent_id."""
         content = "Important configuration"
         id1 = memory_store.save(content, type="long_term", agent_id="agent1")
 
-        # Тот же контент, но другой агент
+        # Same content, but different agent
         id2 = memory_store.save(
             content,
             type="long_term",
@@ -340,30 +340,30 @@ class TestSaveDeduplication:
             update_if_exists=True
         )
 
-        # Должна создаться новая запись для другого агента
+        # A new entry should be created for the different agent
         assert id1 != id2
 
     def test_save_dedup_respects_type_filter(self, memory_store):
-        """Дедупликация должна учитывать тип памяти."""
+        """Deduplication should respect memory type."""
         content = "Important note"
         id1 = memory_store.save(content, type="long_term")
 
-        # Тот же контент, но другой тип
+        # Same content, but different type
         id2 = memory_store.save(
             content,
             type="short_term",
             update_if_exists=True
         )
 
-        # Должна создаться новая запись для другого типа
+        # A new entry should be created for the different type
         assert id1 != id2
 
     def test_save_dedup_importance_max_1(self, memory_store):
-        """Importance не должен превышать 1.0 при множественных обновлениях."""
+        """Importance should not exceed 1.0 after multiple updates."""
         content = "Test content"
         id1 = memory_store.save(content, type="long_term", importance=0.95)
 
-        # Множественные обновления
+        # Multiple updates
         for _ in range(10):
             memory_store.save(content, type="long_term", update_if_exists=True)
 
@@ -372,80 +372,80 @@ class TestSaveDeduplication:
 
 
 class TestEdgeCases:
-    """Тесты граничных случаев."""
+    """Edge case tests."""
 
     def test_empty_query_find_similar(self, memory_store):
-        """Пустой запрос не должен вызывать ошибок."""
+        """Empty query should not cause errors."""
         memory_store.save("Some content", type="long_term")
 
-        # Пустой запрос должен вернуть пустой результат
+        # Empty query should return empty result
         results = memory_store.find_similar("", threshold=0.8)
         assert isinstance(results, list)
 
     def test_short_query_find_similar(self, memory_store):
-        """Короткий запрос должен обрабатываться корректно."""
+        """Short query should be handled correctly."""
         memory_store.save("Python is great", type="long_term")
 
-        # Короткие токены (< 4 символов) не должны попасть в FTS запрос
+        # Short tokens (< 4 characters) should not be included in FTS query
         results = memory_store.find_similar("Py is", threshold=0.5)
         assert isinstance(results, list)
 
     def test_archived_entries_excluded_from_dedup(self, memory_store):
-        """Архивированные записи должны исключаться из дедупликации."""
+        """Archived entries should be excluded from deduplication."""
         content = "User likes Python"
         id1 = memory_store.save(content, type="long_term")
 
-        # Архивируем запись
+        # Archive the entry
         memory_store.delete(id1, hard=False)
 
-        # Сохраняем тот же контент с update_if_exists
+        # Save the same content with update_if_exists
         id2 = memory_store.save(content, type="long_term", update_if_exists=True)
 
-        # Должна создаться новая запись, т.к. старая архивирована
-        # Примечание: поведение зависит от реализации search (include_archived)
+        # A new entry should be created because the old one is archived
+        # Note: behavior depends on search implementation (include_archived)
         assert id2 is not None
 
     def test_special_characters_in_content(self, memory_store):
-        """Специальные символы в контенте должны обрабатываться."""
+        """Special characters in content should be handled."""
         content = "Email: user@example.com, JSON: {\"key\": \"value\"}"
         id1 = memory_store.save(content, type="long_term")
 
         id2 = memory_store.save(content, type="long_term", update_if_exists=True)
 
-        # Должен обновить существующую
+        # Should update existing entry
         assert id1 == id2
 
     def test_very_long_content(self, memory_store):
-        """Очень длинный контент должен обрабатываться."""
-        content = "Python " * 1000  # Очень длинная строка
+        """Very long content should be handled."""
+        content = "Python " * 1000  # Very long string
         id1 = memory_store.save(content, type="long_term")
 
         similar_content = "Python " * 999 + "code"
         id2 = memory_store.save(similar_content, type="long_term", update_if_exists=True)
 
-        # Должен найти похожую и обновить
+        # Should find similar and update
         assert id1 == id2
 
     def test_multiline_content(self, memory_store):
-        """Многострочный контент должен обрабатываться."""
-        # FTS5 работает со словами, поэтому используем слова > 3 символов
+        """Multiline content should be processed."""
+        # FTS5 works with words, so use words > 3 characters
         content = "First line with important data"
         id1 = memory_store.save(content, type="long_term")
 
-        # Тот же контент с добавлением пробелов (нормализуется при similarity)
+        # Same content with added whitespace (normalized during similarity)
         similar_content = "First   line   with   important   data"
         id2 = memory_store.save(similar_content, type="long_term", update_if_exists=True)
 
-        # Должен найти похожую (similarity=1.0 после нормализации)
+        # Should find similar (similarity=1.0 after normalization)
         assert id1 == id2
 
 
 class TestIntegration:
-    """Интеграционные тесты дедупликации."""
+    """Integration tests for deduplication."""
 
     def test_full_deduplication_workflow(self, memory_store):
-        """Полный сценарий дедупликации."""
-        # Шаг 1: Создаём начальную запись
+        """Full deduplication workflow."""
+        # Step 1: Create initial entry
         id1 = memory_store.save(
             "User prefers Python for data science",
             type="long_term",
@@ -454,7 +454,7 @@ class TestIntegration:
             user_id="user1"
         )
 
-        # Шаг 2: Пытаемся сохранить дубликат
+        # Step 2: Try to save duplicate
         id2 = memory_store.save(
             "User prefers Python for data science!",
             type="long_term",
@@ -463,40 +463,40 @@ class TestIntegration:
             user_id="user1"
         )
 
-        # Шаг 3: Проверяем, что запись обновилась, а не создалась новая
+        # Step 3: Verify entry was updated, not created new
         assert id1 == id2
 
-        # Шаг 4: Проверяем, что importance увеличился
+        # Step 4: Verify importance increased
         entry = memory_store.get_by_id(id1)
         assert entry.importance > 0.5
 
-        # Шаг 5: Проверяем, что контент обновился
+        # Step 5: Verify content was updated
         assert "!" in entry.content
 
     def test_multiple_users_same_content(self, memory_store):
-        """Разные пользователи могут иметь одинаковый контент."""
+        """Different users can have the same content."""
         content = "I like Python"
 
         id1 = memory_store.save(content, type="long_term", user_id="user1")
         id2 = memory_store.save(content, type="long_term", user_id="user2", update_if_exists=True)
         id3 = memory_store.save(content, type="long_term", user_id="user3", update_if_exists=True)
 
-        # Все записи должны быть разными (разные пользователи)
+        # All entries should be different (different users)
         assert len({id1, id2, id3}) == 3
 
     def test_dedup_with_search_integration(self, memory_store):
-        """Дедупликация должна работать с FTS5 поиском."""
-        # Создаём несколько записей
+        """Deduplication should work with FTS5 search."""
+        # Create several entries
         memory_store.save("Python is great for ML", type="long_term")
         memory_store.save("JavaScript is great for web", type="long_term")
 
-        # Ищем Python-related записи
+        # Search for Python-related entries
         results = memory_store.search("Python", type="long_term")
         assert len(results) >= 1
 
-        # Проверяем дедупликацию при сохранении похожего
+        # Verify deduplication when saving similar content
         memory_store.save("Python is great for ML!", type="long_term", update_if_exists=True)
 
-        # Количество записей не должно увеличиться
+        # Number of entries should not increase
         new_results = memory_store.search("Python", type="long_term")
         assert len(new_results) == len(results)

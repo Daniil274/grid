@@ -17,27 +17,27 @@ def git_status_impl(directory: str = ".") -> str:
         from pathlib import Path
         path = Path(directory)
         if not path.exists():
-            return f"❌ Директория {directory} не найдена"
+            return f"❌ Directory {directory} not found"
         
         cmd_result = _run_git_command(["git", "status", "--porcelain"], cwd=str(path))
         
         if not cmd_result["success"]:
             if "not a git repository" in cmd_result["error"]:
-                return f"❌ Не Git репозиторий: {cmd_result['error']}"
-            return f"❌ Ошибка Git: {cmd_result['error']}"
+                return f"❌ Not a Git repository: {cmd_result['error']}"
+            return f"❌ Git error: {cmd_result['error']}"
         
-        # Форматируем вывод  
+        # Format output
         if not cmd_result["output"].strip():
-            return "✅ Рабочая директория чистая - нет изменений"
+            return "✅ Working directory is clean - no changes"
         else:
             lines = cmd_result["output"].split('\n')
             status_map = {
-                'M': 'изменен',
-                'A': 'добавлен', 
-                'D': 'удален',
-                'R': 'переименован',
-                'C': 'скопирован',
-                '??': 'неотслеживаемый'
+                'M': 'modified',
+                'A': 'added', 
+                'D': 'deleted',
+                'R': 'renamed',
+                'C': 'copied',
+                '??': 'untracked'
             }
             
             formatted_lines = []
@@ -53,12 +53,12 @@ def git_status_impl(directory: str = ".") -> str:
                 formatted_lines.append(f"  📝 {status_text}: {filename}")
             
             changes_count = len(formatted_lines)
-            result = f"📊 Статус Git репозитория в {directory} ({changes_count} изменений):\n\n" + "\n".join(formatted_lines)
+            result = f"📊 Git repository status in {directory} ({changes_count} changes):\n\n" + "\n".join(formatted_lines)
         
         return result
         
     except Exception as e:
-        return f"❌ Ошибка при получении статуса Git: {str(e)}"
+        return f"❌ Error getting Git status: {str(e)}"
 
 def git_status(directory: str = ".") -> str:
     return git_status_impl(directory)
@@ -102,14 +102,14 @@ class TestGitCommandRunner:
         result = _run_git_command(["ls", "-la"])
         
         assert result["success"] is False
-        assert "Команда должна начинаться с 'git'" in result["error"]
+        assert "Command must start with 'git'" in result["error"]
     
     def test_run_git_command_empty_command(self):
         """Test validation of empty commands."""
         result = _run_git_command([])
         
         assert result["success"] is False
-        assert "Команда должна начинаться с 'git'" in result["error"]
+        assert "Command must start with 'git'" in result["error"]
     
     def test_run_git_command_dangerous_commands(self):
         """Test blocking of dangerous git commands."""
@@ -124,7 +124,7 @@ class TestGitCommandRunner:
         for cmd in dangerous_commands:
             result = _run_git_command(cmd)
             assert result["success"] is False
-            assert "Опасная команда заблокирована" in result["error"]
+            assert "Dangerous command blocked" in result["error"]
     
     def test_run_git_command_timeout(self):
         """Test git command timeout handling."""
@@ -134,7 +134,7 @@ class TestGitCommandRunner:
             result = _run_git_command(["git", "status"])
             
             assert result["success"] is False
-            assert "превысила лимит времени" in result["error"]
+            assert "Command exceeded time limit" in result["error"]
     
     def test_run_git_command_exception(self):
         """Test git command exception handling."""
@@ -144,7 +144,7 @@ class TestGitCommandRunner:
             result = _run_git_command(["git", "status"])
             
             assert result["success"] is False
-            assert "Ошибка выполнения команды" in result["error"]
+            assert "Command execution error" in result["error"]
     
     def test_run_git_command_with_cwd(self):
         """Test git command execution with custom working directory."""
@@ -194,8 +194,8 @@ class TestGitTools:
         non_existent_dir = temp_dir / "non_existent"
         result = git_status(str(non_existent_dir))
         
-        assert "❌ Директория" in result
-        assert "не найдена" in result
+        assert "❌ Directory" in result
+        assert "not found" in result
     
     @patch('tests.test_git_tools._run_git_command')
     @patch('tools.git_tools.pretty_logger')
@@ -212,7 +212,7 @@ class TestGitTools:
         
         result = git_status(str(temp_dir))
         
-        assert "❌ Не Git репозиторий" in result
+        assert "❌ Not a Git repository" in result
         assert "fatal: not a git repository" in result
     
     def test_git_status_with_changes(self, temp_dir):
@@ -234,7 +234,7 @@ class TestGitTools:
         assert "❌" in result
 
 
-@pytest.mark.skip(reason="Интеграционные тесты Git - временно отключены")
+@pytest.mark.skip(reason="Git integration tests - temporarily disabled")
 class TestGitToolsIntegration:
     """Integration tests for Git tools with real Git operations."""
     
@@ -251,7 +251,7 @@ class TestGitToolsIntegration:
         
         result = git_status(str(mock_git_repo))
         
-        assert "📊 Статус Git репозитория" in result
+        assert "📊 Git repository status" in result
         # Should show untracked file
         assert "test.txt" in result
     
@@ -269,7 +269,7 @@ class TestGitToolsIntegration:
             cmd = cmd_str.split()
             result = _run_git_command(cmd)
             assert result["success"] is False
-            assert "Опасная команда заблокирована" in result["error"]
+            assert "Dangerous command blocked" in result["error"]
     
     def test_safe_command_execution(self):
         """Test that safe commands are allowed."""
@@ -293,13 +293,13 @@ class TestGitToolsIntegration:
                 assert result["success"] is True
 
 
-@pytest.mark.skip(reason="Edge case тесты Git - временно отключены")
+@pytest.mark.skip(reason="Edge case Git tests - temporarily disabled")
 class TestGitToolsEdgeCases:
     """Test edge cases and error conditions for Git tools."""
     
     def test_git_command_with_unicode_output(self):
         """Test git command handling unicode output."""
-        unicode_output = "На ветке main\nИзменения не зафиксированы"
+        unicode_output = "On branch main\nChanges not staged"
         
         with patch('subprocess.run') as mock_run:
             mock_result = Mock()
@@ -365,7 +365,7 @@ class TestGitToolsEdgeCases:
             with patch('tools.git_tools.pretty_logger'):
                 result = git_status(str(special_dir))
                 
-                assert "📊 Статус Git репозитория" in result
+                assert "📊 Git repository status" in result
                 mock_run_cmd.assert_called_once()
     
     def test_concurrent_git_operations(self, mock_git_repo):
@@ -393,7 +393,7 @@ class TestGitToolsEdgeCases:
             thread.start()
         
         for thread in threads:
-            thread.join(timeout=10)  # Таймаут 10 сек для каждого потока
+            thread.join(timeout=10)  # 10 sec timeout for each thread
             if thread.is_alive():
                 pytest.fail(f"Thread {thread.name} did not finish within timeout")
         

@@ -299,7 +299,7 @@ async def semantic_memory_search(
 
     Uses hybrid vector + keyword search (ChromaDB + FTS5 with RRF merge).
     Finds relevant memories even when the exact words don't match —
-    e.g., query "как решить проблему со звуком" finds memories about
+    e.g., query "how to fix an audio problem" finds memories about
     "ALSA", "TLV320AIC3100", "audio DSP" by semantic similarity.
 
     Prefer this over memory_search when:
@@ -327,10 +327,10 @@ async def semantic_memory_search(
     entries, mode = _semantic_search(store, query, memory_type, user_id, limit)
 
     if not entries:
-        return f"[semantic_memory_search] Ничего не найдено по запросу: '{query}' (mode: {mode})"
+        return f"[semantic_memory_search] Nothing found for query: '{query}' (mode: {mode})"
 
-    lines = [f"## Семантический поиск по памяти: '{query}'"]
-    lines.append(f"_Режим: {mode}_\n")
+    lines = [f"## Semantic memory search: '{query}'"]
+    lines.append(f"_Mode: {mode}_\n")
 
     for i, entry in enumerate(entries, 1):
         vec_sim = getattr(entry, "_vec_sim", 0.0)
@@ -344,9 +344,9 @@ async def semantic_memory_search(
             signals.append("fts✓")
         score_str = f"  `[{', '.join(signals)}]`" if signals else ""
 
-        lines.append(f"### {i}. [{entry.type}] {entry.tags or '(нет тегов)'}{score_str}")
+        lines.append(f"### {i}. [{entry.type}] {entry.tags or '(no tags)'}{score_str}")
         lines.append(f"**importance:** {entry.importance:.1f}  |  **id:** {entry.id}")
-        lines.append(f"**сохранено:** {entry.created_at[:10] if entry.created_at else '?'}")
+        lines.append(f"**saved:** {entry.created_at[:10] if entry.created_at else '?'}")
         lines.append("")
         lines.append(entry.content[:600] + ("…" if len(entry.content) > 600 else ""))
         lines.append("")

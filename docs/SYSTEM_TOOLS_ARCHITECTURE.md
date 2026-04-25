@@ -2,12 +2,12 @@
 
 ## Problem Statement
 
-Необходимо добавить системные инструменты, которые позволят агентам:
-1. Получать список других агентов
-2. Изучать инструкции и возможности других агентов
-3. Просматривать доступные инструменты с описаниями
-4. Просматривать скиллы агентов
-5. Получать справку по работе системы
+It is necessary to add system tools that will allow agents to:
+1. Get a list of other agents
+2. Study the instructions and capabilities of other agents
+3. View available tools with descriptions
+4. View agent skills
+5. Get help on how the system works
 
 ## Design Principles
 
@@ -19,8 +19,8 @@
 │  User Tools           │  System Tools            │  Meta Tools  │
 │  (file, git, etc.)    │  (introspection)         │  (orchestrate)│
 ├───────────────────────┼──────────────────────────┼──────────────┤
-│  Работа с внешним     │  Самоанализ системы      │  Управление  │
-│  миром                │  и мета-информация       │  агентами    │
+│  Work with external   │  System self-analysis    │  Agent       │
+│  world                │  and meta-information    │  management  │
 └───────────────────────┴──────────────────────────┴──────────────┘
 ```
 

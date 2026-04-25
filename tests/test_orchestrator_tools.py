@@ -10,7 +10,7 @@ async def test_orchestrate_requires_factory_in_context():
     ctx.context = None
     tool = ORCHESTRATOR_TOOLS["orchestrate"]
     out = await tool.on_invoke_tool(ctx, input='{"task": "do something"}')
-    assert "нет доступа к AgentFactory" in out
+    assert "no access to AgentFactory" in out
 
 
 @pytest.mark.asyncio

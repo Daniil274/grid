@@ -1,5 +1,5 @@
 """
-BashTool — выполнение shell-команд с изоляцией по рабочей директории.
+BashTool — executes shell commands with isolation by working directory.
 """
 
 import os
@@ -19,7 +19,7 @@ from utils.path_utils import resolve_agent_path_auto, display_agent_path_auto
 # Dangerous-command patterns (Linux + Windows)
 # ---------------------------------------------------------------------------
 DANGEROUS_PATTERNS = [
-    # Linux: удаление системных директорий
+    # Linux: deleting system directories
     r"rm\s+-[rf]{1,2}\s+/\s*$",
     r"rm\s+-[rf]{1,2}\s+/\s+",
     r"rm\s+-[rf]{1,2}\s+/(bin|boot|etc|lib|sbin|sys|usr|var)\b",
@@ -27,13 +27,13 @@ DANGEROUS_PATTERNS = [
     r"rm\s+-[rf]{1,2}\s+\$HOME",
     # Fork bomb
     r":\(\)\s*\{\s*:\|:&\s*\};:",
-    # Перезапись критических файлов
+    # Overwriting critical files
     r">\s*/etc/(passwd|shadow|sudoers|crontab)",
-    # dd в устройства
+    # dd to devices
     r"dd\s+.*of=/dev/(sd|hd|nvme|disk)",
-    # mkfs на разделах
+    # mkfs on partitions
     r"mkfs\b.*\s+/dev/",
-    # Windows: опасные команды
+    # Windows: dangerous commands
     r"format\s+[a-zA-Z]:\s*(/[a-zA-Z])*\s*$",
     r"del\s+/[fFsS].*\s+[a-zA-Z]:\\",
     r"rd\s+/[sS]\s+/[qQ]\s+[a-zA-Z]:\\",
@@ -75,7 +75,7 @@ def _is_dangerous(command: str) -> Optional[str]:
     """Return reason string if command is dangerous, else None."""
     for pattern in DANGEROUS_REGEX:
         if pattern.search(command):
-            return f"Обнаружен опасный паттерн: {pattern.pattern}"
+            return f"Dangerous pattern detected: {pattern.pattern}"
     return None
 
 
@@ -86,7 +86,7 @@ def _is_caution(command: str) -> bool:
 def _truncate(text: str, max_chars: int = 10000) -> str:
     if len(text) <= max_chars:
         return text
-    return text[:max_chars] + f"\n\n... [обрезано {len(text) - max_chars} символов] ..."
+    return text[:max_chars] + f"\n\n... [truncated {len(text) - max_chars} characters] ..."
 
 
 def _detect_encoding() -> str:
@@ -127,7 +127,7 @@ def _run_command(
         )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
-        raise TimeoutError(f"Команда превысила таймаут {timeout} секунд")
+        raise TimeoutError(f"Command exceeded timeout of {timeout} seconds")
 
 
 @function_tool
@@ -138,16 +138,16 @@ def bash_tool(
     description: str = "",
 ) -> str:
     """
-    Выполняет shell-команду в рабочей директории с проверкой безопасности.
+    Executes shell commands in the working directory with security checks.
 
     Args:
-        command:     Команда для выполнения
-        working_dir: Рабочая директория (по умолчанию текущая)
-        timeout:     Таймаут в секундах (1–300)
-        description: Описание команды для вывода
+        command:     Command to execute
+        working_dir: Working directory (default current)
+        timeout:     Timeout in seconds (1–300)
+        description: Command description for display
 
     Returns:
-        Результат выполнения (stdout + stderr)
+        Execution result (stdout + stderr)
     """
     # --- Validate timeout --------------------------------------------------
     timeout = max(1, min(int(timeout), 300))
@@ -155,9 +155,9 @@ def bash_tool(
     # --- Security check ----------------------------------------------------
     danger_reason = _is_dangerous(command)
     if danger_reason:
-        return f"❌ Команда заблокирована: {danger_reason}"
+        return f"❌ Command blocked: {danger_reason}"
 
-    caution_prefix = "⚠️ Потенциально опасная команда\n" if _is_caution(command) else ""
+    caution_prefix = "⚠️ Potentially dangerous command\n" if _is_caution(command) else ""
 
     # --- Resolve working directory (sandbox enforced) ----------------------
     visible_dir = display_agent_path_auto(working_dir)
@@ -168,9 +168,9 @@ def bash_tool(
 
     work_path = Path(resolved_dir)
     if not work_path.exists():
-        return f"❌ Рабочая директория не существует: {visible_dir}"
+        return f"❌ Working directory does not exist: {visible_dir}"
     if not work_path.is_dir():
-        return f"❌ Путь не является директорией: {visible_dir}"
+        return f"❌ Path is not a directory: {visible_dir}"
 
     # --- Execute -----------------------------------------------------------
     try:
@@ -178,7 +178,7 @@ def bash_tool(
     except TimeoutError as exc:
         return f"⏱️ {exc}"
     except Exception as exc:
-        return f"❌ Ошибка выполнения: {exc}"
+        return f"❌ Execution error: {exc}"
 
     # --- Format output -----------------------------------------------------
     parts = []

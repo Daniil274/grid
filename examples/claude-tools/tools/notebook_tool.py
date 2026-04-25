@@ -1,6 +1,6 @@
 """
-Notebook Tool — чтение, редактирование и создание Jupyter notebooks.
-Все пути ограничены рабочей директорией агента.
+Notebook Tool — reading, editing, and creating Jupyter notebooks.
+All paths are restricted to the agent's working directory.
 """
 
 import json
@@ -33,11 +33,11 @@ def _resolve(filepath: str) -> tuple:
 def _check_ipynb(path: Path, visible: str) -> Optional[str]:
     """Returns error string if path is not a valid .ipynb file."""
     if not path.exists():
-        return f"❌ Файл не найден: {visible}"
+        return f"❌ File not found: {visible}"
     if path.suffix != ".ipynb":
-        return f"❌ Ожидается файл .ipynb: {visible}"
+        return f"❌ Expected .ipynb file: {visible}"
     if not path.is_file():
-        return f"❌ Не является файлом: {visible}"
+        return f"❌ Not a file: {visible}"
     return None
 
 
@@ -51,14 +51,14 @@ def notebook_read(
     include_output: bool = False,
 ) -> str:
     """
-    Читает Jupyter notebook (.ipynb).
+    Reads a Jupyter notebook (.ipynb).
 
     Args:
-        filepath:       Путь к .ipynb файлу
-        include_output: Включать вывод ячеек
+        filepath:       Path to the .ipynb file
+        include_output: Include cell output
 
     Returns:
-        Структура notebook с ячейками
+        Notebook structure with cells
     """
     try:
         visible, resolved = _resolve(filepath)
@@ -85,19 +85,19 @@ def notebook_read(
         return _format_nb_json(nb, visible, include_output)
 
     except Exception as exc:
-        return f"❌ Ошибка чтения notebook: {exc}"
+        return f"❌ Error reading notebook: {exc}"
 
 
 def _format_nb_nbformat(nb, visible: str, include_output: bool) -> str:
     lines = [
         f"📓 {visible}",
-        f"Формат: {nb.nbformat}.{nb.nbformat_minor}",
+        f"Format: {nb.nbformat}.{nb.nbformat_minor}",
         "",
     ]
     kernel = nb.metadata.get("kernelspec", {}).get("display_name", "")
     if kernel:
         lines += [f"Kernel: {kernel}", ""]
-    lines.append(f"Всего ячеек: {len(nb.cells)}\n")
+    lines.append(f"Total cells: {len(nb.cells)}\n")
 
     for i, cell in enumerate(nb.cells, 1):
         lines.append(f"## Cell {i} [{cell.cell_type}]")
@@ -135,13 +135,13 @@ def _format_nb_json(nb: dict, visible: str, include_output: bool) -> str:
     metadata = nb.get("metadata", {})
     lines = [
         f"📓 {visible}",
-        f"Формат: {nb.get('nbformat', 4)}.{nb.get('nbformat_minor', 2)}",
+        f"Format: {nb.get('nbformat', 4)}.{nb.get('nbformat_minor', 2)}",
         "",
     ]
     kernel = metadata.get("kernelspec", {}).get("display_name", "")
     if kernel:
         lines += [f"Kernel: {kernel}", ""]
-    lines.append(f"Всего ячеек: {len(cells)}\n")
+    lines.append(f"Total cells: {len(cells)}\n")
 
     for i, cell in enumerate(cells, 1):
         cell_type = cell.get("cell_type", "unknown")
@@ -177,16 +177,16 @@ def notebook_edit(
     cell_type: Optional[str] = None,
 ) -> str:
     """
-    Редактирует ячейку Jupyter notebook.
+    Edits a Jupyter notebook cell.
 
     Args:
-        filepath:   Путь к .ipynb файлу
-        cell_index: Индекс ячейки (1-based)
-        new_source: Новое содержимое ячейки
-        cell_type:  Тип ячейки ('code' или 'markdown', опционально)
+        filepath:   Path to the .ipynb file
+        cell_index: Cell index (1-based)
+        new_source: New cell content
+        cell_type:  Cell type ('code' or 'markdown', optional)
 
     Returns:
-        Результат операции
+        Operation result
     """
     try:
         visible, resolved = _resolve(filepath)
@@ -199,7 +199,7 @@ def notebook_edit(
         return err
 
     if cell_type and cell_type not in ("code", "markdown", "raw"):
-        return f"❌ Некорректный тип ячейки: {cell_type}. Используйте: code, markdown, raw"
+        return f"❌ Invalid cell type: {cell_type}. Use: code, markdown, raw"
 
     # Try nbformat
     if HAS_NBFORMAT:
@@ -207,7 +207,7 @@ def notebook_edit(
             nb = nbformat.read(path, as_version=4)
 
             if cell_index < 1 or cell_index > len(nb.cells):
-                return f"❌ Индекс {cell_index} вне диапазона (ячеек: {len(nb.cells)})"
+                return f"❌ Index {cell_index} out of range (cells: {len(nb.cells)})"
 
             cell = nb.cells[cell_index - 1]
             cell.source = new_source
@@ -218,7 +218,7 @@ def notebook_edit(
                     cell.execution_count = None
 
             nbformat.write(nb, path)
-            return f"✅ Ячейка {cell_index} обновлена ({cell.cell_type})"
+            return f"✅ Cell {cell_index} updated ({cell.cell_type})"
 
         except Exception as exc:
             logger.warning(f"nbformat edit failed for {visible}: {exc}. Falling back to JSON.")
@@ -230,7 +230,7 @@ def notebook_edit(
 
         cells = nb.get("cells", [])
         if cell_index < 1 or cell_index > len(cells):
-            return f"❌ Индекс {cell_index} вне диапазона (ячеек: {len(cells)})"
+            return f"❌ Index {cell_index} out of range (cells: {len(cells)})"
 
         cell = cells[cell_index - 1]
         # nbformat spec: source must always be a list of strings
@@ -242,10 +242,10 @@ def notebook_edit(
             json.dump(nb, f, indent=2, ensure_ascii=False)
 
         actual_type = cell.get("cell_type", "unknown")
-        return f"✅ Ячейка {cell_index} обновлена ({actual_type})"
+        return f"✅ Cell {cell_index} updated ({actual_type})"
 
     except Exception as exc:
-        return f"❌ Ошибка редактирования: {exc}"
+        return f"❌ Edit error: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -258,14 +258,14 @@ def notebook_create(
     kernel: str = "python3",
 ) -> str:
     """
-    Создаёт новый Jupyter notebook.
+    Creates a new Jupyter notebook.
 
     Args:
-        filepath: Путь для сохранения (.ipynb)
-        kernel:   Имя kernel (по умолчанию python3)
+        filepath: Path to save (.ipynb)
+        kernel:   Kernel name (default python3)
 
     Returns:
-        Результат операции
+        Operation result
     """
     try:
         visible, resolved = _resolve(filepath)
@@ -279,7 +279,7 @@ def notebook_create(
             visible = visible if visible.endswith(".ipynb") else visible + ".ipynb"
 
         if path.exists():
-            return f"❌ Файл уже существует: {visible}"
+            return f"❌ File already exists: {visible}"
 
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -290,7 +290,7 @@ def notebook_create(
                 "language": "python",
                 "name": kernel,
             }
-            nb.cells.append(nbformat.v4.new_markdown_cell("# Новый Notebook"))
+            nb.cells.append(nbformat.v4.new_markdown_cell("# New Notebook"))
             nbformat.write(nb, path)
         else:
             nb = {
@@ -298,7 +298,7 @@ def notebook_create(
                     {
                         "cell_type": "markdown",
                         "metadata": {},
-                        "source": ["# Новый Notebook"],
+                        "source": ["# New Notebook"],
                     }
                 ],
                 "metadata": {
@@ -317,7 +317,7 @@ def notebook_create(
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(nb, f, indent=2, ensure_ascii=False)
 
-        return f"✅ Создан notebook: {visible}"
+        return f"✅ Notebook created: {visible}"
 
     except Exception as exc:
-        return f"❌ Ошибка создания: {exc}"
+        return f"❌ Creation error: {exc}"

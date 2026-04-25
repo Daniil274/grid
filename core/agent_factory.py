@@ -80,7 +80,7 @@ _original_invoke_mcp_tool = _MCPUtil.__dict__["invoke_mcp_tool"].__func__
 async def _invoke_mcp_tool_safe(cls, server, tool, context, input_json):  # type: ignore[override]
     try:
         result = await _original_invoke_mcp_tool(cls, server, tool, context, input_json)
-        # Логируем полный результат вызова MCP инструмента в verbose режиме
+        # Log the full result of the MCP tool call in verbose mode
         Logger("agent_factory").log_verbose(
             f"MCP TOOL RESULT: {tool.name}",
             result if isinstance(result, str) else str(result)
@@ -398,7 +398,7 @@ class AgentFactory:
         else:
             self.context_manager = ContextManager(
                 max_history=self.config.get_max_history(),
-                persist_path="logs/context.json"  # Сохраняем контекст в файл для persistence
+                persist_path="logs/context.json"  # Saving context to file for persistence
             )
             self.unified_memory = None
 
@@ -642,7 +642,7 @@ class AgentFactory:
             if _TRACING_CONFIGURED:
                 return
             tracing_config.configure_console_tracing(level)
-            # Timeline tracer: тот же путь к БД, что и у serve_timeline / configure_tracing_from_env
+            # Timeline tracer: same DB path as serve_timeline / configure_tracing_from_env
             if os.getenv("GRID_TIMELINE_ENABLED", "true").lower() not in ("0", "false", "no"):
                 try:
                     from core.tracing.tracer import get_tracer
@@ -812,6 +812,19 @@ class AgentFactory:
         """Heuristic check for reasoning-style models requiring Responses API."""
         return self._runtime_support.is_reasoning_model_name(model_name)
 
+    @staticmethod
+    def _model_requires_manual_history(model_config: Any) -> bool:
+        """Return True when SDK session history is unsafe for the model.
+
+        Some thinking-enabled providers require `reasoning_content` from prior
+        assistant tool-call turns to be replayed verbatim on subsequent requests.
+        Our manual ContextManager history stores user/assistant-visible messages
+        only, which is sufficient for continuity, while SDK SQLiteSession may
+        replay internal tool-call turns without the provider-specific reasoning
+        payload and trigger 400 errors.
+        """
+        return bool(getattr(model_config, "preserve_reasoning_content", False))
+
     def _build_model_settings(self, model_config: Any) -> ModelSettings:
         """Build ModelSettings from model config, applying reasoning overrides if configured.
 
@@ -903,7 +916,7 @@ class AgentFactory:
             except Exception:
                 use_responses = False
             
-            # Разрешаем Responses API только для провайдера OpenAI
+            # Allow Responses API only for OpenAI provider
             base_url_lower = (provider_config.base_url or "").lower()
             provider_supports_responses = "api.openai.com" in base_url_lower
             if use_responses and not provider_supports_responses:
@@ -950,7 +963,7 @@ class AgentFactory:
                     preserve_reasoning_content=getattr(model_config, "preserve_reasoning_content", False),
                 )
             
-            # Build instructions with context (включаем контекст диалога для агентов)
+            # Build instructions with context (include conversation context for agents)
             instructions = self._build_agent_instructions(
                 agent_key,
                 context_path,
@@ -1041,13 +1054,13 @@ class AgentFactory:
                     tool_result = await target_tool.on_invoke_tool(
                         tool_ctx_wrapper, json.dumps(tool_params)
                     )
-                    # Логируем полный результат вызова авто-запуска инструмента в verbose режиме
+                    # Log the full result of the auto-run tool call in verbose mode
                     Logger("agent_factory").log_verbose(
                         f"AUTO-RUN TOOL RESULT: {tool_name}",
                         tool_result if isinstance(tool_result, str) else str(tool_result)
                     )
                     result_parts.append(
-                        f"\n\n=== РЕЗУЛЬТАТ АВТО-ЗАПУСКА ИНСТРУМЕНТА '{tool_name}' ===\n{tool_result}\n"
+                        f"\n\n=== AUTO-RUN TOOL RESULT '{tool_name}' ===\n{tool_result}\n"
                     )
                     logger.debug(f"Injected auto-run result of '{tool_name}' into instructions")
                 except Exception as tool_err:
@@ -1089,13 +1102,13 @@ class AgentFactory:
                 try:
                     wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
                     result = await target_tool.on_invoke_tool(wrapper, json.dumps(tool_params))
-                    # Логируем полный результат вызова init инструмента в verbose режиме
+                    # Log the full result of the init tool call in verbose mode
                     Logger("agent_factory").log_verbose(
                         f"INIT TOOL RESULT: {tool_name}",
                         result if isinstance(result, str) else str(result)
                     )
                     result_parts.append(
-                        f"\n\n=== КОНТЕКСТ [{tool_name}] ===\n{result}\n"
+                        f"\n\n=== CONTEXT [{tool_name}] ===\n{result}\n"
                     )
                 except Exception as e:
                     logger.warning(f"⚠️ init_tool '{tool_name}' error: {e}")
@@ -1212,7 +1225,7 @@ class AgentFactory:
             # Don't fail agent creation if pipeline check fails
             logger.warning(f"Failed to check pipeline for emergency_shutdown auto-add: {e}")
 
-        # Собираем все имена инструментов (включая MCP)
+        # Gather all tool names (including MCP)
         all_tool_names = list(effective_tool_names)
         if mcp_tool_names:
             all_tool_names.extend(mcp_tool_names)
@@ -1221,7 +1234,7 @@ class AgentFactory:
             tools, inferred_mcp = await self._resolve_tools_for_names(effective_tool_names)
             if inferred_mcp:
                 mcp_tool_names = list(dict.fromkeys([*(mcp_tool_names or []), *inferred_mcp]))
-                # Добавляем inferred_mcp к all_tool_names, убирая дубликаты
+                # Add inferred_mcp to all_tool_names, removing duplicates
                 for mcp_name in inferred_mcp:
                     if mcp_name not in all_tool_names:
                         all_tool_names.append(mcp_name)
@@ -1231,7 +1244,7 @@ class AgentFactory:
             if self.config.is_mcp_enabled():
                 mcp_servers_list = await self._create_mcp_servers(mcp_tool_names)
 
-        # Добавляем prompt_addition из конфигурации инструментов к инструкциям
+        # Add prompt_addition from tool configuration to instructions
         enhanced_instructions = self._build_dynamic_agent_instructions(instructions, all_tool_names)
 
         # Run init_tools and prepend results to instructions
@@ -1326,13 +1339,13 @@ class AgentFactory:
 
         This mirrors the logic from Config.build_agent_prompt but for dynamic agents.
         """
-        # Комбинируем части
+        # Combine parts
         parts = [base_instructions]
 
         if not tool_names:
             return "\n\n".join(parts)
 
-        # Собираем prompt_addition из конфигурации инструментов
+        # Collect prompt_addition from tool configuration
         tool_descriptions = []
         for tool_name in tool_names:
             try:
@@ -1340,22 +1353,22 @@ class AgentFactory:
                 if tool_config.prompt_addition:
                     tool_descriptions.append(tool_config.prompt_addition)
             except Exception:
-                # Игнорируем неизвестные инструменты (для совместимости)
+                # Ignore unknown tools (for compatibility)
                 logger.debug(f"Tool '{tool_name}' not found in config, skipping prompt_addition")
                 continue
 
-        # Если нет описаний инструментов, возвращаем базовые инструкции + память
+        # If no tool descriptions, return base instructions + memory
         if not tool_descriptions:
             return "\n\n".join(parts)
 
-        # Общие правила для инструментов (если заданы)
+        # General rules for tools (if set)
         common_rules = getattr(self.config.config.settings, 'tools_common_rules', None)
         if common_rules:
-            parts.append("\nПравила использования инструментов (общие):")
+            parts.append("\nRules for using tools (general):")
             parts.append(str(common_rules))
 
-        # Добавляем описания инструментов
-        parts.append("\nДоступные инструменты:")
+        # Add tool descriptions
+        parts.append("\nAvailable tools:")
         parts.extend(tool_descriptions)
 
         return "\n\n".join(parts)
@@ -1825,7 +1838,7 @@ class AgentFactory:
                 if context_id:
                     active_context_id = self.context_manager.activate_context(context_id)
                 elif use_active_context:
-                    # Используем активный контекст, если он есть, иначе создаем новый
+                    # Use active context if available, otherwise create a new one
                     current_id = self.context_manager.get_current_context_id()
                     if current_id:
                         active_context_id = current_id
@@ -1890,6 +1903,7 @@ class AgentFactory:
 
             # Run auto_run_tools with current working_dir.
             run_agent_config = self.config.get_agent(agent_key)
+            model_config = self.config.get_model(run_agent_config.model)
             init_key = f"{agent_key}:{user_id or 'default'}"
             working_dir = "/" if self.container_id else self.config.get_working_directory()
             ctx_user_id = user_id or (self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, "get_metadata") else None)
@@ -1915,7 +1929,7 @@ class AgentFactory:
                         if auto_run_info and isinstance(parsed_message, str):
                             parsed_message = (
                                 auto_run_info
-                                + "\n\n[Текущий запрос пользователя]\n\n"
+                                + "\n\n[Current user request]\n\n"
                                 + parsed_message
                             )
                         self._initialized_agents.add(init_key)
@@ -1932,19 +1946,19 @@ class AgentFactory:
                     if every_run_info and isinstance(parsed_message, str):
                         parsed_message = (
                             every_run_info
-                            + "\n\n[Текущий запрос пользователя]\n\n"
+                            + "\n\n[Current user request]\n\n"
                             + parsed_message
                         )
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to run per-message auto_run_tools: {e}")
 
-            # Определяем, нужно ли включать контекст диалога
-            # Контекст включается если:
-            # 1. Указан явный context_id (пользователь хочет продолжить диалог)
-            # 2. Используется активный контекст (интерактивный режим)
+            # Determine whether to include dialogue context
+            # Context is included if:
+            # 1. Explicit context_id is provided (user wants to continue the dialogue)
+            # 2. Active context is used (interactive mode)
             include_conversation_context = (
-                context_id is not None or  # Явно указан context_id
-                use_active_context  # Используем активный контекст
+                context_id is not None or  # Explicit context_id provided
+                use_active_context  # Use active context
             )
             
             # Check if conversation history contains images
@@ -1977,10 +1991,12 @@ class AgentFactory:
             except Exception as e:
                 logger.debug(f"Failed to check history for images: {e}")
             
-            # If current message is multimodal OR history has images, use list format
-            needs_list_format = is_multimodal or history_has_images
+            # If current message is multimodal, history has images, or the model
+            # requires provider-specific reasoning replay, use manual history.
+            model_requires_manual_history = self._model_requires_manual_history(model_config)
+            needs_list_format = is_multimodal or history_has_images or model_requires_manual_history
             
-            # Не добавляем инструкции агента в диалог; сохраняем в metadata для служебного использования
+            # Do not add agent instructions to dialogue; store in metadata for internal use
             if not self.context_manager.get_conversation_context():
                 initial_instructions = self._build_agent_instructions(
                     agent_key,
@@ -2020,7 +2036,7 @@ class AgentFactory:
             if needs_list_format:
                 history_messages = self.context_manager.get_conversation_history_as_sdk_messages()
             
-            # Добавляем сообщение в контекст для текущей сессии
+            # Add message to context for current session
             # For multimodal messages, we need to parse JSON and create proper ContextMessage
             if not skip_input_add:
                 if is_multimodal and isinstance(parsed_message, list) and len(parsed_message) > 0:
@@ -2161,6 +2177,11 @@ class AgentFactory:
                     logger.debug("Multimodal message detected - disabling session, prepending history to input")
                 elif history_has_images:
                     logger.debug("History contains images - disabling session, prepending history to input")
+                elif model_requires_manual_history:
+                    logger.debug(
+                        "Model '%s' requires manual history replay - disabling session",
+                        getattr(model_config, "name", run_agent_config.model),
+                    )
                 
                 # Convert current message to list format if it's a string
                 if isinstance(parsed_message, str):
@@ -2218,7 +2239,7 @@ class AgentFactory:
                     )
                     try:
                         if stream:
-                            # Streaming режим: прозрачная подсветка tool/MCP вызовов через наблюдателя
+                            # Streaming mode: transparent highlighting of tool/MCP calls via observer
                             result_output: Optional[str] = None
                             streaming_text_parts: List[str] = []
                             run_result_streaming = _get_runner().run_streamed(
@@ -2272,7 +2293,7 @@ class AgentFactory:
                                             await self.emit_progress_event(
                                                 event_type="tool_call_start",
                                                 agent_name=agent_key,
-                                                content=f"Вызов инструмента: {tool_name}",
+                                                content=f"Tool call: {tool_name}",
                                                 status="running",
                                                 details={
                                                     "tool_name": tool_name,
@@ -2287,7 +2308,7 @@ class AgentFactory:
                                             await self.emit_progress_event(
                                                 event_type="tool_call_end",
                                                 agent_name=agent_key,
-                                                content=f"Результат: {tool_name}",
+                                                content=f"Result: {tool_name}",
                                                 status="completed",
                                                 details={
                                                     "tool_name": tool_name,
@@ -2387,7 +2408,7 @@ class AgentFactory:
                         await self.emit_progress_event(
                             event_type="agent_retry",
                             agent_name=agent_key,
-                            content=f"Временная ошибка провайдера, повтор через {delay:.1f}с",
+                            content=f"Provider temporary error, retrying in {delay:.1f}s",
                             status="retrying",
                             details={
                                 "retry_count": retry_count,
@@ -2401,7 +2422,7 @@ class AgentFactory:
             # Process result - more robust extraction
             try:
                 output = None
-                # Проверяем, является ли result строкой (уже обработанной)
+                # Check if result is a string (already processed)
                 if isinstance(result, str):
                     output = result
                 elif hasattr(result, 'final_output') and result.final_output:
@@ -2429,17 +2450,17 @@ class AgentFactory:
                 
                 # Ensure we have a non-empty response
                 if not output or output.strip() == "":
-                    output = "Агент выполнил задачу, но не предоставил текстовый ответ. Проверьте логи для деталей выполнения."
+                    output = "Agent completed the task but did not provide a text response. Check logs for execution details."
             except Exception as e:
                 logger.error(f"Error processing agent result: {e}", exc_info=True)
-                output = f"Произошла ошибка при обработке результата агента: {e}"
+                output = f"An error occurred while processing the agent result: {e}"
             
-            # Добавляем ответ агента в контекст для текущей сессии
+            # Add agent response to context for current session
             # Post-process potential manual tool call before storing response
             try:
                 # Ensure output is defined before using it
                 if 'output' not in locals():
-                    output = "Ошибка: переменная output не определена."
+                    output = "Error: output variable is not defined."
 
                 manual_tool_result = await self._execute_first_tool_call_in_text(output)
                 if manual_tool_result is not None:
@@ -2476,21 +2497,19 @@ class AgentFactory:
                 )
 
                 # Add system correction message
-                correction_prompt = """КРИТИЧЕСКАЯ ОШИБКА: Вы использовали неправильный формат вызова инструментов!
+                correction_prompt = """CRITICAL ERROR: You used an incorrect tool call format!
 
-Ваш ответ содержал некорректный XML формат вида:
-<tool_call><function=имя_функции><parameter=имя_параметра>значение</parameter></function></tool_call>
+Your response contained an incorrect XML format like:
+<tool_call><function=function_name><parameter=parameter_name>value</parameter></function></tool_call>
 
-Это НЕПРАВИЛЬНО! SDK обрабатывает вызовы инструментов автоматически через JSON tool_use blocks.
-Вы НЕ должны писать XML теги вручную.
 
-ПРАВИЛЬНЫЙ способ вызова инструментов:
-- Просто используйте доступные инструменты как обычно через SDK
-- SDK автоматически сериализует вызовы в правильный формат
-- Ваша задача - просто выбрать нужный инструмент и параметры
+CORRECT way to call tools:
+- Simply use the available tools as usual through the SDK
+- The SDK automatically serializes calls in the correct format
+- Your job is just to select the right tool and parameters
 
-Пожалуйста, повторите последнее действие, используя ТОЛЬКО стандартные вызовы инструментов через SDK.
-НЕ пишите XML теги вручную!"""
+Please repeat the last action using ONLY standard tool calls through the SDK.
+DO NOT write XML tags manually!"""
 
                 self.context_manager.add_message(
                     "user",
@@ -2555,7 +2574,7 @@ class AgentFactory:
             # Update execution record
             execution.end_time = time.time()
             execution.output = output
-            # Если у нас был RunResult, попробуем извлечь список инструментов
+            # If we had a RunResult, try to extract the tool list
             tools_used: List[str] = []
             try:
                 if not isinstance(result, str):
@@ -2629,7 +2648,7 @@ class AgentFactory:
 
         if path_context:
             parts.append(path_context)
-        # Добавляем контекст текущей сессии только если явно запрошено
+        # Add current session context only if explicitly requested
         if include_conversation_context:
             conversation_context = self.context_manager.get_conversation_context()
             if conversation_context:
@@ -2644,13 +2663,13 @@ class AgentFactory:
         config_dir = self.config.get_config_directory()
         
         context_parts = [
-            "Информация о путях:",
-            f"Рабочая директория: {working_dir}",
+            "Path information:",
+            f"Working directory: {working_dir}",
         ]
         
         # Only add config dir if not in container (or if we decide to map it later)
         if not self.container_id:
-            context_parts.append(f"Директория конфигурации: {config_dir}")
+            context_parts.append(f"Configuration directory: {config_dir}")
         
         if context_path:
             # If in container, we try to make the path relative to the workspace
@@ -2672,13 +2691,13 @@ class AgentFactory:
                 absolute_path = self.config.get_absolute_path(context_path)
 
             context_parts.extend([
-                f"Контекстный путь: {context_path}",
-                f"Абсолютный контекстный путь: {absolute_path}"
+                f"Context path: {context_path}",
+                f"Absolute context path: {absolute_path}"
             ])
         
         context_parts.extend([
             "",
-            "Используй эти пути для работы с файлами и директориями."
+            "Use these paths for working with files and directories."
         ])
         
         return "\n".join(context_parts)
@@ -2729,20 +2748,18 @@ class AgentFactory:
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
-        """Оценивает количество токенов в строке (~4 символа = 1 токен)."""
+        """Estimates the number of tokens in a string (~4 chars = 1 token)."""
         return max(1, len(text) // 4)
 
     def _truncate_tool_output(self, output: Any, tool_name: str = "") -> Any:
-        """Проверяет вывод инструмента на превышение лимитов.
+        """Check tool output for limit violations.
 
-        Порядок проверок:
-        1. max_tool_output_tokens — при превышении возвращает ошибку агенту (без обрезки).
-        2. max_tool_output — при превышении обрезает строку с предупреждением.
+        2. max_tool_output — truncates the string with a warning when exceeded.
         """
         settings = self.config.config.settings
         output_str = str(output) if not isinstance(output, str) else output
 
-        # Проверка по токенам — возвращаем ошибку без обрезки
+        # Token check — return error without truncation
         max_tokens = getattr(settings, 'max_tool_output_tokens', None)
         if max_tokens is not None and isinstance(output, str):
             estimated = self._estimate_tokens(output_str)
@@ -2757,14 +2774,14 @@ class AgentFactory:
                     f"Use more specific parameters or split the request into smaller parts."
                 )
 
-        # Проверка по символам — обрезаем с предупреждением
+        # Character check — truncate with warning
         max_chars = getattr(settings, 'max_tool_output', None)
         if max_chars is not None and isinstance(output, str) and len(output) > max_chars:
             original_length = len(output)
             truncated = output[:max_chars]
             truncated += (
-                f"\n\n⚠️ Вывод инструмента обрезан "
-                f"(показано {max_chars} из {original_length} символов)"
+                f"\n\n⚠️ Tool output truncated "
+                f"(showing {max_chars} of {original_length} characters)"
             )
             logger.info(
                 "Tool output truncated: %s (%d -> %d chars)",
@@ -2814,7 +2831,7 @@ class AgentFactory:
         return registry, pipeline_id, active_context_id
 
     def _wrap_tool_with_output_limit(self, tool: Any, tool_key: Optional[str] = None) -> Any:
-        """Оборачивает FunctionTool сериализацией pipeline и лимитами вывода."""
+        """Wraps FunctionTool with pipeline serialization and output limits."""
         settings = self.config.config.settings
         max_tokens = getattr(settings, 'max_tool_output_tokens', None)
         max_chars = getattr(settings, 'max_tool_output', None)
@@ -2937,7 +2954,7 @@ class AgentFactory:
                 context_depth = getattr(tool_config, 'context_depth', 5)
                 include_tool_history = getattr(tool_config, 'include_tool_history', True)
                 
-                # Create context-aware tool (основное имя)
+                # Create context-aware tool (primary name)
                 main_tool = self._create_context_aware_agent_tool(
                     agent_key=agent_key,
                     sub_agent=sub_agent,
@@ -2952,7 +2969,7 @@ class AgentFactory:
                 wrapped_main = self._wrap_agent_tool(main_tool, sub_agent.name)
                 tools.append(wrapped_main)
                 
-                # Добавим алиасы каналов, чтобы не падать, если модель приписывает суффиксы каналов
+                # Add channel aliases to avoid errors when model appends channel suffixes
                 channel_suffixes = ("_commentary", "_tool", "_final")
                 for suffix in channel_suffixes:
                     alias_tool = self._create_context_aware_agent_tool(
@@ -2983,31 +3000,31 @@ class AgentFactory:
         
         async def wrapped_invoke_tool(tool_context, tool_call_arguments):
             start_time = time.time()
-            # Нормализуем и логируем аргументы инструмента
+            # Normalize and log tool arguments
             normalized_args = tool_call_arguments
-            # Приводим к словарю и сводим все алиасы к одному обязательному полю 'input'
+            # Convert to dict and map all aliases to a single required 'input' field
             preferred_text: Optional[str] = None
             if isinstance(tool_call_arguments, dict):
-                # Приоритет текстовых алиасов над input, чтобы не терять задачу
+                # Prioritize text aliases over input to avoid losing the task
                 for alias in ('task', 'message', 'prompt', 'input'):
                     value = tool_call_arguments.get(alias)
                     if isinstance(value, str) and value.strip():
                         preferred_text = value.strip()
                         break
-                # Если пришёл null/None или пустые строки — заменим на пустую строку
+                # If null/None or empty strings — replace with empty string
                 if not isinstance(preferred_text, str):
                     preferred_text = ""
                 normalized_args = { 'input': preferred_text }
             else:
-                # Если пришла не-структурированная форма, приводим к строке
+                # If unstructured form received, convert to string
                 preferred_text = str(tool_call_arguments) if tool_call_arguments is not None else ""
                 normalized_args = { 'input': preferred_text }
 
-            # Безопасно преобразуем аргументы в строку для логов
+            # Safely convert arguments to string for logging
             requested_context_id = self._extract_context_id_from_text(preferred_text)
             sub_context_id = requested_context_id or f"ctx-{uuid.uuid4().hex[:8]}"
 
-            # Безопасно преобразуем аргументы в строку для логов
+            # Safely convert arguments to string for logging
             input_data = str(normalized_args)
 
             execution = AgentExecution(
@@ -3018,9 +3035,9 @@ class AgentFactory:
             execution.context_id = sub_context_id
 
             try:
-                # Логируем вызов инструмента с красивым именем
+                # Log tool call with a nice name
                 tool_display_name = getattr(agent_tool, 'name', agent_name)
-                # Добавляем префикс для агентов-инструментов
+                # Add prefix for agent-tools
                 formatted_tool_name = f"Agent-Tool: {tool_display_name}"
                 
                 Logger("agent_factory").log_verbose(f"TOOL CALL: {tool_display_name}", normalized_args)
@@ -3052,26 +3069,26 @@ class AgentFactory:
                     },
                 )
 
-                # ✅ ИЗОЛЯЦИЯ КОНТЕКСТА: НЕ инжектируем мультимодальный вывод в глобальный контекст!
-                # Каждый агент работает со своим изолированным контекстом.
-                # Родительский агент должен видеть только текстовый результат (final_output).
-                # Мультимодальные данные (изображения) остаются внутри подагента и НЕ утекают наверх.
+                # ✅ CONTEXT ISOLATION: DO NOT inject multimodal output into the global context!
+                # Each agent works with its own isolated context.
+                # The parent agent should only see the text result (final_output).
+                # Multimodal data (images) stays inside the sub-agent and does NOT leak upward.
 
                 execution.end_time = time.time()
                 
-                # Подготовка текстового представления для логов/истории
+                # Prepare text representation for logs/history
                 if isinstance(result, str):
                     result_text = result
                 elif isinstance(result, list) and result:
-                    # Для списка объектов (мультимодальный вывод) делаем summary
+                    # For object list (multimodal output), create a summary
                     result_text = f"[Multimodal Tool Output: {len(result)} items]"
-                    # Если элементы имеют текстовое представление, можно добавить
+                    # If all elements have a text representation, use it
                     if all(isinstance(x, str) for x in result):
                         result_text = str(result)
                 else:
                     result_text = str(result)
 
-                marker_line = f"Контекст ID: {sub_context_id}"
+                marker_line = f"Context ID: {sub_context_id}"
                 if marker_line not in result_text:
                     result_text_for_history = result_text.rstrip() + "\n\n" + marker_line
                 else:
@@ -3083,7 +3100,7 @@ class AgentFactory:
 
                 self.context_manager.add_execution(execution)
 
-                # Логируем полный результат вызова инструмента в verbose режиме
+                # Log the full tool call result in verbose mode
                 Logger("agent_factory").log_verbose(
                     f"TOOL RESULT: {tool_display_name}",
                     result if isinstance(result, str) else str(result)
@@ -3115,10 +3132,10 @@ class AgentFactory:
     ) -> Any:
         """Create an agent tool that can share context with the sub-agent."""
         
-        # Усиливаем описание инструмента, но выносим общие правила в общий промпт (см. settings.tools_common_rules)
+        # Enhance tool description, but move common rules to the shared prompt (see settings.tools_common_rules)
         effective_description = (tool_description or "")
-        # Ключевые локальные правила оставим кратко (одна строка), остальное в общем блоке
-        local_rule = "Вызов: передавай одно поле input (string). Допустимые алиасы: task, message, prompt."
+        # Key local rules kept brief (one line), the rest in the shared block
+        local_rule = "Call: pass a single field input (string). Allowed aliases: task, message, prompt."
         if effective_description:
             effective_description = effective_description + "\n" + local_rule
         else:
@@ -3132,18 +3149,17 @@ class AgentFactory:
             context: RunContextWrapper,
             input: str,
         ) -> str:
-            # Подготавливаем человекочитаемый контекст для подагента
-            # На этом уровне input должен быть строкой, т.к. нормализация прошла в `wrapped_invoke_tool`
+            # Prepare human-readable context for the sub-agent
+            # At this level, input must be a string, as normalization happened in `wrapped_invoke_tool`
             if not isinstance(input, str) or not input.strip():
-                return f"❌ Пустой ввод для инструмента '{tool_name}'. Передайте непустой 'input' (string)."
+                return f"❌ Empty input for tool '{tool_name}'. Please provide a non-empty 'input' (string)."
             
             raw_input = input.strip()
             
-            # Определяем, нужно ли передавать контекст агенту-инструменту
-            # Контекст передается ТОЛЬКО если:
-            # 1. Явно указан context_id в запросе
+            # Context is passed ONLY if:
+            # 1. context_id is explicitly specified in the request
             should_include_context = (
-                self._extract_context_id_from_text(raw_input) is not None  # Явно указан context_id в запросе
+                self._extract_context_id_from_text(raw_input) is not None  # context_id explicitly specified in request
             )
             
             if should_include_context:
@@ -3154,17 +3170,17 @@ class AgentFactory:
                     task_input=raw_input
                 )
             else:
-                # Для новых сессий передаем только исходный запрос без контекста
+                # For new sessions, pass only the original request without context
                 enhanced_input = raw_input
             
-            # Сессия подагента привязывается к выбранному контексту
-            # Если контекст не передается, создаем новый контекст для подагента
+            # Sub-agent session is tied to the selected context
+            # If no context is passed, create a new context for the sub-agent
             if should_include_context:
-                # Используем текущий контекст, если контекст передается
+                # Use current context if context is being passed
                 current_context_id = self.context_manager.get_current_context_id()
                 session = self._get_agent_session(agent_key, current_context_id or f"ctx-{uuid.uuid4().hex[:8]}")
             else:
-                # Создаем новый контекст для подагента, если контекст не передается
+                # Create a new context for the sub-agent if no context is passed
                 new_context_id = f"ctx-{uuid.uuid4().hex[:8]}"
                 session = self._get_agent_session(agent_key, new_context_id)
             sub_agent._session = session
@@ -3202,7 +3218,7 @@ class AgentFactory:
                         if auto_run_info:
                             enhanced_input = (
                                 auto_run_info
-                                + "\n\n[Текущий запрос пользователя]\n\n"
+                                + "\n\n[Current user request]\n\n"
                                 + (enhanced_input if isinstance(enhanced_input, str) else "")
                             )
                         self._initialized_agents.add(init_key)
@@ -3219,7 +3235,7 @@ class AgentFactory:
                     if every_run_info:
                         enhanced_input = (
                             every_run_info
-                            + "\n\n[Текущий запрос пользователя]\n\n"
+                            + "\n\n[Current user request]\n\n"
                             + (enhanced_input if isinstance(enhanced_input, str) else "")
                         )
                 except Exception as e:
@@ -3280,7 +3296,7 @@ class AgentFactory:
             finally:
                 reset_current_factory()
 
-            # Запишем результат как сообщение ассистента, чтобы главный агент мог обсуждать и давать правки
+            # Record the result as an assistant message so the main agent can discuss and provide corrections
             try:
                 self.context_manager.add_tool_result_as_message(tool_name, output)
             except Exception as exc:
@@ -3551,7 +3567,7 @@ class AgentFactory:
         
 
     
-    # Fallback: заглушка для ручного парсинга tool call из текста ответа
+    # Fallback: stub for manual tool call parsing from response text
     async def _execute_first_tool_call_in_text(self, output: str) -> Optional[str]:
         """Safely ignore manual tool call parsing until fully implemented."""
         return None

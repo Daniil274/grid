@@ -1,11 +1,11 @@
 """
-ExecutionTracer — сохраняет дерево выполнения агентов в SQLite.
-Хукается в систему трассировки Agents SDK через TracingExporter.
-Поддерживает live-обновления через WebSocket callbacks.
+ExecutionTracer — saves the agent execution tree in SQLite.
+Hooks into the Agents SDK tracing system via TracingExporter.
+Supports live updates through WebSocket callbacks.
 
-Данные хранятся в data/timeline.db:
-  - traces: верхнеуровневые запуски
-  - nodes: отдельные шаги (спаны) с parent-child связями
+Data is stored in data/timeline.db:
+  - traces: top-level runs
+  - nodes: individual steps (spans) with parent-child relationships
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from agents.tracing.spans import Span
 
 logger = logging.getLogger("grid.timeline")
 
-# ─── Путь к БД по умолчанию ─────────────────────────────────────────────────
+# ─── Default DB path ─────────────────────────────────────────────────────────
 _DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "timeline.db"
 
 
@@ -92,8 +92,8 @@ def _dumps(v: Any) -> str | None:
 
 class ExecutionTracer(TracingExporter):
     """
-    Записывает трейсы и спаны из Agents SDK в SQLite.
-    Регистрируется как TracingExporter в ImmediateTraceProcessor.
+    Writes traces and spans from Agents SDK to SQLite.
+    Registers as TracingExporter in ImmediateTraceProcessor.
     """
 
     def __init__(self, db_path: str | Path = _DEFAULT_DB):
@@ -108,7 +108,7 @@ class ExecutionTracer(TracingExporter):
     # ──────────────────────────────────────────────────────────────────────────
 
     def register_ws_callback(self, cb: Callable[[dict], None]) -> None:
-        """Зарегистрировать callback для WebSocket live-обновлений."""
+        """Register a callback for WebSocket live updates."""
         with self._lock:
             self._ws_callbacks.append(cb)
 
@@ -117,7 +117,7 @@ class ExecutionTracer(TracingExporter):
             self._ws_callbacks = [c for c in self._ws_callbacks if c is not cb]
 
     def get_traces(self, limit: int = 50, offset: int = 0) -> list[dict]:
-        """Список трейсов (новые первые)."""
+        """List of traces (newest first)."""
         # #region agent log
         _log = {"id": "log_get_traces_enter", "timestamp": datetime.now(timezone.utc).timestamp() * 1000, "location": "core/timeline_tracer.py:get_traces", "message": "get_traces enter", "data": {"db_path": str(self._db_path), "limit": limit, "offset": offset}, "runId": "serve", "hypothesisId": "H2"}
         try:
@@ -163,7 +163,7 @@ class ExecutionTracer(TracingExporter):
             raise
 
     def get_trace(self, trace_id: str) -> dict | None:
-        """Полное дерево трейса: trace + вложенные nodes."""
+        """Full trace tree: trace + nested nodes."""
         with self._connect() as conn:
             cur = conn.execute("SELECT * FROM traces WHERE id = ?", (trace_id,))
             row = cur.fetchone()
@@ -182,7 +182,7 @@ class ExecutionTracer(TracingExporter):
         return trace
 
     def update_node_output(self, node_id: str, edited_output: str) -> bool:
-        """Сохранить отредактированный вывод ноды."""
+        """Save the edited output of a node."""
         with self._connect() as conn:
             conn.execute(
                 "UPDATE nodes SET edited_output = ? WHERE id = ?",
@@ -271,7 +271,7 @@ class ExecutionTracer(TracingExporter):
         span_data = data.get("span_data") or {}
         span_type = span_data.get("type") or "unknown"
 
-        # Не трекаем mcp_tools (только инициализация инструментов, не вызовы)
+        # Don't track mcp_tools (only tool initialization, not calls)
         if span_type == "mcp_tools":
             return
 
@@ -285,7 +285,7 @@ class ExecutionTracer(TracingExporter):
             or span_type
         )
 
-        # input / output зависят от типа спана
+        # input / output depend on the span type
         input_data: Any = None
         output_data: Any = None
         metadata: dict = {}
@@ -379,7 +379,7 @@ class ExecutionTracer(TracingExporter):
         return conn
 
     def _build_tree(self, nodes: list[dict]) -> list[dict]:
-        """Построить дерево nodes по parent_id. Возвращает корневые узлы."""
+        """Build a tree of nodes by parent_id. Returns root nodes."""
         by_id: dict[str, dict] = {n["id"]: {**n, "children": []} for n in nodes}
         roots: list[dict] = []
 
@@ -402,12 +402,12 @@ class ExecutionTracer(TracingExporter):
                 pass
 
 
-# ─── Глобальный синглтон ─────────────────────────────────────────────────────
+# ─── Global singleton ─────────────────────────────────────────────────────
 _tracer: ExecutionTracer | None = None
 
 
 def get_tracer(db_path: str | Path = _DEFAULT_DB) -> ExecutionTracer:
-    """Возвращает (или создаёт) глобальный экземпляр ExecutionTracer."""
+    """Returns (or creates) the global ExecutionTracer instance."""
     global _tracer
     if _tracer is None:
         _tracer = ExecutionTracer(db_path)

@@ -35,7 +35,7 @@ uvicorn[standard]>=0.20.0   # ASGI server (includes websockets for timeline dash
 docker>=7.0.0
 
 #tools
-pyautogui>=0.9.0     # Управление мышью и клавиатурой
+pyautogui>=0.9.0     # Mouse and keyboard control
 
 # ChromaDB for vector storage and similarity search
 chromadb>=0.4.0

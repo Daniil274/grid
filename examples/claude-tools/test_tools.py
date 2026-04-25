@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Тестовый скрипт для проверки инструментов Claude Tools.
+Test script for verifying Claude Tools.
 
-Запуск:
+Run:
     cd examples/claude-tools
     python test_tools.py
 """
@@ -10,7 +10,7 @@
 import sys
 from pathlib import Path
 
-# Добавляем родительскую директорию в путь
+# Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from tools import (
@@ -25,53 +25,53 @@ from tools import (
 
 def test_bash():
     print("=" * 60)
-    print("Тест: bash_tool")
+    print("Test: bash_tool")
     print("=" * 60)
     
-    # Простая команда
+    # Simple command
     result = bash_tool("echo 'Hello, World!'")
     print(result)
     print()
     
-    # Проверка безопасности
+    # Security check
     result = bash_tool("rm -rf /")
     print(result)
     print()
     
-    # С таймаутом
-    result = bash_tool("pwd", description="Текущая директория")
+    # With timeout
+    result = bash_tool("pwd", description="Current directory")
     print(result)
     print()
 
 
 def test_file():
     print("=" * 60)
-    print("Тест: file_tools")
+    print("Test: file_tools")
     print("=" * 60)
     
     test_file_path = "/tmp/test_claude_tools.txt"
     
-    # Запись
+    # Write
     result = file_write(test_file_path, "Line 1\nLine 2\nLine 3\n")
     print(result)
     print()
     
-    # Чтение
+    # Read
     result = file_read(test_file_path)
     print(result)
     print()
     
-    # Добавление
+    # Append
     result = file_append(test_file_path, "Line 4\n")
     print(result)
     print()
     
-    # Чтение с offset
+    # Read with offset
     result = file_read(test_file_path, offset=1, limit_lines=2)
     print(result)
     print()
     
-    # Редактирование
+    # Edit
     patch = """--- a/test_claude_tools.txt
 +++ b/test_claude_tools.txt
 @@ -1,4 +1,4 @@
@@ -85,21 +85,21 @@ def test_file():
     print(result)
     print()
     
-    # Проверяем результат
+    # Check the result
     result = file_read(test_file_path)
     print(result)
     print()
     
-    # Очистка
+    # Cleanup
     import os
     os.remove(test_file_path)
-    print("✅ Тестовый файл удалён")
+    print("✅ Test file deleted")
     print()
 
 
 def test_search():
     print("=" * 60)
-    print("Тест: search_tools")
+    print("Test: search_tools")
     print("=" * 60)
     
     # Glob
@@ -115,39 +115,39 @@ def test_search():
 
 def test_todo():
     print("=" * 60)
-    print("Тест: todo_tools")
+    print("Test: todo_tools")
     print("=" * 60)
     
-    # Очистка перед тестом
+    # Clear before test
     todo_clear()
     
-    # Создание задач
-    result = todo_write("Первая задача", priority=3)
+    # Create tasks
+    result = todo_write("First task", priority=3)
     print(result)
     
-    result = todo_write("Вторая задача", priority=5)
+    result = todo_write("Second task", priority=5)
     print(result)
     
-    result = todo_write("Третья задача", status="in_progress")
+    result = todo_write("Third task", status="in_progress")
     print(result)
     print()
     
-    # Список
+    # List
     result = todo_list()
     print(result)
     print()
     
-    # Обновление
-    result = todo_write("Первая задача (обновлена)", todo_id="todo_1", status="done")
+    # Update
+    result = todo_write("First task (updated)", todo_id="todo_1", status="done")
     print(result)
     print()
     
-    # Список с фильтром
+    # List with filter
     result = todo_list(status_filter="pending")
     print(result)
     print()
     
-    # Очистка
+    # Clear
     result = todo_clear()
     print(result)
     print()
@@ -155,74 +155,74 @@ def test_todo():
 
 def test_notebook():
     print("=" * 60)
-    print("Тест: notebook_tools")
+    print("Test: notebook_tools")
     print("=" * 60)
     
     test_nb_path = "/tmp/test_claude_tools.ipynb"
     
-    # Создание
+    # Create
     result = notebook_create(test_nb_path)
     print(result)
     print()
     
-    # Чтение
+    # Read
     result = notebook_read(test_nb_path)
     print(result)
     print()
     
-    # Редактирование
+    # Edit
     result = notebook_edit(
         test_nb_path,
         cell_index=1,
-        new_source="# Новый заголовок\n\nЭто markdown ячейка"
+        new_source="# New header\n\nThis is a markdown cell"
     )
     print(result)
     print()
     
-    # Проверка
+    # Verify
     result = notebook_read(test_nb_path)
     print(result)
     print()
     
-    # Очистка
+    # Cleanup
     import os
     os.remove(test_nb_path)
-    print("✅ Тестовый notebook удалён")
+    print("✅ Test notebook deleted")
     print()
 
 
 def main():
     print("\n" + "=" * 60)
-    print("Тестирование инструментов Claude Tools")
+    print("Testing Claude Tools")
     print("=" * 60 + "\n")
     
     try:
         test_bash()
     except Exception as e:
-        print(f"❌ Ошибка в test_bash: {e}")
+        print(f"❌ Error in test_bash: {e}")
     
     try:
         test_file()
     except Exception as e:
-        print(f"❌ Ошибка в test_file: {e}")
+        print(f"❌ Error in test_file: {e}")
     
     try:
         test_search()
     except Exception as e:
-        print(f"❌ Ошибка в test_search: {e}")
+        print(f"❌ Error in test_search: {e}")
     
     try:
         test_todo()
     except Exception as e:
-        print(f"❌ Ошибка в test_todo: {e}")
+        print(f"❌ Error in test_todo: {e}")
     
     try:
         test_notebook()
     except Exception as e:
-        print(f"❌ Ошибка в test_notebook: {e}")
+        print(f"❌ Error in test_notebook: {e}")
     
     print("\n" + "=" * 60)
-    print("Тестирование завершено")
+    print("Testing complete")
     print("=" * 60)
 
 

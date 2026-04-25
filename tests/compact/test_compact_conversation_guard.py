@@ -24,7 +24,7 @@ class _FakeResponse:
 class _FakeCompletions:
     async def create(self, **kwargs):
         # Deliberately long summary to force non-beneficial compaction.
-        return _FakeResponse("Очень длинное summary. " * 200)
+        return _FakeResponse("Very long summary. " * 200)
 
 
 class _FakeChat:
@@ -40,8 +40,8 @@ class _FakeClient:
 @pytest.mark.asyncio
 async def test_compact_conversation_aborts_if_summary_is_larger():
     messages = [
-        CompactMessage(role="user", content="Привет", message_id="m1"),
-        CompactMessage(role="assistant", content="И тебе привет", message_id="m2"),
+        CompactMessage(role="user", content="Hello", message_id="m1"),
+        CompactMessage(role="assistant", content="And hello to you too", message_id="m2"),
     ]
 
     result = await compact_conversation(

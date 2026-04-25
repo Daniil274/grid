@@ -21,7 +21,7 @@ logger = logging.getLogger("core.context")
 
 @contextmanager
 def safe_lock(lock, timeout=5.0):
-    """Context manager для безопасного использования lock'а с таймаутом."""
+    """Context manager for safe lock usage with timeout."""
     acquired = lock.acquire(timeout=timeout)
     if not acquired:
         raise ContextError(f"Lock timeout after {timeout} seconds")
@@ -134,7 +134,7 @@ class ContextManager:
             metadata: Optional metadata
         """
         try:
-            with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
+            with safe_lock(self._lock, timeout=5.0):  # 5 sec timeout
                 try:
                     # Normalize content to convert file images to base64
                     # This ensures images remain accessible after restart
@@ -188,7 +188,7 @@ class ContextManager:
     def add_execution(self, execution: AgentExecution) -> None:
         """Add agent execution to history."""
         try:
-            with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
+            with safe_lock(self._lock, timeout=5.0):  # 5 sec timeout
                 self._execution_history.append(execution)
 
                 # Keep execution history reasonable
@@ -228,14 +228,14 @@ class ContextManager:
                     messages = messages[-last_n:]
                 
                 # Natural, concise dialogue transcript without emojis
-                lines = ["Предыдущий диалог (сжатый):"]
+                lines = ["Previous dialogue (compressed):"]
                 from utils.multimodal_converter import MultimodalConverter
 
                 for msg in messages:
                     role = {
-                        "user": "Пользователь",
-                        "assistant": "Ассистент",
-                        "system": "Система"
+                        "user": "User",
+                        "assistant": "Assistant",
+                        "system": "System"
                     }.get(msg.role, msg.role)
 
                     raw_content = msg.content
@@ -246,7 +246,7 @@ class ContextManager:
                         try:
                             content = MultimodalConverter.extract_text_from_multimodal(raw_content).strip()
                         except Exception:
-                            content = "[мультимодальный контент]"
+                            content = "[multimodal content]"
 
                     # Hard trim very long single messages to keep prompt lightweight
                     if len(content) > 2000:
@@ -275,7 +275,7 @@ class ContextManager:
         """Get context statistics."""
         try:
             with safe_lock(self._lock):
-                # Прямой доступ к данным внутри lock'а для избежания deadlock'ов
+                # Direct access to data within lock to avoid deadlocks
                 last_user = None
                 last_assistant = None
                 
@@ -312,7 +312,7 @@ class ContextManager:
     def get_conversation_history(self) -> List[Dict[str, Any]]:
         """Return raw conversation history as list of dicts for external consumers."""
         try:
-            with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
+            with safe_lock(self._lock, timeout=5.0):  # 5 sec timeout
                 return [msg.model_dump() for msg in self._conversation_history]
         except ContextError:
             logger.warning("Lock timeout in get_conversation_history")
@@ -390,7 +390,7 @@ class ContextManager:
     def get_last_user_message(self) -> Optional[str]:
         """Get the last user message."""
         try:
-            with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
+            with safe_lock(self._lock, timeout=5.0):  # 5 sec timeout
                 for msg in reversed(self._conversation_history):
                     if msg.role == "user":
                         return msg.content
@@ -402,7 +402,7 @@ class ContextManager:
     def get_last_assistant_message(self) -> Optional[str]:
         """Get the last assistant message."""
         try:
-            with safe_lock(self._lock, timeout=5.0):  # 5 сек таймаут
+            with safe_lock(self._lock, timeout=5.0):  # 5 sec timeout
                 for msg in reversed(self._conversation_history):
                     if msg.role == "assistant":
                         return msg.content
@@ -476,30 +476,30 @@ class ContextManager:
                 return ""
 
             lines = [
-                "Незавершённая предыдущая попытка выполнения:",
+                "Unfinished previous execution attempt:",
             ]
 
             agent = payload.get("agent")
             if agent:
-                lines.append(f"Агент: {agent}")
+                lines.append(f"Agent: {agent}")
 
             last_error = payload.get("last_error")
             if isinstance(last_error, str) and last_error.strip():
                 err = last_error.strip()
                 if len(err) > max_field_length:
                     err = err[:max_field_length] + "…"
-                lines.append(f"Последняя ошибка: {err}")
+                lines.append(f"Last error: {err}")
 
             retries = payload.get("retry_count")
             if retries is not None:
-                lines.append(f"Число повторов: {retries}")
+                lines.append(f"Retry count: {retries}")
 
             input_preview = payload.get("input_preview")
             if isinstance(input_preview, str) and input_preview.strip():
                 preview = input_preview.strip()
                 if len(preview) > max_field_length:
                     preview = preview[:max_field_length] + "…"
-                lines.append(f"Исходный запрос: {preview}")
+                lines.append(f"Original request: {preview}")
 
             tool_events = payload.get("tool_events")
             if isinstance(tool_events, list):
@@ -508,7 +508,7 @@ class ContextManager:
                 compact_events = []
 
             if compact_events:
-                lines.append("Последние события выполнения:")
+                lines.append("Recent execution events:")
                 for item in compact_events:
                     event_type = str(item.get("event_type") or "event")
                     tool_name = str(item.get("tool_name") or "").strip()
@@ -534,7 +534,7 @@ class ContextManager:
                         lines.append(f"- {event_type}")
 
             lines.append(
-                "Если это уместно, продолжай с учётом уже выполненных шагов и не повторяй завершённые операции без необходимости."
+                "If appropriate, continue taking into account already completed steps and do not repeat completed operations unnecessarily."
             )
             return "\n".join(lines)
 
@@ -788,10 +788,10 @@ class ContextManager:
                 return task_input
             
             context_parts = [
-                "🔧 Контекст операций:",
-                f"Текущая задача: {task_input}",
+                "🔧 Operation context:",
+                f"Current task: {task_input}",
                 "",
-                "История выполнения операций (JSON формат):"
+                "Execution history (JSON format):"
             ]
             
             tools_json = []
@@ -809,8 +809,8 @@ class ContextManager:
             
             context_parts.extend([
                 "",
-                "💡 Используй эту информацию о предыдущих операциях.",
-                f"Задача: {task_input}"
+                "💡 Use this information about previous operations.",
+                f"Task: {task_input}"
             ])
             
             return "\n".join(context_parts)
@@ -821,73 +821,70 @@ class ContextManager:
             if not self._conversation_history:
                 return task_input
             recent_messages = self._conversation_history[-depth:] if depth > 0 else self._conversation_history
-            lines = ["Контекст диалога:", f"Текущая задача: {task_input}", ""]
+            lines = ["Conversation context:", f"Current task: {task_input}", ""]
             for msg in recent_messages:
                 role = {
-                    "user": "Пользователь",
-                    "assistant": "Ассистент",
-                    "system": "Система"
+                    "user": "User",
+                    "assistant": "Assistant",
+                    "system": "System"
                 }.get(msg.role, msg.role)
                 content = msg.content.strip()
                 if len(content) > 2000:
                     content = content[:2000] + "…"
                 lines.append(f"{role}: {content}")
             lines.append("")
-            lines.append("Используй эту информацию для понимания контекста задачи.")
+            lines.append("Use this information to understand the task context.")
             return "\n".join(lines)
 
     def _build_full_context_human(self, task_input: str, include_tools: bool) -> str:
         """Full human-readable context: dialogue and recent tool results."""
         with self._lock:
-            lines = ["ПОЛНЫЙ КОНТЕКСТ:", f"Текущая задача: {task_input}", "", "История диалога:"]
+            lines = ["FULL CONTEXT:", f"Current task: {task_input}", "", "Conversation history:"]
             if self._conversation_history:
                 for msg in self._conversation_history:
                     role = {
-                        "user": "Пользователь",
-                        "assistant": "Ассистент",
-                        "system": "Система"
+                        "user": "User",
+                        "assistant": "Assistant",
+                        "system": "System"
                     }.get(msg.role, msg.role)
                     content = msg.content.strip()
                     if len(content) > 2000:
                         content = content[:2000] + "…"
                     lines.append(f"{role}: {content}")
             else:
-                lines.append("(пусто)")
+                lines.append("(empty)")
             if include_tools and self._execution_history:
-                lines.extend(["", "Результаты последних операций:"])
+                lines.extend(["", "Recent operation results:"])
                 for ex in self._execution_history[-10:]:
                     summary_output = (ex.output or "").strip()
                     if len(summary_output) > 2000:
                         summary_output = summary_output[:2000] + "…"
-                    lines.append(f"Инструмент/агент: {ex.agent_name}")
-                    lines.append(f"Ввод: {ex.input_message}")
+                    lines.append(f"Tool/Agent: {ex.agent_name}")
+                    lines.append(f"Input: {ex.input_message}")
                     if summary_output:
-                        lines.append(f"Вывод: {summary_output}")
+                        lines.append(f"Output: {summary_output}")
                     if ex.error:
-                        lines.append(f"Ошибка: {ex.error}")
+                        lines.append(f"Error: {ex.error}")
                     lines.append("")
-            lines.append("ВНИМАНИЕ: Используй информацию выше для решения задачи.")
+            lines.append("ATTENTION: Use the information above to solve the task.")
             return "\n".join(lines)
 
     def _build_smart_context_human(self, task_input: str, depth: int, include_tools: bool) -> str:
         """Human-readable smart context selection."""
         task_lower = task_input.lower()
         conversation_keywords = [
-            "продолжи", "далее", "следующий", "предыдущий", "раньше", "уже", "было",
-            "continue", "next", "previous", "before", "already", "was", "что сказал",
-            "ответь на", "отвечай на", "который", "этот", "тот", "тот же", "тот самый",
-            "прочитал", "анализировал", "оценил", "создал", "отредактировал"
+            "continue", "next", "previous", "before", "already", "was",
+            "what did you say", "answer", "reply to", "which", "this", "that",
+            "read", "analyzed", "evaluated", "created", "edited"
         ]
         tool_keywords = [
-            "файл", "git", "код", "изменения", "результат", "выполнил", "сделал",
-            "file", "git", "code", "changes", "result", "executed", "done", "создал",
-            "отредактировал", "прочитал", "написал", "весит", "размер", "байт",
-            "проанализировал", "оценил", "проверил", "нашел", "создал файл"
+            "edited", "read", "wrote", "weighs", "size", "bytes",
+            "analyzed", "evaluated", "checked", "found", "created file"
         ]
         reference_keywords = [
-            "который", "этот", "тот", "тот же", "тот самый", "прочитанный", "анализированный",
-            "созданный", "отредактированный", "проверенный", "найденный", "тот файл",
-            "этот файл", "прочитанный файл", "анализированный файл", "созданный файл"
+            "which", "this", "that", "the same", "the very", "read", "analyzed",
+            "created", "edited", "checked", "found", "that file",
+            "this file", "the read file", "the analyzed file", "the created file"
         ]
         needs_conversation = any(k in task_lower for k in conversation_keywords)
         needs_tools = any(k in task_lower for k in tool_keywords)
@@ -899,16 +896,16 @@ class ContextManager:
         elif needs_tools and include_tools:
             # Light tool-only summary
             with self._lock:
-                lines = ["Контекст операций:", f"Текущая задача: {task_input}", ""]
+                lines = ["Operation context:", f"Current task: {task_input}", ""]
                 for ex in self._execution_history[-5:]:
                     summary_output = (ex.output or "").strip()
                     if len(summary_output) > 1200:
                         summary_output = summary_output[:1200] + "…"
-                    lines.append(f"Инструмент/агент: {ex.agent_name}")
+                    lines.append(f"Tool/Agent: {ex.agent_name}")
                     if summary_output:
-                        lines.append(f"Вывод: {summary_output}")
+                        lines.append(f"Output: {summary_output}")
                     lines.append("")
-                lines.append("Используй эту информацию о предыдущих операциях.")
+                lines.append("Use this information about previous operations.")
                 return "\n".join(lines)
         else:
             return task_input
@@ -946,4 +943,4 @@ class ContextManager:
         """Record tool result into conversation as assistant message for follow-ups."""
         if not output_text:
             return
-        self.add_message("assistant", f"Результат инструмента {tool_name}: {output_text}")
+        self.add_message("assistant", f"Tool result of {tool_name}: {output_text}")

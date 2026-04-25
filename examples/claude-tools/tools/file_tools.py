@@ -1,6 +1,6 @@
 """
-File Tools — чтение, запись, редактирование и добавление файлов.
-Все пути изолированы в рабочей директории агента через resolve_agent_path_auto().
+File Tools — reading, writing, editing, and appending files.
+All paths are isolated in the agent's working directory via resolve_agent_path_auto().
 """
 
 import os
@@ -59,11 +59,11 @@ def _parse_unified_diff(patch_content: str) -> list[_Hunk]:
             if not line.strip():
                 i += 1
                 continue
-            raise _PatchApplyError(f"❌ Ожидался заголовок hunk, найдено: {line}")
+            raise _PatchApplyError(f"❌ Expected hunk header, found: {line}")
 
         match = _HUNK_HEADER_RE.match(line)
         if not match:
-            raise _PatchApplyError(f"❌ Некорректный заголовок блока: {line}")
+            raise _PatchApplyError(f"❌ Invalid hunk header: {line}")
 
         old_start = int(match.group(1)) - 1
         old_count = int(match.group(2)) if match.group(2) is not None else 1
@@ -80,11 +80,11 @@ def _parse_unified_diff(patch_content: str) -> list[_Hunk]:
                 i += 1
                 continue
             if not current:
-                raise _PatchApplyError("❌ Пустая строка в hunk без префикса ' ', '+' или '-'")
+                raise _PatchApplyError("❌ Empty line in hunk without ' ', '+' or '-' prefix")
 
             prefix = current[0]
             if prefix not in (" ", "+", "-"):
-                raise _PatchApplyError(f"❌ Некорректная строка патча: {current}")
+                raise _PatchApplyError(f"❌ Invalid patch line: {current}")
             hunk_lines.append((prefix, current[1:]))
             i += 1
 
@@ -99,7 +99,7 @@ def _parse_unified_diff(patch_content: str) -> list[_Hunk]:
         )
 
     if not hunks:
-        raise _PatchApplyError("❌ Патч не содержит ни одного hunk-блока")
+        raise _PatchApplyError("❌ Patch contains no hunk blocks")
 
     return hunks
 
@@ -163,12 +163,12 @@ def _find_hunk_start(lines: list[str], hunk: _Hunk, expected_start: int) -> int:
     line_no = mismatch_start + (mismatch_idx or 0) + 1
     if expected is None:
         raise _PatchApplyError(
-            f"❌ Hunk не помещается в файл около строки {expected_start + 1}. "
-            f"Проверьте смещение и контекст патча."
+            f"❌ Hunk does not fit in file around line {expected_start + 1}. "
+            f"Check the offset and context of the patch."
         )
     raise _PatchApplyError(
-        f"❌ Контекст патча не найден около строки {expected_start + 1}: "
-        f"на строке {line_no} ожидалось '{expected}', найдено '{actual if actual is not None else '<EOF>'}'"
+        f"❌ Patch context not found near line {expected_start + 1}: "
+        f"at line {line_no} expected '{expected}', found '{actual if actual is not None else '<EOF>'}'"
     )
 
 
@@ -197,7 +197,7 @@ def _truncate(content: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
     if len(content) <= max_chars:
         return content
     remaining = len(content) - max_chars
-    return content[:max_chars] + f"\n\n... [обрезано {remaining} символов, используй limit_lines и offset] ..."
+    return content[:max_chars] + f"\n\n... [truncated {remaining} characters, use limit_lines and offset] ..."
 
 
 def _resolve(raw: str) -> tuple:
@@ -217,15 +217,15 @@ def file_read(
     limit_lines: Optional[int] = None,
 ) -> str:
     """
-    Читает содержимое файла.
+    Reads file content.
 
     Args:
-        filepath:    Путь к файлу
-        offset:      Начальная строка (0-indexed)
-        limit_lines: Количество строк для чтения (None = все)
+        filepath:    Path to the file
+        offset:      Starting line (0-indexed)
+        limit_lines: Number of lines to read (None = all)
 
     Returns:
-        Содержимое файла или его части
+        File content or a portion of it
     """
     try:
         visible, resolved = _resolve(filepath)
@@ -236,13 +236,13 @@ def file_read(
         path = Path(resolved)
 
         if not path.exists():
-            return f"❌ Файл не найден: {visible}"
+            return f"❌ File not found: {visible}"
         if not path.is_file():
-            return f"❌ Не является файлом: {visible}"
+            return f"❌ Not a file: {visible}"
 
         file_size = path.stat().st_size
         if file_size > MAX_FILE_SIZE:
-            return f"⚠️ Файл слишком большой ({file_size} байт). Используй limit_lines и offset."
+            return f"⚠️ File too large ({file_size} bytes). Use limit_lines and offset."
 
         content = path.read_text(encoding="utf-8", errors="replace")
         lines = content.split("\n")
@@ -253,15 +253,15 @@ def file_read(
             end = start + limit_lines if limit_lines is not None else total
             end = min(end, total)
             sliced = lines[start:end]
-            header = f"📄 {visible} (строки {start + 1}–{end} из {total}):\n"
+            header = f"📄 {visible} (lines {start + 1}–{end} of {total}):\n"
             content = "\n".join(sliced)
         else:
-            header = f"📄 {visible} ({total} строк):\n"
+            header = f"📄 {visible} ({total} lines):\n"
 
         return header + "\n" + _truncate(content)
 
     except Exception as exc:
-        return f"❌ Ошибка чтения: {exc}"
+        return f"❌ Read error: {exc}"
 
 
 @function_tool
@@ -271,15 +271,15 @@ def file_write(
     overwrite: bool = False,
 ) -> str:
     """
-    Записывает содержимое в файл.
+    Writes content to a file.
 
     Args:
-        filepath:  Путь к файлу
-        content:   Содержимое
-        overwrite: Разрешить перезапись существующего файла
+        filepath:  Path to the file
+        content:   Content to write
+        overwrite: Allow overwriting an existing file
 
     Returns:
-        Результат операции
+        Operation result
     """
     try:
         visible, resolved = _resolve(filepath)
@@ -291,19 +291,19 @@ def file_write(
         existed_before = path.exists()
 
         if existed_before and not overwrite:
-            return f"❌ Файл уже существует: {visible}. Используй overwrite=true для перезаписи."
+            return f"❌ File already exists: {visible}. Use overwrite=true to overwrite."
 
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
         lines = len(content.split("\n"))
         size = path.stat().st_size
-        verb = "перезаписан" if existed_before else "создан"
+        verb = "overwritten" if existed_before else "created"
         emoji = "📝" if existed_before else "✅"
-        return f"{emoji} Файл {verb}: {visible} ({lines} строк, {size} байт)"
+        return f"{emoji} File {verb}: {visible} ({lines} lines, {size} bytes)"
 
     except Exception as exc:
-        return f"❌ Ошибка записи: {exc}"
+        return f"❌ Write error: {exc}"
 
 
 @function_tool
@@ -312,15 +312,15 @@ def file_append(
     content: str,
 ) -> str:
     """
-    Добавляет содержимое в конец файла.
-    Автоматически вставляет перевод строки, если файл не заканчивается на него.
+    Appends content to the end of a file.
+    Automatically inserts a newline if the file does not end with one.
 
     Args:
-        filepath: Путь к файлу
-        content:  Содержимое для добавления
+        filepath: Path to the file
+        content:  Content to append
 
     Returns:
-        Результат операции
+        Operation result
     """
     try:
         visible, resolved = _resolve(filepath)
@@ -346,10 +346,10 @@ def file_append(
         new_size = path.stat().st_size
         added_bytes = new_size - old_size
         lines_added = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-        return f"✅ Добавлено в {visible}: {lines_added} строк, {added_bytes} байт"
+        return f"✅ Appended to {visible}: {lines_added} lines, {added_bytes} bytes"
 
     except Exception as exc:
-        return f"❌ Ошибка добавления: {exc}"
+        return f"❌ Append error: {exc}"
 
 
 @function_tool
@@ -358,9 +358,9 @@ def file_edit(
     patch_content: str,
 ) -> str:
     """
-    Редактирует файл через патч в формате unified diff.
+    Edits a file via a unified diff patch.
 
-    Формат патча:
+    Patch format:
         --- a/filename
         +++ b/filename
         @@ -start,count +start,count @@
@@ -369,11 +369,11 @@ def file_edit(
         +added line
 
     Args:
-        filepath:      Путь к файлу
-        patch_content: Патч в формате unified diff
+        filepath:      Path to the file
+        patch_content: Patch in unified diff format
 
     Returns:
-        Результат операции
+        Operation result
     """
     try:
         visible, resolved = _resolve(filepath)
@@ -384,9 +384,9 @@ def file_edit(
         path = Path(resolved)
 
         if not path.exists():
-            return f"❌ Файл не найден: {visible}"
+            return f"❌ File not found: {visible}"
         if not path.is_file():
-            return f"❌ Не является файлом: {visible}"
+            return f"❌ Not a file: {visible}"
 
         original = path.read_text(encoding="utf-8", errors="replace")
         updated = _apply_unified_patch(original, patch_content)
@@ -396,9 +396,9 @@ def file_edit(
         result_lines, _ = _split_file_content(updated)
         diff = len(result_lines) - len(original_lines)
         sign = f"{diff:+d}" if diff != 0 else "±0"
-        return f"✅ Файл обновлён: {visible} ({len(result_lines)} строк, {sign})"
+        return f"✅ File updated: {visible} ({len(result_lines)} lines, {sign})"
 
     except _PatchApplyError as exc:
         return str(exc)
     except Exception as exc:
-        return f"❌ Ошибка редактирования: {exc}"
+        return f"❌ Edit error: {exc}"

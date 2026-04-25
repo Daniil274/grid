@@ -336,8 +336,8 @@ async def memory_delete(
     Returns:
         Confirmation message or list of entries to delete
 
-    Examples:
-        memory_delete(query="мембрана ULP22-8040")  # Search first
+    Example:
+        memory_delete(query="membrane ULP22-8040")  # Search first
         memory_delete(entry_id=42)  # Delete specific entry
     """
     store = _get_memory_store(context)
@@ -353,9 +353,9 @@ async def memory_delete(
             success = store.delete(entry_id, hard=False)
             if success:
                 logger.info(f"🗑️ Deleted memory entry #{entry_id}")
-                return f"✅ Удалена запись #{entry_id} из памяти"
+                return f"✅ Deleted entry #{entry_id} from memory"
             else:
-                return f"❌ Запись #{entry_id} не найдена"
+                return f"❌ Entry #{entry_id} not found"
 
         # If query provided, search and show entries
         if query:
@@ -368,10 +368,10 @@ async def memory_delete(
             )
 
             if not results:
-                return f"ℹ️ Записей по запросу '{query}' не найдено"
+                return f"ℹ️ No entries found for query '{query}'"
 
-            # Format results with IDs
-            lines = [f"🔍 Найдено {len(results)} записей по запросу '{query}':", ""]
+            # Format results
+            lines = [f"🔍 Found {len(results)} entries for query '{query}':", ""]
 
             for entry in results:
                 timestamp = entry.created_at[:10] if entry.created_at else "N/A"
@@ -386,10 +386,10 @@ async def memory_delete(
                 lines.append(f"  {content}")
                 lines.append("")
 
-            lines.append("💡 Используй memory_delete(entry_id=N) для удаления конкретной записи")
+            lines.append("💡 Use memory_delete(entry_id=N) to delete a specific entry")
             return "\n".join(lines)
 
-        return "❌ Укажи query (для поиска) или entry_id (для удаления)"
+        return "❌ Provide query (to search) or entry_id (to delete)"
 
     except Exception as e:
         logger.error(f"❌ Failed to delete memory: {e}")
@@ -634,13 +634,13 @@ async def memory_explore_entity(
     limit: int = 10
 ) -> str:
     """
-    Найти все записи с указанной сущностью через MemoryStore.get_entity_graph().
+    Find all entries with a specified entity via MemoryStore.get_entity_graph().
 
-    Вернуть форматированный список записей с summary, type, created_at для каждой записи.
+    Returns a formatted list of entries with summary, type, created_at for each entry.
 
     Args:
-        entity: Сущность для поиска (e.g. "Python", "Даниил")
-        limit: Максимум записей (default: 10)
+        entity: Entity to search for (e.g. "Python", "Daniel")
+        limit: Maximum entries (default: 10)
     """
     store = _get_memory_store(context)
     if store is None:
@@ -680,14 +680,14 @@ async def memory_graph_path(
     max_depth: int = 3
 ) -> str:
     """
-    Найти путь между двумя сущностями через MemoryStore.find_entity_connections().
+    Find path between two entities via MemoryStore.find_entity_connections().
 
-    Вернуть форматированное описание пути. Если не найден - сообщение.
+    Returns a formatted path description. If not found - a message.
 
     Args:
-        from_entity: Начальная сущность
-        to_entity: Целевая сущность
-        max_depth: Максимальная глубина поиска (default: 3)
+        from_entity: Starting entity
+        to_entity: Target entity
+        max_depth: Maximum search depth (default: 3)
     """
     store = _get_memory_store(context)
     if store is None:

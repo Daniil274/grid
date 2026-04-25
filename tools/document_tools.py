@@ -1,6 +1,6 @@
 """
-Document Tools - инструменты для конвертации и экспорта документов.
-Агент использует эти инструменты для преобразования форматов и создания отчетов.
+Document Tools - tools for converting and exporting documents.
+The agent uses these tools to transform formats and generate reports.
 """
 import logging
 import json
@@ -16,17 +16,17 @@ logger = logging.getLogger("tools.document")
 
 
 def get_user_workspace(ctx: RunContextWrapper[Any]) -> Path:
-    """Получает workspace директорию пользователя."""
+    """Gets the user workspace directory."""
     import os
 
     user_id = "default"
     if hasattr(ctx, 'user_id'):
         user_id = str(ctx.user_id)
     elif hasattr(ctx, 'context'):
-        # Проверяем GridRunContext
+        # Check GridRunContext
         if hasattr(ctx.context, 'user_id') and ctx.context.user_id:
             user_id = str(ctx.context.user_id)
-        # Проверяем metadata
+        # Check metadata
         elif hasattr(ctx.context, 'metadata'):
             metadata = ctx.context.metadata
             if isinstance(metadata, dict) and 'user_id' in metadata:
@@ -48,26 +48,26 @@ async def markdown_to_html(
     title: str = "Document"
 ) -> ToolOutputText:
     """
-    Конвертирует Markdown в HTML файл.
+    Converts Markdown to an HTML file.
 
     Args:
-        markdown_content: Markdown контент для конвертации
-        output_filename: Имя выходного файла (например "report.html")
-        title: Заголовок HTML документа
+        markdown_content: Markdown content to convert
+        output_filename: Output file name (e.g. "report.html")
+        title: HTML document title
 
     Returns:
-        Путь к созданному HTML файлу
+        Path to the created HTML file
     """
     try:
         import markdown
 
-        # Генерируем HTML
+        # Generate HTML
         html_body = markdown.markdown(
             markdown_content,
             extensions=['tables', 'fenced_code', 'codehilite']
         )
 
-        # Обёртка HTML
+        # HTML wrapper
         html_template = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -122,7 +122,7 @@ async def markdown_to_html(
 </html>
 """
 
-        # Сохраняем файл
+        # Save file
         user_workspace = get_user_workspace(ctx)
         output_path = user_workspace / output_filename
 
@@ -130,13 +130,13 @@ async def markdown_to_html(
         visible_output = output_path.name
         logger.info(f"✅ Created HTML: {visible_output}")
 
-        return ToolOutputText(text=f"✅ HTML файл создан: {visible_output}")
+        return ToolOutputText(text=f"✅ HTML file created: {visible_output}")
 
     except ImportError:
-        return ToolOutputText(text="❌ Требуется установить библиотеку 'markdown': pip install markdown")
+        return ToolOutputText(text="❌ Need to install 'markdown' library: pip install markdown")
     except Exception as e:
         logger.error(f"HTML conversion failed: {e}", exc_info=True)
-        return ToolOutputText(text=f"❌ Ошибка конвертации: {str(e)}")
+        return ToolOutputText(text=f"❌ Conversion error: {str(e)}")
 
 
 @function_tool
@@ -147,22 +147,22 @@ async def markdown_to_pdf(
     title: str = "Document"
 ) -> ToolOutputText:
     """
-    Конвертирует Markdown в PDF файл через HTML.
+    Converts Markdown to PDF via HTML.
 
     Args:
-        markdown_content: Markdown контент для конвертации
-        output_filename: Имя выходного файла (например "report.pdf")
-        title: Заголовок документа
+        markdown_content: Markdown content to convert
+        output_filename: Output file name (e.g. "report.pdf")
+        title: Document title
 
     Returns:
-        Путь к созданному PDF файлу
+        Path to the created PDF file
     """
     try:
         import markdown
         from weasyprint import HTML
         from io import BytesIO
 
-        # Генерируем HTML
+        # Generate HTML
         html_body = markdown.markdown(
             markdown_content,
             extensions=['tables', 'fenced_code']
@@ -213,7 +213,7 @@ async def markdown_to_pdf(
 </html>
 """
 
-        # Генерируем PDF
+        # Generate PDF
         user_workspace = get_user_workspace(ctx)
         output_path = user_workspace / output_filename
 
@@ -222,16 +222,16 @@ async def markdown_to_pdf(
 
         visible_output = output_path.name
         logger.info(f"✅ Created PDF: {visible_output}")
-        return ToolOutputText(text=f"✅ PDF файл создан: {visible_output}")
+        return ToolOutputText(text=f"✅ PDF file created: {visible_output}")
 
     except ImportError as e:
         return ToolOutputText(
-            text=f"❌ Требуются библиотеки: pip install markdown weasyprint\n"
-            f"Также нужен GTK3 runtime для WeasyPrint (см. документацию)"
+            text=f"❌ Required libraries: pip install markdown weasyprint\n"
+            f"Also need GTK3 runtime for WeasyPrint (see documentation)"
         )
     except Exception as e:
         logger.error(f"PDF conversion failed: {e}", exc_info=True)
-        return ToolOutputText(text=f"❌ Ошибка конвертации в PDF: {str(e)}")
+        return ToolOutputText(text=f"❌ PDF conversion error: {str(e)}")
 
 
 @function_tool
@@ -242,31 +242,31 @@ async def save_report(
     format: str = "md"
 ) -> ToolOutputText:
     """
-    Сохраняет отчет в указанном формате.
+    Saves a report in the specified format.
 
     Args:
-        content: Содержимое отчета
-        filename: Имя файла без расширения
-        format: Формат файла (md, txt, html, json)
+        content: Report content
+        filename: File name without extension
+        format: File format (md, txt, html, json)
 
     Returns:
-        Путь к сохраненному файлу
+        Path to the saved file
     """
     try:
         user_workspace = get_user_workspace(ctx)
 
-        # Добавляем timestamp к имени файла
+        # Add timestamp to filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         full_filename = f"{filename}_{timestamp}.{format}"
         output_path = user_workspace / full_filename
 
         if format == "json":
-            # Для JSON пытаемся распарсить контент
+            # For JSON, try to parse the content
             try:
                 data = json.loads(content)
                 output_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
             except json.JSONDecodeError:
-                # Если не JSON, сохраняем как есть в wrapper
+                # If not JSON, save as-is in a wrapper
                 data = {"content": content, "timestamp": timestamp}
                 output_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
         else:
@@ -274,11 +274,11 @@ async def save_report(
 
         visible_output = output_path.name
         logger.info(f"✅ Saved report: {visible_output}")
-        return ToolOutputText(text=f"✅ Отчет сохранен: {visible_output}")
+        return ToolOutputText(text=f"✅ Report saved: {visible_output}")
 
     except Exception as e:
         logger.error(f"Save report failed: {e}", exc_info=True)
-        return ToolOutputText(text=f"❌ Ошибка сохранения отчета: {str(e)}")
+        return ToolOutputText(text=f"❌ Error saving report: {str(e)}")
 
 
 @function_tool
@@ -289,20 +289,20 @@ async def merge_reports(
     section_headers: Optional[list[str]] = None
 ) -> ToolOutputText:
     """
-    Объединяет несколько отчетов в один документ.
+    Merges multiple reports into a single document.
 
     Args:
-        report_paths: Список путей к файлам отчетов
-        output_filename: Имя выходного файла
-        section_headers: Опциональные заголовки для каждой секции
+        report_paths: List of paths to report files
+        output_filename: Output file name
+        section_headers: Optional headers for each section
 
     Returns:
-        Путь к объединенному отчету
+        Path to the merged report
     """
     try:
         combined_content = []
-        combined_content.append(f"# Объединенный отчет\n")
-        combined_content.append(f"Дата создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        combined_content.append(f"# Merged Report\n")
+        combined_content.append(f"Date created: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
         for idx, report_path in enumerate(report_paths):
             visible_input = display_agent_path_from_ctx(report_path, ctx)
@@ -311,19 +311,19 @@ async def merge_reports(
                 logger.warning(f"Report not found: {visible_input}")
                 continue
 
-            # Добавляем заголовок секции
+            # Add section header
             if section_headers and idx < len(section_headers):
                 header = section_headers[idx]
             else:
-                header = f"Отчет {idx + 1}: {path.name}"
+                header = f"Report {idx + 1}: {path.name}"
 
             combined_content.append(f"\n---\n\n## {header}\n\n")
 
-            # Читаем и добавляем содержимое
+            # Read and add content
             content = path.read_text(encoding='utf-8')
             combined_content.append(content)
 
-        # Сохраняем объединенный отчет
+        # Save the merged report
         user_workspace = get_user_workspace(ctx)
         output_path = user_workspace / output_filename
 
@@ -331,14 +331,14 @@ async def merge_reports(
 
         visible_output = output_path.name
         logger.info(f"✅ Merged {len(report_paths)} reports into: {visible_output}")
-        return ToolOutputText(text=f"✅ Объединенный отчет создан: {visible_output}\nОбработано файлов: {len(report_paths)}")
+        return ToolOutputText(text=f"✅ Merged report created: {visible_output}\nFiles processed: {len(report_paths)}")
 
     except Exception as e:
         logger.error(f"Merge reports failed: {e}", exc_info=True)
-        return ToolOutputText(text=f"❌ Ошибка объединения отчетов: {str(e)}")
+        return ToolOutputText(text=f"❌ Error merging reports: {str(e)}")
 
 
-# Экспортируемые инструменты
+# Exported tools
 DOCUMENT_TOOLS = {
     "markdown_to_html": markdown_to_html,
     "markdown_to_pdf": markdown_to_pdf,

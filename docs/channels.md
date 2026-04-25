@@ -1,49 +1,49 @@
-# Каналы интеграции (Channels)
+# Integration Channels
 
-## Оглавление
-1. [Обзор](#обзор)
+## Table of Contents
+1. [Overview](#overview)
 2. [Telegram Bridge](../examples/telegram_bot/telegram_bridge.py)
 3. [Live Transparency](../examples/telegram_bot/live_transparency.py)
-4. [Конфигурация](#конфигурация)
-5. [Примеры использования](#примеры-использования)
+4. [Configuration](#configuration)
+5. [Usage Examples](#usage-examples)
 
 ---
 
-## Обзор
+## Overview
 
-**Channels** — модули для внешних интерфейсов:
-- `telegram_bridge.py` (91KB): Полноценный Telegram-бот
-- `live_transparency.py` (12KB): Прозрачность выполнения (прогресс)
+**Channels** — modules for external interfaces:
+- `telegram_bridge.py` (91KB): Full-featured Telegram bot
+- `live_transparency.py` (12KB): Execution transparency (progress)
 
-**Интеграция:** Через `AgentFactory(broadcaster=...)` и Telegram config.
+**Integration:** Via `AgentFactory(broadcaster=...)` and Telegram config.
 
 ---
 
 ## Telegram Bridge (telegram_bridge.py)
 
-**Функции:**
-- Polling сообщений (text, voice, images)
-- Запуск `AgentFactory.run_agent()`
-- Multimodal: изображения → vision_agent
+**Functions:**
+- Polling messages (text, voice, images)
+- Running `AgentFactory.run_agent()`
+- Multimodal: images → vision_agent
 - Voice: STT → text → TTS → voice reply
-- Команды: /memory, /workspace
-- Ограничения: allowed_users, max_concurrent_tasks
-- Transparency: Показ шагов (если `enable_transparency: true`)
+- Commands: /memory, /workspace
+- Restrictions: allowed_users, max_concurrent_tasks
+- Transparency: Show steps (if `enable_transparency: true`)
 
-**Конфигурация (config.yaml):**
-| Параметр | Описание |
+**Configuration (config.yaml):**
+| Parameter | Description |
 |----------|----------|
 | `telegram.token_env` | TELEGRAM_BOT_TOKEN |
 | `telegram.workspace_path` | ./workspace |
-| `telegram.enable_transparency` | Показывать tool calls |
-| `telegram.allowed_users` | Список user_id |
+| `telegram.enable_transparency` | Show tool calls |
+| `telegram.allowed_users` | List of user_id |
 
-**Поток:**
+**Flow:**
 ```
 User → Telegram Message/Voice/Image → Bridge → AgentFactory → Response → SendMessage/Voice
 ```
 
-**Пример запуска:**
+**Launch Example:**
 ```python
 from examples.telegram_bot.telegram_bridge import TelegramBridge
 bridge = TelegramBridge(config)
@@ -54,31 +54,31 @@ await bridge.start_polling()
 
 ## Live Transparency (live_transparency.py)
 
-**Функции:**
-- Broadcasting прогресс-ивентов из `AgentFactory.emit_progress()`
-- Telegram-уведомления в реальном времени
-- Дерево задач (parent_id)
-- Спойлеры для деталей (tool output)
+**Functions:**
+- Broadcasting progress events from `AgentFactory.emit_progress()`
+- Real-time Telegram notifications
+- Task tree (parent_id)
+- Spoilers for details (tool output)
 
-**События:**
-| Event | Описание |
+**Events:**
+| Event | Description |
 |-------|----------|
-| agent_start/end | Запуск/завершение агента |
-| tool_call/output | Вызов/результат инструмента |
-| handoff | Передача между агентами |
+| agent_start/end | Agent start/completion |
+| tool_call/output | Tool call/result |
+| handoff | Agent handoff |
 
-**Интеграция:**
+**Integration:**
 ```python
 from examples.telegram_bot.live_transparency import LiveTransparencyBroadcaster
 broadcaster = LiveTransparencyBroadcaster(channel="telegram_progress")
 factory = AgentFactory(broadcaster=broadcaster)
 ```
 
-**Конфигурация:**
+**Configuration:**
 - `telegram.enable_transparency: true`
 - `progress_update_interval: 2.0`
 
-**Пример события:**
+**Event Example:**
 ```python
 await factory.emit_progress(
     event_type="tool_call",
@@ -90,9 +90,9 @@ await factory.emit_progress(
 
 ---
 
-## Конфигурация
+## Configuration
 
-**config.yaml (telegram секция):**
+**config.yaml (telegram section):**
 ```yaml
 telegram:
   token_env: TELEGRAM_BOT_TOKEN
@@ -103,20 +103,20 @@ telegram:
 
 ---
 
-## Примеры использования
+## Usage Examples
 
-### 1. Запуск бота
+### 1. Launching the Bot
 ```bash
 TELEGRAM_BOT_TOKEN=your_token python -m examples.telegram_bot.telegram_server
 ```
 
-### 2. Transparency в AgentFactory
+### 2. Transparency in AgentFactory
 ```python
 factory = AgentFactory(broadcaster=LiveTransparencyBroadcaster())
-response = await factory.run_agent("chat_agent", "Задача...")
-# Автоматически шлёт прогресс в Telegram
+response = await factory.run_agent("chat_agent", "Task...")
+# Automatically sends progress to Telegram
 ```
 
 ---
 
-*Документация на основе examples/telegram_bot/.*
+*Documentation based on examples/telegram_bot/.*

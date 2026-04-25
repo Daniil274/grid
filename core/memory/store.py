@@ -113,10 +113,10 @@ class MemoryStore:
     VALID_TYPES = {"long_term", "short_term", "task", "task_plan", "skill", "insight"}
     VALID_STATUSES = {"active", "completed", "abandoned"}
 
-    # Дедупликация
-    DEFAULT_SIMILARITY_THRESHOLD = 0.8  # 80% = дубликат
-    MAX_FTS_CANDIDATES = 50  # Макс. кандидатов от FTS5
-    IMPORTANCE_BOOST_ON_UPDATE = 0.1  # Увеличение importance при обновлении
+    # Deduplication
+    DEFAULT_SIMILARITY_THRESHOLD = 0.8  # 80% = duplicate
+    MAX_FTS_CANDIDATES = 50  # Max candidates from FTS5
+    IMPORTANCE_BOOST_ON_UPDATE = 0.1  # Importance boost on update
 
     def __init__(
         self,
@@ -445,22 +445,22 @@ class MemoryStore:
             )
             conn.commit()
 
-    # ==================== ДЕДУПЛИКАЦИЯ ====================
+    # ==================== DEDUPLICATION ====================
 
     def _calculate_similarity(self, text1: str, text2: str) -> float:
         """
-        Вычислить коэффициент схожести двух текстов.
+        Calculate the similarity coefficient of two texts.
 
-        Использует SequenceMatcher.ratio() — нормализованное расстояние Левенштейна.
+        Uses SequenceMatcher.ratio() — normalized Levenshtein distance.
 
         Args:
-            text1: Первый текст
-            text2: Второй текст
+            text1: First text
+            text2: Second text
 
         Returns:
-            float от 0.0 (полностью разные) до 1.0 (идентичные)
+            float from 0.0 (completely different) to 1.0 (identical)
         """
-        # Нормализация: lowercase, удаление лишних пробелов
+        # Normalization: lowercase, remove extra whitespace
         t1 = ' '.join(text1.lower().split())
         t2 = ' '.join(text2.lower().split())
 
@@ -476,25 +476,25 @@ class MemoryStore:
         exclude_ids: Optional[List[int]] = None
     ) -> List[MemoryEntry]:
         """
-        Быстрый FTS5 поиск кандидатов по ключевым словам.
+        Fast FTS5 candidate search by keywords.
 
         Args:
-            query: Текст для поиска
-            max_candidates: Максимальное количество кандидатов
-            type: Фильтр по типу памяти
-            user_id: Фильтр по пользователю
-            agent_id: Фильтр по агенту
-            exclude_ids: ID записей для исключения
+            query: Search text
+            max_candidates: Maximum number of candidates
+            type: Filter by memory type
+            user_id: Filter by user
+            agent_id: Filter by agent
+            exclude_ids: IDs of records to exclude
 
         Returns:
-            Список кандидатов MemoryEntry
+            List of MemoryEntry candidates
         """
-        # Извлекаем значимые слова (длина > 3)
+        # Extract significant words (length > 3)
         tokens = [t for t in query.lower().split() if len(t) > 3]
         if not tokens:
             return []
 
-        # Просто передаём слова через пробел (search превратит их в AND/implicit OR)
+        # Just pass words separated by spaces (search converts to AND/implicit OR)
         fts_query = ' '.join(tokens[:10])
 
         return self.search(
@@ -516,27 +516,27 @@ class MemoryStore:
         exclude_ids: Optional[List[int]] = None
     ) -> List[Tuple[MemoryEntry, float]]:
         """
-        Найти похожие записи в памяти.
+        Find similar records in memory.
 
-        Алгоритм:
-        1. FTS5 поиск кандидатов по ключевым словам
-        2. Вычисление similarity через SequenceMatcher для каждого кандидата
-        3. Фильтрация по threshold и сортировка по убыванию similarity
+        Algorithm:
+        1. FTS5 search for candidates by keywords
+        2. Similarity calculation via SequenceMatcher for each candidate
+        3. Filter by threshold and sort by descending similarity
 
         Args:
-            query: Текст для поиска похожих записей
-            threshold: Минимальный порог схожести (0.0-1.0), default 0.8
-            limit: Максимальное количество результатов
-            type: Фильтр по типу памяти
-            user_id: Фильтр по пользователю
-            agent_id: Фильтр по агенту
-            exclude_ids: ID записей для исключения из поиска
+            query: Text to search for similar records
+            threshold: Minimum similarity threshold (0.0-1.0), default 0.8
+            limit: Maximum number of results
+            type: Memory type filter
+            user_id: User filter
+            agent_id: Agent filter
+            exclude_ids: Record IDs to exclude from search
 
         Returns:
-            List[Tuple[MemoryEntry, float]] — список (запись, similarity_score)
-            отсортированный по убыванию similarity
+            List[Tuple[MemoryEntry, float]] — list of (record, similarity_score)
+            sorted by descending similarity
         """
-        # Шаг 1: FTS5 для отбора кандидатов (быстро)
+        # Step 1: FTS5 candidate selection (fast)
         candidates = self._fts_search_candidates(
             query=query,
             max_candidates=self.MAX_FTS_CANDIDATES,
@@ -546,15 +546,15 @@ class MemoryStore:
             exclude_ids=exclude_ids
         )
 
-        # Фильтрация по exclude_ids
+        # Filter by exclude_ids
         if exclude_ids:
             candidates = [c for c in candidates if c.id not in exclude_ids]
 
-        # Шаг 2: Re-ranking — embeddings (если доступны) или SequenceMatcher
+        # Step 2: Re-ranking — embeddings (if available) or SequenceMatcher
         results: List[Tuple[MemoryEntry, float]] = []
 
         if self._embeddings and candidates:
-            # Семантический re-ranking: одним батч-запросом вычисляем сходство
+            # Semantic re-ranking: compute similarity with a single batch request
             try:
                 query_vec = self._embeddings.embed_text(query)
                 if query_vec:
@@ -591,13 +591,13 @@ class MemoryStore:
                     if sim >= threshold:
                         results.append((entry, sim))
         else:
-            # Fallback: SequenceMatcher (без embeddings)
+            # Fallback: SequenceMatcher (no embeddings)
             for entry in candidates:
                 similarity = self._calculate_similarity(query, entry.content)
                 if similarity >= threshold:
                     results.append((entry, similarity))
 
-        # Шаг 3: Сортировка и лимит
+        # Step 3: Sort and limit
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:limit]
 
@@ -616,9 +616,9 @@ class MemoryStore:
         entities: str = '[]',
         connections: str = '[]',
         source_ids: str = '[]',
-        # TTL параметры:
+        # TTL parameters:
         ttl_days: Optional[int] = None,
-        # Параметры дедупликации:
+        # Deduplication parameters:
         update_if_exists: bool = False,
         similarity_threshold: Optional[float] = None
     ) -> int:
@@ -639,9 +639,9 @@ class MemoryStore:
             entities: JSON array of entities
             connections: JSON array of connections
             source_ids: JSON array of source memory IDs
-            ttl_days: TTL в днях (None = бессрочно для long_term используется default_long_term_ttl_days из config)
-            update_if_exists: Если True, проверяет дубликаты и обновляет существующую запись
-            similarity_threshold: Порог схожести для дедупликации (default: DEFAULT_SIMILARITY_THRESHOLD)
+            ttl_days: TTL in days (None = indefinite; for long_term, uses default_long_term_ttl_days from config)
+            update_if_exists: If True, checks for duplicates and updates the existing record
+            similarity_threshold: Similarity threshold for deduplication (default: DEFAULT_SIMILARITY_THRESHOLD)
 
         Returns:
             ID of created or updated entry
@@ -655,7 +655,7 @@ class MemoryStore:
         if not 0 <= importance <= 1:
             raise ValueError(f"Invalid importance: {importance}. Must be 0.0 to 1.0")
 
-        # Дедупликация: поиск похожих записей
+        # Deduplication: search for similar records
         if update_if_exists:
             threshold = similarity_threshold if similarity_threshold is not None else self.DEFAULT_SIMILARITY_THRESHOLD
             similar = self.find_similar(
@@ -671,7 +671,7 @@ class MemoryStore:
                 existing_entry, score = similar[0]
                 logger.info(f"🔄 Found similar entry #{existing_entry.id} (similarity={score:.2f}), updating...")
 
-                # Стратегия: обновить content, увеличить importance
+                # Strategy: update content, increase importance
                 new_importance = min(1.0, existing_entry.importance + self.IMPORTANCE_BOOST_ON_UPDATE)
                 self.update(
                     entry_id=existing_entry.id,
@@ -680,7 +680,7 @@ class MemoryStore:
                 )
                 return existing_entry.id
 
-        # TTL логика: default TTL для long_term если не указан
+        # TTL logic: default TTL for long_term if not specified
         effective_ttl = ttl_days
         if effective_ttl is None and type == "long_term" and self.config:
             effective_ttl = self.config.get('memory_optimizer.default_long_term_ttl_days', 90)
@@ -1158,7 +1158,7 @@ class MemoryStore:
 
         # Insights
         if preload.get("insights"):
-            lines.append("=== КЛЮЧЕВЫЕ ИНСАЙТЫ ===")
+            lines.append("=== KEY INSIGHTS ===")
             for entry in preload["insights"]:
                 content = entry.summary if entry.summary else entry.content
                 line = f"💡 {content}"
@@ -1169,7 +1169,7 @@ class MemoryStore:
 
         # Long-term memory
         if preload.get("long_term") and char_count < max_chars:
-            lines.append("\n=== ДОЛГОСРОЧНАЯ ПАМЯТЬ ===")
+            lines.append("\n=== LONG-TERM MEMORY ===")
             for entry in preload["long_term"]:
                 content = entry.summary if entry.summary else entry.content
                 line = f"- {content}"
@@ -1180,7 +1180,7 @@ class MemoryStore:
 
         # Short-term memory
         if preload.get("short_term") and char_count < max_chars:
-            lines.append("\n=== НЕДАВНИЕ ЗАМЕТКИ ===")
+            lines.append("\n=== RECENT NOTES ===")
             for entry in preload["short_term"]:
                 content = entry.summary if entry.summary else entry.content
                 line = f"- [{entry.created_at[:10]}] {content}"
@@ -1191,12 +1191,12 @@ class MemoryStore:
 
         # Active tasks
         if preload.get("tasks") and char_count < max_chars:
-            lines.append("\n=== ТЕКУЩИЕ ЗАДАЧИ ===")
+            lines.append("\n=== ACTIVE TASKS ===")
             for entry in preload["tasks"]:
                 if entry.type == "task":
                     line = f"📋 {entry.content}"
                 else:  # task_plan
-                    line = f"  └─ План: {entry.content}"
+                    line = f"  └─ Plan: {entry.content}"
                 if char_count + len(line) > max_chars:
                     break
                 lines.append(line)

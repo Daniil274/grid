@@ -1,15 +1,15 @@
 ## Grid Agent System
 
-## Оркестратор (динамический мета-агент)
+## Orchestrator (Dynamic Meta-Agent)
 
-В проект добавлен базовый механизм “динамических агентов” и мета‑инструмент `orchestrate`, который умеет:
-- создавать **временных под‑агентов** на лету (без записи в `config.yaml`);
-- “раздавать” им набор инструментов (по ключам `tools:` из конфигурации)
+A basic "dynamic agents" mechanism and meta-tool `orchestrate` has been added to the project, which can:
+- Create **temporary sub-agents** on the fly (without writing to `config.yaml`);
+- "Distribute" tool sets to them (by `tools:` keys from the configuration)
 
-![Агенты orchestration pipeline](assets/agents.png)
-### Как включить
+![Agents orchestration pipeline](assets/agents.png)
+### How to enable
 
-1) Добавьте инструмент `orchestrate` в `tools:` конфигурации (тип `function`):
+1) Add the `orchestrate` tool to `tools:` configuration (type `function`):
 
 ```yaml
 tools:
@@ -18,18 +18,18 @@ tools:
     name: "orchestrate"
 ```
 
-2) Дайте этот tool агенту (например, вашему `orchestrator`/`coordinator`):
+2) Give this tool to an agent (e.g., your `orchestrator`/`coordinator`):
 
 ```yaml
 agents:
   orchestrator:
     # ...
-    tools: ["orchestrate", "...другие..."]
+    tools: ["orchestrate", "...others..."]
 ```
 
-3) Вызовите агента и попросите его использовать `orchestrate(goal=...)`.
+3) Call the agent and ask it to use `orchestrate(goal=...)`.
 
-Возвращаемый результат — JSON, в котором есть `final` (итог).
+The returned result is JSON containing `final` (summary).
 
 An orchestration system for AI agents focused on engineering tasks.
 
@@ -68,7 +68,7 @@ copy config.yaml.example config.yaml       # Windows
 # or
 cp config.yaml.example config.yaml         # Linux/macOS
 ```
-Fill in `config.yaml` for your environment (see the “Configuration” section).
+Fill in `config.yaml` for your environment (see the "Configuration" section).
 
 4) Environment variables
 Create a `.env` (following `.env.example`, if present) and set API keys, or use environment variables corresponding to `providers.*.api_key_env`.
@@ -209,7 +209,7 @@ The system assigns a lightweight context identifier to every agent turn. This al
 humans, tools, and downstream agents to resume a previous conversation explicitly.
 
 - **Automatic creation** – Every call to `AgentFactory.run_agent` without an override
-  starts a fresh context session and appends a line `Контекст ID: ctx-xxxxxx` to the
+  starts a fresh context session and appends a line `Context ID: ctx-xxxxxx` to the
   final answer.
 - **Manual reuse** – Pass `context_id=...` when invoking `run_agent` (or include the
   same string in API/CLI requests) to continue the exact conversation state.
@@ -243,7 +243,7 @@ from utils.multimodal_converter import MultimodalConverter
 # Create message with image
 message = MultimodalConverter.create_multimodal_message(
     role="user",
-    text="Опиши это изображение",
+    text="Describe this image",
     image_sources=["path/to/image.jpg"]
 )
 

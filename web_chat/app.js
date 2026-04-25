@@ -193,7 +193,7 @@ function closeSettingsDrawer() {
 function updateActiveAgentButton() {
   const agent = getAgentOption(state.currentAgentKey) || state.bootstrap?.agents?.[0];
   if (!agent) {
-    els.activeAgentName.textContent = "Агент не найден";
+    els.activeAgentName.textContent = "Agent not found";
     els.activeAgentMeta.textContent = "";
     return;
   }
@@ -213,7 +213,7 @@ function renderAgentPicker() {
     btn.innerHTML = `
       <div class="agentOption__name">${escapeHtml(agent.name)}</div>
       <div class="agentOption__key">${escapeHtml(agent.key)}</div>
-      <div class="agentOption__desc">${escapeHtml(agent.description || "Без описания")}</div>
+      <div class="agentOption__desc">${escapeHtml(agent.description || "No description")}</div>
       <div class="agentOption__meta">${escapeHtml(agent.model_description || agent.model_key || "")} · ${agent.tool_count} tools${agent.mcp_enabled ? " · MCP" : ""}</div>
     `;
     btn.addEventListener("click", async () => {
@@ -234,7 +234,8 @@ function renderConversations() {
     btn.type = "button";
     btn.className = `conversationCard ${conversation.id === state.currentContextId ? "active" : ""}`;
     btn.innerHTML = `
-      <div class="conversationCard__title">${escapeHtml(conversation.title || "Новый чат")}</div>
+      <div class="conversationCard__title">${escapeHtml(conversation.title || "New chat")}</div>
+      <div class="conversationCard__title">${escapeHtml(conversation.title || "New chat")}</div>
       <div class="conversationCard__meta">
         <span>${escapeHtml(conversation.agent_name || conversation.agent_key || "")} · ${conversation.message_count || 0}</span>
         <span>${escapeHtml(formatConversationTime(conversation.updated_at))}</span>
@@ -249,7 +250,7 @@ function createMessageElement(role, subtitle = "") {
   const wrapper = document.createElement("article");
   wrapper.className = `message message--${role}`;
   const avatar = role === "assistant" ? "AI" : role === "user" ? "U" : "S";
-  const author = role === "assistant" ? "Grid" : role === "user" ? "Вы" : "Система";
+  const author = role === "assistant" ? "Grid" : role === "user" ? "You" : "System";
   wrapper.innerHTML = `
     <div class="message__panel">
       <div class="message__avatar">${avatar}</div>
@@ -270,10 +271,10 @@ function createAssistantTrace() {
   details.innerHTML = `
     <summary class="trace__summary">
       <span>
-        <span class="trace__title">Ход выполнения</span>
-        <span class="trace__caption">Подробный runtime trace этого ответа</span>
+        <span class="trace__title">Execution trace</span>
+        <span class="trace__caption">Detailed runtime trace of this response</span>
       </span>
-      <span class="trace__caption trace__counter">0 событий</span>
+      <span class="trace__caption trace__counter">0 events</span>
     </summary>
     <div class="trace__body"></div>
   `;
@@ -289,7 +290,7 @@ function setTypingState(node, active) {
   node.classList.toggle("is-typing", active);
   if (active) {
     node.innerHTML = `
-      <div class="typingIndicator" aria-label="Grid печатает">
+      <div class="typingIndicator" aria-label="Grid typing">
         <span></span>
         <span></span>
         <span></span>
@@ -326,7 +327,7 @@ function appendTraceEvent(traceState, event) {
   if (!traceState) return;
   traceState.root.classList.remove("hidden");
   traceState.count += 1;
-  traceState.counter.textContent = `${traceState.count} событий`;
+  traceState.counter.textContent = `${traceState.count} events`;
   const item = document.createElement("div");
   item.className = `traceEvent traceEvent--${event.status || "done"}`;
   
@@ -337,7 +338,7 @@ function appendTraceEvent(traceState, event) {
 
   item.innerHTML = `
     <div class="traceEvent__header">
-      <div class="traceEvent__title">${escapeHtml(event.title || "Событие")}</div>
+      <div class="traceEvent__title">${escapeHtml(event.title || "Event")}</div>
       <div class="traceEvent__meta">${escapeHtml(event.ts != null ? `${event.ts} ms` : nowTime())}</div>
     </div>
     ${event.subtitle ? `<div class="traceEvent__subtitle">${escapeHtml(event.subtitle)}</div>` : ""}
@@ -522,7 +523,7 @@ async function sendMessage() {
   state.waitingForFirstToken = true;
   els.stopBtn.classList.remove("hidden");
   els.emptyState.classList.add("hidden");
-  els.runtimePill.textContent = `${getAgentOption(state.currentAgentKey)?.name || state.currentAgentKey} думает`;
+  els.runtimePill.textContent = `${getAgentOption(state.currentAgentKey)?.name || state.currentAgentKey} thinking`;
 
   appendMessage("user", message, nowTime());
   const assistant = appendMessage(
@@ -543,7 +544,7 @@ async function sendMessage() {
       const payload = JSON.parse(evt.data);
       if (payload.type === "token") {
         state.waitingForFirstToken = false;
-        els.runtimePill.textContent = `${getAgentOption(state.currentAgentKey)?.name || state.currentAgentKey} отвечает`;
+        els.runtimePill.textContent = `${getAgentOption(state.currentAgentKey)?.name || state.currentAgentKey} responds`;
         state.currentAssistant.text += payload.content;
         renderMessageContent(state.currentAssistant.contentNode, state.currentAssistant.text, true);
       } else if (payload.type === "final_output") {
@@ -560,7 +561,7 @@ async function sendMessage() {
         state.waitingForFirstToken = false;
         setTypingState(state.currentAssistant.contentNode, false);
         appendTraceEvent(state.currentAssistant.trace, {
-          title: "Ошибка выполнения",
+          title: "Execution error",
           subtitle: state.currentAgentKey,
           details: payload.content,
           status: "error",
@@ -575,7 +576,7 @@ async function sendMessage() {
     state.socket.onclose = () => finishStreaming();
   } catch (error) {
     appendTraceEvent(state.currentAssistant.trace, {
-      title: "Не удалось отправить запрос",
+      title: "Failed to send request",
       subtitle: state.currentAgentKey,
       details: error.message,
       status: "error",
@@ -685,7 +686,7 @@ function renderAgentsSettings() {
 
   const agent = state.settings.agents?.[state.selectedAgentEditorKey];
   if (!agent) {
-    els.agentEditor.innerHTML = '<div class="editorPanel__empty">Выбери или создай агента.</div>';
+    els.agentEditor.innerHTML = '<div class="editorPanel__empty">Select or create an agent.</div>';
     return;
   }
 
@@ -696,7 +697,7 @@ function renderAgentsSettings() {
     <div class="editorPanel__header">
       <div>
         <h3>${escapeHtml(agent.name || state.selectedAgentEditorKey)}</h3>
-        <div class="editorPanel__sub">Внутренний ключ: ${escapeHtml(state.selectedAgentEditorKey)}</div>
+        <div class="editorPanel__sub">Internal key: ${escapeHtml(state.selectedAgentEditorKey)}</div>
       </div>
       <button class="secondaryBtn" id="delete-agent-btn" type="button">Delete</button>
     </div>
@@ -767,7 +768,7 @@ function renderAgentsSettings() {
     });
   });
   els.agentEditor.querySelector("#delete-agent-btn").addEventListener("click", () => {
-    if (!confirm(`Удалить агента ${state.selectedAgentEditorKey}?`)) return;
+    if (!confirm(`Delete agent ${state.selectedAgentEditorKey}?`)) return;
     delete state.settings.agents[state.selectedAgentEditorKey];
     state.selectedAgentEditorKey = Object.keys(state.settings.agents)[0] || null;
     renderAgentsSettings();
@@ -789,7 +790,7 @@ function renderToolsSettings() {
 
   const tool = state.settings.tools?.[state.selectedToolEditorKey];
   if (!tool) {
-    els.toolEditor.innerHTML = '<div class="editorPanel__empty">Выбери или создай инструмент.</div>';
+    els.toolEditor.innerHTML = '<div class="editorPanel__empty">Select or create a tool.</div>';
     return;
   }
 
@@ -797,7 +798,7 @@ function renderToolsSettings() {
     <div class="editorPanel__header">
       <div>
         <h3>${escapeHtml(tool.name || state.selectedToolEditorKey)}</h3>
-        <div class="editorPanel__sub">Ключ: ${escapeHtml(state.selectedToolEditorKey)}</div>
+        <div class="editorPanel__sub">Key: ${escapeHtml(state.selectedToolEditorKey)}</div>
       </div>
       <button class="secondaryBtn" id="delete-tool-btn" type="button">Delete</button>
     </div>
@@ -811,7 +812,7 @@ function renderToolsSettings() {
     </div>
     <div class="field"><label>Description</label><textarea id="tool-description">${escapeHtml(tool.description || "")}</textarea></div>
     <div class="field"><label>Prompt addition</label><textarea id="tool-prompt-addition">${escapeHtml(tool.prompt_addition || "")}</textarea></div>
-    <div class="field"><label>Server command (по одному аргументу на строку)</label><textarea id="tool-server-command">${escapeHtml(
+    <div class="field"><label>Server command (one argument per line)</label><textarea id="tool-server-command">${escapeHtml(
       (tool.server_command || []).join("\n")
     )}</textarea></div>
     <div class="field"><label>Env vars (KEY=value)</label><textarea id="tool-env-vars">${escapeHtml(
@@ -858,7 +859,7 @@ function renderToolsSettings() {
     tool.env_vars = env;
   });
   els.toolEditor.querySelector("#delete-tool-btn").addEventListener("click", () => {
-    if (!confirm(`Удалить инструмент ${state.selectedToolEditorKey}?`)) return;
+    if (!confirm(`Delete tool ${state.selectedToolEditorKey}?`)) return;
     delete state.settings.tools[state.selectedToolEditorKey];
     Object.values(state.settings.agents || {}).forEach((agent) => {
       agent.tools = (agent.tools || []).filter((toolKey) => toolKey !== state.selectedToolEditorKey);
@@ -884,7 +885,7 @@ function renderPromptsSettings() {
 
   const promptValue = state.settings.prompt_templates?.[state.selectedPromptKey];
   if (promptValue == null) {
-    els.promptEditor.innerHTML = '<div class="editorPanel__empty">Выбери или создай prompt template.</div>';
+    els.promptEditor.innerHTML = '<div class="editorPanel__empty">Select or create a prompt template.</div>';
     return;
   }
 
@@ -907,7 +908,7 @@ function renderPromptsSettings() {
     renderPromptsSettings();
   });
   els.promptEditor.querySelector("#delete-prompt-btn").addEventListener("click", () => {
-    if (!confirm(`Удалить prompt ${state.selectedPromptKey}?`)) return;
+    if (!confirm(`Delete prompt ${state.selectedPromptKey}?`)) return;
     delete state.settings.prompt_templates[state.selectedPromptKey];
     state.selectedPromptKey = Object.keys(state.settings.prompt_templates)[0] || null;
     renderPromptsSettings();
@@ -935,7 +936,7 @@ async function loadSettings() {
 }
 
 async function saveStructuredSettings() {
-  setSettingsStatus("Сохраняю structured config...");
+  setSettingsStatus("Saving structured config...");
   const payload = await fetchJson("/api/settings/structured", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -944,7 +945,7 @@ async function saveStructuredSettings() {
   state.settings = deepClone(payload.config);
   state.rawYaml = payload.raw_yaml;
   els.yamlEditor.value = state.rawYaml;
-  setSettingsStatus("Изменения сохранены.", "ok");
+  setSettingsStatus("Changes saved.", "ok");
   await loadBootstrap();
   await loadConversations();
   renderSystemSettings(payload.meta);
@@ -956,7 +957,7 @@ async function saveStructuredSettings() {
 }
 
 async function saveYamlSettings() {
-  setSettingsStatus("Сохраняю YAML...");
+  setSettingsStatus("Saving YAML...");
   const payload = await fetchJson("/api/settings/yaml", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -965,7 +966,7 @@ async function saveYamlSettings() {
   state.settings = deepClone(payload.config);
   state.rawYaml = payload.raw_yaml;
   els.yamlEditor.value = state.rawYaml;
-  setSettingsStatus("YAML сохранён и провалидирован.", "ok");
+  setSettingsStatus("YAML saved and validated.", "ok");
   await loadBootstrap();
   await loadConversations();
   renderSystemSettings(payload.meta);
@@ -1028,13 +1029,13 @@ function bindStaticEvents() {
   els.saveSettingsBtn.addEventListener("click", saveSettings);
   els.reloadSettingsBtn.addEventListener("click", async () => {
     await loadSettings();
-    setSettingsStatus("Конфигурация перечитана с диска.");
+    setSettingsStatus("Configuration re-read from disk.");
   });
   els.addAgentBtn.addEventListener("click", () => {
-    const key = prompt("Новый ключ агента", "new_agent")?.trim();
+    const key = prompt("New agent key", "new_agent")?.trim();
     if (!key || state.settings.agents[key]) return;
     state.settings.agents[key] = {
-      name: "Новый агент",
+      name: "New agent",
       model: Object.keys(state.settings.models || {})[0] || "",
       tools: [],
       base_prompt: Object.keys(state.settings.prompt_templates || {})[0] || "base",
@@ -1046,14 +1047,14 @@ function bindStaticEvents() {
     renderAgentsSettings();
   });
   els.addToolBtn.addEventListener("click", () => {
-    const key = prompt("Новый ключ инструмента", "new_tool")?.trim();
+    const key = prompt("New tool key", "new_tool")?.trim();
     if (!key || state.settings.tools[key]) return;
     state.settings.tools[key] = { type: "function", name: "", description: "", prompt_addition: "" };
     state.selectedToolEditorKey = key;
     renderToolsSettings();
   });
   els.addPromptBtn.addEventListener("click", () => {
-    const key = prompt("Новый ключ промпта", "new_prompt")?.trim();
+    const key = prompt("New prompt key", "new_prompt")?.trim();
     if (!key || state.settings.prompt_templates[key]) return;
     state.settings.prompt_templates[key] = "";
     state.selectedPromptKey = key;

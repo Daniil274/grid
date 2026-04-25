@@ -84,7 +84,7 @@ class ResilientMCPServerStdio(MCPServerStdio):
         return max(1, len(text) // 4)
 
     def _check_output_size(self, tool_name: str, result: Any) -> Optional["CallToolResult"]:
-        """Проверяет размер вывода MCP-инструмента. Возвращает ошибку если превышен лимит токенов."""
+        """Checks the output size of an MCP tool. Returns an error if the token limit is exceeded."""
         if self._max_output_tokens is None:
             return None
         if not hasattr(result, "content") or not result.content:

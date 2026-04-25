@@ -17,18 +17,18 @@ from schemas.improvement import ImprovementProblem
 
 
 CORRECTION_RE = re.compile(
-    r"\b(нет|не то|неверно|попробуй|ошибка|неправильно|исправь|wrong|incorrect|retry)\b",
+    r"\b(wrong|incorrect|retry|no|try|error|fix|correct|mistake)\b",
     re.IGNORECASE,
 )
 FAILURE_RE = re.compile(
-    r"(не могу|не получается|cannot|can't|unable|failed|ошибка|не удалось)",
+    r"(cannot|can't|unable|failed|fail|failure|error|couldn't)",
     re.IGNORECASE,
 )
 TIMEOUT_RE = re.compile(
-    r"(timed out while waiting for response|tool execution timed out|agent execution timed out|max_turns exceeded|execution timed out|превышен лимит)",
+    r"(timed out while waiting for response|tool execution timed out|agent execution timed out|max_turns exceeded|execution timed out|timeout|limit exceeded|exceeded limit)",
     re.IGNORECASE,
 )
-TOOL_ERROR_RE = re.compile(r"(tool|instrument).*(error|failed)|ошибк.*инструмент", re.IGNORECASE)
+TOOL_ERROR_RE = re.compile(r"(tool|instrument).*(error|failed)|error.*(tool|instrument)", re.IGNORECASE)
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:

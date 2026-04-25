@@ -422,7 +422,7 @@ class Config:
             sections.append(
                 PromptSection(
                     key="tools_common_rules",
-                    content="\nПравила использования инструментов (общие):\n" + str(common_rules),
+                    content="\nRules for using tools (general):\n" + str(common_rules),
                     scope="static",
                 )
             )
@@ -430,7 +430,7 @@ class Config:
             sections.append(
                 PromptSection(
                     key="tool_capabilities",
-                    content="\n".join(["\nДоступные инструменты:", *tool_descriptions]),
+                    content="\n".join(["\nAvailable tools:", *tool_descriptions]),
                     scope="static",
                 )
             )
@@ -459,13 +459,13 @@ class Config:
         
         # Combine parts
         parts = [base_prompt]
-        # Общие правила для инструментов (если заданы) — добавляем один раз
+        # General rules for tools (if set) — add once
         common_rules = getattr(self.config.settings, 'tools_common_rules', None)
         if common_rules:
-            parts.append("\nПравила использования инструментов (общие):")
+            parts.append("\nRules for using tools (general):")
             parts.append(str(common_rules))
         if tool_descriptions:
-            parts.append("\nДоступные инструменты:")
+            parts.append("\nAvailable tools:")
             parts.extend(tool_descriptions)
         
         return "\n".join(parts)

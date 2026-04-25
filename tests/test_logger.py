@@ -231,7 +231,7 @@ class TestJSONFormatter:
             level=logging.INFO,
             pathname="test.py",
             lineno=42,
-            msg="Тест юникода 🚀",
+            msg="Unicode test 🚀",
             args=(),
             exc_info=None
         )
@@ -242,7 +242,7 @@ class TestJSONFormatter:
         formatted = formatter.format(record)
         data = json.loads(formatted)
         
-        assert data["message"] == "Тест юникода 🚀"
+        assert data["message"] == "Unicode test 🚀"
 
 
 class TestLegacyFormatter:
@@ -401,7 +401,7 @@ class TestLoggerIntegration:
         
         # Wait for all threads to complete
         for thread in threads:
-            thread.join(timeout=10)  # Таймаут 10 сек для каждого потока
+            thread.join(timeout=10)  # 10 sec timeout for each thread
             if thread.is_alive():
                 pytest.fail(f"Thread {thread.name} did not finish within timeout")
         
@@ -441,7 +441,7 @@ class TestLoggerIntegration:
         logger.setup_file_logging(str(log_file))
         
         # Log messages with various special characters
-        logger.info("Unicode test: Привет мир! 🌍 测试 テスト")
+        logger.info("Unicode test: Hello world! 🌍 测试 テスト")
         logger.info("Special chars: !@#$%^&*()_+-=[]{}|;:,.<>?")
         logger.info("Newlines and\ttabs\ntest")
         

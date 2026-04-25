@@ -117,7 +117,7 @@ class _LazyToolsDict:
 
 AVAILABLE_TOOLS = _LazyToolsDict()
 
-# Добавляем дополнительные инструменты для совместимости
+# Add extra tools for compatibility
 TOOL_ALIASES = {
     # File operations
     "read_file": "file_read",
@@ -128,7 +128,7 @@ TOOL_ALIASES = {
     "edit_file_patch": "file_edit_patch",
     "append_to_file": "file_append",
     
-    # Git operations - основные
+    # Git operations - main
     "git_status": "git_status",
     "git_log": "git_log",
     "git_diff": "git_diff",
@@ -138,12 +138,12 @@ TOOL_ALIASES = {
     "git_commit": "git_commit",
     "git_checkout_branch": "git_checkout_branch",
     
-    # Git operations - инициализация и настройка
+    # Git operations - initialization and configuration
     "git_init": "git_init",
     "git_config": "git_config",
     "git_clone": "git_clone",
     
-    # Git operations - удаленные репозитории
+    # Git operations - remote repositories
     "git_remote_info": "git_remote_info",
     "git_remote_add": "git_remote_add",
     "git_remote_remove": "git_remote_remove",
@@ -151,12 +151,12 @@ TOOL_ALIASES = {
     "git_pull": "git_pull",
     "git_push": "git_push",
     
-    # Git operations - управление ветками и слияние
+    # Git operations - branch management and merging
     "git_merge": "git_merge",
     "git_reset": "git_reset",
     "git_stash": "git_stash",
     
-    # Git operations - теги
+    # Git operations - tags
     "git_tag": "git_tag",
     "git_tag_list": "git_tag_list",
 
@@ -231,17 +231,17 @@ TOOL_ALIASES = {
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:
     """
-    Возвращает список инструментов по их именам.
-    Поддерживает загрузку из:
-    1. Проектных инструментов (если инициализирован project_tools_loader)
-    2. Базовых системных инструментов
-    3. Алиасов
+    Returns a list of tools by their names.
+    Supports loading from:
+    1. Project tools (if project_tools_loader is initialized)
+    2. Base system tools
+    3. Aliases
 
     Args:
-        tool_names: Список имен инструментов
+        tool_names: List of tool names
 
     Returns:
-        List[Any]: Список функций инструментов
+        List[Any]: List of tool functions
     """
     from core.managers.project_tools_loader import get_project_loader
 
@@ -249,74 +249,74 @@ def get_tools_by_names(tool_names: List[str]) -> List[Any]:
     project_loader = get_project_loader()
 
     for name in tool_names:
-        # 1. Проверяем проектные инструменты (приоритет!)
+        # 1. Check project tools (priority!)
         if project_loader and project_loader.has_tool(name):
             tool = project_loader.get_tool(name)
             if tool:
                 tools.append(tool)
                 continue
 
-        # 2. Разрешаем алиас (до обхода lazy-модулей, чтобы не грузить лишнее)
+        # 2. Resolve alias (before iterating lazy modules, to avoid loading unnecessary ones)
         lookup_name = TOOL_ALIASES.get(name, name)
 
-        # 3. Ищем в системных инструментах
+        # 3. Search in system tools
         tool = AVAILABLE_TOOLS.get(lookup_name)
         if tool is not None:
             tools.append(tool)
         else:
             from utils.logger import Logger
-            Logger(__name__).warning(f"Инструмент '{name}' не найден ни в проектных, ни в системных инструментах")
+            Logger(__name__).warning(f"Tool '{name}' not found in project or system tools")
 
     return tools
 
 def get_all_tools() -> List[Any]:
     """
-    Возвращает все доступные инструменты.
+    Returns all available tools.
     
     Returns:
-        List[Any]: Список всех функций инструментов
+        List[Any]: List of all tool functions
     """
     return list(AVAILABLE_TOOLS.values())
 
 def get_file_tools_list() -> List[Any]:
-    """Возвращает только файловые инструменты."""
+    """Returns only file tools."""
     return get_file_tools()
 
 def get_git_tools_list() -> List[Any]:
-    """Возвращает только Git инструменты."""
+    """Returns only Git tools."""
     return get_git_tools()
 
 def get_available_tool_names() -> List[str]:
     """
-    Возвращает список имен всех доступных инструментов.
+    Returns the list of names of all available tools.
     
     Returns:
-        List[str]: Список имен инструментов
+        List[str]: List of tool names
     """
     return list(AVAILABLE_TOOLS.keys()) + list(TOOL_ALIASES.keys())
 
 def get_tool_info(tool_name: str) -> Dict[str, Any]:
     """
-    Возвращает информацию об инструменте.
+    Returns information about a tool.
     
     Args:
-        tool_name: Имя инструмента
+        tool_name: Tool name
         
     Returns:
-        Dict[str, Any]: Информация об инструменте
+        Dict[str, Any]: Tool information
     """
-    # Получаем реальное имя через алиас если нужно
+    # Get the real name via alias if needed
     actual_name = TOOL_ALIASES.get(tool_name, tool_name)
     
     if actual_name not in AVAILABLE_TOOLS:
-        return {"error": f"Инструмент '{tool_name}' не найден"}
+        return {"error": f"Tool '{tool_name}' not found"}
     
     tool_func = AVAILABLE_TOOLS[actual_name]
     
     return {
         "name": actual_name,
         "alias": tool_name if tool_name != actual_name else None,
-        "description": tool_func.__doc__ or "Описание не доступно",
+        "description": tool_func.__doc__ or "Description not available",
         "module": tool_func.__module__,
         "type": "file" if actual_name.startswith("file_") else "git" if actual_name.startswith("git_") else "ape" if actual_name == "automatic_prompt_engineer" else "other"
     }
@@ -325,26 +325,26 @@ def get_tool_info(tool_name: str) -> Dict[str, Any]:
 # BACKWARDS COMPATIBILITY
 # ============================================================================
 
-# Экспортируем основные функции для обратной совместимости
+# Export main functions for backwards compatibility
 from .file_tools import read_file, write_file, list_files, get_file_info, search_files, edit_file_patch
 
-# Если git_tools.py экспортирует функции напрямую, добавим их
+# If git_tools.py exports functions directly, add them
 try:
     from .git_tools import (
-        # Основные операции
+        # Main operations
         git_status, git_log, git_diff, git_branch_list, git_add_file, git_add_all,
         git_commit, git_checkout_branch,
-        # Инициализация и настройка
+        # Initialization and configuration
         git_init, git_config, git_clone,
-        # Удаленные репозитории
+        # Remote repositories
         git_remote_info, git_remote_add, git_remote_remove, git_fetch, git_pull, git_push,
-        # Управление ветками и слияние
+        # Branch management and merging
         git_merge, git_reset, git_stash,
-        # Теги
+        # Tags
         git_tag, git_tag_list
     )
 except ImportError:
-    # Git инструменты могут быть не готовы
+    # Git tools may not be ready
     pass
 
 # ============================================================================
@@ -353,10 +353,10 @@ except ImportError:
 
 def get_tool_stats() -> Dict[str, Any]:
     """
-    Возвращает статистику по инструментам.
+    Returns tool statistics.
     
     Returns:
-        Dict[str, Any]: Статистика инструментов
+        Dict[str, Any]: Tool statistics
     """
     file_tools_count = len([name for name in AVAILABLE_TOOLS.keys() if name.startswith('file_')])
     git_tools_count = len([name for name in AVAILABLE_TOOLS.keys() if name.startswith('git_')])
@@ -369,6 +369,6 @@ def get_tool_stats() -> Dict[str, Any]:
         "available_names": get_available_tool_names()
     }
 
-# Информация о модуле
+# Module information
 __version__ = "2.0.0"
 __description__ = "Enhanced Grid Agent Tools with beautiful logging"

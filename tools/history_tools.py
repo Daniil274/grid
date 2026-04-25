@@ -275,7 +275,7 @@ def _search(query: str, limit: int = 5, sender_filter: Optional[str] = None) -> 
 
         results.append(
             {
-                "conversation": best_fts["conv_name"] or "(без названия)",
+                "conversation": best_fts["conv_name"] or "(unnamed)",
                 "date": (best_fts["created_at"] or "")[:10],
                 "match_snippet": snip_text,
                 "messages": window,
@@ -322,14 +322,14 @@ async def claude_history_search(
     if not results:
         return f"[claude_history_search] No results found for query: '{query}'"
 
-    lines = [f"## История диалогов с Claude: '{query}'\n"]
-    lines.append(f"Найдено совпадений: {result.get('total_matched', 0)}, показано: {len(results)}\n")
+    lines = [f"## Claude conversation history: '{query}'\n"]
+    lines.append(f"Matches found: {result.get('total_matched', 0)}, displayed: {len(results)}\n")
 
     for i, r in enumerate(results, 1):
         lines.append(f"### {i}. {r['conversation']}  ({r['date']})")
-        lines.append(f"> Фрагмент: {r['match_snippet']}\n")
+        lines.append(f"> Snippet: {r['match_snippet']}\n")
         for msg in r["messages"]:
-            role = "**Ты**" if msg["sender"] == "human" else "**Claude**"
+            role = "**You**" if msg["sender"] == "human" else "**Claude**"
             lines.append(f"{role}: {msg['text']}\n")
         lines.append("---")
 

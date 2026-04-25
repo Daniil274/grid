@@ -28,11 +28,11 @@ async def read_markdown(
     Read a Markdown file and return structured content with images.
     Images in the markdown (e.g. ![alt](path)) are extracted and provided as visual inputs to the agent.
 
-    ВАЖНО ДЛЯ БОЛЬШИХ ДОКУМЕНТОВ:
-    - Для документов > 50000 символов используй start_char и max_chars для постепенного чтения
-    - Сначала прочитай начало (0-50000) чтобы найти содержание/оглавление
-    - Затем читай нужные разделы по диапазонам символов
-    - Не пытайся прочитать весь большой документ за раз!
+    IMPORTANT FOR LARGE DOCUMENTS:
+    - For documents > 50000 characters, use start_char and max_chars for incremental reading
+    - First read the beginning (0-50000) to find the table of contents
+    - Then read the required sections by character ranges
+    - Don't try to read the entire large document at once!
 
     Args:
         file_path: Path to the markdown file.
@@ -40,8 +40,8 @@ async def read_markdown(
         max_chars: Maximum number of characters to read (default: 50000, ~10-15 pages).
 
     Example:
-        read_markdown(ctx, "large_doc.md", start_char=0, max_chars=50000)  # Первая часть
-        read_markdown(ctx, "large_doc.md", start_char=50000, max_chars=50000)  # Вторая часть
+        read_markdown(ctx, "large_doc.md", start_char=0, max_chars=50000)  # First part
+        read_markdown(ctx, "large_doc.md", start_char=50000, max_chars=50000)  # Second part
     """
     try:
         visible_path = display_agent_path_from_ctx(file_path, ctx)
@@ -59,7 +59,7 @@ async def read_markdown(
                 content = full_content[start_char:end_char]
 
                 if start_char > 0 or end_char < total_chars:
-                    pagination_info = f"\n[Документ: символы {start_char}-{end_char} из {total_chars}]\n\n"
+                    pagination_info = f"\n[Document: characters {start_char}-{end_char} of {total_chars}]\n\n"
                     content = pagination_info + content
 
         except Exception as e:
