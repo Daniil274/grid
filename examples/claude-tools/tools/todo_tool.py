@@ -1,5 +1,5 @@
 """
-Todo Tool — управление задачами с хранением в рабочей директории агента.
+Todo Tool — task management with storage in the agent's working directory.
 """
 
 import json
@@ -93,16 +93,16 @@ def todo_write(
     priority: int = 1,
 ) -> str:
     """
-    Создаёт или обновляет задачу в todo-списке.
+    Creates or updates a task in the todo list.
 
     Args:
-        content:  Текст задачи
-        todo_id:  ID задачи для обновления (оставь пустым для создания новой)
-        status:   Статус: 'pending', 'in_progress', 'done'
-        priority: Приоритет 1–5 (5 = высший)
+        content:  Task text
+        todo_id:  Task ID for update (leave empty to create new)
+        status:   Status: 'pending', 'in_progress', 'done'
+        priority: Priority 1–5 (5 = highest)
 
     Returns:
-        Результат операции
+        Operation result
     """
     try:
         data = _load()
@@ -112,10 +112,10 @@ def todo_write(
         # CREATE a new task when todo_id is absent or a null-like value
         if _is_null(todo_id):
             if not content:
-                return "❌ Укажите content для создания задачи"
+                return "❌ Provide content to create a task"
 
             if status and status not in valid_statuses:
-                return f"❌ Некорректный статус: {status}. Допустимо: {', '.join(valid_statuses)}"
+                return f"❌ Invalid status: {status}. Allowed: {', '.join(valid_statuses)}"
 
             new_todo = {
                 "id": _new_id(),
@@ -129,7 +129,7 @@ def todo_write(
             data["todos"] = todos
             _save(data)
             short = content[:50] + ("..." if len(content) > 50 else "")
-            return f"➕ Создана задача [{new_todo['id']}]: {short}"
+            return f"➕ Task created [{new_todo['id']}]: {short}"
 
         # UPDATE an existing task
         for todo in todos:
@@ -138,7 +138,7 @@ def todo_write(
                     todo["content"] = content
                 if status:
                     if status not in valid_statuses:
-                        return f"❌ Некорректный статус: {status}. Допустимо: {', '.join(valid_statuses)}"
+                        return f"❌ Invalid status: {status}. Allowed: {', '.join(valid_statuses)}"
                     todo["status"] = status
                     if status == "done":
                         todo["completed_at"] = datetime.now().isoformat()
@@ -148,12 +148,12 @@ def todo_write(
                 _save(data)
 
                 emoji = {"pending": "⏳", "in_progress": "🔄", "done": "✅"}.get(todo["status"], "⏳")
-                return f"{emoji} Задача обновлена: {todo['content'][:50]}"
+                return f"{emoji} Task updated: {todo['content'][:50]}"
 
-        return f"❌ Задача с ID '{todo_id}' не найдена"
+        return f"❌ Task with ID '{todo_id}' not found"
 
     except Exception as exc:
-        return f"❌ Ошибка: {exc}"
+        return f"❌ Error: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -166,32 +166,32 @@ def todo_list(
     sort_by: str = "priority",
 ) -> str:
     """
-    Показывает список задач.
+    Shows the task list.
 
     Args:
-        status_filter: Фильтр ('pending', 'in_progress', 'done', 'all' или None)
-        sort_by:       Сортировка: 'priority', 'created', 'updated'
+        status_filter: Filter ('pending', 'in_progress', 'done', 'all' or None)
+        sort_by:       Sort by: 'priority', 'created', 'updated'
 
     Returns:
-        Список задач
+        Task list
     """
     try:
         data = _load()
         all_todos = data.get("todos", [])
 
         if not all_todos:
-            return "📋 Задач нет. Используй todo_write для создания."
+            return "📋 No tasks. Use todo_write to create one."
 
         valid_statuses = ("pending", "in_progress", "done")
         todos = all_todos
 
         if status_filter and status_filter != "all":
             if status_filter not in valid_statuses:
-                return f"❌ Некорректный фильтр: {status_filter}"
+                return f"❌ Invalid filter: {status_filter}"
             todos = [t for t in todos if t.get("status") == status_filter]
 
         if not todos:
-            return f"📋 Нет задач со статусом '{status_filter}'"
+            return f"📋 No tasks with status '{status_filter}'"
 
         if sort_by == "priority":
             todos = sorted(todos, key=lambda x: (-x.get("priority", 1), x.get("created_at", "")))
@@ -205,7 +205,7 @@ def todo_list(
         done = sum(1 for t in all_todos if t.get("status") == "done")
 
         lines = [
-            f"📋 Задачи (всего: {len(all_todos)}, ⏳{pending} 🔄{in_progress} ✅{done})",
+            f"📋 Tasks (total: {len(all_todos)}, ⏳{pending} 🔄{in_progress} ✅{done})",
             "",
         ]
         emoji_map = {"pending": "⏳", "in_progress": "🔄", "done": "✅"}
@@ -222,7 +222,7 @@ def todo_list(
         return "\n".join(lines)
 
     except Exception as exc:
-        return f"❌ Ошибка: {exc}"
+        return f"❌ Error: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -232,13 +232,13 @@ def todo_list(
 @function_tool
 def todo_delete(todo_id: str) -> str:
     """
-    Удаляет задачу по ID.
+    Deletes a task by ID.
 
     Args:
-        todo_id: ID задачи
+        todo_id: Task ID
 
     Returns:
-        Результат операции
+        Operation result
     """
     try:
         data = _load()
@@ -249,11 +249,11 @@ def todo_delete(todo_id: str) -> str:
                 todos.pop(i)
                 data["todos"] = todos
                 _save(data)
-                return f"🗑️ Удалена задача: {text}"
-        return f"❌ Задача с ID '{todo_id}' не найдена"
+                return f"🗑️ Task deleted: {text}"
+        return f"❌ Task with ID '{todo_id}' not found"
 
     except Exception as exc:
-        return f"❌ Ошибка: {exc}"
+        return f"❌ Error: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -263,20 +263,20 @@ def todo_delete(todo_id: str) -> str:
 @function_tool
 def todo_clear(status: Optional[str] = None) -> str:
     """
-    Очищает задачи (все или только с указанным статусом).
+    Clears tasks (all or only those with the specified status).
 
     Args:
-        status: Статус для очистки ('done', 'pending', 'in_progress') или None для всех
+        status: Status to clear ('done', 'pending', 'in_progress') or None for all
 
     Returns:
-        Результат операции
+        Operation result
     """
     try:
         data = _load()
         todos = data.get("todos", [])
 
         if not todos:
-            return "📋 Задач нет"
+            return "📋 No tasks"
 
         if status:
             original = len(todos)
@@ -284,12 +284,12 @@ def todo_clear(status: Optional[str] = None) -> str:
             removed = original - len(todos)
             data["todos"] = todos
             _save(data)
-            return f"🗑️ Удалено {removed} задач со статусом '{status}'"
+            return f"🗑️ Removed {removed} tasks with status '{status}'"
         else:
             count = len(todos)
             data["todos"] = []
             _save(data)
-            return f"🗑️ Удалены все задачи ({count} шт.)"
+            return f"🗑️ All tasks removed ({count})"
 
     except Exception as exc:
-        return f"❌ Ошибка: {exc}"
+        return f"❌ Error: {exc}"

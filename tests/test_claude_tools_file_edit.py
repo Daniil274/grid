@@ -63,7 +63,7 @@ def test_apply_unified_patch_validates_context_lines():
     else:
         raise AssertionError("Patch unexpectedly applied")
 
-    assert "Контекст патча не найден" in message
+    assert "Patch context not found" in message
     assert "wrong context" in message
 
 

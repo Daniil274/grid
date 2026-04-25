@@ -1,10 +1,13 @@
 """Tests for config-driven auto compact thresholds."""
 
+from pathlib import Path
+
 from core.compact import (
     calculate_token_warning_state,
     get_auto_compact_threshold,
     is_auto_compact_enabled,
 )
+from core.config import Config
 from schemas import CompactAutoConfig, CompactConfig
 
 
@@ -44,3 +47,14 @@ def test_warning_state_uses_model_context_window_and_config():
 def test_global_compact_disable_turns_off_auto_compact():
     compact_cfg = CompactConfig(enabled=False)
     assert is_auto_compact_enabled(compact_cfg) is False
+
+
+def test_claude_tools_example_uses_expected_compact_thresholds():
+    config = Config(str(Path("examples/claude-tools/config.yaml")))
+
+    pro_model = config.get_model("deepseek-v4-opencode")
+    flash_model = config.get_model("deepseek-v4-flash-opencode")
+    compact_cfg = config.config.compact
+
+    assert get_auto_compact_threshold(pro_model.context_window, compact_cfg) == 64000
+    assert get_auto_compact_threshold(flash_model.context_window, compact_cfg) == 128000

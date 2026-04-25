@@ -1,48 +1,48 @@
-# Отчет: TTL для долгосрочной памяти в Grid
+# Report: TTL for Long-Term Memory in Grid
 
-## Статус: ✅ ЗАВЕРШЕНО
+## Status: ✅ COMPLETED
 
 **Bead ID:** workspace-d46  
-**Дата завершения:** 2026-03-14  
-**Вердикт:** PASS (верифицировано в workspace-hpq)
+**Completion Date:** 2026-03-14  
+**Verdict:** PASS (verified in workspace-hpq)
 
 ---
 
-## Реализованные требования
+## Implemented Requirements
 
-| Требование | Статус | Комментарии |
+| Requirement | Status | Comments |
 |------------|--------|-------------|
-| Схема БД: ttl_days INTEGER NULL | ✅ | Колонка добавлена в SCHEMA_VERSION=4 |
-| Схема БД: last_accessed_at TEXT | ✅ | Колонка добавлена в SCHEMA_VERSION=4 |
-| MemoryStore.save() параметр ttl_days | ✅ | Optional[int] = None, default из config для long_term |
-| MemoryStore.search() обновляет last_accessed_at | ✅ | Через метод _touch_entries() |
-| MemoryStore.cleanup_expired() | ✅ | Архивирует записи с истекшим TTL |
-| Config: default_long_term_ttl_days=90 | ✅ | В grid/config.yaml |
-| Config: extend_ttl_on_access=true | ✅ | В grid/config.yaml |
+| DB schema: ttl_days INTEGER NULL | ✅ | Column added in SCHEMA_VERSION=4 |
+| DB schema: last_accessed_at TEXT | ✅ | Column added in SCHEMA_VERSION=4 |
+| MemoryStore.save() parameter ttl_days | ✅ | Optional[int] = None, default from config for long_term |
+| MemoryStore.search() updates last_accessed_at | ✅ | Via _touch_entries() method |
+| MemoryStore.cleanup_expired() | ✅ | Archives entries with expired TTL |
+| Config: default_long_term_ttl_days=90 | ✅ | In grid/config.yaml |
+| Config: extend_ttl_on_access=true | ✅ | In grid/config.yaml |
 | MemoryOptimizer periodic cleanup | ✅ | _ttl_cleanup_loop() |
-| Тесты | ✅ | 16 TTL тестов в test_memory_ttl.py |
+| Tests | ✅ | 16 TTL tests in test_memory_ttl.py |
 
 ---
 
-## Измененные файлы
+## Modified Files
 
 ### 1. grid/core/memory_store.py
 
-#### Добавлено в метод save():
+#### Added to save() method:
 ```python
 def save(
     self,
     content: str,
     type: str = "long_term",
-    # ... другие параметры ...
-    ttl_days: Optional[int] = None  # НОВЫЙ ПАРАМЕТР
+    # ... other parameters ...
+    ttl_days: Optional[int] = None  # NEW PARAMETER
 ) -> int:
     # ...
-    # Применение default TTL для long_term
+    # Apply default TTL for long_term
     if ttl_days is None and type == "long_term" and self.config:
         ttl_days = self.config.get('memory_optimizer.default_long_term_ttl_days', 90)
     
-    # INSERT с ttl_days и last_accessed_at
+    # INSERT with ttl_days and last_accessed_at
     cursor = conn.execute(
         """
         INSERT INTO memory (type, content, tags, importance, session_id, task_id, user_id, agent_id, status, summary, entities, connections, source_ids, ttl_days, last_accessed_at)
@@ -52,12 +52,12 @@ def save(
     )
 ```
 
-#### Новый метод _touch_entries():
+#### New method _touch_entries():
 ```python
 def _touch_entries(self, entry_ids: List[int]):
     """
-    Обновляет last_accessed_at для указанных записей.
-    Вызывается при чтении если extend_ttl_on_access=true.
+    Updates last_accessed_at for the specified entries.
+    Called on read if extend_ttl_on_access=true.
     """
     if not entry_ids or not self.config:
         return
@@ -76,19 +76,19 @@ def _touch_entries(self, entry_ids: List[int]):
         conn.commit()
 ```
 
-#### Обновлен search():
+#### Updated search():
 ```python
 def search(self, query: str = "", ...) -> List[MemoryEntry]:
-    # ... выполнение запроса ...
+    # ... execute query ...
     entries = [MemoryEntry(**dict(row)) for row in rows]
     
-    # Обновляем last_accessed_at для всех найденных записей
+    # Update last_accessed_at for all found entries
     self._touch_entries([e.id for e in entries])
     
     return entries
 ```
 
-#### Обновлен get_by_id():
+#### Updated get_by_id():
 ```python
 def get_by_id(self, entry_id: int) -> Optional[MemoryEntry]:
     with self._get_connection() as conn:
@@ -97,25 +97,25 @@ def get_by_id(self, entry_id: int) -> Optional[MemoryEntry]:
         
         if row:
             entry = MemoryEntry(**dict(row))
-            # Обновляем last_accessed_at
+            # Update last_accessed_at
             self._touch_entries([entry.id])
             return entry
         return None
 ```
 
-#### Новый метод cleanup_expired():
+#### New method cleanup_expired():
 ```python
 def cleanup_expired(self) -> int:
     """
-    Архивирует записи с истекшим TTL.
+    Archives entries with expired TTL.
     
-    TTL считается истекшим если:
+    TTL is considered expired if:
     - ttl_days IS NOT NULL
     - last_accessed_at IS NOT NULL
     - datetime(last_accessed_at, '+' || ttl_days || ' days') < datetime('now')
     
     Returns:
-        Количество архивированных записей
+        Number of archived entries
     """
     with self._get_connection() as conn:
         cursor = conn.execute("""
@@ -137,14 +137,14 @@ def cleanup_expired(self) -> int:
 
 ### 2. grid/core/memory_optimizer.py
 
-#### Добавлен periodic TTL cleanup loop:
+#### Added periodic TTL cleanup loop:
 ```python
 class MemoryOptimizer:
     def __init__(self, memory_store: MemoryStore, config: Config, agent_factory: Any):
         # ...
         self.ttl_cleanup_interval_seconds = self.config.get('memory_optimizer.ttl_cleanup_interval_seconds', 3600)
         
-        # Запуск TTL cleanup loop
+        # Start TTL cleanup loop
         self.ttl_cleanup_task = None
         self._ttl_cleanup_running = True
         self.ttl_cleanup_task = asyncio.create_task(self._ttl_cleanup_loop())
@@ -152,7 +152,7 @@ class MemoryOptimizer:
     async def _ttl_cleanup_loop(self):
         """
         Periodic TTL cleanup loop.
-        Вызывает store.cleanup_expired() каждые ttl_cleanup_interval_seconds.
+        Calls store.cleanup_expired() every ttl_cleanup_interval_seconds.
         """
         logger.info("MemoryOptimizer._ttl_cleanup_loop started with interval=%s seconds", 
                     self.ttl_cleanup_interval_seconds)
@@ -170,10 +170,10 @@ class MemoryOptimizer:
                 logger.error("MemoryOptimizer._ttl_cleanup_loop error: %s", e)
     
     async def stop_periodic_loop(self):
-        """Останавливает оба цикла: consolidation и TTL cleanup."""
-        # ... остановка consolidation loop ...
+        """Stops both loops: consolidation and TTL cleanup."""
+        # ... stop consolidation loop ...
         
-        # Остановка TTL cleanup loop
+        # Stop TTL cleanup loop
         if self.ttl_cleanup_task:
             self._ttl_cleanup_running = False
             self.ttl_cleanup_task.cancel()
@@ -188,113 +188,113 @@ class MemoryOptimizer:
 
 ### 3. grid/config.yaml
 
-#### Добавлены настройки TTL:
+#### Added TTL settings:
 ```yaml
 memory_optimizer:
   consolidation_batch_size: 5
   consolidation_trigger: "on_save"
   consolidation_interval_seconds: 3600
   min_short_term_age_hours: 1
-  default_long_term_ttl_days: 90      # ← НОВОЕ
-  extend_ttl_on_access: true          # ← НОВОЕ
-  ttl_cleanup_interval_seconds: 3600  # ← НОВОЕ
+  default_long_term_ttl_days: 90      # ← NEW
+  extend_ttl_on_access: true          # ← NEW
+  ttl_cleanup_interval_seconds: 3600  # ← NEW
 ```
 
 ---
 
-## Примеры использования
+## Usage Examples
 
-### Пример 1: Сохранение с явным TTL
+### Example 1: Saving with Explicit TTL
 ```python
 from core.memory_store import MemoryStore
 
 store = MemoryStore(db_path="data/memory.db")
 
-# Сохранить с TTL 7 дней
+# Save with TTL of 7 days
 entry_id = store.save(
-    content="Временная заметка",
+    content="Temporary note",
     type="long_term",
     ttl_days=7
 )
 ```
 
-### Пример 2: Сохранение с default TTL (из config)
+### Example 2: Saving with default TTL (from config)
 ```python
-# При сохранении long_term без указания ttl_days
-# будет использован default_long_term_ttl_days=90 из config
+# When saving long_term without specifying ttl_days
+# the default_long_term_ttl_days=90 from config will be used
 entry_id = store.save(
-    content="Долгосрочное воспоминание",
-    type="long_term"  # ttl_days=90 автоматически
+    content="Long-term memory",
+    type="long_term"  # ttl_days=90 automatically
 )
 ```
 
-### Пример 3: Бессрочная запись
+### Example 3: Indefinite Entry
 ```python
-# NULL TTL = запись никогда не будет архивирована
+# NULL TTL = entry will never be archived
 entry_id = store.save(
-    content="Важная константа",
+    content="Important constant",
     type="long_term",
-    ttl_days=None  # явно указано
+    ttl_days=None  # explicitly specified
 )
 ```
 
-### Пример 4: Ручной запуск cleanup
+### Example 4: Manual Cleanup
 ```python
-# Архивировать все истекшие записи
+# Archive all expired entries
 archived_count = store.cleanup_expired()
-print(f"Архивировано записей: {archived_count}")
+print(f"Archived entries: {archived_count}")
 ```
 
-### Пример 5: Проверка истечения TTL
+### Example 5: Checking TTL Expiration
 ```python
 entry = store.get_by_id(entry_id)
-print(f"TTL дней: {entry.ttl_days}")
-print(f"Последний доступ: {entry.last_accessed_at}")
+print(f"TTL days: {entry.ttl_days}")
+print(f"Last accessed: {entry.last_accessed_at}")
 
 from datetime import datetime, timedelta
 if entry.ttl_days and entry.last_accessed_at:
     accessed = datetime.fromisoformat(entry.last_accessed_at)
     expires = accessed + timedelta(days=entry.ttl_days)
     is_expired = datetime.now() > expires
-    print(f"Истекло: {is_expired}, Архивировано: {bool(entry.is_archived)}")
+    print(f"Expired: {is_expired}, Archived: {bool(entry.is_archived)}")
 ```
 
 ---
 
-## Результаты тестов
+## Test Results
 
 ```
 pytest grid/tests/test_memory_ttl.py -v
 
 16 passed in 3.40s
 
-Все тесты memory:
+All memory tests:
 - test_memory_ttl.py:           16 passed
 - test_memory_deduplication.py: 21 passed  
 - test_memory_optimizer.py:      7 passed
 ----------------------------------------
-ИТОГО:                        60 passed, 1 warning
+TOTAL:                        60 passed, 1 warning
 ```
 
 ---
 
-## Обратная совместимость
+## Backward Compatibility
 
-| Сценарий | Поведение |
+| Scenario | Behavior |
 |----------|-----------|
-| Существующие записи без ttl_days | `NULL` = никогда не архивируются |
-| MemoryStore без config | Работает как раньше, TTL не применяется |
-| extend_ttl_on_access=false | last_accessed_at не обновляется при чтении |
-| short_term тип | Не получает default TTL (только если явно указан) |
+| Existing entries without ttl_days | `NULL` = never archived |
+| MemoryStore without config | Works as before, TTL not applied |
+| extend_ttl_on_access=false | last_accessed_at not updated on read |
+| short_term type | Does not get default TTL (only if explicitly specified) |
 
 ---
 
-## Выводы
+## Conclusions
 
-TTL функциональность для долгосрочной памяти полностью реализована:
+TTL functionality for long-term memory is fully implemented:
 
-1. ✅ **Автоматическая архивация** старых неиспользуемых записей
-2. ✅ **Продление TTL** при активном использовании (опционально)
-3. ✅ **Гибкая настройка** через config.yaml
-4. ✅ **Полная обратная совместимость** с существующими данными
-5. ✅ **Покрыто тестами** (16 специализированных + 44 регрессионных)
+1. ✅ **Automatic archiving** of old unused entries
+2. ✅ **TTL extension** on active use (optional)
+3. ✅ **Flexible configuration** via config.yaml
+4. ✅ **Full backward compatibility** with existing data
+5. ✅ **Test coverage** (16 specialized + 44 regression)

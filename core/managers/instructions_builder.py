@@ -149,12 +149,12 @@ class InstructionsBuilder:
         config_dir = self.config.get_config_directory()
 
         context_parts = [
-            "Информация о путях:",
-            f"Рабочая директория: {working_dir}",
+            "Path information:",
+            f"Working directory: {working_dir}",
         ]
 
         if not self.container_id:
-            context_parts.append(f"Директория конфигурации: {config_dir}")
+            context_parts.append(f"Configuration directory: {config_dir}")
 
         if context_path:
             if self.container_id:
@@ -176,15 +176,15 @@ class InstructionsBuilder:
 
             context_parts.extend(
                 [
-                    f"Контекстный путь: {context_path}",
-                    f"Абсолютный контекстный путь: {absolute_path}",
+                    f"Context path: {context_path}",
+                    f"Absolute context path: {absolute_path}",
                 ]
             )
 
         context_parts.extend(
             [
                 "",
-                "Используй эти пути для работы с файлами и директориями.",
+                "Use these paths to work with files and directories.",
             ]
         )
 
@@ -195,7 +195,7 @@ class InstructionsBuilder:
             return None
         return (
             f"Context reference: {context_id}. "
-            f'Always append the line "Контекст ID: {context_id}" '
+            f'Always append the line "Context ID: {context_id}" '
             "to every reply so humans or agents can return to this dialogue via that identifier."
         )
 

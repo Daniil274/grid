@@ -22,9 +22,9 @@ from agents import RunContextWrapper, function_tool
 logger = logging.getLogger(__name__)
 verbose_logger = logging.getLogger("grid.verbose")
 
-# Семафор для последовательного выполнения orchestrate (лимит = 1)
+# Semaphore for sequential orchestrate execution (limit = 1)
 _orchestrate_semaphore = asyncio.Semaphore(1)
-# Глубина вложенности orchestrate в текущем asyncio-контексте (для защиты от deadlock при реэнтерансе)
+# Nesting depth of orchestrate in the current asyncio context (to protect against deadlock on reentry)
 _orchestrate_depth: contextvars.ContextVar[int] = contextvars.ContextVar("_orchestrate_depth", default=0)
 
 
@@ -125,10 +125,10 @@ def _coerce_tool_list(val: Any) -> Optional[List[str]]:
 
 async def _review_once(factory: Any, *, model_key: str, draft: str, goal: str) -> _ReviewDecision:
     reviewer_instructions = (
-        "Ты проверяющий (reviewer). Тебе дадут цель и черновик решения.\n"
-        "Нужно найти ошибки/пробелы/риски и решить: approve или revise.\n"
-        "Верни строго JSON: {\"decision\":\"approve|revise\",\"feedback\":\"...\"}.\n"
-        "Если approve — feedback может быть пустым."
+        "You are a reviewer. You will be given a goal and a draft solution.\n"
+        "You need to find errors/gaps/risks and decide: approve or revise.\n"
+        "Return strict JSON: {\"decision\":\"approve|revise\",\"feedback\":\"...\"}.\n"
+        "If approve — feedback can be empty."
     )
     reviewer = await factory.create_dynamic_agent(
         name=f"reviewer-{uuid.uuid4().hex[:6]}",
@@ -136,14 +136,14 @@ async def _review_once(factory: Any, *, model_key: str, draft: str, goal: str) -
         model_key=model_key,
         tool_names=[],
     )
-    prompt = f"ЦЕЛЬ:\n{goal}\n\nЧЕРНОВИК:\n{draft}\n"
+    prompt = f"GOAL:\n{goal}\n\nDRAFT:\n{draft}\n"
     out = await factory.run_agent_object_simple(reviewer, prompt)
     parsed = _parse_json_from_text(_extract_text(out)) or {}
     decision = str(parsed.get("decision", "")).strip().lower()
     feedback = str(parsed.get("feedback", "")).strip()
     if decision not in ("approve", "revise"):
         # Fail-safe: ask for revision
-        return _ReviewDecision(decision="revise", feedback="Reviewer вернул некорректный формат; требуется переработка.")
+        return _ReviewDecision(decision="revise", feedback="Reviewer returned invalid format; revision required.")
     return _ReviewDecision(decision=decision, feedback=feedback)
 
 
@@ -151,9 +151,9 @@ async def _committee_vote(factory: Any, *, model_key: str, goal: str, draft: str
     judges: List[_Vote] = []
     for _ in range(max(1, n)):
         judge_instructions = (
-            "Ты член комиссии (judge). Тебе дадут цель и решение.\n"
-            "Оцени, достаточно ли это хорошо для принятия.\n"
-            "Верни строго JSON: {\"vote\":\"accept|reject\",\"reason\":\"...\"}."
+            "You are a judge. You will be given a goal and a solution.\n"
+            "Evaluate whether it is good enough for acceptance.\n"
+            "Return strict JSON: {\"vote\":\"accept|reject\",\"reason\":\"...\"}."
         )
         judge = await factory.create_dynamic_agent(
             name=f"judge-{uuid.uuid4().hex[:6]}",
@@ -161,14 +161,14 @@ async def _committee_vote(factory: Any, *, model_key: str, goal: str, draft: str
             model_key=model_key,
             tool_names=[],
         )
-        prompt = f"ЦЕЛЬ:\n{goal}\n\nРЕШЕНИЕ:\n{draft}\n"
+        prompt = f"GOAL:\n{goal}\n\nSOLUTION:\n{draft}\n"
         out = await factory.run_agent_object_simple(judge, prompt)
         parsed = _parse_json_from_text(_extract_text(out)) or {}
         vote = str(parsed.get("vote", "")).strip().lower()
         reason = str(parsed.get("reason", "")).strip()
         if vote not in ("accept", "reject"):
             vote = "reject"
-            reason = reason or "Некорректный формат голоса."
+            reason = reason or "Invalid vote format."
         judges.append(_Vote(vote=vote, reason=reason))
 
     accept_count = sum(1 for j in judges if j.vote == "accept")
@@ -187,33 +187,33 @@ async def orchestrate(
     init_tools: Optional[str] = None,
 ) -> str:
     """
-    Мета-инструмент: запускает динамического исполнителя для решения задачи.
-    Аргументы:
-    - task: Задача, которую должен выполнить агент
-    - agent_system_prompt: Системный промпт (роль и инструкции) для агента.
-    - executor_tools: Список инструментов для агента
-    - init_tools: JSON-строка со списком инструментов для сбора контекста перед
-      запуском агента. Формат: '[{"name": "tool_name", "parameters": {...}}]'.
-      Результаты этих инструментов будут добавлены в инструкции агента.
-      Пример: '[{"name":"file_list","parameters":{"directory":"."}}]'
+    Meta-tool: launches a dynamic agent to solve a task.
+    Arguments:
+    - task: The task the agent should perform
+    - agent_system_prompt: System prompt (role and instructions) for the agent.
+    - executor_tools: List of tools for the agent
+    - init_tools: JSON string with a list of tools for context collection before
+      launching the agent. Format: '[{"name": "tool_name", "parameters": {...}}]'.
+      The results of these tools will be added to the agent's instructions.
+      Example: '[{"name":"file_list","parameters":{"directory":"."}}]'
 
-    Примечание: Вызовы orchestrate выполняются последовательно (не параллельно)
-    для предотвращения конфликтов и обеспечения предсказуемости выполнения.
+    Note: orchestrate calls are executed sequentially (not in parallel)
+    to prevent conflicts and ensure predictable execution.
     """
     depth = _orchestrate_depth.get()
     token = _orchestrate_depth.set(depth + 1)
     acquired = False
     try:
-        # Используем семафор только на верхнем уровне.
-        # Это делает orchestrate реентерабельным (если orchestrate вызывает orchestrate),
-        # не создавая deadlock внутри одного и того же asyncio Task.
+        # Use semaphore only at the top level.
+        # This makes orchestrate reentrant (if orchestrate calls orchestrate),
+        # without creating a deadlock within the same asyncio Task.
         if depth == 0:
             await _orchestrate_semaphore.acquire()
             acquired = True
 
         factory = _get_factory_from_context(context)
         if factory is None:
-            return "❌ orchestrate: нет доступа к AgentFactory (ожидается context.context.factory)."
+            return "❌ orchestrate: no access to AgentFactory (expected context.context.factory)."
 
         # Import pipeline registry (inside function to avoid circular import)
         from core.tracing.pipeline_registry import PipelineRegistry, PipelineStatus
@@ -246,7 +246,7 @@ async def orchestrate(
             f"Executor tools: {executor_tools}\n{'='*80}\n"
         )
 
-        # Пытаемся получить модель из конфига инструмента orchestrate, если не передана явно
+        # Try to get the model from the orchestrate tool config if not passed explicitly
         default_model_key = None
         try:
             tool_cfg = factory.config.get_tool("orchestrate")
@@ -256,7 +256,7 @@ async def orchestrate(
             pass
 
         effective_key = _coerce_optional_str(model_key)
-        # Строку "default" трактуем как "модель из конфига" (DEFAULT_MODEL или default_agent), а не как ключ модели
+        # Treat "default" as "model from config" (DEFAULT_MODEL or default_agent), not as a model key
         if effective_key and effective_key.strip().lower() == "default":
             effective_key = None
         resolved_model_key = effective_key or default_model_key or factory.resolve_model_key(None)
@@ -351,7 +351,7 @@ async def orchestrate(
         )
         return result_json
     finally:
-        # Важно: сбрасываем depth корректно даже при исключениях
+        # Important: reset depth correctly even on exceptions
         _orchestrate_depth.reset(token)
         if acquired:
             _orchestrate_semaphore.release()

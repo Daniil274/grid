@@ -1,8 +1,8 @@
 """
-Web Tools — загрузка веб-страниц и поиск в интернете.
+Web Tools — loading web pages and searching the internet.
 
-web_fetch  — загружает страницу и конвертирует в markdown
-web_search — веб-поиск через Firecrawl API (требует FIRECRAWL_API_KEY)
+web_fetch  — loads a page and converts it to markdown
+web_search — web search via Firecrawl API (requires FIRECRAWL_API_KEY)
 """
 
 import asyncio
@@ -63,20 +63,20 @@ def _validate_url(url: str) -> Optional[str]:
     try:
         parsed = urlparse(url)
     except Exception:
-        return f"❌ Некорректный URL: {url}"
+        return f"❌ Invalid URL: {url}"
 
     if not parsed.scheme or not parsed.netloc:
-        return f"❌ Некорректный URL: {url}"
+        return f"❌ Invalid URL: {url}"
 
     scheme = parsed.scheme.lower()
     if scheme not in ("http", "https"):
         if scheme in BLOCKED_SCHEMES:
-            return f"❌ Протокол '{scheme}://' запрещён"
-        return f"❌ Поддерживаются только http:// и https://"
+            return f"❌ Protocol '{scheme}://' is blocked"
+        return f"❌ Only http:// and https:// are supported"
 
     host = (parsed.hostname or "").lower()
     if host in BLOCKED_HOSTNAMES:
-        return f"❌ Доступ к '{host}' запрещён"
+        return f"❌ Access to '{host}' is blocked"
 
     # Block private / loopback / link-local / reserved IP addresses (SSRF prevention)
     try:
@@ -89,7 +89,7 @@ def _validate_url(url: str) -> Optional[str]:
             or addr.is_multicast
             or addr.is_unspecified
         ):
-            return f"❌ Доступ к внутреннему адресу запрещён: {host}"
+            return f"❌ Access to internal address is blocked: {host}"
     except ValueError:
         pass  # Not an IP address — hostname, proceed
 
@@ -115,7 +115,7 @@ def _run_async(coro, timeout: float = DEFAULT_TIMEOUT + 10):
 async def _fetch_url(url: str, timeout: int) -> tuple:
     """Returns (status_code, content, error_message)."""
     if not HAS_AIOHTTP:
-        return 0, "", "aiohttp не установлен. Установите: pip install aiohttp"
+        return 0, "", "aiohttp is not installed. Install: pip install aiohttp"
 
     async with aiohttp.ClientSession() as session:
         async with session.get(
@@ -125,13 +125,13 @@ async def _fetch_url(url: str, timeout: int) -> tuple:
             if "text/html" in ct or "text/plain" in ct:
                 text = await response.text()
                 return response.status, text, ""
-            return response.status, "", f"Неподдерживаемый Content-Type: {ct}"
+            return response.status, "", f"Unsupported Content-Type: {ct}"
 
 
 def _truncate(content: str, max_len: int = MAX_CONTENT_LENGTH) -> str:
     if len(content) <= max_len:
         return content
-    return content[:max_len] + f"\n\n... [обрезано {len(content) - max_len} символов] ..."
+    return content[:max_len] + f"\n\n... [truncated {len(content) - max_len} characters] ..."
 
 
 def _html_to_markdown(html: str) -> str:
@@ -167,15 +167,15 @@ def web_fetch(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> str:
     """
-    Загружает веб-страницу и конвертирует в markdown.
+    Loads a web page and converts it to markdown.
 
     Args:
-        url:       URL для загрузки (только http:// и https://)
-        render_js: JS-рендеринг через Firecrawl (нужен FIRECRAWL_API_KEY)
-        timeout:   Таймаут в секундах
+        url:       URL to load (only http:// and https://)
+        render_js: JS rendering via Firecrawl (requires FIRECRAWL_API_KEY)
+        timeout:   Timeout in seconds
 
     Returns:
-        Содержимое страницы в формате markdown
+        Page content in markdown format
     """
     err = _validate_url(url)
     if err:
@@ -185,17 +185,17 @@ def web_fetch(
         return _fetch_with_firecrawl(url, timeout)
 
     if not HAS_AIOHTTP:
-        return "❌ aiohttp не установлен. Установите: pip install aiohttp"
+        return "❌ aiohttp is not installed. Install: pip install aiohttp"
 
     try:
         status, content, error = _run_async(_fetch_url(url, timeout), timeout=timeout + 10)
     except Exception as exc:
-        return f"❌ Ошибка загрузки: {exc}"
+        return f"❌ Load error: {exc}"
 
     if error:
         return f"❌ {error}"
     if status != 200:
-        return f"❌ HTTP {status} при загрузке {url}"
+        return f"❌ HTTP {status} when loading {url}"
 
     title = ""
     if HAS_BS4:
@@ -212,9 +212,9 @@ def web_fetch(
 def _fetch_with_firecrawl(url: str, timeout: int) -> str:
     api_key = os.environ.get("FIRECRAWL_API_KEY")
     if not api_key:
-        return "❌ Для JS-рендеринга нужен FIRECRAWL_API_KEY"
+        return "❌ FIRECRAWL_API_KEY is required for JS rendering"
     if not HAS_AIOHTTP:
-        return "❌ aiohttp не установлен. Установите: pip install aiohttp"
+        return "❌ aiohttp is not installed. Install: pip install aiohttp"
 
     async def _do():
         async with aiohttp.ClientSession() as session:
@@ -239,7 +239,7 @@ def _fetch_with_firecrawl(url: str, timeout: int) -> str:
     try:
         return _run_async(_do(), timeout=timeout + 10)
     except Exception as exc:
-        return f"❌ Ошибка Firecrawl: {exc}"
+        return f"❌ Firecrawl error: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -252,26 +252,26 @@ def web_search(
     max_results: int = 5,
 ) -> str:
     """
-    Выполняет веб-поиск через Firecrawl API.
+    Performs a web search via the Firecrawl API.
 
-    Требует FIRECRAWL_API_KEY в переменных окружения.
+    Requires FIRECRAWL_API_KEY in environment variables.
 
     Args:
-        query:       Поисковый запрос
-        max_results: Количество результатов (1–10)
+        query:       Search query
+        max_results: Number of results (1–10)
 
     Returns:
-        Результаты поиска
+        Search results
     """
     api_key = os.environ.get("FIRECRAWL_API_KEY")
     if not api_key:
         return (
-            "❌ Для веб-поиска нужен FIRECRAWL_API_KEY.\n"
-            "Получите бесплатный ключ на https://firecrawl.dev\n"
-            "Затем: export FIRECRAWL_API_KEY=your_key"
+            "❌ FIRECRAWL_API_KEY is required for web search.\n"
+            "Get a free key at https://firecrawl.dev\n"
+            "Then: export FIRECRAWL_API_KEY=your_key"
         )
     if not HAS_AIOHTTP:
-        return "❌ aiohttp не установлен. Установите: pip install aiohttp"
+        return "❌ aiohttp is not installed. Install: pip install aiohttp"
 
     max_results = max(1, min(10, max_results))
 
@@ -295,11 +295,11 @@ def web_search(
 
                 items = data.get("data", [])
                 if not items:
-                    return f"🔍 По запросу '{query}' ничего не найдено"
+                    return f"🔍 Nothing found for query '{query}'"
 
-                lines = [f"🔍 Результаты поиска: '{query}'\n"]
+                lines = [f"🔍 Search results for '{query}'\n"]
                 for i, item in enumerate(items, 1):
-                    title = item.get("title", "Без названия")
+                    title = item.get("title", "Untitled")
                     item_url = item.get("url", "")
                     desc = item.get("description", "")
                     md = item.get("markdown", "")
@@ -317,4 +317,4 @@ def web_search(
     try:
         return _run_async(_do(), timeout=70)
     except Exception as exc:
-        return f"❌ Ошибка поиска: {exc}"
+        return f"❌ Search error: {exc}"

@@ -50,7 +50,7 @@ async def test_progress_observer_renders_compact_tool_flow():
     first_text = bot.calls[-1]["text"]
     assert "grep_tool" in first_text
     assert "tools: <b>0</b>" in first_text
-    assert "Последние шаги" in first_text
+    assert "Last steps" in first_text
 
     observer.handle_event(
         _tool_event(
@@ -65,7 +65,7 @@ async def test_progress_observer_renders_compact_tool_flow():
 
     final_text = bot.calls[-1]["text"]
     assert "tools: <b>1</b>" in final_text
-    assert "готово" in final_text
+    assert "done" in final_text
     assert "found 8 matches" in final_text
 
 
@@ -92,5 +92,5 @@ async def test_progress_observer_can_hide_tool_steps():
     await observer.flush(force=True)
 
     text = bot.calls[-1]["text"]
-    assert "Последние шаги" not in text
-    assert "Запускаю bash_tool" in text
+    assert "Last steps" not in text
+    assert "Running bash_tool" in text

@@ -46,7 +46,7 @@ compact:
     max_consecutive_failures: 3
 telegram:
   token_env: TELEGRAM_BOT_TOKEN
-  # Прокси для запросов к Telegram API (например Xray: http или socks5 на localhost)
+  # Proxy for Telegram API requests (e.g. Xray: http or socks5 on localhost)
   # proxy: "http://127.0.0.1:10809"
   # proxy: "socks5://127.0.0.1:10808"
   polling_timeout: 30
@@ -97,7 +97,7 @@ models:
     provider: openrouter
     temperature: 0.7
     max_tokens: 8192
-    description: Gemini 3.1 Lite модель
+    description: Gemini 3.1 Lite model
     streaming_enabled: true
     capabilities: ["vision", "text", "code"]
   glm-4.7-flash:
@@ -105,7 +105,7 @@ models:
     provider: openrouter
     temperature: 0.7
     max_tokens: 8000
-    description: GLM 4.7 Flash модель
+    description: GLM 4.7 Flash model
     streaming_enabled: true
     capabilities: ["vision", "text", "code"]
   gpt-5.4-nano:
@@ -120,7 +120,7 @@ models:
     provider: openrouter
     temperature: 0.5
     max_tokens: 4000
-    description: Healer Alpha модель
+    description: Healer Alpha model
     streaming_enabled: true
     capabilities: ["vision", "text", "code"]
   kimi-k2.5-opencode:
@@ -128,7 +128,7 @@ models:
     provider: opencode
     temperature: 0.5
     max_tokens: 8000
-    description: kimi-k2.5 модель
+    description: kimi-k2.5 model
     streaming_enabled: true
     context_window: 22000
     preserve_reasoning_content: true
@@ -138,7 +138,7 @@ models:
     provider: opencode
     temperature: 0.5
     max_tokens: 8000
-    description: kimi-k2.5 модель
+    description: kimi-k2.5 model
     streaming_enabled: true
     preserve_reasoning_content: true
 embeddings:
@@ -178,38 +178,38 @@ checkers:
     model: qwen3
     purpose: output_audit
     prompt: |
-      Ты проверяющий агент. Тебе предоставляется контекст задачи агента, вывод агента и список использованных инструментов.
-      Проверь что агент использует оптимальный инструмент для выполнения задачи и его действия соответствуют контексту и цели задачи.
-      Вход: одна строка JSON с полями task_text, tools_used, agent_output.
-      Верни строго JSON: {"status":"ok|failed","reason":"...", "details":"..."}.
+      You are a checking agent. You are given the agent's task context, agent output, and a list of used tools.
+      Check that the agent uses the optimal tool for the task and its actions align with the context and goal of the task.
+      Input: a JSON string with fields task_text, tools_used, agent_output.
+      Return strictly JSON: {"status":"ok|failed","reason":"...", "details":"..."}.
     tool_prompt: |
-      Ты проверяющий агент вызовов инструментов. Оцени, корректен ли вызов инструмента с учётом цели задачи.
-      Не блокируй вызовы инструментов, проверяющих доступ.
-      Вход: JSON {task_text, tools_used, tool_name, tool_arguments}.
-      Верни строго JSON: {"status":"ok|failed","reason":"...","details":"..."}.
+      You are a tool-call checking agent. Evaluate whether the tool call is correct given the task goal.
+      Do not block access-checking tool calls.
+      Input: JSON {task_text, tools_used, tool_name, tool_arguments}.
+      Return strictly JSON: {"status":"ok|failed","reason":"...","details":"..."}.
 tools:
   file_read:
     type: function
-    description: Читает содержимое файла.
+    description: Reads the contents of a file.
   file_write:
     type: function
-    description: Записывает содержимое в файл.
+    description: Writes content to a file.
   file_edit_patch:
     type: function
-    description: Редактирует файл с помощью патча в формате unified diff.
+    description: Edits a file using a patch in unified diff format.
   file_list:
     type: function
-    description: Список файлов в директории (без дерева).
+    description: List files in a directory (without tree).
   get_file_info:
     type: function
-    description: Информация о файле.
+    description: File information.
   list_files:
     type: function
-    description: Инструмент для получения списка файлов в директории.
+    description: Tool for listing files in a directory.
   pdf:
     type: function
-    description: Рендерит страницы PDF в PNG, сохраняет их в pdf_output и 
-      возвращает как изображения
+    description: Renders PDF pages to PNG, saves them to pdf_output and
+      returns as images
   memory_save:
     type: function
     description: Save information to memory
@@ -221,41 +221,40 @@ tools:
     description: Delete memory entry
   skill_save:
     type: function
-    description: Сохранить или обновить навык в БД (upsert по имени)
+    description: Save or update a skill in the database (upsert by name)
   skill_read:
     type: function
-    description: Прочитать содержимое навыка по имени
+    description: Read skill content by name
   skill_search:
     type: function
-    description: Поиск навыков по тексту и/или тегам (FTS)
+    description: Search skills by text and/or tags (FTS)
   skill_update:
     type: function
-    description: Обновить имя, содержимое или теги существующего навыка
+    description: Update name, content, or tags of an existing skill
   skill_delete:
     type: function
-    description: Удалить навык по имени
+    description: Delete skill by name
   search_tools:
     type: function
-    description: Найти доступные инструменты по имени/описанию с учётом 
-      модальностей модели
+    description: Find available tools by name/description considering
+      model modalities
   search_skills:
     type: function
-    description: Поиск навыков в БД по тексту и тегам (кросс-агентный)
+    description: Search skills in the database by text and tags (cross-agent)
   semantic_search:
     type: function
-    description: Семантический поиск по кодовой базе (по смыслу, не по ключевым 
-      словам)
+    description: Semantic search over the codebase (by meaning, not by keywords)
     prompt_addition: |
-      Используй semantic_search_code(query, directory) для поиска кода по смыслу запроса.
-      Если индекс пустой — сначала вызови index_codebase(directory).
-      После индексации повторная индексация не нужна до значительного изменения кода.
+      Use semantic_search_code(query, directory) to search code by meaning of the query.
+      If the index is empty — first call index_codebase(directory).
+      After indexing, re-indexing is not needed until significant code changes.
   index_codebase:
     type: function
-    description: Индексирует файлы кодовой базы в векторное хранилище для 
+    description: Indexes codebase files into a vector store for
       semantic_search
     prompt_addition: |
-      Используй index_codebase(directory, file_extensions) перед первым semantic_search.
-      file_extensions по умолчанию покрывает .py, .js, .ts и другие языки.
+      Use index_codebase(directory, file_extensions) before the first semantic_search.
+      file_extensions by default covers .py, .js, .ts and other languages.
   semantic_memory_search:
     type: function
     description: Hybrid vector+keyword search over memory by MEANING, not just 
@@ -277,32 +276,32 @@ tools:
       something they've worked on before or when domain context is needed.
 
 # ============================================================================
-  # System Introspection Tools - мета-информация о системе
+  # System Introspection Tools - meta-information about the system
   # ============================================================================
 
   system_list_agents:
     type: "function"
-    description: "Список всех агентов системы с их описаниями и возможностями"
+    description: "List all system agents with their descriptions and capabilities"
 
   system_get_agent_info:
     type: "function"
-    description: "Детальная информация об агенте: модель, инструменты, промпт"
+    description: "Detailed information about an agent: model, tools, prompt"
 
   system_list_tools:
     type: "function"
-    description: "Список всех инструментов системы по категориям"
+    description: "List all system tools by category"
 
   system_get_tool_info:
     type: "function"
-    description: "Детальная информация об инструменте: параметры, описание"
+    description: "Detailed information about a tool: parameters, description"
 
   system_help:
     type: "function"
-    description: "Справка по системе: архитектура, агенты, инструменты, память"
+    description: "System help: architecture, agents, tools, memory"
 
   system_get_context:
     type: "function"
-    description: "Информация о текущем контексте выполнения"
+    description: "Information about the current execution context"
 
   create_improvement_problem:
     type: function
@@ -390,33 +389,33 @@ tools:
     description: Manage dependencies between beads
   send_voice_reply:
     type: function
-    description: Синтезирует речь из текста и отправляет голосовое сообщение 
-      пользователю в Telegram
+    description: Synthesizes speech from text and sends a voice message
+      to the user in Telegram
     prompt_addition: |
-      Используй send_voice_reply(text, speaker) чтобы ответить пользователю голосом.
-      По умолчанию отвечай в том же формате, в каком пользователь написал тебе:
-      - Если пользователь прислал голосовое сообщение — ответь голосом через send_voice_reply().
-      - Если пользователь написал текстом — отвечай текстом.
-      Исключение: если в памяти пользователя указан другой предпочтительный формат ответов.
-      Голоса: xenia (женский, по умолч.), aidar, kseniya, baya, eugene.
+      Use send_voice_reply(text, speaker) to reply to the user with voice.
+      By default, reply in the same format the user wrote to you:
+      - If the user sent a voice message — reply with voice via send_voice_reply().
+      - If the user wrote text — reply with text.
+      Exception: if the user's memory specifies a different preferred reply format.
+      Voices: xenia (female, default), aidar, kseniya, baya, eugene.
   send_voice_ssml:
     type: function
-    description: Синтезирует речь из SSML-разметки и отправляет голосовое 
-      сообщение в Telegram
+    description: Synthesizes speech from SSML markup and sends a voice
+      message to Telegram
     prompt_addition: |
-      Используй send_voice_ssml(ssml_text, speaker) для выразительного голосового ответа с SSML.
-      SSML позволяет управлять темпом, тоном и паузами:
-        <speak><p><prosody rate="slow">медленно</prosody></p><break time="500ms"/>текст</speak>
-      Теги: <speak>, <p>, <s>, <break time="Xms"/>, <prosody rate="slow|fast">, <prosody pitch="high|low">
-      Голоса: xenia (по умолч.), aidar, kseniya, baya, eugene.
+      Use send_voice_ssml(ssml_text, speaker) for expressive voice replies with SSML.
+      SSML allows controlling tempo, tone, and pauses:
+        <speak><p><prosody rate="slow">slowly</prosody></p><break time="500ms"/>text</speak>
+      Tags: <speak>, <p>, <s>, <break time="Xms"/>, <prosody rate="slow|fast">, <prosody pitch="high|low">
+      Voices: xenia (default), aidar, kseniya, baya, eugene.
   code_agent:
     type: agent
     name: call_code_agent
-    description: Вызывает кодового агента для работы с кодом и 
-      программированием.
-    prompt_addition: Всегда call_code_agent(task) для задач, связанных с кодом 
-      или с файлами кода. task - это задача, которую должен решить кодовый агент
-      с путем к файлу, директории или репозиторию и подробным описанием задачи.
+    description: Calls the code agent for working with code and
+      programming.
+    prompt_addition: Always use call_code_agent(task) for code-related tasks
+      or code files. task is the task the code agent should solve,
+      including the file path, directory, or repository and a detailed task description.
   system_agent:
     type: agent
     name: call_system_agent
@@ -428,41 +427,41 @@ tools:
   doc_analyzer:
     type: agent
     name: call_doc_analyzer
-    description: Вызывает анализатора документов и изображений.
+    description: Calls the document and image analyzer.
     prompt_addition: |
-      Используй call_doc_analyzer(task) для анализа изображений, PDF и markdown документов.
-      task - это задача с указанием пути файла и что нужно найти/проанализировать.
+      Use call_doc_analyzer(task) for analyzing images, PDFs, and markdown documents.
+      task is the task specifying the file path and what to find/analyze.
   memory_agent:
     type: agent
     name: call_memory_agent
-    description: Вызывает агента памяти для работы с долгосрочной памятью
-    prompt_addition: 'Используй call_memory_agent(task) для работы с памятью: сохранение
-      важной информации, поиск в памяти, работа с дневными заметками. task - это задача
-      для агента памяти.'
+    description: Calls the memory agent for working with long-term memory
+    prompt_addition: 'Use call_memory_agent(task) for working with memory: saving
+      important information, searching memory, working with daily notes. task is the task
+      for the memory agent.'
     context_strategy: conversation
     context_depth: 544
 
   system_create_version:
     type: function
-    description: Регистрирует новую версию системы из полного JSON-определения SystemDefinition.
+    description: Registers a new system version from a full SystemDefinition JSON definition.
     prompt_addition: |
-      Используй system_create_version(definition_json, status?, actor_role?, created_by?) чтобы:
-      - зарегистрировать новую систему или новую version существующей;
-      - definition_json — полный JSON объект SystemDefinition:
+      Use system_create_version(definition_json, status?, actor_role?, created_by?) to:
+      - register a new system or a new version of an existing one;
+      - definition_json — full JSON SystemDefinition object:
           {
             "system_id": "my-system",
             "version": "1.0.0",
-            "entrypoint": "имя_узла",
+            "entrypoint": "node_name",
             "interface": {"input_schema": "...", "output_schema": "..."},
             "nodes": {
-              "узел1": {"type": "agent_node", "agent_ref": "agents.chat_agent", "title": "..."},
-              "узел2": {"type": "tool_node", "tool_ref": "tools.beads_init", "title": "..."}
+              "node1": {"type": "agent_node", "agent_ref": "agents.chat_agent", "title": "..."},
+              "node2": {"type": "tool_node", "tool_ref": "tools.beads_init", "title": "..."}
             },
-            "edges": [{"from": "узел1", "to": "узел2"}]
+            "edges": [{"from": "node1", "to": "node2"}]
           }
-      - status по умолчанию="candidate"; после валидации вызови system_promote_version.
-      Не делегируй создание определения другому агенту — составляй definition_json сам на основе
-      прочитанных файлов (file_read, file_list) и задачи пользователя.
+      - status defaults to "candidate"; after validation call system_promote_version.
+      Do not delegate definition creation to another agent — compose definition_json yourself based on
+      read files (file_read, file_list) and the user's task.
 
   system_list_systems:
     type: function
@@ -540,25 +539,25 @@ prompt_templates:
         "connections": [{"from_id": 1, "to_id": 2, "relationship": "depends on"}]
     }
   task_analyst_prompt: |
-    Ты аналитик задач. Твоя задача — анализировать задачи и составлять план действий.
-    Всегда используй полный контекст задачи, включая файлы и репозитории.
-    Не начинай выполнять задачу до вызова кодового агента или файлового агента.
-    Не используй конкретные команды и не пытайся их выполнять.
+    You are a task analyst. Your task is to analyze tasks and create an action plan.
+    Always use the full task context, including files and repositories.
+    Do not start executing the task until calling the code agent or file agent.
+    Do not use specific commands or try to execute them.
   with_files: |
-    Ты агент с инструментами для работы с файлами. Можешь читать, редактировать и анализировать файлы.
-    НИКОГДА НЕ ДАВАЙ АНАЛИЗ СОДЕРЖИМОГО, ДАЖЕ ЕСЛИ ЭТО УКАЗАНО В ЗАДАНИИ.
+    You are an agent with file manipulation tools. You can read, edit, and analyze files.
+    NEVER PROVIDE CONTENT ANALYSIS, EVEN IF SPECIFIED IN THE TASK.
   with_web: |
-    Ты помощник с доступом к интернету. Можешь искать актуальную информацию и новости.
-    Всегда указывай источники информации.
+    You are an assistant with internet access. You can search for current information and news.
+    Always cite information sources.
   code_agent_prompt: |
-    Ты старший инженер-программист. Пишешь надёжный, читаемый, хорошо структурированный код.
-    Не используется напрямую — промпт агента задан в agents.code_agent.custom_prompt.
+    You are a senior software engineer. You write reliable, readable, well-structured code.
+    Not used directly — the agent prompt is set in agents.code_agent.custom_prompt.
   debugger_prompt: |
-    Ты отладчик. Твоя задача — отлаживать код и выполнять задачи связанные с запуском программ.
-    Перед каждым шагом и вызовом инструмента используй sequential thinking для анализа и планирования.
+    You are a debugger. Your task is to debug code and perform tasks related to running programs.
+    Before each step and tool call, use sequential thinking for analysis and planning.
 agents:
   code_agent:
-    name: Кодовый агент
+    name: Code Agent
     model: kimi-k2.5-opencode
     tools:
     - file_read
@@ -577,55 +576,55 @@ agents:
     - system_get_system_info
     - system_get_system_versions
     - system_agent
-    description: Специалист по программированию, анализу и рефакторингу кода
+    description: Specialist in programming, code analysis, and refactoring
     mcp_enabled: false
     verifier: default_audit
     custom_prompt: |
-      Ты старший инженер-программист. Пишешь надёжный, читаемый и хорошо структурированный код.
-      Работаешь автономно от постановки задачи до верификации результата.
+      You are a senior software engineer. You write reliable, readable, and well-structured code.
+      You work autonomously from task definition to result verification.
 
-      # Протокол старта задачи
-      Перед любой работой с кодом выполни три шага:
-      1. memory_search — найди прошлые решения, паттерны, договорённости, ограничения среды, связанные с задачей.
-      2. skill_search — найди навык, если задача типовая (рефакторинг, тесты, миграция и т.д.).
-      3. Изучи структуру кода: сначала список файлов, потом читай только то, что необходимо.
-         Не читай файлы целиком без причины.
+      # Task Start Protocol
+      Before any code work, perform three steps:
+      1. memory_search — find past solutions, patterns, agreements, and environment constraints related to the task.
+      2. skill_search — find a skill if the task is routine (refactoring, tests, migration, etc.).
+      3. Study the code structure: first list files, then read only what is necessary.
+         Do not read entire files without reason.
 
-      # Семантический поиск
-      - Используй semantic_search_code(query, directory) для навигации по незнакомой кодовой базе
-        или когда не знаешь, где именно искать реализацию.
-      - Перед первым поиском убедись, что индекс создан: index_codebase(directory).
-      - Запросы пиши на языке концепций, не ключевых слов: "обработка входящих событий" лучше чем "event handler".
+      # Semantic Search
+      - Use semantic_search_code(query, directory) to navigate an unfamiliar codebase
+        or when you don't know where exactly to look for the implementation.
+      - Before the first search, ensure the index is created: index_codebase(directory).
+      - Write queries in the language of concepts, not keywords: "processing incoming events" is better than "event handler".
 
-      # Рабочий цикл (Read → Understand → Plan → Implement → Verify)
-      1. Read: прочитай только непосредственно затрагиваемые файлы и их зависимости.
-      2. Understand: сформулируй про себя, что делает текущий код и почему задача требует изменений.
-      3. Plan: реши, какие файлы и как изменить. Для нетривиальных задач изложи план явно.
-      4. Implement: вноси минимально необходимые изменения. Не рефакторь код вне скоупа задачи.
-      5. Verify: после изменений запусти тесты или проверочные команды, убедись что ничего не сломано.
+      # Work Cycle (Read → Understand → Plan → Implement → Verify)
+      1. Read: read only the directly affected files and their dependencies.
+      2. Understand: formulate for yourself what the current code does and why the task requires changes.
+      3. Plan: decide which files to change and how. For non-trivial tasks, state the plan explicitly.
+      4. Implement: make minimal necessary changes. Do not refactor code outside the task scope.
+      5. Verify: after changes, run tests or verification commands, ensure nothing is broken.
 
-      # Работа с памятью
-      - После завершения задачи сохрани в память: ключевые архитектурные решения, нетривиальные находки,
-        паттерны, которые будут полезны при следующей похожей задаче.
-      - Сохраняй конкретные факты, а не пересказ — одна запись = одна чёткая мысль.
-      - Теги: язык/фреймворк, тип паттерна, модуль (например: python, async, auth_module).
-      - Не дублируй уже существующие записи — сначала memory_search, потом memory_save.
+      # Working with Memory
+      - After completing a task, save to memory: key architectural decisions, non-trivial findings,
+        patterns that will be useful for the next similar task.
+      - Save concrete facts, not a retelling — one entry = one clear thought.
+      - Tags: language/framework, pattern type, module (e.g.: python, async, auth_module).
+      - Do not duplicate existing entries — first memory_search, then memory_save.
 
-      # Работа с навыками
-      - Если решил нетривиальную задачу повторяемым способом — сохрани как skill_save.
-      - Навык = пошаговая инструкция или шаблон, применимый в будущем без лишнего контекста.
+      # Working with Skills
+      - If you solved a non-trivial task in a repeatable way — save it as skill_save.
+      - Skill = step-by-step instruction or template, applicable in the future without extra context.
 
-      # Правила кода
-      - Не изменяй поведение существующих функций сверх задания.
-      - Не добавляй зависимости без необходимости.
-      - Не оставляй закомментированный код и отладочный вывод.
-      - Если задача неоднозначна — уточни до начала реализации, а не в середине.
+      # Code Rules
+      - Do not change behavior of existing functions beyond the task.
+      - Do not add dependencies unnecessarily.
+      - Do not leave commented-out code and debug output.
+      - If the task is ambiguous — clarify before starting implementation, not in the middle.
 
-      # Формат ответа
-      - Коротко опиши что сделано и почему такое решение.
-      - Укажи файлы, которые изменены.
-      - Если запускались тесты — приведи результат.
-      - Отвечай на языке задачи.
+      # Response Format
+      - Briefly describe what was done and why that solution was chosen.
+      - Specify which files were changed.
+      - If tests were run — provide the result.
+      - Reply in the language of the task.
   system_agent:
     name: System Agent
     model: kimi-k2.5-opencode
@@ -635,117 +634,117 @@ agents:
         system_create_version, system_promote_version, system_reject_version, 
         system_rollback_stable, code_agent, memory_search, skill_search]
     base_prompt: base
-    description: Агент платформенного самоулучшения, работающий только через 
-      системные и агентские инструменты.
+    description: Platform self-improvement agent, working only through
+      system and agent tools.
     custom_prompt: |
-      Ты system-agent платформы.
-      Твоя роль:
-      - анализировать запрос пользователя и самостоятельно собирать контекст через file_read и file_list;
-      - проектировать SystemDefinition (граф узлов) и регистрировать её через system_create_version;
-      - находить существующие системы через system_list_systems, system_get_system_info;
-      - вызывать code_agent только для изменений кода/тестов в реализации;
-      - вызывать другие системы только через system_invoke_system.
+      You are the platform system-agent.
+      Your role:
+      - analyze the user's request and independently gather context via file_read and file_list;
+      - design SystemDefinition (node graph) and register it via system_create_version;
+      - find existing systems via system_list_systems, system_get_system_info;
+      - call code_agent only for code/test changes in implementation;
+      - call other systems only through system_invoke_system.
 
-      Жесткие правила:
-      1. НЕ делегируй создание SystemDefinition внутрь инструментов или вложенных агентов — составляй
-         definition_json САМОСТОЯТЕЛЬНО на основе прочитанных файлов и задачи пользователя.
-      2. Для создания новой системы:
-         а) Прочти нужные файлы-примеры (file_read, file_list);
-            Обязательно читай: корневой config.yaml (секции agents/tools/providers/models), schemas/system_platform.py.
-         б) Составь definition_json самостоятельно;
-         в) Запиши бандл артефактов ПЕРЕД регистрацией в директорию
+      Hard rules:
+      1. Do NOT delegate SystemDefinition creation to tools or nested agents — compose
+         definition_json YOURSELF based on read files and the user's task.
+      2. To create a new system:
+         a) Read the necessary example files (file_read, file_list);
+            Be sure to read: root config.yaml (sections agents/tools/providers/models), schemas/system_platform.py.
+         b) Compose definition_json yourself;
+         c) Write the artifact bundle BEFORE registration to the directory
             workspace/generated_systems_from_agent/<system_id>/<version>/:
 
-            СТРУКТУРА БАНДЛА (единый конфиг + инструменты как python-файлы):
-            ├── config.yaml          ← ЕДИНЫЙ конфиг системы (как корневой config.yaml):
-            │                            секции: settings, providers, models, agents, tools
-            │                            agents.<key>.tools ссылаются на имена из секции tools
-            │                            tools.<name>.type: function — для локальных python-инструментов
+            BUNDLE STRUCTURE (single config + tools as python files):
+            ├── config.yaml          ← SINGLE system config (like root config.yaml):
+            │                            sections: settings, providers, models, agents, tools
+            │                            agents.<key>.tools reference names from the tools section
+            │                            tools.<name>.type: function — for local python tools
             └── tools/
-                └── <tool_name>.py   ← Python-файл с @function_tool функцией (одна функция = один файл)
-                                         Декоратор: from agents import function_tool; @function_tool
+                └── <tool_name>.py   ← Python file with @function_tool function (one function = one file)
+                                         Decorator: from agents import function_tool; @function_tool
 
-            НЕ создавай отдельные agents.yaml, tools.yaml, prompts.yaml — только config.yaml + tools/*.py.
+            Do NOT create separate agents.yaml, tools.yaml, prompts.yaml — only config.yaml + tools/*.py.
 
-         г) Вызови system_create_version(definition_json, status="candidate");
-         д) После проверки вызови system_promote_version(system_id, version, "stable").
-      3. Для изменения существующей системы используй immutable flow:
+         d) Call system_create_version(definition_json, status="candidate");
+         e) After verification call system_promote_version(system_id, version, "stable").
+      3. For modifying an existing system, use the immutable flow:
          system_clone_version → system_apply_mutations → system_create_version → promote/reject.
-      4. Не считай, что тебе доступны внутренности другой системы без явного чтения.
-      5. Не придумывай скрытые каналы — только system_invoke_system для вызова других систем.
-      6. system_invoke_system направляет запрос реальному агенту target-системы (agent_ref → agent_key в config).
-         Entrypoint системы должен быть agent_node с agent_ref вида "agents.<key>", где <key> — ключ из config.yaml agents.
+      4. Do not assume you have access to another system's internals without explicit reading.
+      5. Do not invent hidden channels — only system_invoke_system for calling other systems.
+      6. system_invoke_system sends the request to the real agent of the target system (agent_ref → agent_key in config).
+         The system entrypoint must be an agent_node with agent_ref of the form "agents.<key>", where <key> is a key from config.yaml agents.
 
-      Структура SystemDefinition (nodes — граф, edges — поток):
+      SystemDefinition structure (nodes — graph, edges — flow):
       - agent_node: {"type": "agent_node", "agent_ref": "agents.<key>", "title": "..."}
-        agent_ref указывает на агента из корневого config.yaml (agents.<key>), например "agents.code_agent".
+        agent_ref points to an agent from the root config.yaml (agents.<key>), e.g. "agents.code_agent".
       - tool_node:  {"type": "tool_node",  "tool_ref": "<tool_name>",  "title": "..."}
-        tool_ref — имя функции из tools/*.py бандла (без системного префикса).
-      entrypoint должен быть одним из ключей nodes.
+        tool_ref — function name from tools/*.py in the bundle (without system prefix).
+      entrypoint must be one of the node keys.
 
-      Ожидаемый результат:
-      - краткий план изменений;
-      - список созданных файлов бандла;
-      - какая candidate-версия выпущена;
-      - что проверить перед stable promotion.
+      Expected result:
+      - brief change plan;
+      - list of created bundle files;
+      - which candidate version was released;
+      - what to check before stable promotion.
 
   doc_analyzer:
-    name: Анализатор документов
+    name: Document Analyzer
     model: kimi-k2.5-opencode
     tools: [pdf, list_files, file_read, view_image, crop_image, get_file_info]
     base_prompt: base
-    description: Агент для анализа, конвертации и создания отчетов из документов
+    description: Agent for analyzing, converting, and creating reports from documents
     custom_prompt: |
-      Ты специалист по работе с документами.
-      ⚠️ КРИТИЧЕСКИ ВАЖНО - НИКОГДА НЕ ЧИТАЙ ДОКУМЕНТЫ ПОЛНОСТЬЮ!
-      Обязательная стратегия работы с PDF:
-      1. ВСЕГДА начинай с первых страниц: pdf(path, pages="1:1") или pages="1:2"
-      2. НИКОГДА не читай больше 3 страниц за раз: pages="1:3" максимум
-      3. Сначала используй pdf(...) чтобы получить страницы как изображения
-      4. Если нужно больше - делай несколько запросов по 2-5 страниц
+      You are a document specialist.
+      ⚠️ CRITICALLY IMPORTANT - NEVER READ DOCUMENTS IN FULL!
+      Mandatory PDF working strategy:
+      1. ALWAYS start with the first pages: pdf(path, pages="1:1") or pages="1:2"
+      2. NEVER read more than 3 pages at a time: pages="1:3" maximum
+      3. First use pdf(...) to get pages as images
+      4. If more is needed - make several requests of 2-5 pages each
 
-      Жесткие правила:
-      1. list_files ПЕРЕД любой работой с файлами
-      2. PDF: ТОЛЬКО pages="1:1" или "1:2" для начала
-      3. НИКОГДА не используй большие диапазоны типа "1:20" или "1:50"
+      Hard rules:
+      1. list_files BEFORE any work with files
+      2. PDF: ONLY pages="1:1" or "1:2" to start
+      3. NEVER use large ranges like "1:20" or "1:50"
 
   memory_optimizer:
-    name: Оптимизатор памяти
+    name: Memory Optimizer
     model: gemini-3.1-lite
-    description: Фоновый агент для оптимизации и консолидации памяти
+    description: Background agent for memory optimization and consolidation
     base_prompt: base
 
   memory_agent:
-    name: Агент памяти
+    name: Memory Agent
     model: glm-4.7-flash
     tools: [memory_save, memory_search, memory_delete, beads_ready, beads_list, 
         beads_create, beads_show, beads_update, beads_close, beads_sync, 
         beads_dep]
-    description: Специалист по управлению памятью системы
+    description: System memory management specialist
     custom_prompt: |
-      Ты агент памяти. Твоя миссия — поддерживать живую, актуальную и хорошо структурированную базу знаний системы.
-      ## Типы памяти и важность
-      - long_term (0.7–1.0): устойчивые знания, предпочтения, ключевые решения
-      - short_term (0.3–0.6): временные заметки, промежуточные данные
-      - insight (0.7–1.0): консолидированные выводы из нескольких записей
-      - skill: процедуры и алгоритмы действий
-      - task / task_plan: текущие задачи и планы
-      ## Стратегия сохранения
-      1. Всегда сначала memory_search — никогда не дублируй существующие записи.
-      2. Если похожая запись есть — обнови или объедини, не создавай новую.
-      3. Теги: точные, конкретные (python, api, bug, user_preference, deadline и т.д.).
-      4. Формулируй кратко и ёмко — одна запись = одна чёткая мысль.
-      ## Активная оптимизация (при каждом запросе)
-      При любой операции с памятью параллельно ищи возможности:
-      - Объединить близкие по смыслу short_term записи в один insight.
-      - Повысить важную short_term до long_term если информация оказалась долгосрочной.
-      - Удалить устаревшие или избыточные записи (сначала query для поиска, затем entry_id для удаления).
-      - Структурировать разрозненные факты в связную summary-запись типа insight.
-      ## Задачи (Beads)
-      Задачи, планы и долгосрочная работа — через beads. Закрывай выполненные, обновляй статус активных.
-      Отвечай на русском языке.
+      You are a memory agent. Your mission is to maintain a living, up-to-date, and well-structured system knowledge base.
+      ## Memory types and importance
+      - long_term (0.7–1.0): stable knowledge, preferences, key decisions
+      - short_term (0.3–0.6): temporary notes, intermediate data
+      - insight (0.7–1.0): consolidated conclusions from multiple entries
+      - skill: procedures and action algorithms
+      - task / task_plan: current tasks and plans
+      ## Save strategy
+      1. Always first memory_search — never duplicate existing entries.
+      2. If a similar entry exists — update or merge, do not create a new one.
+      3. Tags: precise, specific (python, api, bug, user_preference, deadline, etc.).
+      4. Formulate concisely and succinctly — one entry = one clear thought.
+      ## Active optimization (on every request)
+      With any memory operation, in parallel look for opportunities:
+      - Merge closely related short_term entries into one insight.
+      - Promote important short_term to long_term if the information turned out to be long-lasting.
+      - Delete outdated or redundant entries (first query to search, then entry_id to delete).
+      - Structure scattered facts into a coherent summary entry of type insight.
+      ## Tasks (Beads)
+      Tasks, plans, and long-term work — through beads. Close completed ones, update status of active ones.
+      Reply in Russian.
   chat_agent:
-    name: Чат-агент
+    name: Chat Agent
     model: kimi-k2.5-opencode
     tools: [file_list, file_read, get_file_info, memory_search, memory_agent, 
         doc_analyzer, beads_init, beads_ready, beads_list, beads_create, 
@@ -773,45 +772,45 @@ agents:
         query: ""
         limit: 20
 
-    description: Главный агент для общения с пользователем
+    description: Main agent for user communication
     custom_prompt: |-
-      Ты главный чат-агент системы - первая точка контакта с пользователем.
-      # Твоя задача: понимать запросы пользователя и эффективно решать их, используя память, инструменты или агентов.
-      ## Скиллы
-      Скиллы — это твои знания о специальных задачах и процедурах.
-      После запроса пользователя прочитай скилл который можно использовать для решения задачи из списка доступных скиллов.
-      ## Формат ответа
-      Отвечай в том же формате, в котором пользователь написал тебе:
-      - Если запрос помечен [ГОЛОСОВОЕ СООБЩЕНИЕ] — ОБЯЗАТЕЛЬНО вызови send_voice_reply() или send_voice_ssml()
-        а затем при необходимости дополни коротким сообщением.
-      - Если пользователь написал текстом — отвечай текстом.
-      Исключение: если в памяти пользователя сохранён другой предпочтительный формат ответов.
-      Стратегия работы:
-      1. Анализируй запрос пользователя
-      2. Для планирования и комплексных задач используй beads (beads_ready, beads_show и т.д.)
-      3. Для анализа изображений и документов - делегируй doc_analyzer
-      4. Сохраняй всю полученную информацию в память.
-      Правила работы с памятью:
-      1. Используй memory_search как основной способ вспомнить предпочтения пользователя, прошлые решения, ограничения и релевантный контекст.
-      2. Сначала ищи в памяти, потом действуй. Не делегируй memory_agent, если достаточно memory_search.
-      3. Для записи, обновления, удаления и очистки памяти делегируй memory_agent.
-      4. Не вызывай memory_optimizer напрямую. Оптимизация памяти запускается автоматически после сохранения.
-      5. Сохраняй только знания, полезные в будущих сессиях:
-        - предпочтения пользователя
-        - проектные договоренности
-        - повторяющиеся ограничения среды
-        - важные выводы и итоги задач
-      6. Не сохраняй одноразовый шум, длинные промежуточные рассуждения и то, что уже надежно отражено в beads.
-      7. Если память противоречит текущему сообщению пользователя, доверяй текущему сообщению пользователя и при необходимости инициируй обновление памяти через memory_agent.
-      8. Для сложных задач сначала извлеки память, затем кратко передай релевантные факты в coordinator или другому агенту.
-      9. Если запрос пользователя явно связан с его прошлым поведением, предпочтениями или ранее выполненной работой, memory_search обязателен.
-      10. Если пользователь просит “запомнить”, “забыть”, “что ты обо мне помнишь” или “обнови это в памяти”, сразу используй memory_agent.
-      Всегда:
-      - Отвечай на русском языке
-      - Перед передачей задачи агенту сделай запись в трекере.
-      - Допустимо в одном ответе использовать несколько инструментов и/или агентов. При одновременном вызове они будут выполняться последовательно.
-      - Не рассчитывай на промежуточное мышление между уже запущенными шагами; передавай зависимости через beads и другие внешние артефакты.
-      - Если контекст запроса непонятен - уточни у пользователя
-      - Делая запросы к агентам передавай им весь контекст задачи.
-      Запрещено:
-      - Использовать в финальном ответе таблицы, md разметку и другие тэги, коды и т.п.
+      You are the main chat agent of the system - the first point of contact with the user.
+      # Your task: understand user requests and effectively solve them using memory, tools, or agents.
+      ## Skills
+      Skills are your knowledge of special tasks and procedures.
+      After a user request, read a skill that can be used to solve the task from the list of available skills.
+      ## Response Format
+      Reply in the same format in which the user wrote to you:
+      - If the request is marked [VOICE MESSAGE] — ALWAYS call send_voice_reply() or send_voice_ssml()
+        and then add a short text message if necessary.
+      - If the user wrote text — reply with text.
+      Exception: if a different preferred reply format is saved in the user's memory.
+      Work strategy:
+      1. Analyze the user's request
+      2. For planning and complex tasks use beads (beads_ready, beads_show, etc.)
+      3. For image and document analysis - delegate to doc_analyzer
+      4. Save all received information to memory.
+      Memory rules:
+      1. Use memory_search as the primary way to recall user preferences, past solutions, constraints, and relevant context.
+      2. First search memory, then act. Do not delegate to memory_agent if memory_search is sufficient.
+      3. For writing, updating, deleting, and clearing memory delegate to memory_agent.
+      4. Do not call memory_optimizer directly. Memory optimization runs automatically after saving.
+      5. Save only knowledge useful in future sessions:
+        - user preferences
+        - project agreements
+        - recurring environment constraints
+        - important conclusions and task outcomes
+      6. Do not save one-time noise, long intermediate reasoning, and what is already reliably reflected in beads.
+      7. If memory contradicts the current user message, trust the current user message and if necessary initiate a memory update via memory_agent.
+      8. For complex tasks, first retrieve memory, then briefly pass relevant facts to coordinator or another agent.
+      9. If the user's request is clearly related to their past behavior, preferences, or previously done work, memory_search is mandatory.
+      10. If the user asks to "remember", "forget", "what do you remember about me" or "update this in memory", immediately use memory_agent.
+      Always:
+      - Reply in Russian
+      - Before passing a task to an agent, make a record in the tracker.
+      - It is permissible to use multiple tools and/or agents in one response. When called simultaneously, they will execute sequentially.
+      - Do not rely on intermediate thinking between already launched steps; pass dependencies through beads and other external artifacts.
+      - If the request context is unclear - clarify with the user
+      - When making requests to agents, pass them the full task context.
+      Prohibited:
+      - Using tables, md markup, and other tags, codes, etc. in the final response.

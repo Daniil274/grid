@@ -1,15 +1,15 @@
 """
-SpeechProcessor — модуль распознавания и синтеза речи для Telegram бота.
+SpeechProcessor — speech recognition and synthesis module for Telegram bot.
 
-STT: faster-whisper (configurable model size, CUDA или CPU)
-TTS: Silero v5_ru (model.pt, голоса: xenia, aidar, kseniya, baya, eugene)
+STT: faster-whisper (configurable model size, CUDA or CPU)
+TTS: Silero v5_ru (model.pt, voices: xenia, aidar, kseniya, baya, eugene)
 
-Lazy-load: модели грузятся при первом вызове, не при старте сервера.
-Async-safe: CPU/GPU операции выполняются в executor, не блокируя event loop.
+Lazy-load: models are loaded on first call, not at server startup.
+Async-safe: CPU/GPU operations run in executor, without blocking the event loop.
 
-Оптимизация холодного старта:
-  warmup() — вызывается при старте бота, загружает модели заранее + прогревает
-  JIT Silero, чтобы первый реальный запрос был без задержки загрузки.
+Cold start optimization:
+  warmup() — called on bot startup, preloads models + warms up
+  JIT Silero so the first real request has no loading delay.
 """
 
 import asyncio
@@ -22,7 +22,7 @@ from typing import Optional
 
 logger = logging.getLogger("grid.speech_processor")
 
-# ─── Транслитерация латиницы в кириллицу (для русской Silero) ──────────────
+# ─── Transliteration from Latin to Cyrillic (for Russian Silero) ──────────────
 try:
     from transliterate import translit as _translit
 
@@ -32,7 +32,7 @@ try:
     _HAS_TRANSLITERATE = True
 except ImportError:
     _HAS_TRANSLITERATE = False
-    # Каждый символ Latin → соответствующий Cyrillic (строки одинаковой длины: 44)
+    # Each Latin character → corresponding Cyrillic (strings of equal length: 44)
     _LATIN_TO_CYR = str.maketrans(
         "abvgdezijklmnoprstufhcABVGDEZIJKLMNOPRSTUFHC",
         "абвгдезийклмнопрстуфхцАБВГДЕЗИЙКЛМНОПРСТУФХЦ",
@@ -49,7 +49,7 @@ except ImportError:
 
 
 def prepare_text_for_tts(text: str) -> str:
-    """Заменяет латинские слова кириллической транслитерацией для Silero."""
+    """Replaces Latin words with Cyrillic transliteration for Silero."""
     def replace_latin_word(m):
         word = m.group(0)
         if not re.search(r"[a-zA-Z]", word):
@@ -58,13 +58,13 @@ def prepare_text_for_tts(text: str) -> str:
     return re.sub(r"[a-zA-Z0-9]+", replace_latin_word, text)
 
 
-# ─── Основной класс ─────────────────────────────────────────────────────────
+# ─── Main class ─────────────────────────────────────────────────────────
 
 class SpeechProcessor:
     """
-    Обёртка над Whisper (STT) и Silero (TTS).
+    Wrapper over Whisper (STT) and Silero (TTS).
 
-    Использование:
+    Usage:
         sp = get_speech_processor(config["voice"])
         text = await sp.transcribe("/path/to/voice.ogg")
         audio = await sp.synthesize(text, "/path/to/out/dir")
@@ -72,16 +72,16 @@ class SpeechProcessor:
 
     def __init__(self, config: dict):
         self._config = config
-        self._whisper = None    # lazy / прогревается через warmup()
-        self._silero = None     # lazy / прогревается через warmup()
+        self._whisper = None    # lazy / warmed up via warmup()
+        self._silero = None     # lazy / warmed up via warmup()
 
-    # ── Приватные методы загрузки моделей ────────────────────────────────────
+    # ── Private model loading methods ────────────────────────────────────
 
     def _load_whisper_model(self) -> None:
-        """Загружает модель Whisper (idempotent)."""
+        """Load the Whisper model (idempotent)."""
         if self._whisper is not None:
             return
-        logger.info("Загружаю модель Whisper...")
+        logger.info("Loading Whisper model...")
         from faster_whisper import WhisperModel
         stt = self._config.get("stt", {})
         self._whisper = WhisperModel(
@@ -89,12 +89,12 @@ class SpeechProcessor:
             device=stt.get("device", "cuda"),
             compute_type=stt.get("compute_type", "float16"),
         )
-        logger.info("Whisper загружен.")
+        logger.info("Whisper loaded.")
 
     def _wav_to_ogg(self, wav_path: str) -> Optional[str]:
         """
-        Конвертирует WAV в OGG Opus для голосового сообщения в Telegram.
-        Сначала пробует pydub, при ошибке (например pyaudioop в Python 3.13) — ffmpeg.
+        Converts WAV to OGG Opus for Telegram voice messages.
+        Tries pydub first, on error (e.g., pyaudioop in Python 3.13) — ffmpeg.
         """
         ogg_path = wav_path.replace(".wav", ".ogg")
         # 1) pydub
@@ -108,8 +108,8 @@ class SpeechProcessor:
                 pass
             return ogg_path
         except Exception as e:
-            logger.debug("pydub WAV→OGG не удался: %s", e)
-        # 2) ffmpeg (достаточно для голосового пузыря в Telegram)
+            logger.debug("pydub WAV→OGG failed: %s", e)
+        # 2) ffmpeg (sufficient for Telegram voice bubble)
         try:
             import subprocess
             r = subprocess.run(
@@ -129,48 +129,48 @@ class SpeechProcessor:
 
     def _load_silero_model(self) -> None:
         """
-        Загружает модель Silero TTS и прогревает JIT (idempotent).
-        JIT-компиляция происходит при первом apply_tts() — выполняем её здесь
-        с коротким текстом, чтобы реальный запрос пользователя не тормозил.
+        Loads the Silero TTS model and warms up JIT (idempotent).
+        JIT compilation happens on first apply_tts() — we do it here
+        with short text so the real user request doesn't slow down.
         """
         if self._silero is not None:
             return
-        logger.info("Загружаю модель Silero TTS...")
+        logger.info("Loading Silero TTS model...")
         import torch
         tts_cfg = self._config.get("tts", {})
         model_path = tts_cfg.get("model_path", "speech-text/model.pt")
 
-        # Абсолютный путь: относительно корня проекта (рядом с core/)
+        # Absolute path: relative to project root (next to core/)
         if not Path(model_path).is_absolute():
             model_path = Path(__file__).parent.parent / model_path
 
         if not Path(model_path).exists():
-            raise FileNotFoundError(f"Silero model не найден: {model_path}")
+            raise FileNotFoundError(f"Silero model not found: {model_path}")
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._silero = torch.package.PackageImporter(str(model_path)).load_pickle(
             "tts_models", "model"
         )
         self._silero.to(device)
-        logger.info(f"Silero TTS загружен, device={device}.")
+        logger.info(f"Silero TTS loaded, device={device}.")
 
-        # Прогрев JIT: первый apply_tts компилирует граф — делаем это сейчас,
-        # а не во время запроса пользователя.
-        logger.info("Прогрев JIT Silero...")
+        # JIT warmup: first apply_tts compiles the graph — do it now,
+        # not during the user's request.
+        logger.info("Warming up JIT Silero...")
         try:
             sample_rate = tts_cfg.get("sample_rate", 48000)
-            self._silero.apply_tts(text="Привет.", speaker="xenia", sample_rate=sample_rate)
-            logger.info("JIT Silero прогрет.")
+            self._silero.apply_tts(text="Hello.", speaker="xenia", sample_rate=sample_rate)
+            logger.info("JIT Silero warmed up.")
         except Exception as e:
-            logger.warning(f"JIT-прогрев не удался (не критично): {e}")
+            logger.warning(f"JIT warmup failed (not critical): {e}")
 
     # ── STT ──────────────────────────────────────────────────────────────────
 
     async def transcribe(self, audio_path: str) -> str:
         """
-        Распознаёт речь из аудиофайла (OGG, WAV, MP3, ...).
-        Запускает Whisper в executor, не блокирует event loop.
-        Возвращает пустую строку при ошибке — не бросает исключение.
+        Transcribes speech from an audio file (OGG, WAV, MP3, ...).
+        Runs Whisper in an executor, does not block the event loop.
+        Returns an empty string on error — does not raise an exception.
         """
         loop = asyncio.get_event_loop()
         try:
@@ -181,7 +181,7 @@ class SpeechProcessor:
             return ""
 
     def _sync_transcribe(self, path: str) -> str:
-        """Синхронный вызов Whisper (вызывается в executor)."""
+        """Synchronous Whisper call (called in executor)."""
         self._load_whisper_model()
         segments, info = self._whisper.transcribe(path, beam_size=5)
         text = " ".join(s.text.strip() for s in segments).strip()
@@ -192,20 +192,20 @@ class SpeechProcessor:
 
     async def synthesize(self, text: str, out_dir: str, speaker: Optional[str] = None) -> str:
         """
-        Синтезирует речь из текста.
-        Возвращает путь к аудиофайлу (OGG Opus или WAV как fallback).
-        Бросает исключение при ошибке (вызывающий код должен обработать).
+        Synthesizes speech from text.
+        Returns the path to the audio file (OGG Opus or WAV as fallback).
+        Raises an exception on error (caller must handle).
 
         Args:
-            text: Текст для синтеза
-            out_dir: Директория для сохранения файла
-            speaker: Голос (переопределяет config). None = брать из config.
+            text: Text to synthesize
+            out_dir: Directory to save the file
+            speaker: Voice (overrides config). None = use config.
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._sync_synthesize, text, out_dir, speaker)
 
     def _sync_synthesize(self, text: str, out_dir: str, speaker: Optional[str] = None) -> str:
-        """Синхронный вызов Silero (вызывается в executor)."""
+        """Synchronous Silero call (called in executor)."""
         import numpy as np
         import re
 
@@ -217,8 +217,8 @@ class SpeechProcessor:
 
         prepared = prepare_text_for_tts(text).strip()
         
-        # Разбиваем длинный текст на чанки, чтобы избежать "Model couldn't generate your text, probably it's too long"
-        # Максимальная длина для Silero ~800-1000 символов.
+        # Split long text into chunks to avoid "Model couldn't generate your text, probably it's too long"
+        # Max length for Silero ~800-1000 characters.
         max_chars = 800
         sentences = re.split(r'(?<=[.!?\n])\s+', prepared)
         chunks = []
@@ -231,7 +231,7 @@ class SpeechProcessor:
             else:
                 if current_chunk:
                     chunks.append(current_chunk.strip())
-                # Если одно предложение длиннее max_chars (бывает редко, но на всякий случай)
+                # If a single sentence is longer than max_chars (rare, but just in case)
                 if len(s) >= max_chars:
                     words = s.split()
                     temp_chunk = ""
@@ -262,18 +262,18 @@ class SpeechProcessor:
                     chunk_audio = chunk_audio.cpu().numpy()
                 audio_chunks.append(np.asarray(chunk_audio, dtype=np.float32))
             except Exception as e:
-                logger.warning(f"Ошибка синтеза чанка '{chunk[:30]}...': {e}")
+                logger.warning(f"Chunk synthesis error '{chunk[:30]}...': {e}")
 
         if not audio_chunks:
-            raise RuntimeError("Не удалось синтезировать ни один чанк текста.")
+            raise RuntimeError("Failed to synthesize any text chunk.")
 
-        # Объединяем аудио чанки с небольшой паузой между ними (например, 200 мс)
+        # Merge audio chunks with a short pause between them (e.g., 200 ms)
         pause = np.zeros(int(sample_rate * 0.2), dtype=np.float32)
         audio = audio_chunks[0]
         for ac in audio_chunks[1:]:
             audio = np.concatenate([audio, pause, ac])
 
-        # Сохранить WAV
+        # Save WAV
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
         timestamp = int(time.time() * 1000)
@@ -287,30 +287,30 @@ class SpeechProcessor:
             import soundfile as sf
             sf.write(wav_path, audio, sample_rate)
 
-        # Конвертировать в OGG Opus (голосовое сообщение в Telegram)
+        # Convert to OGG Opus (Telegram voice message)
         ogg_path = self._wav_to_ogg(wav_path)
         if ogg_path:
-            logger.info(f"TTS синтез → OGG: {ogg_path}")
+            logger.info(f"TTS synthesis → OGG: {ogg_path}")
             return ogg_path
-        logger.warning("OGG конвертация недоступна (pydub и ffmpeg), отправка WAV")
+        logger.warning("OGG conversion unavailable (pydub and ffmpeg), sending WAV")
         return wav_path
 
     # ── TTS SSML ─────────────────────────────────────────────────────────────
 
     async def synthesize_ssml(self, ssml_text: str, out_dir: str, speaker: Optional[str] = None) -> str:
         """
-        Синтезирует речь из SSML-разметки.
-        Возвращает путь к аудиофайлу (OGG Opus или WAV как fallback).
-        Silero v5 поддерживает: <speak>, <p>, <s>, <break>, <prosody rate|pitch>.
+        Synthesizes speech from SSML markup.
+        Returns the path to the audio file (OGG Opus or WAV as fallback).
+        Silero v5 supports: <speak>, <p>, <s>, <break>, <prosody rate|pitch>.
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._sync_synthesize_ssml, ssml_text, out_dir, speaker)
 
     def _sync_synthesize_ssml(self, ssml_text: str, out_dir: str, speaker: Optional[str] = None) -> str:
         """
-        Синхронный SSML-синтез через model.save_wav(ssml_text=...).
-        save_wav может вернуть несколько WAV-файлов (по одному на сегмент SSML) —
-        они склеиваются через pydub, результат конвертируется в OGG Opus.
+        Synchronous SSML synthesis via model.save_wav(ssml_text=...).
+        save_wav may return multiple WAV files (one per SSML segment) —
+        they are merged via pydub, result is converted to OGG Opus.
         """
         self._load_silero_model()
 
@@ -323,7 +323,7 @@ class SpeechProcessor:
         timestamp = int(time.time() * 1000)
         audio_base = str(out_path / f"ssml_{timestamp}.wav")
 
-        # save_wav возвращает список путей (один файл на абзац/сегмент)
+        # save_wav returns a list of paths (one file per paragraph/segment)
         wav_paths = self._silero.save_wav(
             ssml_text=ssml_text,
             speaker=effective_speaker,
@@ -335,7 +335,7 @@ class SpeechProcessor:
             wav_paths = [str(wav_paths)]
         wav_paths = [str(p) for p in wav_paths]
 
-        # Склеить сегменты если их несколько
+        # Merge segments if there are multiple
         if len(wav_paths) == 1:
             merged_wav = wav_paths[0]
         else:
@@ -353,52 +353,52 @@ class SpeechProcessor:
                     except Exception:
                         pass
             except Exception as e:
-                logger.warning(f"Не удалось склеить SSML сегменты ({e}), использую первый")
+                logger.warning(f"Failed to merge SSML segments ({e}), using first")
                 merged_wav = wav_paths[0]
 
-        logger.info(f"SSML TTS синтез → WAV: {merged_wav}")
+        logger.info(f"SSML TTS synthesis → WAV: {merged_wav}")
 
-        # Конвертировать в OGG Opus (голосовое сообщение в Telegram)
+        # Convert to OGG Opus (Telegram voice message)
         ogg_path = self._wav_to_ogg(merged_wav)
         if ogg_path:
             logger.info(f"SSML TTS → OGG: {ogg_path}")
             return ogg_path
-        logger.warning("OGG конвертация недоступна (pydub и ffmpeg), отправка WAV")
+        logger.warning("OGG conversion unavailable (pydub and ffmpeg), sending WAV")
         return merged_wav
 
-    # ── Прогрев (warmup) ─────────────────────────────────────────────────────
+    # ── Warmup ─────────────────────────────────────────────────────────────
 
     async def warmup(self) -> None:
         """
-        Загружает STT и TTS модели в фоновом потоке при старте сервера.
-        Устраняет задержку при первом голосовом сообщении пользователя.
-        Ошибки логируются но не поднимаются — сервер стартует в любом случае.
+        Loads STT and TTS models in a background thread at server startup.
+        Eliminates delay on the user's first voice message.
+        Errors are logged but not raised — the server starts regardless.
         """
         loop = asyncio.get_event_loop()
 
-        logger.info("▶ Начинаю предзагрузку голосовых моделей (STT + TTS)...")
+        logger.info("▶ Starting preload of voice models (STT + TTS)...")
         t0 = time.monotonic()
 
         # Whisper STT
         try:
             await loop.run_in_executor(None, self._load_whisper_model)
         except Exception as e:
-            logger.warning(f"⚠ Whisper warmup не удался: {e}")
+            logger.warning(f"⚠ Whisper warmup failed: {e}")
 
-        # Silero TTS (включает JIT-прогрев)
+        # Silero TTS (includes JIT warmup)
         try:
             await loop.run_in_executor(None, self._load_silero_model)
         except Exception as e:
-            logger.warning(f"⚠ Silero warmup не удался: {e}")
+            logger.warning(f"⚠ Silero warmup failed: {e}")
 
         elapsed = time.monotonic() - t0
-        logger.info(f"✅ Голосовые модели готовы за {elapsed:.1f}с")
+        logger.info(f"✅ Voice models ready in {elapsed:.1f}s")
 
     @staticmethod
     def check_dependencies() -> dict:
         """
-        Проверяет наличие всех зависимостей для STT и TTS.
-        Возвращает словарь с результатами и печатает предупреждения.
+        Checks the availability of all STT and TTS dependencies.
+        Returns a dictionary with results and prints warnings.
         """
         results = {
             "faster_whisper": False,
@@ -414,77 +414,77 @@ class SpeechProcessor:
             import faster_whisper  # noqa
             results["faster_whisper"] = True
         except ImportError:
-            warnings.append("faster-whisper не установлен → STT недоступен (pip install faster-whisper)")
+            warnings.append("faster-whisper not installed → STT unavailable (pip install faster-whisper)")
 
         try:
             import torch  # noqa
             results["torch"] = True
         except ImportError:
-            warnings.append("torch не установлен → TTS недоступен")
+            warnings.append("torch not installed → TTS unavailable")
 
         try:
             import scipy  # noqa
             results["scipy"] = True
         except ImportError:
-            warnings.append("scipy не установлен → TTS может не работать (pip install scipy)")
+            warnings.append("scipy not installed → TTS may not work (pip install scipy)")
 
         try:
             import pydub  # noqa
             results["pydub"] = True
-            # Проверить ffmpeg
+            # Check ffmpeg
             import subprocess
             r = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=3)
             if r.returncode == 0:
                 results["ffmpeg"] = True
             else:
-                warnings.append("ffmpeg не найден → TTS будет отправлять WAV вместо OGG (голосовой пузырь)")
+                warnings.append("ffmpeg not found → TTS will send WAV instead of OGG (voice bubble)")
         except ImportError:
-            warnings.append("pydub не установлен → WAV→OGG конвертация недоступна (pip install pydub)")
+            warnings.append("pydub not installed → WAV→OGG conversion unavailable (pip install pydub)")
         except Exception:
-            warnings.append("ffmpeg не найден в PATH → TTS будет отправлять WAV вместо OGG (голосовой пузырь)")
+            warnings.append("ffmpeg not found in PATH → TTS will send WAV instead of OGG (voice bubble)")
 
         if results["torch"]:
             from pathlib import Path as _Path
             import os as _os
-            # Проверить model.pt
+            # Check model.pt
             default_path = _Path(__file__).parent.parent / "speech-text" / "model.pt"
             if default_path.exists():
                 results["silero_model"] = True
             else:
-                warnings.append(f"Silero model.pt не найден: {default_path} → TTS недоступен")
+                warnings.append(f"Silero model.pt not found: {default_path} → TTS unavailable")
 
         if warnings:
-            logger.warning("⚠️  Voice subsystem: обнаружены проблемы с зависимостями:")
+            logger.warning("⚠️  Voice subsystem: dependency issues detected:")
             for w in warnings:
                 logger.warning(f"   • {w}")
         else:
-            logger.info("✅ Voice subsystem: все зависимости доступны (STT + TTS готовы)")
+            logger.info("✅ Voice subsystem: all dependencies available (STT + TTS ready)")
 
         return results
 
 
-# ─── Глобальный синглтон ────────────────────────────────────────────────────
+# ─── Global singleton ────────────────────────────────────────────────────
 
 _processor: Optional[SpeechProcessor] = None
 
 
 def get_speech_processor(config: dict) -> SpeechProcessor:
     """
-    Возвращает глобальный синглтон SpeechProcessor.
-    При первом вызове создаёт, проверяет зависимости и логирует статус.
+    Returns the global SpeechProcessor singleton.
+    On first call, creates it, checks dependencies, and logs status.
     """
     global _processor
     if _processor is None:
         _processor = SpeechProcessor(config)
-        # Проверить зависимости сразу при создании — чтобы проблемы были видны в логах
+        # Check dependencies immediately on creation — so issues are visible in logs
         _processor.check_dependencies()
     return _processor
 
 
 def get_existing_speech_processor() -> Optional[SpeechProcessor]:
     """
-    Возвращает синглтон SpeechProcessor если он уже создан, иначе None.
-    Не создаёт новый экземпляр. Используется в инструментах агента,
-    чтобы не перечитывать config.yaml при каждом вызове.
+    Returns the SpeechProcessor singleton if already created, otherwise None.
+    Does not create a new instance. Used in agent tools
+    to avoid re-reading config.yaml on every call.
     """
     return _processor

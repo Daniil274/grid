@@ -44,7 +44,7 @@ SESSION_FILE = Path(__file__).parent.parent / 'workspace' / '.session.json'
 # Titles / class names of system helper windows to hide from find_window results
 _SYSTEM_TITLES = {
     'mutter guard window', 'gnome-shell', 'gnome shell',
-    'nautilus-desktop', 'рабочий стол',
+    'nautilus-desktop', 'desktop',
     'vboxclientwnddnd', 'main', 'ibus-x11', 'ibus-xim',
 }
 _SYSTEM_PREFIXES = ('gsd-', 'qt selection owner', 'qt client leader',

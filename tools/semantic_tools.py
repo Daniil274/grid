@@ -110,24 +110,24 @@ def semantic_search_code(
     reindex: bool = False,
 ) -> str:
     """
-    Семантический поиск по кодовой базе конкретной директории.
+    Semantic search within a specific directory's codebase.
 
-    Ищет код по смыслу запроса — находит релевантные фрагменты, даже если
-    точные ключевые слова не совпадают.
+    Searches code by meaning — finds relevant fragments even if
+    exact keywords do not match.
 
-    Каждая директория использует изолированный индекс; результаты из других
-    директорий никогда не попадают в выдачу.
+    Each directory uses an isolated index; results from other
+    directories never appear in the output.
 
     Args:
-        query: Поисковый запрос на естественном языке или техническом описании
-        directory: Корневая директория кодовой базы для поиска
-        file_extensions: Фильтр по расширениям, через запятую (например "py,ts").
-                         Пусто = все поддерживаемые языки
-        n_results: Максимальное количество результатов (по умолчанию 5)
-        reindex: True — переиндексировать директорию перед поиском
+        query: Search query in natural language or technical description
+        directory: Root directory of the codebase to search
+        file_extensions: Filter by extensions, comma-separated (e.g. "py,ts").
+                         Empty = all supported languages
+        n_results: Maximum number of results (default 5)
+        reindex: True — reindex the directory before searching
 
     Returns:
-        str: Найденные фрагменты кода с оценкой релевантности и путём к файлу
+        str: Found code fragments with relevance scores and file paths
     """
     _log.log_tool_call("semantic_search_code", {
         "query": query, "directory": directory,
@@ -136,20 +136,20 @@ def semantic_search_code(
     })
 
     if not EMBEDDINGS_AVAILABLE:
-        msg = "Семантический поиск недоступен. Установите: pip install chromadb openai"
+        msg = "Semantic search is not available. Install: pip install chromadb openai"
         _log.error(f"TOOL_ERROR | semantic_search_code | {msg}")
         return f"❌ {msg}"
 
     base_path = _resolve(directory)
     if base_path is None:
-        msg = f"Директория не найдена: {directory}"
+        msg = f"Directory not found: {directory}"
         _log.error(f"TOOL_ERROR | semantic_search_code | {msg}")
         return f"❌ {msg}"
 
     resolved = str(base_path)
     manager = _get_manager(resolved)
     if manager is None:
-        msg = "Не удалось инициализировать менеджер поиска (проверьте OPENROUTER_API_KEY)"
+        msg = "Failed to initialize search manager (check OPENROUTER_API_KEY)"
         _log.error(f"TOOL_ERROR | semantic_search_code | {msg}")
         return f"❌ {msg}"
 
@@ -163,7 +163,7 @@ def semantic_search_code(
                 files.extend(base_path.glob(f"**/*{ext}"))
 
             if not files:
-                msg = f"Нет файлов для индексации в {resolved} (расширения: {extensions})"
+                msg = f"No files to index in {resolved} (extensions: {extensions})"
                 _log.info(f"TOOL_RESULT | semantic_search_code | {msg}")
                 return f"⚠️ {msg}"
 
@@ -185,14 +185,14 @@ def semantic_search_code(
         results = manager.search_code(query=query, n_results=n_results, file_extension=ext_filter)
 
         if not results:
-            msg = f"Ничего не найдено по запросу: «{query}»"
+            msg = f"Nothing found for query: '{query}'"
             _log.info(f"TOOL_RESULT | semantic_search_code | {msg}")
             return f"🔍 {msg}"
 
         lines = [
-            f"🔍 Семантический поиск: «{query}»",
-            f"Директория: {resolved}",
-            f"Найдено {len(results)} фрагментов:",
+            f"🔍 Semantic search: '{query}'",
+            f"Directory: {resolved}",
+            f"Found {len(results)} fragments:",
             "",
         ]
         for i, hit in enumerate(results, 1):
@@ -201,9 +201,9 @@ def semantic_search_code(
             similarity = hit.get("similarity", 0.0)
             text = hit.get("text", "")
             if len(text) > 500:
-                text = text[:500] + "\n... (усечено)"
+                text = text[:500] + "\n... (truncated)"
             lines += [
-                f"[{i}] {file_rel}  (релевантность: {similarity:.0%})",
+                f"[{i}] {file_rel}  (relevance: {similarity:.0%})",
                 "```",
                 text,
                 "```",
@@ -216,7 +216,7 @@ def semantic_search_code(
 
     except Exception as exc:
         _log.error(f"TOOL_ERROR | semantic_search_code | {exc}")
-        return f"❌ Ошибка при поиске: {exc}"
+        return f"❌ Search error: {exc}"
 
 
 @function_tool
@@ -226,18 +226,18 @@ def index_codebase(
     force_reindex: bool = False,
 ) -> str:
     """
-    Индексировать кодовую базу директории для семантического поиска.
+    Index a directory's codebase for semantic search.
 
-    Создаёт изолированный векторный индекс для указанной директории.
-    Индекс привязан только к этой директории — другие директории не затрагиваются.
+    Creates an isolated vector index for the specified directory.
+    The index is tied only to this directory — other directories are unaffected.
 
     Args:
-        directory: Корневая директория для индексации
-        file_extensions: Расширения через запятую (по умолчанию "py,js,ts,jsx,tsx")
-        force_reindex: True — очистить и пересоздать индекс полностью
+        directory: Root directory for indexing
+        file_extensions: Comma-separated extensions (default "py,js,ts,jsx,tsx")
+        force_reindex: True — clear and fully recreate the index
 
     Returns:
-        str: Статистика индексации
+        str: Indexing statistics
     """
     _log.log_tool_call("index_codebase", {
         "directory": directory,
@@ -246,20 +246,20 @@ def index_codebase(
     })
 
     if not EMBEDDINGS_AVAILABLE:
-        msg = "Индексация недоступна. Установите: pip install chromadb openai"
+        msg = "Indexing unavailable. Install with: pip install chromadb openai"
         _log.error(f"TOOL_ERROR | index_codebase | {msg}")
         return f"❌ {msg}"
 
     base_path = _resolve(directory)
     if base_path is None:
-        msg = f"Директория не найдена: {directory}"
+        msg = f"Directory not found: {directory}"
         _log.error(f"TOOL_ERROR | index_codebase | {msg}")
         return f"❌ {msg}"
 
     resolved = str(base_path)
     manager = _get_manager(resolved)
     if manager is None:
-        msg = "Не удалось инициализировать менеджер (проверьте OPENROUTER_API_KEY)"
+        msg = "Failed to initialize manager (check OPENROUTER_API_KEY)"
         _log.error(f"TOOL_ERROR | index_codebase | {msg}")
         return f"❌ {msg}"
 
@@ -267,8 +267,8 @@ def index_codebase(
         count = manager.get_collection_count()
         if count > 0 and not force_reindex:
             msg = (
-                f"Директория уже проиндексирована ({count} фрагментов). "
-                f"Передайте force_reindex=True для пересоздания индекса."
+                f"Directory already indexed ({count} fragments). "
+                f"Pass force_reindex=True to recreate the index."
             )
             _log.info(f"TOOL_RESULT | index_codebase | {msg}")
             return f"ℹ️ {msg}"
@@ -279,7 +279,7 @@ def index_codebase(
             files.extend(base_path.glob(f"**/*{ext}"))
 
         if not files:
-            msg = f"Нет файлов в {resolved} (расширения: {extensions})"
+            msg = f"No files in {resolved} (extensions: {extensions})"
             _log.info(f"TOOL_RESULT | index_codebase | {msg}")
             return f"⚠️ {msg}"
 
@@ -290,19 +290,19 @@ def index_codebase(
         total = manager.get_collection_count()
 
         out = (
-            f"✅ Индексация завершена\n"
-            f"Директория:  {resolved}\n"
-            f"Коллекция:   {manager.collection_name}\n"
-            f"Файлов:      {len(files)}\n"
-            f"Фрагментов:  {total}\n"
-            f"Расширения:  {', '.join(extensions)}"
+            f"✅ Indexing complete\n"
+            f"Directory:   {resolved}\n"
+            f"Collection:  {manager.collection_name}\n"
+            f"Files:       {len(files)}\n"
+            f"Fragments:   {total}\n"
+            f"Extensions:  {', '.join(extensions)}"
         )
         _log.info(f"TOOL_RESULT | index_codebase | indexed {len(files)} files in '{resolved}'")
         return out
 
     except Exception as exc:
         _log.error(f"TOOL_ERROR | index_codebase | {exc}")
-        return f"❌ Ошибка индексации: {exc}"
+        return f"❌ Indexing error: {exc}"
 
 
 # ---------------------------------------------------------------------------

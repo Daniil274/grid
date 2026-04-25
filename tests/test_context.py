@@ -163,9 +163,9 @@ class TestContextManager:
         
         context = cm.get_conversation_context()
         
-        assert "Предыдущий диалог" in context
-        assert "Пользователь: Hello" in context
-        assert "Ассистент: Hi there!" in context
+        assert "Previous conversation" in context
+        assert "User: Hello" in context
+        assert "Assistant: Hi there!" in context
     
     def test_get_conversation_context_with_limit(self):
         """Test getting conversation context with message limit."""
@@ -266,9 +266,9 @@ class TestContextManager:
 
         summary = cm.get_incomplete_run_summary()
 
-        assert "Незавершённая предыдущая попытка выполнения" in summary
-        assert "Агент: test_agent" in summary
-        assert "Последняя ошибка: Connection error while reading response" in summary
+        assert "Unfinished previous execution attempt" in summary
+        assert "Agent: test_agent" in summary
+        assert "Last error: Connection error while reading response" in summary
         assert "tool_called: bash_tool" in summary
         assert "tool_output: bash_tool | output=ok" in summary
 
@@ -502,10 +502,10 @@ class TestContextManager:
             task_input="Continue conversation"
         )
         
-        assert "Контекст диалога" in context
+        assert "Conversation context" in context
         assert "Continue conversation" in context
-        assert "Пользователь: Hello" in context
-        assert "Ассистент: Hi" in context
+        assert "User: Hello" in context
+        assert "Assistant: Hi" in context
     
     def test_context_for_agent_tool_smart(self):
         """Test smart context strategy for agent tool."""
@@ -515,10 +515,10 @@ class TestContextManager:
         # Task with conversation keywords should include conversation
         context = cm.get_context_for_agent_tool(
             strategy="smart",
-            task_input="продолжи анализ файла"
+            task_input="continue file analysis"
         )
         
-        assert "файла" in context or "Контекст" in context
+        assert "file" in context or "Context" in context
     
     def test_add_tool_result_as_message(self):
         """Test adding tool result as message."""
@@ -529,7 +529,7 @@ class TestContextManager:
         assert len(cm._conversation_history) == 1
         message = cm._conversation_history[0]
         assert message.role == "assistant"
-        assert "Результат инструмента file_reader" in message.content
+        assert "Tool result of file_reader" in message.content
         assert "File content: Hello World" in message.content
     
     def test_add_tool_result_as_message_empty_output(self):
@@ -585,7 +585,7 @@ class TestContextManager:
             thread.start()
         
         for thread in threads:
-            thread.join(timeout=10)  # Таймаут 10 сек для каждого потока
+            thread.join(timeout=10)  # 10 sec timeout for each thread
             if thread.is_alive():
                 pytest.fail(f"Thread {thread.name} did not finish within timeout")
         
@@ -595,7 +595,7 @@ class TestContextManager:
         assert len(cm._conversation_history) == 20  # 2 threads * 10 messages
 
     def test_thread_safety_simple(self):
-        """Простой тест thread safety без deadlock'ов."""
+        """Simple thread safety test without deadlocks."""
         import threading
         import time
         

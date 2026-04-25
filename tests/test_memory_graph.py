@@ -2,11 +2,11 @@
 Unit tests for MemoryStore graph methods.
 
 Tests:
-- get_entity_graph() - поиск записей по entity
-- get_connected_entries() - BFS обход графа связей
-- find_entity_connections() - поиск пути между сущностями
-- _get_outgoing_connections() - получение исходящих связей
-- _get_incoming_connections() - получение входящих связей
+- get_entity_graph() - search for entries by entity
+- get_connected_entries() - BFS traversal of connection graph
+- find_entity_connections() - find path between entities
+- _get_outgoing_connections() - get outgoing connections
+- _get_incoming_connections() - get incoming connections
 """
 
 import pytest
@@ -88,7 +88,7 @@ class TestGetOutgoingConnections:
     """Test _get_outgoing_connections() method."""
 
     def test_get_outgoing_no_connections(self, store):
-        """Entry без connections должен возвращать пустой список."""
+        """Entry without connections should return an empty list."""
         entry_id = store.save(
             content="Test entry",
             type="long_term"
@@ -99,12 +99,12 @@ class TestGetOutgoingConnections:
         assert result == []
 
     def test_get_outgoing_single_connection(self, store):
-        """Проверка получения одной исходящей связи."""
-        # Создаём две записи
+        """Check getting a single outgoing connection."""
+        # Create two entries
         entry1_id = store.save(content="Entry 1", type="long_term")
         entry2_id = store.save(content="Entry 2", type="long_term")
         
-        # Обновляем connections для entry1
+        # Update connections for entry1
         connections = json.dumps([{"target_id": entry2_id, "relation": "relates_to"}])
         _update_connections(store, entry1_id, connections)
         
@@ -114,7 +114,7 @@ class TestGetOutgoingConnections:
         assert result[0] == (entry2_id, "relates_to")
 
     def test_get_outgoing_multiple_connections(self, store):
-        """Проверка получения нескольких исходящих связей."""
+        """Check getting multiple outgoing connections."""
         entry1_id = store.save(content="Entry 1", type="long_term")
         entry2_id = store.save(content="Entry 2", type="long_term")
         entry3_id = store.save(content="Entry 3", type="long_term")
@@ -133,16 +133,16 @@ class TestGetOutgoingConnections:
         assert entry3_id in target_ids
 
     def test_get_outgoing_nonexistent_entry(self, store):
-        """Запрос для несуществующего entry должен возвращать пустой список."""
+        """Query for non-existent entry should return an empty list."""
         result = store._get_outgoing_connections(99999)
         
         assert result == []
 
     def test_get_outgoing_invalid_json_connections(self, store):
-        """Невалидный JSON в connections должен возвращать пустой список."""
+        """Invalid JSON in connections should return an empty list."""
         entry_id = store.save(content="Test", type="long_term")
         
-        # Устанавливаем невалидный JSON напрямую через SQL
+        # Set invalid JSON directly via SQL
         with sqlite3.connect(str(store.db_path)) as conn:
             conn.execute("UPDATE memory SET connections = ? WHERE id = ?", ("not a json", entry_id))
             conn.commit()
@@ -152,11 +152,11 @@ class TestGetOutgoingConnections:
         assert result == []
 
     def test_get_outgoing_missing_target_id(self, store):
-        """Connection без target_id должен быть пропущен."""
+        """Connection without target_id should be skipped."""
         entry_id = store.save(content="Test", type="long_term")
         
         connections = json.dumps([
-            {"relation": "invalid"},  # Нет target_id
+            {"relation": "invalid"},  # No target_id
             {"target_id": None, "relation": "also_invalid"}
         ])
         _update_connections(store, entry_id, connections)
@@ -166,7 +166,7 @@ class TestGetOutgoingConnections:
         assert result == []
 
     def test_get_outgoing_string_target_id(self, store):
-        """target_id как строка должен конвертироваться в int."""
+        """target_id as string should be converted to int."""
         entry1_id = store.save(content="Entry 1", type="long_term")
         entry2_id = store.save(content="Entry 2", type="long_term")
         
@@ -183,7 +183,7 @@ class TestGetIncomingConnections:
     """Test _get_incoming_connections() method."""
 
     def test_get_incoming_no_connections(self, store):
-        """Entry без входящих связей должен возвращать пустой список."""
+        """Entry without incoming connections should return an empty list."""
         entry_id = store.save(content="Test entry", type="long_term")
         
         result = store._get_incoming_connections(entry_id)
@@ -191,11 +191,11 @@ class TestGetIncomingConnections:
         assert result == []
 
     def test_get_incoming_single_connection(self, store):
-        """Проверка получения одной входящей связи."""
+        """Check getting a single incoming connection."""
         entry1_id = store.save(content="Source entry", type="long_term")
         entry2_id = store.save(content="Target entry", type="long_term")
         
-        # entry1 указывает на entry2
+        # entry1 points to entry2
         connections = json.dumps([{"target_id": entry2_id, "relation": "references"}])
         _update_connections(store, entry1_id, connections)
         
@@ -205,7 +205,7 @@ class TestGetIncomingConnections:
         assert result[0] == (entry1_id, "references")
 
     def test_get_incoming_multiple_connections(self, store):
-        """Проверка получения нескольких входящих связей."""
+        """Check getting multiple incoming connections."""
         entry1_id = store.save(content="Source 1", type="long_term")
         entry2_id = store.save(content="Source 2", type="long_term")
         target_id = store.save(content="Target", type="long_term")
@@ -224,14 +224,14 @@ class TestGetIncomingConnections:
         assert entry2_id in source_ids
 
     def test_get_incoming_ignores_archived(self, store):
-        """Архивированные записи не должны учитываться."""
+        """Archived entries should not be considered."""
         entry1_id = store.save(content="Source", type="long_term")
         entry2_id = store.save(content="Target", type="long_term")
         
         connections = json.dumps([{"target_id": entry2_id, "relation": "link"}])
         _update_connections(store, entry1_id, connections)
         
-        # Архивируем source
+        # Archive source
         _update_entry(store, entry1_id, is_archived=True)
         
         result = store._get_incoming_connections(entry2_id)
@@ -239,11 +239,11 @@ class TestGetIncomingConnections:
         assert result == []
 
     def test_get_incoming_missing_relation(self, store):
-        """Connection без relation должен возвращать пустую строку."""
+        """Connection without relation should return an empty string."""
         entry1_id = store.save(content="Source", type="long_term")
         entry2_id = store.save(content="Target", type="long_term")
         
-        # connection без relation
+        # connection without relation
         connections = json.dumps([{"target_id": entry2_id}])
         _update_connections(store, entry1_id, connections)
         
@@ -257,13 +257,13 @@ class TestGetEntityGraph:
     """Test get_entity_graph() method."""
 
     def test_get_entity_graph_empty_result(self, store):
-        """Поиск несуществующей entity должен возвращать пустой список."""
+        """Search for non-existent entity should return an empty list."""
         result = store.get_entity_graph("NonExistentEntity")
         
         assert result == []
 
     def test_get_entity_graph_single_match(self, store):
-        """Поиск должен находить записи с указанной entity."""
+        """Search should find entries with the specified entity."""
         entities = json.dumps([{"name": "Python", "type": "programming_language"}])
         entry_id = store.save(content="Python is great", type="long_term", entities=entities)
         
@@ -273,7 +273,7 @@ class TestGetEntityGraph:
         assert result[0].id == entry_id
 
     def test_get_entity_graph_multiple_matches(self, store):
-        """Поиск должен возвращать все записи с указанной entity."""
+        """Search should return all entries with the specified entity."""
         entities_python = json.dumps([{"name": "Python"}])
         
         entry1_id = store.save(content="Python for backend", type="long_term", entities=entities_python)
@@ -289,7 +289,7 @@ class TestGetEntityGraph:
         assert "Python for ML" in contents
 
     def test_get_entity_graph_respects_limit(self, store):
-        """Результат должен ограничиваться limit."""
+        """Result should be limited by limit."""
         entities = json.dumps([{"name": "TestEntity"}])
         
         for i in range(30):
@@ -300,7 +300,7 @@ class TestGetEntityGraph:
         assert len(result) == 10
 
     def test_get_entity_graph_sorted_by_importance(self, store):
-        """Результаты должны сортироваться по importance DESC."""
+        """Results should be sorted by importance DESC."""
         entities = json.dumps([{"name": "Important"}])
         
         entry1_id = store.save(content="Low importance", type="long_term", 
@@ -317,13 +317,13 @@ class TestGetEntityGraph:
         assert result[2].importance == 0.3
 
     def test_get_entity_graph_ignores_archived(self, store):
-        """Архивированные записи не должны включаться."""
+        """Archived entries should not be included."""
         entities = json.dumps([{"name": "Archived"}])
         
         entry1_id = store.save(content="Active entry", type="long_term", entities=entities)
         entry2_id = store.save(content="Archived entry", type="long_term", entities=entities)
         
-        # Архивируем entry2
+        # Archive entry2
         _update_entry(store, entry2_id, is_archived=True)
         
         result = store.get_entity_graph("Archived")
@@ -332,7 +332,7 @@ class TestGetEntityGraph:
         assert result[0].content == "Active entry"
 
     def test_get_entity_graph_multiple_entities_per_entry(self, store):
-        """Запись с несколькими entities должна находиться по любой из них."""
+        """Entry with multiple entities should be found by any of them."""
         entities = json.dumps([
             {"name": "Python"},
             {"name": "Django"}
@@ -352,13 +352,13 @@ class TestGetConnectedEntries:
     """Test get_connected_entries() method - BFS graph traversal."""
 
     def test_get_connected_nonexistent_entry(self, store):
-        """Запрос для несуществующего entry должен возвращать пустой список."""
+        """Query for non-existent entry should return an empty list."""
         result = store.get_connected_entries(99999, max_depth=2)
         
         assert result == []
 
     def test_get_connected_no_connections(self, store):
-        """Entry без связей должен возвращать пустой список."""
+        """Entry without connections should return an empty list."""
         entry_id = store.save(content="Isolated entry", type="long_term")
         
         result = store.get_connected_entries(entry_id)
@@ -366,7 +366,7 @@ class TestGetConnectedEntries:
         assert result == []
 
     def test_get_connected_direct_outgoing(self, store):
-        """Проверка прямых исходящих связей (depth=1)."""
+        """Check direct outgoing connections (depth=1)."""
         entry1_id = store.save(content="Source", type="long_term")
         entry2_id = store.save(content="Target", type="long_term")
         
@@ -381,14 +381,14 @@ class TestGetConnectedEntries:
         assert relation == "links_to"
 
     def test_get_connected_direct_incoming(self, store):
-        """Проверка прямых входящих связей (depth=1)."""
+        """Check direct incoming connections (depth=1)."""
         entry1_id = store.save(content="Source", type="long_term")
         entry2_id = store.save(content="Target", type="long_term")
         
         connections = json.dumps([{"target_id": entry2_id, "relation": "parent"}])
         _update_connections(store, entry1_id, connections)
         
-        # entry2 должен видеть entry1 как входящую связь
+        # entry2 should see entry1 as an incoming connection
         result = store.get_connected_entries(entry2_id, max_depth=1)
         
         assert len(result) == 1
@@ -397,9 +397,9 @@ class TestGetConnectedEntries:
         assert relation == "parent"
 
     def test_get_connected_bidirectional(self, store):
-        """Проверка двунаправленного обхода (outgoing + incoming)."""
+        """Check bidirectional traversal (outgoing + incoming)."""
         #   entry1 -> entry2 -> entry3
-        #   entry4 -> entry2 (entry2 имеет входящую от entry4)
+        #   entry4 -> entry2 (entry2 has incoming from entry4)
         entry1_id = store.save(content="Entry 1", type="long_term")
         entry2_id = store.save(content="Entry 2", type="long_term")
         entry3_id = store.save(content="Entry 3", type="long_term")
@@ -415,7 +415,7 @@ class TestGetConnectedEntries:
             {"target_id": entry2_id, "relation": "references"}
         ]))
         
-        # entry2 должен иметь 3 связи: entry1 (incoming), entry3 (outgoing), entry4 (incoming)
+        # entry2 should have 3 connections: entry1 (incoming), entry3 (outgoing), entry4 (incoming)
         result = store.get_connected_entries(entry2_id, max_depth=1)
         
         assert len(result) == 3
@@ -425,7 +425,7 @@ class TestGetConnectedEntries:
         assert entry4_id in connected_ids
 
     def test_get_connected_respects_max_depth(self, store):
-        """Проверка ограничения глубины обхода."""
+        """Check max depth traversal limit."""
         # Chain: entry1 -> entry2 -> entry3 -> entry4
         entry1_id = store.save(content="E1", type="long_term")
         entry2_id = store.save(content="E2", type="long_term")
@@ -442,25 +442,25 @@ class TestGetConnectedEntries:
             {"target_id": entry4_id, "relation": "r3"}
         ]))
         
-        # max_depth=1: только прямые связи
+        # max_depth=1: only direct connections
         result1 = store.get_connected_entries(entry1_id, max_depth=1)
         assert len(result1) == 1
         assert result1[0][0].id == entry2_id
         
-        # max_depth=2: entry2 и entry3
+        # max_depth=2: entry2 and entry3
         result2 = store.get_connected_entries(entry1_id, max_depth=2)
         connected_ids = {e.id for e, r in result2}
         assert entry2_id in connected_ids
         assert entry3_id in connected_ids
         assert entry4_id not in connected_ids
         
-        # max_depth=3: все три
+        # max_depth=3: all three
         result3 = store.get_connected_entries(entry1_id, max_depth=3)
         connected_ids = {e.id for e, r in result3}
         assert entry4_id in connected_ids
 
     def test_get_connected_handles_cycles(self, store):
-        """Обработка циклов в графе (не должно зацикливаться)."""
+        """Handle cycles in the graph (should not loop infinitely)."""
         # Cycle: entry1 -> entry2 -> entry1
         entry1_id = store.save(content="E1", type="long_term")
         entry2_id = store.save(content="E2", type="long_term")
@@ -472,16 +472,16 @@ class TestGetConnectedEntries:
             {"target_id": entry1_id, "relation": "to1"}
         ]))
         
-        # Не должно зациклиться
+        # Should not loop infinitely
         result = store.get_connected_entries(entry1_id, max_depth=5)
         
-        # Каждая запись должна появиться только один раз
+        # Each entry should appear only once
         connected_ids = [e.id for e, r in result]
         assert len(connected_ids) == len(set(connected_ids))
         assert entry2_id in connected_ids
 
     def test_get_connected_complex_graph(self, store):
-        """Тест на сложном графе."""
+        """Test on a complex graph."""
         #      entry1
         #      /    \
         #   entry2  entry3
@@ -505,7 +505,7 @@ class TestGetConnectedEntries:
         
         result = store.get_connected_entries(entry1_id, max_depth=2)
         
-        # entry1 соединён с entry2, entry3, entry4 (через два пути)
+        # entry1 is connected to entry2, entry3, entry4 (via two paths)
         connected_ids = {e.id for e, r in result}
         assert entry2_id in connected_ids
         assert entry3_id in connected_ids
@@ -516,13 +516,13 @@ class TestFindEntityConnections:
     """Test find_entity_connections() method - shortest path between entities."""
 
     def test_find_connections_no_start_entity(self, store):
-        """Поиск без начальной entity должен возвращать пустой список."""
+        """Search without a start entity should return an empty list."""
         result = store.find_entity_connections("NonExistent1", "Python")
         
         assert result == []
 
     def test_find_connections_no_target_entity(self, store):
-        """Поиск без конечной entity должен возвращать пустой список."""
+        """Search without a target entity should return an empty list."""
         entities = json.dumps([{"name": "Python"}])
         store.save(content="Python entry", type="long_term", entities=entities)
         
@@ -531,24 +531,24 @@ class TestFindEntityConnections:
         assert result == []
 
     def test_find_connections_same_entity(self, store):
-        """Поиск пути между одной и той же entity должен возвращать пустой список."""
+        """Searching for a path between the same entity should return an empty list."""
         entities = json.dumps([{"name": "Python"}])
         store.save(content="Python entry", type="long_term", entities=entities)
         
         result = store.find_entity_connections("Python", "Python")
         
-        # Direct overlap - пустой результат
+        # Direct overlap - empty result
         assert result == []
 
     def test_find_connections_direct_path(self, store):
-        """Поиск прямого пути между двумя entities."""
-        # entry1 с entity1 -> entry2 с entity2
+        """Search for a direct path between two entities."""
+        # entry1 with entity1 -> entry2 with entity2
         entry1_id = store.save(content="Python project", type="long_term", 
                                entities=json.dumps([{"name": "Python"}]))
         entry2_id = store.save(content="Django framework", type="long_term", 
                                entities=json.dumps([{"name": "Django"}]))
         
-        # Создаём связь
+        # Create connection
         _update_connections(store, entry1_id, json.dumps([
             {"target_id": entry2_id, "relation": "uses"}
         ]))
@@ -561,7 +561,7 @@ class TestFindEntityConnections:
         assert result[0]["relation"] == "uses"
 
     def test_find_connections_indirect_path(self, store):
-        """Поиск косвенного пути через промежуточные entries."""
+        """Find indirect path through intermediate entries."""
         # Python -> Framework -> Django
         entry1_id = store.save(content="Python", type="long_term", 
                                entities=json.dumps([{"name": "Python"}]))
@@ -587,7 +587,7 @@ class TestFindEntityConnections:
         assert result[1]["to_id"] == entry3_id
 
     def test_find_connections_no_path_within_depth(self, store):
-        """Путь длиннее max_depth не должен находиться."""
+        """Path longer than max_depth should not be found."""
         entry1_id = store.save(content="E1", type="long_term", 
                                entities=json.dumps([{"name": "A"}]))
         entry2_id = store.save(content="E2", type="long_term")
@@ -595,7 +595,7 @@ class TestFindEntityConnections:
         entry4_id = store.save(content="E4", type="long_term", 
                                entities=json.dumps([{"name": "D"}]))
         
-        # Цепочка длины 3
+        # Chain of length 3
         _update_connections(store, entry1_id, json.dumps([
             {"target_id": entry2_id, "relation": "r1"}
         ]))
@@ -606,13 +606,13 @@ class TestFindEntityConnections:
             {"target_id": entry4_id, "relation": "r3"}
         ]))
         
-        # max_depth=2 недостаточно для пути длины 3
+        # max_depth=2 is not enough for a path of length 3
         result = store.find_entity_connections("A", "D", max_depth=2)
         
         assert result == []
 
     def test_find_connections_respects_max_depth(self, store):
-        """Проверка ограничения max_depth."""
+        """Check max_depth limit."""
         entry1_id = store.save(content="E1", type="long_term", 
                                entities=json.dumps([{"name": "Start"}]))
         entry2_id = store.save(content="E2", type="long_term")
@@ -626,19 +626,19 @@ class TestFindEntityConnections:
             {"target_id": entry3_id, "relation": "r2"}
         ]))
         
-        # Путь длины 2, max_depth=2 должен находить
+        # Path of length 2, max_depth=2 should find it
         result = store.find_entity_connections("Start", "End", max_depth=2)
         assert len(result) == 2
         
-        # max_depth=1 недостаточно
+        # max_depth=1 is not enough
         result2 = store.find_entity_connections("Start", "End", max_depth=1)
         assert result2 == []
 
     def test_find_connections_shortest_path(self, store):
-        """Должен находиться кратчайший путь при наличии нескольких."""
-        # Два пути от A до D:
-        # Путь 1 (длины 2): A -> B -> D
-        # Путь 2 (длины 3): A -> C -> E -> D
+        """Should find the shortest path when multiple exist."""
+        # Two paths from A to D:
+        # Path 1 (length 2): A -> B -> D
+        # Path 2 (length 3): A -> C -> E -> D
         
         entry_a = store.save(content="A", type="long_term", 
                              entities=json.dumps([{"name": "A"}]))
@@ -648,7 +648,7 @@ class TestFindEntityConnections:
                              entities=json.dumps([{"name": "D"}]))
         entry_e = store.save(content="E", type="long_term")
         
-        # Короткий путь
+        # Short path
         _update_connections(store, entry_a, json.dumps([
             {"target_id": entry_b, "relation": "toB"}
         ]))
@@ -656,7 +656,7 @@ class TestFindEntityConnections:
             {"target_id": entry_d, "relation": "toD"}
         ]))
         
-        # Длинный путь (добавляем к existing connections)
+        # Long path (add to existing connections)
         _update_connections(store, entry_a, json.dumps([
             {"target_id": entry_b, "relation": "toB"},
             {"target_id": entry_c, "relation": "toC"}
@@ -670,32 +670,32 @@ class TestFindEntityConnections:
         
         result = store.find_entity_connections("A", "D", max_depth=5)
         
-        # BFS найдёт короткий путь (длины 2)
+        # BFS will find the short path (length 2)
         assert len(result) == 2
 
     def test_find_connections_bidirectional(self, store):
-        """Поиск должен работать в обоих направлениях (outgoing + incoming)."""
+        """Search should work in both directions (outgoing + incoming)."""
         entry1_id = store.save(content="E1", type="long_term", 
                                entities=json.dumps([{"name": "Start"}]))
         entry2_id = store.save(content="E2", type="long_term", 
                                entities=json.dumps([{"name": "End"}]))
         
-        # Связь от E1 к E2
+        # Connection from E1 to E2
         _update_connections(store, entry1_id, json.dumps([
             {"target_id": entry2_id, "relation": "forward"}
         ]))
         
-        # Поиск Start -> End (по outgoing)
+        # Search Start -> End (via outgoing)
         result1 = store.find_entity_connections("Start", "End", max_depth=1)
         assert len(result1) == 1
         
-        # Теперь проверим обратный поиск - должен найти по incoming
-        # End может найти Start через входящую связь
+        # Now check reverse search - should find via incoming
+        # End can find Start through incoming connection
         result2 = store.find_entity_connections("End", "Start", max_depth=1)
         assert len(result2) == 1
 
     def test_find_connections_includes_entity_in_path(self, store):
-        """Путь должен включать entity из конечной записи."""
+        """Path must include entity from the target entry."""
         entry1_id = store.save(content="Python entry", type="long_term", 
                                entities=json.dumps([{"name": "Python", "type": "language"}]))
         entry2_id = store.save(content="Django entry", type="long_term", 
@@ -708,12 +708,12 @@ class TestFindEntityConnections:
         result = store.find_entity_connections("Python", "Django")
         
         assert len(result) == 1
-        # entity из конечной записи
+        # entity from target entry
         assert result[0]["entity"] == "Django"
 
     def test_find_connections_complex_graph(self, store):
-        """Тест на сложном графе с несколькими entities."""
-        # Создаём граф:
+        """Test on complex graph with multiple entities."""
+        # Create graph:
         # User -> Project (has)
         # Project -> Python (uses)
         # Project -> Django (uses)
@@ -741,7 +741,7 @@ class TestFindEntityConnections:
             {"target_id": web_id, "relation": "is_a"}
         ]))
         
-        # Ищем путь User -> Django
+        # Find path User -> Django
         result = store.find_entity_connections("User", "Django", max_depth=3)
         
         assert len(result) == 2
@@ -750,8 +750,8 @@ class TestFindEntityConnections:
         assert "Project" in path_entities or "Django" in path_entities
 
     def test_find_connections_multiple_start_entries(self, store):
-        """Поиск при наличии нескольких entries с одной entity."""
-        # Несколько entries с entity "Python"
+        """Search when multiple entries share one entity."""
+        # Multiple entries with entity "Python"
         entry1_id = store.save(content="Python entry 1", type="long_term", 
                                entities=json.dumps([{"name": "Python"}]))
         entry2_id = store.save(content="Python entry 2", type="long_term", 
@@ -759,42 +759,41 @@ class TestFindEntityConnections:
         entry3_id = store.save(content="Target", type="long_term", 
                                entities=json.dumps([{"name": "Target"}]))
         
-        # Только entry2 связана с target
+        # Only entry2 is linked to target
         _update_connections(store, entry2_id, json.dumps([
             {"target_id": entry3_id, "relation": "links"}
         ]))
         
         result = store.find_entity_connections("Python", "Target")
         
-        # Должен найти путь через entry2
+        # Should find a path through entry2
         assert len(result) == 1
 
 
 class TestGraphEdgeCases:
-    """Тесты граничных случаев для графовых методов."""
+    """Edge case tests for graph methods."""
 
     def test_empty_database(self, store):
-        """Все методы должны работать с пустой базой."""
+        """All methods should work with an empty database."""
         assert store.get_entity_graph("Anything") == []
         assert store.get_connected_entries(1) == []
         assert store.find_entity_connections("A", "B") == []
 
     def test_self_connection(self, store):
-        """Entry может ссылаться сама на себя."""
+        """Entry can reference itself."""
         entry_id = store.save(content="Self-referential", type="long_term")
         _update_connections(store, entry_id, json.dumps([
             {"target_id": entry_id, "relation": "self"}
         ]))
         
-        # Не должно зациклиться
+        # Should not loop
         result = store.get_connected_entries(entry_id, max_depth=3)
         
-        # При self-loop BFS не добавит начальный entry в результат
-        # (он пропускается когда rel is None)
+        # For self-loop, BFS won't add the starting entry to the result
+        # (it is skipped when rel is None)
         assert isinstance(result, list)
 
     def test_orphaned_connection_target(self, store):
-        """Связь на несуществующий target_id."""
         entry_id = store.save(content="Orphan link", type="long_term")
         _update_connections(store, entry_id, json.dumps([
             {"target_id": 99999, "relation": "broken"}

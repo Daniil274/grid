@@ -1,40 +1,40 @@
-# Полная конфигурация AI системы
-# Провайдеры -> Модели -> Инструменты -> Агенты
+# Full AI system configuration
+# Providers -> Models -> Tools -> Agents
 
-# Глобальные настройки
+# Global settings
 settings:
   default_agent: "coordinator"
   max_history: 50
-  max_turns: 100  # Увеличиваем лимит ходов для агентов
-  agent_timeout: 300  # Таймаут выполнения агента в секундах (5 минут)
+  max_turns: 100  # Increase turn limit for agents
+  agent_timeout: 300  # Agent execution timeout in seconds (5 minutes)
   debug: false
   mcp_enabled: true
-  # Настройки путей
-  working_directory: "C:/Users/daniil/Documents/agents"  # Рабочая директория по умолчанию
-  config_directory: "."   # Директория конфигурации
+  # Path settings
+  working_directory: "C:/Users/daniil/Documents/agents"  # Default working directory
+  config_directory: "."   # Configuration directory
   logs_directory: "C:/Users/daniil/Documents/agents/logs"
-  allow_path_override: true  # Разрешить переопределение пути при запуске
-  # Настройки логирования
+  allow_path_override: true  # Allow path override on launch
+  # Logging settings
   agent_logging:
     enabled: true
     level: "full"  # basic, detailed, full
     save_prompts: true
     save_conversations: true
     save_executions: true
-    # Общие правила использования инструментов (добавляются к каждому агенту один раз)
+    # Common tool usage rules (added to each agent once)
     tools_common_rules: |
-      Всегда выполняй операции с файлами через инструменты и возвращай их результаты.
-      Запрещено утверждать создание/изменение файла без вызова инструмента.
-  # Настройки обработки изображений
+      Always perform file operations through tools and return their results.
+      Do not claim file creation/modification without invoking a tool.
+  # Image processing settings
   image_processing:
     enabled: true
-    auto_resize: true  # Автоматически уменьшать большие изображения
-    max_width: 1920  # Максимальная ширина в пикселях
-    max_height: 1080  # Максимальная высота в пикселях
-    max_file_size_mb: 10  # Максимальный размер файла в MB
-    jpeg_quality: 85  # Качество JPEG (1-100). 85 дает ~8k токенов, хорошо для текста
+    auto_resize: true  # Automatically resize large images
+    max_width: 1920  # Maximum width in pixels
+    max_height: 1080  # Maximum height in pixels
+    max_file_size_mb: 10  # Maximum file size in MB
+    jpeg_quality: 85  # JPEG quality (1-100). 85 gives ~8k tokens, good for text
  
-# Провайдеры API
+# API Providers
 providers:
   lm-studio:
     name: "lm-studio"
@@ -53,14 +53,14 @@ providers:
 
 
 
-# Модели
+# Models
 models:
   gemini-3-pro:
     name: "google/gemini-3-pro-preview"
     provider: "openrouter"
     temperature: 0.3
     max_tokens: 8000
-    description: "Gemini 3 pro модель"
+    description: "Gemini 3 pro model"
     streaming_enabled: true
 
   openai-oss-20b:
@@ -68,7 +68,7 @@ models:
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 8192
-    description: "OpenAI OSS 20b модель"
+    description: "OpenAI OSS 20b model"
     streaming_enabled: false
   
   openai-oss-20b-local:
@@ -76,7 +76,7 @@ models:
     provider: "lm-studio"
     temperature: 0.7
     max_tokens: 8192
-    description: "OpenAI OSS 20b модель"
+    description: "OpenAI OSS 20b model"
     streaming_enabled: true
 
   openai-oss-120b:
@@ -84,14 +84,14 @@ models:
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 8192
-    description: "OpenAI OSS 120b модель"
+    description: "OpenAI OSS 120b model"
 
   gpt-5-nano:
     name: "openai/gpt-5-nano"
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 2000
-    description: "GPT-5 nano модель"
+    description: "GPT-5 nano model"
     streaming_enabled: true
 
   qwen3-8b:
@@ -99,50 +99,50 @@ models:
     provider: "lm-studio"
     temperature: 0.7
     max_tokens: 8000
-    description: "Qwen 3 8b модель"
+    description: "Qwen 3 8b model"
 
   qwen3-max:
     name: "qwen/qwen3-max"
     provider: "openrouter"
     temperature: 0.7
     max_tokens: 8000
-    description: "Qwen 3 Max модель"
+    description: "Qwen 3 Max model"
     streaming_enabled: true
 
 
 
-# Минимальная секция проверяющих (для аудита в Output guardrail)
+# Minimal checker section (for output guardrail audit)
 checkers:
   default_audit:
-    model: "qwen3"   # опционально для будущего расширения; сейчас не вызывается
+    model: "qwen3"   # optional for future extension; currently not invoked
     purpose: "output_audit"
     prompt: |
-      Ты проверяющий агент. Тебе предоставляется контекст задачи агента, вывод агента и список использованных инструментов.
-      Проверь что агент использует оптимальный инструмент для выполнения задачи и его действия соответствуют контексту и цели задачи.
-      Вход: одна строка JSON с полями task_text, tools_used, agent_output.
-      Верни строго JSON: {"status":"ok|failed","reason":"...", "details":"..."}.
+      You are a checker agent. You are provided with the agent's task context, agent output, and list of tools used.
+      Verify that the agent uses the optimal tool for the task and that its actions align with the context and task goal.
+      Input: one line JSON with fields task_text, tools_used, agent_output.
+      Return strictly JSON: {"status":"ok|failed","reason":"...", "details":"..."}.
     tool_prompt: |
-      Ты проверяющий агент вызовов инструментов. Оцени, корректен ли вызов инструмента с учётом цели задачи.
-      Не блокируй вызовы инструментов, проверяющих доступ.
-      Вход: JSON {task_text, tools_used, tool_name, tool_arguments}.
-      Верни строго JSON: {"status":"ok|failed","reason":"...","details":"..."}.
+      You are a tool call checker agent. Assess whether the tool call is correct given the task goal.
+      Do not block access-checking tool calls.
+      Input: JSON {task_text, tools_used, tool_name, tool_arguments}.
+      Return strictly JSON: {"status":"ok|failed","reason":"...","details":"..."}.
 
-# Инструменты
+# Tools
 tools:
-  # MCP серверы
-  # Терминал - используем простой и стабильный MCP сервер  
+  # MCP servers
+  # Terminal - simple and stable MCP server  
   terminal:
     type: "mcp"
     server_command: ["'c:/Program Files/nodejs/npx.cmd'", "@dillip285/mcp-terminal", "--", "C:/Users/daniil/Documents/agents"]
-    description: "MCP сервер для выполнения команд терминала"
-    prompt_addition: "Используй execute_command для выполнения команд в терминале."
+    description: "MCP server for executing terminal commands"
+    prompt_addition: "Use execute_command to run terminal commands."
   
-  # Файловая система
+  # File system
   filesystem:
     type: "mcp"
     server_command: ["'c:/Program Files/nodejs/npx.cmd'", "@modelcontextprotocol/server-filesystem", "C:/Users/daniil/Documents/agents"]
-    description: "MCP сервер для работы с файловой системой (ограничен рабочей директорией)"
-    prompt_addition: "Используй filesystem(task) для доступа к файловой системе. task - это операция, которую нужно выполнить."
+    description: "MCP server for filesystem operations (restricted to working directory)"
+    prompt_addition: "Use filesystem(task) to access the filesystem. task is the operation to perform."
   
   git:
     type: "mcp"
@@ -150,21 +150,21 @@ tools:
     env_vars:
       MCP_LOG_LEVEL: "info"
       GIT_SIGN_COMMITS: "false"
-    description: "Управление Git: clone, commit, branch, merge, rebase, stash"
+    description: "Git management: clone, commit, branch, merge, rebase, stash"
 
   sequentialthinking:
     type: "mcp"
     server_command: ['c:/Program Files/nodejs/npx.cmd', "@modelcontextprotocol/server-sequential-thinking"]
-    description: "MCP сервер для последовательного мышления"
-    prompt_addition: "ВАЖНО!!! ВСЕГДА Используй sequential thinking для анализа, планирования задачи. Вызывай его перед выполнением любой задачи."
+    description: "MCP server for sequential thinking"
+    prompt_addition: "IMPORTANT!!! ALWAYS use sequential thinking for analysis and task planning. Call it before performing any task."
   
   
-  # Агенты как инструменты
+  # Agents as tools
   file_agent:
     type: "agent"
     name: "call_file_agent"
-    description: "Вызывает файлового агента для работы с файлами"
-    prompt_addition: "Используй call_file_agent(task) для задач по работе с файлами, где task - это задача, которую должен выполнить файловый агент.  Используй unified diff для редактирования файлов."
+    description: "Calls the file agent for file operations"
+    prompt_addition: "Use call_file_agent(task) for file-related tasks, where task is the task the file agent should perform. Use unified diff for file editing."
     # Context sharing configuration for agent tools
     context_strategy: "conversation"
     context_depth: 5
@@ -173,8 +173,8 @@ tools:
   git_agent:
     type: "agent"
     name: "call_git_agent"
-    description: "Вызывает Git агента для работы с репозиторием. Вызывай его, если требуется выполнить Git операцию."
-    prompt_addition: "Используй call_git_agent(task) для Git операций. task - это задача, которую должен выполнить Git агент."
+    description: "Calls the Git agent for repository work. Call when a Git operation is needed."
+    prompt_addition: "Use call_git_agent(task) for Git operations. task is the task the Git agent should perform."
     # Context sharing configuration for agent tools
     context_strategy: "conversation"
     context_depth: 5
@@ -183,8 +183,8 @@ tools:
   task_analyst:
     type: "agent"
     name: "call_task_analyst"
-    description: "Вызывает аналитика задач для анализа задач и составления плана действий."
-    prompt_addition: "ВСЕГДА ВЫЗЫВАЙ call_code_agent(task) для помощи в составлении плана действий. task - это задача, которую нужно решить с полным контекстом и списком досткупных тебе инструментов. БЕЗ ПРЕДОСТАВЛЕНИЯ ПОЛНОГО КОНТЕКСТА И СПИСКА ДОСТУПНЫХ ИНСТРУМЕНТОВ АНАЛИТИК НЕ ПОМОЖЕТ!!! НЕ вызывай другие инструменты до вызова аналитика."
+    description: "Calls the task analyst for task analysis and action planning."
+    prompt_addition: "ALWAYS CALL call_task_analyst(task) for help in creating an action plan. task is the task to solve with full context and a list of available tools. WITHOUT FULL CONTEXT AND TOOL LIST THE ANALYST CANNOT HELP!!! DO NOT call other tools before calling the analyst."
     # Context sharing configuration for agent tools
     context_strategy: "full"
     
@@ -192,8 +192,8 @@ tools:
   researcher:
     type: "agent"
     name: "call_researcher"
-    description: "Вызывает исследователя для поиска информации"
-    prompt_addition: "Используй call_researcher(query) для поиска информации в интернете. query - это тема исследования."
+    description: "Calls the researcher to search for information"
+    prompt_addition: "Use call_researcher(query) to search for information online. query is the research topic."
     # Context sharing configuration for agent tools
     context_strategy: "minimal"
     context_depth: 3
@@ -202,8 +202,8 @@ tools:
   code_agent:
     type: "agent"
     name: "call_code_agent"
-    description: "Вызывает кодового агента для работы с кодом и программированием"
-    prompt_addition: "Всегда call_code_agent(task) для задач, связанных с кодом или с файлами кода. task - это задача, которую должен решить кодовый агент с путем к файлу, директории или репозиторию и подробным описанием задачи."
+    description: "Calls the code agent for coding and programming tasks"
+    prompt_addition: "Always use call_code_agent(task) for tasks related to code or code files. task is the task the code agent should solve with the file path, directory, or repository and a detailed task description."
     # Context sharing configuration for agent tools
     context_strategy: "conversation"
     context_depth: 10
@@ -212,10 +212,10 @@ tools:
   coordinator:
     type: "agent"
     name: "call_coordinator"
-    description: "Вызывает координатора для планирования и решения задачи"
+    description: "Calls the coordinator for planning and solving tasks"
     prompt_addition: |
-      Вызывай call_coordinator(task) для планирования и решения задачи. 
-      task - это задача, которую нужно решить.
+      Call call_coordinator(task) for planning and solving tasks. 
+      task is the task to solve.
     # Context sharing configuration for agent tools
     context_strategy: "conversation"
     context_depth: 10
@@ -225,8 +225,8 @@ tools:
   context_wrapper:
     type: "agent"
     name: "call_context_wrapper"
-    description: "Вызывает сборщика контекста для управления контекстом и взаимодействия с агентами"
-    prompt_addition: "Используй call_context_wrapper(task) для получения контекста по кодовой базе. task - это задача для которой требуется контекст."
+    description: "Calls the context collector for context management and agent interaction"
+    prompt_addition: "Use call_context_wrapper(task) to get codebase context. task is the task requiring context."
     context_strategy: "conversation"
     context_depth: 10
     include_tool_history: true
@@ -235,8 +235,8 @@ tools:
   debugger:
     type: "agent"
     name: "call_debugger"
-    description: "Вызывает отладчика для отладки кода"
-    prompt_addition: "Используй call_debugger(task) для запуска программ и отладки кода."
+    description: "Calls the debugger for code debugging"
+    prompt_addition: "Use call_debugger(task) for running programs and debugging code."
     context_strategy: "conversation"
     context_depth: 10
     include_tool_history: true
@@ -244,155 +244,160 @@ tools:
   thinker:
     type: "agent"
     name: "call_thinker"
-    description: "Вызывает мыслящего агента для глубокого анализа задачи и проблемы. "
-    prompt_addition: "ВСЕГДА вызывай этого агента ПЕРЕД выполнением любой задачи. Используй call_thinker(task), где task - это задача которую нужно решить с полным контекстом. БЕЗ ПРЕДОСТАВЛЕНИЯ ПОЛНОГО КОНТЕКСТА МЫСЛИТЕЛЬ НЕ ПОМОЖЕТ!!! НЕ вызывай другие инструменты до вызова мыслителя."
+    description: "Calls the thinking agent for deep task and problem analysis."
+    prompt_addition: "ALWAYS call this agent BEFORE performing any task. Use call_thinker(task), where task is the task to solve with full context. WITHOUT FULL CONTEXT THE THINKER CANNOT HELP!!! DO NOT call other tools before calling the thinker."
 
-# Базовые промпты для инструментов
+# Base prompt templates for tools
 prompt_templates:
   context_wrapper_prompt: |
-    Ты агент для извлечения контекста из кодовой базы. К тебе обращаются другие агенты для получения контекста по задачам.
-    Твоя задача — собрать контекст из файлов и git.
-    Используй инструменты для извлечения информации.
+    You are an agent for extracting context from the codebase. Other agents contact you to get context for tasks.
+    Your job is to gather context from files and git.
+    Use tools to extract information.
 
   task_analyst_prompt: |
-    Ты аналитик задач. Твоя задача — анализировать задачи и составлять план действий.
-    Всегда используй полный контекст задачи, включая файлы и репозитории.
-    Не начинай выполнять задачу до вызова кодового агента или файлового агента.
-    Не используй конкретные команды и не пытайся их выполнять. 
+    You are a task analyst. Your job is to analyze tasks and create action plans.
+    Always use the full task context, including files and repositories.
+    Do not start executing the task before calling the code agent or file agent.
+    Do not use specific commands or attempt to execute them.
 
   base: |
-    Ты - AI ассистент. Отвечай на языке пользователя.
-    Будь полезным и точным в своих ответах.
+    You are an AI assistant. Respond in the user's language.
+    Be helpful and accurate in your answers.
   
   with_files: |
-    Ты агент с инструментами для работы с файлами. Можешь читать, редактировать и анализировать файлы.
-    НИКОГДА НЕ ДАВАЙ АНАЛИЗ СОДЕРЖИМОГО, ДАЖЕ ЕСЛИ ЭТО УКАЗАНО В ЗАДАНИИ.
+    You are an agent with file tools. You can read, edit, and analyze files.
+    NEVER PROVIDE CONTENT ANALYSIS, EVEN IF SPECIFIED IN THE TASK.
 
   with_git: |
-    Ты агент с инструментами Git. Можешь проверять статус, создавать коммиты и управлять репозиторием.
-    Всегда проверяй статус перед изменениями. Анализируй задачу, составляй план действий и двигайся по нему, корректируя по необходимости.
+    You are an agent with Git tools. You can check status, create commits, and manage the repository.
+    Always check status before making changes. Analyze the task, create an action plan, and follow it, adjusting as needed.
   
   with_web: |
-    Ты помощник с доступом к интернету. Можешь искать актуальную информацию и новости.
-    Всегда указывай источники информации.
+    You are an assistant with internet access. You can search for current information and news.
+    Always cite your sources.
 
   code_agent_prompt: |
-    Ты кодовый агент, специализирующийся на программировании.
+    You are a code agent specializing in programming.
 
   coordinator_prompt: |
-    Ты координатор команды специализированных агентов в агентской системе. 
-    Твоя задача — анализировать запросы пользователей или агентов и делегировать работу подходящим агентам или воспользоваться инструментом для эффективного и качественного решения задачи.
-    Ты явно указываешь отчетность для агентов которых вызываешь. Формат отчетов зависит от задачи, тебе нужно сначала подумать над валидацией работы агента чтобы дать ему формат отчета.
+    You are a coordinator of a team of specialized agents in an agent system. 
+    Your job is to analyze user or agent requests and delegate work to appropriate agents or use tools to efficiently and effectively solve the task.
+    You explicitly specify reporting requirements for the agents you call. Report formats depend on the task; think about agent work validation first to give them the right report format.
 
+  orchestrator_prompt: |
+    You are an orchestrator of a team of specialized agents. After receiving a request you:
+    1. Ask the coordinator about available tools and agents.
+    2. Think through a plan to solve the task with the available tools.
+    3. If tools and agents are sufficient for the task, pass the plan to the coordinator.
 
   debugger_prompt: |
-    Ты отладчик. Твоя задача — отлаживать код и выполнять задачи связанные с запуском программ. 
-    Перед каждым шагом и вызовом инструмента используй sequential thinking для анализа и планирования.
+    You are a debugger. Your job is to debug code and perform tasks related to running programs. 
+    Before each step and tool call, use sequential thinking for analysis and planning.
 
-# Агенты - полная конфигурация
+# Agents - full configuration
 agents:
-  # Git агент
+  # Git agent
   git_agent:
-    name: "Git агент"
+    name: "Git Agent"
     model: "openai-oss-20b-local"
     tools: ["git", "filesystem"]
     base_prompt: "with_git"
-    description: "Полнофункциональный помощник разработчика для Git"
+    description: "Full-featured developer assistant for Git"
     verifier: "default_audit"
   
   context_wrapper:
-    name: "Сборщик контекста"
+    name: "Context Collector"
     model: "openai-oss-20b-local"
     tools: ["filesystem", "git"]
     base_prompt: "context_wrapper_prompt"
-    description: "Обертка для управления контекстом и взаимодействия с агентами"
+    description: "Wrapper for context management and agent interaction"
     verifier: "default_audit"
 
   code_agent:
-    name: "Кодовый агент"
+    name: "Code Agent"
     model: "gemini-3-pro"
     tools: [
       "filesystem", "git", "terminal"
     ]
     base_prompt: "code_agent_prompt"
-    description: "Специалист по программированию и анализу кода"
+    description: "Programming and code analysis specialist"
     mcp_enabled: true
     verifier: "default_audit"
   
-  # Мыслящий агент
+  # Thinking agent
   thinker:
-    name: "Мыслитель"
+    name: "Thinker"
     model: "openai-oss-20b-local"
     tools: []
     base_prompt: "base"
     custom_prompt: |
-      Ты глубоко мыслящий помощник. Анализируй проблемы со всех сторон.
-      Рассуждай пошагово и предоставляй развернутые обоснования своих выводов.
-      Тебе передается проблема, которую нужно решить и операции, доступные для решения задачи.
-    description: "Агент для глубокого анализа и размышлений"
+      You are a deep-thinking assistant. Analyze problems from all angles.
+      Reason step by step and provide comprehensive justifications for your conclusions.
+      You are given a problem to solve and the operations available to solve the task.
+    description: "Agent for deep analysis and reasoning"
   
   task_analyst:
-    name: "Аналитик задач"
+    name: "Task Analyst"
     model: "openai-oss-20b-local"
     tools: []
     base_prompt: "task_analyst_prompt"
-    description: "Агент для анализа задач и составления плана действий"
+    description: "Agent for task analysis and action planning"
 
   debugger:
-    name: "Отладчик"
+    name: "Debugger"
     model: "openai-oss-20b-local"
     tools: ["terminal", "filesystem", "git"]
     base_prompt: "debugger_prompt"
-    description: "Агент для отладки кода"
+    description: "Agent for code debugging"
 
-  # Координатор агентов
+  # Agent coordinator
   coordinator:
-    name: "Координатор"
+    name: "Coordinator"
     model: "gemini-3-pro"
     tools: ["filesystem", "git_agent","code_agent", "debugger", "file_agent"]
     base_prompt: "coordinator_prompt"
     verifier: "default_audit"
     custom_prompt: |
-      Ты координатор команды специализированных агентов. 
-      Твоя задача — эффективное распределение ролей и работа с контекстом. 
-      Ты получаешь задачу, собираешь или уточняешь контекст при необходимости, обдумываешь эффективное решение и делегируешь работу подходящим агентам.
-      Ты можешь управлять контекстом агентов, прописывая Context ID в начале запроса агенту. Без указания Context ID агент не вспомнит ваши предыдущие взаимодействия.
-      После получения каждого запроса ты Обдумываешь:
-      2. Каких агентов использовать.
-      2. Направление действий агентов.
-      4. Использовать предыдущий ID, чтобы агент вспомнил ваше предыдущие взаимодействия или начать с чистого листа. 
+      You are a coordinator of a team of specialized agents. 
+      Your job is effective role distribution and context management. 
+      You receive a task, gather or refine context as needed, think through an effective solution, and delegate work to appropriate agents.
+      You can manage agent context by specifying a Context ID at the beginning of your request to an agent. Without a Context ID, the agent won't remember your previous interactions.
+      After receiving each request, you think about:
+      1. Which agents to use.
+      2. Direction of agent actions.
+      3. Whether to use the previous ID so the agent remembers your interactions, or start fresh.
 
   orchestrator:
-    name: "Оркестратор"
+    name: "Orchestrator"
     model: "qwen3-max"
     tools: ["coordinator"]
     base_prompt: "orchestrator_prompt"
     verifier: "default_audit"
     custom_prompt: |
-      Ты оркестратор команды специализированных агентов. После получения запроса ты:
-      1. Узнаешь у координатора доступные ему инструменты и агенты.
-      2. Обдумываешь план решения задачи с поставленными инструментами.
-      3. Если инструментов и агентов достаточно для выполнения задачи, то ты передаешь план координатору.
+      You are an orchestrator of a team of specialized agents. After receiving a request you:
+      1. Ask the coordinator about available tools and agents.
+      2. Think through a plan to solve the task with the available tools.
+      3. If tools and agents are sufficient for the task, pass the plan to the coordinator.
 
-  # Vision-агент для анализа изображений
+  # Vision agent for image analysis
   vision_analyzer:
-    name: "Визуальный аналитик"
+    name: "Visual Analyst"
     model: "gemini-3-pro"
     tools: []
     base_prompt: "base"
-    description: "Агент для анализа изображений и скриншотов"
+    description: "Agent for image and screenshot analysis"
     custom_prompt: |
-      Ты специалист по анализу изображений и визуального контента.
-      Ты можешь описывать что видишь на изображениях, читать текст, анализировать графики, диаграммы, интерфейсы.
-      Отвечай детально и структурированно на русском языке.
-      Если на изображении есть текст - обязательно прочитай его и процитируй важные части.
+      You are a specialist in image and visual content analysis.
+      You can describe what you see in images, read text, analyze graphs, diagrams, and interfaces.
+      Answer in detail and in a structured manner.
+      If the image contains text — be sure to read it and quote important parts.
 
   file_agent:
-    name: "Файловый агент"
+    name: "File Agent"
     model: "gpt-5-nano"
     tools: ["filesystem"]
     base_prompt: "with_files"
-    description: "Специалист по работе с файлами."
+    description: "File operations specialist."
     mcp_enabled: true
 
 # =============================================================================

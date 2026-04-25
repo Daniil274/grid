@@ -1,10 +1,10 @@
 """
-Timeline server integration — запуск dashboard внутри агентной системы.
+Timeline server integration — launch dashboard inside the agent system.
 
-Используется из agent_chat.py и examples/telegram_bot/telegram_server.py для запуска timeline
-в фоне в том же event loop, с доступом к AgentFactory (нужно для rerun).
+Used from agent_chat.py and examples/telegram_bot/telegram_server.py to start timeline
+in the background in the same event loop, with access to AgentFactory (needed for rerun).
 
-Использование:
+Usage:
     factory = AgentFactory(...)
     asyncio.create_task(run_timeline_server(factory, port=8789))
 """
@@ -28,8 +28,8 @@ async def run_timeline_server(
     db_path: str | Path | None = None,
 ) -> None:
     """
-    Запустить timeline сервер в фоне (asyncio task).
-    Можно вызвать без await — просто как asyncio.create_task(run_timeline_server(...)).
+    Start timeline server in the background (asyncio task).
+    Can be called without await — just as asyncio.create_task(run_timeline_server(...)).
     """
     try:
         import uvicorn

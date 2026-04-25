@@ -1,5 +1,5 @@
 """
-Claude Tools - адаптация инструментов OpenClaude для Grid Agent System.
+Claude Tools - adaptation of OpenClaude tools for the Grid Agent System.
 """
 
 from .bash_tool import bash_tool
@@ -9,7 +9,7 @@ from .web_tools import web_fetch, web_search
 from .notebook_tool import notebook_read, notebook_edit, notebook_create
 from .todo_tool import todo_write, todo_list, todo_delete, todo_clear
 
-# Реестр инструментов для автоматической регистрации
+# Tool registry for automatic registration
 CLAUDE_TOOLS = {
     "bash_tool": bash_tool,
     "file_read": file_read,

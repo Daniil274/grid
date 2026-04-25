@@ -1,60 +1,60 @@
-# Emergency Shutdown для динамических агентов
+# Emergency Shutdown for Dynamic Agents
 
-## Обзор
+## Overview
 
-Emergency Shutdown - механизм экстренной остановки всего pipeline при критической ошибке в одном из агентов. Позволяет агентам останавливать весь pipeline, очищать очередь задач, и предоставлять оркестратору информацию для перезапуска.
+Emergency Shutdown is a mechanism for emergency stopping of the entire pipeline upon a critical error in one of the agents. It allows agents to stop the entire pipeline, clear the task queue, and provide the orchestrator with information for restart.
 
-## Архитектура
+## Architecture
 
-### Компоненты
+### Components
 
 1. **PipelineRegistry** (`core/pipeline_registry.py`)
-   - Singleton для отслеживания всех активных pipeline
-   - Управление жизненным циклом задач
-   - Emergency shutdown с graceful завершением (5 сек timeout)
+   - Singleton for tracking all active pipelines
+   - Lifecycle management of tasks
+   - Emergency shutdown with graceful completion (5 sec timeout)
 
 2. **Emergency Tools** (`tools/emergency_tools.py`)
-   - `emergency_shutdown(reason, severity)` - остановка pipeline
-   - `get_pipeline_status()` - статус pipeline
+   - `emergency_shutdown(reason, severity)` - stop pipeline
+   - `get_pipeline_status()` - pipeline status
 
 3. **Orchestrator Integration** (`tools/orchestrator_tools.py`)
-   - Автоматическая регистрация pipeline
-   - Обработка CancelledError
-   - Передача информации об остановке
+   - Automatic pipeline registration
+   - CancelledError handling
+   - Passing shutdown information
 
 4. **Agent Factory** (`core/agent_factory.py`)
-   - Автоматическое добавление emergency_shutdown к агентам
+   - Automatic addition of emergency_shutdown to agents
 
-## Использование
+## Usage
 
-### Автоматическое использование
+### Automatic Usage
 
-Emergency shutdown инструмент **автоматически добавляется** ко всем агентам внутри активного pipeline. Агентам не нужно явно запрашивать этот инструмент.
+The emergency shutdown tool is **automatically added** to all agents within an active pipeline. Agents do not need to explicitly request this tool.
 
-### Вызов из агента
+### Agent Invocation
 
 ```python
-# Когда агент обнаруживает критическую проблему:
+# When an agent detects a critical problem:
 emergency_shutdown(
     reason="Database connection failed: Connection refused. All tasks require database access.",
     severity="critical"
 )
 ```
 
-### Параметры
+### Parameters
 
-- **reason** (required): Детальное описание причины остановки
-  - Должно быть максимально конкретным
-  - Помогает оркестратору принять решение о перезапуске
+- **reason** (required): Detailed description of the stop reason
+  - Should be as specific as possible
+  - Helps the orchestrator make restart decisions
 
-- **severity** (optional): Уровень критичности
-  - `"critical"` (default) - критическая ошибка, система не может продолжить
-  - `"error"` - серьезная ошибка, но система может продолжить
-  - `"warning"` - проблема требует внимания
+- **severity** (optional): Criticality level
+  - `"critical"` (default) - critical error, system cannot continue
+  - `"error"` - serious error, but system can continue
+  - `"warning"` - problem requires attention
 
-### Возвращаемое значение
+### Return Value
 
-JSON строка с информацией об остановке:
+JSON string with shutdown information:
 
 ```json
 {
@@ -70,12 +70,12 @@ JSON строка с информацией об остановке:
 }
 ```
 
-## Примеры использования
+## Usage Examples
 
-### Пример 1: Отсутствующая зависимость
+### Example 1: Missing Dependency
 
 ```python
-# Агент проверяет наличие критической зависимости
+# Agent checks for critical dependency
 try:
     import required_library
 except ImportError:
@@ -85,10 +85,10 @@ except ImportError:
     )
 ```
 
-### Пример 2: Недоступный сервис
+### Example 2: Unavailable Service
 
 ```python
-# Агент пытается подключиться к базе данных
+# Agent tries to connect to the database
 try:
     connection = connect_to_database()
 except ConnectionError as e:
@@ -98,10 +98,10 @@ except ConnectionError as e:
     )
 ```
 
-### Пример 3: Обнаружение бесконечной рекурсии
+### Example 3: Infinite Recursion Detected
 
 ```python
-# Агент проверяет количество запущенных задач
+# Agent checks the number of running tasks
 status = get_pipeline_status()
 status_data = json.loads(status)
 
@@ -112,9 +112,9 @@ if len(status_data["running_tasks"]) > 20:
     )
 ```
 
-## Обработка в оркестраторе
+## Handling in the Orchestrator
 
-Когда происходит emergency shutdown, оркестратор получает результат с флагом `emergency_stopped=True`:
+When an emergency shutdown occurs, the orchestrator receives a result with the flag `emergency_stopped=True`:
 
 ```python
 result = orchestrate(task="Complex task")
@@ -124,131 +124,131 @@ if result_data.get("emergency_stopped"):
     print(f"Pipeline stopped: {result_data['emergency_reason']}")
     print(f"Severity: {result_data['emergency_severity']}")
 
-    # Анализ ситуации и возможный перезапуск
+    # Situation analysis and possible restart
     if result_data['emergency_severity'] == 'critical':
-        # Критическая ошибка - требуется вмешательство
+        # Critical error - requires human intervention
         notify_admin(result_data['emergency_reason'])
     else:
-        # Некритическая ошибка - можно попробовать перезапустить
+        # Non-critical error - can try restarting
         retry_pipeline(result_data)
 ```
 
-## Жизненный цикл Pipeline
+## Pipeline Lifecycle
 
-### 1. Нормальное выполнение
+### 1. Normal Execution
 
 ```
-orchestrate() вызван
+orchestrate() called
     ↓
-Pipeline зарегистрирован (pipeline-xxx)
+Pipeline registered (pipeline-xxx)
     ↓
-Агент создан с emergency_shutdown
+Agent created with emergency_shutdown
     ↓
-Task зарегистрирован и отслеживается
+Task registered and tracked
     ↓
-Task выполняется успешно
+Task executed successfully
     ↓
-Task отмечен как completed
+Task marked as completed
     ↓
-Pipeline завершен успешно
+Pipeline completed successfully
 ```
 
 ### 2. Emergency Shutdown
 
 ```
-orchestrate() вызван
+orchestrate() called
     ↓
-Pipeline зарегистрирован
+Pipeline registered
     ↓
-Несколько агентов запущены
+Multiple agents started
     ↓
-Агент #2 обнаруживает критическую проблему
+Agent #2 detects critical problem
     ↓
-emergency_shutdown() вызван
+emergency_shutdown() called
     ↓
 PipelineRegistry:
-  - Находит все running tasks
-  - Вызывает task.cancel() для каждой
-  - Ждет graceful завершения (5 сек)
-  - Статус → EMERGENCY_STOPPED
+  - Finds all running tasks
+  - Calls task.cancel() for each
+  - Waits for graceful completion (5 sec)
+  - Status → EMERGENCY_STOPPED
     ↓
-Оркестратор ловит CancelledError
+Orchestrator catches CancelledError
     ↓
-Проверяет pipeline status
+Checks pipeline status
     ↓
-Возвращает emergency_stopped=True
+Returns emergency_stopped=True
     ↓
-Верхнеуровневый код анализирует и решает
+High-level code analyzes and decides
 ```
 
-## Технические детали
+## Technical Details
 
 ### Pipeline Statuses
 
-- `RUNNING` - активно выполняется
-- `COMPLETED` - успешно завершен
-- `FAILED` - провален с ошибкой
-- `EMERGENCY_STOPPED` - остановлен через emergency_shutdown
-- `CANCELLING` - в процессе остановки
+- `RUNNING` - actively executing
+- `COMPLETED` - successfully completed
+- `FAILED` - failed with error
+- `EMERGENCY_STOPPED` - stopped via emergency_shutdown
+- `CANCELLING` - in the process of stopping
 
 ### Graceful Shutdown
 
-Emergency shutdown использует graceful подход:
+Emergency shutdown uses a graceful approach:
 
-1. Все running tasks получают `task.cancel()`
-2. Система ждет 5 секунд для завершения
-3. После timeout процесс завершается принудительно
+1. All running tasks receive `task.cancel()`
+2. The system waits 5 seconds for completion
+3. After timeout, the process terminates forcibly
 
 ### Persistence
 
-Критические события emergency shutdown сохраняются в MemoryStore для последующего анализа.
+Critical emergency shutdown events are saved to MemoryStore for subsequent analysis.
 
-## Тестирование
+## Testing
 
-Запустите тест для проверки функциональности:
+Run the test to verify functionality:
 
 ```bash
 python test_emergency_shutdown.py
 ```
 
-Тест проверяет:
-- Регистрацию pipeline
-- Регистрацию tasks
-- Emergency shutdown с несколькими tasks
+The test checks:
+- Pipeline registration
+- Task registration
+- Emergency shutdown with multiple tasks
 - Graceful vs timeout shutdown
-- Корректность статусов
+- Correctness of statuses
 
 ## Best Practices
 
-1. **Детальные причины**: Всегда указывайте максимально конкретную причину остановки
-2. **Правильный severity**: Используйте `critical` только для действительно критических ошибок
-3. **Проверка перед остановкой**: Убедитесь, что проблема действительно блокирует весь pipeline
-4. **Логирование**: Логируйте контекст перед вызовом emergency_shutdown
-5. **Альтернативы**: Рассмотрите возможность обработки ошибки без остановки pipeline
+1. **Detailed reasons**: Always provide the most specific reason for stopping
+2. **Correct severity**: Use `critical` only for truly critical errors
+3. **Check before stopping**: Ensure the problem truly blocks the entire pipeline
+4. **Logging**: Log the context before calling emergency_shutdown
+5. **Alternatives**: Consider handling the error without stopping the pipeline
 
-## Ограничения
+## Limitations
 
-1. Emergency shutdown останавливает ВЕСЬ pipeline - нет частичной остановки
-2. Graceful shutdown ограничен 5 секундами
-3. Механизм работает только внутри orchestrate() pipeline
-4. Нет автоматического перезапуска - решение принимает оркестратор
+1. Emergency shutdown stops the ENTIRE pipeline - no partial stopping
+2. Graceful shutdown is limited to 5 seconds
+3. The mechanism only works inside orchestrate() pipeline
+4. No automatic restart - the orchestrator decides
 
 ## Troubleshooting
 
-### Проблема: emergency_shutdown не доступен
+### Problem: emergency_shutdown is not available
 
-**Решение**: Убедитесь, что агент создан внутри активного pipeline через orchestrate()
+**Solution**: Ensure the agent is created inside an active pipeline via orchestrate()
 
-### Проблема: Tasks не останавливаются
+### Problem: Tasks are not stopping
 
-**Решение**: Проверьте логи - возможно задачи не обрабатывают CancelledError
+**Solution**: Check logs - tasks might not be handling CancelledError
 
-### Проблема: Pipeline status не обновляется
+### Problem: Pipeline status is not updating
 
-**Решение**: Проверьте, что PipelineRegistry правильно инициализирован в AgentFactory
+**Solution**: Check that PipelineRegistry is properly initialized in AgentFactory
 
-## См. также
+## See Also
 
-- [План реализации](../.claude/plans/concurrent-knitting-pumpkin.md)
+- [Implementation Plan](../.claude/plans/concurrent-knitting-pumpkin.md)
 - [PipelineRegistry API](../core/pipeline_registry.py)
 - [Emergency Tools API](../tools/emergency_tools.py)

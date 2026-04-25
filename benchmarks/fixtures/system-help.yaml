@@ -3,7 +3,7 @@ agent: chat_agent
 owner: system
 source: manual-stage1
 tags: [introspection, help]
-prompt: "Дай краткую справку по системе и её архитектуре."
+prompt: "Give a brief overview of the system and its architecture."
 required_tools: ["system_help"]
 forbidden_substrings: ["ERROR:"]
 max_latency_ms: 120000

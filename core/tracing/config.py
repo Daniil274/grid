@@ -1,6 +1,6 @@
 """
-Конфигурация трассировки для Grid системы.
-Заменяет логгеры на трассировку Agents SDK без обращения к OpenAI.
+Tracing configuration for the Grid system.
+Replaces loggers with Agents SDK tracing without calling OpenAI.
 """
 
 import os
@@ -15,36 +15,36 @@ import logging
 
 
 class ConsoleSpanExporter(TracingExporter):
-    """Экспортер трассировки в консоль с красивым форматированием."""
+    """Trace exporter to console with pretty formatting."""
     
     def __init__(self, level: str = "INFO"):
         self.level = level.upper()
-        # Компактный режим по умолчанию (INFO): минимум строк и синтаксиса
+        # Compact mode by default (INFO): minimum lines and syntax
         self._compact = self.level in ("INFO", "COMPACT", "MINIMAL", "LOW")
-        # Для подавления повторов MCP list tools по одному и тому же серверу
+        # Suppress repeated MCP list tools for the same server
         self._printed_mcp_servers: set[str] = set()
     
     def export(self, items: list[Trace | Span[Any]]) -> None:
-        """Экспорт трассировки в консоль с красивым форматированием."""
+        """Export trace to console with pretty formatting."""
         for item in items:
             try:
                 data = item.export()
                 if not data:
                     continue
                 
-                # Форматируем вывод в зависимости от типа
+                # Format output based on type
                 if data.get("object") == "trace":
                     self._print_trace(data)
                 elif data.get("object") == "trace.span":
                     self._print_span(data)
                 else:
-                    # Не печатаем сырые объекты в консоль
+                    # Don't print raw objects to console
                     return
             except Exception as e:
-                print(f"❌ Ошибка экспорта трассировки: {e}")
+                print(f"❌ Trace export error: {e}")
     
     def _print_trace(self, data: dict):
-        """Красивый вывод трейса."""
+        """Pretty print a trace."""
         # trace_id = data.get("id", "unknown")
         # workflow = data.get("workflow_name", "Unknown")
         # print(f"\n🚀 TRACE START: {workflow}")
@@ -53,11 +53,11 @@ class ConsoleSpanExporter(TracingExporter):
         #     print(f"   Metadata: {self._format_kv_table(data['metadata'])}")
     
     def _print_span(self, data: dict):
-        """Красивый вывод спана."""
+        """Pretty print a span."""
         span_data = data.get("span_data", {})
         span_type = span_data.get("type", "unknown")
         
-        # Иконки
+        # Icons
         icons = {
             "agent": "🤖",
             "generation": "💭", 
@@ -70,16 +70,16 @@ class ConsoleSpanExporter(TracingExporter):
         duration = self._calculate_duration(data)
         dur = f" ⏱ {duration}" if duration else ""
         
-        # Детали по типам (компактно)
+        # Details by type (compact)
         if span_type == "agent":
-            # Скрываем трассировку агентов в компактном режиме
+            # Hide agent tracing in compact mode
             if self._compact:
                 return
             print(f"{icon} {name or 'agent'}{dur}")
             return
         
         if span_type == "generation":
-            # Скрываем детали генерации в компактном режиме
+            # Hide generation details in compact mode
             if self._compact:
                 return
             usage = span_data.get("usage") or {}
@@ -100,7 +100,7 @@ class ConsoleSpanExporter(TracingExporter):
             return
         
         if span_type == "function":
-            # Однострочно, без JSON
+            # Single-line, no JSON
             mcp_data = span_data.get("mcp_data") or {}
             mcp_hint = ""
             server = mcp_data.get("server")
@@ -113,10 +113,10 @@ class ConsoleSpanExporter(TracingExporter):
             return
         
         if span_type == "mcp_tools":
-            # В компактном режиме не печатаем вовсе
+            # In compact mode, don't print at all
             if self._compact:
                 return
-            # Печатаем один раз на сервер, без перечислений
+            # Print once per server, no enumerations
             server = span_data.get("server") or "unknown"
             if server in self._printed_mcp_servers:
                 return
@@ -126,13 +126,13 @@ class ConsoleSpanExporter(TracingExporter):
             return
         
         if span_type == "handoff":
-            # Человекочитаемый хенд-офф: АгентA → АгентB
+            # Human-readable handoff: AgentA → AgentB
             src = span_data.get("from_agent") or "agent"
             dst = span_data.get("to_agent") or "agent"
             print(f"🔀 {src} → {dst}{dur}")
             return
         
-        # Прочие типы — одна строка
+        # Other types — single line
         if name:
             print(f"{icon} {span_type} {name}{dur}")
         else:
@@ -155,7 +155,7 @@ class ConsoleSpanExporter(TracingExporter):
                 print(f"     … +{len(output_seq) - 2}")
     
     def _print_function_info(self, span_data: dict):
-        # Не используется — оставлено для совместимости
+        # Not used — kept for compatibility
         self._print_function_io(span_data)
     
     def _print_function_io(self, span_data: dict) -> None:
@@ -167,7 +167,7 @@ class ConsoleSpanExporter(TracingExporter):
             print(f"   out: {self._humanize_value(output_data, max_len=200)}")
     
     def _calculate_duration(self, data: dict) -> str:
-        """Вычисляет длительность спана."""
+        """Calculate span duration."""
         try:
             from datetime import datetime
             started = data.get("started_at")
@@ -193,7 +193,7 @@ class ConsoleSpanExporter(TracingExporter):
         return s if len(s) <= max_len else s[: max_len - 1] + "…"
     
     def _humanize_value(self, value: Any, max_len: int = 200) -> str:
-        """Короткий человекочитаемый вид без JSON-скобок и кавычек вокруг ключей."""
+        """Short human-readable representation without JSON brackets and quotes around keys."""
         try:
             if isinstance(value, (dict, list)):
                 if isinstance(value, dict):
@@ -249,14 +249,14 @@ class ConsoleSpanExporter(TracingExporter):
 
 
 class FileSpanExporter(TracingExporter):
-    """Экспортер спанов в JSONL файл для анализа."""
+    """Exports spans to a JSONL file for analysis."""
     
     def __init__(self, path: str = "traces/traces.json"):
         self.path = path
         self.logger = logging.getLogger("grid.tracing")
         
     def export(self, items: List[Trace | Span]) -> None:
-        """Экспортирует спаны в файл."""
+        """Export spans to file."""
         try:
             # ensure directory exists
             import os as _os
@@ -274,14 +274,14 @@ class FileSpanExporter(TracingExporter):
 
 
 class HttpSpanExporter(TracingExporter):
-    """Экспортер спанов по HTTP в локальный или self-hosted сервис."""
+    """Exports spans via HTTP to a local or self-hosted service."""
     
     def __init__(self, endpoint: str, timeout: float = 0.1):
         self.endpoint = endpoint
         self.timeout = timeout
         self.logger = logging.getLogger("grid.tracing")
         
-        # Импортируем httpx только при необходимости
+        # Import httpx only when needed
         try:
             import httpx
             self.client = httpx.Client(timeout=timeout)
@@ -291,7 +291,7 @@ class HttpSpanExporter(TracingExporter):
             self._httpx_available = False
         
     def export(self, items: List[Trace | Span]) -> None:
-        """Экспортирует спаны по HTTP."""
+        """Export spans via HTTP."""
         if not self._httpx_available:
             return
             
@@ -310,7 +310,7 @@ class HttpSpanExporter(TracingExporter):
 
 
 class ImmediateTraceProcessor(TracingProcessor):
-    """Синхронный процессор, немедленно экспортирующий трейсы/спаны без фоновой очереди."""
+    """Synchronous processor that immediately exports traces/spans without a background queue."""
     def __init__(self, exporter: TracingExporter, export_span_start: bool = False):
         self._exporter = exporter
         self._export_span_start = export_span_start
@@ -322,7 +322,7 @@ class ImmediateTraceProcessor(TracingProcessor):
             pass
 
     def on_trace_end(self, trace: Trace) -> None:
-        # Ничего не делаем — уже экспортировано на старте
+        # Do nothing — already exported on start
         pass
 
     def on_span_start(self, span: Span[Any]) -> None:
@@ -346,47 +346,47 @@ class ImmediateTraceProcessor(TracingProcessor):
 
 
 class TracingConfig:
-    """Конфигурация трассировки для Grid системы."""
+    """Tracing configuration for the Grid system."""
     
     def __init__(self):
         self._configured = False
         self._processors = []
         
     def configure_console_tracing(self, level: str = "INFO") -> None:
-        """Настраивает трассировку в консоль."""
+        """Configure console tracing."""
         if self._configured:
             return
             
         exporter = ConsoleSpanExporter(level)
-        # Немедленный экспорт в консоль
+        # Immediate export to console
         processor = ImmediateTraceProcessor(exporter)
         self._processors = [processor]
         self._configured = True
         
     def configure_file_tracing(self, path: str = "traces.jsonl") -> None:
-        """Настраивает трассировку в файл."""
+        """Configure file tracing."""
         if self._configured:
             return
             
         exporter = FileSpanExporter(path)
-        # Для файла также используем немедленный экспорт
+        # For files, also use immediate export
         processor = ImmediateTraceProcessor(exporter)
         self._processors = [processor]
         self._configured = True
         
     def configure_http_tracing(self, endpoint: str, timeout: float = 0.1) -> None:
-        """Настраивает трассировку по HTTP."""
+        """Configure HTTP tracing."""
         if self._configured:
             return
             
         exporter = HttpSpanExporter(endpoint, timeout)
-        # Немедленный экспорт, чтобы события не задерживались
+        # Immediate export so events aren't delayed
         processor = ImmediateTraceProcessor(exporter)
         self._processors = [processor]
         self._configured = True
         
     def configure_custom_tracing(self, exporters: List[TracingExporter]) -> None:
-        """Настраивает кастомную трассировку с несколькими экспортерами."""
+        """Configure custom tracing with multiple exporters."""
         if self._configured:
             return
             
@@ -395,27 +395,27 @@ class TracingConfig:
         self._configured = True
         
     def apply(self) -> None:
-        """Применяет конфигурацию трассировки."""
+        """Apply tracing configuration."""
         if not self._configured:
-            # По умолчанию используем консольную трассировку
+            # Default to console tracing
             self.configure_console_tracing()
             
-        # Устанавливаем процессоры трассировки
+        # Set tracing processors
         set_trace_processors(self._processors)
         
     def disable(self) -> None:
-        """Отключает трассировку."""
+        """Disable tracing."""
         from agents.tracing import set_trace_processors
         set_trace_processors([])
         self._configured = False
 
 
-# Глобальный экземпляр конфигурации трассировки
+# Global tracing configuration instance
 tracing_config = TracingConfig()
 
 
 def configure_tracing_from_env() -> None:
-    """Настраивает трассировку на основе переменных окружения."""
+    """Configure tracing based on environment variables."""
     tracing_type = os.getenv("GRID_TRACING_TYPE", "console").lower()
     tracing_level = os.getenv("GRID_TRACING_LEVEL", "INFO")
     file_path = os.getenv("GRID_TRACING_FILE", "traces/traces.jsonl")
@@ -427,7 +427,7 @@ def configure_tracing_from_env() -> None:
         timeout = float(os.getenv("GRID_TRACING_TIMEOUT", "0.1"))
         tracing_config.configure_http_tracing(endpoint, timeout)
     elif tracing_type in ("console", "both", "multi"):
-        # По умолчанию: и консоль, и файл — чтобы в CLI было видно сразу и сохранялось на диск
+        # Default: both console and file — visible in CLI immediately and saved to disk
         exporters: List[TracingExporter] = [
             ConsoleSpanExporter(tracing_level),
             FileSpanExporter(file_path),
@@ -437,16 +437,16 @@ def configure_tracing_from_env() -> None:
         tracing_config.disable()
         return
     else:
-        # По умолчанию консоль + файл
+        # Default: console + file
         exporters = [ConsoleSpanExporter(tracing_level), FileSpanExporter(file_path)]
         tracing_config.configure_custom_tracing(exporters)
 
-    # Timeline tracer: всегда включён (если не отключён явно)
+    # Timeline tracer: always enabled (unless explicitly disabled)
     if os.getenv("GRID_TIMELINE_ENABLED", "true").lower() not in ("0", "false", "no"):
         try:
             from core.tracing.tracer import get_tracer
             timeline_exporter = get_tracer()
-            # Используем export_span_start=True чтобы видеть running-статус в реальном времени
+            # Use export_span_start=True to see running status in real time
             timeline_processor = ImmediateTraceProcessor(timeline_exporter, export_span_start=True)
             tracing_config._processors.append(timeline_processor)
             # #region agent log
@@ -461,10 +461,10 @@ def configure_tracing_from_env() -> None:
         except Exception as e:
             logging.getLogger("grid.tracing").warning(f"Timeline tracer init failed: {e}")
 
-    # Применяем конфигурацию
+    # Apply configuration
     tracing_config.apply()
 
 
 def get_tracing_config() -> TracingConfig:
-    """Возвращает глобальную конфигурацию трассировки."""
+    """Returns the global tracing configuration."""
     return tracing_config 

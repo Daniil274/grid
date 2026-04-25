@@ -3,8 +3,8 @@ agent: chat_agent
 owner: system
 source: manual-stage1
 tags: [introspection, tools]
-prompt: "Какие инструменты вообще есть в системе? Кратко перечисли основные категории."
+prompt: "What tools are available in the system? Briefly list the main categories."
 required_tools: ["system_list_tools"]
-required_substrings: ["инструмент"]
+required_substrings: ["tool"]
 forbidden_substrings: ["ERROR:"]
 max_latency_ms: 120000

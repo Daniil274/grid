@@ -52,7 +52,7 @@ async def test_benchmark_runner_produces_scorecard(tmp_path):
                 latency_ms=110,
             ),
             "list-tools": BenchmarkAdapterResult(
-                output="категории инструментов доступны",
+                output="tool categories available",
                 tools_used=["system_list_tools"],
                 latency_ms=105,
             ),

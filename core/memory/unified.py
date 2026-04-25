@@ -1,8 +1,8 @@
 """
-Unified Memory System - обёртка над краткосрочной памятью (ContextManager).
+Unified Memory System - wrapper around short-term memory (ContextManager).
 
-Долгосрочная память перенесена в SQLite (MemoryStore / memory_tools_v2).
-Здесь остаётся только контекст разговора для совместимости с TelegramBridge и AgentFactory.
+Long-term memory has been moved to SQLite (MemoryStore / memory_tools_v2).
+Only conversation context remains here for compatibility with TelegramBridge and AgentFactory.
 """
 
 import logging
@@ -16,14 +16,14 @@ from core.context import ContextManager
 
 class UnifiedMemory:
     """
-    Обёртка над ContextManager для краткосрочной истории разговора.
+    Wrapper around ContextManager for short-term conversation history.
 
-    Использование:
+    Usage:
         memory = UnifiedMemory(
             workspace=Path("./workspace"),
             persist_path=Path("./workspace/persistence")
         )
-        memory.add_message("user", "Привет!")
+        memory.add_message("user", "Hello!")
         context = memory.get_full_context()
     """
 
@@ -35,9 +35,9 @@ class UnifiedMemory:
     ):
         """
         Args:
-            workspace: Рабочая директория (для совместимости, не создаёт MEMORY.md/daily_notes)
-            persist_path: Директория для персистентности ContextManager
-            max_history: Максимум сообщений в краткосрочной памяти
+            workspace: Working directory (for compatibility, does not create MEMORY.md/daily_notes)
+            persist_path: Directory for ContextManager persistence
+            max_history: Maximum messages in short-term memory
         """
         self.workspace = Path(workspace)
         self.persist_path = Path(persist_path)
@@ -54,7 +54,7 @@ class UnifiedMemory:
 
     def get_full_context(self, last_n_messages: int = 5) -> str:
         """
-        Получить контекст для агента: последние сообщения и недавние операции.
+        Get context for the agent: recent messages and recent operations.
         """
         sections = []
 
@@ -63,14 +63,14 @@ class UnifiedMemory:
                 last_n=last_n_messages
             )
             if conv_context:
-                sections.append("=== ПОСЛЕДНИЕ СООБЩЕНИЯ ===\n" + conv_context)
+                sections.append("=== RECENT MESSAGES ===\n" + conv_context)
         except Exception as e:
             logger.error(f"Failed to load conversation context: {e}")
 
         try:
             recent_execs = self.context_manager.get_recent_executions(limit=3)
             if recent_execs:
-                exec_lines = ["=== НЕДАВНИЕ ОПЕРАЦИИ ==="]
+                exec_lines = ["=== RECENT OPERATIONS ==="]
                 for ex in recent_execs:
                     input_preview = str(ex.input_message)[:50] if ex.input_message else "N/A"
                     output_preview = str(ex.output)[:50] if ex.output else "N/A"
@@ -84,14 +84,14 @@ class UnifiedMemory:
         return "\n\n".join(sections) if sections else ""
 
     def add_message(self, role: str, content: str, metadata: Optional[dict] = None):
-        """Добавить сообщение в историю разговора."""
+        """Add a message to the conversation history."""
         try:
             self.context_manager.add_message(role, content, metadata)
         except Exception as e:
             logger.error(f"Failed to add message: {e}")
 
     def clear_conversation(self):
-        """Очистить историю текущего разговора."""
+        """Clear the current conversation history."""
         try:
             context_id = self.context_manager.start_new_context()
             logger.info(f"Conversation cleared, new context: {context_id}")
@@ -101,7 +101,7 @@ class UnifiedMemory:
             return None
 
     def get_memory_stats(self) -> dict:
-        """Статистика по краткосрочной памяти (контекст)."""
+        """Short-term memory (context) statistics."""
         return {
             "short_term": {
                 "current_context_id": self.context_manager.get_current_context_id(),

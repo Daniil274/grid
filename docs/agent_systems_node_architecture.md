@@ -1,61 +1,61 @@
-# Архитектура агентских систем как исполняемых нод
+# Architecture of Agent Systems as Executable Nodes
 
-## Зачем это нужно
+## Why This Is Needed
 
-Сейчас в Grid уже есть сильные заготовки:
+Grid already has strong foundations:
 
-- конфиг-ориентированное описание агентов и инструментов;
-- dynamic agents через `AgentFactory`;
-- system tools для интроспекции;
-- improvement loop с registry, experiment, evaluation и promotion;
-- pipeline/runtime слой для сериализованного исполнения.
+- config-oriented description of agents and tools;
+- dynamic agents via `AgentFactory`;
+- system tools for introspection;
+- improvement loop with registry, experiment, evaluation and promotion;
+- pipeline/runtime layer for serialized execution.
 
-Но онтология пока разорвана:
+But the ontology is still fragmented:
 
-- `agents` есть как первичная сущность;
-- `agent systems` фактически существуют, но не оформлены как объект модели;
-- self-improvement живёт рядом с runtime, а не внутри общей архитектуры;
-- версия системы, эксперимент и релиз не являются первоклассными сущностями.
+- `agents` exist as a primary entity;
+- `agent systems` effectively exist but are not formalized as a model object;
+- self-improvement lives alongside the runtime, not inside the common architecture;
+- system version, experiment and release are not first-class entities.
 
-Из-за этого саморазвитие выглядит как надстройка над конфигом, а не как нормальная часть платформы.
+Because of this, self-development looks like an add-on over config rather than a normal part of the platform.
 
-## Главная идея
+## Core Idea
 
-Нужно поднять уровень абстракции:
+We need to raise the abstraction level:
 
-- не `agent` как единственная исполняемая сущность;
-- а `node` как общий исполняемый объект;
-- где `agent system config` компилируется в `system node`.
+- not `agent` as the only executable entity;
+- but `node` as a common executable object;
+- where `agent system config` compiles into `system node`.
 
-Тогда:
+Then:
 
-- агент остаётся частным случаем ноды;
-- целая агентская система тоже становится нодой;
-- системные агенты могут видеть не только отдельных агентов, но и целые системы;
-- версии систем, эксперименты и тестовые прогоны становятся естественной частью runtime.
+- an agent remains a special case of a node;
+- an entire agent system also becomes a node;
+- system agents can see not only individual agents but entire systems;
+- system versions, experiments and test runs become a natural part of the runtime.
 
-## Базовая модель
+## Basic Model
 
 ### 1. Node
 
-Единая сущность исполнения.
+A unified execution entity.
 
-Типы нод:
+Node types:
 
-- `agent` — один агент с моделью, инструментами и prompt;
-- `system` — композиция из нескольких нод с входной точкой;
-- `tool` — внешняя или встроенная функция;
-- `workflow` — декларативный граф шагов;
-- `router` — выбор следующей ноды;
-- `evaluator` — проверка результата;
-- `benchmark` — сценарий оценки;
-- `policy` — правила доступа, лимитов и promotion.
+- `agent` — one agent with model, tools and prompt;
+- `system` — composition of several nodes with an entry point;
+- `tool` — external or built-in function;
+- `workflow` — declarative graph of steps;
+- `router` — selection of the next node;
+- `evaluator` — result checking;
+- `benchmark` — evaluation scenario;
+- `policy` — access, limits and promotion rules.
 
 ### 2. System Definition
 
-Описание агентской системы как графа.
+Description of an agent system as a graph.
 
-Обязательные свойства:
+Mandatory properties:
 
 - `id`;
 - `version`;
@@ -66,26 +66,26 @@
 - `policies`;
 - `dependencies`.
 
-Смысл:
+Rationale:
 
-- `default_agent` нужен для обратной совместимости и простого запуска;
-- `entrypoint` нужен для корректной модели исполнения;
-- `nodes` задают внутренний граф;
-- `interfaces` определяют, как система вызывается снаружи;
-- `dependencies` позволяют системе использовать другие системы.
+- `default_agent` is needed for backward compatibility and simple launch;
+- `entrypoint` is needed for a correct execution model;
+- `nodes` define the internal graph;
+- `interfaces` define how the system is called from outside;
+- `dependencies` allow the system to use other systems.
 
 ### 3. System Version
 
-Версия системы должна быть неизменяемой.
+A system version must be immutable.
 
-Это ключевой принцип, иначе self-improvement превращается в перетирание живого конфига.
+This is a key principle; otherwise self-improvement turns into overwriting a live config.
 
-Правильная модель:
+The correct model:
 
 - definition immutable;
 - release pointers mutable.
 
-То есть меняется не существующая версия, а указатель:
+That is, the existing version does not change, only the pointer:
 
 - `stable`;
 - `candidate`;
@@ -95,31 +95,31 @@
 
 ### 4. System Registry
 
-Нужен отдельный реестр систем, а не только improvement registry.
+A separate registry of systems is needed, not just an improvement registry.
 
-Он хранит:
+It stores:
 
-- список систем;
-- их версии;
-- активные alias/каналы;
-- зависимости между системами;
-- контракты интерфейсов;
-- историю публикаций;
-- связи с экспериментами и benchmark-результатами.
+- list of systems;
+- their versions;
+- active aliases/channels;
+- dependencies between systems;
+- interface contracts;
+- publication history;
+- links to experiments and benchmark results.
 
-## Целевая архитектура
+## Target Architecture
 
-### Слой 1. Declarative Layer
+### Layer 1. Declarative Layer
 
-Конфиг описывает не только агентов и tools, но и системы.
+Config describes not only agents and tools, but also systems.
 
-Примерно так:
+Something like:
 
 ```yaml
 systems:
   coding_assistant:
     title: Coding Assistant
-    description: Система для инженерных задач
+    description: System for engineering tasks
     entrypoint: main
     default_agent: chat_agent
     versioning:
@@ -157,65 +157,65 @@ systems:
       evaluation_profile: coding_regression_suite
 ```
 
-### Слой 2. Compilation Layer
+### Layer 2. Compilation Layer
 
-Конфиг не должен исполняться напрямую как YAML на каждом шаге.
+Config should not be executed directly as YAML at every step.
 
-Нужен компилятор:
+A compiler is needed:
 
 - `config -> normalized IR -> executable graph`.
 
-IR должен быть единым и для одиночного агента, и для целой системы.
+The IR must be unified for both a single agent and an entire system.
 
-Это убирает костыли, потому что runtime работает не с разными сущностями, а с одной моделью графа.
+This eliminates workarounds because the runtime works with one graph model, not different entities.
 
-### Слой 3. Runtime Layer
+### Layer 3. Runtime Layer
 
-Runtime должен уметь запускать любую ноду по одинаковому контракту:
+The runtime must be able to execute any node using the same contract:
 
 - `invoke(node_ref, input, context, policy) -> result`.
 
-Тогда:
+Then:
 
-- агент вызывает систему так же, как другую ноду;
-- система вызывает вложенную систему тем же способом;
-- self-improvement агент может запускать candidate-версии как обычные callable nodes.
+- an agent calls a system the same way as another node;
+- a system calls a nested system the same way;
+- a self-improvement agent can run candidate versions as regular callable nodes.
 
-### Слой 4. Registry Layer
+### Layer 4. Registry Layer
 
-Нужно разделить два реестра:
+We need to separate two registries:
 
-- `SystemRegistry` — что существует;
-- `ImprovementRegistry` — что меняем и как проверяем.
+- `SystemRegistry` — what exists;
+- `ImprovementRegistry` — what we change and how we verify.
 
-Связь между ними такая:
+The relationship between them:
 
-- проблема относится к системе или версии системы;
-- эксперимент создаёт candidate version;
-- evaluator проверяет candidate;
-- promotion двигает alias канала на новую версию.
+- a problem relates to a system or system version;
+- an experiment creates a candidate version;
+- an evaluator checks the candidate;
+- promotion moves the channel alias to the new version.
 
-### Слой 5. Evaluation Layer
+### Layer 5. Evaluation Layer
 
-Оцениваться должен не просто `config_diff`, а исполняемая версия системы.
+What should be evaluated is not just `config_diff`, but an executable system version.
 
-Сценарий:
+Scenario:
 
-1. есть `system@1.4.0`;
-2. агент создаёт `system@1.5.0-candidate.3`;
-3. benchmark гоняется именно по candidate version;
-4. canary идёт на alias `canary`;
-5. после успеха `stable -> 1.5.0`.
+1. there is `system@1.4.0`;
+2. an agent creates `system@1.5.0-candidate.3`;
+3. benchmark runs against the candidate version;
+4. canary goes to alias `canary`;
+5. after success `stable -> 1.5.0`.
 
-Это намного чище, чем “изменили кусок конфига и как-то применили”.
+This is much cleaner than "changed a piece of config and somehow applied it".
 
-## Как именно превратить агентскую систему в ноду
+## How to Turn an Agent System into a Node
 
-### Правило
+### Rule
 
-Любая система обязана иметь внешний контракт вызова.
+Any system must have an external call contract.
 
-Минимальный контракт:
+Minimum contract:
 
 - `system_id`;
 - `version_selector`;
@@ -223,20 +223,20 @@ Runtime должен уметь запускать любую ноду по од
 - `execution_mode`;
 - `constraints`.
 
-Пример вызова:
+Call example:
 
 ```json
 {
   "system_id": "coding_assistant",
   "version_selector": "stable",
   "input": {
-    "task": "Исправь flaky tests вокруг config proposer"
+    "task": "Fix flaky tests around config proposer"
   },
   "execution_mode": "sync"
 }
 ```
 
-Ответ:
+Response:
 
 ```json
 {
@@ -252,17 +252,17 @@ Runtime должен уметь запускать любую ноду по од
 }
 ```
 
-Тогда системный агент может:
+Then a system agent can:
 
-- получить список систем;
-- запросить интерфейс системы;
-- вызвать систему;
-- вызвать конкретную версию;
-- сравнить несколько версий;
-- запустить benchmark;
-- выпустить candidate.
+- get a list of systems;
+- request a system's interface;
+- invoke a system;
+- invoke a specific version;
+- compare multiple versions;
+- run a benchmark;
+- release a candidate.
 
-## Какие сущности нужны в модели данных
+## What Entities Are Needed in the Data Model
 
 ### `SystemDefinition`
 
@@ -299,9 +299,9 @@ Runtime должен уметь запускать любую ноду по од
 
 ### `SystemExperiment`
 
-Можно либо расширить текущий `ImprovementExperiment`, либо сделать связанный слой поверх него.
+Can either extend the current `ImprovementExperiment` or create a related layer on top of it.
 
-Главное, чтобы эксперимент ссылался не на абстрактный diff, а на:
+The main thing is that the experiment should reference not an abstract diff, but:
 
 - `target_system_id`
 - `base_version`
@@ -309,11 +309,11 @@ Runtime должен уметь запускать любую ноду по од
 - `change_set`
 - `evaluation_suite`
 
-## Предлагаемая структура конфигов и файлов
+## Proposed Config and File Structure
 
-Если делать чисто, лучше уйти от одного огромного `config.yaml` к каталогам.
+If done cleanly, it's better to move away from one huge `config.yaml` to directories.
 
-Пример:
+Example:
 
 ```text
 config/
@@ -338,19 +338,19 @@ config/
     systems.yaml
 ```
 
-Почему так лучше:
+Why this is better:
 
-- системы отделены от агентов;
-- версия системы хранится явно;
-- легче диффить и сравнивать;
-- проще делать candidate и canary;
-- можно хранить несколько параллельных вариантов без засорения главного файла.
+- systems are separated from agents;
+- system version is stored explicitly;
+- easier to diff and compare;
+- simpler to make candidate and canary;
+- multiple parallel variants can be stored without polluting the main file.
 
-## Что должен уметь системный агент
+## What a System Agent Should Be Able to Do
 
-Не прямой доступ к live config, а bounded capability surface.
+Not direct access to live config, but a bounded capability surface.
 
-Нужны инструменты уровня системы:
+System-level tools are needed:
 
 - `system_list_systems`
 - `system_get_system_info`
@@ -362,60 +362,60 @@ config/
 - `system_promote_version`
 - `system_archive_version`
 
-Важно:
+Important:
 
-агент не должен “править конфиг как текст”.
+an agent should not "edit config as text".
 
-Он должен работать через операции домена:
+It should work through domain operations:
 
-- создать версию;
-- изменить ноду;
-- изменить dependency;
-- переключить entrypoint;
-- сменить policy;
-- запустить оценку.
+- create a version;
+- change a node;
+- change a dependency;
+- switch entrypoint;
+- change policy;
+- run evaluation.
 
-Это главный анти-костыльный принцип.
+This is the main anti-workaround principle.
 
-## Как встроить self-improvement без мёртвого кода
+## How to Embed Self-Improvement Without Dead Code
 
-### Плохой путь
+### Bad Path
 
-- отдельный self-improvement режим;
-- отдельные special-case функции;
-- прямое редактирование текущего `config.yaml`;
-- promotion как побочный эффект.
+- separate self-improvement mode;
+- separate special-case functions;
+- direct editing of the current `config.yaml`;
+- promotion as a side effect.
 
-### Хороший путь
+### Good Path
 
-self-improvement — это обычный consumer платформы системных нод.
+Self-improvement is a regular consumer of the system node platform.
 
-То есть улучшатель работает так:
+That is, the improver works like this:
 
-1. наблюдает проблему;
-2. выбирает target system;
-3. создаёт candidate version;
-4. меняет graph definition через domain API;
-5. запускает benchmark;
-6. запускает canary;
-7. двигает release channel.
+1. observes a problem;
+2. selects a target system;
+3. creates a candidate version;
+4. changes the graph definition through domain API;
+5. runs a benchmark;
+6. runs a canary;
+7. moves the release channel.
 
-Это не отдельная “магия”, а обычный lifecycle любой системы.
+This is not separate "magic", but a normal lifecycle of any system.
 
-## Взаимодействие с текущим кодом Grid
+## Interaction with Current Grid Code
 
-На базе текущего репо это раскладывается так.
+Based on the current repo, this breaks down as follows.
 
-### Уже можно переиспользовать
+### Already Reusable
 
-- `core/agent_factory.py` как runtime для agent nodes;
-- `tools/system_tools.py` как основу интроспекции;
-- `tools/orchestrator_tools.py` как механизм исполнения динамических графов;
-- `core/pipeline_registry.py` как execution coordination;
-- `core/improvement_registry.py` как основу experiment lifecycle;
-- `core/evaluator.py` и `benchmarks/run.py` как evaluation layer.
+- `core/agent_factory.py` as runtime for agent nodes;
+- `tools/system_tools.py` as basis for introspection;
+- `tools/orchestrator_tools.py` as mechanism for executing dynamic graphs;
+- `core/pipeline_registry.py` as execution coordination;
+- `core/improvement_registry.py` as basis for experiment lifecycle;
+- `core/evaluator.py` and `benchmarks/run.py` as evaluation layer.
 
-### Чего не хватает
+### What's Missing
 
 - `SystemRegistry`;
 - `SystemDefinition` / `SystemVersion` schemas;
@@ -424,7 +424,7 @@ self-improvement — это обычный consumer платформы сист�
 - release/channel management;
 - version-aware invocation.
 
-## Как это должно выглядеть структурно в коде
+## How This Should Look Structurally in Code
 
 ```text
 core/
@@ -444,84 +444,84 @@ tools/
   system_release_tools.py
 ```
 
-## Правильный жизненный цикл
+## Correct Lifecycle
 
 ### 1. Authoring
 
-Система описывается декларативно.
+The system is described declaratively.
 
 ### 2. Compile
 
-Конфиг компилируется в нормализованный graph IR.
+Config is compiled into a normalized graph IR.
 
 ### 3. Register
 
-Версия регистрируется как неизменяемый артефакт.
+A version is registered as an immutable artifact.
 
 ### 4. Invoke
 
-Система вызывается по контракту через runtime.
+The system is called by contract through the runtime.
 
 ### 5. Observe
 
-Логи, метрики и результаты привязываются к версии системы.
+Logs, metrics and results are tied to the system version.
 
 ### 6. Experiment
 
-На основе версии создаётся candidate.
+A candidate is created based on the version.
 
 ### 7. Evaluate
 
-Прогоняются benchmark/canary.
+Benchmark/canary are run.
 
 ### 8. Promote
 
-Меняется alias канала, а не содержимое старой версии.
+The channel alias changes, not the content of the old version.
 
-## Ключевые принципы, чтобы не было костылём
+## Key Principles to Avoid Workarounds
 
-1. Одна исполняемая абстракция: всё является `node`.
-2. Система — это не особый режим, а обычная callable node.
-3. Версии immutable, каналы mutable.
-4. Изменения только через domain operations, не через редактирование YAML как текста.
-5. Evaluation работает по версиям систем, не по “идеям изменений”.
-6. Runtime ничего не знает о self-improvement как об исключении.
-7. Интроспекция и управление идут через tool/API surface, а не через прямой доступ к внутренностям.
+1. One executable abstraction: everything is `node`.
+2. A system is not a special mode, but a regular callable node.
+3. Versions immutable, channels mutable.
+4. Changes only through domain operations, not by editing YAML as text.
+5. Evaluation works on system versions, not on "change ideas".
+6. Runtime knows nothing about self-improvement as an exception.
+7. Introspection and management go through tool/API surface, not through direct access to internals.
 
-## Рекомендуемая последовательность внедрения
+## Recommended Implementation Sequence
 
-### Этап 1
+### Stage 1
 
-Добавить `systems:` как новую секцию конфига и сделать `SystemRegistry` без изменения runtime.
+Add `systems:` as a new config section and create `SystemRegistry` without changing runtime.
 
-### Этап 2
+### Stage 2
 
-Сделать `system_invoke_system`, где system пока просто проксируется в `default_agent`.
+Create `system_invoke_system`, where system is still proxied to `default_agent`.
 
-Это даст совместимость и быстрый старт.
+This provides compatibility and quick start.
 
-### Этап 3
+### Stage 3
 
-Добавить graph IR и `system_runtime`, чтобы система стала полноценной композицией нод.
+Add graph IR and `system_runtime` so the system becomes a full node composition.
 
-### Этап 4
+### Stage 4
 
-Перевести improvement loop с `config_diff` на `candidate system version`.
+Convert improvement loop from `config_diff` to `candidate system version`.
 
-### Этап 5
+### Stage 5
 
-Вынести version/channel/release в отдельный слой и подключить canary/promotion.
+Extract version/channel/release into a separate layer and connect canary/promotion.
 
-## Короткий вывод
+## Short Conclusion
 
-Правильная цель не в том, чтобы “агент редактировал конфиг и улучшал себя”.
+The correct goal is not for "the agent to edit config and improve itself".
 
-Правильная цель в том, чтобы:
+The correct goal is for:
 
-- конфиг описывал исполняемые системы;
-- система была нодой;
-- нода имела версию и контракт;
-- агенты могли вызывать и сравнивать системы;
-- improvement loop управлял версиями и релизами систем.
+- config to describe executable systems;
+- a system to be a node;
+- a node to have a version and a contract;
+- agents to be able to call and compare systems;
+- the improvement loop to manage system versions and releases.
 
-Тогда саморазвитие получится не магическим и не хрупким, а естественным свойством платформы.
+Then self-development will not be magical and fragile, but a natural property of the platform.

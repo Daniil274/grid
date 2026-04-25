@@ -90,7 +90,7 @@ class WebStreamObserver:
                     {
                         "type": "trace",
                         "kind": "tool_call",
-                        "title": f"Запуск инструмента {title}",
+                        "title": f"Running tool {title}",
                         "subtitle": self.agent_label,
                         "details": _truncate(arguments or {}),
                         "status": "running",
@@ -105,7 +105,7 @@ class WebStreamObserver:
                     {
                         "type": "trace",
                         "kind": "tool_output",
-                        "title": f"Результат {title}",
+                        "title": f"Tool result {title}",
                         "subtitle": self.agent_label,
                         "details": _truncate(output),
                         "status": "done",
@@ -117,9 +117,9 @@ class WebStreamObserver:
                     {
                         "type": "trace",
                         "kind": "handoff_requested",
-                        "title": f"Передача в {target}",
+                        "title": f"Handoff to {target}",
                         "subtitle": self.agent_label,
-                        "details": "Агент делегирует следующую часть задачи.",
+                        "details": "Agent is delegating the next part of the task.",
                         "status": "running",
                     }
                 )
@@ -132,9 +132,9 @@ class WebStreamObserver:
                     {
                         "type": "trace",
                         "kind": "handoff",
-                        "title": f"{src_name} -> {dst_name}",
+                        "title": f"{src_name} → {dst_name}",
                         "subtitle": "Handoff",
-                        "details": "Подагент принял управление этой веткой.",
+                        "details": "Sub-agent has taken control of this branch.",
                         "status": "done",
                     }
                 )
@@ -145,7 +145,6 @@ class WebStreamObserver:
                     {
                         "type": "trace",
                         "kind": "mcp",
-                        "title": f"MCP сервер {server_label} подключен",
                         "subtitle": self.agent_label,
                         "details": _truncate([getattr(tool, "name", str(tool)) for tool in tools], 600),
                         "status": "done",
@@ -174,14 +173,14 @@ class WebChatServer:
 
     def _conversation_title(self, bucket: dict[str, Any]) -> str:
         metadata = bucket.get("metadata") or {}
-        if metadata.get("title") and metadata.get("title") != "Новый чат":
+        if metadata.get("title") and metadata.get("title") != "New chat":
             return metadata["title"]
         for msg in bucket.get("conversation", []):
             if getattr(msg, "role", None) == "user":
                 text = msg.get_text_content() if hasattr(msg, "get_text_content") else str(getattr(msg, "content", ""))
                 text = " ".join(text.split())
                 return text[:42] + ("..." if len(text) > 42 else "")
-        return "Новый чат"
+        return "New chat"
 
     def _serialize_message(self, msg: Any) -> dict[str, Any]:
         if hasattr(msg, "get_text_content"):
@@ -297,7 +296,7 @@ class WebChatServer:
                 context_id,
                 created_by_web=True,
                 agent_key=agent_key,
-                title="Новый чат",
+                title="New chat",
             )
             return JSONResponse({"id": context_id, "agent_key": agent_key})
 
@@ -362,7 +361,7 @@ class WebChatServer:
                         {
                             "type": "trace",
                             "kind": "prepare",
-                            "title": "Подготовка окружения",
+                            "title": "Environment setup",
                             "subtitle": agent_key,
                             "details": f"Workspace: {self.runtime.workspace_path}",
                             "status": "running",
@@ -373,7 +372,7 @@ class WebChatServer:
                         context_id,
                         created_by_web=True,
                         agent_key=agent_key,
-                        title=(" ".join(message.split())[:42] + ("..." if len(" ".join(message.split())) > 42 else "")) or "Новый чат",
+                        title=(" ".join(message.split())[:42] + ("..." if len(" ".join(message.split())) > 42 else "")) or "New chat",
                     )
                     observer_queue: asyncio.Queue = asyncio.Queue()
                     agent_label = next((agent["name"] for agent in self._agent_options() if agent["key"] == agent_key), agent_key)
@@ -386,9 +385,9 @@ class WebChatServer:
                                 {
                                     "type": "trace",
                                     "kind": "agent_start",
-                                    "title": f"Старт агента {agent_label}",
+                                    "title": f"Agent start {agent_label}",
                                     "subtitle": agent_key,
-                                    "details": "Запрос передан в runtime Grid.",
+                                    "details": "Request passed to Grid runtime.",
                                     "status": "running",
                                 }
                             )
@@ -406,9 +405,9 @@ class WebChatServer:
                                 {
                                     "type": "trace",
                                     "kind": "agent_end",
-                                    "title": f"Завершено: {agent_label}",
+                                    "title": f"Completed: {agent_label}",
                                     "subtitle": agent_key,
-                                    "details": "Ответ готов и сохранён в истории диалога.",
+                                    "details": "Response ready and saved in conversation history.",
                                     "status": "done",
                                 }
                             )
@@ -418,9 +417,9 @@ class WebChatServer:
                                 {
                                     "type": "trace",
                                     "kind": "cancelled",
-                                    "title": "Генерация остановлена",
+                                    "title": "Generation stopped",
                                     "subtitle": agent_key,
-                                    "details": "Поток был остановлен пользователем.",
+                                    "details": "Stream was stopped by the user.",
                                     "status": "warning",
                                 }
                             )
@@ -443,7 +442,7 @@ class WebChatServer:
                                     thinking_event = {
                                         "type": "trace",
                                         "kind": "thinking",
-                                        "title": "Размышления",
+                                        "title": "Thinking",
                                         "subtitle": agent_key,
                                         "details": text,
                                         "status": "done",

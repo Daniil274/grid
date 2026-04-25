@@ -44,9 +44,9 @@ def test_log_observer_creates_problem_from_repeated_user_corrections(temp_dir, c
         context_id = f"ctx-correct-{index}"
         contexts[context_id] = {
             "conversation_history": [
-                {"role": "user", "content": "Сделай кратко", "timestamp": "2026-03-20T10:00:00"},
-                {"role": "assistant", "content": "Очень длинный ответ", "timestamp": "2026-03-20T10:00:01"},
-                {"role": "user", "content": "нет, это не то", "timestamp": "2026-03-20T10:00:02"},
+                {"role": "user", "content": "Make it brief", "timestamp": "2026-03-20T10:00:00"},
+                {"role": "assistant", "content": "Very long answer", "timestamp": "2026-03-20T10:00:01"},
+                {"role": "user", "content": "no, that's not it", "timestamp": "2026-03-20T10:00:02"},
             ],
             "execution_history": [],
             "metadata": {"last_invocation": {"agent": "chat_agent"}},
@@ -79,7 +79,7 @@ def test_log_observer_deduplicates_on_second_run(temp_dir, config_file, sample_c
             "execution_history": [
                 {
                     "agent_name": "coordinator",
-                    "output": "Не могу завершить задачу из-за ошибки инструмента",
+                    "output": "Cannot complete the task due to a tool error",
                     "error": None,
                     "end_time": "2026-03-20T10:00:03",
                 }

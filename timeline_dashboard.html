@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -163,26 +163,26 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
     <div class="sh">
       <div class="sh-title">Agent Timeline <span class="wsdot" id="wsDot"></span></div>
       <div class="sh-row">
-        <input id="srch" type="text" placeholder="Поиск…" oninput="renderSidebar()">
+        <input id="srch" type="text" placeholder="Search…" oninput="renderSidebar()">
         <button class="btn on" id="liveBtn" onclick="toggleLive()">⚡</button>
       </div>
     </div>
     <div class="tlist" id="tlist">
-      <div style="padding:18px;text-align:center;font-size:11px;color:var(--text2)">Загрузка…</div>
+      <div style="padding:18px;text-align:center;font-size:11px;color:var(--text2)">Loading…</div>
     </div>
     <div class="sfoot">
       <button class="btn" onclick="loadTraces()">↻</button>
       <button class="btn" onclick="cy&&cy.fit(40)">Fit</button>
-      <button class="btn" id="genBtn" onclick="toggleGen()" title="Скрыть reasoning">💭</button>
+      <button class="btn" id="genBtn" onclick="toggleGen()" title="Hide reasoning">💭</button>
       <button class="btn" id="dirBtn" onclick="toggleDir()">⇄ H</button>
     </div>
   </div>
 
   <div class="canvas-area">
     <div class="toolbar">
-      <span class="tbar-name" id="traceTitle">Выберите трейс</span>
+      <span class="tbar-name" id="traceTitle">Select a trace</span>
       <div class="sep"></div>
-      <button class="btn" id="snakeBtn" onclick="toggleSnake()" title="Змейка">🐍</button>
+      <button class="btn" id="snakeBtn" onclick="toggleSnake()" title="Snake">🐍</button>
       <button class="btn" onclick="cy&&cy.zoom(cy.zoom()*1.25)">＋</button>
       <button class="btn" onclick="cy&&cy.zoom(cy.zoom()*.8)">－</button>
       <button class="btn" onclick="cy&&cy.fit(40)">Fit</button>
@@ -190,15 +190,15 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
     <div id="cy"></div>
     <div class="empty" id="emptyMsg">
       <div class="ic">⬡</div>
-      <div>Выберите трейс слева</div>
-      <div style="font-size:11px">Трейсы появляются по мере запуска агентов</div>
+      <div>Select a trace from the left</div>
+      <div style="font-size:11px">Traces appear as agents run</div>
     </div>
     <div class="legend" id="legend" style="display:none">
       <div class="leg"><div class="leg-sq" style="border-color:#6366f1;background:#12103a;border-radius:3px"></div>Agent</div>
       <div class="leg"><div class="leg-sq" style="border-color:#7c3aed;background:#140c2a"></div>Reasoning</div>
       <div class="leg"><div class="leg-sq" style="border-color:#d97706;background:#1a1200"></div>Tool</div>
       <div class="leg"><div class="leg-sq" style="border-color:#059669;background:#021a10;border-radius:50%"></div>Handoff</div>
-      <div class="leg" style="margin-left:10px;color:var(--text2)">→ следующий &nbsp; ⇢ sub-agent</div>
+      <div class="leg" style="margin-left:10px;color:var(--text2)">→ next &nbsp; ⇢ sub-agent</div>
     </div>
   </div>
 
@@ -222,15 +222,15 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 <div class="overlay" id="rrOverlay" style="display:none" onclick="if(event.target===this)closeRR()">
   <div class="modal" onclick="event.stopPropagation()">
     <div class="modal-h">
-      <span>▶</span><h3>Rerun из снимка</h3>
+      <span>▶</span><h3>Rerun from snapshot</h3>
       <span style="font-size:10px;color:var(--text2)" id="rrInfo2"></span>
       <button class="mcls" onclick="closeRR()">✕</button>
     </div>
     <div class="modal-body" id="rrBody"></div>
     <div class="modal-foot">
-      <span class="minfo" id="rrInfo">Редактируйте и нажмите Запустить</span>
+      <span class="minfo" id="rrInfo">Edit and click Run</span>
       <button class="btn" onclick="rrAdd()">+ user</button>
-      <button class="btn-run" id="rrBtn" onclick="doRR()">▶ Запустить</button>
+      <button class="btn-run" id="rrBtn" onclick="doRR()">▶ Run</button>
     </div>
   </div>
 </div>
@@ -483,7 +483,7 @@ function buildEls(nodesFlat){
     for(let i=0;i<children.length;i++){
       const a=children[i];
       if (a.node_type === 'agent') {
-          // Динамический агент: связываем его с последним основным узлом
+          // Dynamic agent: link it to the last main node
           if (lastMainNode) {
               els.push({group:'edges',data:{
                 id:`sq-${lastMainNode.id}-${a.id}`,
@@ -493,7 +493,7 @@ function buildEls(nodesFlat){
               }});
           }
       } else {
-          // Обычный узел: связываем с предыдущим основным узлом
+          // Regular node: link to the previous main node
           if (lastMainNode) {
               els.push({group:'edges',data:{
                 id:`sq-${lastMainNode.id}-${a.id}`,
@@ -576,7 +576,7 @@ function applyLaneLayout(nodesFlat){
         const isDynamicAgent=child.node_type==='agent';
         if(isDynamicAgent){
           flow.push(child.id);
-          // Внутри ветки динамические агенты тоже собирают свои ветки
+          // Inside a branch, dynamic agents also collect their own branches
           flow.push(...collectBranchFlow(child.id, false));
           continue;
         }
@@ -753,13 +753,13 @@ async function selectTrace(id){
   renderSidebar();
   document.getElementById('emptyMsg').style.display='none';
   document.getElementById('legend').style.display='none';
-  document.getElementById('traceTitle').textContent='Загрузка…';
+  document.getElementById('traceTitle').textContent='Loading…';
   try{
     const r=await fetch(`${API}/api/traces/${id}`);
     if(!r.ok)throw new Error(await r.text());
     curTrace=await r.json();
     renderTrace(curTrace);
-  }catch(e){toast('Ошибка: '+e.message,'err');}
+  }catch(e){toast('Error: '+e.message,'err');}
 }
 
 function renderTrace(trace){
@@ -788,13 +788,13 @@ function pulseRunning(){
 // ── Sidebar ─────────────────────────────────────────────────────────────
 async function loadTraces(){
   try{const r=await fetch(`${API}/api/traces?limit=200`);allTraces=(await r.json()).traces||[];renderSidebar();}
-  catch(e){document.getElementById('tlist').innerHTML=`<div style="padding:14px;color:var(--err);font-size:11px">Ошибка: ${esc(e.message)}</div>`;}
+  catch(e){document.getElementById('tlist').innerHTML=`<div style="padding:14px;color:var(--err);font-size:11px">Error: ${esc(e.message)}</div>`;}
 }
 function renderSidebar(){
   const q=(document.getElementById('srch').value||'').toLowerCase();
   const list=allTraces.filter(t=>!q||(t.workflow_name||'').toLowerCase().includes(q)||(t.id||'').includes(q));
   const el=document.getElementById('tlist');
-  if(!list.length){el.innerHTML=`<div style="padding:18px;text-align:center;font-size:11px;color:var(--text2)">${q?'Не найдено':'Нет трейсов'}</div>`;return;}
+  if(!list.length){el.innerHTML=`<div style="padding:18px;text-align:center;font-size:11px;color:var(--text2)">${q?'Not found':'No traces'}</div>`;return;}
   const sc={running:'s-run',completed:'s-ok',failed:'s-err'};
   el.innerHTML=list.map(t=>`
     <div class="ti ${t.id===activeTraceId?'active':''}" onclick="selectTrace('${esc(t.id)}')">
@@ -869,8 +869,8 @@ function renderDetailTabs(node){
   const isFn=node.node_type==='function';
 
   // Build tab definitions
-  const tabs=[{id:'text',label:'Текст'}];
-  if(isGen&&meta&&meta.input_tokens!=null) tabs.push({id:'tokens',label:'Токены'});
+  const tabs=[{id:'text',label:'Text'}];
+  if(isGen&&meta&&meta.input_tokens!=null) tabs.push({id:'tokens',label:'Tokens'});
   tabs.push({id:'json',label:'JSON'});
 
   // Ensure active tab is valid
@@ -887,26 +887,26 @@ function renderDetailTabs(node){
   // TEXT tab
   let textHtml='';
   if(isGen){
-    if(isMsgArr(inR)) textHtml+=`<div><div class="kv-title">Сообщения</div>${renderChat(inR)}</div>`;
+    if(isMsgArr(inR)) textHtml+=`<div><div class="kv-title">Messages</div>${renderChat(inR)}</div>`;
     else if(inR) textHtml+=`<div><div class="kv-title">Input</div><div class="plain">${esc(toPlain(inR))}</div></div>`;
     // Separate reasoning vs answer from output
     const {reasoningText, answerText} = splitGenOutput(outR);
-    if(reasoningText) textHtml+=`<div><div class="kv-title" style="color:#818cf8">💭 Размышление</div><div class="plain" style="color:#a5b4fc;font-size:11px">${esc(reasoningText)}</div></div>`;
+    if(reasoningText) textHtml+=`<div><div class="kv-title" style="color:#818cf8">💭 Reasoning</div><div class="plain" style="color:#a5b4fc;font-size:11px">${esc(reasoningText)}</div></div>`;
     const outText=answerText||extractOutputText(outR);
-    textHtml+=`<div id="dpOutWrap"><div class="kv-title">Ответ${node.edited_output!=null?' <span style="color:var(--warn);font-size:9px">(ред.)</span>':''}</div>
-      <div class="plain rz" id="dpOut">${esc(outText)||'<span style="color:var(--text2);font-style:italic">(пусто)</span>'}</div>
+    textHtml+=`<div id="dpOutWrap"><div class="kv-title">Response${node.edited_output!=null?' <span style="color:var(--warn);font-size:9px">(edited)</span>':''}</div>
+      <div class="plain rz" id="dpOut">${esc(outText)||'<span style="color:var(--text2);font-style:italic">(empty)</span>'}</div>
       <div id="dpEA" style="display:none;flex:1;display:none;flex-direction:column;gap:6px">
         <textarea class="edit-ta" id="dpTa">${esc(outText)}</textarea>
-        <div style="display:flex;gap:6px"><button class="btn-save" onclick="saveEdit()">Сохранить</button><button class="btn-cancel" onclick="cancelEdit()">Отмена</button></div>
+        <div style="display:flex;gap:6px"><button class="btn-save" onclick="saveEdit()">Save</button><button class="btn-cancel" onclick="cancelEdit()">Cancel</button></div>
       </div></div>`;
   } else if(isFn){
     textHtml+=renderToolCall(inR,node.name);
     const outText=toPlain(outR);
-    if(outText) textHtml+=`<div><div class="kv-title">Результат${node.edited_output!=null?' <span style="color:var(--warn);font-size:9px">(ред.)</span>':''}</div>
+    if(outText) textHtml+=`<div><div class="kv-title">Result${node.edited_output!=null?' <span style="color:var(--warn);font-size:9px">(edited)</span>':''}</div>
       <div class="plain" id="dpOut">${esc(outText)}</div>
       <div id="dpEA" style="display:none;flex-direction:column;gap:6px">
         <textarea class="edit-ta" id="dpTa">${esc(outText)}</textarea>
-        <div style="display:flex;gap:6px"><button class="btn-save" onclick="saveEdit()">Сохранить</button><button class="btn-cancel" onclick="cancelEdit()">Отмена</button></div>
+        <div style="display:flex;gap:6px"><button class="btn-save" onclick="saveEdit()">Save</button><button class="btn-cancel" onclick="cancelEdit()">Cancel</button></div>
       </div></div>`;
   } else {
     if(inR!=null) textHtml+=`<div><div class="kv-title">Input</div><div class="plain">${esc(toPlain(inR))}</div></div>`;
@@ -914,12 +914,12 @@ function renderDetailTabs(node){
     if(outText) textHtml+=`<div><div class="kv-title">Output</div><div class="plain" id="dpOut">${esc(outText)}</div></div>`;
   }
   // Meta kv
-  textHtml+=`<div class="kv-section"><div class="kv-title">Метаданные</div>
+  textHtml+=`<div class="kv-section"><div class="kv-title">Metadata</div>
     <div class="kv"><span class="kk">Start</span><span class="kv-val">${fmtFull(node.started_at)}</span></div>
     <div class="kv"><span class="kk">Duration</span><span class="kv-val">${fmtDur(node.duration_ms)||'—'}</span></div>
     <div class="kv"><span class="kk">ID</span><span class="kv-val" style="font-size:10px;font-family:monospace">${esc(node.id)}</span></div>
     ${node.parent_id?`<div class="kv"><span class="kk">Parent</span><span class="klink" onclick="jumpTo('${esc(node.parent_id)}')">${esc(node.parent_id.slice(0,16))}…</span></div>`:''}
-    ${meta&&meta.model?`<div class="kv"><span class="kk">Модель</span><span class="kv-val">${esc(meta.model)}</span></div>`:''}
+    ${meta&&meta.model?`<div class="kv"><span class="kk">Model</span><span class="kv-val">${esc(meta.model)}</span></div>`:''}
   </div>`;
 
   body+=`<div class="dp-tc${_dpTab==='text'?' active':''}" id="tc-text">${textHtml}</div>`;
@@ -936,7 +936,7 @@ function renderDetailTabs(node){
       </div>
       <div class="kv-section" style="margin-top:4px">
         <div class="kv"><span class="kk">Duration</span><span class="kv-val">${fmtDur(node.duration_ms)||'—'}</span></div>
-        ${meta.model?`<div class="kv"><span class="kk">Модель</span><span class="kv-val">${esc(meta.model)}</span></div>`:''}
+        ${meta.model?`<div class="kv"><span class="kk">Model</span><span class="kv-val">${esc(meta.model)}</span></div>`:''}
       </div>
     </div>`;
   }
@@ -953,10 +953,10 @@ function renderDetailTabs(node){
   // Footer actions
   const hasOutput=isGen||isFn||(outR!=null);
   document.getElementById('dpFoot').innerHTML=`
-    ${hasOutput?'<button class="btn-act" onclick="startEdit()">✏️ Ред.</button>':''}
-    <button class="btn-act" onclick="copyDP()">⎘ Копировать</button>
+    ${hasOutput?'<button class="btn-act" onclick="startEdit()">✏️ Edit</button>':''}
+    <button class="btn-act" onclick="copyDP()">⎘ Copy</button>
     ${isGen?`<button class="btn-act prim" onclick="openRR('${esc(node.id)}')">▶ Rerun</button>`:''}
-    <button class="btn-act" onclick="jumpTo('${esc(node.id)}')">⊹ Центр</button>
+    <button class="btn-act" onclick="jumpTo('${esc(node.id)}')">⊹ Center</button>
   `;
 }
 
@@ -1014,27 +1014,27 @@ async function saveEdit(){
     const r=await fetch(`${API}/api/traces/${activeTraceId}/nodes/${detNode.id}/edit`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output:val})});
     if(!r.ok)throw new Error(await r.text());
     const o=document.getElementById('dpOut');if(o)o.textContent=val;
-    cancelEdit();toast('Сохранено','ok');
-  }catch(e){toast('Ошибка: '+e.message,'err');}
+    cancelEdit();toast('Saved','ok');
+  }catch(e){toast('Error: '+e.message,'err');}
 }
-function copyDP(){const o=document.getElementById('dpOut');if(o)navigator.clipboard.writeText(o.textContent).then(()=>toast('Скопировано','ok'));}
+function copyDP(){const o=document.getElementById('dpOut');if(o)navigator.clipboard.writeText(o.textContent).then(()=>toast('Copied','ok'));}
 
 // ── Rerun ─────────────────────────────────────────────────────────────────
 async function openRR(nodeId){
   rrNodeId=nodeId;rrTraceId=activeTraceId;
   document.getElementById('rrInfo2').textContent=nodeId.slice(0,14)+'…';
-  document.getElementById('rrBody').innerHTML='<div style="padding:20px;text-align:center;font-size:12px;color:var(--text2)">Загрузка снимка…</div>';
+  document.getElementById('rrBody').innerHTML='<div style="padding:20px;text-align:center;font-size:12px;color:var(--text2)">Loading snapshot…</div>';
   document.getElementById('rrOverlay').style.display='flex';
   document.getElementById('rrBtn').disabled=false;
-  document.getElementById('rrInfo').textContent='Редактируйте и нажмите Запустить';
+  document.getElementById('rrInfo').textContent='Edit and click Run';
   try{
     const r=await fetch(`${API}/api/traces/${rrTraceId}/nodes/${nodeId}/messages`);
     if(!r.ok)throw new Error(await r.text());
     const data=await r.json();
     rrMsgs=data.messages||[];
-    if(!data.rerun_available){document.getElementById('rrInfo').textContent='⚠️ Rerun недоступен (нет factory)';document.getElementById('rrBtn').disabled=true;}
+    if(!data.rerun_available){document.getElementById('rrInfo').textContent='⚠️ Rerun unavailable (no factory)';document.getElementById('rrBtn').disabled=true;}
     renderRRMsgs();
-  }catch(e){document.getElementById('rrBody').innerHTML=`<div style="padding:20px;color:var(--err)">Ошибка: ${esc(e.message)}</div>`;}
+  }catch(e){document.getElementById('rrBody').innerHTML=`<div style="padding:20px;color:var(--err)">Error: ${esc(e.message)}</div>`;}
 }
 
 function renderRRMsgs(){
@@ -1058,13 +1058,13 @@ function rrDel(i){rrMsgs.splice(i,1);renderRRMsgs();}
 async function doRR(){
   const msgs=rrMsgs.map((m,i)=>{const ta=document.getElementById('rr-'+i);return{...m,content:ta?ta.value:m.content};});
   const btn=document.getElementById('rrBtn');const info=document.getElementById('rrInfo');
-  btn.disabled=true;btn.innerHTML='<span class="spin"></span>';info.textContent='Запуск…';
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span>';info.textContent='Running…';
   try{
     const r=await fetch(`${API}/api/traces/${rrTraceId}/nodes/${rrNodeId}/rerun`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:msgs,user_id:'default_user'})});
     if(!r.ok)throw new Error((await r.json()).detail||'error');
-    info.textContent='✅ Готово! Новый трейс в списке.';btn.innerHTML='▶ Запустить';btn.disabled=false;
-    toast('Rerun завершён','ok');await loadTraces();
-  }catch(e){info.textContent='❌ '+e.message;btn.innerHTML='▶ Запустить';btn.disabled=false;toast('Ошибка: '+e.message,'err');}
+    info.textContent='✅ Done! New trace in list.';btn.innerHTML='▶ Run';btn.disabled=false;
+    toast('Rerun completed','ok');await loadTraces();
+  }catch(e){info.textContent='❌ '+e.message;btn.innerHTML='▶ Run';btn.disabled=false;toast('Error: '+e.message,'err');}
 }
 function closeRR(){document.getElementById('rrOverlay').style.display='none';rrNodeId=rrTraceId=null;rrMsgs=[];}
 
@@ -1106,7 +1106,7 @@ function handleWS(p){
 function toggleLive(){
   liveMode=!liveMode;
   document.getElementById('liveBtn').classList.toggle('on',liveMode);
-  if(liveMode){connectWS();toast('Live включён','ok');}else{if(ws)ws.close();toast('Live выключен');}
+  if(liveMode){connectWS();toast('Live enabled','ok');}else{if(ws)ws.close();toast('Live disabled');}
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

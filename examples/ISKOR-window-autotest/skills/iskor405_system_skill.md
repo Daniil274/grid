@@ -1,2 +1,2 @@
-Конфиги хранятся в /etc/ISKOR405/configs/
-Логи в /etc/ISKOR405/logs/project/
+Configs are stored in /etc/ISKOR405/configs/
+Logs in /etc/ISKOR405/logs/project/

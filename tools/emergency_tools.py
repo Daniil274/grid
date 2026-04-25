@@ -41,43 +41,43 @@ async def emergency_shutdown(
     severity: str = "critical"
 ) -> str:
     """
-    ЭКСТРЕННАЯ ОСТАНОВКА всего текущего pipeline.
+    EMERGENCY STOP of the entire current pipeline.
 
-    Останавливает все запущенные агенты в текущем pipeline и удаляет задачи из очереди.
-    Этот инструмент следует использовать только при критических ошибках, которые делают
-    невозможным продолжение выполнения всего pipeline.
+    Stops all running agents in the current pipeline and removes tasks from the queue.
+    This tool should only be used for critical errors that make it
+    impossible to continue executing the entire pipeline.
 
     Args:
-        reason: Детальное описание причины остановки. Должно быть максимально конкретным,
-                чтобы оркестратор мог понять проблему и принять решение о перезапуске.
-                Примеры:
+        reason: Detailed description of the stop reason. Should be as specific as possible
+                so the orchestrator can understand the problem and decide on a restart.
+                Examples:
                 - "Database connection failed after 3 retries: ConnectionRefusedError"
                 - "Required dependency 'libpq' not found, cannot proceed with PostgreSQL operations"
                 - "Infinite recursion detected: spawned >20 concurrent tasks"
 
-        severity: Уровень критичности проблемы:
-                - "warning": Проблема может быть решена, но требует внимания
-                - "error": Серьезная ошибка, но система может продолжить работу
-                - "critical" (default): Критическая ошибка, система не может продолжить работу
+        severity: Problem criticality level:
+                - "warning": Problem can be resolved but requires attention
+                - "error": Serious error, but the system can continue
+                - "critical" (default): Critical error, system cannot continue
 
     Returns:
-        JSON строка с результатом остановки, включающая:
+        JSON string with stop result, including:
         - success: true/false
-        - pipeline_id: ID остановленного pipeline
-        - reason: причина остановки
-        - severity: уровень критичности
-        - cancelled_tasks: количество отмененных задач
-        - completed_tasks: количество завершенных задач до остановки
-        - failed_tasks: количество проваленных задач
-        - total_tasks: общее количество задач в pipeline
+        - pipeline_id: ID of the stopped pipeline
+        - reason: stop reason
+        - severity: criticality level
+        - cancelled_tasks: number of cancelled tasks
+        - completed_tasks: number of completed tasks before stop
+        - failed_tasks: number of failed tasks
+        - total_tasks: total number of tasks in the pipeline
 
     Example:
         ```python
-        # Агент обнаруживает критическую проблему
+        # Agent detects a critical problem
         try:
             connection = connect_to_database()
         except ConnectionError as e:
-            # Останавливаем весь pipeline, т.к. все последующие задачи требуют БД
+            # Stop the entire pipeline since all subsequent tasks require DB
             result = emergency_shutdown(
                 reason=f"Database unavailable: {e}. All subsequent tasks require DB access.",
                 severity="critical"
@@ -183,32 +183,32 @@ async def get_pipeline_status(
     context: RunContextWrapper
 ) -> str:
     """
-    Получить детальный статус текущего pipeline.
+    Get detailed status of the current pipeline.
 
-    Возвращает информацию о текущем pipeline, включая список запущенных задач,
-    завершенных задач, проваленных задач и общий статус.
+    Returns information about the current pipeline, including running tasks,
+    completed tasks, failed tasks, and overall status.
 
     Args:
-        context: Контекст выполнения (автоматически передается)
+        context: Execution context (automatically passed)
 
     Returns:
-        JSON строка со статусом pipeline:
+        JSON string with pipeline status:
         - pipeline_id: ID pipeline
-        - status: текущий статус (running/completed/failed/emergency_stopped/cancelling)
-        - orchestrator_name: имя оркестратора
-        - context_id: ID контекста
-        - created_at: время создания (ISO format)
-        - running_tasks: список запущенных задач с их деталями
-        - completed_tasks: список ID завершенных задач
-        - failed_tasks: словарь {task_id: error_message}
-        - all_tasks: общее количество задач
-        - emergency_reason: причина emergency shutdown (если был)
-        - emergency_severity: уровень критичности (если был)
-        - shutdown_requested_at: время запроса остановки (если был)
+        - status: current status (running/completed/failed/emergency_stopped/cancelling)
+        - orchestrator_name: orchestrator name
+        - context_id: context ID
+        - created_at: creation time (ISO format)
+        - running_tasks: list of running tasks with details
+        - completed_tasks: list of completed task IDs
+        - failed_tasks: dict {task_id: error_message}
+        - all_tasks: total number of tasks
+        - emergency_reason: emergency shutdown reason (if any)
+        - emergency_severity: criticality level (if any)
+        - shutdown_requested_at: stop request time (if any)
 
     Example:
         ```python
-        # Агент проверяет текущий статус pipeline перед началом работы
+        # Agent checks the current pipeline status before starting work
         status_json = get_pipeline_status()
         status = json.loads(status_json)
 

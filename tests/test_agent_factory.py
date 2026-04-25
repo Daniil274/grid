@@ -174,6 +174,17 @@ class TestAgentFactory:
         assert not factory._is_reasoning_model_name("llama2")
         assert not factory._is_reasoning_model_name("")
         assert not factory._is_reasoning_model_name(None)
+
+    def test_model_requires_manual_history(self, config_file):
+        """Thinking models that preserve reasoning should bypass SDK session history."""
+        config = Config(str(config_file))
+        factory = AgentFactory(config)
+
+        base_model = config.get_model("gpt-4")
+        assert factory._model_requires_manual_history(base_model) is False
+
+        base_model.preserve_reasoning_content = True
+        assert factory._model_requires_manual_history(base_model) is True
     
     @pytest.mark.asyncio 
     async def test_create_agent_success(self, config_file):
@@ -401,7 +412,7 @@ class TestAgentFactory:
             # Should return fallback message
             assert "ID:" in response
             assert "ctx-" in response
-            assert "Агент выполнил задачу, но не предоставил текстовый ответ" in response
+            assert "Agent completed the task but did not provide a text response" in response
     
     @pytest.mark.asyncio
     async def test_run_agent_refreshes_cached_agent_instructions(self, config_file):
@@ -452,8 +463,8 @@ class TestAgentFactory:
             instructions = factory._build_agent_instructions("test_agent")
             
             assert "Base prompt" in instructions
-            assert "Информация о путях:" in instructions
-            assert "Рабочая директория:" in instructions
+            assert "Path information:" in instructions
+            assert "Working directory:" in instructions
     
     def test_build_agent_instructions_with_context_path(self, config_file):
         """Test building agent instructions with context path."""
@@ -464,7 +475,7 @@ class TestAgentFactory:
             instructions = factory._build_agent_instructions("test_agent", "/test/context")
             
             assert "Base prompt" in instructions
-            assert "Контекстный путь: /test/context" in instructions
+            assert "Context path: /test/context" in instructions
     
     def test_build_path_context(self, config_file):
         """Test building path context."""
@@ -473,9 +484,9 @@ class TestAgentFactory:
         
         context = factory._build_path_context()
         
-        assert "Информация о путях:" in context
-        assert "Рабочая директория:" in context
-        assert "Директория конфигурации:" in context
+        assert "Path information:" in context
+        assert "Working directory:" in context
+        assert "Configuration directory:" in context
     
     def test_build_path_context_with_context_path(self, config_file):
         """Test building path context with context path."""
@@ -484,8 +495,8 @@ class TestAgentFactory:
         
         context = factory._build_path_context("/test/context")
         
-        assert "Контекстный путь: /test/context" in context
-        assert "Абсолютный контекстный путь:" in context
+        assert "Context path: /test/context" in context
+        assert "Absolute context path:" in context
     
     @pytest.mark.asyncio
     async def test_get_agent_tools_caching(self, config_file):

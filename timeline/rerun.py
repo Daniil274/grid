@@ -1,8 +1,8 @@
 """
-Rerun logic: воспроизведение агента из снимка контекста (generation span).
+Rerun logic: replay agent from a context snapshot (generation span).
 
-Берём input_data generation-спана (полная история сообщений),
-позволяем изменить любое сообщение и запускаем агента заново.
+Takes input_data of a generation span (full message history),
+allows modifying any message and re-runs the agent.
 """
 
 from __future__ import annotations
@@ -26,20 +26,20 @@ def _parse(s: Any) -> Any:
 
 def extract_messages(input_data: Any) -> list[dict]:
     """
-    Извлечь список сообщений из input_data generation-спана.
-    SDK сохраняет input как list[{role, content}].
+    Extract message list from input_data of a generation span.
+    SDK saves input as list[{role, content}].
     """
     data = _parse(input_data)
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        # Иногда обёрнуто: {"messages": [...]}
+        # Sometimes wrapped as: {"messages": [...]}
         return data.get("messages", [])
     return []
 
 
 def split_system_and_conversation(messages: list[dict]) -> tuple[str, list[dict]]:
-    """Разделить system-сообщения и диалог."""
+    """Split system messages and conversation."""
     system_parts = []
     conversation = []
     for m in messages:
@@ -63,13 +63,13 @@ async def rerun_from_node(
     user_id: str = "default_user",
 ) -> dict:
     """
-    Запустить агента с изменённым снимком контекста.
+    Run the agent with a modified context snapshot.
 
     Args:
         factory: AgentFactory instance
         node: raw node dict from SQLite
-        modified_messages: полная история сообщений (изменённая пользователем)
-        user_id: user ID для workspace isolation
+        modified_messages: full message history (modified by user)
+        user_id: user ID for workspace isolation
 
     Returns:
         {"output": str, "trace_id": str | None}
@@ -82,20 +82,20 @@ async def rerun_from_node(
     if not instructions:
         instructions = "You are a helpful assistant."
 
-    # Создаём динамического агента с теми же инструкциями
+    # Create a dynamic agent with the same instructions
     agent_name = f"rerun-{uuid.uuid4().hex[:6]}"
     try:
         agent = await factory.create_dynamic_agent(
             name=agent_name,
             instructions=instructions,
-            model_key=None,  # default model
-            tool_names=[],   # без инструментов — чистый диалог
+            model_key=None,
+            tool_names=[],   # no tools — pure dialog
         )
     except Exception as e:
         logger.error(f"Failed to create rerun agent: {e}")
         raise
 
-    # Построить GridRunContext
+    # Build GridRunContext
     active_context_id = factory.context_manager.start_new_context()
     run_ctx = GridRunContext(
         factory=factory,
@@ -105,8 +105,8 @@ async def rerun_from_node(
         container_id=getattr(factory, "container_id", None),
     )
 
-    # Запускаем с conversation messages как input
-    # SDK Runner.run_streamed принимает list[dict] в качестве input
+    # Run with conversation messages as input
+    # SDK Runner.run_streamed accepts list[dict] as input
     input_messages: Any = conversation if conversation else "Continue."
 
     try:

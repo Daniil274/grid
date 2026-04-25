@@ -1,29 +1,29 @@
-# Архитектура системы Grid
+# Grid System Architecture
 
-## Оглавление
-1. [Обзор](#обзор)
-2. [Высокоуровневая архитектура](#высокоуровневая-архитектура)
-3. [Карта зависимостей](#карта-зависимостей)
-4. [Основные компоненты](#основные-компоненты)
-5. [Поток данных](#поток-данных)
-6. [Интеграции](#интеграции)
-
----
-
-## Обзор
-
-**Grid** — модульная система для оркестрации агентов ИИ с расширенными возможностями инструментов, памяти и каналов коммуникации.
-
-**Ключевые принципы:**
-- **Модульность**: Инструменты, агенты и каналы подключаются через конфигурацию
-- **Изоляция**: Docker/Podman для безопасности
-- **Прозрачность**: Streaming событий и Telegram-уведомления
-- **Память**: Гибридная (short-term сессии + long-term SQLite)
-- **MCP-поддержка**: Стандартизированные инструменты (terminal, filesystem, git)
+## Table of Contents
+1. [Overview](#overview)
+2. [High-Level Architecture](#high-level-architecture)
+3. [Dependency Map](#dependency-map)
+4. [Main Components](#main-components)
+5. [Data Flow](#data-flow)
+6. [Integrations](#integrations)
 
 ---
 
-## Высокоуровневая архитектура
+## Overview
+
+**Grid** is a modular system for orchestrating AI agents with advanced tools, memory, and communication channels.
+
+**Key Principles:**
+- **Modularity**: Tools, agents, and channels are connected via configuration
+- **Isolation**: Docker/Podman for security
+- **Transparency**: Streaming events and Telegram notifications
+- **Memory**: Hybrid (short-term sessions + long-term SQLite)
+- **MCP Support**: Standardized tools (terminal, filesystem, git)
+
+---
+
+## High-Level Architecture
 
 ```
 ┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
@@ -62,9 +62,9 @@
 
 ---
 
-## Карта зависимостей
+## Dependency Map
 
-| Компонент | Зависимости | Использует |
+| Component | Dependencies | Uses |
 |-----------|-------------|------------|
 | **AgentFactory** | config.py, memory_store.py, context.py | OpenAI Agents SDK, tools/* |
 | **Tools/** | agent_factory (GridRunContext) | filesystem, git_tools, vision_tools |
@@ -74,7 +74,7 @@
 | **MemoryStore** | SQLite | long/short-term memory |
 | **MCP Servers** | npx @modelcontextprotocol/* | stdio subprocess |
 
-**Граф зависимостей (упрощённый):**
+**Dependency Graph (simplified):**
 ```
 config.yaml → AgentFactory → Agent (SDK)
 tools/* → Agent.tools
@@ -84,42 +84,42 @@ docker → ContainerManager → GridRunContext
 
 ---
 
-## Основные компоненты
+## Main Components
 
 ### 1. AgentFactory (core/agent_factory.py)
-Центральный оркестратор:
-- Создание/кэширование агентов
-- Управление сессиями и контекстом
+Central orchestrator:
+- Creating/caching agents
+- Session and context management
 - Streaming observers
-- Интеграция MCP и function tools
+- MCP and function tools integration
 
 ### 2. Tools (tools/)
-- **Function Tools**: Прямые вызовы (beads_tools, file_tools, git_tools)
-- **Agent Tools**: Подагенты (orchestrator_tools, skill_tools)
+- **Function Tools**: Direct calls (beads_tools, file_tools, git_tools)
+- **Agent Tools**: Sub-agents (orchestrator_tools, skill_tools)
 
 ### 3. Channels (examples/telegram_bot/)
-- **TelegramBridge**: Обработка сообщений, запуск агентов
-- **LiveTransparency**: Прогресс-уведомления в реальном времени
+- **TelegramBridge**: Message processing, agent launching
+- **LiveTransparency**: Real-time progress notifications
 
 ### 4. Core Modules
-| Модуль | Описание |
+| Module | Description |
 |--------|----------|
-| config.py | Загрузка/валидация config.yaml |
+| config.py | Loading/validating config.yaml |
 | memory_store.py | SQLite long/short-term memory |
-| context.py | История диалогов |
-| pipeline_registry.py | Регистр пайплайнов |
-| skills_integration.py | Навыки из Markdown |
-| timeline_tracer.py | Трассировка |
+| context.py | Dialog history |
+| pipeline_registry.py | Pipeline registry |
+| skills_integration.py | Skills from Markdown |
+| timeline_tracer.py | Tracing |
 
-### 5. Внешние зависимости
-- **OpenAI Agents SDK**: Основной runtime агентов
-- **MCP Servers**: npx пакеты (filesystem, terminal, git)
+### 5. External Dependencies
+- **OpenAI Agents SDK**: Core agent runtime
+- **MCP Servers**: npx packages (filesystem, terminal, git)
 - **aiogram**: Telegram Bot API
-- **Docker/Podman**: Изоляция
+- **Docker/Podman**: Isolation
 
 ---
 
-## Поток данных
+## Data Flow
 
 ### 1. Telegram → Agent
 ```
@@ -143,15 +143,15 @@ AgentFactory.emit_progress() → LiveTransparencyBroadcaster → Telegram Update
 
 ---
 
-## Интеграции
+## Integrations
 
-- **Telegram**: Полный бот с voice, images, transparency
-- **MCP**: Стандартизированные инструменты (10+ серверов)
-- **Docker**: Изоляция рабочих пространств
+- **Telegram**: Full bot with voice, images, transparency
+- **MCP**: Standardized tools (10+ servers)
+- **Docker**: Workspace isolation
 - **Voice**: STT (Whisper), TTS (local models)
 - **Vision**: OCR, image analysis
 - **Beads**: Task management (workspace/beads)
 
 ---
 
-*Архитектура составлена на основе анализа core/, tools/, examples/telegram_bot/ (2026).*
+*Architecture compiled based on analysis of core/, tools/, examples/telegram_bot/ (2026).*

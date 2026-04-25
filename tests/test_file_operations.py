@@ -16,18 +16,18 @@ def read_file_impl(filepath: str) -> str:
     try:
         path = Path(filepath)
         if not path.exists():
-            return f"❌ Файл {filepath} не найден"
+            return f"❌ File {filepath} not found"
         
         if not path.is_file():
-            return f"❌ {filepath} не является файлом"
+            return f"❌ {filepath} is not a file"
         
         content = path.read_text(encoding='utf-8')
         lines_count = len(content.splitlines())
         
-        return f"📄 Содержимое файла {filepath}:\n\n{content}"
+        return f"📄 File contents {filepath}:\n\n{content}"
         
     except Exception as e:
-        return f"❌ Ошибка при чтении {filepath}: {str(e)}"
+        return f"❌ Error reading {filepath}: {str(e)}"
 
 
 def write_file_impl(filepath: str, content: str) -> str:
@@ -35,19 +35,19 @@ def write_file_impl(filepath: str, content: str) -> str:
     try:
         path = Path(filepath)
         
-        # Создаем родительские директории если нужно
+        # Create parent directories if needed
         path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Записываем файл
+        # Write file
         path.write_text(content, encoding='utf-8')
         
         size = path.stat().st_size
         lines_count = len(content.splitlines())
         
-        return f"✅ Файл {filepath} успешно записан ({size} байт)"
+        return f"✅ File {filepath} successfully written ({size} bytes)"
         
     except Exception as e:
-        return f"❌ Ошибка при записи файла {filepath}: {str(e)}"
+        return f"❌ Error writing file {filepath}: {str(e)}"
 
 
 def get_file_info_impl(filepath: str) -> str:
@@ -55,26 +55,26 @@ def get_file_info_impl(filepath: str) -> str:
     try:
         path = Path(filepath)
         if not path.exists():
-            return f"❌ Файл {filepath} не найден"
+            return f"❌ File {filepath} not found"
         
         if not path.is_file():
-            return f"❌ {filepath} не является файлом"
+            return f"❌ {filepath} is not a file"
         
         stat = path.stat()
         content = path.read_text(encoding='utf-8')
         lines_count = len(content.splitlines())
         extension = path.suffix.lower()
         
-        result = f"""📄 Информация о файле {filepath}:
-• Имя: {path.name}
-• Размер: {stat.st_size} байт
-• Строк: {lines_count}
-• Расширение: {extension if extension else 'без расширения'}"""
+        result = f"""📄 File info {filepath}:
+• Name: {path.name}
+• Size: {stat.st_size} bytes
+• Lines: {lines_count}
+• Extension: {extension if extension else 'no extension'}"""
         
         return result
         
     except Exception as e:
-        return f"❌ Ошибка при получении информации о {filepath}: {str(e)}"
+        return f"❌ Error getting file info for {filepath}: {str(e)}"
 
 
 def list_files_impl(directory: str = ".") -> str:
@@ -82,31 +82,31 @@ def list_files_impl(directory: str = ".") -> str:
     try:
         path = Path(directory)
         if not path.exists():
-            return f"❌ Директория {directory} не найдена"
+            return f"❌ Directory {directory} not found"
         
         if not path.is_dir():
-            return f"❌ {directory} не является директорией"
+            return f"❌ {directory} is not a directory"
         
         files = []
         dirs = []
         for item in sorted(path.iterdir()):
             if item.is_file():
                 size = item.stat().st_size
-                files.append(f"📄 {item.name} ({size} байт)")
+                files.append(f"📄 {item.name} ({size} bytes)")
             elif item.is_dir():
                 dirs.append(f"📁 {item.name}/")
         
         total_items = len(files) + len(dirs)
         
         if total_items == 0:
-            return f"📂 Директория {directory} пуста"
+            return f"📂 Directory {directory} is empty"
         
-        all_items = dirs + files  # Директории сначала
-        result = f"📂 Содержимое директории {directory} ({total_items} элементов):\n\n" + "\n".join(all_items)
+        all_items = dirs + files  # Directories first
+        result = f"📂 Directory contents {directory} ({total_items} items):\n\n" + "\n".join(all_items)
         return result
         
     except Exception as e:
-        return f"❌ Ошибка при чтении директории {directory}: {str(e)}"
+        return f"❌ Error reading directory {directory}: {str(e)}"
 
 
 class TestFileOperations:
@@ -120,7 +120,7 @@ class TestFileOperations:
         
         result = read_file_impl(str(test_file))
         
-        assert "📄 Содержимое файла" in result
+        assert "📄 File contents" in result
         assert "Hello, World!" in result
         assert str(test_file) in result
     
@@ -129,15 +129,15 @@ class TestFileOperations:
         non_existent_file = temp_dir / "non_existent.txt"
         result = read_file_impl(str(non_existent_file))
         
-        assert "❌ Файл" in result
-        assert "не найден" in result
+        assert "❌ File" in result
+        assert "not found" in result
     
     def test_read_file_not_a_file(self, temp_dir):
         """Test reading a directory instead of file."""
         result = read_file_impl(str(temp_dir))
         
         assert "❌" in result
-        assert "не является файлом" in result
+        assert "is not a file" in result
     
     def test_read_file_encoding_error(self, temp_dir):
         """Test reading file with encoding issues."""
@@ -148,7 +148,7 @@ class TestFileOperations:
         result = read_file_impl(str(binary_file))
         
         # Should handle the error gracefully
-        assert "❌ Ошибка при чтении" in result
+        assert "❌ Error reading" in result
     
     def test_write_file_success(self, temp_dir):
         """Test successful file writing."""
@@ -157,8 +157,8 @@ class TestFileOperations:
         
         result = write_file_impl(str(test_file), content)
         
-        assert "✅ Файл" in result
-        assert "успешно записан" in result
+        assert "✅ File" in result
+        assert "successfully written" in result
         assert test_file.exists()
         assert test_file.read_text() == content
     
@@ -169,7 +169,7 @@ class TestFileOperations:
         
         result = write_file_impl(str(nested_file), content)
         
-        assert "✅ Файл" in result
+        assert "✅ File" in result
         assert nested_file.exists()
         assert nested_file.read_text() == content
     
@@ -180,11 +180,11 @@ class TestFileOperations:
         
         result = get_file_info_impl(str(test_file))
         
-        assert "📄 Информация о файле" in result
-        assert "Имя:" in result
-        assert "Размер:" in result
-        assert "Строк:" in result
-        assert "Расширение:" in result
+        assert "📄 File info" in result
+        assert "Name:" in result
+        assert "Size:" in result
+        assert "Lines:" in result
+        assert "Extension:" in result
         assert test_file.name in result
     
     def test_get_file_info_not_found(self, temp_dir):
@@ -192,8 +192,8 @@ class TestFileOperations:
         non_existent_file = temp_dir / "non_existent.txt"
         result = get_file_info_impl(str(non_existent_file))
         
-        assert "❌ Файл" in result
-        assert "не найден" in result
+        assert "❌ File" in result
+        assert "not found" in result
     
     def test_list_files_success(self, temp_dir):
         """Test listing files in directory."""
@@ -204,11 +204,11 @@ class TestFileOperations:
         
         result = list_files_impl(str(temp_dir))
         
-        assert "📂 Содержимое директории" in result
+        assert "📂 Directory contents" in result
         assert "📁 subdir/" in result
         assert "📄 test1.txt" in result
         assert "📄 test2.py" in result
-        assert "3 элементов" in result
+        assert "3 items" in result
     
     def test_list_files_empty_directory(self, temp_dir):
         """Test listing empty directory."""
@@ -217,21 +217,21 @@ class TestFileOperations:
         
         result = list_files_impl(str(empty_dir))
         
-        assert "📂 Директория" in result
-        assert "пуста" in result
+        assert "📂 Directory" in result
+        assert "is empty" in result
     
     def test_list_files_not_found(self, temp_dir):
         """Test listing non-existent directory."""
         non_existent_dir = temp_dir / "non_existent"
         result = list_files_impl(str(non_existent_dir))
         
-        assert "❌ Директория" in result
-        assert "не найдена" in result
+        assert "❌ Directory" in result
+        assert "not found" in result
     
     def test_unicode_handling(self, temp_dir):
         """Test handling of unicode content."""
         test_file = temp_dir / "unicode_test.txt"
-        unicode_content = "Привет мир! 🌍 测试 テスト"
+        unicode_content = "Hello world! 🌍 测试 テスト"
         
         # Write unicode content
         write_result = write_file_impl(str(test_file), unicode_content)
@@ -243,7 +243,7 @@ class TestFileOperations:
         
         # Get info for unicode file
         info_result = get_file_info_impl(str(test_file))
-        assert "📄 Информация о файле" in info_result
+        assert "📄 File info" in info_result
     
     def test_large_file_handling(self, temp_dir):
         """Test handling of large files."""
@@ -251,7 +251,7 @@ class TestFileOperations:
         large_content = "x" * 10000  # 10KB content
         
         write_result = write_file_impl(str(test_file), large_content)
-        assert "✅ Файл" in write_result
+        assert "✅ File" in write_result
         assert test_file.exists()
         assert len(test_file.read_text()) == 10000
         
@@ -316,7 +316,7 @@ class TestFileOperations:
             thread.start()
         
         for thread in threads:
-            thread.join(timeout=10)  # Таймаут 10 сек для каждого потока
+            thread.join(timeout=10)  # Timeout 10 sec for each thread
             if thread.is_alive():
                 pytest.fail(f"Thread {thread.name} did not finish within timeout")
         

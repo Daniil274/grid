@@ -1,54 +1,54 @@
-# Мета-когнитивный слой для самоорганизующейся платформы
+# Meta-Cognitive Layer for a Self-Organizing Platform
 
-## Зачем нужен отдельный слой
+## Why a Separate Layer Is Needed
 
-Текущая архитектура уже задаёт сильный фундамент:
+The current architecture already provides a strong foundation:
 
 - versioned systems;
 - registry;
 - lifecycle;
 - enforcement;
 - bounded APIs;
-- self-improvement и self-expansion как контролируемые процессы.
+- self-improvement and self-expansion as controlled processes.
 
-Но этого недостаточно для самоорганизующегося интеллекта.
+But this is not enough for a self-organizing intelligence.
 
-Эта архитектура хорошо отвечает на вопрос:
+This architecture answers well the question:
 
-- как безопасно создавать, версионировать, публиковать и вызывать системы.
+- how to safely create, version, publish and invoke systems.
 
-Но она ещё слабо отвечает на вопросы:
+But it still weakly answers the questions:
 
-- как агент понимает, какой способ решения выбрать;
-- как он извлекает удачные стратегии из опыта;
-- как переносит стратегию в другой контекст;
-- как обнаруживает пробелы в пространстве задач;
-- как композиционно выводит новые capabilities;
-- как не деградирует семантически при длительной эволюции.
+- how does an agent understand which solution method to choose;
+- how does it extract successful strategies from experience;
+- how does it transfer a strategy to another context;
+- how does it detect gaps in the task space;
+- how does it compositionally derive new capabilities;
+- how does it not degrade semantically during long-term evolution.
 
-Поэтому нужен отдельный слой:
+Therefore, a separate layer is needed:
 
-- не слой исполняемых систем;
-- а слой `мета-когнитивных сущностей`.
+- not a layer of executable systems;
+- but a layer of `meta-cognitive entities`.
 
-Это слой про:
+This layer is about:
 
-- паттерны мышления;
-- модель задач;
-- рефлексию;
-- абстрагирование;
-- композицию;
-- консолидацию знаний.
+- thinking patterns;
+- task model;
+- reflection;
+- abstraction;
+- composition;
+- knowledge consolidation.
 
 ---
 
-## 1. Полная архитектура по слоям
+## 1. Complete Architecture by Layers
 
-Платформу лучше мыслить как 4 уровня.
+The platform is best thought of as 4 levels.
 
-### Уровень 1. Execution Layer
+### Level 1. Execution Layer
 
-Исполняемые сущности:
+Executable entities:
 
 - nodes;
 - systems;
@@ -56,9 +56,9 @@
 - runtime;
 - release channels.
 
-### Уровень 2. Control Layer
+### Level 2. Control Layer
 
-Управление изменением:
+Change management:
 
 - registry;
 - lifecycle;
@@ -67,20 +67,20 @@
 - budgets;
 - canary/promotion.
 
-### Уровень 3. Knowledge Layer
+### Level 3. Knowledge Layer
 
-Структурированное знание о:
+Structured knowledge about:
 
-- задачах;
+- tasks;
 - capabilities;
-- зависимостях;
+- dependencies;
 - design rationale;
 - benchmark provenance;
-- semantic identity систем.
+- semantic identity of systems.
 
-### Уровень 4. Meta-Cognitive Layer
+### Level 4. Meta-Cognitive Layer
 
-Сущности более высокого порядка:
+Higher-order entities:
 
 - task ontology;
 - strategy patterns;
@@ -90,22 +90,22 @@
 - design templates;
 - anti-patterns.
 
-Если нет 4 уровня, система умеет строить и менять инструменты, но почти не умеет улучшать способ собственного мышления.
+Without level 4, the system can build and change tools, but almost cannot improve its own way of thinking.
 
 ---
 
-## 2. Какие новые сущности нужны
+## 2. What New Entities Are Needed
 
 ## 2.1 `TaskType`
 
-Первичная сущность пространства задач.
+Primary entity of the task space.
 
-Пример:
+Example:
 
 ```yaml
 task_type_id: flaky_test_repair
 title: Flaky Test Repair
-description: Диагностика и устранение нестабильных тестов
+description: Diagnosis and elimination of unstable tests
 properties:
   requires_root_cause_analysis: true
   requires_reproducibility_check: true
@@ -120,19 +120,19 @@ related_capabilities:
   - test_fixing
 ```
 
-### Зачем это нужно
+### Why This Is Needed
 
-Без `TaskType` агент не может:
+Without `TaskType`, an agent cannot:
 
-- осмысленно классифицировать задачу;
-- делать gap analysis;
-- понимать, что новой задаче нужен новый capability cluster.
+- meaningfully classify a task;
+- do gap analysis;
+- understand that a new task needs a new capability cluster.
 
 ## 2.2 `Capability`
 
-Capability уже есть в неявном виде, но теперь должна стать типизированной сущностью.
+Capability already exists implicitly, but now should become a typed entity.
 
-Пример:
+Example:
 
 ```yaml
 capability_id: failure_isolation
@@ -151,27 +151,27 @@ task_types:
   - regression_debugging
 ```
 
-### Важно
+### Important
 
-Capability должна существовать отдельно от системы.
+Capability should exist separately from a system.
 
-Система:
+A system:
 
-- реализует capability;
+- implements a capability;
 
-а capability:
+while a capability:
 
-- описывает класс полезного поведения.
+- describes a class of useful behavior.
 
 ## 2.3 `StrategyPattern`
 
-Это недостающее звено между задачей и системой.
+This is the missing link between task and system.
 
-Не tool, не system, не benchmark.
+Not a tool, not a system, not a benchmark.
 
-Это шаблон мышления.
+It is a thinking template.
 
-Пример:
+Example:
 
 ```yaml
 pattern_id: isolate_then_fix
@@ -199,21 +199,21 @@ signals_of_success:
   - fix_is_localized
 ```
 
-### Это и есть "когнитивный инструмент"
+### This Is a "Cognitive Tool"
 
-Система может быть одной из реализаций паттерна.
+A system can be one of the implementations of a pattern.
 
-Но паттерн сам по себе:
+But the pattern itself:
 
-- абстрактнее системы;
-- переносим между системами;
-- пригоден для reuse при проектировании новых графов.
+- is more abstract than a system;
+- is portable between systems;
+- is suitable for reuse when designing new graphs.
 
 ## 2.4 `ReflectionRecord`
 
-Сущность рефлексии над решением.
+Entity for reflection on a solution.
 
-Пример:
+Example:
 
 ```yaml
 reflection_id: refl-123
@@ -233,9 +233,9 @@ lessons:
   - adding repro step improved reliability
 ```
 
-### ReflectionRecord нужен не ради аудита
+### ReflectionRecord Is Not Just for Audit
 
-Он нужен как материал для последующего обучения:
+It is needed as material for subsequent learning:
 
 - pattern refinement;
 - anti-pattern extraction;
@@ -243,9 +243,9 @@ lessons:
 
 ## 2.5 `DesignTemplate`
 
-Шаблон проектирования систем.
+System design template.
 
-Пример:
+Example:
 
 ```yaml
 template_id: analyzer_executor_validator
@@ -266,13 +266,13 @@ selection_heuristics:
     - task_has_verifiable_output
 ```
 
-Это мост между паттерном и конкретной системой.
+This is a bridge between a pattern and a concrete system.
 
 ## 2.6 `AntiPattern`
 
-Нужно хранить не только полезные паттерны, но и плохие.
+Not only useful patterns should be stored, but also bad ones.
 
-Пример:
+Example:
 
 ```yaml
 anti_pattern_id: patch_without_isolation
@@ -286,118 +286,118 @@ signals:
   - fix_attempt_before_root_cause
 ```
 
-Без anti-patterns агент будет снова и снова повторять формально допустимые, но плохие решения.
+Without anti-patterns, the agent will repeatedly make formally acceptable but poor decisions.
 
 ---
 
-## 3. Как связать слой задач, capabilities и паттернов
+## 3. How to Connect Task Layer, Capabilities and Patterns
 
-Нужна явная цепочка.
+An explicit chain is needed.
 
-### Правильная последовательность
+### Correct Sequence
 
 `TaskType -> CapabilitySet -> StrategyPattern -> DesignTemplate -> SystemDefinition`
 
-То есть:
+That is:
 
-1. агент классифицирует задачу как `TaskType`;
-2. определяет, какие capabilities нужны;
-3. выбирает или выводит подходящий `StrategyPattern`;
-4. выбирает `DesignTemplate`;
-5. инстанцирует конкретную систему.
+1. the agent classifies the task as a `TaskType`;
+2. determines what capabilities are needed;
+3. selects or derives a suitable `StrategyPattern`;
+4. selects a `DesignTemplate`;
+5. instantiates a concrete system.
 
-Это критически важно.
+This is critically important.
 
-Без этого агент прыгает прямо из "задача" в "сделаю какой-то граф", а это и есть источник хаотического self-expansion.
+Without this, the agent jumps directly from "task" to "I'll make some graph", which is the source of chaotic self-expansion.
 
 ---
 
-## 4. Как агент извлекает паттерны из опыта
+## 4. How an Agent Extracts Patterns from Experience
 
-Паттерны не должны появляться только вручную.
+Patterns should not appear only manually.
 
-Нужен controlled extraction pipeline.
+A controlled extraction pipeline is needed.
 
-## 4.1 Источники паттернов
+## 4.1 Sources of Patterns
 
-- успешные runs;
+- successful runs;
 - reflection records;
 - recurring system structures;
 - recurring causal sequences;
 - human-authored templates;
 - benchmark-backed improvements.
 
-## 4.2 Pipeline извлечения
+## 4.2 Extraction Pipeline
 
-1. собрать успешные case clusters;
-2. сгруппировать по task type;
-3. найти повторяющиеся decision sequences;
-4. сформировать candidate pattern;
-5. связать его с результатами;
-6. отправить на validation/review;
-7. зарегистрировать в pattern registry.
+1. collect successful case clusters;
+2. group by task type;
+3. find recurring decision sequences;
+4. form a candidate pattern;
+5. link it to results;
+6. send for validation/review;
+7. register in pattern registry.
 
-## 4.3 Что считается паттерном
+## 4.3 What Counts as a Pattern
 
-Не любая повторяемость.
+Not any recurrence.
 
-Кандидат в паттерн должен иметь:
+A pattern candidate must have:
 
-- повторяемость;
-- переносимость;
+- reproducibility;
+- portability;
 - measurable benefit;
-- понятные preconditions;
-- понятные failure modes.
+- clear preconditions;
+- clear failure modes.
 
-Иначе это просто локальный трюк, а не паттерн.
+Otherwise, it is just a local trick, not a pattern.
 
 ---
 
-## 5. Рефлексия как обязательная часть lifecycle
+## 5. Reflection as a Mandatory Part of the Lifecycle
 
-Сейчас evaluation меряет в основном outcome.
+Currently, evaluation mainly measures outcome.
 
-Но для мета-обучения нужно мерить ещё и качество принятия решений.
+But for meta-learning, the quality of decision-making also needs to be measured.
 
-### Поэтому после значимых runs должен существовать этап `reflect`
+### Therefore, after significant runs, there should be a `reflect` stage
 
-Он отвечает на вопросы:
+It answers the questions:
 
-- почему был выбран именно этот pattern;
-- какие альтернативы рассматривались;
-- что было сигналом выбора;
-- где произошли ошибки проектирования;
-- можно ли обобщить урок.
+- why was this particular pattern chosen;
+- what alternatives were considered;
+- what was the signal for the choice;
+- where did design errors occur;
+- can the lesson be generalized.
 
-### Reflection должна быть многоуровневой
+### Reflection Should Be Multi-Level
 
 #### `Run reflection`
 
-Разбор одного execution.
+Analysis of a single execution.
 
 #### `Version reflection`
 
-Разбор, почему candidate version оказалась лучше или хуже.
+Analysis of why a candidate version turned out better or worse.
 
 #### `Pattern reflection`
 
-Разбор, где паттерн работает, а где нет.
+Analysis of where a pattern works and where it does not.
 
 #### `System family reflection`
 
-Разбор группы похожих систем и их semantic drift.
+Analysis of a group of similar systems and their semantic drift.
 
 ---
 
-## 6. Bootstrapping problem
+## 6. Bootstrapping Problem
 
-Проблема курицы и яйца реальна:
+The chicken-and-egg problem is real:
 
-чтобы проектировать системы, агент уже должен обладать design competence.
+to design systems, an agent must already possess design competence.
 
-Значит нужен bootstrap слой.
+Therefore, a bootstrap layer is needed.
 
-## 6.1 Источники bootstrap-компетенции
+## 6.1 Sources of Bootstrap Competence
 
 - reference systems;
 - design templates;
@@ -406,16 +406,16 @@ signals:
 - worked examples;
 - anti-pattern library.
 
-## 6.2 Что должно храниться для bootstrap
+## 6.2 What Should Be Stored for Bootstrap
 
-Не только готовые системы, но и:
+Not only ready-made systems, but also:
 
-- почему система устроена так;
-- какие alternatives были отвергнуты;
-- при каких task types этот дизайн работает;
-- какие risks в нём типичны.
+- why the system is structured that way;
+- what alternatives were rejected;
+- under what task types this design works;
+- what risks are typical for it.
 
-### Минимальный bootstrap package
+### Minimal Bootstrap Package
 
 ```yaml
 bootstrap_knowledge:
@@ -431,33 +431,33 @@ bootstrap_knowledge:
     - planner_executor_verifier
 ```
 
-Это позволяет новому builder-agent не изобретать архитектуру с нуля на каждом шаге.
+This allows a new builder-agent not to invent architecture from scratch at every step.
 
 ---
 
-## 7. Capability composition
+## 7. Capability Composition
 
-Discovery capability — это только половина задачи.
+Discovery of a capability is only half the task.
 
-Нужен механизм композиции capabilities в новые capability clusters.
+A mechanism for composing capabilities into new capability clusters is needed.
 
-## 7.1 Базовая идея
+## 7.1 Basic Idea
 
-Новая система часто рождается не из новой атомарной capability, а из новой комбинации старых.
+A new system is often born not from a new atomic capability, but from a new combination of old ones.
 
-Пример:
+Example:
 
 - `code_analysis`
 - `test_generation`
 - `execution_feedback`
 
-могут вместе образовать:
+can together form:
 
 - `mutation_testing`.
 
-## 7.2 Нужна сущность `CapabilityCompositionHypothesis`
+## 7.2 An Entity `CapabilityCompositionHypothesis` Is Needed
 
-Пример:
+Example:
 
 ```yaml
 hypothesis_id: capcomp-1
@@ -472,37 +472,37 @@ confidence: 0.62
 status: draft
 ```
 
-### Жизненный цикл гипотезы
+### Hypothesis Lifecycle
 
-1. обнаружить сочетание capabilities;
-2. выдвинуть гипотезу emergent capability;
-3. предложить prototype system;
-4. проверить на task cluster;
-5. подтвердить или отклонить.
+1. detect a combination of capabilities;
+2. propose an emergent capability hypothesis;
+3. propose a prototype system;
+4. test on a task cluster;
+5. confirm or reject.
 
-Это и есть формализация "творческой композиции".
+This is the formalization of "creative composition".
 
 ---
 
-## 8. Task ontology как основа gap analysis
+## 8. Task Ontology as a Basis for Gap Analysis
 
-Self-expansion должно начинаться не с "давайте построим систему", а с анализа разрыва.
+Self-expansion should start not with "let's build a system", but with gap analysis.
 
-### Для этого нужны три пространства
+### Three Spaces Are Needed
 
 #### `Task Space`
 
-Какие типы задач вообще существуют.
+What types of tasks exist in general.
 
 #### `Capability Space`
 
-Какие виды полезного поведения умеет платформа.
+What types of useful behavior the platform can perform.
 
 #### `Coverage Map`
 
-Какие task types покрываются какими capabilities и системами.
+Which task types are covered by which capabilities and systems.
 
-### Пример coverage record
+### Example Coverage Record
 
 ```yaml
 task_type: flaky_test_repair
@@ -517,33 +517,33 @@ known_gaps:
   - weak_environment_modeling
 ```
 
-### Тогда self-expansion запускается по правилу
+### Then Self-Expansion Is Triggered by the Rule
 
-Если:
+If:
 
-- задача относится к известному `TaskType`;
-- coverage недостаточен;
-- нужный capability cluster отсутствует;
+- the task belongs to a known `TaskType`;
+- coverage is insufficient;
+- the required capability cluster is missing;
 
-тогда:
+then:
 
-- создаётся expansion proposal.
+- an expansion proposal is created.
 
-Это намного лучше, чем ad hoc генерация новых систем.
+This is much better than ad hoc generation of new systems.
 
 ---
 
-## 9. Semantic drift
+## 9. Semantic Drift
 
-Это один из самых недооценённых рисков.
+This is one of the most underestimated risks.
 
-Система может сохранять `system_id`, но перестать быть тем, чем была.
+A system may keep its `system_id`, but cease to be what it was.
 
-Нужен механизм semantic identity.
+A semantic identity mechanism is needed.
 
 ## 9.1 `SemanticContract`
 
-Для каждой системы должна существовать сущность:
+For each system, there should be an entity:
 
 ```yaml
 system_id: coding_assistant
@@ -558,37 +558,37 @@ semantic_contract:
     - becomes_general_web_research_system
 ```
 
-## 9.2 Drift detection
+## 9.2 Drift Detection
 
-Проверять:
+Check:
 
-- distribution задач, на которых система теперь успешна;
-- изменение exported capabilities;
-- изменение output style/shape;
-- изменение dependency profile;
-- изменение benchmark portfolio.
+- distribution of tasks on which the system is now successful;
+- change in exported capabilities;
+- change in output style/shape;
+- change in dependency profile;
+- change in benchmark portfolio.
 
-### Если drift превышает порог
+### If Drift Exceeds a Threshold
 
-Варианты:
+Options:
 
 - require major version bump;
 - require rename / fork into new system;
 - block promotion until reviewed.
 
-Без этого self-improvement может незаметно превратиться в смену назначения системы.
+Without this, self-improvement can imperceptibly transform into a change of the system's purpose.
 
 ---
 
-## 10. Combinatorial explosion
+## 10. Combinatorial Explosion
 
-Budget — это только throttling.
+Budget is only throttling.
 
-Нужны ещё механизмы сокращения сложности.
+Mechanisms for reducing complexity are also needed.
 
-## 10.1 Нужна сущность `SystemLifecycleHealth`
+## 10.1 An Entity `SystemLifecycleHealth` Is Needed
 
-Пример:
+Example:
 
 ```yaml
 system_id: test_repair_system
@@ -601,7 +601,7 @@ semantic_overlap_with:
 recommended_action: consolidate
 ```
 
-## 10.2 Политики сокращения
+## 10.2 Reduction Policies
 
 - archive unused systems;
 - merge semantically overlapping systems;
@@ -609,25 +609,25 @@ recommended_action: consolidate
 - collapse system families into templates/patterns;
 - promote pattern reuse over new system creation.
 
-### Правило
+### Rule
 
-Self-expansion должна сопровождаться `self-consolidation`.
+Self-expansion must be accompanied by `self-consolidation`.
 
-Иначе платформа будет только расти, но не организовываться.
+Otherwise, the platform will only grow, but not organize itself.
 
 ---
 
-## 11. Evaluation gaming и Goodhart's Law
+## 11. Evaluation Gaming and Goodhart's Law
 
-Даже хороший benchmark governance не решает проблему полностью.
+Even good benchmark governance does not fully solve the problem.
 
-Нужны дополнительные защитные механизмы.
+Additional protective mechanisms are needed.
 
-## 11.1 Многомерная оценка
+## 11.1 Multi-Dimensional Evaluation
 
-Нельзя оптимизировать только один score.
+One cannot optimize only a single score.
 
-Нужны измерения:
+Measurements needed:
 
 - usefulness;
 - robustness;
@@ -637,37 +637,37 @@ Self-expansion должна сопровождаться `self-consolidation`.
 - human satisfaction;
 - long-term regression stability.
 
-## 11.2 Hidden evaluation
+## 11.2 Hidden Evaluation
 
-Часть suites должна быть невидима builder-agent.
+Part of the suites should be invisible to the builder-agent.
 
-Иначе оптимизация пойдёт в benchmark gaming.
+Otherwise, optimization will go into benchmark gaming.
 
-## 11.3 Delayed evaluation
+## 11.3 Delayed Evaluation
 
-Нужна оценка не только сразу после candidate, но и позже:
+Evaluation is needed not only immediately after a candidate, but also later:
 
 - post-promotion performance;
 - downstream system effects;
 - user correction rate;
 - rollback frequency.
 
-## 11.4 Pattern-level evaluation
+## 11.4 Pattern-Level Evaluation
 
-Оценивать надо не только системы, но и паттерны.
+Not only systems but also patterns should be evaluated.
 
-Например:
+For example:
 
-- паттерн `patch_first` может давать быстрый локальный gain;
-- но ухудшать долгосрочную стабильность.
+- the `patch_first` pattern may give quick local gain;
+- but worsen long-term stability.
 
 ---
 
 ## 12. Pattern Registry
 
-Нужен отдельный реестр, не смешанный с SystemRegistry.
+A separate registry is needed, not mixed with SystemRegistry.
 
-### Он хранит
+### It Stores
 
 - strategy patterns;
 - anti-patterns;
@@ -677,47 +677,47 @@ Self-expansion должна сопровождаться `self-consolidation`.
 - pattern usage stats;
 - pattern confidence scores.
 
-### Почему отдельно
+### Why Separate
 
-Потому что:
+Because:
 
-- system registry хранит исполняемые артефакты;
-- pattern registry хранит абстракции и мета-знание.
+- system registry stores executable artifacts;
+- pattern registry stores abstractions and meta-knowledge.
 
-Это разные типы сущностей и разные lifecycle.
+These are different types of entities with different lifecycles.
 
 ---
 
-## 13. Как всё связывается вместе
+## 13. How Everything Connects Together
 
-Полный цикл должен выглядеть так:
+The complete cycle should look like this:
 
-1. Приходит новая задача.
-2. Агент классифицирует её в `TaskType`.
-3. Смотрит coverage map.
-4. Если покрытия хватает:
-   выбирает подходящий `StrategyPattern`.
-5. Если покрытия не хватает:
-   формирует `CapabilityGap`.
-6. На основе gap и pattern/template предлагает:
-   - новую систему;
-   - или расширение существующей.
-7. Создаёт candidate version/system.
-8. Запускает evaluation.
-9. Выполняет reflection.
-10. Обновляет:
+1. A new task arrives.
+2. The agent classifies it into a `TaskType`.
+3. Checks the coverage map.
+4. If coverage is sufficient:
+   selects a suitable `StrategyPattern`.
+5. If coverage is insufficient:
+   forms a `CapabilityGap`.
+6. Based on the gap and pattern/template, proposes:
+   - a new system;
+   - or an extension of an existing one.
+7. Creates a candidate version/system.
+8. Runs evaluation.
+9. Performs reflection.
+10. Updates:
    - pattern registry;
    - task coverage;
    - design templates;
    - anti-pattern library.
 
-Только такой цикл превращает платформу в реально обучающуюся.
+Only such a cycle turns the platform into a truly learning one.
 
 ---
 
-## 14. Новые реестры и модули
+## 14. New Registries and Modules
 
-Помимо `SystemRegistry` нужны ещё:
+In addition to `SystemRegistry`, the following are needed:
 
 - `TaskRegistry`
 - `CapabilityRegistry`
@@ -725,7 +725,7 @@ Self-expansion должна сопровождаться `self-consolidation`.
 - `ReflectionStore`
 - `CoverageIndex`
 
-### Возможная структура кода
+### Possible Code Structure
 
 ```text
 core/
@@ -750,49 +750,49 @@ schemas/
 
 ---
 
-## 15. Минимальный путь внедрения
+## 15. Minimal Implementation Path
 
-Чтобы не перегрузить проект, это тоже нужно внедрять поэтапно.
+To avoid overloading the project, this should also be implemented in stages.
 
-### Этап M1
+### Stage M1
 
-Добавить:
+Add:
 
 - `TaskType`
 - `Capability`
 - `SemanticContract`
 
-И связать их с системами.
+And link them to systems.
 
-### Этап M2
+### Stage M2
 
-Добавить:
+Add:
 
 - `StrategyPattern`
 - `DesignTemplate`
 - `AntiPattern`
 
-и ручной pattern registry.
+and a manual pattern registry.
 
-### Этап M3
+### Stage M3
 
-Добавить:
+Add:
 
 - `ReflectionRecord`
-- reflection pipeline после evaluation;
+- reflection pipeline after evaluation;
 - pattern usage metrics.
 
-### Этап M4
+### Stage M4
 
-Добавить:
+Add:
 
 - `CoverageIndex`
 - `CapabilityCompositionHypothesis`
 - gap-driven self-expansion.
 
-### Этап M5
+### Stage M5
 
-Добавить:
+Add:
 
 - semantic drift monitor;
 - consolidation manager;
@@ -800,22 +800,22 @@ schemas/
 
 ---
 
-## 16. Итог
+## 16. Summary
 
-Чтобы получилась не просто безопасная платформа систем, а самоорганизующийся интеллект, нужно явно разделить:
+To achieve not just a safe platform of systems, but a self-organizing intelligence, we need to explicitly separate:
 
-- исполнение;
-- управление изменением;
-- знание;
-- мета-когницию.
+- execution;
+- change management;
+- knowledge;
+- meta-cognition.
 
-Тогда:
+Then:
 
-- systems будут исполняемыми артефактами;
-- patterns будут когнитивными стратегиями;
-- task ontology даст пространство для gap analysis;
-- reflection даст улучшение не только outputs, но и способов мышления;
-- capability composition даст источник новых систем;
-- semantic drift и consolidation не дадут платформе расползтись и потерять смысл.
+- systems will be executable artifacts;
+- patterns will be cognitive strategies;
+- task ontology will provide a space for gap analysis;
+- reflection will provide improvement not only of outputs but also of ways of thinking;
+- capability composition will provide a source of new systems;
+- semantic drift and consolidation will prevent the platform from sprawling and losing its meaning.
 
-Именно этот слой превращает “платформу, которая умеет строить новые инструменты” в “платформу, которая умеет учиться строить лучшие способы мышления и лучшие инструменты”.
+It is this layer that turns a "platform that can build new tools" into a "platform that can learn to build better ways of thinking and better tools".

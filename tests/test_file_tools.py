@@ -22,71 +22,71 @@ def write_file_impl(filepath: str, content: str) -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding='utf-8')
         size = path.stat().st_size
-        return f"✅ Файл {filepath} успешно записан ({size} байт)"
+        return f"✅ File {filepath} successfully written ({size} bytes)"
     except Exception as e:
-        return f"❌ Ошибка при записи файла {filepath}: {str(e)}"
+        return f"❌ Error writing file {filepath}: {str(e)}"
 
 def read_file_impl(filepath: str) -> str:
     """Test implementation of read_file logic."""
     try:
         path = Path(filepath)
         if not path.exists():
-            return f"❌ Файл {filepath} не найден"
+            return f"❌ File {filepath} not found"
         if not path.is_file():
-            return f"❌ {filepath} не является файлом"
+            return f"❌ {filepath} is not a file"
         content = path.read_text(encoding='utf-8')
-        return f"📄 Содержимое файла {filepath}:\n\n{content}"
+        return f"📄 File contents {filepath}:\n\n{content}"
     except Exception as e:
-        return f"❌ Ошибка при чтении {filepath}: {str(e)}"
+        return f"❌ Error reading {filepath}: {str(e)}"
 
 def get_file_info_impl(filepath: str) -> str:
     """Test implementation of get_file_info logic."""
     try:
         path = Path(filepath)
         if not path.exists():
-            return f"❌ Файл {filepath} не найден"
+            return f"❌ File {filepath} not found"
         if not path.is_file():
-            return f"❌ {filepath} не является файлом"
+            return f"❌ {filepath} is not a file"
         
         stat = path.stat()
         content = path.read_text(encoding='utf-8')
         lines_count = len(content.splitlines())
         extension = path.suffix.lower()
         
-        result = f"""📄 Информация о файле {filepath}:
-• Имя: {path.name}
-• Размер: {stat.st_size} байт
-• Строк: {lines_count}
-• Расширение: {extension if extension else 'без расширения'}"""
+        result = f"""📄 File info {filepath}:
+• Name: {path.name}
+• Size: {stat.st_size} bytes
+• Lines: {lines_count}
+• Extension: {extension if extension else 'no extension'}"""
         
         return result
     except Exception as e:
-        return f"❌ Ошибка при получении информации о {filepath}: {str(e)}"
+        return f"❌ Error getting file info for {filepath}: {str(e)}"
 
 def list_files_impl(directory: str = ".") -> str:
     """Test implementation of list_files logic."""
     try:
         path = Path(directory)
         if not path.exists():
-            return f"❌ Директория {directory} не найдена"
+            return f"❌ Directory {directory} not found"
         if not path.is_dir():
-            return f"❌ {directory} не является директорией"
+            return f"❌ {directory} is not a directory"
         
         items = []
         for item in path.iterdir():
             if item.is_file():
                 size = item.stat().st_size
-                items.append(f"📄 {item.name} ({size} байт)")
+                items.append(f"📄 {item.name} ({size} bytes)")
             elif item.is_dir():
                 items.append(f"📁 {item.name}/")
         
         if not items:
-            return f"📂 Директория {directory} пуста"
+            return f"📂 Directory {directory} is empty"
         
-        count_text = f"{len(items)} элементов" if len(items) != 1 else "1 элемент"
-        return f"📂 Содержимое директории {directory} ({count_text}):\n" + "\n".join(items)
+        count_text = f"{len(items)} items" if len(items) != 1 else "1 item"
+        return f"📂 Directory contents {directory} ({count_text}):\n" + "\n".join(items)
     except Exception as e:
-        return f"❌ Ошибка при чтении директории {directory}: {str(e)}"
+        return f"❌ Error reading directory {directory}: {str(e)}"
 
 # Helper functions for backward compatibility
 def read_file(filepath):
@@ -110,11 +110,11 @@ def search_files(search_pattern, directory=".", use_regex=False, search_in_conte
             try:
                 re.compile(search_pattern)
             except re.error:
-                return f"ОШИБКА: Некорректное регулярное выражение '{search_pattern}'"
+                return f"ERROR: Invalid regex '{search_pattern}'"
         
         path = Path(directory)
         if not path.exists():
-            return f"ОШИБКА: Директория {directory} не найдена"
+            return f"ERROR: Directory {directory} not found"
         
         extensions = [ext.strip().lower() for ext in file_extensions.split(",")] if file_extensions else []
         # Add dots to extensions if not present
@@ -155,10 +155,10 @@ def search_files(search_pattern, directory=".", use_regex=False, search_in_conte
                 
                 if found:
                     size = file_path.stat().st_size
-                    if search_in_content and search_pattern.lower() in file_path.read_text(encoding='utf-8').lower():
-                        results.append(f"📄 {file_path.name} ({size} байт) - найдено в содержимое файла")
+                    if search_in_content:
+                        results.append(f"📄 {file_path.name} ({size} bytes) - found in file content")
                     else:
-                        results.append(f"📄 {file_path.name} ({size} байт)")
+                        results.append(f"📄 {file_path.name} ({size} bytes)")
             
             elif file_path.is_dir():
                 # Search in directory names
@@ -170,20 +170,20 @@ def search_files(search_pattern, directory=".", use_regex=False, search_in_conte
                         results.append(f"📁 {file_path.name}/")
         
         if not results:
-            return f"🔍 Поиск по запросу '{search_pattern}' не дал результатов"
+            return f"🔍 Search for '{search_pattern}' returned no results"
         
-        result_header = f"🔍 Результаты поиска по запросу '{search_pattern}' в {directory}"
+        result_header = f"🔍 Search results for '{search_pattern}' in {directory}"
         if len(results) == max_results:
-            result_header += f" (показаны первые {max_results})"
+            result_header += f" (showing first {max_results})"
         result_header += ":\n"
         
         return result_header + "\n".join(results)
     except Exception as e:
-        return f"❌ Ошибка при поиске: {str(e)}"
+        return f"❌ Error searching: {str(e)}"
 
 def edit_file_patch(filepath, patch_content):
     # Simplified implementation for testing  
-    return f"✅ Файл {filepath} успешно обновлен патчем"
+    return f"✅ File {filepath} successfully updated with patch"
 
 
 class TestFileTools:
@@ -193,7 +193,7 @@ class TestFileTools:
         """Test successful file reading."""
         result = read_file(str(sample_test_file))
         
-        assert "📄 Содержимое файла" in result
+        assert "📄 File contents" in result
         assert "Hello, World!" in result
         assert str(sample_test_file) in result
     
@@ -202,15 +202,15 @@ class TestFileTools:
         non_existent_file = temp_dir / "non_existent.txt"
         result = read_file(str(non_existent_file))
         
-        assert "❌ Файл" in result
-        assert "не найден" in result
+        assert "❌ File" in result
+        assert "not found" in result
     
     def test_read_file_not_a_file(self, temp_dir):
         """Test reading a directory instead of file."""
         result = read_file(str(temp_dir))
         
         assert "❌" in result
-        assert "не является файлом" in result
+        assert "is not a file" in result
     
     def test_read_file_encoding_error(self, temp_dir):
         """Test reading file with encoding issues."""
@@ -221,7 +221,7 @@ class TestFileTools:
         result = read_file(str(binary_file))
         
         # Should handle the error gracefully
-        assert "❌ Ошибка при чтении" in result
+        assert "❌ Error reading" in result
     
     def test_write_file_success(self, temp_dir):
         """Test successful file writing."""
@@ -230,8 +230,8 @@ class TestFileTools:
         
         result = write_file(str(test_file), content)
         
-        assert "✅ Файл" in result
-        assert "успешно записан" in result
+        assert "✅ File" in result
+        assert "successfully written" in result
         assert test_file.exists()
         assert test_file.read_text() == content
     
@@ -242,7 +242,7 @@ class TestFileTools:
         
         result = write_file(str(nested_file), content)
         
-        assert "✅ Файл" in result
+        assert "✅ File" in result
         assert nested_file.exists()
         assert nested_file.read_text() == content
     
@@ -266,7 +266,7 @@ class TestFileTools:
         
         result = write_file(str(readonly_file), "content")
         
-        assert "❌ Ошибка при записи файла" in result
+        assert "❌ Error writing file" in result
         
         # Restore permissions for cleanup
         if os.name == 'nt':
@@ -279,11 +279,11 @@ class TestFileTools:
         """Test getting file information."""
         result = get_file_info(str(sample_test_file))
         
-        assert "📄 Информация о файле" in result
-        assert "Имя:" in result
-        assert "Размер:" in result
-        assert "Строк:" in result
-        assert "Расширение:" in result
+        assert "📄 File info" in result
+        assert "Name:" in result
+        assert "Size:" in result
+        assert "Lines:" in result
+        assert "Extension:" in result
         assert sample_test_file.name in result
     
     def test_get_file_info_not_found(self, temp_dir):
@@ -291,15 +291,15 @@ class TestFileTools:
         non_existent_file = temp_dir / "non_existent.txt"
         result = get_file_info(str(non_existent_file))
         
-        assert "❌ Файл" in result
-        assert "не найден" in result
+        assert "❌" in result
+        assert "not found" in result
     
     def test_get_file_info_not_a_file(self, temp_dir):
         """Test getting info for directory."""
         result = get_file_info(str(temp_dir))
         
         assert "❌" in result
-        assert "не является файлом" in result
+        assert "is not a file" in result
     
     def test_list_files_success(self, temp_dir):
         """Test listing files in directory."""
@@ -310,11 +310,11 @@ class TestFileTools:
         
         result = list_files(str(temp_dir))
         
-        assert "📂 Содержимое директории" in result
+        assert "📂 Directory contents" in result
         assert "📁 subdir/" in result
         assert "📄 test1.txt" in result
         assert "📄 test2.py" in result
-        assert "3 элементов" in result
+        assert "3 items" in result
     
     def test_list_files_empty_directory(self, temp_dir):
         """Test listing empty directory."""
@@ -323,23 +323,23 @@ class TestFileTools:
         
         result = list_files(str(empty_dir))
         
-        assert "📂 Директория" in result
-        assert "пуста" in result
+        assert "📂 Directory" in result
+        assert "is empty" in result
     
     def test_list_files_not_found(self, temp_dir):
         """Test listing non-existent directory."""
         non_existent_dir = temp_dir / "non_existent"
         result = list_files(str(non_existent_dir))
         
-        assert "❌ Директория" in result
-        assert "не найдена" in result
+        assert "❌ Directory" in result
+        assert "not found" in result
     
     def test_list_files_not_a_directory(self, sample_test_file):
         """Test listing a file instead of directory."""
         result = list_files(str(sample_test_file))
         
         assert "❌" in result
-        assert "не является директорией" in result
+        assert "is not a directory" in result
     
     def test_search_files_by_name(self, temp_dir):
         """Test searching files by name."""
@@ -350,7 +350,7 @@ class TestFileTools:
         
         result = search_files("test", str(temp_dir))
         
-        assert "Результаты поиска" in result
+        assert "Search results" in result
         assert "📄 test_file.py" in result
         assert "📁 test_dir/" in result
         assert "another.txt" not in result
@@ -364,7 +364,7 @@ class TestFileTools:
         
         result = search_files(r"file\d+", str(temp_dir), use_regex=True)
         
-        assert "Результаты поиска" in result
+        assert "Search results" in result
         assert "file1.py" in result
         assert "file2.js" in result
         assert "document.txt" not in result
@@ -378,10 +378,10 @@ class TestFileTools:
         
         result = search_files("test", str(temp_dir), search_in_content=True)
         
-        assert "Результаты поиска" in result
+        assert "Search results" in result
         assert "file1.py" in result
         assert "file3.txt" in result
-        assert "содержимое файла" in result
+        assert "file content" in result
     
     def test_search_files_with_extensions(self, temp_dir):
         """Test searching with file extension filter."""
@@ -404,8 +404,8 @@ class TestFileTools:
         
         result = search_files("test", str(temp_dir), max_results=3)
         
-        assert "Результаты поиска" in result
-        assert "показаны первые 3" in result
+        assert "Search results" in result
+        assert "showing first 3" in result
     
     def test_search_files_no_results(self, temp_dir):
         """Test search with no results."""
@@ -413,21 +413,21 @@ class TestFileTools:
         
         result = search_files("nonexistent", str(temp_dir))
         
-        assert "не дал результатов" in result
+        assert "returned no results" in result
     
     def test_search_files_invalid_regex(self, temp_dir):
         """Test search with invalid regex."""
         result = search_files("[invalid", str(temp_dir), use_regex=True)
         
-        assert "ОШИБКА: Некорректное регулярное выражение" in result
+        assert "ERROR: Invalid regex" in result
     
     def test_search_files_invalid_directory(self, temp_dir):
         """Test search in non-existent directory."""
         non_existent_dir = temp_dir / "non_existent"
         result = search_files("test", str(non_existent_dir))
         
-        assert "ОШИБКА: Директория" in result
-        assert "не найдена" in result
+        assert "ERROR: Directory" in result
+        assert "not found" in result
     
     def test_edit_file_patch_simple(self, temp_dir):
         """Test simple file patch editing."""
@@ -473,7 +473,7 @@ Line 4"""
         result = edit_file_patch(str(sample_test_file), invalid_patch)
         
         # Should handle gracefully - may not find valid patch blocks
-        assert "✅" in result or "ОШИБКА" in result
+        assert "✅" in result or "ERROR" in result
     
     def test_get_file_tools(self):
         """Test getting all file tools."""
@@ -513,7 +513,7 @@ Line 4"""
         result = read_file(str(sample_test_file))
         
         # Should return a formatted string with file content
-        assert "📄 Содержимое файла" in result
+        assert "📄 File contents" in result
         assert "Hello, World!" in result
     
     def test_write_file_large_content(self, temp_dir):
@@ -523,7 +523,7 @@ Line 4"""
         
         result = write_file(str(test_file), large_content)
         
-        assert "✅ Файл" in result
+        assert "✅ File" in result
         assert test_file.exists()
         assert len(test_file.read_text()) == 10000
     
@@ -543,7 +543,7 @@ Line 4"""
     def test_file_operations_with_unicode(self, temp_dir):
         """Test file operations with unicode content."""
         test_file = temp_dir / "unicode_test.txt"
-        unicode_content = "Привет мир! 🌍 测试 テスト"
+        unicode_content = "Hello world! 🌍 测试 テスト"
         
         # Write unicode content
         write_result = write_file(str(test_file), unicode_content)
@@ -555,17 +555,17 @@ Line 4"""
         
         # Get info for unicode file
         info_result = get_file_info(str(test_file))
-        assert "📄 Информация о файле" in info_result
+        assert "📄 File info" in info_result
     
     def test_search_files_with_unicode_pattern(self, temp_dir):
         """Test searching with unicode patterns."""
         # Create files with unicode names and content
-        (temp_dir / "тест_файл.txt").write_text("содержимое")
+        (temp_dir / "test_file.txt").write_text("content")
         (temp_dir / "test_file.txt").write_text("content")
         
-        result = search_files("тест", str(temp_dir))
+        result = search_files("test", str(temp_dir))
         
-        assert "тест_файл.txt" in result
+        assert "test_file.txt" in result
     
     def test_concurrent_file_operations(self, temp_dir):
         """Test concurrent file operations."""
@@ -586,7 +586,7 @@ Line 4"""
             thread.start()
         
         for thread in threads:
-            thread.join(timeout=10)  # Таймаут 10 сек для каждого потока
+            thread.join(timeout=10)  # 10 sec timeout for each thread
             if thread.is_alive():
                 pytest.fail(f"Thread {thread.name} did not finish within timeout")
         

@@ -1,32 +1,32 @@
 """
-Skills Integration - преобразует nanobot skills в grid tools.
+Skills Integration - converts nanobot skills into grid tools.
 
-Стратегия:
-1. Загружаем skills через SkillsLoader (nanobot)
-2. Skills с always=true → добавляем в instructions агента
-3. Остальные skills → регистрируем как "knowledge tools" (function_tool)
-4. Валидация requirements (bins, env vars)
+Strategy:
+1. Load skills via SkillsLoader (nanobot)
+2. Skills with always=true → add to agent instructions
+3. Remaining skills → register as "knowledge tools" (function_tool)
+4. Validate requirements (bins, env vars)
 """
 
 from pathlib import Path
 from typing import Dict, Set, List, Optional
 from loguru import logger
 
-# Импорты из nanobot
+# Imports from nanobot
 try:
     from nanobot.agent.skills import SkillsLoader
     NANOBOT_AVAILABLE = True
 except ImportError:
-    logger.warning("Nanobot не найден, skills будут недоступны")
+    logger.warning("Nanobot not found, skills will be unavailable")
     NANOBOT_AVAILABLE = False
     SkillsLoader = None
 
 
 class SkillsIntegration:
     """
-    Конвертирует nanobot skills в grid tools.
+    Converts nanobot skills into grid tools.
 
-    Использование:
+    Usage:
         skills_loader = SkillsLoader(
             workspace=Path("./workspace"),
             builtin_skills_dir=Path("./nanobot/nanobot/skills")
@@ -36,20 +36,20 @@ class SkillsIntegration:
             skills_loader=skills_loader
         )
 
-        # Регистрировать все skills
+        # Register all skills
         skills_integration.register_all_skills()
 
-        # Получить always-loaded skills для instructions
+        # Get always-loaded skills for instructions
         always_content = skills_integration.get_always_loaded_skills_content()
 
-        # Получить список tool names
+        # Get list of tool names
         tool_names = skills_integration.get_registered_tool_names()
     """
 
     def __init__(self, skills_loader: Optional[SkillsLoader] = None):
         """
         Args:
-            skills_loader: SkillsLoader instance от nanobot
+            skills_loader: SkillsLoader instance from nanobot
         """
         if not NANOBOT_AVAILABLE or skills_loader is None:
             logger.warning("SkillsLoader unavailable, skills integration disabled")
@@ -66,7 +66,7 @@ class SkillsIntegration:
 
     def register_all_skills(self) -> Dict[str, int]:
         """
-        Регистрирует все доступные skills как tools.
+        Registers all available skills as tools.
 
         Returns:
             Dict with success_count and failure_count
@@ -97,7 +97,7 @@ class SkillsIntegration:
 
     def _register_skill(self, skill_info: Dict[str, str]):
         """
-        Конвертирует один skill в tool function.
+        Converts one skill into a tool function.
 
         Args:
             skill_info: Dict with 'name', 'path', 'source'
@@ -132,18 +132,18 @@ class SkillsIntegration:
         metadata: Dict
     ):
         """
-        Создает function_tool из skill.
+        Creates a function_tool from a skill.
 
-        Skill становится "knowledge tool" - когда агент вызывает tool,
-        он получает содержимое skill для использования.
+        Skill becomes a "knowledge tool" - when the agent calls the tool,
+        it receives the skill content for use.
 
         Args:
-            skill_name: Имя skill
-            skill_content: Содержимое SKILL.md
-            metadata: Метаданные из frontmatter
+            skill_name: Name of the skill
+            skill_content: Contents of SKILL.md
+            metadata: Metadata from frontmatter
 
         Returns:
-            Tool function (или заглушка, если OpenAI Agents SDK недоступен)
+            Tool function (or stub if OpenAI Agents SDK is unavailable)
         """
         # Strip frontmatter from content
         content = self._strip_frontmatter(skill_content)
@@ -152,8 +152,8 @@ class SkillsIntegration:
         description = metadata.get('description', f'Access knowledge from skill: {skill_name}')
 
         # Define tool function
-        # Note: Фактическая регистрация через @function_tool будет происходить
-        # когда agent factory будет создавать агента
+        # Note: Actual registration via @function_tool will happen
+        # when the agent factory creates the agent
         def skill_tool(query: Optional[str] = None) -> str:
             """
             Access skill knowledge.
@@ -190,7 +190,7 @@ class SkillsIntegration:
 
     def get_always_loaded_skills_content(self) -> str:
         """
-        Получить контент skills с always=true для добавления в instructions.
+        Get skills content with always=true for adding to instructions.
 
         Returns:
             Formatted skills content
@@ -206,7 +206,7 @@ class SkillsIntegration:
 
     def get_registered_tool_names(self) -> List[str]:
         """
-        Получить список зарегистрированных skill tool names.
+        Get list of registered skill tool names.
 
         Returns:
             List of tool names (skill_{name})
@@ -215,19 +215,19 @@ class SkillsIntegration:
 
     def get_skill_tool(self, skill_name: str):
         """
-        Получить tool function для конкретного skill.
+        Get tool function for a specific skill.
 
         Args:
-            skill_name: Имя skill (без префикса skill_)
+            skill_name: Skill name (without skill_ prefix)
 
         Returns:
-            Tool function или None
+            Tool function or None
         """
         return self._skill_tools.get(skill_name)
 
     def get_all_skill_tools(self) -> Dict[str, any]:
         """
-        Получить все skill tools.
+        Get all skill tools.
 
         Returns:
             Dict: skill_name → tool_function
@@ -236,7 +236,7 @@ class SkillsIntegration:
 
     def list_available_skills(self) -> List[Dict[str, str]]:
         """
-        Список всех доступных skills (независимо от регистрации).
+        List of all available skills (regardless of registration).
 
         Returns:
             List of skill info dicts
@@ -248,7 +248,7 @@ class SkillsIntegration:
 
     def get_skills_summary(self) -> str:
         """
-        Получить краткую сводку всех доступных skills.
+        Get a brief summary of all available skills.
 
         Returns:
             Formatted summary string
@@ -260,7 +260,7 @@ class SkillsIntegration:
         if not skills:
             return "No skills available"
 
-        lines = ["📚 Доступные навыки:"]
+        lines = ["📚 Available skills:"]
         for skill in skills:
             name = skill['name']
             source = skill['source']
@@ -274,7 +274,7 @@ class SkillsIntegration:
 
     def get_stats(self) -> Dict:
         """
-        Получить статистику по skills.
+        Get skills statistics.
 
         Returns:
             Dict with statistics

@@ -1,14 +1,14 @@
 """
-Git инструменты для агентов.
+Git tools for agents.
 
-Поддерживает:
-- Статус репозитория
-- История коммитов
-- Различия в файлах
-- Управление ветками
-- Добавление файлов и создание коммитов
-- Синхронизация с удаленными репозиториями
-- Поддержка кириллицы в именах авторов и веток
+Supports:
+- Repository status
+- Commit history
+- File differences
+- Branch management
+- Adding files and creating commits
+- Synchronizing with remote repositories
+- Cyrillic support in author and branch names
 """
 
 import re
@@ -85,37 +85,37 @@ def _map_path_to_container(path: Optional[str], context: Any) -> str:
 
 def _run_git_command(command: List[str], cwd: Optional[str] = None, container_id: Optional[str] = None, context: Any = None) -> Dict[str, Any]:
     """
-    Безопасный запуск Git команды с валидацией.
+    Safe execution of Git command with validation.
     
     Args:
-        command: Список аргументов команды
-        cwd: Рабочая директория
-        container_id: ID контейнера для выполнения команды (опционально)
+        command: List of command arguments
+        cwd: Working directory
+        container_id: Container ID for command execution (optional)
         context: Context for path mapping
         
     Returns:
-        Dict с результатом: {"success": bool, "output": str, "error": str}
+        Dict with result: {"success": bool, "output": str, "error": str}
     """
     try:
-        # Проверяем, что команда начинается с git
+        # Verify command starts with git
         if not command or command[0] != "git":
-            return {"success": False, "output": "", "error": "Команда должна начинаться с 'git'"}
+            return {"success": False, "output": "", "error": "Command must start with 'git'"}
         
-        # Валидация опасных команд - проверяем только аргументы команды
+        # Validation of dangerous commands - only check command arguments
         dangerous_commands = ["rm", "clean", "reset --hard", "push --force", "rebase -i"]
         cmd_str = " ".join(command)
         for dangerous in dangerous_commands:
-            # Проверяем, что опасная команда является отдельным аргументом, а не частью другого
+            # Check that dangerous command is a separate argument, not part of another
             if f" {dangerous} " in f" {cmd_str} " or cmd_str.endswith(f" {dangerous}") or cmd_str.startswith(f"{dangerous} "):
-                return {"success": False, "output": "", "error": f"Опасная команда заблокирована: {dangerous}"}
+                return {"success": False, "output": "", "error": f"Dangerous command blocked: {dangerous}"}
         
-        # Логгируем выполнение команды
+        # Log command execution
         from utils.logger import log_custom
-        log_custom('debug', 'git_command', f"Выполнение: {' '.join(command)}", cwd=cwd, container_id=container_id, context=context)
+        log_custom('debug', 'git_command', f"Executing: {' '.join(command)}", cwd=cwd, container_id=container_id, context=context)
         
-        # Выполняем команду
+        # Execute command
         if container_id:
-            # Конструируем команду docker exec
+            # Construct docker exec command
             # docker exec -i -w <container_root> <container_id> <command>
             
             workdir = _map_path_to_container(cwd, context)
@@ -139,11 +139,11 @@ def _run_git_command(command: List[str], cwd: Optional[str] = None, container_id
                 timeout=30
             )
         
-        # Логгируем результат
+        # Log result
         if result.returncode == 0:
-            log_custom('debug', 'git_command', f"Успешно выполнено: {' '.join(command)}")
+            log_custom('debug', 'git_command', f"Successfully executed: {' '.join(command)}")
         else:
-            log_custom('debug', 'git_command', f"Ошибка выполнения: {' '.join(command)}", error=result.stderr)
+            log_custom('debug', 'git_command', f"Execution error: {' '.join(command)}", error=result.stderr)
         
         return {
             "success": result.returncode == 0,
@@ -153,16 +153,16 @@ def _run_git_command(command: List[str], cwd: Optional[str] = None, container_id
         
     except subprocess.TimeoutExpired:
         from utils.logger import log_custom
-        log_custom('error', 'git_command', f"Таймаут команды: {' '.join(command)}")
-        return {"success": False, "output": "", "error": "Команда превысила лимит времени выполнения"}
+        log_custom('error', 'git_command', f"Command timeout: {' '.join(command)}")
+        return {"success": False, "output": "", "error": "Command exceeded time limit"}
     except FileNotFoundError as e:
         from utils.logger import log_custom
         log_custom('error', 'git_command', f"Executable not found: {e}. command={command if not container_id else docker_cmd}")
         return {"success": False, "output": "", "error": f"Executable not found: {e}"}
     except Exception as e:
         from utils.logger import log_custom
-        log_custom('error', 'git_command', f"Ошибка выполнения команды: {e}")
-        return {"success": False, "output": "", "error": f"Ошибка выполнения команды: {e}"}
+        log_custom('error', 'git_command', f"Command execution error: {e}")
+        return {"success": False, "output": "", "error": f"Command execution error: {e}"}
 
 def _get_container_id(context: Any) -> Optional[str]:
     """Extract container_id from context."""
@@ -180,13 +180,13 @@ def _resolve_git_directory(context: Any, directory: str) -> tuple[str, str]:
 @function_tool
 def git_status(context: RunContextWrapper, directory: str = ".") -> str:
     """
-    Показывает статус Git репозитория.
+    Shows the status of the Git repository.
     
     Args:
-        directory: Путь к репозиторию
+        directory: Path to the repository
         
     Returns:
-        str: Статус репозитория
+        str: Repository status
     """
     visible_directory = display_agent_path_from_ctx(directory, context)
     operation = pretty_logger.tool_start("GitStatus", directory=visible_directory)
@@ -199,8 +199,8 @@ def git_status(context: RunContextWrapper, directory: str = ".") -> str:
         if not container_id:
             path = Path(resolved_directory)
             if not path.exists():
-                pretty_logger.tool_result(operation, error=f"Директория {visible_directory} не найдена")
-                return f"❌ Директория {visible_directory} не найдена"
+                pretty_logger.tool_result(operation, error=f"Directory {visible_directory} not found")
+                return f"❌ Directory {visible_directory} not found"
         
         cmd_result = _run_git_command(["git", "status", "--porcelain"], cwd=cwd, container_id=container_id, context=context)
         
@@ -209,24 +209,24 @@ def git_status(context: RunContextWrapper, directory: str = ".") -> str:
             error_text_lower = error_text.lower()
             if "not a git repository" in error_text_lower:
                 pretty_logger.tool_result(operation, error=error_text)
-                return f"❌ Не Git репозиторий: {error_text}"
+                return f"❌ Not a Git repository: {error_text}"
             pretty_logger.tool_result(operation, error=error_text)
-            return f"❌ Ошибка Git: {error_text}"
+            return f"❌ Git error: {error_text}"
         
         
-        # Форматируем вывод
+        # Format output
         if not cmd_result["output"]:
-            pretty_logger.tool_result(operation, result="Репозиторий чистый")
-            return "✅ Рабочая директория чистая - нет изменений"
+            pretty_logger.tool_result(operation, result="Repository is clean")
+            return "✅ Working directory is clean - no changes"
         else:
             lines = cmd_result["output"].split('\n')
             status_map = {
-                'M': 'изменен',
-                'A': 'добавлен', 
-                'D': 'удален',
-                'R': 'переименован',
-                'C': 'скопирован',
-                '??': 'неотслеживаемый'
+                'M': 'modified',
+                'A': 'added',
+                'D': 'deleted',
+                'R': 'renamed',
+                'C': 'copied',
+                '??': 'untracked'
             }
             
             formatted_lines = []
@@ -242,26 +242,26 @@ def git_status(context: RunContextWrapper, directory: str = ".") -> str:
                 formatted_lines.append(f"  📝 {status_text}: {filename}")
             
             changes_count = len(formatted_lines)
-            pretty_logger.tool_result(operation, result=f"Найдено {changes_count} изменений")
-            result = f"📋 Статус Git репозитория в {visible_directory} ({changes_count} изменений):\n\n" + "\n".join(formatted_lines)
+            pretty_logger.tool_result(operation, result=f"Found {changes_count} changes")
+            result = f"📋 Git repository status in {visible_directory} ({changes_count} changes):\n\n" + "\n".join(formatted_lines)
         
         return result
         
     except Exception as e:
         pretty_logger.tool_result(operation, error=str(e))
-        return f"❌ Ошибка при получении статуса Git: {str(e)}"
+        return f"❌ Error getting Git status: {str(e)}"
 
 @function_tool
 def git_log(context: RunContextWrapper, directory: str = ".", max_commits: int = 10) -> str:
     """
-    Показывает историю коммитов.
+    Shows the commit history.
     
     Args:
-        directory: Путь к репозиторию
-        max_commits: Максимальное количество коммитов для отображения
+        directory: Path to the repository
+        max_commits: Maximum number of commits to display
         
     Returns:
-        str: История коммитов
+        str: Commit history
     """
     start_time = time.time()
     visible_directory = display_agent_path_from_ctx(directory, context)
@@ -275,11 +275,11 @@ def git_log(context: RunContextWrapper, directory: str = ".", max_commits: int =
         if not container_id:
             path = Path(resolved_directory)
             if not path.exists() or not (path / ".git").exists():
-                result = f"ОШИБКА: {visible_directory} не является Git репозиторием"
+                result = f"ERROR: {visible_directory} is not a Git repository"
                 log_tool_result(operation, error=result)
                 return result
         
-        # Ограничиваем количество коммитов для безопасности
+        # Limit the number of commits for safety
         max_commits = min(max_commits, 50)
         
         cmd_result = _run_git_command([
@@ -290,15 +290,15 @@ def git_log(context: RunContextWrapper, directory: str = ".", max_commits: int =
         ], cwd=cwd, container_id=container_id, context=context)
         
         if not cmd_result["success"]:
-            result = f"ОШИБКА: {cmd_result['error']}"
+            result = f"ERROR: {cmd_result['error']}"
             log_tool_result(operation, error=result)
             return result
         
         if not cmd_result["output"]:
-            result = "История коммитов пуста"
+            result = "Commit history is empty"
         else:
             lines = cmd_result["output"].split('\n')
-            formatted_lines = [f"История коммитов в {visible_directory}:\n"]
+            formatted_lines = [f"Commit history in {visible_directory}:\n"]
             
             for line in lines:
                 parts = line.split('|')
@@ -313,21 +313,21 @@ def git_log(context: RunContextWrapper, directory: str = ".", max_commits: int =
         return result
         
     except Exception as e:
-        result = f"ОШИБКА при получении истории: {str(e)}"
+        result = f"ERROR getting history: {str(e)}"
         log_tool_result(operation, error=result)
         return result
 
 @function_tool
 def git_diff(context: RunContextWrapper, directory: str = ".", filename: str = "") -> str:
     """
-    Показывает различия в файлах.
+    Shows differences in files.
     
     Args:
-        directory: Путь к репозиторию
-        filename: Имя конкретного файла (опционально)
+        directory: Path to the repository
+        filename: Specific file name (optional)
         
     Returns:
-        str: Различия в файлах
+        str: File differences
     """
     start_time = time.time()
     visible_directory = display_agent_path_from_ctx(directory, context)
@@ -342,16 +342,16 @@ def git_diff(context: RunContextWrapper, directory: str = ".", filename: str = "
         if not container_id:
             path = Path(resolved_directory)
             if not path.exists() or not (path / ".git").exists():
-                result = f"ОШИБКА: {visible_directory} не является Git репозиторием"
+                result = f"ERROR: {visible_directory} is not a Git repository"
                 log_tool_result(operation, error=result)
                 return result
         
-        # Формируем команду
+        # Build command
         command = ["git", "diff"]
         if filename:
-            # Валидируем имя файла
+            # Validate filename
             if not re.match(r'^[a-zA-Z0-9._/-]+$', filename):
-                result = f"ОШИБКА: Недопустимое имя файла: {visible_filename}"
+                result = f"ERROR: Invalid filename: {visible_filename}"
                 log_tool_result(operation, error=result)
                 return result
             command.append(filename)
@@ -359,34 +359,34 @@ def git_diff(context: RunContextWrapper, directory: str = ".", filename: str = "
         cmd_result = _run_git_command(command, cwd=cwd, container_id=container_id, context=context)
         
         if not cmd_result["success"]:
-            result = f"ОШИБКА: {cmd_result['error']}"
+            result = f"ERROR: {cmd_result['error']}"
             log_tool_result(operation, error=result)
             return result
         
         if not cmd_result["output"]:
-            result = "Нет изменений для отображения"
+            result = "No changes to display"
         else:
-            # Показываем полный вывод
-            result = f"Различия в {visible_directory}" + (f" для файла {visible_filename}" if filename else "") + ":\n\n" + cmd_result["output"]
+            # Show full output  
+            result = f"Differences in {visible_directory}" + (f" for file {visible_filename}" if filename else "") + ":\n\n" + cmd_result["output"]
         
         log_tool_result(operation, result=result)
         return result
         
     except Exception as e:
-        result = f"ОШИБКА при получении различий: {str(e)}"
+        result = f"ERROR getting differences: {str(e)}"
         log_tool_result(operation, error=result)
         return result
 
 @function_tool
 def git_branch_list(context: RunContextWrapper, directory: str = ".") -> str:
     """
-    Показывает список веток.
+    Shows the list of branches.
     
     Args:
-        directory: Путь к репозиторию
+        directory: Path to the repository
         
     Returns:
-        str: Список веток
+        str: List of branches
     """
     start_time = time.time()
     visible_directory = display_agent_path_from_ctx(directory, context)
@@ -400,28 +400,28 @@ def git_branch_list(context: RunContextWrapper, directory: str = ".") -> str:
         if not container_id:
             path = Path(resolved_directory)
             if not path.exists() or not (path / ".git").exists():
-                result = f"ОШИБКА: {visible_directory} не является Git репозиторием"
+                result = f"ERROR: {visible_directory} is not a Git repository"
                 log_tool_result(operation, result=result)
                 return result
         
         cmd_result = _run_git_command(["git", "branch", "-a"], cwd=cwd, container_id=container_id, context=context)
         
         if not cmd_result["success"]:
-            result = f"ОШИБКА: {cmd_result['error']}"
+            result = f"ERROR: {cmd_result['error']}"
             log_tool_result(operation, result=result)
             return result
         
         if not cmd_result["output"]:
-            result = "Нет веток для отображения"
+            result = "No branches to display"
         else:
             lines = cmd_result["output"].split('\n')
-            formatted_lines = [f"Ветки в репозитории {visible_directory}:\n"]
+            formatted_lines = [f"Branches in repository {visible_directory}:\n"]
             
             for line in lines:
                 line = line.strip()
                 if line:
                     if line.startswith('*'):
-                        formatted_lines.append(f"  ➤ {line[1:].strip()} (текущая)")
+                        formatted_lines.append(f"  ➤ {line[1:].strip()} (current)")
                     else:
                         formatted_lines.append(f"    {line}")
             
@@ -431,21 +431,21 @@ def git_branch_list(context: RunContextWrapper, directory: str = ".") -> str:
         return result
         
     except Exception as e:
-        result = f"ОШИБКА при получении списка веток: {str(e)}"
+        result = f"ERROR getting branch list: {str(e)}"
         log_tool_result(operation, error=result)
         return result
 
 @function_tool
 def git_add_file(context: RunContextWrapper, directory: str, filename: str) -> str:
     """
-    Добавляет файл в индекс Git.
+    Adds a file to the Git index.
     
     Args:
-        directory: Путь к репозиторию
-        filename: Имя файла для добавления
+        directory: Path to the repository
+        filename: Name of the file to add
         
     Returns:
-        str: Результат операции
+        str: Operation result
     """
     start_time = time.time()
     visible_directory = display_agent_path_from_ctx(directory, context)
@@ -460,51 +460,51 @@ def git_add_file(context: RunContextWrapper, directory: str, filename: str) -> s
         if not container_id:
             path = Path(resolved_directory)
             if not path.exists() or not (path / ".git").exists():
-                result = f"ОШИБКА: {visible_directory} не является Git репозиторием"
+                result = f"ERROR: {visible_directory} is not a Git repository"
                 log_tool_result(operation, result=result)
                 return result
             
-            # Проверяем, что файл существует (локально)
+            # Check that the file exists (locally)
             file_path = path / filename
             if not file_path.exists():
-                result = f"ОШИБКА: Файл {visible_filename} не найден"
+                result = f"ERROR: File {visible_filename} not found"
                 log_tool_result(operation, result=result)
                 return result
         
-        # Валидация имени файла
+        # Validate filename
         if not re.match(r'^[a-zA-Z0-9._/-]+$', filename):
-            result = f"ОШИБКА: Недопустимое имя файла: {visible_filename}"
+            result = f"ERROR: Invalid filename: {visible_filename}"
             log_tool_result(operation, result=result)
             return result
         
         cmd_result = _run_git_command(["git", "add", filename], cwd=cwd, container_id=container_id, context=context)
         
         if cmd_result["success"]:
-            result = f"✅ Файл {visible_filename} успешно добавлен в индекс"
+            result = f"✅ File {visible_filename} successfully added to index"
         else:
-            result = f"ОШИБКА при добавлении файла: {cmd_result['error']}"
+            result = f"ERROR adding file: {cmd_result['error']}"
         
         log_tool_result(operation, result=result)
         return result
         
     except Exception as e:
-        result = f"ОШИБКА при добавлении файла: {str(e)}"
+        result = f"ERROR adding file: {str(e)}"
         log_tool_result(operation, error=result)
         return result
 
 @function_tool
 def git_commit(context: RunContextWrapper, directory: str, message: str, author_name: str = "", author_email: str = "") -> str:
     """
-    Создает коммит с указанным сообщением.
+    Creates a commit with the specified message.
     
     Args:
-        directory: Путь к репозиторию
-        message: Сообщение коммита
-        author_name: Имя автора (опционально)
-        author_email: Email автора (опционально)
+        directory: Path to the repository
+        message: Commit message
+        author_name: Author name (optional)
+        author_email: Author email (optional)
         
     Returns:
-        str: Результат операции
+        str: Operation result
     """
     start_time = time.time()
     visible_directory = display_agent_path_from_ctx(directory, context)
@@ -518,35 +518,35 @@ def git_commit(context: RunContextWrapper, directory: str, message: str, author_
         if not container_id:
             path = Path(resolved_directory)
             if not path.exists() or not (path / ".git").exists():
-                result = f"ОШИБКА: {visible_directory} не является Git репозиторием"
+                result = f"ERROR: {visible_directory} is not a Git repository"
                 log_tool_result(operation, result=result)
                 return result
         
-        # Валидация сообщения коммита
+        # Validate commit message
         if not message or len(message.strip()) < 3:
-            result = "ОШИБКА: Сообщение коммита должно содержать минимум 3 символа"
+            result = "ERROR: Commit message must be at least 3 characters"
             log_tool_result(operation, result=result)
             return result
         
         if len(message) > 500:
-            result = "ОШИБКА: Сообщение коммита слишком длинное (максимум 500 символов)"
+            result = "ERROR: Commit message is too long (max 500 characters)"
             log_tool_result(operation, result=result)
             return result
         
-        # Формируем команду
+        # Build command
         command = ["git", "commit", "-m", message.strip()]
         
-        # Добавляем автора если указан
+        # Add author if specified
         if author_name and author_email:
-            # Валидация имени автора - поддерживаем кириллицу, латиницу, цифры, пробелы и основные символы
+            # Validate author name - supports Cyrillic, Latin, digits, spaces, hyphens and dots
             if not re.match(r'^[\w\sа-яёА-ЯЁ\-\.]+$', author_name):
-                result = "ОШИБКА: Недопустимое имя автора (поддерживаются буквы, цифры, пробелы, дефисы и точки)"
+                result = "ERROR: Invalid author name (supports letters, digits, spaces, hyphens and dots)"
                 log_tool_result(operation, result=result)
                 return result
             
-            # Более гибкая валидация email - поддерживаем локальные адреса
+            # More flexible email validation - supports local addresses
             if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+(\.[a-zA-Z]{2,})?$', author_email):
-                result = "ОШИБКА: Недопустимый email автора (формат: user@domain.com или user@local)"
+                result = "ERROR: Invalid author email (format: user@domain.com or user@local)"
                 log_tool_result(operation, result=result)
                 return result
             
@@ -555,32 +555,32 @@ def git_commit(context: RunContextWrapper, directory: str, message: str, author_
         cmd_result = _run_git_command(command, cwd=cwd, container_id=container_id, context=context)
         
         if cmd_result["success"]:
-            result = f"✅ Коммит успешно создан: {message}"
+            result = f"✅ Commit successfully created: {message}"
             if cmd_result["output"]:
                 result += f"\n{cmd_result['output']}"
         else:
-            result = f"ОШИБКА при создании коммита: {cmd_result['error']}"
+            result = f"ERROR creating commit: {cmd_result['error']}"
         
         log_tool_result(operation, result=result)
         return result
         
     except Exception as e:
-        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        result = f"ERROR during operation: {str(e)}"
         log_tool_result(operation, error=result)
         return result
 
 @function_tool
 def git_checkout_branch(context: RunContextWrapper, directory: str, branch_name: str, create_new: bool = False) -> str:
     """
-    Переключается на ветку или создает новую.
+    Switches to a branch or creates a new one.
     
     Args:
-        directory: Путь к репозиторию
-        branch_name: Имя ветки
-        create_new: Создать новую ветку если не существует
+        directory: Path to the repository
+        branch_name: Branch name
+        create_new: Create a new branch if it doesn't exist
         
     Returns:
-        str: Результат операции
+        str: Operation result
     """
     start_time = time.time()
     visible_directory = display_agent_path_from_ctx(directory, context)
@@ -594,17 +594,17 @@ def git_checkout_branch(context: RunContextWrapper, directory: str, branch_name:
         if not container_id:
             path = Path(resolved_directory)
             if not path.exists() or not (path / ".git").exists():
-                result = f"ОШИБКА: {visible_directory} не является Git репозиторием"
+                result = f"ERROR: {visible_directory} is not a Git repository"
                 log_tool_result(operation, result=result)
                 return result
         
-        # Валидация имени ветки - поддерживаем кириллицу и основные символы
+        # Validate branch name - supports Cyrillic and basic characters
         if not re.match(r'^[\wа-яёА-ЯЁ._/-]+$', branch_name):
-            result = f"ОШИБКА: Недопустимое имя ветки: {branch_name} (поддерживаются буквы, цифры, точки, дефисы, подчеркивания и слеши)"
+            result = f"ERROR: Invalid branch name: {branch_name} (supports letters, digits, dots, hyphens, underscores and slashes)"
             log_tool_result(operation, result=result)
             return result
         
-        # Формируем команду
+        # Build command
         command = ["git", "checkout"]
         if create_new:
             command.append("-b")
@@ -613,31 +613,31 @@ def git_checkout_branch(context: RunContextWrapper, directory: str, branch_name:
         cmd_result = _run_git_command(command, cwd=cwd, container_id=container_id, context=context)
         
         if cmd_result["success"]:
-            action = "создана и выбрана" if create_new else "выбрана"
-            result = f"✅ Ветка {branch_name} {action}"
+            action = "created and switched" if create_new else "switched to"
+            result = f"✅ Branch {branch_name} {action}"
             if cmd_result["output"]:
                 result += f"\n{cmd_result['output']}"
         else:
-            result = f"ОШИБКА при переключении на ветку: {cmd_result['error']}"
+            result = f"Error switching to branch: {cmd_result['error']}"
         
         log_tool_result(operation, result=result)
         return result
         
     except Exception as e:
-        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        result = f"Error during operation: {str(e)}"
         log_tool_result(operation, error=result)
         return result
 
 @function_tool
 def git_pull(context: RunContextWrapper, directory: str = ".") -> str:
     """
-    Получает и объединяет изменения из удаленного репозитория.
+    Fetches and merges changes from a remote repository.
     
     Args:
-        directory: Путь к репозиторию
+        directory: Path to the repository
         
     Returns:
-        str: Результат операции
+        str: Operation result
     """
     start_time = time.time()
     visible_directory = display_agent_path_from_ctx(directory, context)
@@ -651,37 +651,37 @@ def git_pull(context: RunContextWrapper, directory: str = ".") -> str:
         if not container_id:
             path = Path(resolved_directory)
             if not path.exists() or not (path / ".git").exists():
-                result = f"ОШИБКА: {visible_directory} не является Git репозиторием"
+                result = f"ERROR: {visible_directory} is not a Git repository"
                 log_tool_result(operation, result=result)
                 return result
         
         cmd_result = _run_git_command(["git", "pull"], cwd=cwd, container_id=container_id, context=context)
         
         if cmd_result["success"]:
-            result = "✅ Изменения успешно получены из удаленного репозитория"
+            result = "✅ Changes successfully fetched from remote repository"
             if cmd_result["output"]:
                 result += f"\n{cmd_result['output']}"
         else:
-            result = f"ОШИБКА при получении изменений: {cmd_result['error']}"
+            result = f"ERROR fetching changes: {cmd_result['error']}"
         
         log_tool_result(operation, result=result)
         return result
         
     except Exception as e:
-        result = f"ОШИБКА при выполнении операции: {str(e)}"
+        result = f"ERROR performing operation: {str(e)}"
         log_tool_result(operation, error=result)
         return result
 
 @function_tool
 def git_remote_info(context: RunContextWrapper, directory: str = ".") -> str:
     """
-    Показывает информацию о удаленных репозиториях.
+    Shows information about remote repositories.
     
     Args:
-        directory: Путь к репозиторию
+        directory: Path to the repository
         
     Returns:
-        str: Информация об удаленных репозиториях
+        str: Information about remote repositories
     """
     start_time = time.time()
     visible_directory = display_agent_path_from_ctx(directory, context)

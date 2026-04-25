@@ -44,8 +44,8 @@ logger = logging.getLogger("compact.auto")
 
 
 # ---------------------------------------------------------------------------
-# Default constants — используются как fallback когда конфиг не передан.
-# В production значения берутся из compact.* в config.yaml.
+# Default constants — used as fallback when config is not provided.
+# In production, values are taken from compact.* in config.yaml.
 # ---------------------------------------------------------------------------
 
 AUTOCOMPACT_BUFFER_TOKENS = 13_000
@@ -78,7 +78,7 @@ class AutoCompactTrackingState:
 # ---------------------------------------------------------------------------
 
 def _auto_cfg(compact_cfg):
-    """Возвращает CompactAutoConfig если передан CompactConfig, иначе None."""
+    """Returns CompactAutoConfig if CompactConfig is provided, otherwise None."""
     return getattr(compact_cfg, "auto", None) if compact_cfg is not None else None
 
 
@@ -87,8 +87,8 @@ def get_effective_context_window_size(
     compact_cfg: "Optional[CompactConfig]" = None,
 ) -> int:
     """
-    Reserve max_output_tokens_for_summary токенов под ответ LLM при компакте.
-    Читается из config.yaml → compact.auto.max_output_tokens_for_summary.
+    Reserve max_output_tokens_for_summary tokens for LLM response during compaction.
+    Read from config.yaml → compact.auto.max_output_tokens_for_summary.
     """
     auto = _auto_cfg(compact_cfg)
     reserve = (
@@ -104,9 +104,9 @@ def get_auto_compact_threshold(
     compact_cfg: "Optional[CompactConfig]" = None,
 ) -> int:
     """
-    Порог токенов для авто-компакта = effective_window - buffer_tokens.
-    Читается из config.yaml → compact.auto.buffer_tokens.
-    Поддерживает env override CLAUDE_AUTOCOMPACT_PCT_OVERRIDE для тестов.
+    Token threshold for auto-compact = effective_window - buffer_tokens.
+    Read from config.yaml → compact.auto.buffer_tokens.
+    Supports env override CLAUDE_AUTOCOMPACT_PCT_OVERRIDE for testing.
     """
     auto = _auto_cfg(compact_cfg)
     effective = get_effective_context_window_size(context_window, compact_cfg)
@@ -132,8 +132,8 @@ def calculate_token_warning_state(
     compact_cfg: "Optional[CompactConfig]" = None,
 ) -> TokenWarningState:
     """
-    Рассчитывает пороги предупреждения/ошибки/блокировки.
-    Все пороги читаются из config.yaml → compact.auto.*.
+    Calculates warning/error/blocking thresholds.
+    All thresholds are read from config.yaml → compact.auto.*.
     """
     auto = _auto_cfg(compact_cfg)
     auto_compact_threshold = get_auto_compact_threshold(context_window, compact_cfg)
@@ -177,8 +177,8 @@ def calculate_token_warning_state(
 
 def is_auto_compact_enabled(compact_cfg: "Optional[CompactConfig]" = None) -> bool:
     """
-    Проверяет включён ли авто-компакт.
-    Приоритет: env vars > config.yaml (compact.auto.enabled) > True.
+    Checks if auto-compact is enabled.
+    Priority: env vars > config.yaml (compact.auto.enabled) > True.
     """
     if os.environ.get("DISABLE_COMPACT", "").lower() in ("1", "true", "yes"):
         return False
@@ -198,7 +198,7 @@ def should_auto_compact(
     is_subagent: bool = False,
     compact_cfg: "Optional[CompactConfig]" = None,
 ) -> bool:
-    """Проверяет, нужно ли запускать авто-компакт прямо сейчас."""
+    """Checks whether auto-compact should run right now."""
     if is_subagent:
         return False
     if not is_auto_compact_enabled(compact_cfg):

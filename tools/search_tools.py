@@ -272,7 +272,7 @@ async def semantic_search_skills(
     Search skills by MEANING using hybrid vector + keyword search.
 
     Finds relevant skills even when exact words don't match — e.g.
-    query "как сохранить файл" finds a skill about "write_file / file persistence".
+    query "how to save a file" finds a skill about "write_file / file persistence".
 
     Falls back to FTS-only if embeddings are unavailable.
 
@@ -362,14 +362,14 @@ async def semantic_search_skills(
             s._in_fts    = True
         return _format_skills(fts_skills, query, "fts-only (no embeddings)")
     except Exception as exc:
-        return f"❌ Ошибка поиска: {exc}"
+        return f"❌ Search error: {exc}"
 
 
 def _format_skills(skills: List[Any], query: str, mode: str) -> str:
     if not skills:
-        return f"[semantic_search_skills] Ничего не найдено по запросу: '{query}' (mode: {mode})"
+        return f"[semantic_search_skills] Nothing found for query: '{query}' (mode: {mode})"
 
-    lines = [f"## Поиск навыков: '{query}'", f"_Режим: {mode}_\n"]
+    lines = [f"## Skill search: '{query}'", f"_Mode: {mode}_\n"]
     for i, skill in enumerate(skills, 1):
         vec_sim = getattr(skill, "_vec_sim", 0.0)
         in_fts  = getattr(skill, "_in_fts",  False)

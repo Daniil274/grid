@@ -229,22 +229,22 @@ def print_agent_skill_status(config: Config, agent_key: str) -> None:
 
     print("Skills")
     if declared_total == 0:
-        print(f"Skills - Для агента '{agent_key}' system_skills не заданы")
+        print(f"Skills - Agent '{agent_key}' has no system_skills defined")
         return
 
-    print(f"Skills - Для агента '{agent_key}' заявлено навыков: {declared_total}")
+    print(f"Skills - Agent '{agent_key}' declared skills: {declared_total}")
     if found:
-        print("  Найдены:")
+        print("  Found:")
         for skill_name, skill_path in found:
             print(f"    - {skill_name}: {skill_path}")
     if missing:
-        print("  Не найдены:")
+        print("  Not found:")
         for skill_name in missing:
             print(f"    - {skill_name}")
 
 
 async def main():
-    """Главная функция."""
+    """Main entry point."""
     parser = argparse.ArgumentParser(description="Legacy Grid agent chat interface")
     parser.add_argument(
         "--agent", "-a",
@@ -287,12 +287,12 @@ async def main():
     
     try:
         # Beautiful initialization
-        print("Запуск Grid Agent System...")
+        print("Starting Grid Agent System...")
         
         # Load configuration
         print("Load Config")
         config = Config(args.config, args.path)
-        print("Load Config - Конфигурация загружена")
+        print("Load Config - Configuration loaded")
 
         # Container isolation (optional)
         # If enabled, we run tools (git/beads/mcp) inside a per-user container.
@@ -360,7 +360,7 @@ async def main():
             container_id=container_id,
             stream_observer=stream_observer,
         )
-        print("Initialize SecurityAwareAgentFactory - Фабрика агентов инициализирована")
+        print("Initialize SecurityAwareAgentFactory - Agent factory initialized")
         selected_context_id: Optional[str] = None
         last_context_id: Optional[str] = None
 
@@ -392,17 +392,18 @@ async def main():
                 selected_context_id = factory.activate_context(args.context_path)
                 last_context_id = selected_context_id
                 activated_existing_context = True
-                print(f"Context - Активирован сохранённый контекст: {selected_context_id}")
+                print(f"Context - Activated saved context: {selected_context_id}")
             except Exception as exc:
-                print(f"⚠️ Не удалось активировать контекст {args.context_path}: {exc}")
+                print(f"⚠️ Failed to activate context {args.context_path}: {exc}")
 
         # Context is automatically managed by ContextManager
         # - New clean context is created on each startup
         # - Old contexts are preserved and accessible via Context ID
         if not activated_existing_context:
-            print("Context - Новая сессия создана, старые контексты доступны по ID")
+            print("Context - New session created, old contexts accessible by ID")
         
-        print("Grid Agent System готов к работе")
+        print("Grid Agent System ready for work")
+        
         
         chat_ui.print_banner(
             agent_key=agent_key,
@@ -412,7 +413,7 @@ async def main():
         
         if args.message:
             # Single message mode
-            print(f"Обработка сообщения")
+            print(f"Processing message")
 
             try:
                 # Parse message for images
@@ -427,7 +428,7 @@ async def main():
                             size_mb = info['size_bytes'] / (1024 * 1024) if info['size_bytes'] else 0
                             print(f"   - {img_path} ({size_mb:.2f} MB, {info['mime_type']})")
                         else:
-                            print(f"   - {img_path} (ошибка: {info['error']})")
+                            print(f"   - {img_path} (error: {info['error']})")
 
                 # Prepare message for agent
                 agent_message = prepare_agent_message(text, image_paths)
@@ -485,16 +486,16 @@ async def main():
 
             except Exception as e:
                 print("Operation completed")
-                print(f"Ошибка: {e}")
+                print(f"Error: {e}")
         else:
             # Interactive mode
             print("\nCommands:")
             print("  'exit' or 'quit' - Exit")
             print("  'clear' - Start new context (old contexts saved)")
-            print("  'context' или '/context' - Show current context info")
-            print("  'contexts' или '/contexts' - List all saved context IDs")
+            print("  'context' or '/context' - Show current context info")
+            print("  'contexts' or '/contexts' - List all saved context IDs")
             print("  'use <context_id>' - Switch to a saved context")
-            print("  'compact' или '/compact' - Принудительная компактизация контекста (LLM саммари)")
+            print("  'compact' or '/compact' - Force context compaction (LLM summary)")
             print("  'help' - Show this help")
             print("\nContext IDs:")
             print("  Use context ID in message: 'ctx-abc12345 your message'")
@@ -526,14 +527,14 @@ async def main():
                         cleared_id = factory.clear_context()
                         selected_context_id = None
                         last_context_id = cleared_id
-                        print("Clear Context - Создан новый контекст")
+                        print("Clear Context - New context created")
                         print(f"New context ID: {cleared_id}")
-                        print("Старые контексты сохранены и доступны по ID")
+                        print("Old contexts are saved and accessible by ID")
                         continue
                     elif user_input.lower() in {'context', '/context'}:
                         print("Get Context")
                         context_info = factory.get_context_info()
-                        print("Get Context - Информация о контексте получена")
+                        print("Get Context - Context information retrieved")
 
                         current_messages = factory.context_manager._conversation_history
                         compact_messages = _context_to_compact_messages(current_messages)
@@ -550,14 +551,14 @@ async def main():
                         except Exception:
                             pass
                         
-                        print(f"\n📋 Информация о контексте:")
-                        print(f"   Сообщений: {context_info.get('conversation_messages', 0)}")
-                        print(f"   История выполнения: {context_info.get('execution_history', 0)}")
-                        print(f"   Использование памяти: {context_info.get('memory_usage_mb', 0):.2f} МБ")
-                        print(f"   Примерно токенов: {estimated_tokens}")
+                        print(f"\n📋 Context info:")
+                        print(f"   Messages: {context_info.get('conversation_messages', 0)}")
+                        print(f"   Execution history: {context_info.get('execution_history', 0)}")
+                        print(f"   Memory usage: {context_info.get('memory_usage_mb', 0):.2f} MB")
+                        print(f"   Estimated tokens: {estimated_tokens}")
                         if context_window:
-                            print(f"   Окно модели: {context_window} токенов")
-                            print(f"   Заполнено: {context_pct}%")
+                            print(f"   Model window: {context_window} tokens")
+                            print(f"   Filled: {context_pct}%")
                         active_id = context_info.get('current_context_id')
                         if active_id:
                             print(f"   Active context ID: {active_id}")
@@ -570,7 +571,7 @@ async def main():
                             print(f"   Known contexts: {', '.join(available_ids)}")
                         if context_info.get('last_user_message'):
                             last_msg = context_info['last_user_message']
-                            print(f"   Последнее сообщение: {last_msg}")
+                            print(f"   Last message: {last_msg}")
                         continue
                     elif user_input.lower() in {'contexts', '/contexts'}:
                         ids = factory.list_context_ids()
@@ -595,11 +596,11 @@ async def main():
                             print(f'Failed to switch context: {exc}')
                         continue
                     elif user_input.lower() in {'/compact', 'compact'}:
-                        print("Компактизация контекста...")
+                        print("Compacting context...")
                         try:
                             messages = factory.context_manager._conversation_history
                             if not messages:
-                                print("Контекст пуст — компактизация не нужна.")
+                                print("Context is empty — compaction not needed.")
                                 continue
 
                             compact_cfg = factory.config.config.compact
@@ -607,7 +608,7 @@ async def main():
 
                             tokens_before = estimate_messages_tokens(compact_messages)
 
-                            # Получаем клиент и модель для текущего агента
+                            # Get client and model for the current agent
                             compact_client, compact_model = factory._get_compact_client_and_model(agent_key)
 
                             result = await compact_conversation(
@@ -622,7 +623,7 @@ async def main():
                             if not result.success():
                                 print(
                                     result.user_display_message
-                                    or "Компактизация пропущена: результат не уменьшает контекст."
+                                    or "Compaction skipped: result does not reduce context size."
                                 )
                                 continue
 
@@ -636,11 +637,11 @@ async def main():
                             tokens_after = getattr(result, 'tokens_after', 0)
                             tokens_saved = getattr(result, 'tokens_saved', tokens_before - tokens_after)
                             print(
-                                f"Компакт завершён: ~{tokens_before} -> ~{tokens_after} токенов, "
-                                f"сохранено ~{tokens_saved}."
+                                f"Compact complete: ~{tokens_before} -> ~{tokens_after} tokens, "
+                                f"saved ~{tokens_saved}."
                             )
                         except Exception as ce:
-                            print(f"Ошибка компактизации: {ce}")
+                            print(f"Compact error: {ce}")
                         continue
                     elif user_input.lower() == 'help':
                         print("\nAvailable commands:")
@@ -649,7 +650,7 @@ async def main():
                         print("  context, /context - Show current context information")
                         print("  contexts, /contexts - List all saved context IDs")
                         print("  use <context_id> - Switch to a saved context")
-                        print("  compact, /compact - Принудительная компактизация (LLM саммари)")
+                        print("  compact, /compact - Force context compaction (LLM summary)")
                         print("  help - Show this help message")
                         print("\nContext IDs:")
                         print("  Use in message: 'ctx-abc12345 your message'")
@@ -674,7 +675,7 @@ async def main():
                                 size_mb = info['size_bytes'] / (1024 * 1024) if info['size_bytes'] else 0
                                 print(f"   - {img_path} ({size_mb:.2f} MB, {info['mime_type']})")
                             else:
-                                print(f"   - {img_path} (ошибка: {info['error']})")
+                                print(f"   - {img_path} (error: {info['error']})")
 
                     # Prepare message for agent
                     agent_message = prepare_agent_message(text, image_paths)
@@ -732,7 +733,7 @@ async def main():
 
                     except Exception as e:
                         print("Operation completed")
-                        print(f"Ошибка: {e}")
+                        print(f"Error: {e}")
                     
                 except KeyboardInterrupt:
                     print("\n\nInterrupted. Goodbye!")
@@ -744,17 +745,17 @@ async def main():
         # Beautiful cleanup and session summary
         print("Cleanup")
         await factory.cleanup()
-        print("Cleanup - Ресурсы освобождены")
+        print("Cleanup - Resources freed")
         
         # Session summary
-        print("Grid Agent System завершил работу")
+        print("Grid Agent System finished")
         
     except GridError as e:
-        print(f"Ошибка Grid: {e}")
+        print(f"Grid Error: {e}")
         print(f"Grid Error: {e}")
         sys.exit(1)
     except Exception as e:
-        print(f"Неожиданная ошибка: {e}")
+        print(f"Unexpected error: {e}")
         print(f"Unexpected Error: {e}")
         import traceback
         traceback.print_exc()
