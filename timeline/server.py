@@ -28,6 +28,7 @@ logger = logging.getLogger("grid.timeline.server")
 ROOT = Path(__file__).resolve().parent.parent
 _TIMELINE_DIR = Path(__file__).resolve().parent
 _DASHBOARD_CANDIDATES = (
+    ROOT / "timeline_dashboard.html",
     _TIMELINE_DIR / "timeline_dashboard.html",
     ROOT / "scripts" / "timeline_dashboard.html",
 )
@@ -94,6 +95,8 @@ def create_app(
 
     ws_manager = WSManager()
     loop_holder: dict[str, Any] = {}
+    # Mutable holder so the factory can be updated after server start
+    factory_holder: dict[str, Any] = {"factory": factory}
 
     def _on_tracer_event(payload: dict) -> None:
         loop = loop_holder.get("loop")
@@ -161,7 +164,7 @@ def create_app(
             "node_id": node_id,
             "node_type": node.get("node_type"),
             "messages": messages,
-            "rerun_available": factory is not None,
+            "rerun_available": factory_holder["factory"] is not None,
         })
 
     @app.post("/api/traces/{trace_id}/nodes/{node_id}/edit")
@@ -184,7 +187,7 @@ def create_app(
         Restart the agent from a generation span snapshot with possibly modified messages.
         Requires that factory was passed to create_app().
         """
-        if factory is None:
+        if factory_holder["factory"] is None:
             raise HTTPException(
                 status_code=503,
                 detail="Rerun unavailable: timeline server started standalone (no factory). "
@@ -198,7 +201,7 @@ def create_app(
         from timeline.rerun import rerun_from_node
         try:
             result = await rerun_from_node(
-                factory=factory,
+                factory=factory_holder["factory"],
                 node=node,
                 modified_messages=body.messages,
                 user_id=body.user_id,
@@ -222,5 +225,8 @@ def create_app(
                 await ws_manager.disconnect(websocket)
             except Exception:
                 pass
+
+    # Expose factory holder for late binding (update factory after server start)
+    app.state.timeline_factory_holder = factory_holder
 
     return app
