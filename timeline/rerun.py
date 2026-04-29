@@ -77,6 +77,8 @@ async def rerun_from_node(
     from agents import Runner
     from core.agent_factory import GridRunContext
 
+    from utils.path_utils import set_current_factory, reset_current_factory
+
     instructions, conversation = split_system_and_conversation(modified_messages)
 
     if not instructions:
@@ -110,6 +112,8 @@ async def rerun_from_node(
     input_messages: Any = conversation if conversation else "Continue."
 
     try:
+        # Set factory context so tools (if any) can resolve working directory
+        set_current_factory(factory)
         run_result_streaming = Runner.run_streamed(
             agent,
             input_messages,
@@ -123,6 +127,8 @@ async def rerun_from_node(
     except Exception as e:
         logger.error(f"Rerun execution failed: {e}")
         raise
+    finally:
+        reset_current_factory()
 
     return {
         "output": final_output,

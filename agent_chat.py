@@ -4,6 +4,7 @@ Legacy chat interface for Grid Agent System.
 Simplified version of the main.py CLI for backward compatibility.
 """
 
+import signal
 import asyncio
 import argparse
 import sys
@@ -289,6 +290,15 @@ async def main():
         # Beautiful initialization
         print("Starting Grid Agent System...")
         
+        # Start timeline dashboard server immediately (read-only until factory is ready)
+        timeline_handle = None
+        try:
+            from timeline.integration import run_timeline_server, TimelineHandle
+            timeline_handle = TimelineHandle()
+            asyncio.create_task(run_timeline_server(handle=timeline_handle, port=8789))
+        except Exception as _tl_err:
+            print(f"Timeline server not started: {_tl_err}")
+
         # Load configuration
         print("Load Config")
         config = Config(args.config, args.path)
@@ -363,6 +373,9 @@ async def main():
         print("Initialize SecurityAwareAgentFactory - Agent factory initialized")
         selected_context_id: Optional[str] = None
         last_context_id: Optional[str] = None
+        # Update timeline dashboard with factory for rerun support
+        if timeline_handle is not None:
+            timeline_handle.update_factory(factory)
 
         def extract_context_id_from_text(text: Optional[str]) -> Optional[str]:
             if not text:
@@ -373,12 +386,6 @@ async def main():
         def is_context_id(value: Optional[str]) -> bool:
             return bool(value and re.fullmatch(r"ctx-[0-9a-f]{8}", value))
 
-        # Start timeline dashboard server in background (with factory for rerun support)
-        try:
-            from timeline.integration import run_timeline_server
-            asyncio.create_task(run_timeline_server(factory=factory, port=8789))
-        except Exception as _tl_err:
-            print(f"Timeline server not started: {_tl_err}")
 
         # Tracing is configured automatically by Agents SDK
 
@@ -396,11 +403,12 @@ async def main():
             except Exception as exc:
                 print(f"⚠️ Failed to activate context {args.context_path}: {exc}")
 
-        # Context is automatically managed by ContextManager
-        # - New clean context is created on each startup
-        # - Old contexts are preserved and accessible via Context ID
         if not activated_existing_context:
             print("Context - New session created, old contexts accessible by ID")
+        
+        # Let the timeline server task complete its startup (print URL, etc.)
+        # before we enter interactive mode or single-message mode.
+        await asyncio.sleep(0)
         
         print("Grid Agent System ready for work")
         
@@ -411,6 +419,25 @@ async def main():
             context_path=args.context_path,
         )
         
+        # ── Ctrl+C handling ───────────────────────────────────────────
+        # Use asyncio's native signal handler so SIGINT cancels the current
+        # task cleanly instead of raising KeyboardInterrupt at random places.
+        _shutdown_flag = False
+        _main_task = asyncio.current_task()
+
+        def _on_sigint():
+            nonlocal _shutdown_flag, _main_task
+            if _shutdown_flag:
+                print("\nForce exit...")
+                os._exit(1)
+            _shutdown_flag = True
+            # Cancel the main task to trigger CancelledError cleanly
+            if _main_task:
+                _main_task.cancel()
+
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, _on_sigint)
+
         if args.message:
             # Single message mode
             print(f"Processing message")
@@ -487,6 +514,8 @@ async def main():
             except Exception as e:
                 print("Operation completed")
                 print(f"Error: {e}")
+            except asyncio.CancelledError:
+                print("\nInterrupted.")
         else:
             # Interactive mode
             print("\nCommands:")
@@ -509,7 +538,12 @@ async def main():
                 print(prompt, end="", flush=True)
                 loop = asyncio.get_running_loop()
                 import sys
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(None, sys.stdin.readline)
+                except asyncio.CancelledError:
+                    # Ctrl+C in run_in_executor manifests as CancelledError,
+                    # translate to KeyboardInterrupt for uniform handling.
+                    raise KeyboardInterrupt()
                 if not line:
                     raise EOFError
                 return line.rstrip('\n')
@@ -738,14 +772,20 @@ async def main():
                 except KeyboardInterrupt:
                     print("\n\nInterrupted. Goodbye!")
                     break
+                except asyncio.CancelledError:
+                    print("\n\nInterrupted. Goodbye!")
+                    break
                 except EOFError:
                     print("\n\nEOF. Goodbye!")
                     break
         
         # Beautiful cleanup and session summary
-        print("Cleanup")
-        await factory.cleanup()
-        print("Cleanup - Resources freed")
+        try:
+            print("Cleanup")
+            await factory.cleanup()
+            print("Cleanup - Resources freed")
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\nCleanup interrupted.")
         
         # Session summary
         print("Grid Agent System finished")
@@ -754,6 +794,9 @@ async def main():
         print(f"Grid Error: {e}")
         print(f"Grid Error: {e}")
         sys.exit(1)
+    except asyncio.CancelledError:
+        print("\nInterrupted.")
+        sys.exit(0)
     except Exception as e:
         print(f"Unexpected error: {e}")
         print(f"Unexpected Error: {e}")
@@ -762,4 +805,10 @@ async def main():
         sys.exit(1)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Clean exit on Ctrl+C — suppress the ugly asyncio.run() traceback.
+        # The inner loop already printed "Interrupted. Goodbye!" so just exit.
+        print()
+        sys.exit(0)
