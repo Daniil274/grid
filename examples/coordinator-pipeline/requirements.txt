@@ -1,0 +1,13 @@
+# Coordinator Pipeline Example - Requirements
+# Наследует зависимости из claude-tools и основной системы
+
+# Основные зависимости Grid (уже должны быть установлены)
+# См. requirements.txt в корне проекта
+
+# Дополнительные зависимости для инструментов
+Pillow>=10.0.0       # Обработка изображений
+pyserial>=3.5         # Serial порт (опционально)
+
+# Web tools
+requests>=2.31.0
+beautifulsoup4>=4.12.0

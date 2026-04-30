@@ -1,0 +1,12 @@
+# Environment
+.env
+
+# Workspace (runtime data)
+workspace/data/
+workspace/logs/
+workspace/test_results/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
