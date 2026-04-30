@@ -1,0 +1,295 @@
+# ISKOR-window-autotest Configuration
+# Автотестирование UI через захват окна приложения (без физического прибора)
+# Инструменты: xdotool (ввод клавиш) + mss (захват экрана)
+
+isolation:
+  enabled: false
+
+settings:
+  default_agent: "ui_tester"
+  max_history: 30
+  max_turns: 100
+  agent_timeout: 300
+  debug: true
+  mcp_enabled: false
+
+  working_directory: "/home/user/grid/examples/ISKOR-window-autotest/workspace"
+  config_directory: "."
+  logs_directory: "/home/user/grid/logs"
+  allow_path_override: true
+
+  agent_logging:
+    enabled: false
+    level: "full"
+    save_prompts: true
+    save_conversations: true
+    save_executions: true
+
+  image_processing:
+    enabled: true
+    auto_resize: true
+    max_width: 1920
+    max_height: 1080
+    max_file_size_mb: 10
+    jpeg_quality: 85
+
+  compact:
+    enabled: true
+    micro:
+      enabled: true
+      gap_threshold_minutes: 60.0
+      preserve_last_n: 5
+    auto:
+      enabled: true
+      buffer_tokens: 13000
+      warning_buffer_tokens: 20000
+      error_buffer_tokens: 20000
+      manual_buffer_tokens: 3000
+      max_output_tokens_for_summary: 20000
+      max_consecutive_failures: 3
+
+  # Настройки захвата окна приложения (вместо serial)
+  window:
+    # Паттерн поиска окна по заголовку (xdotool search --name)
+    # Поддерживает частичное совпадение: "ISKOR" найдёт "ISKOR405 v1.2.3"
+    # Переопределяется переменной окружения: ISKOR_WINDOW_TITLE=MyApp
+    title_pattern: "ISKOR405"
+
+    # Пауза в секундах после каждого нажатия кнопки
+    # Даёт приложению время обработать событие перед следующим действием
+    key_delay_sec: 0.3
+
+    # Дополнительная задержка перед захватом скриншота
+    # Даёт WM время отрисовать обновлённый UI
+    screenshot_delay_sec: 0.2
+
+  project_tools:
+    enabled: true
+    tools_directory: "./tools"
+    base_tools:
+      - "list_files"
+      - "read_file"
+      - "write_file"
+      - "append_to_file"
+
+providers:
+  openrouter:
+    name: "openrouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+
+  lm-studio:
+    name: "lm-studio"
+    base_url: "http://192.168.3.2:1234/v1"
+    api_key: "lm-studio"
+    timeout: 300
+    max_retries: 3
+
+  opencode:
+    name: opencode
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: "OPENCODE_API_KEY"
+    timeout: 300
+    max_retries: 3
+    streaming_enabled: true
+
+models:
+
+  qwen-3.6-plus:
+    name: qwen/qwen3.6-plus-preview:free
+    provider: openrouter
+    temperature: 0.7
+    max_tokens: 8192
+    description: Qwen 3.5 397b модель
+    streaming_enabled: true
+
+  qwen3.5-flash:
+    name: "qwen/qwen3.5-122b-a10b:alibaba"
+    provider: "openrouter"
+    temperature: 0.7
+    max_tokens: 8192
+    description: "Qwen 3.5 Flash — быстрая модель для тестирования"
+    streaming_enabled: true
+
+  qwen3.5-27b:
+    name: "qwen/qwen3.5-27b:alibaba"
+    provider: "openrouter"
+    temperature: 0.3
+    max_tokens: 8000
+    description: "qwen3.5-27b"
+    streaming_enabled: true
+
+  kimi-k2.5:
+    name: kimi-k2.5
+    provider: opencode
+    temperature: 0.5
+    max_tokens: 8000
+    description: kimi-k2.5
+    streaming_enabled: true
+    preserve_reasoning_content: true
+
+  qwen3.5-35b-local:
+    name: "qwen/qwen3.5-35b-a3b"
+    provider: "lm-studio"
+    temperature: 0.3
+    max_tokens: 8192
+    description: "Qwen 3.5 35b локально"
+    streaming_enabled: true
+
+tools:
+  skill_list:
+    type: "function"
+    description: "List all available skill names"
+
+  skill_create:
+    type: "function"
+    description: "Create a new skill"
+
+  skill_update:
+    type: "function"
+    description: "Update an existing skill"
+
+  skill_delete:
+    type: "function"
+    description: "Delete a skill"
+
+  skill_read:
+    type: "function"
+    description: "Read the content of a skill"
+
+  # --------------------------------------------------------------------------
+  # GUI window automation tools (заменяют serial-инструменты)
+  # --------------------------------------------------------------------------
+  ping_device:
+    type: "function"
+    description: "Проверить, что окно приложения открыто и видно на экране."
+    prompt_addition: |
+      ping_device() → ищет окно приложения по заголовку (ISKOR_WINDOW_TITLE).
+      Возвращает window_id и геометрию окна если найдено.
+
+  key_press:
+    type: "function"
+    description: "Отправить одно нажатие клавиши в окно приложения."
+    prompt_addition: |
+      key_press(key) → посылает клавишу в окно через xdotool.
+      Допустимые ключи: '0'..'9', 'enter', 'esc', 'up', 'down', 'left', 'right', 'q', 'off'.
+
+  key_hold:
+    type: "function"
+    description: "Удержать клавишу в окне приложения на заданное время."
+    prompt_addition: |
+      key_hold(key, duration_ms=1000) → xdotool keydown + sleep + keyup.
+      X11 генерирует авто-повтор событий во время удержания.
+
+  get_screen:
+    type: "function"
+    description: "Захватить скриншот окна приложения (mss по геометрии xdotool)."
+    prompt_addition: |
+      get_screen(save_path=None) → захватывает регион экрана, занятый окном приложения.
+      Возвращает текст с метаданными и изображение для анализа.
+
+  view_image:
+    type: "function"
+    description: "Анализирует изображение с помощью vision модели"
+
+  crop_image:
+    type: "function"
+    description: "Вырезает фрагмент изображения по координатам"
+
+  save_test_result:
+    type: "function"
+    description: "Сохраняет результат теста в JSON формате"
+
+  list_files:
+    type: "function"
+    description: "Список файлов в директории"
+
+  file_write:
+    type: function
+    description: Записывает содержимое в файл.
+
+  read_file:
+    type: "function"
+    description: "Читает текст из файла"
+
+  append_to_file:
+    type: "function"
+    description: "Добавляет текст в конец файла"
+
+  file_list:
+    type: "function"
+    description: "Список файлов в директории (без дерева)."
+
+  ui_tester:
+    type: "agent"
+    description: "Агент тестирования UI окна приложения"
+    prompt_addition: |
+      Вызывай ui_tester с чётким планом тестирования.
+      Агент нажимает клавиши в окно приложения, делает скриншоты и пишет отчёты.
+
+agents:
+  ui_tester:
+    name: "UI Tester (Window)"
+    model: "qwen3.5-flash"
+    tools: [
+      ping_device, key_press, key_hold, get_screen,
+      crop_image, append_to_file,
+      skill_list, skill_read, skill_create,
+      file_list
+    ]
+    description: "Агент тестирования UI через захват окна приложения"
+    custom_prompt: |
+      # Ты автономный агент для автоматизированного тестирования UI приложения через захват окна.
+      Вместо физического прибора ты работаешь с окном запущенного приложения на экране.
+
+      ## Инструменты:
+      - ping_device() — убедиться, что окно приложения открыто
+      - get_screen() — захватить скриншот окна
+      - key_press(key) — нажать клавишу в окне
+      - key_hold(key, duration_ms) — удержать клавишу
+      - crop_image() — вырезать фрагмент для детального анализа
+
+      ## Протокол тестирования:
+      1. Проверь наличие окна (ping_device)
+      2. Сделай начальный скриншот
+      3. Выполни тестовые действия, делая скриншот после каждого важного шага
+      4. Сохраняй результаты в отчёт markdown со встроенными скриншотами
+
+      ## Правила:
+      - Нажимай не больше одной кнопки за раз
+      - ВСЕГДА делай скриншот перед и после важных действий
+      - Имена файлов скриншотов: test_name_step_N.png
+      - Отвечай на русском языке
+      - Если окно не найдено — останови тестирование и сообщи об ошибке
+
+  test_coordinator:
+    name: "Test Coordinator (Window)"
+    model: kimi-k2.5
+    tools: [
+      file_list, read_file, file_write, append_to_file,
+      skill_list, skill_read, skill_create,
+      view_image, crop_image,
+      ping_device, key_press, key_hold, get_screen,
+      ui_tester
+    ]
+    description: "Координатор тестовых прогонов для GUI-автоматизации"
+    custom_prompt: |
+      # Ты координатор агентов автоматизированного тестирования UI через захват окна.
+      ## Порядок работы:
+      1. Получить задачу от пользователя
+      2. Проверить, что окно приложения открыто (ping_device)
+      3. Разбить задачу на небольшие тесты и делегировать ui_tester
+      4. Собрать результаты и написать итоговый отчёт
+      ## Правила:
+      - Агент ui_tester не имеет памяти между вызовами — давай ему полный контекст
+      - Разбивай задачу на маленькие шаги — это эффективнее, чем один большой вызов
+      - Будь критичен к результатам агентов, проверяй скриншоты
+
+prompt_templates:
+  base: |
+    Ты агент системы автоматизированного тестирования GUI приложения через захват окна.
+    Всегда отвечай на русском языке.
+    Используй доступные инструменты для выполнения задач.
