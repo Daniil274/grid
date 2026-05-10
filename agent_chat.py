@@ -436,7 +436,15 @@ async def main():
                 _main_task.cancel()
 
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, _on_sigint)
+        try:
+            loop.add_signal_handler(signal.SIGINT, _on_sigint)
+        except NotImplementedError:
+            # Windows ProactorEventLoop supports subprocesses but not
+            # add_signal_handler; use the regular signal module there.
+            signal.signal(
+                signal.SIGINT,
+                lambda _signum, _frame: loop.call_soon_threadsafe(_on_sigint),
+            )
 
         if args.message:
             # Single message mode
