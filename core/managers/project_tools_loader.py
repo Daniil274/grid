@@ -11,6 +11,7 @@ import importlib
 import importlib.util
 import inspect
 import logging
+import hashlib
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 
@@ -87,11 +88,16 @@ class ProjectToolsLoader:
             file_path: Path to module file
         """
         try:
-            # Create the full module name for import
-            # Use the relative path from config_dir
-            relative_path = file_path.relative_to(self.config_dir)
-            parts = list(relative_path.parts[:-1]) + [relative_path.stem]
-            full_module_name = ".".join(parts)
+            # Create the full module name for import.
+            # Project tools may live outside config_dir, for example shared
+            # tools used by multiple example configs.
+            try:
+                relative_path = file_path.relative_to(self.config_dir)
+                parts = list(relative_path.parts[:-1]) + [relative_path.stem]
+                full_module_name = ".".join(parts)
+            except ValueError:
+                digest = hashlib.sha1(str(file_path.resolve()).encode("utf-8")).hexdigest()[:12]
+                full_module_name = f"_project_tools_{digest}_{file_path.stem}"
 
             logger.debug(f"Loading module: {full_module_name} from {file_path}")
 
@@ -107,7 +113,8 @@ class ProjectToolsLoader:
                     module = cached  # Same file — safe to reuse
                 else:
                     # Collision with another module — use a unique name
-                    full_module_name = f"_project_tools_.{full_module_name}"
+                    digest = hashlib.sha1(str(file_path.resolve()).encode("utf-8")).hexdigest()[:12]
+                    full_module_name = f"_project_tools_{digest}_{file_path.stem}"
                     cached = sys.modules.get(full_module_name)
                     if cached is not None:
                         module = cached
