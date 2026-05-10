@@ -85,6 +85,21 @@ def _coerce_optional_str(val: Any) -> Optional[str]:
     return None
 
 
+def _has_config_entry(factory: Any, getter_name: str, key: str) -> bool:
+    getter = getattr(getattr(factory, "config", None), getter_name, None)
+    if getter is None:
+        return False
+    try:
+        getter(key)
+        return True
+    except Exception:
+        return False
+
+
+def _is_known_model_or_agent(factory: Any, key: str) -> bool:
+    return _has_config_entry(factory, "get_model", key) or _has_config_entry(factory, "get_agent", key)
+
+
 def _coerce_tool_list(val: Any) -> Optional[List[str]]:
     """
     Accept:
@@ -251,7 +266,9 @@ async def orchestrate(
         try:
             tool_cfg = factory.config.get_tool("orchestrate")
             if tool_cfg.env_vars:
-                default_model_key = tool_cfg.env_vars.get("DEFAULT_MODEL")
+                default_model_key = _coerce_optional_str(tool_cfg.env_vars.get("DEFAULT_MODEL"))
+                if default_model_key and default_model_key.strip().lower() == "default":
+                    default_model_key = None
         except Exception:
             pass
 
@@ -259,7 +276,17 @@ async def orchestrate(
         # Treat "default" as "model from config" (DEFAULT_MODEL or default_agent), not as a model key
         if effective_key and effective_key.strip().lower() == "default":
             effective_key = None
-        resolved_model_key = effective_key or default_model_key or factory.resolve_model_key(None)
+
+        requested_model_key = effective_key or default_model_key
+        if effective_key and not _is_known_model_or_agent(factory, effective_key):
+            logger.warning(
+                "orchestrate: unknown model_key '%s'; using orchestrate DEFAULT_MODEL '%s'",
+                effective_key,
+                default_model_key,
+            )
+            requested_model_key = default_model_key
+
+        resolved_model_key = factory.resolve_model_key(requested_model_key)
         coerced_executor_tools = _coerce_tool_list(executor_tools)
 
         # Parse init_tools JSON (optional context-gathering tools)
