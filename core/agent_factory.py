@@ -971,7 +971,7 @@ class AgentFactory:
             )
             
             # Get tools (function and agent tools only; MCP tools handled via mcp_servers)
-            tools = await self._get_agent_tools(agent_config)
+            tools = await self._get_agent_tools(agent_config, agent_key=agent_key)
 
             # Prepare MCP servers for this agent (if enabled)
             mcp_server_names: list[str] = []
@@ -2877,7 +2877,7 @@ DO NOT write XML tags manually!"""
         tool.on_invoke_tool = limited_invoke
         return tool
 
-    async def _get_agent_tools(self, agent_config: AgentConfig) -> List[Any]:
+    async def _get_agent_tools(self, agent_config: AgentConfig, agent_key: Optional[str] = None) -> List[Any]:
         """Get all tools for agent with caching."""
         cache_key = f"{agent_config.name}:{hash(tuple(agent_config.tools))}"
         
@@ -2923,7 +2923,7 @@ DO NOT write XML tags manually!"""
         # Add agent tools
         if agent_tools:
             try:
-                agent_tool_instances = await self._create_agent_tools(agent_tools)
+                agent_tool_instances = await self._create_agent_tools(agent_tools, current_agent_key=agent_key)
                 tools.extend(agent_tool_instances)
 
             except Exception as e:
@@ -2935,19 +2935,24 @@ DO NOT write XML tags manually!"""
         
         return tools
     
-    async def _create_agent_tools(self, agent_keys: List[str]) -> List[Any]:
+    async def _create_agent_tools(self, agent_keys: List[str], current_agent_key: Optional[str] = None) -> List[Any]:
         """Create agent tools with proper logging and context sharing."""
         tools = []
         
-        for agent_key in agent_keys:
+        for agent_tool_key in agent_keys:
             try:
-                # Create sub-agent
-                sub_agent = await self.create_agent(agent_key)
-                
                 # Get tool configuration
-                tool_config = self.config.get_tool(agent_key)
-                tool_name = tool_config.name or f"call_{agent_key}"
-                tool_description = tool_config.description or f"Calls {sub_agent.name}"
+                tool_config = self.config.get_tool(agent_tool_key)
+                target_agent_key = getattr(tool_config, "target_agent", None) or agent_tool_key
+                target_agent_config = self.config.get_agent(target_agent_key)
+                tool_name = tool_config.name or f"call_{target_agent_key}"
+
+                # Self-referential coordinator tools must be lazy. Creating the
+                # target eagerly while the parent agent is still being assembled
+                # recurses through _get_agent_tools indefinitely.
+                sub_agent = None if target_agent_key == current_agent_key else await self.create_agent(target_agent_key)
+                target_agent_name = getattr(sub_agent, "name", None) or target_agent_config.name
+                tool_description = tool_config.description or f"Calls {target_agent_name}"
                 
                 # Get context sharing parameters from tool config
                 context_strategy = getattr(tool_config, 'context_strategy', 'conversation')
@@ -2956,7 +2961,7 @@ DO NOT write XML tags manually!"""
                 
                 # Create context-aware tool (primary name)
                 main_tool = self._create_context_aware_agent_tool(
-                    agent_key=agent_key,
+                    agent_key=target_agent_key,
                     sub_agent=sub_agent,
                     tool_name=tool_name,
                     tool_description=tool_description,
@@ -2966,14 +2971,14 @@ DO NOT write XML tags manually!"""
                 )
                 
                 # Wrap for logging
-                wrapped_main = self._wrap_agent_tool(main_tool, sub_agent.name)
+                wrapped_main = self._wrap_agent_tool(main_tool, target_agent_name)
                 tools.append(wrapped_main)
                 
                 # Add channel aliases to avoid errors when model appends channel suffixes
                 channel_suffixes = ("_commentary", "_tool", "_final")
                 for suffix in channel_suffixes:
                     alias_tool = self._create_context_aware_agent_tool(
-                        agent_key=agent_key,
+                        agent_key=target_agent_key,
                         sub_agent=sub_agent,
                         tool_name=f"{tool_name}{suffix}",
                         tool_description=tool_description,
@@ -2981,12 +2986,12 @@ DO NOT write XML tags manually!"""
                         context_depth=context_depth,
                         include_tool_history=include_tool_history
                     )
-                    wrapped_alias = self._wrap_agent_tool(alias_tool, sub_agent.name)
+                    wrapped_alias = self._wrap_agent_tool(alias_tool, target_agent_name)
                     tools.append(wrapped_alias)
                 
             except Exception as e:
                 logger.error(
-                    "Failed to configure agent tool", extra={"agent_tool": agent_key}, exc_info=e
+                    "Failed to configure agent tool", extra={"agent_tool": agent_tool_key}, exc_info=e
                 )
 
         return tools
@@ -3123,7 +3128,7 @@ DO NOT write XML tags manually!"""
     def _create_context_aware_agent_tool(
         self,
         agent_key: str,
-        sub_agent: Agent,
+        sub_agent: Optional[Agent],
         tool_name: str,
         tool_description: str,
         context_strategy: str = "minimal",
@@ -3149,6 +3154,10 @@ DO NOT write XML tags manually!"""
             context: RunContextWrapper,
             input: str,
         ) -> str:
+            local_sub_agent = sub_agent
+            if local_sub_agent is None:
+                local_sub_agent = await self.create_agent(agent_key)
+
             # Prepare human-readable context for the sub-agent
             # At this level, input must be a string, as normalization happened in `wrapped_invoke_tool`
             if not isinstance(input, str) or not input.strip():
@@ -3183,7 +3192,7 @@ DO NOT write XML tags manually!"""
                 # Create a new context for the sub-agent if no context is passed
                 new_context_id = f"ctx-{uuid.uuid4().hex[:8]}"
                 session = self._get_agent_session(agent_key, new_context_id)
-            sub_agent._session = session
+            local_sub_agent._session = session
 
             # Create GridRunContext for sub-agent with LOCAL session access
             # Inherit user_id from parent context
@@ -3204,7 +3213,7 @@ DO NOT write XML tags manually!"""
             # Execute auto_run_tools for sub-agent (mirrors logic in run_agent())
             sub_agent_config = self.config.get_agent(agent_key)
             if getattr(sub_agent_config, "auto_run_tools", None):
-                sub_agent_tools = getattr(sub_agent, "tools", []) or []
+                sub_agent_tools = getattr(local_sub_agent, "tools", []) or []
                 working_dir = "/" if self.container_id else self.config.get_working_directory()
                 init_key = f"{agent_key}:{parent_user_id or 'default'}"
 
@@ -3246,7 +3255,7 @@ DO NOT write XML tags manually!"""
             set_current_factory(self)
             try:
                 run_result_streaming = _get_runner().run_streamed(
-                    starting_agent=sub_agent,
+                    starting_agent=local_sub_agent,
                     input=enhanced_input,
                     context=sub_run_ctx,  # Pass sub-agent context with session
                     session=session,

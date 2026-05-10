@@ -151,7 +151,7 @@ class Settings(BaseModel):
     """Global system settings."""
     default_agent: str = "assistant"
     max_history: int = Field(default=15, ge=1, le=100)
-    max_turns: int = Field(default=10, ge=1, le=100)
+    max_turns: int = Field(default=10, ge=1, le=300)
     agent_timeout: int = Field(default=300, ge=30, le=1800)
     debug: bool = False
     mcp_enabled: bool = False

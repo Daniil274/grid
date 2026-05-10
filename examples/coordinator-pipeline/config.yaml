@@ -3,18 +3,18 @@
 # с инструментами из claude-tools
 
 isolation:
-  enabled: false
+  enabled: true
 
 settings:
   default_agent: "coordinator"
   max_history: 100
-  max_turns: 150
+  max_turns: 300
   agent_timeout: 900
   debug: true
   mcp_enabled: false
   max_tool_output_tokens: 16000
-  working_directory: "/home/user/grid/examples/coordinator-pipeline/workspace"
-  config_directory: "."
+  working_directory: .
+  config_directory: .
   allow_path_override: true
 
   agent_logging:
@@ -36,23 +36,13 @@ settings:
     enabled: true
     tools_directory: "../../examples/claude-tools/tools"
 
-  tools_common_rules: |
-    - Используй специализированные инструменты вместо bash, когда они подходят задаче.
-    - Для чтения файлов используй `file_read`, а не `cat`, `head`, `tail`, `sed`.
-    - Для редактирования файлов используй `file_edit`, а не `sed` или `awk`.
-    - Для создания файлов используй `file_write`, а не heredoc через shell.
-    - Для поиска файлов используй `glob_tool`, для поиска по содержимому — `grep_tool`.
-    - Если нужно сделать несколько независимых вызовов инструментов, делай их параллельно в одном ответе.
-    - Если задача состоит из нескольких заметных шагов, веди её через `todo_write` и держи ровно одну задачу в `in_progress`.
-
 compact:
   enabled: true
-  summary_max_output_tokens: 4000
-
+  summary_max_output_tokens: 16000
   auto:
     enabled: true
-    max_output_tokens_for_summary: 4000
-    buffer_tokens: 3000
+    max_output_tokens_for_summary: 64000
+    buffer_tokens: 16000
     warning_buffer_tokens: 2000
     error_buffer_tokens: 1000
     manual_buffer_tokens: 500
@@ -98,24 +88,7 @@ providers:
     timeout: 300
     max_retries: 3
 
-  anthropic:
-    name: "anthropic"
-    base_url: "https://api.anthropic.com/v1"
-    api_key_env: "ANTHROPIC_API_KEY"
-    timeout: 300
-    max_retries: 3
-
 models:
-  claude-sonnet-4.6:
-    name: claude-sonnet-4-6
-    provider: "anthropic"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "Anthropic Claude Sonnet 4.6 — for coordinator"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
   kimi-k2.6-opencode:
     name: "kimi-k2.6"
     provider: "opencode"
@@ -136,29 +109,77 @@ models:
     streaming_enabled: true
     preserve_reasoning_content: true
 
+  deepseek-v4-flash-opencode:
+    name: deepseek-v4-flash
+    provider: "opencode"
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: deepseek-v4-pro
+    streaming_enabled: true
+    preserve_reasoning_content: true
+
+
 tools:
+  beads_init:
+    type: function
+    description: Initialize beads (bd) in the given directory. Idempotent; safe if already initialized.
+  beads_ready:
+    type: function
+    description: List beads tasks that are ready to be worked on (no open blockers)
+  beads_list:
+    type: function
+    description: List beads tasks with optional filters and pagination
+  beads_create:
+    type: function
+    description: Create a new bead (task, epic, message, etc.)
+  beads_show:
+    type: function
+    description: Show detailed information about a specific bead
+  beads_update:
+    type: function
+    description: Update an existing bead
+  beads_close:
+    type: function
+    description: Close a bead
+  beads_sync:
+    type: function
+    description: Sync beads with the remote repository
+  beads_dep:
+    type: function
+    description: Manage dependencies between beads
+  beads_log_append:
+    type: function
+    description: Append a single entry to a shared, append-only JSONL log (inside .beads/shared_log/).
+  beads_log_read:
+    type: function
+    description: Read ONLY new log data for (channel, reader) since the last read (cursor-based).
+  
   # ── Core orchestration ──────────────────────────────────────────
   orchestrate:
     type: "function"
     name: "orchestrate"
     description: "Meta-tool: запускает динамического агента для решения подзадачи."
     prompt_addition: |
-      `orchestrate(task, agent_system_prompt=None, model_key=None, executor_tools=None)`
+      `orchestrate(task, agent_system_prompt=None, model_key=None, executor_tools=None, context_id=None, init_tools=None)`
       Главный инструмент координатора. Запускает автономного агента, который решает переданную задачу.
       
       Параметры:
       - `task`: полное описание задачи для агента (строкой)
       - `agent_system_prompt`: системный промпт — роль, протокол, требования к результату
       - `model_key`: ключ модели (kimi-k2.6-opencode, deepseek-v4-pro-opencode и др.)
-      - `executor_tools`: список инструментов агента (массив строк или JSON-строка)
+      - `executor_tools`: список инструментов агента (массив строк, JSON-строка или CSV)
+      - `context_id`: опциональный ID контекста для продолжения общей ветки
+      - `init_tools`: опциональная JSON-строка со списком предварительных вызовов инструментов перед стартом агента
       
       Агент выполняется изолированно и возвращает JSON с полем `final` — итоговый ответ.
+      Вызовы `orchestrate` исполняются последовательно, в depth-first порядке. Не рассчитывай на параллельный runtime.
       
       Важно: каждый вызов orchestrate должен содержать САМОДОСТАТОЧНУЮ задачу.
       Не ссылайся на «предыдущие находки» — включай всё необходимое в task и agent_system_prompt.
     
     env_vars:
-      DEFAULT_MODEL: "kimi-k2.6-opencode"
+      DEFAULT_MODEL: deepseek-v4-flash-opencode
 
   # ── Claude-tools (function) ─────────────────────────────────────
   bash_tool:
@@ -286,14 +307,15 @@ tools:
     context_depth: 5
     include_tool_history: false
 
-  web_spider:
+  call_coordinator:
     type: "agent"
-    name: "WebSpider"
-    description: "Launch a web research subagent that searches the internet, follows relevant pages, and returns a concise fact-and-sources report."
+    name: "call_coordinator"
+    target_agent: "coordinator"
+    description: "Call another instance of the coordinator for a bounded subtask that needs its own decomposition."
     prompt_addition: |
-      `WebSpider(input)`
-      Используй `WebSpider` для веб-исследования: поиск свежей информации, обход найденных страниц, сбор фактов, ссылок, документации и кратких выводов.
-      Передавай чёткий briefing: что нужно найти, какие домены или источники предпочтительны, какие ограничения есть по глубине поиска и какой формат ответа нужен.
+      `call_coordinator(input)`
+      Используй для крупной выделенной ветки, где нужен такой же координатор: у ветки должны быть четкие границы, bead_id, ожидаемый результат и критерии готовности.
+      Не используй для атомарной работы, которую можно отдать одному `orchestrate`-агенту.
     context_strategy: "minimal"
     context_depth: 4
     include_tool_history: false
@@ -304,11 +326,12 @@ tools:
 agents:
   # ── Координатор ─────────────────────────────────────────────────
   coordinator:
-    name: "Coordinator"
-    model: claude-sonnet-4.6
+    name: Координатор
+    model: deepseek-v4-pro-opencode
     tools:
-      # Мета-инструмент для запуска динамических агентов
+        # Мета-инструмент для запуска динамических агентов
       - orchestrate
+      - call_coordinator
       # Инструменты claude-tools (для прямых операций координатора)
       - bash_tool
       - file_read
@@ -319,204 +342,171 @@ agents:
       - grep_tool
       - web_fetch
       - web_search
-      - notebook_read
-      - notebook_edit
-      - notebook_create
-      - todo_write
-      - todo_list
-      - todo_delete
-      - todo_clear
-      # Агент-инструменты (субагенты)
-      - general_purpose
-      - web_spider
-    system_skills:
-      - coordinator_pipeline_skill
-    description: "Автономный координатор — строит агентские пайплайны через orchestrate для решения инженерных задач"
+      - beads_ready
+      - beads_list
+      - beads_create
+      - beads_show
+      - beads_update
+      - beads_close
+      - beads_sync
+      - beads_dep
+      - beads_init
+      - beads_log_append
+      - beads_log_read
+    auto_run_tools:
+    - name: beads_init
+      parameters:
+        directory: ${working_directory}
+    - name: beads_ready
+      parameters:
+        directory: ${working_directory}
     custom_prompt: |
-      You are GRID Coordinator — an AI that orchestrates software engineering tasks across autonomous agent pipelines.
+      Ты координатор агентного pipeline. Твоя задача - понять запрос, выбрать минимальный рабочий процесс, запустить нужных агентов через `orchestrate`, собрать их результаты и вернуть проверенный итог.
 
-      ## 1. Your Role
+      ## 0. Главный принцип
+      Делегируй только тогда, когда это снижает риск или стоимость контекста.
+      Если задачу можно надежно решить прямыми инструментами координатора за 1-2 шага, решай сам.
+      Если нужны анализ проекта, изменение файлов, несколько источников, ревью или верификация - используй pipeline через `orchestrate` и beads.
 
-      You are a **coordinator**. Your job is to:
-      - Help the user achieve their goal
-      - Decompose tasks and build autonomous agent pipelines via `orchestrate`
-      - Synthesize results and communicate with the user
-      - Answer simple questions directly when possible — don't build a pipeline for trivial tasks
+      ## 1. Реальные инструменты
+      В `executor_tools` передавай только ключи из конфигурации. Не используй несуществующие имена `filesystem`, `terminal`, `read_file`, `run_command`, `memory_save`, `memory_search`.
+      `call_coordinator` - это отдельный agent-tool для делегирования ветки координатору; его нельзя передавать в `executor_tools` для обычных агентов.
 
-      You are NOT an executor. Your value is in correct decomposition, agent briefing, and result synthesis.
+      Условные пресеты ниже нужны только для планирования. В `executor_tools` всегда раскрывай их в реальные ключи:
+      - `tool1_read`: `["file_read", "glob_tool", "grep_tool", "beads_show"]`
+      - `tool2_edit`: `["file_read", "file_edit", "file_write", "file_append", "bash_tool", "glob_tool", "grep_tool", "beads_show", "beads_update"]`
+      - `tool3_verify`: `["file_read", "bash_tool", "glob_tool", "grep_tool", "beads_show", "beads_update"]`
+      - `tool4_web`: `["web_search", "web_fetch", "beads_show", "beads_update"]`
+      - `tool5_beads_admin`: `["beads_show", "beads_update", "beads_create", "beads_dep", "beads_close", "beads_list", "beads_ready"]`
 
-      ## 2. Your Tools
+      Координатору доступны `orchestrate`, `call_coordinator`, файловые инструменты, `bash_tool`, `web_fetch`, `web_search` и `beads_*`. Для shell-команд используй `bash_tool`; для чтения/поиска/правок предпочитай профильные инструменты.
 
-      ### Primary: `orchestrate` — Your Pipeline Engine
+      ## 2. Preflight перед работой
+      Перед действиями быстро классифицируй задачу:
+      - тривиальная или нет;
+      - нужен ли анализ файлов/документации;
+      - будут ли изменения файлов;
+      - нужны ли web-источники;
+      - какие артефакты должны появиться;
+      - чем подтвердить результат.
 
-      `orchestrate(task, agent_system_prompt, model_key, executor_tools)` launches an autonomous agent that solves a single well-defined subtask.
+      Выбирай самый короткий достаточный поток:
+      - `direct`: простой ответ или локальная операция без риска;
+      - `executor -> verifier`: понятная задача с изменениями;
+      - `context -> executor -> verifier`: задача требует предварительного анализа;
+      - `fan-out -> synthesize -> verifier`: есть независимые части.
 
-      **When to use orchestrate:**
-      - Research tasks: codebase exploration, documentation study, architecture analysis
-      - Implementation tasks: writing files, editing code, executing commands
-      - Verification tasks: running tests, reviewing code, validating outputs
+      ## 3. Runtime-модель
+      `orchestrate` запускает динамического агента и возвращает JSON с полем `final`.
+      Несколько вызовов `orchestrate` в одном ходе исполняются последовательно, depth-first. Не планируй шаг так, будто между уже отправленными вызовами у тебя будет новый reasoning-loop.
+      Если следующий агент зависит от предыдущего, связывай их через bead, файл или `context_id`, а не через твои будущие размышления.
 
-      **How to use orchestrate:**
-      - Each call must be SELF-CONTAINED. The agent sees only what you put in `task` and `agent_system_prompt`.
-      - Never write "based on previous findings" — include the actual data.
-      - Specify `executor_tools` explicitly for each agent based on its role.
-      - Use `model_key` to choose model: "kimi-k2.6-opencode" for complex work, "deepseek-v4-pro-opencode" for lightweight tasks.
+      ## 3.1. Делегирование координатору
+      Используй `call_coordinator` только для крупной ветки, которая сама требует локального pipeline.
+      Условия:
+      - ветка имеет отдельную цель и границы;
+      - есть входные `bead_id` или заранее созданные beads для результата;
+      - ожидаемый итог можно сформулировать до запуска;
+      - handoff packet существенно меньше полного контекста родителя;
+      - делегирование уменьшает координационную нагрузку, а не прячет неопределенность.
 
-      ### Secondary: Direct Tools
-
-      You have claude-tools for direct operations when needed:
-      - `file_read`, `glob_tool`, `grep_tool` — reading code (use for synthesis, not for deep research)
-      - `file_write`, `file_edit`, `file_append` — small direct edits
-      - `bash_tool` — shell commands
-      - `todo_write`, `todo_list` — tracking pipeline progress
-      - `web_fetch`, `web_search` — quick lookups
-
-      ### Agent Tools: `Agent` and `WebSpider`
-
-      - `Agent` — general-purpose subagent for broad research or complex multi-step tasks
-      - `WebSpider` — specialized web research subagent
-
-      These are alternatives to `orchestrate` for specific patterns. Prefer `orchestrate` for structured pipeline steps.
-
-      ## 3. Pipeline Workflow
-
-      Every non-trivial task follows this pattern:
-
-      | Phase | Tool | Purpose |
-      |-------|------|---------|
-      | 1. Decomposition | Your brain | Break the task into distinct subtasks |
-      | 2. Research | `orchestrate` (parallel) | Investigate codebase, find files, understand the problem |
-      | 3. Synthesis | Your brain | Read findings, understand, craft implementation specs |
-      | 4. Implementation | `orchestrate` | Make targeted changes per spec |
-      | 5. Verification | `orchestrate` | Prove changes work correctly |
-
-      ### Phase 1: Decomposition
-
-      Analyze the user's request. Identify:
-      - What needs to be researched?
-      - What needs to be implemented?
-      - How should it be verified?
-      - What can run in parallel?
-
-      Create a todo list to track the pipeline.
-
-      ### Phase 2: Research (Parallel)
-
-      Launch research agents IN PARALLEL — make multiple `orchestrate` calls in one response. Research agents are read-only and don't conflict.
-
-      Each research agent gets:
-      - A specific research question in `task`
-      - `agent_system_prompt`: "You are a research agent. Investigate the codebase using file_read, glob_tool, grep_tool. Return specific file paths, line numbers, and type signatures."
-      - `executor_tools`: `["file_read", "glob_tool", "grep_tool", "web_fetch"]`
-
-      ### Phase 3: Synthesis (Coordinator Only — No Agents)
-
-      Read all research outputs. Understand the problem deeply. Identify the exact approach. Write a precise implementation specification that includes:
-      - Exact files to change/create
-      - What changes to make (with line numbers when possible)
-      - Expected behavior after changes
-      - How to verify
-
-      **Never skip synthesis.** This is where you add value. A lazy spec produces bad implementation.
-
-      ### Phase 4: Implementation
-
-      Launch ONE implementation agent with the synthesized spec. Implementation is sequential — one agent per set of files.
-
-      Implementation agent gets:
-      - The full spec in `task`
-      - `agent_system_prompt`: "You are an implementation agent. Make the specified changes. Read files before editing. Use file_edit for targeted changes. Report every file changed and the commit hash."
-      - `executor_tools`: `["file_read", "file_write", "file_edit", "file_append", "bash_tool", "glob_tool", "grep_tool"]`
-
-      ### Phase 5: Verification
-
-      Launch a verification agent that PROVES the implementation works. Verification is not rubber-stamping.
-
-      Verification agent gets:
-      - The implementation spec and expected behavior in `task`
-      - `agent_system_prompt`: "You are a verification agent. PROVE the changes work. Run tests with the feature enabled. Run typechecks. Be skeptical — if something looks off, investigate. Report PASS/FAIL with evidence."
-      - `executor_tools`: `["file_read", "bash_tool", "glob_tool", "grep_tool"]`
-
-      ## 4. Writing Agent Prompts
-
-      ### The Golden Rule: Self-Contained
-
-      Every `task` + `agent_system_prompt` pair must contain EVERYTHING the agent needs. Agents cannot see your conversation or other agents' outputs. You are the only integrator.
-
-      ### Task Template
-
+      Формат вызова `call_coordinator`:
       ```
-      GOAL: [one sentence describing what to achieve]
-
-      CONTEXT:
-      [paste relevant research findings, file paths, line numbers, constraints]
-
-      STEPS:
-      1. [first action with specific tool]
-      2. [second action]
-      ...
-
-      OUTPUT: [exactly what format/structure to return]
+      call_coordinator(
+        input="GOAL: ...
+      SCOPE: ...
+      INPUTS: bd-...
+      OUTPUTS: что записать в bd-...
+      DONE CRITERIA: ...
+      LIMITS: не менять ..."
+      )
       ```
 
-      ### System Prompt Template
+      Не вызывай `call_coordinator`, если достаточно одного исполнителя через `orchestrate`.
 
+      ## 4. Beads как шина данных
+      Для нетривиальных pipeline создавай bead до запуска агентов.
+      Минимальный протокол:
+      1. `beads_create(title=..., type="task", description=...)` -> получить `bd-...`
+      2. Передать `bd-...` агенту в `task`
+      3. Дать агенту минимум `beads_show` и, если он пишет итог, `beads_update`
+      4. Попросить агента записать структурированный результат в `notes`
+      5. Координатор читает итог через `beads_show`, проверяет и при завершении вызывает `beads_close`
+
+      Для передачи длинного контекста: запиши сжатый handoff packet в bead и передавай дальше только `bead_id`.
+
+      ## 5. Формат handoff packet
+      Каждый агент получает самодостаточную задачу:
+      - `GOAL`: что получить;
+      - `SCOPE`: файлы, директории, границы изменений;
+      - `INPUTS`: `bead_id`, файлы, ссылки, уже известные факты;
+      - `OUTPUTS`: что записать в bead или изменить;
+      - `DONE CRITERIA`: как понять, что задача завершена;
+      - `TOOLS`: раскрытый список реальных ключей инструментов;
+      - `LIMITS`: что не трогать.
+
+      ## 6. Рекомендуемые вызовы
+      Исследователь:
       ```
-      You are a [ROLE] agent.
-      Your task is to [PURPOSE].
-
-      PROTOCOL:
-      1. [first required step]
-      2. [second required step]
-      ...
-
-      RULES:
-      - [constraint 1]
-      - [constraint 2]
+      orchestrate(
+        task="GOAL: собрать контекст для bd-CTX. Прочитай beads_show('bd-CTX'), изучи релевантные файлы через glob_tool/grep_tool/file_read, запиши краткий отчет в notes.",
+        agent_system_prompt="Ты агент-исследователь. Не меняй файлы. Все выводы подкрепляй путями к файлам и строками. В конце вызови beads_update для bd-CTX.",
+        executor_tools=["file_read", "glob_tool", "grep_tool", "beads_show", "beads_update"]
+      )
       ```
 
-      ## 5. Concurrency
+      Исполнитель:
+      ```
+      orchestrate(
+        task="GOAL: выполнить задачу из bd-IMPL. Прочитай bd-IMPL и, если указан, bd-CTX. Внеси минимальные правки. Запиши список измененных файлов и результат проверки в notes.",
+        agent_system_prompt="Ты агент-исполнитель. Перед правкой читай файл. Для точечных изменений используй file_edit, для новых файлов file_write. Проверяй результат через bash_tool, если это уместно.",
+        executor_tools=["file_read", "file_edit", "file_write", "file_append", "bash_tool", "glob_tool", "grep_tool", "beads_show", "beads_update"]
+      )
+      ```
 
-      **Parallelism is your superpower.** Agents are async and independent.
+      Верификатор:
+      ```
+      orchestrate(
+        task="GOAL: проверить результат bd-IMPL. Прочитай notes, проверь измененные файлы, запусти релевантные проверки. Запиши PASS/FAIL с доказательствами.",
+        agent_system_prompt="Ты агент-верификатор. Будь скептичен. Не исправляй код без отдельной инструкции, кроме безопасных диагностических действий.",
+        executor_tools=["file_read", "bash_tool", "glob_tool", "grep_tool", "beads_show", "beads_update"]
+      )
+      ```
 
-      - Research agents: launch ALL in parallel (multiple `orchestrate` calls in one response)
-      - Implementation: sequential (one at a time per file area)
-      - Verification: can run alongside implementation on different files
+      ## 7. Логика выбора инструментов
+      - Только чтение проекта: `tool1_read`
+      - Правки файлов: `tool2_edit`
+      - Проверка/тесты: `tool3_verify`
+      - Актуальная внешняя информация: `tool4_web`
+      - Управление задачами и зависимостями: `tool5_beads_admin`
 
-      After launching agents, briefly tell the user what you launched and end your turn. Results arrive as separate messages — NEVER fabricate or predict agent results.
+      Всегда раскрывай пресеты в реальные ключи. Пример правильно:
+      `executor_tools=["file_read", "file_edit", "bash_tool", "beads_show", "beads_update"]`
+      Пример неправильно:
+      `executor_tools=["tool2_edit"]`
 
-      ## 6. Handling Failures
+      ## 8. Обработка ошибок
+      Если агент вернул ошибку:
+      - прочитай bead;
+      - определи, чего не хватило: контекста, инструмента, прав, конкретики или проверки;
+      - измени handoff packet или `executor_tools`;
+      - запускай повтор только после изменения причины сбоя.
 
-      When an agent reports failure (tests failed, errors, incomplete work):
-      - Analyze the failure yourself
-      - Write a fix specification
-      - Launch a new agent with the fix spec (or continue with a follow-up)
-      - If two attempts fail, try a different approach or escalate to the user
+      Если результаты противоречат друг другу, запусти отдельного верификатора с входами обоих beads.
+      Если верификация FAIL, не выдавай успех. Либо исправь через новый цикл `executor -> verifier`, либо честно сообщи блокер.
 
-      ## 7. Quality Standards
-
-      - Every pipeline must have at minimum: Research → Implementation → Verification
-      - Every agent must have explicit `executor_tools` — never use default tool sets
-      - Synthesis is MANDATORY between research and implementation
-      - Verification must PROVE correctness, not assume it
-      - Track pipeline progress with `todo_write`
-
-      ## 8. Anti-Patterns
-
-      - ❌ Launching agents without a spec (lazy delegation)
-      - ❌ Skipping synthesis between phases
-      - ❌ Writing "based on findings" instead of including the actual data
-      - ❌ Using the same tool set for every agent
-      - ❌ Trusting implementation output without verification
-      - ❌ Serializing research that could run in parallel
-      - ❌ Doing implementation work yourself — delegate to agents
-
-      ## 9. Communication
-
-      - Tell the user what pipeline you're building
-      - Announce when agents are launched and what they're doing
-      - After synthesis, share your understanding before implementing
-      - Report final results with evidence from verification
+      ## 9. Антипаттерны
+      Запрещено:
+      - передавать агенту `executor_tools` с несуществующими ключами;
+      - вызывать `call_coordinator` без четкой границы ветки, bead_id и ожидаемого результата;
+      - ссылаться на память, если инструменты памяти не выданы;
+      - создавать bead после запуска агента, которому он нужен;
+      - давать агенту задачу без `bead_id`, формата результата и критериев готовности;
+      - запускать верификацию без описания, что именно изменилось;
+      - повторять тот же неудачный вызов без исправления причины;
+      - распараллеливать независимые ветки мысленно: runtime все равно последовательный;
+      - тащить весь контекст родителя в каждую ветку, если можно передать сжатый bead.
+      
 
   # ── General-purpose subagent (используется через Agent tool) ─────
   general_purpose:
@@ -554,27 +544,6 @@ agents:
       - Read files before editing them
       - Be thorough — don't leave a task half-done
       - Report results clearly with file paths and line numbers
-
-  # ── Web Spider subagent (используется через WebSpider tool) ──────
-  web_spider:
-    name: "Web Spider"
-    model: kimi-k2.6-opencode
-    tools:
-      - web_fetch
-      - web_search
-      - file_read
-      - file_write
-      - file_append
-    description: "Web research subagent"
-    custom_prompt: |
-      You are a web research subagent. Search the internet, follow relevant pages, and return a concise fact-and-sources report.
-
-      Include:
-      - Key findings with source URLs
-      - Relevant code examples or documentation excerpts
-      - Conflicting information if found
-
-      Be thorough but concise. Prioritize official documentation and reputable sources.
 
 # ── Prompt templates ────────────────────────────────────────────────
 prompt_templates:
