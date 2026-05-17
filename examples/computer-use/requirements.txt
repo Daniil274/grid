@@ -1,7 +1,0 @@
-# computer-use requirements
-
-# Image processing
-Pillow>=10.0.0
-
-# System dependencies (not pip):
-#   sudo apt install xdotool imagemagick

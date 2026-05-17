@@ -489,7 +489,7 @@ class AgentFactory:
         return SQLiteSession(session_id=session_id, db_path=self._agent_session_db_path)
 
     @staticmethod
-    def _safe_preview(value: Any, max_length: int = 500) -> str:
+    def _safe_preview(value: Any, max_length: Optional[int] = 500) -> str:
         """Convert arbitrary runtime data to a compact preview string."""
         if value is None:
             return ""
@@ -501,9 +501,23 @@ class AgentFactory:
             except Exception:
                 text = str(value)
         text = text.strip()
-        if len(text) > max_length:
+        if max_length is not None and len(text) > max_length:
             return text[:max_length] + "..."
         return text
+
+    def _runtime_event_preview_limit(self) -> Optional[int]:
+        """Max length for tool_events in context metadata; None = keep full payloads."""
+        settings = getattr(self.config.config.settings, "agent_logging", None)
+        if not settings or not getattr(settings, "enabled", True):
+            return 700
+        level = (getattr(settings, "level", "full") or "full").lower()
+        if level in ("full", "detailed"):
+            return None
+        return 700
+
+    def _logs_directory_path(self) -> Path:
+        configured = self.config.get("settings.logs_directory", "logs")
+        return Path(self.config.get_absolute_path(configured))
 
     def _update_pending_agent_run(
         self,
@@ -557,14 +571,15 @@ class AgentFactory:
         }
         if tool_name:
             event["tool_name"] = tool_name
+        preview_limit = self._runtime_event_preview_limit()
         if arguments is not None:
-            event["arguments"] = self._safe_preview(arguments, max_length=700)
+            event["arguments"] = self._safe_preview(arguments, max_length=preview_limit)
         if output is not None:
-            event["output"] = self._safe_preview(output, max_length=700)
+            event["output"] = self._safe_preview(output, max_length=preview_limit)
         if extra:
             for key, value in extra.items():
                 if value is not None:
-                    event[key] = self._safe_preview(value, max_length=300)
+                    event[key] = self._safe_preview(value, max_length=preview_limit or 300)
         pending = self.context_manager.get_metadata("pending_agent_run")
         if not isinstance(pending, dict):
             pending = {}
@@ -1862,6 +1877,20 @@ class AgentFactory:
                 # Set user_id in metadata for workspace isolation
                 if user_id:
                     self.context_manager.set_metadata("user_id", user_id)
+
+                agent_logging = getattr(self.config.config.settings, "agent_logging", None)
+                if agent_logging and getattr(agent_logging, "enabled", True):
+                    Logger.configure_agent_logging(
+                        enabled=True,
+                        level=getattr(agent_logging, "level", "full"),
+                        log_dir=str(self._logs_directory_path()),
+                    )
+                    Logger.activate_session_log(active_context_id)
+                    if getattr(agent_logging, "save_conversations", True) and message and not skip_input_add:
+                        Logger("agent_factory").log_verbose(
+                            f"USER INPUT: {agent_key}",
+                            message,
+                        )
             
             # Create agent (or get from cache)
             agent = await self.create_agent(agent_key, context_path)
@@ -2635,6 +2664,8 @@ DO NOT write XML tags manually!"""
             self.context_manager.add_execution(execution)
             
             raise
+        finally:
+            Logger.deactivate_session_log()
     
     def _build_agent_instructions(self, agent_key: str, context_path: Optional[str] = None, include_conversation_context: bool = True) -> str:
         """Build complete agent instructions with context."""

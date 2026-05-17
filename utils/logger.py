@@ -5,11 +5,107 @@ Enterprise-grade logging for Grid system with structured logging and multiple ou
 import logging
 import sys
 import json
+import threading
 from datetime import datetime
 from typing import Any, Dict, Optional
 from pathlib import Path
 from functools import lru_cache
 import re
+
+
+def format_verbose_block(title: str, content: Any) -> str:
+    """Format a verbose log section (shared by verbose.log and session logs)."""
+    border = "=" * 80
+    try:
+        if isinstance(content, (dict, list)):
+            formatted_content = json.dumps(content, ensure_ascii=False, indent=2)
+        else:
+            formatted_content = str(content)
+    except Exception:
+        formatted_content = str(content)
+    return f"\n{border}\n{title}\n{border}\n{formatted_content}\n{border}\n"
+
+
+class SessionLogManager:
+    """Mirrors grid.verbose output into per-context session log files."""
+
+    _lock = threading.Lock()
+    _enabled = False
+    _verbose_level = "full"
+    _log_dir: Optional[Path] = None
+    _active_context_id: Optional[str] = None
+    _mirror_handler: Optional[logging.Handler] = None
+    _activation_depth: int = 0
+
+    @classmethod
+    def configure(
+        cls,
+        *,
+        enabled: bool,
+        level: str = "full",
+        log_dir: Optional[Path] = None,
+    ) -> None:
+        with cls._lock:
+            cls._enabled = enabled
+            cls._verbose_level = (level or "full").lower()
+            if log_dir is not None:
+                cls._log_dir = log_dir
+
+    @classmethod
+    def uses_verbose_mirror(cls) -> bool:
+        return cls._enabled and cls._verbose_level in ("full", "detailed")
+
+    @classmethod
+    def activate(cls, context_id: str) -> None:
+        if not cls.uses_verbose_mirror() or not context_id:
+            return
+        with cls._lock:
+            if cls._active_context_id == context_id and cls._mirror_handler is not None:
+                cls._activation_depth += 1
+                return
+            cls.deactivate_unlocked()
+            log_dir = cls._log_dir or (Path(__file__).parent.parent.resolve() / "logs")
+            session_dir = log_dir / "sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            session_path = session_dir / f"{context_id}.log"
+            handler = NonLockingFileHandler(session_path, level=logging.DEBUG)
+            handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+            verbose_logger = logging.getLogger("grid.verbose")
+            verbose_logger.addHandler(handler)
+            cls._mirror_handler = handler
+            cls._active_context_id = context_id
+            cls._activation_depth = 1
+
+    @classmethod
+    def deactivate(cls) -> None:
+        with cls._lock:
+            if cls._mirror_handler is None:
+                return
+            if cls._activation_depth > 1:
+                cls._activation_depth -= 1
+                return
+            cls.deactivate_unlocked()
+
+    @classmethod
+    def deactivate_unlocked(cls) -> None:
+        if cls._mirror_handler is None:
+            cls._active_context_id = None
+            cls._activation_depth = 0
+            return
+        verbose_logger = logging.getLogger("grid.verbose")
+        try:
+            verbose_logger.removeHandler(cls._mirror_handler)
+        except Exception:
+            pass
+        cls._mirror_handler = None
+        cls._active_context_id = None
+        cls._activation_depth = 0
+
+    @classmethod
+    def write_verbose(cls, title: str, content: Any) -> None:
+        if not cls.uses_verbose_mirror():
+            return
+        logging.getLogger("grid.verbose").debug(format_verbose_block(title, content))
 
 
 class JSONFormatter(logging.Formatter):
@@ -411,25 +507,37 @@ class Logger:
     def log_verbose(self, title: str, content: Any) -> None:
         """
         Log detailed data to verbose log file only (never console).
-        
-        Args:
-            title: Section title
-            content: Content to log (will be stringified)
+        When session logging is active (agent_logging level full/detailed),
+        the same payload is mirrored to logs/sessions/<context_id>.log.
         """
-        logger = logging.getLogger("grid.verbose")
-        border = "=" * 80
-        
-        # Format content safely
-        try:
-            if isinstance(content, (dict, list)):
-                formatted_content = json.dumps(content, ensure_ascii=False, indent=2)
-            else:
-                formatted_content = str(content)
-        except Exception:
-            formatted_content = str(content)
-            
-        message = f"\n{border}\n{title}\n{border}\n{formatted_content}\n{border}\n"
-        logger.debug(message)
+        logging.getLogger("grid.verbose").debug(format_verbose_block(title, content))
+
+    @classmethod
+    def configure_agent_logging(
+        cls,
+        *,
+        enabled: bool,
+        level: str = "full",
+        log_dir: Optional[str] = None,
+    ) -> None:
+        """Apply settings.agent_logging to session log mirroring."""
+        path: Optional[Path] = None
+        if log_dir:
+            path_obj = Path(log_dir)
+            if not path_obj.is_absolute():
+                path_obj = Path(__file__).parent.parent.resolve() / path_obj
+            path = path_obj
+        SessionLogManager.configure(enabled=enabled, level=level, log_dir=path)
+
+    @classmethod
+    def activate_session_log(cls, context_id: str) -> None:
+        """Start mirroring verbose output to logs/sessions/<context_id>.log."""
+        SessionLogManager.activate(context_id)
+
+    @classmethod
+    def deactivate_session_log(cls) -> None:
+        """Stop mirroring verbose output for the current context."""
+        SessionLogManager.deactivate()
 
 
 # Legacy compatibility functions

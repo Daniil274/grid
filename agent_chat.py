@@ -347,13 +347,21 @@ async def main():
 
         # Reconfigure logging from config (e.g. disable console when agent_logging.enabled is False)
         agent_logging = config.config.settings.agent_logging
+        logs_dir = config.get_absolute_path(
+            config.get("settings.logs_directory", str(Path(__file__).parent / "logs"))
+        )
         Logger.configure(
             level="INFO",
-            log_dir=str(Path(__file__).parent / "logs"),
+            log_dir=logs_dir,
             enable_console=False,
             enable_json=False,
             enable_legacy_logs=agent_logging.enabled,
             force_reconfigure=True,
+        )
+        Logger.configure_agent_logging(
+            enabled=agent_logging.enabled,
+            level=agent_logging.level,
+            log_dir=logs_dir,
         )
 
         chat_ui = CliChatRenderer(enabled=True)

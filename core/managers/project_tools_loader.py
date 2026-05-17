@@ -58,14 +58,16 @@ class ProjectToolsLoader:
 
         logger.info(f"Loading project tools from: {self.tools_dir}")
 
-        # Add config_dir and the tools directory itself to sys.path for imports
+        # Add config_dir and the tools directory itself to sys.path for imports.
+        # Keep them behind installed packages so tool files like click.py do not
+        # shadow dependencies imported while project tools are loading.
         parent_dir = str(self.config_dir)
         if parent_dir not in sys.path:
-            sys.path.insert(0, parent_dir)
+            sys.path.append(parent_dir)
             logger.debug(f"Added to sys.path: {parent_dir}")
         tools_dir_str = str(self.tools_dir)
         if tools_dir_str not in sys.path:
-            sys.path.insert(0, tools_dir_str)
+            sys.path.append(tools_dir_str)
             logger.debug(f"Added to sys.path: {tools_dir_str}")
 
         # Scan .py files
