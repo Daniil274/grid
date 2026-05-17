@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch, Mock, mock_open
 from io import StringIO
 
-from utils.logger import Logger, JSONFormatter, LegacyFormatter
+from utils.logger import Logger, JSONFormatter, LegacyFormatter, SessionLogManager, format_verbose_block
 
 
 class TestLogger:
@@ -509,3 +509,44 @@ class TestLoggerIntegration:
         # Verify all messages were logged
         file_content = log_file.read_text()
         assert file_content.count("Performance test message") == 1000
+
+
+class TestSessionLogManager:
+    """Session logs should mirror grid.verbose payloads when level is full."""
+
+    def test_session_log_mirrors_verbose_blocks(self, temp_dir):
+        import logging
+
+        Logger.configure(
+            level="INFO",
+            log_dir=str(temp_dir),
+            enable_console=False,
+            enable_json=False,
+            enable_legacy_logs=False,
+            force_reconfigure=True,
+        )
+        Logger.configure_agent_logging(enabled=True, level="full", log_dir=str(temp_dir))
+
+        context_id = "ctx-test1234"
+        Logger.activate_session_log(context_id)
+        try:
+            payload = {"tool": "bash_tool", "command": "echo full output"}
+            Logger("agent_factory").log_verbose("TOOL CALL: bash_tool", payload)
+        finally:
+            Logger.deactivate_session_log()
+
+        session_file = temp_dir / "sessions" / f"{context_id}.log"
+        assert session_file.exists()
+        content = session_file.read_text(encoding="utf-8")
+        assert "TOOL CALL: bash_tool" in content
+        assert "echo full output" in content
+        assert format_verbose_block("TOOL CALL: bash_tool", payload).strip() in content
+
+    def test_session_log_skipped_for_minimal_level(self, temp_dir):
+        Logger.configure_agent_logging(enabled=True, level="basic", log_dir=str(temp_dir))
+        Logger.activate_session_log("ctx-basic")
+        Logger("agent_factory").log_verbose("SHOULD NOT APPEAR", {"x": 1})
+        Logger.deactivate_session_log()
+
+        session_file = temp_dir / "sessions" / "ctx-basic.log"
+        assert not session_file.exists()
