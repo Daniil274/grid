@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
@@ -18,7 +20,7 @@ async def test_orchestrate_requires_factory_in_context():
 async def test_orchestrate_happy_path_with_mocks():
     # Build a fake AgentFactory with the minimal surface used by the tool
     factory = Mock()
-    factory.get_active_context_id = Mock(return_value="ctx-123")
+    factory.get_active_context_id = Mock(return_value="ctx-12345678")
     factory.config = Mock()
     factory.config.get_tool.side_effect = Exception("Not found")
     factory.resolve_model_key = Mock(return_value="gpt-4")
@@ -48,7 +50,7 @@ async def test_orchestrate_happy_path_with_mocks():
 @pytest.mark.asyncio
 async def test_orchestrate_accepts_executor_tools_as_json_string():
     factory = Mock()
-    factory.get_active_context_id = Mock(return_value="ctx-123")
+    factory.get_active_context_id = Mock(return_value="ctx-12345678")
     factory.config = Mock()
     factory.config.get_tool.side_effect = Exception("Not found")
     factory.resolve_model_key = Mock(return_value="gpt-4")
@@ -77,7 +79,7 @@ async def test_orchestrate_accepts_executor_tools_as_json_string():
 @pytest.mark.asyncio
 async def test_orchestrate_uses_tool_default_model_when_model_key_omitted():
     factory = Mock()
-    factory.get_active_context_id = Mock(return_value="ctx-123")
+    factory.get_active_context_id = Mock(return_value="ctx-12345678")
     factory.config = Mock()
     factory.config.get_tool.return_value = SimpleNamespace(
         env_vars={"DEFAULT_MODEL": "worker-model"}
@@ -102,7 +104,7 @@ async def test_orchestrate_uses_tool_default_model_when_model_key_omitted():
 @pytest.mark.asyncio
 async def test_orchestrate_falls_back_to_tool_default_for_unknown_model_key():
     factory = Mock()
-    factory.get_active_context_id = Mock(return_value="ctx-123")
+    factory.get_active_context_id = Mock(return_value="ctx-12345678")
     factory.config = Mock()
     factory.config.get_tool.return_value = SimpleNamespace(
         env_vars={"DEFAULT_MODEL": "worker-model"}
@@ -133,6 +135,64 @@ async def test_orchestrate_falls_back_to_tool_default_for_unknown_model_key():
     assert "DRAFT" in out
     factory.create_dynamic_agent.assert_awaited_once()
     assert factory.create_dynamic_agent.await_args.kwargs["model_key"] == "worker-model"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_sanitizes_noisy_context_id():
+    factory = Mock()
+    factory.get_active_context_id = Mock(return_value=None)
+    factory.context_manager = Mock()
+    factory.context_manager.start_new_context = Mock(return_value="ctx-newcontext")
+    factory.config = Mock()
+    factory.config.get_tool.side_effect = Exception("Not found")
+    factory.resolve_model_key = Mock(return_value="gpt-4")
+    fake_agent = Mock()
+    fake_agent.name = "fake_agent"
+    factory.create_dynamic_agent = AsyncMock(return_value=fake_agent)
+    factory.run_agent_object_simple = AsyncMock(return_value="DRAFT")
+
+    ctx = Mock()
+    ctx.context = Mock(factory=factory, user_id="user-123", context_id=None)
+
+    tool = ORCHESTRATOR_TOOLS["orchestrate"]
+    noisy_id = "Context ID: ctx-abcdef12 (reuse from previous step)"
+    out = await tool.on_invoke_tool(
+        ctx,
+        input=f'{{"task": "goal", "context_id": {json.dumps(noisy_id)}}}',
+    )
+
+    assert "DRAFT" in out
+    assert '"context_id": "ctx-abcdef12"' in out
+    run_kwargs = factory.run_agent_object_simple.await_args.kwargs
+    assert run_kwargs["context_id"] == "ctx-abcdef12"
+    factory.context_manager.start_new_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_ignores_invalid_context_id_and_reuses_active():
+    factory = Mock()
+    factory.get_active_context_id = Mock(return_value="ctx-11223344")
+    factory.config = Mock()
+    factory.config.get_tool.side_effect = Exception("Not found")
+    factory.resolve_model_key = Mock(return_value="gpt-4")
+    fake_agent = Mock()
+    fake_agent.name = "fake_agent"
+    factory.create_dynamic_agent = AsyncMock(return_value=fake_agent)
+    factory.run_agent_object_simple = AsyncMock(return_value="DRAFT")
+
+    ctx = Mock()
+    ctx.context = Mock(factory=factory, user_id="user-123", context_id=None)
+
+    tool = ORCHESTRATOR_TOOLS["orchestrate"]
+    out = await tool.on_invoke_tool(
+        ctx,
+        input='{"task": "goal", "context_id": "reuse parent session"}',
+    )
+
+    assert "DRAFT" in out
+    assert '"context_id": "ctx-11223344"' in out
+    run_kwargs = factory.run_agent_object_simple.await_args.kwargs
+    assert run_kwargs["context_id"] == "ctx-11223344"
 
 
 

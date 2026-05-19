@@ -13,6 +13,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -82,6 +83,29 @@ def _coerce_optional_str(val: Any) -> Optional[str]:
         return v
     if isinstance(val, (int, float, bool)):
         return str(val)
+    return None
+
+
+_CONTEXT_ID_VALID = re.compile(r"^ctx-[0-9a-f]{8,}$", re.IGNORECASE)
+_CONTEXT_ID_SEARCH = re.compile(r"ctx-[0-9a-f]{8,}", re.IGNORECASE)
+
+
+def _sanitize_context_id(val: Any) -> Optional[str]:
+    """
+    Normalize context_id for orchestrate: accept only ctx-<hex> tokens.
+    Strips wrappers like 'Context ID: ctx-…' and rejects arbitrary garbage.
+    """
+    raw = _coerce_optional_str(val)
+    if not raw:
+        return None
+    if _CONTEXT_ID_VALID.match(raw):
+        return raw.lower()
+    match = _CONTEXT_ID_SEARCH.search(raw)
+    if match:
+        cleaned = match.group(0).lower()
+        if _CONTEXT_ID_VALID.match(cleaned):
+            return cleaned
+    logger.debug("orchestrate: ignored invalid context_id: %r", raw[:120])
     return None
 
 
@@ -200,6 +224,7 @@ async def orchestrate(
     executor_tools: Optional[Union[List[str], str]] = None,
     context_id: Optional[str] = None,
     init_tools: Optional[str] = None,
+    system_skills: Optional[Union[List[str], str]] = None,
 ) -> str:
     """
     Meta-tool: launches a dynamic agent to solve a task.
@@ -211,6 +236,8 @@ async def orchestrate(
       launching the agent. Format: '[{"name": "tool_name", "parameters": {...}}]'.
       The results of these tools will be added to the agent's instructions.
       Example: '[{"name":"file_list","parameters":{"directory":"."}}]'
+    - system_skills: List of system skill names to load from skills/ directory
+      (next to config.yaml). Accepts a list or comma-separated string.
 
     Note: orchestrate calls are executed sequentially (not in parallel)
     to prevent conflicts and ensure predictable execution.
@@ -236,8 +263,12 @@ async def orchestrate(
         # Register or reuse a shared serial pipeline
         registry = PipelineRegistry()
         raw_ctx = getattr(context, "context", None)
-        inherited_context_id = _coerce_optional_str(getattr(raw_ctx, "context_id", None))
-        active_context_id = _coerce_optional_str(context_id) or inherited_context_id or factory.get_active_context_id()
+        inherited_context_id = _sanitize_context_id(getattr(raw_ctx, "context_id", None))
+        active_context_id = (
+            _sanitize_context_id(context_id)
+            or inherited_context_id
+            or _sanitize_context_id(factory.get_active_context_id())
+        )
         if not active_context_id:
             active_context_id = factory.context_manager.start_new_context()
         ctx_user_id = getattr(raw_ctx, "user_id", None)
@@ -303,12 +334,15 @@ async def orchestrate(
 
         base_instructions = _coerce_optional_str(agent_system_prompt)
 
+        coerced_system_skills = _coerce_tool_list(system_skills)
+
         executor = await factory.create_dynamic_agent(
             name=f"executor-{uuid.uuid4().hex[:6]}",
             instructions=base_instructions,
             model_key=resolved_model_key,
             tool_names=coerced_executor_tools,
             init_tools=parsed_init_tools,
+            system_skills=coerced_system_skills,
         )
 
         # Execute with emergency shutdown handling

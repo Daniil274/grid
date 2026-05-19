@@ -2,7 +2,7 @@ isolation:
   enabled: false
 
 settings:
-  default_agent: "claude_engineer"
+  default_agent: "engineer"
   max_history: 100
   max_turns: 100
   agent_timeout: 600
@@ -94,24 +94,7 @@ providers:
     timeout: 300
     max_retries: 3
 
-  anthropic:
-    name: "anthropic"
-    base_url: "https://api.anthropic.com/v1"
-    api_key_env: "ANTHROPIC_API_KEY"
-    timeout: 300
-    max_retries: 3
-
 models:
-  claude-sonnet-4.6:
-    name: claude-sonnet-4-6
-    provider: "anthropic"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "Anthropic Claude Sonnet 4.6"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
   kimi-k2.6-opencode:
     name: "kimi-k2.6"
     provider: "opencode"
@@ -267,6 +250,40 @@ tools:
     type: "function"
     description: "Очищает все задачи или задачи с указанным статусом."
 
+  beads_init:
+    type: "function"
+    description: Initialize beads (bd) in the given directory. Idempotent; safe if already initialized.
+  beads_ready:
+    type: "function"
+    description: List beads tasks that are ready to be worked on (no open blockers)
+  beads_list:
+    type: "function"
+    description: List beads tasks with optional filters and pagination
+  beads_create:
+    type: "function"
+    description: Create a new bead (task, epic, message, etc.)
+  beads_show:
+    type: "function"
+    description: Show detailed information about a specific bead
+  beads_update:
+    type: "function"
+    description: Update an existing bead
+  beads_close:
+    type: "function"
+    description: Close a bead
+  beads_sync:
+    type: "function"
+    description: Sync beads with the remote repository
+  beads_dep:
+    type: "function"
+    description: Manage dependencies between beads
+  beads_log_append:
+    type: "function"
+    description: Append a single entry to a shared, append-only JSONL log (inside .beads/shared_log/).
+  beads_log_read:
+    type: "function"
+    description: Read ONLY new log data for (channel, reader) since the last read (cursor-based).
+
   general_purpose_openai:
     type: "agent"
     name: "Agent"
@@ -316,9 +333,11 @@ tools:
     include_tool_history: false
 
 agents:
-  claude_engineer:
+  engineer:
     name: "Claude Engineer"
     model: deepseek-v4-pro-opencode
+    system_skills:
+      - beads
     tools:
       - bash_tool
       - file_read
@@ -332,10 +351,6 @@ agents:
       - notebook_read
       - notebook_edit
       - notebook_create
-      - todo_write
-      - todo_list
-      - todo_delete
-      - todo_clear
       - general_purpose_glm
       - web_spider
     description: "GRID engineering agent on GLM via OpenCode"
@@ -367,9 +382,10 @@ agents:
 
       # Using your tools
       - Use dedicated tools instead of shell commands when a dedicated tool exists.
-      - Break down and manage non-trivial work with the todo tools.
+      - Break down and manage non-trivial work with the beads tools.
       - Use the `Agent` tool with the specialized `general-purpose` subagent when the task matches: broad research, deep codebase exploration, or a bounded multi-step task that should not bloat the main context.
       - Use the `WebSpider` tool when the task is primarily about internet research: finding current information, checking docs across multiple pages, comparing sources, or collecting links and facts from the web.
+      - When coordinating work through beads, pass bead_id in subagent briefings so they can `beads show` / `beads update` (see skill `beads`).
       - Subagents are valuable for parallelizing independent queries or protecting the main context, but do not overuse them.
       - If you delegate work to a subagent, do not duplicate that same work yourself.
       - When briefing a subagent, write like you are onboarding a capable engineer who has not seen this conversation. Include the goal, what you already know, what has been ruled out, relevant files, constraints, and the format you want back.
@@ -388,6 +404,8 @@ agents:
   general_purpose_glm:
     name: "General-purpose"
     model: deepseek-v4-flash-opencode
+    system_skills:
+      - beads
     tools:
       - bash_tool
       - file_read
@@ -401,10 +419,13 @@ agents:
       - notebook_read
       - notebook_edit
       - notebook_create
-      - todo_write
-      - todo_list
-      - todo_delete
-      - todo_clear
+      - beads_init
+      - beads_ready
+      - beads_list
+      - beads_show
+      - beads_update
+      - beads_create
+      - beads_close
     description: "General-purpose GRID subagent"
     custom_prompt: |
       You are an agent for GRID system agent . Given the user's message, use the tools available to complete the task. Complete the task fully. Don't gold-plate, but don't leave it half-done.
@@ -421,21 +442,23 @@ agents:
       - Be thorough: check multiple locations, naming conventions, and related files.
       - NEVER create files unless they are absolutely necessary.
       - NEVER proactively create documentation files or README files unless explicitly asked.
+      - If a `bead_id` is provided, read the task with `beads_show`, write results with `beads_update` (and `beads_close` when done) before finishing.
       - When you complete the task, respond with a concise report covering what you did and the key findings. The caller will relay the result to the user, so only include the essentials.
 
   web_spider:
     name: "WebSpider"
-    model: claude-sonnet-4.6
+    model: deepseek-v4-flash-opencode
+    system_skills:
+      - beads
+      - web_spider_research_skill
+      - web_spider_source_hygiene_skill
     tools:
       - web_search
       - web_fetch
-      - todo_write
-      - todo_list
-      - todo_delete
-      - todo_clear
-    system_skills:
-      - web_spider_research_skill
-      - web_spider_source_hygiene_skill
+      - beads_init
+      - beads_show
+      - beads_update
+      - beads_create
     description: "Web research subagent for internet search, page traversal, and source-backed summaries"
     custom_prompt: |
       You are WebSpider, a specialized GRID subagent for web research.
@@ -449,6 +472,7 @@ agents:
       - When freshness matters, prioritize recent sources and explicitly note dates when they are available.
       - If sources disagree, say so clearly and explain the likely reason in one or two sentences.
       - Do not fabricate facts, links, dates, or quotes.
+      - If a `bead_id` is provided, read the task with `beads_show` and write the research result with `beads_update` (notes) before finishing.
 
       Output style:
       - Return a compact, useful research memo.

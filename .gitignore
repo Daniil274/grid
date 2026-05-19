@@ -118,3 +118,7 @@ scripts/
 *.bak
 plans/
 .beads/
+
+# bv (beads viewer) local config and caches
+.bv/
+tmp/
