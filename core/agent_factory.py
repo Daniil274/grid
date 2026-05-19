@@ -112,26 +112,111 @@ tracing_config = get_tracing_config()
 
 CONTEXT_ID_REGEX = re.compile(r"ctx-[0-9a-fA-F]{8,}")
 
-# Monkey-patch: normalize tool names returned by model (strip whitespace)
-# Some models (e.g. kimi-k2.5) generate tool call names with leading/trailing spaces
-# which causes "Tool  orchestrate not found in agent" errors.
+# Monkey-patch: resolve tool names and return missing-tool errors to the agent.
+# The SDK raises ModelBehaviorError for unknown tool names, which aborts the run.
+# MCP tools already have a similar patch above; this covers function tool calls.
+_MODEL_TOOL_SHORTCUTS = {
+    "read": "file_read",
+    "write": "file_write",
+    "edit": "file_edit",
+    "grep": "grep_tool",
+    "glob": "glob_tool",
+    "bash": "bash_tool",
+}
+
+
+def _resolve_model_tool_name(name: str, function_map: dict) -> str:
+    """Map model-generated tool names to registered agent tools."""
+    name = name.strip()
+    if name in function_map:
+        return name
+
+    try:
+        from tools.function_tools import TOOL_ALIASES
+    except ImportError:
+        TOOL_ALIASES = {}
+
+    candidates = (
+        TOOL_ALIASES.get(name),
+        _MODEL_TOOL_SHORTCUTS.get(name),
+        TOOL_ALIASES.get(_MODEL_TOOL_SHORTCUTS.get(name, "")),
+    )
+    for candidate in candidates:
+        if candidate and candidate in function_map:
+            return candidate
+    return name
+
+
+def _build_missing_tool_stub(tool_name: str, available: list[str]):
+    """Create a stub FunctionTool that returns an error message to the agent."""
+    from agents.tool import FunctionTool
+
+    async def _on_invoke_tool(_ctx, _input: str) -> str:
+        preview = ", ".join(sorted(available)[:25])
+        suffix = "..." if len(available) > 25 else ""
+        return (
+            f"Error: Tool '{tool_name}' is not available. "
+            f"Available tools include: {preview}{suffix}"
+        )
+
+    return FunctionTool(
+        name=tool_name,
+        description=f"Missing tool stub for {tool_name}",
+        params_json_schema={},
+        on_invoke_tool=_on_invoke_tool,
+        strict_json_schema=False,
+        is_enabled=True,
+    )
+
+
 def _patch_run_impl_tool_name_normalization() -> None:
     try:
         from agents import _run_impl
+        from agents.tool import FunctionTool
+        from openai.types.responses import ResponseFunctionToolCall
+
         original_process = _run_impl.RunImpl.process_model_response.__func__  # type: ignore[attr-defined]
 
         @classmethod  # type: ignore[misc]
         def _patched_process(cls, *, agent, all_tools, response, output_schema, handoffs):  # type: ignore[override]
-            # Normalize tool call names before processing
+            function_map = {
+                tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)
+            }
+            handoff_names = {handoff.tool_name for handoff in handoffs}
+            extra_tools = []
+
             for item in getattr(response, "output", []):
+                if not isinstance(item, ResponseFunctionToolCall):
+                    continue
+
                 name = getattr(item, "name", None)
-                if isinstance(name, str) and name != name.strip():
+                if not isinstance(name, str):
+                    continue
+
+                resolved = _resolve_model_tool_name(name, function_map)
+                if resolved != name:
                     try:
-                        object.__setattr__(item, "name", name.strip())
+                        object.__setattr__(item, "name", resolved)
                     except (AttributeError, TypeError):
                         pass
-            return original_process(cls, agent=agent, all_tools=all_tools, response=response,
-                                    output_schema=output_schema, handoffs=handoffs)
+                    name = resolved
+
+                if name in function_map or name in handoff_names:
+                    continue
+
+                stub = _build_missing_tool_stub(name, list(function_map.keys()))
+                extra_tools.append(stub)
+                function_map[name] = stub
+
+            extended_tools = list(all_tools) + extra_tools
+            return original_process(
+                cls,
+                agent=agent,
+                all_tools=extended_tools,
+                response=response,
+                output_schema=output_schema,
+                handoffs=handoffs,
+            )
 
         _run_impl.RunImpl.process_model_response = _patched_process
     except Exception:
@@ -1143,6 +1228,7 @@ class AgentFactory:
         tool_names: Optional[List[str]] = None,
         mcp_tool_names: Optional[List[str]] = None,
         init_tools: Optional[List[Dict[str, Any]]] = None,
+        system_skills: Optional[List[str]] = None,
     ) -> Agent:
         """
         Create an ad-hoc Agent instance not backed by config.yaml.
@@ -1262,6 +1348,15 @@ class AgentFactory:
         # Add prompt_addition from tool configuration to instructions
         enhanced_instructions = self._build_dynamic_agent_instructions(instructions, all_tool_names)
 
+        # Load system_skills and prepend to instructions
+        if system_skills:
+            for skill_name in system_skills:
+                skill_content = self._load_system_skill(skill_name)
+                if skill_content:
+                    enhanced_instructions = (
+                        f"## System Skill: {skill_name}\n\n{skill_content}\n\n{enhanced_instructions}"
+                    )
+
         # Run init_tools and prepend results to instructions
         if init_tools:
             try:
@@ -1304,7 +1399,13 @@ class AgentFactory:
         )
         setattr(agent, "_grid_model_key", resolved_model_key)
         return agent
+ 
+    # ---------------------------------------------------------------------
+    def _load_system_skill(self, skill_name: str) -> Optional[str]:
+        """Load a system skill file, delegating to config."""
+        return self.config._load_skill_file(skill_name)
 
+    # ---------------------------------------------------------------------
     async def _resolve_tools_for_names(self, tool_names: List[str]) -> tuple[List[Any], List[str]]:
         """
         Resolve a mixed list of tool keys (function/agent/mcp from config) into:

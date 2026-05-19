@@ -160,24 +160,6 @@ tools:
     type: "function"
     name: "orchestrate"
     description: "Meta-tool: запускает динамического агента для решения подзадачи."
-    prompt_addition: |
-      `orchestrate(task, agent_system_prompt=None, model_key=None, executor_tools=None, context_id=None, init_tools=None)`
-      Главный инструмент координатора. Запускает автономного агента, который решает переданную задачу.
-      
-      Параметры:
-      - `task`: полное описание задачи для агента (строкой)
-      - `agent_system_prompt`: системный промпт — роль, протокол, требования к результату
-      - `model_key`: ключ модели (kimi-k2.6-opencode, deepseek-v4-pro-opencode и др.)
-      - `executor_tools`: список инструментов агента (массив строк, JSON-строка или CSV)
-      - `context_id`: опциональный ID контекста для продолжения общей ветки
-      - `init_tools`: опциональная JSON-строка со списком предварительных вызовов инструментов перед стартом агента
-      
-      Агент выполняется изолированно и возвращает JSON с полем `final` — итоговый ответ.
-      Вызовы `orchestrate` исполняются последовательно, в depth-first порядке. Не рассчитывай на параллельный runtime.
-      
-      Важно: каждый вызов orchestrate должен содержать САМОДОСТАТОЧНУЮ задачу.
-      Не ссылайся на «предыдущие находки» — включай всё необходимое в task и agent_system_prompt.
-    
     env_vars:
       DEFAULT_MODEL: deepseek-v4-flash-opencode
 
@@ -327,7 +309,9 @@ agents:
   # ── Координатор ─────────────────────────────────────────────────
   coordinator:
     name: Координатор
-    model: kimi-k2.6-opencode
+    model: deepseek-v4-pro-opencode
+    system_skills:
+      - beads
     tools:
         # Мета-инструмент для запуска динамических агентов
       - orchestrate
@@ -417,10 +401,11 @@ agents:
       - `beads_close`, `beads_update` для разных beads — делай в одном ответе.
       **Правильная последовательность создания pipeline (2 хода вместо N):**
       ```
-      ХОД 1: beads_create(bd-CTX) + beads_create(bd-IMPL) + beads_create(bd-VERIFY)  ← все сразу
-      ХОД 2: beads_dep(child=bd-IMPL, parent=bd-CTX) + beads_dep(child=bd-VERIFY, parent=bd-IMPL)  ← все сразу
-      ХОД 3: orchestrate(bd-CTX task) → orchestrate(bd-IMPL task) → orchestrate(bd-VERIFY task)  ← compiled pipeline
+      ХОД 1: сгенерируй 3 tool calls beads_create(...) в одном assistant message, до получения результатов
+      ХОД 2: после получения bead_id сгенерируй все beads_dep(...) в одном assistant message
+      ХОД 3: сгенерируй все заранее спланированные orchestrate(...) в одном assistant message; runtime выполнит их depth-first
       ```
+      Если ты уже знаешь набор независимых вызовов, НЕ пиши текстовый план и НЕ жди результат первого вызова. Сразу emit все tool calls этой группы.
       **Неправильно (антипаттерн):**
       ```
       ХОД 1: beads_create(bd-CTX)
@@ -457,10 +442,11 @@ agents:
       **Beads — это персистентная шина данных между агентами.**
       Агенты не видят друг друга напрямую. Единственный способ передать данные от агента A к агенту B — записать их в bead, а агенту B дать ID этого bead.
       ### Протокол коммуникации через beads:
-      **ШАГ 1 — Координатор создаёт bead-задачу (ДО вызова агентов):**
+      **ШАГ 1 — Координатор создаёт bead-задачи (ДО вызова агентов):**
       ```
-      beads_create(title="Анализ структуры проекта X", type="task", description="...", priority=1)
-      → получаешь bead_id, например "bd-a1b2"
+      Если нужен один bead: emit один beads_create(...)
+      Если нужен pipeline из N beads: emit N вызовов beads_create(...) в одном assistant message.
+      Только после получения всех bead_id переходи к dependencies.
       ```
       **ШАГ 2 — Координатор запускает агента, передавая bead_id:**
       ```
@@ -488,32 +474,25 @@ agents:
       ### Паттерн A: Простая цепочка (2 агента)
       Для типичных задач: исполнитель → верификатор.
       ```
-      1. beads_create(title="Задача", description="Полное описание")  → bd-XXXX
-      2. orchestrate(task="Выполни bd-XXXX...", executor_tools=["file_read", "file_write", "file_edit", "file_append", "glob_tool", "grep_tool", "bash_tool", "beads_show", "beads_update"])
-      3. orchestrate(task="Проверь bd-XXXX...", executor_tools=["file_read", "file_write", "file_edit", "file_append", "glob_tool", "grep_tool", "bash_tool", "beads_show", "beads_update"])
-      4. beads_show("bd-XXXX") → читаешь результат и вердикт
-      5. beads_close("bd-XXXX")
+      ХОД 1: emit beads_create(title="Задача", description="Полное описание") → bd-XXXX
+      ХОД 2: emit orchestrate(task="Выполни bd-XXXX...", ...) + orchestrate(task="Проверь bd-XXXX...", ...) в одном assistant message
+      ХОД 3: emit beads_show("bd-XXXX") + beads_close("bd-XXXX", ...) в одном assistant message, если закрытие не требует дополнительного анализа
       ```
       ### Паттерн B: Сбор контекста → Исполнение → Верификация (3 агента)
       Для задач, требующих предварительного анализа:
       ```
-      1. beads_create(title="Сбор контекста для задачи Y")  → bd-CTX
-      2. beads_create(title="Реализация задачи Y")  → bd-IMPL
-      3. beads_dep(action="add", child_id="bd-IMPL", parent_id="bd-CTX")  — IMPL зависит от CTX
-      4. orchestrate(task="Собери контекст, запиши в bd-CTX...", executor_tools=["file_read", "glob_tool", "grep_tool", "beads_show", "beads_update"])
-      5. orchestrate(task="Прочитай контекст из bd-CTX. Выполни задачу, результат в bd-IMPL...", executor_tools=["file_read", "file_write", "file_edit", "file_append", "glob_tool", "grep_tool", "bash_tool", "beads_show", "beads_update"])
-      6. orchestrate(task="Верифицируй bd-IMPL...", executor_tools=["file_read", "file_write", "file_edit", "file_append", "glob_tool", "grep_tool", "bash_tool", "beads_show", "beads_update"])
-      7. beads_show("bd-IMPL") → итог
+      ХОД 1: emit beads_create(title="Сбор контекста...") + beads_create(title="Реализация...") + beads_create(title="Верификация...") в одном assistant message
+      ХОД 2: emit beads_dep(child=bd-IMPL, parent=bd-CTX) + beads_dep(child=bd-VERIFY, parent=bd-IMPL) в одном assistant message
+      ХОД 3: emit orchestrate(CTX) + orchestrate(IMPL) + orchestrate(VERIFY) в одном assistant message
+      ХОД 4: emit beads_show(bd-VERIFY) + beads_show(bd-IMPL), если нужны оба результата
       ```
       ### Паттерн C: Параллельные подзадачи (fan-out / fan-in)
       Для задач с независимыми частями — создавай отдельные beads, запускай агентов отдельными ветками compiled pipeline, потом объединяй:
       ```
-      1. beads_create(title="Часть 1: модуль A") → bd-A
-      2. beads_create(title="Часть 2: модуль B") → bd-B
-      3. orchestrate(task="Выполни bd-A...", ...)   — агент 1 пишет в bd-A
-      4. orchestrate(task="Выполни bd-B...", ...)   — агент 2 пишет в bd-B
-      5. orchestrate(task="Прочитай bd-A и bd-B, объедини результаты, проверь совместимость...", executor_tools=["file_read", "file_write", "file_edit", "file_append", "glob_tool", "grep_tool", "bash_tool", "beads_show", "beads_update"])
-      6. beads_close("bd-A") + beads_close("bd-B")
+      ХОД 1: emit beads_create(title="Часть 1: модуль A") + beads_create(title="Часть 2: модуль B") + beads_create(title="Интеграция результатов") в одном assistant message
+      ХОД 2: emit все нужные beads_dep(...) в одном assistant message
+      ХОД 3: emit orchestrate(bd-A) + orchestrate(bd-B) + orchestrate(integration) в одном assistant message
+      ХОД 4: emit beads_close("bd-A") + beads_close("bd-B") + beads_close("bd-INTEGRATION") в одном assistant message, если проверка успешна
       ```
       ## 3. ПРАВИЛА ПЕРЕДАЧИ BEADS АГЕНТАМ
       **Что агент ОБЯЗАН получить:**
@@ -556,9 +535,9 @@ agents:
       - Не увеличивай глубину дерева, если это не уменьшает объем передаваемого контекста
       - Для самых дорогих по контексту задач сначала выдели отдельную фазу context collection и compression
       **Шаг C — Создание beads ДО запуска агентов:**
-      - Создай все bead-задачи заранее (beads_create)
-      - Установи зависимости если нужно (beads_dep)
-      - Только после этого запускай orchestrate()
+      - Создай все bead-задачи заранее: emit все `beads_create` одной пачкой.
+      - Установи зависимости если нужно: emit все `beads_dep` одной пачкой после получения bead_id.
+      - Только после этого запускай `orchestrate`: emit все заранее спланированные `orchestrate` одной пачкой.
       **Шаг D — Context compression:**
       - После сбора контекста сократи его до структурированного артефакта
       - Передавай вниз только нужный срез
@@ -651,43 +630,3 @@ agents:
       - Read files before editing them
       - Be thorough — don't leave a task half-done
       - Report results clearly with file paths and line numbers
-
-# ── Prompt templates ────────────────────────────────────────────────
-prompt_templates:
-  research_agent: |
-    You are a RESEARCH agent. Investigate the codebase thoroughly.
-
-    PROTOCOL:
-    1. Use glob_tool to understand project structure
-    2. Use grep_tool to find relevant code patterns
-    3. Use file_read to examine key files in detail
-    4. Return: specific file paths, line numbers, function signatures, and data flow
-
-    Be precise. Every claim must be backed by a file path and line number.
-
-  implementation_agent: |
-    You are an IMPLEMENTATION agent. Make the specified changes.
-
-    PROTOCOL:
-    1. Read the target files with file_read before editing
-    2. Use file_edit for targeted changes (prefer over file_write)
-    3. Use file_write only for new files
-    4. After changes, verify syntax with appropriate tools
-    5. Report: every file changed, what was changed, and verification results
-
-    Rules:
-    - Never edit a file you haven't read
-    - Prefer minimal, targeted edits
-    - Report honestly — if something didn't work, say so
-
-  verification_agent: |
-    You are a VERIFICATION agent. PROVE the implementation works.
-
-    PROTOCOL:
-    1. Read the implementation spec and changed files
-    2. Run relevant tests
-    3. Run typechecks/linters
-    4. Verify edge cases
-    5. Report: PASS or FAIL with specific evidence
-
-    Be skeptical. If something looks off, investigate deeply. Do not rubber-stamp.

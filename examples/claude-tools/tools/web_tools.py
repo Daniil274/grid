@@ -37,6 +37,12 @@ try:
 except ImportError:
     HAS_MARKDOWNIFY = False
 
+try:
+    import trafilatura
+    HAS_TRAFILATURA = True
+except ImportError:
+    HAS_TRAFILATURA = False
+
 
 MAX_CONTENT_LENGTH = 100_000
 DEFAULT_TIMEOUT = 30
@@ -167,11 +173,11 @@ def web_fetch(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> str:
     """
-    Loads a web page and converts it to markdown.
+    Loads a web page and converts it to markdown using Trafilatura.
 
     Args:
-        url:       URL to load (only http:// and https://)
-        render_js: JS rendering via Firecrawl (requires FIRECRAWL_API_KEY)
+        url:       URL to load
+        render_js: Ignored (kept for backwards compatibility)
         timeout:   Timeout in seconds
 
     Returns:
@@ -181,11 +187,8 @@ def web_fetch(
     if err:
         return err
 
-    if render_js:
-        return _fetch_with_firecrawl(url, timeout)
-
-    if not HAS_AIOHTTP:
-        return "❌ aiohttp is not installed. Install: pip install aiohttp"
+    if not HAS_TRAFILATURA:
+        return "❌ trafilatura is not installed. Install: pip install trafilatura"
 
     try:
         status, content, error = _run_async(_fetch_url(url, timeout), timeout=timeout + 10)
@@ -197,49 +200,11 @@ def web_fetch(
     if status != 200:
         return f"❌ HTTP {status} when loading {url}"
 
-    title = ""
-    if HAS_BS4:
-        soup = BeautifulSoup(content, "html.parser")
-        title_tag = soup.find("title")
-        if title_tag:
-            title = title_tag.get_text(strip=True)
-
-    header = f"# {title}\n\n" if title else ""
-    markdown = _html_to_markdown(content)
-    return _truncate(header + f"Source: {url}\n\n" + markdown)
-
-
-def _fetch_with_firecrawl(url: str, timeout: int) -> str:
-    api_key = os.environ.get("FIRECRAWL_API_KEY")
-    if not api_key:
-        return "❌ FIRECRAWL_API_KEY is required for JS rendering"
-    if not HAS_AIOHTTP:
-        return "❌ aiohttp is not installed. Install: pip install aiohttp"
-
-    async def _do():
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.firecrawl.dev/v1/scrape",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"url": url, "formats": ["markdown"]},
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    return f"❌ Firecrawl API error: {response.status}"
-                data = await response.json()
-                if not data.get("success"):
-                    return f"❌ Firecrawl error: {data.get('error', 'Unknown')}"
-                result = data.get("data", {})
-                title = result.get("metadata", {}).get("title", "")
-                md = result.get("markdown", "")
-                header = f"# {title}\n\n" if title else ""
-                return _truncate(header + f"Source: {url}\n\n" + md)
-
-    try:
-        return _run_async(_do(), timeout=timeout + 10)
-    except Exception as exc:
-        return f"❌ Firecrawl error: {exc}"
+    result = trafilatura.extract(content, output_format="markdown", include_links=True)
+    if result is None:
+        return "❌ Failed to extract content (page might be empty or unsupported format)."
+    
+    return _truncate(f"Source: {url}\n\n{result}")
 
 
 # ---------------------------------------------------------------------------
@@ -252,69 +217,53 @@ def web_search(
     max_results: int = 5,
 ) -> str:
     """
-    Performs a web search via the Firecrawl API.
+    Performs a web search via local SearXNG instance.
 
-    Requires FIRECRAWL_API_KEY in environment variables.
+    Requires SearXNG running locally, defaults to http://localhost:8080.
+    Configure via SEARXNG_URL environment variable.
 
     Args:
         query:       Search query
-        max_results: Number of results (1–10)
+        max_results: Number of results (1–20)
 
     Returns:
         Search results
     """
-    api_key = os.environ.get("FIRECRAWL_API_KEY")
-    if not api_key:
-        return (
-            "❌ FIRECRAWL_API_KEY is required for web search.\n"
-            "Get a free key at https://firecrawl.dev\n"
-            "Then: export FIRECRAWL_API_KEY=your_key"
-        )
     if not HAS_AIOHTTP:
         return "❌ aiohttp is not installed. Install: pip install aiohttp"
 
-    max_results = max(1, min(10, max_results))
+    searxng_url = os.environ.get("SEARXNG_URL", "http://localhost:8080")
+    max_results = max(1, min(20, max_results))
 
     async def _do():
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.firecrawl.dev/v1/search",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "query": query,
-                    "limit": max_results,
-                    "scrapeOptions": {"formats": ["markdown"]},
-                },
-                timeout=aiohttp.ClientTimeout(total=60),
+            async with session.get(
+                f"{searxng_url}/search",
+                params={"q": query, "format": "json"},
+                timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status != 200:
-                    return f"❌ Firecrawl API error: {response.status}"
+                    return f"❌ SearXNG API error: HTTP {response.status}"
                 data = await response.json()
-                if not data.get("success"):
-                    return f"❌ Firecrawl error: {data.get('error', 'Unknown')}"
 
-                items = data.get("data", [])
-                if not items:
+                results = data.get("results", [])
+                if not results:
                     return f"🔍 Nothing found for query '{query}'"
 
                 lines = [f"🔍 Search results for '{query}'\n"]
-                for i, item in enumerate(items, 1):
+                for i, item in enumerate(results[:max_results], 1):
                     title = item.get("title", "Untitled")
                     item_url = item.get("url", "")
-                    desc = item.get("description", "")
-                    md = item.get("markdown", "")
+                    content = item.get("content", "")
 
                     lines.append(f"\n## {i}. {title}")
                     lines.append(f"URL: {item_url}")
-                    if desc:
-                        lines.append(f"\n{desc}")
-                    if md:
-                        snippet = md[:1000] + ("..." if len(md) > 1000 else "")
-                        lines.append(f"\n{snippet}")
+                    if content:
+                        lines.append(f"\n{content}")
 
                 return "\n".join(lines)
 
     try:
-        return _run_async(_do(), timeout=70)
+        return _run_async(_do(), timeout=40)
     except Exception as exc:
         return f"❌ Search error: {exc}"

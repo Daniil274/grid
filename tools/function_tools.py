@@ -121,7 +121,9 @@ AVAILABLE_TOOLS = _LazyToolsDict()
 TOOL_ALIASES = {
     # File operations
     "read_file": "file_read",
-    "write_file": "file_write", 
+    "read": "file_read",
+    "write_file": "file_write",
+    "write": "file_write", 
     "list_files": "file_list",
     "get_file_info": "file_info",
     "search_files": "file_search",
