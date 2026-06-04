@@ -82,6 +82,16 @@ def _auto_cfg(compact_cfg):
     return getattr(compact_cfg, "auto", None) if compact_cfg is not None else None
 
 
+def _clamp_reserved_summary_tokens(value: int, context_window: int) -> int:
+    """Keep the compact reserve useful for threshold math, even with oversized configs."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = MAX_OUTPUT_TOKENS_FOR_SUMMARY
+    cap = max(1_000, min(MAX_OUTPUT_TOKENS_FOR_SUMMARY, context_window // 2))
+    return max(1_000, min(parsed, cap))
+
+
 def get_effective_context_window_size(
     context_window: int,
     compact_cfg: "Optional[CompactConfig]" = None,
@@ -96,6 +106,7 @@ def get_effective_context_window_size(
         if auto is not None
         else MAX_OUTPUT_TOKENS_FOR_SUMMARY
     )
+    reserve = _clamp_reserved_summary_tokens(reserve, context_window)
     return context_window - reserve
 
 

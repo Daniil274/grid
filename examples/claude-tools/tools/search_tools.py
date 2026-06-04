@@ -21,6 +21,7 @@ from utils.path_utils import resolve_agent_path_auto, display_agent_path_auto
 
 MAX_RESULTS = 100
 MAX_OUTPUT_LINES = 100
+MAX_PER_FILE_MATCHES = 5
 
 # Directories always skipped during traversal
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".tox", ".mypy_cache"}
@@ -52,7 +53,7 @@ def glob_tool(
     max_results: int = MAX_RESULTS,
 ) -> str:
     """
-    Searches for files by glob pattern within the working directory.
+    Searches for files and directories by glob pattern within the working directory.
 
     Supports:
       *.py              — Python files in the root of the directory
@@ -94,6 +95,19 @@ def glob_tool(
 
             for root, dirs, files in os.walk(walk_root):
                 dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+
+                for dirname in dirs:
+                    if fnmatch.fnmatch(dirname, file_pat):
+                        full = Path(root) / dirname
+                        try:
+                            results.append(str(full.relative_to(base_path)) + "/")
+                        except ValueError:
+                            results.append(str(full) + "/")
+                        if len(results) >= max_results:
+                            break
+
+                if len(results) >= max_results:
+                    break
 
                 for filename in files:
                     if fnmatch.fnmatch(filename, file_pat):
@@ -170,14 +184,42 @@ def _search_file(filepath: Path, regex, max_per_file: int = 5, per_file_timeout:
         except (IOError, OSError):
             pass
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(_do)
-        try:
-            future.result(timeout=per_file_timeout)
-        except concurrent.futures.TimeoutError:
-            pass  # Return whatever was collected
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(_do)
+    try:
+        future.result(timeout=per_file_timeout)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+    finally:
+        # Do not wait for a regex search that already exceeded the per-file
+        # budget; otherwise the ReDoS guard is only cosmetic.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     return matches
+
+
+def _normalize_grep_args(
+    pattern: str,
+    file_extensions: Optional[str],
+    max_results: int,
+) -> tuple[str, str, int, Optional[str]]:
+    """Normalize public grep arguments and return (pattern, extensions, limit, error)."""
+    if pattern is None:
+        return "", "", MAX_RESULTS, "❌ Pattern is required"
+
+    pattern = str(pattern)
+    if pattern == "":
+        return "", "", MAX_RESULTS, "❌ Pattern must not be empty"
+
+    extensions = "" if file_extensions is None else str(file_extensions)
+
+    try:
+        limit = int(max_results)
+    except (TypeError, ValueError):
+        limit = MAX_RESULTS
+    limit = max(1, min(limit, MAX_RESULTS))
+
+    return pattern, extensions, limit, None
 
 
 def _grep_with_ripgrep(
@@ -295,7 +337,7 @@ def _grep_with_python(
                 continue
 
             filepath = Path(root) / filename
-            for lineno, content in _search_file(filepath, regex):
+            for lineno, content in _search_file(filepath, regex, max_per_file=MAX_PER_FILE_MATCHES):
                 try:
                     rel = str(filepath.relative_to(base_path))
                 except ValueError:
@@ -316,7 +358,7 @@ def _grep_with_python(
     return f"{header}\n\n" + "\n".join(results)
 
 
-@function_tool
+@function_tool(strict_mode=False)
 def grep_tool(
     pattern: str,
     directory: str = ".",
@@ -339,6 +381,12 @@ def grep_tool(
     Returns:
         Found lines with file names and line numbers
     """
+    pattern, file_extensions, max_results, arg_error = _normalize_grep_args(
+        pattern, file_extensions, max_results
+    )
+    if arg_error:
+        return arg_error
+
     try:
         visible, base_path = _resolve_dir(directory)
     except ValueError as exc:

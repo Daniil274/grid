@@ -101,22 +101,55 @@ class CliChatRenderer:
         else:
             print(message)
 
-    def print_tool_call(self, tool_name: str, args_preview: str = "") -> None:
+    def _tool_title(
+        self,
+        label: str,
+        tool_name: str,
+        *,
+        agent_name: Optional[str] = None,
+        duration: Optional[str] = None,
+    ) -> str:
+        parts = [label]
+        if agent_name:
+            parts.append(agent_name)
+        if tool_name:
+            parts.append(tool_name)
+        if duration:
+            parts.append(duration)
+        return " | ".join(parts)
+
+    def print_tool_call(
+        self,
+        tool_name: str,
+        args_preview: str = "",
+        *,
+        agent_name: Optional[str] = None,
+        duration: Optional[str] = None,
+    ) -> None:
         text = f"{tool_name}"
         if args_preview:
             text += f"\n{args_preview}"
+        title = self._tool_title("Tool", tool_name, agent_name=agent_name, duration=duration)
         if self.enabled:
             self.console.print(
-                Panel(text, title="Tool", border_style="magenta", padding=(0, 1))
+                Panel(text, title=title, border_style="magenta", padding=(0, 1))
             )
         else:
             print(f"[tool] {text}")
 
-    def print_tool_output(self, tool_name: str, output_preview: str) -> None:
+    def print_tool_output(
+        self,
+        tool_name: str,
+        output_preview: str,
+        *,
+        agent_name: Optional[str] = None,
+        duration: Optional[str] = None,
+    ) -> None:
         text = output_preview or "(empty)"
+        title = self._tool_title("Tool Result", tool_name, agent_name=agent_name, duration=duration)
         if self.enabled:
             self.console.print(
-                Panel(text, title=f"Tool Result: {tool_name}", border_style="bright_black", padding=(0, 1))
+                Panel(text, title=title, border_style="bright_black", padding=(0, 1))
             )
         else:
             print(f"[tool-result] {tool_name}: {text}")

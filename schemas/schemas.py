@@ -158,6 +158,10 @@ class Settings(BaseModel):
     project_tools: Optional[ProjectToolsConfig] = Field(default=None)
     working_directory: str = "."
     config_directory: str = "."
+    logs_directory: Optional[str] = Field(
+        default=None,
+        description="Logs directory. When unset, defaults to ~/.grid/logs.",
+    )
     allow_path_override: bool = True
     agent_logging: AgentLoggingConfig = Field(default_factory=AgentLoggingConfig)
     image_processing: ImageProcessingConfig = Field(default_factory=ImageProcessingConfig)

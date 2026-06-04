@@ -41,6 +41,7 @@ except Exception:
 from core.tracing.config import configure_tracing_from_env
 from utils.exceptions import GridError
 from utils.cli_chat import CliChatRenderer
+from utils.grid_paths import get_default_logs_dir
 from utils.logger import Logger
 from utils.multimodal_converter import MultimodalConverter
 from utils.image_utils import ImageUtils
@@ -51,7 +52,7 @@ configure_tracing_from_env()
 # Initial logging (console + files); will be reconfigured after config load if agent_logging.enabled is set
 Logger.configure(
     level="INFO",
-    log_dir=str(Path(__file__).parent / "logs"),
+    log_dir=str(get_default_logs_dir()),
     enable_console=False,
     enable_json=False,
     enable_legacy_logs=True,
@@ -283,6 +284,11 @@ async def main():
         default="default_user",
         help="User identifier for isolation"
     )
+    parser.add_argument(
+        "--timeline",
+        action="store_true",
+        help="Start embedded timeline dashboard (default: run separately via python -m timeline)",
+    )
     
     args = parser.parse_args()
     
@@ -290,14 +296,15 @@ async def main():
         # Beautiful initialization
         print("Starting Grid Agent System...")
         
-        # Start timeline dashboard server immediately (read-only until factory is ready)
+        # Optional embedded timeline (normally: python -m timeline in another terminal)
         timeline_handle = None
-        try:
-            from timeline.integration import run_timeline_server, TimelineHandle
-            timeline_handle = TimelineHandle()
-            asyncio.create_task(run_timeline_server(handle=timeline_handle, port=8789))
-        except Exception as _tl_err:
-            print(f"Timeline server not started: {_tl_err}")
+        if args.timeline:
+            try:
+                from timeline.integration import run_timeline_server, TimelineHandle
+                timeline_handle = TimelineHandle()
+                asyncio.create_task(run_timeline_server(handle=timeline_handle, port=8789))
+            except Exception as _tl_err:
+                print(f"Timeline server not started: {_tl_err}")
 
         # Load configuration
         print("Load Config")
@@ -322,7 +329,7 @@ async def main():
                 if args.path is not None:
                     user_workspace = Path(args.path).resolve()
                 else:
-                    user_workspace = Path("workspace") / f"user_{args.user_id}"
+                    user_workspace = Path(config.config_path).resolve().parent / "workspace" / f"user_{args.user_id}"
                 user_workspace.mkdir(parents=True, exist_ok=True)
 
                 if ContainerManager:
@@ -347,9 +354,7 @@ async def main():
 
         # Reconfigure logging from config (e.g. disable console when agent_logging.enabled is False)
         agent_logging = config.config.settings.agent_logging
-        logs_dir = config.get_absolute_path(
-            config.get("settings.logs_directory", str(Path(__file__).parent / "logs"))
-        )
+        logs_dir = config.get_logs_directory()
         Logger.configure(
             level="INFO",
             log_dir=logs_dir,

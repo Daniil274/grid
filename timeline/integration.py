@@ -1,8 +1,9 @@
 """
 Timeline server integration — launch dashboard inside the agent system.
 
-Used from agent_chat.py and examples/telegram_bot/telegram_server.py to start timeline
-in the background in the same event loop, with access to AgentFactory (needed for rerun).
+Used from agent_chat.py (--timeline) to start timeline in the same event loop.
+For normal use, run the dashboard separately: ``python -m timeline`` or ``grid-timeline``.
+Pass AgentFactory (or use ``timeline --with-factory``) for rerun support.
 
 Usage:
     handle = TimelineHandle()
@@ -77,9 +78,10 @@ async def run_timeline_server(
         logger.warning("uvicorn not installed — timeline server disabled. Run: pip install uvicorn")
         return
 
+    from core.tracing.tracer import _DEFAULT_DB
     from timeline.server import create_app
 
-    db = db_path or _ROOT / "data" / "timeline.db"
+    db = db_path or _DEFAULT_DB
     app = create_app(db_path=db, factory=factory if handle is None else None)
 
     requested_port = port or 8789

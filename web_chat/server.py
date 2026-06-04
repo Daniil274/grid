@@ -242,7 +242,10 @@ class WebChatServer:
         async def index() -> HTMLResponse:
             if not INDEX_HTML.exists():
                 return HTMLResponse("<h1>web_chat/index.html not found</h1>", status_code=503)
-            return HTMLResponse(INDEX_HTML.read_text(encoding="utf-8"))
+            return HTMLResponse(
+                INDEX_HTML.read_text(encoding="utf-8"),
+                headers={"Cache-Control": "no-store"},
+            )
 
         @app.get("/api/chat/bootstrap")
         async def bootstrap() -> JSONResponse:

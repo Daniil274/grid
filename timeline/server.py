@@ -190,8 +190,8 @@ def create_app(
         if factory_holder["factory"] is None:
             raise HTTPException(
                 status_code=503,
-                detail="Rerun unavailable: timeline server started standalone (no factory). "
-                       "Start via agent_chat.py or examples/telegram_bot/telegram_server.py for rerun support.",
+                detail="Rerun unavailable: no AgentFactory bound. "
+                       "Start with: python -m timeline --with-factory -c config.yaml",
             )
 
         node = tracer.get_node(node_id)

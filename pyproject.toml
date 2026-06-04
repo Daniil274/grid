@@ -66,6 +66,8 @@ docs = [
 
 [project.scripts]
 agent-chat = "agent_chat:main"
+grid-web-chat = "web_chat.__main__:main"
+grid-timeline = "timeline.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/AgentsSDK/grid"

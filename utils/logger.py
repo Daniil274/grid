@@ -8,6 +8,7 @@ import json
 import threading
 from datetime import datetime
 from typing import Any, Dict, Optional
+from utils.grid_paths import get_default_logs_dir
 from pathlib import Path
 from functools import lru_cache
 import re
@@ -64,7 +65,7 @@ class SessionLogManager:
                 cls._activation_depth += 1
                 return
             cls.deactivate_unlocked()
-            log_dir = cls._log_dir or (Path(__file__).parent.parent.resolve() / "logs")
+            log_dir = cls._log_dir or get_default_logs_dir()
             session_dir = log_dir / "sessions"
             session_dir.mkdir(parents=True, exist_ok=True)
             session_path = session_dir / f"{context_id}.log"
@@ -523,10 +524,11 @@ class Logger:
         """Apply settings.agent_logging to session log mirroring."""
         path: Optional[Path] = None
         if log_dir:
-            path_obj = Path(log_dir)
-            if not path_obj.is_absolute():
-                path_obj = Path(__file__).parent.parent.resolve() / path_obj
-            path = path_obj
+            path_obj = Path(log_dir).expanduser()
+            if path_obj.is_absolute():
+                path = path_obj
+            else:
+                path = get_default_logs_dir() / path_obj
         SessionLogManager.configure(enabled=enabled, level=level, log_dir=path)
 
     @classmethod

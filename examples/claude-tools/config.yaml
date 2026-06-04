@@ -7,7 +7,7 @@ settings:
   max_turns: 100
   agent_timeout: 600
   debug: true
-  mcp_enabled: false
+  mcp_enabled: true
   max_tool_output_tokens: 12000
   working_directory: "/home/user/grid/examples/claude-tools/workspace"
   config_directory: "."
@@ -38,6 +38,7 @@ settings:
     - Для редактирования файлов используй `file_edit`, а не `sed` или `awk`.
     - Для создания файлов используй `file_write`, а не heredoc через shell.
     - Для поиска файлов используй `glob_tool`, для поиска по содержимому — `grep_tool`.
+    - Если в проекте есть `.codegraph/`, для навигации по коду и архитектурных вопросов предпочитай CodeGraph (`codegraph_search`, `codegraph_callers`, `codegraph_callees`, `codegraph_impact`). Широкое исследование через `codegraph_context` — только через subagent `Agent` (см. skill `codegraph`).
     - Если нужно сделать несколько независимых вызовов инструментов, делай их параллельно в одном ответе.
     - Если задача состоит из нескольких заметных шагов, веди её через `todo_write` и держи ровно одну задачу в `in_progress`.
 
@@ -284,6 +285,18 @@ tools:
     type: "function"
     description: Read ONLY new log data for (channel, reader) since the last read (cursor-based).
 
+  codegraph:
+    type: "mcp"
+    server_command: ["codegraph", "serve", "--mcp", "--path"]
+    add_working_directory: true
+    description: "CodeGraph — локальный семантический граф кода (search, context, callers, callees, impact)."
+    prompt_addition: |
+      CodeGraph индексирует **текущую рабочую директорию агента** (не родительский репозиторий).
+      Требует `codegraph` в PATH и `.codegraph/` в working directory (инициализируется автоматически при старте).
+      MCP-инструменты: `codegraph_search`, `codegraph_context`, `codegraph_callers`, `codegraph_callees`,
+      `codegraph_impact`, `codegraph_node`, `codegraph_files`, `codegraph_status`.
+      Следуй skill `codegraph`: лёгкие lookup-вызовы — в основной сессии; широкое исследование — через subagent `Agent`.
+
   general_purpose_openai:
     type: "agent"
     name: "Agent"
@@ -336,8 +349,10 @@ agents:
   engineer:
     name: "Claude Engineer"
     model: deepseek-v4-pro-opencode
+    mcp_enabled: true
     system_skills:
       - beads
+      - codegraph
     tools:
       - bash_tool
       - file_read
@@ -346,6 +361,7 @@ agents:
       - file_append
       - glob_tool
       - grep_tool
+      - codegraph
       - web_fetch
       - web_search
       - notebook_read
@@ -382,8 +398,9 @@ agents:
 
       # Using your tools
       - Use dedicated tools instead of shell commands when a dedicated tool exists.
+      - If `.codegraph/` exists, prefer CodeGraph for symbol lookup and call-graph questions; use `grep_tool`/`glob_tool` for exact text search (see skill `codegraph`).
       - Break down and manage non-trivial work with the beads tools.
-      - Use the `Agent` tool with the specialized `general-purpose` subagent when the task matches: broad research, deep codebase exploration, or a bounded multi-step task that should not bloat the main context.
+      - Use the `Agent` tool with the specialized `general-purpose` subagent when the task matches: broad research, deep codebase exploration, or a bounded multi-step task that should not bloat the main context. Brief subagents to use CodeGraph when `.codegraph/` is present.
       - Use the `WebSpider` tool when the task is primarily about internet research: finding current information, checking docs across multiple pages, comparing sources, or collecting links and facts from the web.
       - When coordinating work through beads, pass bead_id in subagent briefings so they can `beads show` / `beads update` (see skill `beads`).
       - Subagents are valuable for parallelizing independent queries or protecting the main context, but do not overuse them.
@@ -404,8 +421,10 @@ agents:
   general_purpose_glm:
     name: "General-purpose"
     model: deepseek-v4-flash-opencode
+    mcp_enabled: true
     system_skills:
       - beads
+      - codegraph
     tools:
       - bash_tool
       - file_read
@@ -414,6 +433,7 @@ agents:
       - file_append
       - glob_tool
       - grep_tool
+      - codegraph
       - web_fetch
       - web_search
       - notebook_read
@@ -426,6 +446,12 @@ agents:
       - beads_update
       - beads_create
       - beads_close
+    auto_run_tools:
+      - name: bash_tool
+        parameters:
+          command: codegraph init -i
+          working_dir: "."
+          description: Initialize CodeGraph index in workspace
     description: "General-purpose GRID subagent"
     custom_prompt: |
       You are an agent for GRID system agent . Given the user's message, use the tools available to complete the task. Complete the task fully. Don't gold-plate, but don't leave it half-done.
@@ -437,6 +463,7 @@ agents:
       - Performing bounded multi-step research or implementation tasks
 
       Guidelines:
+      - If `.codegraph/` exists, use CodeGraph (`codegraph_context`, `codegraph_search`, callers/callees) as the primary exploration path; fall back to `grep_tool`/`glob_tool`/`file_read` when needed (see skill `codegraph`).
       - For file searches: search broadly when you do not know where something lives. Use `file_read` when you already know the exact file path.
       - For analysis: start broad and narrow down. Use multiple search strategies if the first one does not yield enough.
       - Be thorough: check multiple locations, naming conventions, and related files.
