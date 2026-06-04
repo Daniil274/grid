@@ -41,6 +41,7 @@ ERROR_MESSAGE_NOT_ENOUGH_MESSAGES = "Not enough messages to compact."
 ERROR_MESSAGE_PROMPT_TOO_LONG = (
     "Conversation too long to compact. Try removing some messages and compacting again."
 )
+MAX_SAFE_SUMMARY_OUTPUT_TOKENS = 20_000
 
 
 def _is_prompt_too_long_response(text: str) -> bool:
@@ -50,6 +51,15 @@ def _is_prompt_too_long_response(text: str) -> bool:
     return text.startswith(PROMPT_TOO_LONG_ERROR_MESSAGE) or (
         "prompt_too_long" in text.lower() and len(text) < 300
     )
+
+
+def _clamp_summary_output_tokens(value: int) -> int:
+    """Keep compact summaries below provider/account max_tokens ceilings."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = MAX_SAFE_SUMMARY_OUTPUT_TOKENS
+    return max(1_000, min(parsed, MAX_SAFE_SUMMARY_OUTPUT_TOKENS))
 
 
 def _extract_token_gap_from_error(error: Exception) -> Optional[int]:
@@ -165,6 +175,7 @@ async def compact_conversation(
 
     if compact_cfg is not None:
         max_output_tokens = getattr(compact_cfg, "summary_max_output_tokens", max_output_tokens)
+    max_output_tokens = _clamp_summary_output_tokens(max_output_tokens)
 
     micro_result = microcompact_messages(messages, compact_cfg=compact_cfg)
     messages_to_summarize = micro_result["messages"]

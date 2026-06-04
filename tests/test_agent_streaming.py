@@ -10,6 +10,7 @@ from core.agent_factory import AgentFactory
 from core.config import Config
 from core import agent_factory as agent_factory_module
 from core.agent_factory import ConsoleStreamObserver
+from core.tracing.config import ConsoleSpanExporter
 
 
 class DummyRawDelta:
@@ -194,3 +195,167 @@ def test_console_stream_observer_formats_tool_calls(monkeypatch):
     rendered = "".join(message for message, _, _ in calls)
     assert "[tool] fs.search_code" in rendered
     assert "query=todo" in rendered
+
+
+def test_console_stream_observer_passes_agent_and_duration_to_renderer(monkeypatch):
+    rendered = []
+
+    class FakeRenderer:
+        def print_tool_call(self, tool_name, args_preview="", *, agent_name=None, duration=None):
+            rendered.append(("call", tool_name, args_preview, agent_name, duration))
+
+        def print_tool_output(self, tool_name, output_preview, *, agent_name=None, duration=None):
+            rendered.append(("output", tool_name, output_preview, agent_name, duration))
+
+    observer = ConsoleStreamObserver(renderer=FakeRenderer())
+
+    class DummyRunItemStreamEvent:
+        def __init__(self, name, item):
+            self.name = name
+            self.item = item
+
+    monkeypatch.setattr(agent_factory_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
+
+    raw_item = SimpleNamespace(
+        name="grep_tool",
+        arguments={"pattern": "volume"},
+        server_label=None,
+    )
+    item = SimpleNamespace(raw_item=raw_item, output="ok")
+
+    observer.handle_event(DummyRunItemStreamEvent("tool_called", item), agent_key="executor")
+    assert rendered[0] == ("call", "grep_tool", "pattern=volume", "executor", None)
+
+    observer.handle_event(DummyRunItemStreamEvent("tool_output", item), agent_key="executor")
+
+    assert rendered[1][0:4] == ("output", "grep_tool", "ok", "executor")
+    assert rendered[1][4]
+
+
+def test_console_stream_observer_matches_tool_output_by_call_id(monkeypatch):
+    rendered = []
+
+    class FakeRenderer:
+        def print_tool_call(self, tool_name, args_preview="", *, agent_name=None, duration=None):
+            rendered.append(("call", tool_name, args_preview, agent_name, duration))
+
+        def print_tool_output(self, tool_name, output_preview, *, agent_name=None, duration=None):
+            rendered.append(("output", tool_name, output_preview, agent_name, duration))
+
+    observer = ConsoleStreamObserver(renderer=FakeRenderer())
+
+    class DummyRunItemStreamEvent:
+        def __init__(self, name, item):
+            self.name = name
+            self.item = item
+
+    monkeypatch.setattr(agent_factory_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
+
+    call_raw = SimpleNamespace(
+        name="glob_tool",
+        arguments={"pattern": "**/*"},
+        call_id="call_1",
+    )
+    output_raw = SimpleNamespace(
+        type="function_call_output",
+        call_id="call_1",
+        output="Found 50 results",
+    )
+
+    observer.handle_event(
+        DummyRunItemStreamEvent("tool_called", SimpleNamespace(raw_item=call_raw)),
+        agent_key="coordinator",
+    )
+    assert rendered[0] == ("call", "glob_tool", "pattern=**/*", "coordinator", None)
+
+    observer.handle_event(
+        DummyRunItemStreamEvent("tool_output", SimpleNamespace(raw_item=output_raw)),
+        agent_key="coordinator",
+    )
+
+    assert rendered[1][0:4] == ("output", "glob_tool", "Found 50 results", "coordinator")
+    assert rendered[1][4]
+
+
+def test_console_span_exporter_suppresses_compact_function_lines(capsys):
+    exporter = ConsoleSpanExporter("INFO")
+
+    exporter._print_span(
+        {
+            "span_data": {"type": "function", "name": "grep_tool"},
+            "started_at": "2026-05-19T18:00:00Z",
+            "ended_at": "2026-05-19T18:00:00.123Z",
+        }
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.asyncio
+async def test_run_agent_object_simple_streams_dynamic_agent_tool_calls(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+settings:
+  default_agent: "test_agent"
+  max_history: 5
+  max_turns: 2
+  agent_timeout: 30
+  working_directory: "."
+  config_directory: "."
+  allow_path_override: true
+  mcp_enabled: false
+  agent_logging:
+    enabled: false
+providers:
+  openai:
+    name: "openai"
+    base_url: "https://api.openai.com/v1"
+models:
+  gpt-4:
+    name: "gpt-4"
+    provider: "openai"
+prompt_templates:
+  base: |
+    You are a helpful assistant.
+agents:
+  test_agent:
+    name: "Test Agent"
+    model: "gpt-4"
+    tools: []
+    base_prompt: "base"
+    description: "Test agent"
+""",
+        encoding="utf-8",
+    )
+
+    seen = []
+
+    class FakeObserver:
+        def handle_event(self, event, *, agent_key=None):
+            seen.append((getattr(event, "name", ""), agent_key))
+            return None
+
+    class DummyRunItemStreamEvent:
+        def __init__(self, name, item):
+            self.name = name
+            self.item = item
+
+    monkeypatch.setattr(agent_factory_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
+
+    raw_item = SimpleNamespace(name="glob_tool", arguments={"pattern": "**/*"}, call_id="call_1")
+    events = [DummyRunItemStreamEvent("tool_called", SimpleNamespace(raw_item=raw_item))]
+    dummy_stream = DummyStream(events=events, final_output="done")
+
+    class DummyRunner:
+        @staticmethod
+        def run_streamed(**kwargs):
+            return dummy_stream
+
+    factory = AgentFactory(Config(str(config_path)), stream_observer=FakeObserver())
+    monkeypatch.setattr(agents, "Runner", DummyRunner)
+
+    result = await factory.run_agent_object_simple(SimpleNamespace(name="executor-123"), "task")
+
+    assert result == "done"
+    assert ("tool_called", "executor-123") in seen

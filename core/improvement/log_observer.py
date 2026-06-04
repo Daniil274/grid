@@ -110,8 +110,13 @@ class LogObserver:
     ) -> None:
         self.config = config
         self.registry = registry or ImprovementRegistry(config=config)
-        configured_logs_dir = logs_directory or config.get("settings.logs_directory", "logs")
-        self.logs_directory = Path(config.get_absolute_path(configured_logs_dir))
+        configured_logs_dir = logs_directory or config.get("settings.logs_directory")
+        from utils.grid_paths import resolve_logs_directory
+
+        self.logs_directory = resolve_logs_directory(
+            configured_logs_dir,
+            working_directory=config.get_working_directory(),
+        )
         self.min_occurrences = max(1, min_occurrences)
 
     def observe(self, since: Optional[datetime] = None) -> ObserverResult:

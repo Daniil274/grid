@@ -303,6 +303,16 @@ class Config:
             return relative_path.replace('\\', '/')
         # Join using pathlib and normalize to POSIX string
         return (Path(self.get_working_directory()) / relative_path).as_posix()
+
+    def get_logs_directory(self) -> str:
+        """Return logs directory from config, or ~/.grid/logs when not configured."""
+        from utils.grid_paths import resolve_logs_directory
+
+        configured = self.get("settings.logs_directory")
+        return resolve_logs_directory(
+            configured,
+            working_directory=self.get_working_directory(),
+        ).as_posix()
     
     # Provider methods
     def get_provider(self, provider_key: str) -> ProviderConfig:

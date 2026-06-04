@@ -66,16 +66,22 @@ const els = {
   promptChips: [...document.querySelectorAll("[data-prompt]")],
 };
 
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-  highlight(code, lang) {
-    if (lang && hljs.getLanguage(lang)) {
-      return hljs.highlight(code, { language: lang }).value;
-    }
-    return hljs.highlightAuto(code).value;
-  },
-});
+function renderMarkdown(text) {
+  const parser = globalThis.marked;
+  if (parser && typeof parser.parse === "function") {
+    return parser.parse(text || "");
+  }
+  return escapeHtml(text || "").replace(/\n/g, "<br>");
+}
+
+function renderMessageContent(node, text, markdown = true) {
+  setTypingState(node, false);
+  if (markdown) {
+    node.innerHTML = renderMarkdown(text);
+  } else {
+    node.textContent = text || "";
+  }
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -298,15 +304,6 @@ function setTypingState(node, active) {
     `;
   } else if (node.querySelector(".typingIndicator")) {
     node.innerHTML = "";
-  }
-}
-
-function renderMessageContent(node, text, markdown = true) {
-  setTypingState(node, false);
-  if (markdown) {
-    node.innerHTML = marked.parse(text || "");
-  } else {
-    node.textContent = text || "";
   }
 }
 
@@ -1094,4 +1091,5 @@ async function init() {
 init().catch((error) => {
   console.error(error);
   els.runtimePill.textContent = "bootstrap failed";
+  els.activeAgentName.textContent = "bootstrap failed";
 });

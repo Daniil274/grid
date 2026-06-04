@@ -271,6 +271,9 @@ class ConsoleStreamObserver:
         self._render_text_deltas = render_text_deltas
         self._text_callback = text_callback
         self._renderer = renderer
+        self._pending_tool_calls: Dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._pending_tool_calls_by_id: Dict[tuple[str, str], dict[str, Any]] = {}
+        self._pending_tool_call_order: Dict[str, list[dict[str, Any]]] = {}
 
     def _emit(self, message: str, *, end: str = "\n", flush: bool = False) -> None:
         self._write(message, end=end, flush=flush)
@@ -293,40 +296,201 @@ class ConsoleStreamObserver:
             return str(arguments)
         return ""
 
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        if seconds < 1:
+            return f"{seconds * 1000:.0f}ms"
+        return f"{seconds:.2f}s"
+
+    @staticmethod
+    def _get_value(obj: Any, *names: str) -> Any:
+        for name in names:
+            if obj is None:
+                continue
+            if isinstance(obj, dict) and name in obj:
+                return obj.get(name)
+            value = getattr(obj, name, None)
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _extract_tool_event_info(cls, item: Any) -> dict[str, Any]:
+        raw_item = getattr(item, "raw_item", None)
+        function_data = cls._get_value(raw_item, "function") or cls._get_value(item, "function")
+        tool_name = (
+            cls._get_value(raw_item, "name", "tool_name")
+            or cls._get_value(function_data, "name")
+            or cls._get_value(item, "name", "tool_name")
+        )
+        raw_type = cls._get_value(raw_item, "type") or cls._get_value(item, "type")
+        if not tool_name and raw_type not in {"function_call_output", "tool_call_output"}:
+            tool_name = raw_type
+        server_label = cls._get_value(raw_item, "server_label") or cls._get_value(item, "server_label")
+        call_id = cls._get_value(raw_item, "call_id", "id") or cls._get_value(item, "call_id", "id")
+        arguments = cls._get_value(raw_item, "arguments") or cls._get_value(item, "arguments")
+        output = cls._get_value(item, "output")
+        if output is None:
+            output = cls._get_value(raw_item, "output")
+        return {
+            "tool_name": tool_name,
+            "server_label": server_label,
+            "call_id": str(call_id) if call_id else None,
+            "arguments": arguments,
+            "output": output,
+        }
+
+    def _remember_tool_call(
+        self,
+        agent_key: Optional[str],
+        tool_display_name: str,
+        arguments: Any,
+        call_id: Optional[str] = None,
+    ) -> None:
+        agent = agent_key or "agent"
+        call_info = {
+            "started_at": time.monotonic(),
+            "arguments": arguments,
+            "tool_display_name": tool_display_name,
+            "call_id": call_id,
+        }
+        key = (agent, tool_display_name)
+        self._pending_tool_calls.setdefault(key, []).append(call_info)
+        self._pending_tool_call_order.setdefault(agent, []).append(call_info)
+        if call_id:
+            self._pending_tool_calls_by_id[(agent, call_id)] = call_info
+
+    def _remove_pending_tool_call(self, agent: str, call_info: dict[str, Any]) -> None:
+        display_name = call_info.get("tool_display_name")
+        if display_name:
+            key = (agent, display_name)
+            pending = self._pending_tool_calls.get(key)
+            if pending and call_info in pending:
+                pending.remove(call_info)
+                if not pending:
+                    self._pending_tool_calls.pop(key, None)
+        ordered = self._pending_tool_call_order.get(agent)
+        if ordered and call_info in ordered:
+            ordered.remove(call_info)
+            if not ordered:
+                self._pending_tool_call_order.pop(agent, None)
+        call_id = call_info.get("call_id")
+        if call_id:
+            self._pending_tool_calls_by_id.pop((agent, call_id), None)
+
+    def _finalize_tool_call_info(
+        self,
+        agent_key: Optional[str],
+        tool_display_name: Optional[str],
+        call_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        agent = agent_key or "agent"
+        call_info = None
+        if call_id:
+            call_info = self._pending_tool_calls_by_id.get((agent, call_id))
+        if call_info is None and tool_display_name:
+            pending = self._pending_tool_calls.get((agent, tool_display_name))
+            if pending:
+                call_info = pending[0]
+        if call_info is None:
+            ordered = self._pending_tool_call_order.get(agent)
+            if ordered:
+                call_info = ordered[0]
+        if call_info is None:
+            return {}
+        self._remove_pending_tool_call(agent, call_info)
+        started_at = call_info.get("started_at")
+        info = dict(call_info)
+        if isinstance(started_at, (int, float)):
+            info["duration"] = self._format_duration(time.monotonic() - started_at)
+        return info
+
+    def tool_call_started(
+        self,
+        agent_key: Optional[str],
+        tool_display_name: str,
+        arguments: Any = None,
+        *,
+        call_id: Optional[str] = None,
+    ) -> None:
+        args_str = self._format_args(arguments)
+        self._remember_tool_call(agent_key, tool_display_name, arguments, call_id=call_id)
+        if self._renderer:
+            self._renderer.print_tool_call(
+                tool_display_name,
+                args_str,
+                agent_name=agent_key,
+            )
+        elif args_str:
+            self._emit(f"\n[tool] {tool_display_name} | {args_str}")
+        else:
+            self._emit(f"\n[tool] {tool_display_name}")
+
+    def tool_call_finished(
+        self,
+        agent_key: Optional[str],
+        tool_display_name: Optional[str],
+        output: Any = "",
+        *,
+        call_id: Optional[str] = None,
+    ) -> None:
+        call_info = self._finalize_tool_call_info(
+            agent_key,
+            tool_display_name,
+            call_id=call_id,
+        )
+        display_name = call_info.get("tool_display_name") or tool_display_name or "tool"
+        duration = call_info.get("duration")
+        output_str = str(output if output is not None else "")
+        if len(output_str) > 200:
+            output_str = output_str[:200] + "..."
+        if self._renderer:
+            self._renderer.print_tool_output(
+                display_name,
+                output_str,
+                agent_name=agent_key,
+                duration=duration,
+            )
+        else:
+            self._emit(f"[tool-result] {display_name} -> {output_str}")
+
     def handle_event(self, event: Any, *, agent_key: Optional[str] = None) -> Optional[str]:
         try:
             if isinstance(event, RunItemStreamEvent):
                 name = getattr(event, "name", "")
                 item = getattr(event, "item", None)
                 if name == "tool_called" and item is not None:
-                    raw_item = getattr(item, "raw_item", None)
-                    tool_name = getattr(raw_item, "name", None) or getattr(raw_item, "type", None) or "tool"
-                    arguments = getattr(raw_item, "arguments", None)
+                    info = self._extract_tool_event_info(item)
+                    tool_name = info.get("tool_name") or "tool"
+                    arguments = info.get("arguments")
                     args_str = self._format_args(arguments)
-                    server_label = getattr(raw_item, "server_label", None)
+                    server_label = info.get("server_label")
                     tool_display_name = f"{server_label}.{tool_name}" if server_label else tool_name
-                    if self._renderer:
-                        self._renderer.print_tool_call(tool_display_name, args_str)
-                    elif args_str:
-                        self._emit(f"\n[tool] {tool_display_name} | {args_str}")
-                    else:
-                        self._emit(f"\n[tool] {tool_display_name}")
+                    self.tool_call_started(
+                        agent_key,
+                        tool_display_name,
+                        arguments,
+                        call_id=info.get("call_id"),
+                    )
                     Logger("stream").log_verbose(f"STREAM TOOL CALL: {tool_display_name}", arguments)
 
                 elif name == "tool_output" and item is not None:
-                    raw_item = getattr(item, "raw_item", None)
-                    tool_name = getattr(raw_item, "name", None) or getattr(raw_item, "type", None) or "tool"
-                    output_val = getattr(item, "output", "")
-                    server_label = getattr(raw_item, "server_label", None)
-                    tool_display_name = f"{server_label}.{tool_name}" if server_label else tool_name
-                    output_str = str(output_val)
-                    if len(output_str) > 200:
-                        output_str = output_str[:200] + "..."
-                    if self._renderer:
-                        self._renderer.print_tool_output(tool_display_name, output_str)
-                    else:
-                        self._emit(f"[tool-result] {tool_display_name} -> {output_str}")
-                    Logger("stream").log_verbose(f"STREAM TOOL OUTPUT: {tool_display_name}", output_val)
+                    info = self._extract_tool_event_info(item)
+                    tool_name = info.get("tool_name")
+                    server_label = info.get("server_label")
+                    event_tool_display_name = (
+                        f"{server_label}.{tool_name}" if server_label and tool_name else tool_name
+                    )
+                    output_val = info.get("output")
+                    if output_val is None:
+                        output_val = ""
+                    self.tool_call_finished(
+                        agent_key,
+                        event_tool_display_name,
+                        output_val,
+                        call_id=info.get("call_id"),
+                    )
+                    Logger("stream").log_verbose(f"STREAM TOOL OUTPUT: {event_tool_display_name or 'tool'}", output_val)
 
                 elif name == "handoff_requested" and item is not None:
                     src = getattr(item, "agent", None)
@@ -565,7 +729,7 @@ class AgentFactory:
 
     def _build_agent_session_db_path(self) -> str:
         """Return durable SQLite path for agent sessions."""
-        base_dir = Path(self.config.get_working_directory()) / "logs"
+        base_dir = Path(self.config.get_logs_directory())
         base_dir.mkdir(parents=True, exist_ok=True)
         return str(base_dir / "agent_sessions.db")
 
@@ -601,8 +765,7 @@ class AgentFactory:
         return 700
 
     def _logs_directory_path(self) -> Path:
-        configured = self.config.get("settings.logs_directory", "logs")
-        return Path(self.config.get_absolute_path(configured))
+        return Path(self.config.get_logs_directory())
 
     def _update_pending_agent_run(
         self,
@@ -932,9 +1095,13 @@ class AgentFactory:
           reasoning: {effort: "none"}    → SDK-native reasoning_effort (OpenAI)
           reasoning: {enabled: false}    → extra_body {"reasoning": {"enabled": false}} (OpenRouter etc.)
         """
+        max_tokens = getattr(model_config, "max_tokens", None)
         reasoning_cfg: Optional[Dict[str, Any]] = getattr(model_config, "reasoning", None)
         if not reasoning_cfg:
-            return ModelSettings(parallel_tool_calls=False)
+            return ModelSettings(
+                max_tokens=max_tokens,
+                parallel_tool_calls=False,
+            )
 
         sdk_reasoning: Optional[Reasoning] = None
         extra_body: Optional[Dict[str, Any]] = None
@@ -950,6 +1117,7 @@ class AgentFactory:
             extra_body = {"reasoning": {"enabled": False}}
 
         return ModelSettings(
+            max_tokens=max_tokens,
             reasoning=sdk_reasoning,
             extra_body=extra_body,
             parallel_tool_calls=False,
@@ -1150,10 +1318,14 @@ class AgentFactory:
             if target_tool and hasattr(target_tool, "on_invoke_tool"):
                 logger.info(f"Auto-running tool '{tool_name}' for agent '{agent_key}' (cwd={working_dir}, every_run={every_run})")
                 try:
+                    if hasattr(self._stream_observer, "tool_call_started"):
+                        self._stream_observer.tool_call_started(agent_key, tool_name, tool_params)
                     tool_ctx_wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
                     tool_result = await target_tool.on_invoke_tool(
                         tool_ctx_wrapper, json.dumps(tool_params)
                     )
+                    if hasattr(self._stream_observer, "tool_call_finished"):
+                        self._stream_observer.tool_call_finished(agent_key, tool_name, tool_result)
                     # Log the full result of the auto-run tool call in verbose mode
                     Logger("agent_factory").log_verbose(
                         f"AUTO-RUN TOOL RESULT: {tool_name}",
@@ -1200,8 +1372,21 @@ class AgentFactory:
             if target_tool and hasattr(target_tool, "on_invoke_tool"):
                 logger.info(f"init_tool: running '{tool_name}' for dynamic agent")
                 try:
+                    agent_key = (
+                        getattr(run_context, "agent_key", None)
+                        or getattr(run_context, "agent_name", None)
+                        or getattr(run_context, "agent_id", None)
+                    )
+                    if not agent_key:
+                        agent_key = getattr(getattr(run_context, "context", None), "agent_key", None)
+                    if not agent_key:
+                        agent_key = "dynamic-agent"
+                    if hasattr(self._stream_observer, "tool_call_started"):
+                        self._stream_observer.tool_call_started(agent_key, tool_name, tool_params)
                     wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
                     result = await target_tool.on_invoke_tool(wrapper, json.dumps(tool_params))
+                    if hasattr(self._stream_observer, "tool_call_finished"):
+                        self._stream_observer.tool_call_finished(agent_key, tool_name, result)
                     # Log the full result of the init tool call in verbose mode
                     Logger("agent_factory").log_verbose(
                         f"INIT TOOL RESULT: {tool_name}",
@@ -1304,7 +1489,11 @@ class AgentFactory:
                 model = None
 
         if model is None:
-            model = VisionChatCompletionsModel(model=model_name, openai_client=client)
+            model = VisionChatCompletionsModel(
+                model=model_name,
+                openai_client=client,
+                preserve_reasoning_content=getattr(model_cfg, "preserve_reasoning_content", False),
+            )
 
         tools: List[Any] = []
         mcp_servers_list: List[Any] = []
@@ -1364,6 +1553,7 @@ class AgentFactory:
                     factory=self,
                     context_id=self.get_active_context_id() or "init",
                     user_id=None,
+                    agent_id=name,
                     container_id=getattr(self, "container_id", None),
                 )
                 init_info = await self._execute_init_tools(init_tools, tools, temp_ctx)
@@ -1655,25 +1845,41 @@ class AgentFactory:
         if init_tools:
             # ... existing init_tools code ...
             pass
-        
-        # Run the agent
-        set_current_factory(self)
-        try:
-            run_result = await _get_runner().run(
+
+        async def _run_streamed_simple() -> str:
+            streaming_text_parts: List[str] = []
+            run_result_streaming = _get_runner().run_streamed(
                 starting_agent=agent,
                 input=input_message,
                 context=run_ctx,
                 session=session,
                 max_turns=self.config.get_max_turns(),
             )
-            
-            # Extract output
-            if hasattr(run_result, 'final_output') and run_result.final_output:
-                return run_result.final_output
-            elif hasattr(run_result, 'output') and run_result.output:
-                return run_result.output
-            else:
-                return str(run_result)
+
+            async for event in run_result_streaming.stream_events():
+                if hasattr(self, '_stream_observer'):
+                    fragment = self._stream_observer.handle_event(
+                        event,
+                        agent_key=getattr(agent, 'name', 'dynamic-agent'),
+                    )
+                    if fragment:
+                        streaming_text_parts.append(fragment)
+
+            result_output = (
+                run_result_streaming.final_output
+                if getattr(run_result_streaming, "final_output", None) is not None
+                else ""
+            )
+            if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
+                buffered_text = "".join(streaming_text_parts).strip()
+                if buffered_text:
+                    result_output = buffered_text
+            return str(result_output)
+        
+        # Run the agent
+        set_current_factory(self)
+        try:
+            return await _run_streamed_simple()
         
         except Exception as e:
             # Reactive compact: handle context_length_exceeded errors
@@ -1704,19 +1910,7 @@ class AgentFactory:
                         # returned in reactive_result.messages for the caller to use.
                         set_current_factory(self)
                         try:
-                            run_result = await _get_runner().run(
-                                starting_agent=agent,
-                                input=input_message,
-                                context=run_ctx,
-                                session=session,
-                                max_turns=self.config.get_max_turns(),
-                            )
-                            if hasattr(run_result, 'final_output') and run_result.final_output:
-                                return run_result.final_output
-                            elif hasattr(run_result, 'output') and run_result.output:
-                                return run_result.output
-                            else:
-                                return str(run_result)
+                            return await _run_streamed_simple()
                         finally:
                             reset_current_factory()
                 except Exception as reactive_error:

@@ -342,6 +342,8 @@ class ExecutionTracer(TracingExporter):
             cur = conn.execute(
                 """
                 UPDATE nodes SET
+                    name        = COALESCE(:name, name),
+                    input_data  = COALESCE(:input_data, input_data),
                     ended_at    = :ended_at,
                     duration_ms = :duration_ms,
                     status      = :status,

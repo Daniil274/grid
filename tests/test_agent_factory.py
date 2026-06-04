@@ -139,13 +139,18 @@ class TestAgentFactory:
             assert session1 is session2
             mock_session_class.assert_called_once()  # Only called once
 
-    def test_persistent_session_db_path_lives_under_logs(self, config_file):
-        """Test durable session DB path is created in the workspace logs directory."""
+    def test_persistent_session_db_path_lives_under_user_logs(self, config_file, monkeypatch, tmp_path):
+        """Test durable session DB path is created under ~/.grid/logs by default."""
+        grid_home = tmp_path / "grid_home"
+        monkeypatch.setenv("USERPROFILE", str(grid_home))  # Windows
+        monkeypatch.setenv("HOME", str(grid_home))
+
         config = Config(str(config_file))
         factory = AgentFactory(config)
 
-        assert factory._agent_session_db_path.endswith("logs/agent_sessions.db")
-        assert Path(factory._agent_session_db_path).parent.exists()
+        expected = grid_home / ".grid" / "logs" / "agent_sessions.db"
+        assert Path(factory._agent_session_db_path).resolve() == expected.resolve()
+        assert expected.parent.exists()
 
     def test_is_retriable_agent_exception_detects_transient_errors(self, config_file):
         """Test transient provider/network failures are treated as retriable."""
@@ -220,6 +225,35 @@ class TestAgentFactory:
             assert call_args[1]['name'] == "Test Agent"
             assert call_args[1]['instructions'] == "Test instructions"
             assert call_args[1]['model'] is mock_model_instance
+
+    @pytest.mark.asyncio
+    async def test_create_dynamic_agent_passes_model_config_flags(self, config_file):
+        """Dynamic agents must apply the same VisionChatCompletionsModel flags as create_agent."""
+        config = Config(str(config_file))
+        factory = AgentFactory(config)
+
+        model_cfg = config.get_model("gpt-4")
+        model_cfg.preserve_reasoning_content = True
+
+        with patch('core.agent_factory.AsyncOpenAI'), \
+             patch('core.agent_factory.VisionChatCompletionsModel') as mock_model, \
+             patch('core.agent_factory.Agent') as mock_agent_class, \
+             patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
+             patch.object(factory, '_resolve_tools_for_names', return_value=([], []), new_callable=AsyncMock), \
+             patch.object(factory, '_build_dynamic_agent_instructions', return_value="instr"), \
+             patch.object(factory, '_is_model_allowed', return_value=True):
+
+            mock_model.return_value = Mock()
+            mock_agent_class.return_value = Mock()
+
+            await factory.create_dynamic_agent(
+                name="dyn-test",
+                instructions="do work",
+                model_key="gpt-4",
+            )
+
+            mock_model.assert_called_once()
+            assert mock_model.call_args.kwargs["preserve_reasoning_content"] is True
     
     @pytest.mark.asyncio
     async def test_create_agent_with_force_reload(self, config_file):

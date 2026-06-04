@@ -47,7 +47,7 @@ Global system settings.
 | `mcp_enabled` | `bool` | Enable MCP subsystem. | `true` |
 | `working_directory` | `string` | Path to the project working directory. | `"./"` |
 | `config_directory` | `string` | Path to the configuration directory. | `"./"` |
-| `logs_directory` | `string` | Path to the log directory. | `"./logs"` |
+| `logs_directory` | `string` | Path to the log directory. | `~/.grid/logs` |
 | `allow_path_override` | `bool` | Allow overriding the working directory path at startup. | `true` |
 | `agent_logging` | section | Agent logging parameters | |
 | `image_processing` | section | Image processing parameters | |

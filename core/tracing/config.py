@@ -100,6 +100,10 @@ class ConsoleSpanExporter(TracingExporter):
             return
         
         if span_type == "function":
+            # Tool calls are rendered by the stream observer with agent context.
+            # Avoid duplicate compact trace lines such as "tool 123ms".
+            if self._compact:
+                return
             # Single-line, no JSON
             mcp_data = span_data.get("mcp_data") or {}
             mcp_hint = ""
