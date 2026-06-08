@@ -1,0 +1,59 @@
+# Git
+.git
+.gitattributes
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+.codegraph/
+.cursor/
+
+# Logs and data
+logs/
+data/
+traces/
+*.db
+test.db
+
+# Beads
+.beads/
+
+# Node
+node_modules/
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Tests
+tests/
+benchmarks/
+
+# Docs
+docs/*.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp
+*.swp
+*.swo

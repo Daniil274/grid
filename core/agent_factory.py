@@ -115,45 +115,13 @@ CONTEXT_ID_REGEX = re.compile(r"ctx-[0-9a-fA-F]{8,}")
 # Monkey-patch: resolve tool names and return missing-tool errors to the agent.
 # The SDK raises ModelBehaviorError for unknown tool names, which aborts the run.
 # MCP tools already have a similar patch above; this covers function tool calls.
-_MODEL_TOOL_SHORTCUTS = {
-    "read": "file_read",
-    "write": "file_write",
-    "edit": "file_edit",
-    "grep": "grep_tool",
-    "glob": "glob_tool",
-    "bash": "bash_tool",
-}
-
-
-def _resolve_model_tool_name(name: str, function_map: dict) -> str:
-    """Map model-generated tool names to registered agent tools."""
-    name = name.strip()
-    if name in function_map:
-        return name
-
-    try:
-        from tools.function_tools import TOOL_ALIASES
-    except ImportError:
-        TOOL_ALIASES = {}
-
-    candidates = (
-        TOOL_ALIASES.get(name),
-        _MODEL_TOOL_SHORTCUTS.get(name),
-        TOOL_ALIASES.get(_MODEL_TOOL_SHORTCUTS.get(name, "")),
-    )
-    for candidate in candidates:
-        if candidate and candidate in function_map:
-            return candidate
-    return name
-
-
 def _build_missing_tool_stub(tool_name: str, available: list[str]):
     """Create a stub FunctionTool that returns an error message to the agent."""
     from agents.tool import FunctionTool
 
     async def _on_invoke_tool(_ctx, _input: str) -> str:
-        preview = ", ".join(sorted(available)[:25])
-        suffix = "..." if len(available) > 25 else ""
+        preview = ", ".join(sorted(available)[:30])
+        suffix = "..." if len(available) > 30 else ""
         return (
             f"Error: Tool '{tool_name}' is not available. "
             f"Available tools include: {preview}{suffix}"
@@ -170,47 +138,47 @@ def _build_missing_tool_stub(tool_name: str, available: list[str]):
 
 
 def _patch_run_impl_tool_name_normalization() -> None:
+    """
+    Patch process_model_response to intercept unknown tool calls BEFORE they
+    raise ModelBehaviorError.  Instead of aborting the run, we inject a stub
+    tool that returns a helpful error
+    message to the agent so it can self-correct.
+    """
     try:
-        from agents import _run_impl
+        import agents.run_internal.turn_resolution as turn_resolution
+        import agents.run_internal.run_loop as run_loop
         from agents.tool import FunctionTool
         from openai.types.responses import ResponseFunctionToolCall
 
-        original_process = _run_impl.RunImpl.process_model_response.__func__  # type: ignore[attr-defined]
+        _original_process = turn_resolution.process_model_response
 
-        @classmethod  # type: ignore[misc]
-        def _patched_process(cls, *, agent, all_tools, response, output_schema, handoffs):  # type: ignore[override]
+        def _patched_process(*, agent, all_tools, response, output_schema, handoffs):
             function_map = {
                 tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)
             }
             handoff_names = {handoff.tool_name for handoff in handoffs}
             extra_tools = []
+            seen = set()
 
             for item in getattr(response, "output", []):
                 if not isinstance(item, ResponseFunctionToolCall):
                     continue
-
                 name = getattr(item, "name", None)
                 if not isinstance(name, str):
                     continue
+                # Do NOT strip whitespace — the SDK's internal lookup uses the
+                # exact name from the response, so the stub must match exactly.
 
-                resolved = _resolve_model_tool_name(name, function_map)
-                if resolved != name:
-                    try:
-                        object.__setattr__(item, "name", resolved)
-                    except (AttributeError, TypeError):
-                        pass
-                    name = resolved
-
-                if name in function_map or name in handoff_names:
+                if name in function_map or name in handoff_names or name in seen:
                     continue
 
                 stub = _build_missing_tool_stub(name, list(function_map.keys()))
                 extra_tools.append(stub)
                 function_map[name] = stub
+                seen.add(name)
 
             extended_tools = list(all_tools) + extra_tools
-            return original_process(
-                cls,
+            return _original_process(
                 agent=agent,
                 all_tools=extended_tools,
                 response=response,
@@ -218,9 +186,18 @@ def _patch_run_impl_tool_name_normalization() -> None:
                 handoffs=handoffs,
             )
 
-        _run_impl.RunImpl.process_model_response = _patched_process
+        # Replace both the definining module and the importing module.
+        # run_loop captured a reference at import time; both must point to the
+        # patched function.
+        turn_resolution.process_model_response = _patched_process
+        run_loop.process_model_response = _patched_process
     except Exception:
-        pass  # Patch is best-effort; do not break startup if SDK internals change
+        import logging as _logging
+        _logging.getLogger("grid.agent_factory").warning(
+            "Failed to patch process_model_response for unknown tool handling. "
+            "Unknown tool calls will raise ModelBehaviorError instead of returning errors to the agent.",
+            exc_info=True,
+        )
 
 _patch_run_impl_tool_name_normalization()
 logger = logging.getLogger("grid.agent_factory")

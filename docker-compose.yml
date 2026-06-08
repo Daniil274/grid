@@ -1,0 +1,120 @@
+# Grid Agent System — Docker Compose
+# Orchestrates: web_chat (port 8000), timeline dashboard (port 8795), SearXNG (port 8080)
+#
+# Quick start:
+#   docker compose up -d                 # web_chat + searxng
+#   docker compose --profile full up -d  # all services including timeline
+#   open http://localhost:8000           # web chat
+#   open http://localhost:8080           # SearXNG search
+
+name: grid
+
+services:
+  # ── Main Grid web chat interface (port 8000) ──────────────────────────────
+  web-chat:
+    image: grid-agent:latest
+    container_name: grid-web-chat
+    restart: unless-stopped
+    ports:
+      - "${GRID_WEB_CHAT_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - GRID_LOG_LEVEL=${GRID_LOG_LEVEL:-INFO}
+      - GRID_DEBUG=${GRID_DEBUG:-false}
+      - SEARXNG_URL=http://searxng:8080
+    volumes:
+      - .:/workspace:rw
+    working_dir: /workspace
+    command:
+      - python
+      - -m
+      - web_chat
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --config
+      - /workspace/config.yaml
+    depends_on:
+      searxng:
+        condition: service_healthy
+    networks:
+      - grid-net
+
+  # ── Timeline dashboard — agent execution traces (port 8795) ───────────────
+  # Started only with: docker compose --profile full up -d
+  timeline:
+    image: grid-agent:latest
+    container_name: grid-timeline
+    restart: unless-stopped
+    ports:
+      - "${GRID_TIMELINE_PORT:-8795}:8789"
+    env_file:
+      - .env
+    environment:
+      - GRID_LOG_LEVEL=${GRID_LOG_LEVEL:-INFO}
+    volumes:
+      - .:/workspace:rw
+    working_dir: /workspace
+    command:
+      - python
+      - -m
+      - timeline
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8789"
+      - --with-factory
+      - --config
+      - /workspace/config.yaml
+    profiles:
+      - full
+    networks:
+      - grid-net
+
+  # ── SearXNG — privacy-respecting search engine (port 8080) ────────────────
+  searxng:
+    image: docker.io/searxng/searxng:${SEARXNG_VERSION:-latest}
+    container_name: grid-searxng
+    restart: unless-stopped
+    ports:
+      - "${SEARXNG_PORT:-8080}:8080"
+    env_file:
+      - ./searxng/.env
+    environment:
+      - SEARXNG_PORT=8080
+      - SEARXNG_BIND_ADDRESS=0.0.0.0
+      - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-}
+    volumes:
+      - ./searxng/core-config/:/etc/searxng/:Z
+      - searxng-data:/var/cache/searxng/
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - grid-net
+
+  # ── Valkey — cache backend for SearXNG ────────────────────────────────────
+  valkey:
+    image: docker.io/valkey/valkey:9-alpine
+    container_name: grid-valkey
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    volumes:
+      - valkey-data:/data/
+    networks:
+      - grid-net
+
+volumes:
+  searxng-data:
+    driver: local
+  valkey-data:
+    driver: local
+
+networks:
+  grid-net:
+    driver: bridge

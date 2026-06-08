@@ -1,0 +1,33 @@
+# Grid Agent System — Docker Compose production override
+# Builds source code into the image (no host bind mount).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml build
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  web-chat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: grid-web-chat:prod
+    volumes:
+      - grid-logs:/workspace/logs
+      - grid-data:/workspace/data
+      - ./config.yaml:/workspace/config.yaml:ro
+
+  timeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: grid-timeline:prod
+    volumes:
+      - grid-logs:/workspace/logs
+      - grid-data:/workspace/data
+      - ./config.yaml:/workspace/config.yaml:ro
+
+volumes:
+  grid-logs:
+    driver: local
+  grid-data:
+    driver: local
