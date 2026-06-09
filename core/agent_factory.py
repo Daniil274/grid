@@ -274,6 +274,20 @@ class ConsoleStreamObserver:
         self._pending_tool_calls: Dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._pending_tool_calls_by_id: Dict[tuple[str, str], dict[str, Any]] = {}
         self._pending_tool_call_order: Dict[str, list[dict[str, Any]]] = {}
+        self.reasoning_text: str = ""
+        self._reasoning_buf: list[str] = []
+
+    def _flush_reasoning_now(self) -> None:
+        if not self._reasoning_buf:
+            return
+        text = "".join(self._reasoning_buf).strip()
+        self._reasoning_buf = []
+        if not text:
+            return
+        if self._renderer:
+            self._renderer.print_status(f"reasoning: {text}", style="dim")
+        else:
+            self._emit(f"\n[reasoning] {text}", end="\n", flush=True)
 
     def _emit(self, message: str, *, end: str = "\n", flush: bool = False) -> None:
         self._write(message, end=end, flush=flush)
@@ -457,6 +471,7 @@ class ConsoleStreamObserver:
     def handle_event(self, event: Any, *, agent_key: Optional[str] = None) -> Optional[str]:
         try:
             if isinstance(event, RunItemStreamEvent):
+                self._flush_reasoning_now()
                 name = getattr(event, "name", "")
                 item = getattr(event, "item", None)
                 if name == "tool_called" and item is not None:
@@ -532,6 +547,22 @@ class ConsoleStreamObserver:
                     content = event.text
                 elif hasattr(event, "data") and event.data:
                     data = event.data
+                    data_type = getattr(data, "type", None)
+
+                    if data_type in ("response.reasoning_text.delta", "response.reasoning_summary_text.delta"):
+                        delta_text = getattr(data, "delta", None)
+                        if isinstance(delta_text, str) and delta_text.strip():
+                            self.reasoning_text += delta_text
+                            self._reasoning_buf.append(delta_text)
+                            if self._text_callback:
+                                self._text_callback(delta_text)
+                            if self._render_text_deltas:
+                                self._emit(delta_text, end="", flush=True)
+                            return delta_text
+                        return None
+
+                    self._flush_reasoning_now()
+
                     if hasattr(data, "delta") and data.delta:
                         content = data.delta
                     elif hasattr(data, "content") and data.content:
@@ -2566,6 +2597,10 @@ class AgentFactory:
                             # Streaming mode: transparent highlighting of tool/MCP calls via observer
                             result_output: Optional[str] = None
                             streaming_text_parts: List[str] = []
+                            _init_obs = stream_observer or self._stream_observer
+                            if hasattr(_init_obs, "reasoning_text"):
+                                _init_obs.reasoning_text = ""
+                                _init_obs._reasoning_buf = []
                             run_result_streaming = _get_runner().run_streamed(
                                 agent,
                                 parsed_message,
