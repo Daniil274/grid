@@ -95,7 +95,38 @@ providers:
     timeout: 300
     max_retries: 3
 
+  multiai:
+    name: "multiai"
+    base_url: "https://multiai.store/v1"
+    api_key_env: "MULTIAI_API_KEY"
+    timeout: 300
+    max_retries: 3
+
 models:
+
+  gpt-5-5:
+    name: "gpt-5-5"
+    provider: "multiai"
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "gpt5.5 via MultiAI"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+
+
+  claude-opus-4-8:
+    name: "claude-opus-4-8"
+    provider: "multiai"
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "Claude Opus 4 (8k) via MultiAI"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+    reasoning:
+      effort: "high"
+
   kimi-k2.6-opencode:
     name: "kimi-k2.6"
     provider: "opencode"
@@ -105,6 +136,8 @@ models:
     description: "Kimi K2.5 via OpenCode"
     streaming_enabled: true
     preserve_reasoning_content: true
+    reasoning:
+      effort: "high"
 
   glm-5.1-opencode:
     name: "glm-5.1"
@@ -115,6 +148,8 @@ models:
     description: "GLM-5.1 via OpenCode"
     streaming_enabled: true
     preserve_reasoning_content: true
+    reasoning:
+      effort: "high"
 
   deepseek-v4-pro-opencode:
     name: deepseek-v4-pro
@@ -125,6 +160,8 @@ models:
     description: deepseek-v4-pro
     streaming_enabled: true
     preserve_reasoning_content: true
+    reasoning:
+      effort: "high"
 
   deepseek-v4-flash-opencode:
     name: deepseek-v4-flash
@@ -132,9 +169,11 @@ models:
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: deepseek-v4-pro
+    description: deepseek-v4-flash
     streaming_enabled: true
     preserve_reasoning_content: true
+    reasoning:
+      effort: "low"
 
 
 
@@ -348,7 +387,7 @@ tools:
 agents:
   engineer:
     name: "Claude Engineer"
-    model: deepseek-v4-pro-opencode
+    model: gpt-5-5
     mcp_enabled: true
     system_skills:
       - beads
