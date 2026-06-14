@@ -22,11 +22,11 @@ and cleared by reset_session_memory_state(). An external process (background
 extraction or manual call) is responsible for populating it.
 """
 
-import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Set
 import uuid as _uuid
+from utils.logger import Logger
 
 from .base import (
     CompactMessage,
@@ -41,7 +41,7 @@ from .utils import (
     is_compact_boundary_message,
 )
 
-logger = logging.getLogger("compact.session_memory")
+logger = Logger.get_logger("compact.session_memory")
 
 
 # ---------------------------------------------------------------------------

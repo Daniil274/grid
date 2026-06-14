@@ -5,11 +5,11 @@ Long-term memory has been moved to SQLite (MemoryStore / memory_tools_v2).
 Only conversation context remains here for compatibility with TelegramBridge and AgentFactory.
 """
 
-import logging
 from pathlib import Path
 from typing import Optional
+from utils.logger import Logger
 
-logger = logging.getLogger(__name__)
+logger = Logger.get_logger(__name__)
 
 from core.context import ContextManager
 

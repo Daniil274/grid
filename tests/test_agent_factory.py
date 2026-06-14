@@ -159,6 +159,10 @@ class TestAgentFactory:
 
         assert factory._is_retriable_agent_exception(Exception("Connection error while streaming response"))
         assert factory._is_retriable_agent_exception(AgentError("rate limit exceeded by provider"))
+        assert factory._is_retriable_agent_exception(Exception("all providers exhausted"))
+        assert factory._is_retriable_agent_exception(Exception("HTTP 503: upstream_unavailable"))
+        assert factory._is_retriable_agent_exception(AgentError("upstream unavailable"))
+        assert factory._is_retriable_agent_exception(Exception("server_error: Сервис временно недоступен"))
         assert not factory._is_retriable_agent_exception(Exception("tool arguments are invalid"))
     
     def test_is_reasoning_model_name(self, config_file):

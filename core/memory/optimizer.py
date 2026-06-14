@@ -1,5 +1,4 @@
 import json
-import logging
 import asyncio
 import sqlite3
 import time
@@ -8,9 +7,10 @@ from typing import Optional, List, Dict, Any
 
 from core.memory.store import MemoryStore
 from core.config.config import Config
+from utils.logger import Logger
 
-logger = logging.getLogger(__name__)
-verbose_logger = logging.getLogger("grid.verbose")
+logger = Logger.get_logger(__name__)
+verbose_logger = Logger.get_logger("verbose")
 
 try:
     from agents.tracing import trace, custom_span

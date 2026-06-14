@@ -95,7 +95,25 @@ providers:
     timeout: 300
     max_retries: 3
 
+  multiai:
+    name: "multiai"
+    base_url: "https://multiai.store/v1"
+    api_key_env: "MULTIAI_API_KEY"
+    timeout: 300
+    max_retries: 20
+
 models:
+
+  claude-opus-4-8:
+    name: "claude-opus-4-8"
+    provider: "multiai"
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: Claude Opus 4-8 via Multiai
+    streaming_enabled: true
+    preserve_reasoning_content: true
+
   kimi-k2.6-opencode:
     name: "kimi-k2.6"
     provider: "opencode"
@@ -216,7 +234,7 @@ tools:
     name: "orchestrate"
     description: "Meta-tool: запускает динамического агента для решения подзадачи."
     env_vars:
-      DEFAULT_MODEL: deepseek-v4-pro-opencode
+      DEFAULT_MODEL: deepseek-v4-flash-opencode
 
   # ── Claude-tools (function) ─────────────────────────────────────
   bash_tool:
@@ -375,7 +393,7 @@ agents:
   # ── Координатор ─────────────────────────────────────────────────
   coordinator:
     name: Координатор
-    model: qwen3.7-max
+    model: claude-opus-4-8
     system_skills:
       - beads
       - coordinator

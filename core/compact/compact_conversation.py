@@ -12,11 +12,11 @@ The LLM call uses the OpenAI-compatible async client (AsyncOpenAI or compatible)
 passed as a parameter — no module-level global state.
 """
 
-import logging
 import re
 from datetime import datetime
 from typing import List, Optional, Any
 import uuid as _uuid
+from utils.logger import Logger
 
 from .base import CompactMessage, CompactionResult, CompactionStatus, CompactionStrategy
 from .utils import (
@@ -29,7 +29,7 @@ from .grouping import truncate_head_for_ptl_retry
 from .prompts import get_compact_prompt, get_partial_compact_prompt
 from .micro_compact import microcompact_messages
 
-logger = logging.getLogger("compact.conversation")
+logger = Logger.get_logger("compact.conversation")
 
 # Maximum retries when the compact request itself hits prompt-too-long
 MAX_PTL_RETRIES = 3

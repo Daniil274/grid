@@ -890,6 +890,14 @@ class AgentFactory:
             "overloaded",
             "stream closed",
             "incomplete chunked read",
+            "all providers exhausted",
+            "upstream_unavailable",
+            "upstream unavailable",
+            "server_error",
+            "server error",
+            "provider",
+            "retry",
+            "unavailable",
         )
         return any(marker in text for marker in transient_markers)
 
@@ -1907,47 +1915,60 @@ class AgentFactory:
                     result_output = buffered_text
             return str(result_output)
         
-        # Run the agent
+        # Run the agent with infinite retry for transient provider errors
         set_current_factory(self)
+        retry_count = 0
         try:
-            return await _run_streamed_simple()
-        
-        except Exception as e:
-            # Reactive compact: handle context_length_exceeded errors
-            error_str = str(e).lower()
-            if 'context_length_exceeded' in error_str or 'prompt_too_long' in error_str or 'max_tokens' in error_str:
-                logger.warning(f"Context overflow detected, attempting reactive compact: {e}")
+            while True:
                 try:
-                    # Get messages for reactive compact
-                    messages = self.context_manager._conversation_history
-                    compact_messages = self._context_to_compact_messages(messages)
+                    return await _run_streamed_simple()
+                except Exception as e:
+                    retriable = self._is_retriable_agent_exception(e)
+                    if not retriable:
+                        error_str = str(e).lower()
+                        if 'context_length_exceeded' in error_str or 'prompt_too_long' in error_str or 'max_tokens' in error_str:
+                            logger.warning(f"Context overflow detected, attempting reactive compact: {e}")
+                            try:
+                                # Get messages for reactive compact
+                                messages = self.context_manager._conversation_history
+                                compact_messages = self._context_to_compact_messages(messages)
 
-                    # Try reactive compact (synchronous truncation, no LLM call)
-                    reactive_result = await reactive_compact_on_prompt_too_long(
-                        messages=compact_messages,
-                        error=e,
+                                # Try reactive compact (synchronous truncation, no LLM call)
+                                reactive_result = await reactive_compact_on_prompt_too_long(
+                                    messages=compact_messages,
+                                    error=e,
+                                )
+
+                                if reactive_result.status.value in ('trimmed', 'success'):
+                                    self._replace_context_with_compact_messages(reactive_result.messages)
+                                    run_post_compact_cleanup(context_id=current_context_id)
+                                    logger.info(
+                                        f"Reactive compact: trimmed to {len(reactive_result.messages)} messages "
+                                        f"(tokens {reactive_result.tokens_before} -> {reactive_result.tokens_after}, "
+                                        f"saved ~{reactive_result.tokens_saved}), retrying"
+                                    )
+                                    # Retry the agent run with truncated messages injected
+                                    # via a fresh runner call — the truncated messages are
+                                    # returned in reactive_result.messages for the caller to use.
+                                    set_current_factory(self)
+                                    try:
+                                        return await _run_streamed_simple()
+                                    finally:
+                                        reset_current_factory()
+                            except Exception as reactive_error:
+                                logger.error(f"Reactive compact failed: {reactive_error}")
+                        raise
+
+                    retry_count += 1
+                    delay = self._retry_backoff_seconds(retry_count)
+                    logger.warning(
+                        "Retriable sub-agent failure for %s (attempt %d, retry in %.1fs): %s",
+                        getattr(agent, 'name', 'dynamic-agent'),
+                        retry_count,
+                        delay,
+                        e,
                     )
-
-                    if reactive_result.status.value in ('trimmed', 'success'):
-                        self._replace_context_with_compact_messages(reactive_result.messages)
-                        run_post_compact_cleanup(context_id=current_context_id)
-                        logger.info(
-                            f"Reactive compact: trimmed to {len(reactive_result.messages)} messages "
-                            f"(tokens {reactive_result.tokens_before} -> {reactive_result.tokens_after}, "
-                            f"saved ~{reactive_result.tokens_saved}), retrying"
-                        )
-                        # Retry the agent run with truncated messages injected
-                        # via a fresh runner call — the truncated messages are
-                        # returned in reactive_result.messages for the caller to use.
-                        set_current_factory(self)
-                        try:
-                            return await _run_streamed_simple()
-                        finally:
-                            reset_current_factory()
-                except Exception as reactive_error:
-                    logger.error(f"Reactive compact failed: {reactive_error}")
-            
-            raise
+                    await asyncio.sleep(delay)
         finally:
             reset_current_factory()
 

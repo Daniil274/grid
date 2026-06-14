@@ -18,13 +18,13 @@ Key differences from the previous implementation:
 - reset_microcompact_state() is a no-op (no persistent state to reset).
 """
 
-import logging
 from datetime import datetime
 from typing import List, Optional, Set, Iterable
+from utils.logger import Logger
 
 from .base import CompactMessage
 
-logger = logging.getLogger("compact.micro")
+logger = Logger.get_logger("compact.micro")
 
 # Marker for cleared tool results (matches CC's TIME_BASED_MC_CLEARED_MESSAGE)
 TIME_BASED_MC_CLEARED_MESSAGE = "[Old tool result content cleared]"

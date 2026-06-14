@@ -17,10 +17,10 @@ Key difference from previous implementation:
 - Works purely async-natively, no asyncio.get_event_loop() hacks.
 """
 
-import logging
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional, Any, TYPE_CHECKING
+from utils.logger import Logger
 
 from .base import (
     CompactMessage,
@@ -40,7 +40,7 @@ from .post_compact import run_post_compact_cleanup
 if TYPE_CHECKING:
     from schemas import CompactConfig
 
-logger = logging.getLogger("compact.auto")
+logger = Logger.get_logger("compact.auto")
 
 
 # ---------------------------------------------------------------------------

@@ -8,14 +8,14 @@ Filesystem is the source of truth. Database entries are maintained only for
 search/indexing compatibility.
 """
 
-import logging
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.memory.store import MemoryStore
+from utils.logger import Logger
 
-logger = logging.getLogger(__name__)
+logger = Logger.get_logger(__name__)
 
 SKILL_FILENAME = "SKILL.md"
 SKILL_FILENAME_LEGACY = "skill.md"
