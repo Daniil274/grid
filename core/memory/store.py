@@ -13,7 +13,6 @@ Provides:
 
 import shutil
 import sqlite3
-import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -22,6 +21,7 @@ from contextlib import contextmanager
 from difflib import SequenceMatcher
 import json
 from collections import deque, defaultdict
+from utils.logger import Logger
 
 # Optional semantic search support via OpenRouter embeddings
 try:
@@ -30,7 +30,7 @@ try:
 except ImportError:
     _EMBEDDINGS_MODULE_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
+logger = Logger.get_logger(__name__)
 
 
 @dataclass

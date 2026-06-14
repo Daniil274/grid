@@ -22,7 +22,7 @@ class ProviderConfig(BaseModel):
     api_key_env: Optional[str] = None
     api_key: Optional[str] = None
     timeout: int = Field(default=30, ge=1, le=300)
-    max_retries: int = Field(default=2, ge=0, le=10)
+    max_retries: int = Field(default=2, ge=0, le=1000)
 
 
 class ModelConfig(BaseModel):

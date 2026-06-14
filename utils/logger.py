@@ -214,6 +214,22 @@ class Logger:
         """Initialize logger for given name."""
         self.name = name
         self.logger = self._get_logger(name)
+
+    @classmethod
+    def get_logger(cls, name: str) -> logging.Logger:
+        """Return a standard logger instance under the unified grid.* namespace.
+
+        Accepts either short names ("tool") or existing logger names
+        ("grid.tool", module paths, etc.) and normalizes them to a single
+        hierarchy where possible.
+        """
+        if not name:
+            normalized_name = "grid"
+        elif name == "grid" or name.startswith("grid."):
+            normalized_name = name
+        else:
+            normalized_name = f"grid.{name}"
+        return logging.getLogger(normalized_name)
     
     @classmethod
     def configure(
@@ -304,7 +320,7 @@ class Logger:
     def _get_logger(cls, name: str) -> logging.Logger:
         """Get or create logger instance."""
         if name not in cls._loggers:
-            logger = logging.getLogger(f"grid.{name}")
+            logger = cls.get_logger(name)
             cls._loggers[name] = logger
         return cls._loggers[name]
     

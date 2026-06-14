@@ -8,15 +8,15 @@ from threading import Lock
 from contextlib import contextmanager
 import json
 from pathlib import Path
-import logging
 import uuid
+from utils.logger import Logger
 
 from schemas import ContextMessage, AgentExecution
 from utils.exceptions import ContextError
 from utils.image_utils import ImageUtils
 # Tracing is handled automatically by Agents SDK
 
-logger = logging.getLogger("core.context")
+logger = Logger.get_logger("context")
 
 
 @contextmanager

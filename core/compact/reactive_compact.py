@@ -18,17 +18,17 @@ compact_conversation should be called first. The reactive path is a last-resort
 escape hatch for when the API request itself hits the limit.
 """
 
-import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
+from utils.logger import Logger
 
 from .base import CompactMessage
 from .grouping import truncate_head_for_ptl_retry
 from .utils import estimate_message_tokens, create_compact_boundary_message
 
-logger = logging.getLogger("compact.reactive")
+logger = Logger.get_logger("compact.reactive")
 
 
 # Error patterns that indicate context overflow

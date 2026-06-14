@@ -86,6 +86,12 @@ providers:
     max_retries: 3
     streaming_enabled: true
 
+  lm-studio:
+    name: "lm-studio"
+    base_url: "http://192.168.3.2:1234/v1"
+    api_key: "lm-studio"
+    timeout: 300
+    max_retries: 3
 models:
   "perplexity/pplx-embed-v1-0.6b":
     name: perplexity/pplx-embed-v1-0.6b

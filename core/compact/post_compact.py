@@ -17,15 +17,15 @@ per-session and should be passed or stored at the agent level in production.
 For now, a module-level instance is used for simplicity, with reset available.
 """
 
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from utils.logger import Logger
 
 from .micro_compact import reset_microcompact_state
 from .utils import rough_token_count
 
-logger = logging.getLogger("compact.post")
+logger = Logger.get_logger("compact.post")
 
 
 # Token budgets (mirrors CC's POST_COMPACT_* constants)

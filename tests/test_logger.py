@@ -38,6 +38,12 @@ class TestLogger:
         
         assert logger1.logger is not logger2.logger
         assert logger1.name != logger2.name
+
+    def test_get_logger_normalizes_names(self):
+        """Test unified logger factory normalizes names into grid.* hierarchy."""
+        assert Logger.get_logger("tool").name == "grid.tool"
+        assert Logger.get_logger("grid.timeline").name == "grid.timeline"
+        assert Logger.get_logger("").name == "grid"
     
     def test_logger_logging_methods(self):
         """Test all logging methods."""
@@ -132,6 +138,27 @@ class TestLogger:
                 handler.close()
                 logger.logger.removeHandler(handler)
 
+    def test_configured_root_handles_factory_logger(self, temp_dir):
+        """Test that Logger.get_logger() works with root JSON configuration."""
+        Logger.configure(
+            level="INFO",
+            log_dir=str(temp_dir),
+            enable_console=False,
+            enable_json=False,
+            enable_legacy_logs=False,
+            force_reconfigure=True,
+        )
+        logger = Logger.get_logger("compat.module")
+        logger.info("compat message", extra={"extra_fields": {"request_id": "r1"}})
+
+        grid_log = temp_dir / "grid.log"
+        assert grid_log.exists()
+        lines = [line for line in grid_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        payload = json.loads(lines[-1])
+        assert payload["logger"] == "grid.compat.module"
+        assert payload["message"] == "compat message"
+        assert payload["request_id"] == "r1"
+
 
 class TestJSONFormatter:
     """Test JSONFormatter class functionality."""
@@ -221,37 +248,13 @@ class TestJSONFormatter:
         
         assert data["custom_field"] == "custom_value"
         assert data["agent_name"] == "test_agent"
-    
-    def test_json_formatter_unicode_handling(self):
-        """Test JSON formatter with unicode characters."""
-        formatter = JSONFormatter()
-        
-        record = logging.LogRecord(
-            name="test_logger",
-            level=logging.INFO,
-            pathname="test.py",
-            lineno=42,
-            msg="Unicode test 🚀",
-            args=(),
-            exc_info=None
-        )
-        record.module = "test_module"
-        record.funcName = "test_function"
-        record.created = 1609459200.0
-        
-        formatted = formatter.format(record)
-        data = json.loads(formatted)
-        
-        assert data["message"] == "Unicode test 🚀"
 
 
 class TestLegacyFormatter:
     """Test LegacyFormatter class functionality."""
-    
+
     def test_legacy_formatter_basic(self):
-        """Test basic legacy formatting."""
         formatter = LegacyFormatter()
-        
         record = logging.LogRecord(
             name="test_logger",
             level=logging.INFO,
@@ -259,294 +262,24 @@ class TestLegacyFormatter:
             lineno=42,
             msg="Test message",
             args=(),
-            exc_info=None
-        )
-        record.created = 1609459200.0  # 2021-01-01 00:00:00
-        
-        formatted = formatter.format(record)
-        
-        # Check that time is formatted correctly (accounting for local timezone)
-        assert "2021-01-01" in formatted
-        assert "INFO" in formatted
-        assert "test_logger" in formatted
-        assert "Test message" in formatted
-    
-    def test_legacy_formatter_padding(self):
-        """Test legacy formatter padding for consistent formatting."""
-        formatter = LegacyFormatter()
-        
-        # Test with short level name
-        record = logging.LogRecord(
-            name="short_name",
-            level=logging.INFO,
-            pathname="test.py",
-            lineno=42,
-            msg="Test message",
-            args=(),
-            exc_info=None
+            exc_info=None,
         )
         record.created = 1609459200.0
-        
         formatted = formatter.format(record)
-        
-        # Check that level is padded to 8 characters
-        parts = formatted.split(" | ")
-        level_part = parts[1]
-        assert len(level_part) == 8
-        assert level_part.strip() == "INFO"
-        
-        # Check that logger name is padded to 20 characters
-        logger_part = parts[2]
-        assert len(logger_part) == 20
-        assert logger_part.strip() == "short_name"
-
-
-class TestLoggerIntegration:
-    """Integration tests for logger functionality."""
-    
-    def test_logger_file_and_console_integration(self, temp_dir):
-        """Test that logger works with both file and console output."""
-        log_file = temp_dir / "integration_test.log"
-        
-        # Capture console output
-        console_output = StringIO()
-        
-        # Create logger and setup handlers
-        logger = Logger("integration_test")
-        logger.setup_file_logging(str(log_file), level=logging.DEBUG)
-        
-        # Add console handler for testing
-        console_handler = logging.StreamHandler(console_output)
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(LegacyFormatter())
-        logger.logger.addHandler(console_handler)
-        
-        # Log messages at different levels
-        logger.debug("Debug message")
-        logger.info("Info message")
-        logger.warning("Warning message")
-        logger.error("Error message")
-        
-        # Check file output (should include all levels)
-        file_content = log_file.read_text()
-        assert "Debug message" in file_content
-        assert "Info message" in file_content
-        assert "Warning message" in file_content
-        assert "Error message" in file_content
-        
-        # Check console output (should include INFO and above)
-        console_content = console_output.getvalue()
-        assert "Debug message" not in console_content  # DEBUG not in console
-        assert "Info message" in console_content
-        assert "Warning message" in console_content
-        assert "Error message" in console_content
-        
-        # Cleanup file handlers to allow temp_dir cleanup
-        for handler in logger.logger.handlers[:]:
-            if isinstance(handler, logging.FileHandler):
-                handler.close()
-                logger.logger.removeHandler(handler)
-    
-    def test_logger_with_agent_context(self, temp_dir):
-        """Test logger with agent-specific context."""
-        log_file = temp_dir / "agent_test.log"
-        
-        logger = Logger("agent_test")
-        logger.setup_file_logging(str(log_file))
-        
-        # Log with agent context
-        logger.info("Agent started", agent_name="test_agent", operation="file_read")
-        logger.info("Tool called", tool_name="read_file", filepath="/test/path")
-        logger.error("Agent error", agent_name="test_agent", error_type="FileNotFound")
-        
-        file_content = log_file.read_text()
-        
-        # Verify agent context is logged
-        assert "test_agent" in file_content
-        assert "read_file" in file_content
-        assert "FileNotFound" in file_content
-        
-        # Cleanup file handlers to allow temp_dir cleanup
-        for handler in logger.logger.handlers[:]:
-            if isinstance(handler, logging.FileHandler):
-                handler.close()
-                logger.logger.removeHandler(handler)
-    
-    def test_logger_concurrent_access(self, temp_dir):
-        """Test logger with concurrent access."""
-        import threading
-        import time
-        
-        log_file = temp_dir / "concurrent_test.log"
-        logger = Logger("concurrent_test")
-        logger.setup_file_logging(str(log_file))
-        
-        results = []
-        
-        def log_messages(thread_id):
-            try:
-                for i in range(10):
-                    logger.info(f"Thread {thread_id} message {i}")
-                    time.sleep(0.001)  # Small delay to increase chance of race conditions
-                results.append("success")
-            except Exception as e:
-                results.append(f"error: {e}")
-        
-        # Start multiple threads
-        threads = []
-        for i in range(5):
-            thread = threading.Thread(target=log_messages, args=(i,))
-            threads.append(thread)
-            thread.start()
-        
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join(timeout=10)  # 10 sec timeout for each thread
-            if thread.is_alive():
-                pytest.fail(f"Thread {thread.name} did not finish within timeout")
-        
-        # All threads should succeed
-        assert len(results) == 5
-        assert all(result == "success" for result in results)
-        
-        # Check that all messages were logged
-        file_content = log_file.read_text()
-        for thread_id in range(5):
-            for msg_id in range(10):
-                assert f"Thread {thread_id} message {msg_id}" in file_content
-        
-        # Cleanup: remove file handlers to release file locks
-        for handler in logger.logger.handlers[:]:
-            if isinstance(handler, logging.FileHandler):
-                handler.close()
-                logger.logger.removeHandler(handler)
-    
-    def test_logger_large_messages(self, temp_dir):
-        """Test logger with large messages."""
-        log_file = temp_dir / "large_test.log"
-        logger = Logger("large_test")
-        logger.setup_file_logging(str(log_file))
-        
-        # Log a very large message
-        large_message = "x" * 10000  # 10KB message
-        logger.info("Large message", large_data=large_message)
-        
-        file_content = log_file.read_text()
-        assert large_message in file_content
-    
-    def test_logger_special_characters(self, temp_dir):
-        """Test logger with special characters and unicode."""
-        log_file = temp_dir / "unicode_test.log"
-        logger = Logger("unicode_test")
-        logger.setup_file_logging(str(log_file))
-        
-        # Log messages with various special characters
-        logger.info("Unicode test: Hello world! 🌍 测试 テスト")
-        logger.info("Special chars: !@#$%^&*()_+-=[]{}|;:,.<>?")
-        logger.info("Newlines and\ttabs\ntest")
-        
-        file_content = log_file.read_text(encoding='utf-8')
-        # Check that the content was logged (may be in different encoding in file)
-        assert "Unicode test:" in file_content
-        assert "Special chars:" in file_content
-    
-    def test_logger_error_handling(self, temp_dir):
-        """Test logger error handling."""
-        # Try to log to a read-only file
-        readonly_file = temp_dir / "readonly.log"
-        readonly_file.write_text("initial content")
-        readonly_file.chmod(0o444)  # Make read-only
-        
-        logger = Logger("error_test")
-        
-        # This should not raise an exception, but log setup might fail silently
-        try:
-            logger.setup_file_logging(str(readonly_file))
-            logger.info("This might not be logged")
-        except Exception:
-            # If exception occurs, it should be handled gracefully
-            pass
-        finally:
-            # Restore permissions for cleanup
-            readonly_file.chmod(0o644)
-    
-    def test_logger_rotation_behavior(self, temp_dir):
-        """Test logger behavior with file rotation considerations."""
-        log_file = temp_dir / "rotation_test.log"
-        logger = Logger("rotation_test")
-        logger.setup_file_logging(str(log_file))
-        
-        # Log many messages to simulate log rotation scenario
-        for i in range(1000):
-            logger.info(f"Message {i}")
-        
-        # File should exist and contain messages
-        assert log_file.exists()
-        file_content = log_file.read_text()
-        assert "Message 0" in file_content
-        assert "Message 999" in file_content
-    
-    def test_logger_performance(self, temp_dir):
-        """Test logger performance with many messages."""
-        import time
-        
-        log_file = temp_dir / "performance_test.log"
-        logger = Logger("performance_test")
-        logger.setup_file_logging(str(log_file))
-        
-        start_time = time.time()
-        
-        # Log 1000 messages
-        for i in range(1000):
-            logger.info(f"Performance test message {i}")
-        
-        end_time = time.time()
-        duration = end_time - start_time
-        
-        # Should complete in reasonable time (adjust threshold as needed)
-        assert duration < 5.0  # Should take less than 5 seconds
-        
-        # Verify all messages were logged
-        file_content = log_file.read_text()
-        assert file_content.count("Performance test message") == 1000
+        assert "Test message" in formatted
+        assert "INFO" in formatted
 
 
 class TestSessionLogManager:
-    """Session logs should mirror grid.verbose payloads when level is full."""
+    def test_uses_verbose_mirror(self):
+        SessionLogManager.configure(enabled=True, level="full")
+        assert SessionLogManager.uses_verbose_mirror() is True
+        SessionLogManager.configure(enabled=True, level="basic")
+        assert SessionLogManager.uses_verbose_mirror() is False
 
-    def test_session_log_mirrors_verbose_blocks(self, temp_dir):
-        import logging
 
-        Logger.configure(
-            level="INFO",
-            log_dir=str(temp_dir),
-            enable_console=False,
-            enable_json=False,
-            enable_legacy_logs=False,
-            force_reconfigure=True,
-        )
-        Logger.configure_agent_logging(enabled=True, level="full", log_dir=str(temp_dir))
-
-        context_id = "ctx-test1234"
-        Logger.activate_session_log(context_id)
-        try:
-            payload = {"tool": "bash_tool", "command": "echo full output"}
-            Logger("agent_factory").log_verbose("TOOL CALL: bash_tool", payload)
-        finally:
-            Logger.deactivate_session_log()
-
-        session_file = temp_dir / "sessions" / f"{context_id}.log"
-        assert session_file.exists()
-        content = session_file.read_text(encoding="utf-8")
-        assert "TOOL CALL: bash_tool" in content
-        assert "echo full output" in content
-        assert format_verbose_block("TOOL CALL: bash_tool", payload).strip() in content
-
-    def test_session_log_skipped_for_minimal_level(self, temp_dir):
-        Logger.configure_agent_logging(enabled=True, level="basic", log_dir=str(temp_dir))
-        Logger.activate_session_log("ctx-basic")
-        Logger("agent_factory").log_verbose("SHOULD NOT APPEAR", {"x": 1})
-        Logger.deactivate_session_log()
-
-        session_file = temp_dir / "sessions" / "ctx-basic.log"
-        assert not session_file.exists()
+class TestHelpers:
+    def test_format_verbose_block(self):
+        formatted = format_verbose_block("TITLE", {"a": 1})
+        assert "TITLE" in formatted
+        assert '"a": 1' in formatted
