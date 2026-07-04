@@ -114,7 +114,10 @@ models:
     streaming_enabled: true
     preserve_reasoning_content: true
 
-
+  fable:
+    name: claude-fable-5
+    provider: "multiai"
+    temperature: 0.2
   claude-opus-4-8:
     name: "claude-opus-4-8"
     provider: "multiai"

@@ -103,6 +103,15 @@ providers:
     max_retries: 20
 
 models:
+  gpt-5.5:
+    name: "gpt-5.5"
+    provider: "multiai"
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: GPT-5.5 via Multiai
+    streaming_enabled: true
+    preserve_reasoning_content: true
 
   claude-opus-4-8:
     name: "claude-opus-4-8"
@@ -190,6 +199,16 @@ models:
     temperature: 0.5
     max_tokens: 8000
     description: Qwen 3.7 Max model
+    streaming_enabled: true
+    preserve_reasoning_content: true
+
+  glm-5.2-opencode:
+    name: "glm-5.2"
+    provider: "opencode"
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "GLM-5.2 via OpenCode"
     streaming_enabled: true
     preserve_reasoning_content: true
 
@@ -393,10 +412,7 @@ agents:
   # ── Координатор ─────────────────────────────────────────────────
   coordinator:
     name: Координатор
-    model: claude-opus-4-8
-    system_skills:
-      - beads
-      - coordinator
+    model: gpt-5.5
     tools:
       - orchestrate
       - call_coordinator
@@ -411,36 +427,30 @@ agents:
       - beads_init
       - beads_log_append
       - beads_log_read
+      - codegraph
+      - bash_tool
+      - file_read
+      - file_write
+      - file_edit
+      - file_append
+      - glob_tool
+      - grep_tool
+      - web_fetch
+      - web_search
+    system_skills:
+      - codegraph
     auto_run_tools:
       - name: beads_init
         parameters:
           directory: ${working_directory}
     custom_prompt: |
-      Ты — координатор агентского пайплайна. Следуй skills `coordinator` и `beads`.
-
-      Ты не читаешь код, не правишь файлы и не гоняешь shell — это делают агенты через `orchestrate` и `call_coordinator`. Твои инструменты: beads, планирование, делегирование, синтез для пользователя.
-
-      ## Цикл на нетривиальный запрос
-
-      1. **Классификация** — тривиально ли; если нет → конвейер обязателен (skill `coordinator`).
-      2. **Разведка агентами** — `beads_create` + `orchestrate` с полными промптами; координатор сам репозиторий не исследует.
-      3. **Проектирование** — по `beads_show` разведки реши: сколько агентов, какие роли, `beads_dep`, порядок. Не подставляй шаблон «исполнитель + верификатор» без обоснования.
-      4. **Исполнение** — после `beads_show` разведки: все beads pipeline (и зависимости) одной пачкой, затем все `orchestrate` / `call_coordinator` одной пачкой с осмысленными `agent_system_prompt` под каждую роль.
-      5. **Закрытие** — `beads_show` итоговых beads, `beads_close`, короткий ответ пользователю.
-
-      Между шагами 2 и 4 нужен ход координатора с `beads_show` и выбором цепочки. Внутри уже спланированного pipeline (шаг 4) эмить все `orchestrate` пачкой; не подставляй второго агента «наугад» без разведки.
-
-      ## Промпты агентам
-
-      Пустые роли («ты исполнитель», «ты верификатор») запрещены. В `agent_system_prompt` и `task`: GOAL, SCOPE, INPUTS (bead_id), OUTPUTS, DONE CRITERIA, протокол beads. Детали — в `description` bead.
-
-      ## Запреты
-
-      - Разведка координатором через файловые/поисковые инструменты (их у тебя нет).
-      - Сразу два агента без фазы разведки и явного выбора цепочки.
-      - Один tool call, если можно пачку; текстовый план вместо tool calls на нетривиальной задаче.
-      - `orchestrate` без bead_id, beads skill и beads_show/beads_update у исполнителя.
-  # ── General-purpose subagent (используется через Agent tool) ─────
+      Ты — координатор агентского пайплайна. 
+      ## Цикл работы:
+      1. **Разведка** — создай задачи в трекере и вызови агентов для разностороннего анализа и исследования задачи.
+      2. **Проектирование** — твоя основная задача создать проверяемый и верефицируемый пайплан из агентов, который будет заточен на успешное выполнение всех этапов задачи.
+      4. **Закрытие** — Изучай результаты и верефицируй. 
+      Категорически запрещается выполнять задачу самостоятельно. 
+      Ты обязан передавать доступные тебе инструменты (в том числе для работы с трекером) и скиллы агентам вместе с указанием идентефикатора задачи и их предварительные вызовы инструментов, включая чтение самой задачи и одновления статуса задачи.
   general_purpose:
     name: "General-purpose"
     model: deepseek-v4-pro-opencode
