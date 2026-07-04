@@ -232,6 +232,7 @@ async def orchestrate(
     - task: The task the agent should perform
     - agent_system_prompt: System prompt (role and instructions) for the agent.
     - executor_tools: List of tools for the agent
+      Example: '["file_list", "file_create"] 
     - init_tools: JSON string with a list of tools for context collection before
       launching the agent. Format: '[{"name": "tool_name", "parameters": {...}}]'.
       The results of these tools will be added to the agent's instructions.
