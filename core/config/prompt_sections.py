@@ -23,6 +23,10 @@ class PromptSection:
             "scope": self.scope,
             "length": len(self.content),
             "preview": self.content[:240],
+            # The inspector is a local, read-only debugging surface.  Preserve
+            # the source section as well as its compact list preview so opening
+            # a section can show what was actually sent to the model.
+            "content": self.content,
         }
 
 
