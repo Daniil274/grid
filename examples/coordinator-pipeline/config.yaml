@@ -212,6 +212,16 @@ models:
     streaming_enabled: true
     preserve_reasoning_content: true
 
+  grok4.5:
+    name: x-ai/grok-4.5
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "Grok 4.5"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+
 tools:
   beads_init:
     type: function
@@ -412,7 +422,7 @@ agents:
   # ── Координатор ─────────────────────────────────────────────────
   coordinator:
     name: Координатор
-    model: gpt-5.5
+    model: grok4.5
     tools:
       - orchestrate
       - call_coordinator
@@ -490,3 +500,4 @@ agents:
       - Read files before editing them
       - Be thorough — don't leave a task half-done
       - Report results clearly with file paths and line numbers
+      - Use multiple tool and agent calls in one; they are always executed sequentially. After one tool completes, the next one begins, and upon completion, the results of all called tools are returned to you.

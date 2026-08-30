@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Context Inspector</title>
+<style>
+:root {
+  --primary:#6366f1;--pl:#818cf8;
+  --ok:#10b981;--warn:#f59e0b;--err:#ef4444;--live:#38bdf8;
+  --static:#22d3ee;--dynamic:#a78bfa;--muted:#64748b;
+  --bg:#0f172a;--bg2:#1e293b;--bg3:#334155;
+  --text:#e2e8f0;--text2:#94a3b8;--border:#334155;
+  --r:8px;
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;}
+.app{display:flex;height:100vh;}
+.sidebar{width:300px;min-width:220px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;}
+.sh{padding:12px 14px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.sh-title{font-size:14px;font-weight:700;color:var(--pl);display:flex;align-items:center;gap:7px;}
+.badge-ro{font-size:9px;padding:2px 6px;border-radius:999px;background:#334155;color:var(--text2);font-weight:700;letter-spacing:.3px;}
+.sh-sub{font-size:10px;color:var(--text2);margin-top:6px;word-break:break-all;line-height:1.4;}
+.sh-row{display:flex;gap:5px;margin-top:8px;}
+.sh-row input{flex:1;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:11px;}
+.sh-row input:focus{outline:none;border-color:var(--primary);}
+.btn{padding:5px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;font-size:12px;transition:all .12s;white-space:nowrap;user-select:none;}
+.btn:hover,.btn.on{background:var(--primary);color:#fff;border-color:var(--primary);}
+.clist{flex:1;overflow-y:auto;}
+.ci{padding:10px 12px;cursor:pointer;border-left:3px solid transparent;border-bottom:1px solid #33415533;transition:all .1s;}
+.ci:hover{background:#33415544;}
+.ci.active{background:#6366f118;border-left-color:var(--primary);}
+.ci-id{font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;}
+.ci-meta{font-size:10px;color:var(--text2);margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
+.ci-preview{font-size:10px;color:var(--text2);margin-top:5px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--bg3);display:inline-block;}
+.dot.on{background:var(--ok);box-shadow:0 0 5px var(--ok);}
+.badge{display:inline-flex;align-items:center;padding:1px 5px;border-radius:7px;font-size:9px;font-weight:700;}
+.s-ok{background:var(--ok)22;color:var(--ok);}
+.s-run{background:var(--live)22;color:var(--live);}
+.s-err{background:var(--err)22;color:var(--err);}
+.s-warn{background:var(--warn)22;color:var(--warn);}
+.s-muted{background:#33415566;color:var(--text2);}
+.sfoot{padding:8px;border-top:1px solid var(--border);display:flex;gap:5px;flex-shrink:0;}
+.sfoot .btn{flex:1;text-align:center;font-size:11px;}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
+.toolbar{display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap;}
+.tbar-name{font-size:13px;font-weight:600;flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.tbar-meta{font-size:11px;color:var(--text2);}
+.tabs{display:flex;background:var(--bg);border-bottom:1px solid var(--border);flex-shrink:0;overflow-x:auto;}
+.tab{padding:9px 16px;font-size:11px;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;user-select:none;}
+.tab:hover{color:var(--text);}
+.tab.active{color:var(--text);border-bottom-color:var(--primary);}
+.body{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:12px;}
+.empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--text2);}
+.empty .ic{font-size:42px;opacity:.2;}
+.panel{display:none;flex-direction:column;gap:12px;}
+.panel.active{display:flex;}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:12px;}
+.card-val{font-size:20px;font-weight:700;line-height:1.2;word-break:break-word;}
+.card-label{font-size:10px;color:var(--text2);margin-top:4px;text-transform:uppercase;letter-spacing:.4px;}
+.box{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:12px;display:flex;flex-direction:column;gap:8px;}
+.box-title{font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;}
+.kv{display:flex;gap:8px;font-size:12px;align-items:flex-start;}
+.kk{color:var(--text2);min-width:120px;flex-shrink:0;font-weight:600;}
+.kv-val{color:var(--text);word-break:break-word;line-height:1.45;}
+.bar-wrap{display:flex;height:28px;border-radius:6px;overflow:hidden;background:var(--bg);border:1px solid var(--border);}
+.bar-seg{height:100%;min-width:2px;cursor:pointer;transition:filter .12s;}
+.bar-seg:hover{filter:brightness(1.15);}
+.bar-legend{display:flex;flex-wrap:wrap;gap:8px;font-size:10px;color:var(--text2);}
+.leg-item{display:flex;align-items:center;gap:5px;}
+.leg-sq{width:10px;height:10px;border-radius:2px;}
+.section{background:var(--bg);border:1px solid var(--border);border-radius:6px;overflow:hidden;}
+.section-h{padding:8px 10px;display:flex;gap:8px;align-items:center;cursor:pointer;user-select:none;}
+.section-h:hover{background:#1e293bcc;}
+.section-key{font-size:12px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.section-meta{font-size:10px;color:var(--text2);display:flex;gap:6px;align-items:center;}
+.section-b{display:none;padding:10px;border-top:1px solid var(--border);font-size:11.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:var(--text);background:#0b1220;}
+.section.open .section-b{display:block;}
+.msg,.ex,.evt{background:var(--bg2);border:1px solid var(--border);border-radius:6px;overflow:hidden;}
+.msg-h,.ex-h,.evt-h{padding:6px 10px;font-size:10px;font-weight:700;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border);}
+.msg-b,.ex-b,.evt-b{padding:10px;font-size:11.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word;}
+.r-user{background:#163020;color:#6ee7b7;}
+.r-assistant{background:#1a1040;color:#c4b5fd;}
+.r-system{background:#1e1b4b;color:#818cf8;}
+.r-tool,.r-default{background:#1a1200;color:#fcd34d;}
+.raw{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:12px;font-family:Consolas,'Courier New',monospace;font-size:10.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;color:var(--text2);}
+.muted{color:var(--text2);}
+.mono{font-family:Consolas,'Courier New',monospace;}
+.tags{display:flex;flex-wrap:wrap;gap:5px;}
+.tag{font-size:10px;padding:2px 7px;border-radius:999px;background:#33415566;color:var(--text2);}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sh">
+      <div class="sh-title">Context Inspector <span class="badge-ro">READ-ONLY</span></div>
+      <div class="sh-sub" id="persistPath">loading…</div>
+      <div class="sh-row">
+        <input id="filter" placeholder="filter id / agent / text" />
+        <button class="btn" id="btnReload" title="Reload from disk">↻</button>
+      </div>
+    </div>
+    <div class="clist" id="list"></div>
+    <div class="sfoot">
+      <button class="btn" id="btnRefresh">Refresh</button>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="toolbar">
+      <div class="tbar-name" id="title">Select a context</div>
+      <div class="tbar-meta" id="statusMeta"></div>
+    </div>
+    <div class="tabs" id="tabs">
+      <div class="tab active" data-tab="overview">Overview</div>
+      <div class="tab" data-tab="assembly">Assembly</div>
+      <div class="tab" data-tab="runtime">Runtime</div>
+      <div class="tab" data-tab="messages">Messages</div>
+      <div class="tab" data-tab="raw">Raw</div>
+    </div>
+    <div class="body" id="body">
+      <div class="empty" id="empty">
+        <div class="ic">▥</div>
+        <div>Выберите context из списка слева</div>
+        <div class="muted" style="font-size:11px">OPEN / Assembly / tool_events без изменения persistence</div>
+      </div>
+      <div class="panel" id="panel-overview"></div>
+      <div class="panel" id="panel-assembly"></div>
+      <div class="panel" id="panel-runtime"></div>
+      <div class="panel" id="panel-messages"></div>
+      <div class="panel" id="panel-raw"></div>
+    </div>
+  </main>
+</div>
+<script>
+const state = {
+  contexts: [],
+  selectedId: null,
+  detail: null,
+  tab: 'overview',
+  filter: '',
+  status: null,
+};
+
+const COLORS = [
+  '#6366f1','#22d3ee','#a78bfa','#10b981','#f59e0b','#ef4444',
+  '#38bdf8','#f472b6','#84cc16','#fb7185','#2dd4bf','#c084fc'
+];
+
+const $ = (id) => document.getElementById(id);
+
+function esc(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&')
+    .replaceAll('<', '<')
+    .replaceAll('>', '>')
+    .replaceAll('"', '&quot;');
+}
+
+function fmtTime(value) {
+  if (!value) return '—';
+  try {
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return String(value);
+    return d.toLocaleString();
+  } catch {
+    return String(value);
+  }
+}
+
+function short(value, n = 80) {
+  const text = String(value ?? '');
+  return text.length > n ? text.slice(0, n) + '…' : text;
+}
+
+function roleClass(role) {
+  const r = String(role || '').toLowerCase();
+  if (r === 'user') return 'r-user';
+  if (r === 'assistant') return 'r-assistant';
+  if (r === 'system') return 'r-system';
+  if (r === 'tool') return 'r-tool';
+  return 'r-default';
+}
+
+function activeTab(name) {
+  state.tab = name;
+  document.querySelectorAll('.tab').forEach((el) => {
+    el.classList.toggle('active', el.dataset.tab === name);
+  });
+  document.querySelectorAll('.panel').forEach((el) => {
+    el.classList.toggle('active', el.id === `panel-${name}`);
+  });
+  $('empty').style.display = state.detail ? 'none' : 'flex';
+}
+
+async function api(path) {
+  const res = await fetch(path, { headers: { 'Accept': 'application/json' } });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`${res.status} ${text}`);
+  }
+  return res.json();
+}
+
+function renderList() {
+  const host = $('list');
+  const items = state.contexts;
+  if (!items.length) {
+    host.innerHTML = `<div class="ci"><div class="ci-id muted">No contexts</div><div class="ci-preview">Persistence empty or unread</div></div>`;
+    return;
+  }
+  host.innerHTML = items.map((c) => {
+    const active = c.id === state.selectedId;
+    const pending = c.pending_status ? `<span class="badge s-run">${esc(c.pending_status)}</span>` : '';
+    const assembly = c.has_assembly ? `<span class="badge s-ok">asm</span>` : `<span class="badge s-muted">no asm</span>`;
+    return `
+      <div class="ci ${active ? 'active' : ''}" data-id="${esc(c.id)}">
+        <div class="ci-id">
+          <span class="dot ${c.is_active ? 'on' : ''}"></span>
+          <span class="mono">${esc(c.id)}</span>
+        </div>
+        <div class="ci-meta">
+          <span>${esc(c.agent || '—')}</span>
+          <span>${c.message_count || 0} msg</span>
+          <span>${c.execution_count || 0} exec</span>
+          ${assembly}
+          ${pending}
+        </div>
+        <div class="ci-preview">${esc(c.last_message_preview || c.user_id || fmtTime(c.updated_at))}</div>
+      </div>`;
+  }).join('');
+
+  host.querySelectorAll('.ci[data-id]').forEach((el) => {
+    el.addEventListener('click', () => selectContext(el.dataset.id));
+  });
+}
+
+function renderOverview(detail) {
+  const pending = detail.pending_agent_run;
+  const cards = [
+    ['ID', detail.id],
+    ['Agent', detail.agent || '—'],
+    ['Messages', detail.message_count ?? 0],
+    ['Executions', detail.execution_count ?? 0],
+    ['Instruction', detail.instruction_length ?? '—'],
+    ['Sections', detail.section_count ?? 0],
+    ['Strategy', detail.history_strategy || '—'],
+    ['Pending', pending?.status || '—'],
+  ];
+  const metaKeys = (detail.metadata_summary?.metadata_keys || detail.metadata_keys || [])
+    .map((k) => `<span class="tag">${esc(k)}</span>`).join('') || '<span class="muted">none</span>';
+  $('panel-overview').innerHTML = `
+    <div class="cards">
+      ${cards.map(([label, val]) => `
+        <div class="card">
+          <div class="card-val">${esc(val)}</div>
+          <div class="card-label">${esc(label)}</div>
+        </div>`).join('')}
+    </div>
+    <div class="box">
+      <div class="box-title">Timestamps</div>
+      <div class="kv"><div class="kk">created</div><div class="kv-val">${esc(fmtTime(detail.created_at))}</div></div>
+      <div class="kv"><div class="kk">updated</div><div class="kv-val">${esc(fmtTime(detail.updated_at))}</div></div>
+      <div class="kv"><div class="kk">user_id</div><div class="kv-val mono">${esc(detail.user_id || '—')}</div></div>
+      <div class="kv"><div class="kk">active</div><div class="kv-val">${detail.is_active ? 'yes' : 'no'}</div></div>
+    </div>
+    <div class="box">
+      <div class="box-title">Last message</div>
+      <div class="kv"><div class="kk">role</div><div class="kv-val">${esc(detail.last_message_role || '—')}</div></div>
+      <div class="kv"><div class="kk">preview</div><div class="kv-val">${esc(detail.last_message_preview || '—')}</div></div>
+    </div>
+    <div class="box">
+      <div class="box-title">Metadata keys</div>
+      <div class="tags">${metaKeys}</div>
+    </div>
+    ${pending ? `
+    <div class="box">
+      <div class="box-title">Pending agent run</div>
+      <div class="kv"><div class="kk">status</div><div class="kv-val">${esc(pending.status || '—')}</div></div>
+      <div class="kv"><div class="kk">agent</div><div class="kv-val">${esc(pending.agent || '—')}</div></div>
+      <div class="kv"><div class="kk">retry</div><div class="kv-val">${esc(pending.retry_count ?? '—')}</div></div>
+      <div class="kv"><div class="kk">updated</div><div class="kv-val">${esc(fmtTime(pending.updated_at))}</div></div>
+      <div class="kv"><div class="kk">events</div><div class="kv-val">${esc(pending.tool_event_count ?? 0)}</div></div>
+      <div class="kv"><div class="kk">input</div><div class="kv-val">${esc(pending.input_preview || '—')}</div></div>
+      <div class="kv"><div class="kk">error</div><div class="kv-val">${esc(pending.last_error || '—')}</div></div>
+    </div>` : ''}
+  `;
+}
+
+function renderAssembly(detail) {
+  const assembly = detail.assembly;
+  const host = $('panel-assembly');
+  if (!assembly || !Array.isArray(assembly.sections) || !assembly.sections.length) {
+    host.innerHTML = `<div class="box"><div class="box-title">Assembly</div><div class="muted">No stored last_context_assembly for this context.</div></div>`;
+    return;
+  }
+  const total = Number(assembly.instruction_length || 0) ||
+    assembly.sections.reduce((acc, s) => acc + (Number(s.length) || 0), 0) || 1;
+  const sections = assembly.sections;
+  const bar = sections.map((s, i) => {
+    const len = Number(s.length) || 0;
+    const pct = Math.max(0.6, (len / total) * 100);
+    const color = s.scope === 'static' ? 'var(--static)' : COLORS[i % COLORS.length];
+    return `<div class="bar-seg" title="${esc(s.key)} · ${len}" style="width:${pct}%;background:${color}" data-idx="${i}"></div>`;
+  }).join('');
+  const legend = sections.map((s, i) => {
+    const color = s.scope === 'static' ? 'var(--static)' : COLORS[i % COLORS.length];
+    return `<div class="leg-item"><span class="leg-sq" style="background:${color}"></span>${esc(s.key)} · ${esc(s.length)}</div>`;
+  }).join('');
+
+  host.innerHTML = `
+    <div class="cards">
+      <div class="card"><div class="card-val">${esc(assembly.instruction_length ?? total)}</div><div class="card-label">instruction length</div></div>
+      <div class="card"><div class="card-val">${esc(assembly.section_count ?? sections.length)}</div><div class="card-label">sections</div></div>
+      <div class="card"><div class="card-val">${esc(assembly.history_strategy || '—')}</div><div class="card-label">history strategy</div></div>
+      <div class="card"><div class="card-val">${esc(assembly.context_id || detail.id)}</div><div class="card-label">assembly context</div></div>
+    </div>
+    <div class="box">
+      <div class="box-title">Section weight</div>
+      <div class="bar-wrap">${bar}</div>
+      <div class="bar-legend">${legend}</div>
+    </div>
+    <div class="box">
+      <div class="box-title">Sections</div>
+      ${sections.map((s, i) => `
+        <div class="section" data-idx="${i}">
+          <div class="section-h">
+            <div class="section-key mono">${esc(s.key || 'section')}</div>
+            <div class="section-meta">
+              <span class="badge ${s.scope === 'static' ? 's-ok' : 's-run'}">${esc(s.scope || 'dynamic')}</span>
+              <span>${esc(s.length || 0)} chars</span>
+            </div>
+          </div>
+          <div class="section-b">${esc(s.content ?? s.preview ?? '')}</div>
+        </div>`).join('')}
+    </div>
+  `;
+
+  host.querySelectorAll('.section-h').forEach((el) => {
+    el.addEventListener('click', () => el.parentElement.classList.toggle('open'));
+  });
+  host.querySelectorAll('.bar-seg').forEach((el) => {
+    el.addEventListener('click', () => {
+      const section = host.querySelector(`.section[data-idx="${el.dataset.idx}"]`);
+      if (section) {
+        section.classList.add('open');
+        section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    });
+  });
+}
+
+function renderRuntime(detail) {
+  const host = $('panel-runtime');
+  const pending = detail.pending_agent_run;
+  const events = pending?.tool_events || [];
+  const executions = detail.executions || [];
+
+  const eventsHtml = events.length ? events.map((e) => `
+    <div class="evt">
+      <div class="evt-h r-default">
+        <span>${esc(e.event_type || 'event')}</span>
+        <span class="muted">${esc(e.tool_name || '')}</span>
+        <span class="muted" style="margin-left:auto">${esc(fmtTime(e.timestamp))}</span>
+      </div>
+      <div class="evt-b">
+${e.arguments ? `<div class="muted">arguments</div>${esc(e.arguments)}\n\n` : ''}${e.output ? `<div class="muted">output</div>${esc(e.output)}` : (!e.arguments ? '<span class="muted">—</span>' : '')}
+      </div>
+    </div>
+  `).join('') : `<div class="muted">No pending tool_events.</div>`;
+
+  const execHtml = executions.length ? executions.slice().reverse().map((ex) => `
+    <div class="ex">
+      <div class="ex-h ${ex.has_error ? 'r-default' : 'r-assistant'}">
+        <span>${esc(ex.agent_name || 'agent')}</span>
+        ${ex.has_error ? '<span class="badge s-err">error</span>' : '<span class="badge s-ok">ok</span>'}
+        <span class="muted" style="margin-left:auto">${esc(fmtTime(ex.start_time || ex.end_time))}</span>
+      </div>
+      <div class="ex-b">
+<div class="muted">input (${esc(ex.input_length || 0)})</div>
+${esc(ex.input ?? ex.input_preview ?? '—')}
+
+<div class="muted" style="margin-top:8px">output (${esc(ex.output_length || 0)})</div>
+${esc(ex.output ?? ex.output_preview ?? '—')}
+${(ex.error_full ?? ex.error) ? `\n\n<div class="muted">error</div>${esc(ex.error_full ?? ex.error)}` : ''}
+      </div>
+    </div>
+  `).join('') : `<div class="muted">No executions.</div>`;
+
+  host.innerHTML = `
+    <div class="box">
+      <div class="box-title">Tool events ${pending ? `(${esc(pending.tool_event_count ?? events.length)})` : ''}</div>
+      ${eventsHtml}
+    </div>
+    <div class="box">
+      <div class="box-title">Executions (${esc(detail.execution_count ?? executions.length)})</div>
+      ${execHtml}
+    </div>
+  `;
+}
+
+function renderMessages(detail) {
+  const messages = detail.messages || [];
+  const host = $('panel-messages');
+  if (!messages.length) {
+    host.innerHTML = `<div class="box"><div class="muted">No messages.</div></div>`;
+    return;
+  }
+  host.innerHTML = `
+    <div class="box">
+      <div class="box-title">Conversation (${esc(detail.message_count ?? messages.length)})</div>
+      ${messages.map((m) => `
+        <div class="msg">
+          <div class="msg-h ${roleClass(m.role)}">
+            <span>${esc(m.role || 'unknown')}</span>
+            ${m.has_image ? `<span class="badge s-warn">${esc(m.image_count || 1)} img</span>` : ''}
+            <span class="muted">${esc(m.content_length || 0)} chars</span>
+            <span class="muted" style="margin-left:auto">${esc(fmtTime(m.timestamp))}</span>
+          </div>
+          <div class="msg-b">${esc(m.content ?? m.preview ?? '')}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderRaw(detail) {
+  $('panel-raw').innerHTML = `<div class="raw">${esc(JSON.stringify(detail, null, 2))}</div>`;
+}
+
+function renderDetail() {
+  const detail = state.detail;
+  if (!detail) {
+    $('title').textContent = 'Select a context';
+    $('empty').style.display = 'flex';
+    document.querySelectorAll('.panel').forEach((el) => {
+      el.classList.remove('active');
+      el.innerHTML = '';
+    });
+    return;
+  }
+  $('empty').style.display = 'none';
+  $('title').textContent = `${detail.id}${detail.agent ? ' · ' + detail.agent : ''}`;
+  renderOverview(detail);
+  renderAssembly(detail);
+  renderRuntime(detail);
+  renderMessages(detail);
+  renderRaw(detail);
+  activeTab(state.tab);
+}
+
+async function loadList() {
+  const q = state.filter.trim();
+  const path = q ? `/api/contexts?q=${encodeURIComponent(q)}` : '/api/contexts';
+  const data = await api(path);
+  state.contexts = data.contexts || [];
+  state.status = data;
+  $('persistPath').textContent = `${data.persist_path || '—'} · ${data.context_count ?? state.contexts.length} contexts`;
+  $('statusMeta').textContent = data.exists === false ? 'file missing' : 'read-only';
+  renderList();
+}
+
+async function selectContext(id) {
+  state.selectedId = id;
+  renderList();
+  try {
+    state.detail = await api(`/api/contexts/${encodeURIComponent(id)}?max_messages=100&max_executions=100&include_raw_metadata=false&include_full_messages=true&include_full_executions=true&include_full_runtime=true`);
+    const url = new URL(window.location.href);
+    url.searchParams.set('ctx', id);
+    history.replaceState(null, '', url);
+    renderDetail();
+  } catch (err) {
+    state.detail = null;
+    renderDetail();
+    $('panel-overview').innerHTML = `<div class="box"><div class="box-title">Error</div><div class="muted">${esc(err.message)}</div></div>`;
+    activeTab('overview');
+  }
+}
+
+async function reloadFromDisk() {
+  await api('/api/reload'.replace('/api/reload', '/api/reload')); // keep shape stable for lints
+  const res = await fetch('/api/reload', { method: 'POST' });
+  if (!res.ok) throw new Error(await res.text());
+  await loadList();
+  if (state.selectedId) await selectContext(state.selectedId);
+}
+
+function bind() {
+  document.querySelectorAll('.tab').forEach((el) => {
+    el.addEventListener('click', () => {
+      if (!state.detail) return;
+      activeTab(el.dataset.tab);
+    });
+  });
+  $('filter').addEventListener('input', (e) => {
+    state.filter = e.target.value || '';
+    clearTimeout(bind._t);
+    bind._t = setTimeout(() => loadList().catch(console.error), 180);
+  });
+  $('btnRefresh').addEventListener('click', () => {
+    loadList().then(() => state.selectedId && selectContext(state.selectedId)).catch(console.error);
+  });
+  $('btnReload').addEventListener('click', () => {
+    reloadFromDisk().catch((err) => alert(err.message || err));
+  });
+}
+
+async function boot() {
+  bind();
+  activeTab('overview');
+  try {
+    await loadList();
+    const params = new URLSearchParams(window.location.search);
+    const initial = params.get('ctx') || (state.contexts[0] && state.contexts[0].id);
+    if (initial) await selectContext(initial);
+  } catch (err) {
+    $('persistPath').textContent = err.message || String(err);
+  }
+}
+
+boot();
+</script>
+</body>
+</html>

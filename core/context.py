@@ -34,16 +34,28 @@ def safe_lock(lock, timeout=5.0):
 class ContextManager:
     """Thread-safe context manager with persistence and memory optimization."""
     
-    def __init__(self, max_history: int = 15, persist_path: Optional[str] = None):
+    def __init__(
+        self,
+        max_history: int = 15,
+        persist_path: Optional[str] = None,
+        *,
+        read_only: bool = False,
+        create_initial_context: bool = True,
+    ):
         """
         Initialize context manager.
         
         Args:
             max_history: Maximum number of messages to keep in memory
             persist_path: Optional path for persistence (JSON file)
+            read_only: When True, never write persistence and do not create a fresh
+                empty session context after loading (inspector mode)
+            create_initial_context: When False, keep only loaded buckets and may
+                leave no active context if persistence is empty
         """
         self.max_history = max_history
         self.persist_path = Path(persist_path) if persist_path else None
+        self.read_only = bool(read_only)
 
         self._lock = Lock()
         self._contexts: Dict[str, Dict[str, Any]] = {}
@@ -56,13 +68,33 @@ class ContextManager:
 
         # Load from persistence if available (but don't auto-activate old contexts)
         if self.persist_path and self.persist_path.exists():
-            self._load_from_file(auto_activate=False)
+            self._load_from_file(auto_activate=False, normalize_and_save=not self.read_only)
 
-        # Always start with a fresh context
-        # Old contexts are preserved and accessible by Context ID
-        new_context = self._create_context()
-        self._activate_context(new_context)
-        logger.info(f"Started new context session: {new_context}")
+        if create_initial_context and not self.read_only:
+            # Always start with a fresh context
+            # Old contexts are preserved and accessible by Context ID
+            new_context = self._create_context()
+            self._activate_context(new_context)
+            logger.info(f"Started new context session: {new_context}")
+        elif self._contexts and self._current_context_id is None:
+            # Inspector / read-only: expose the newest bucket without creating a new session
+            sorted_contexts = sorted(
+                self._contexts.items(),
+                key=lambda item: item[1].get("updated_at") or item[1].get("created_at") or "",
+                reverse=True,
+            )
+            self._activate_context(sorted_contexts[0][0])
+            logger.info(
+                "Loaded contexts in read-only/inspect mode; active=%s count=%s",
+                self._current_context_id,
+                len(self._contexts),
+            )
+        else:
+            logger.info(
+                "Context manager ready without new session (read_only=%s, buckets=%s)",
+                self.read_only,
+                len(self._contexts),
+            )
 
     def _generate_context_id(self) -> str:
         """Generate a short identifier for a context session."""
@@ -96,7 +128,7 @@ class ContextManager:
         """Public helper to switch to a specific context ID, creating it if needed."""
         with safe_lock(self._lock, timeout=5.0):
             active_id = self._activate_context(context_id)
-            if self.persist_path:
+            if self.persist_path and not self.read_only:
                 self._save_to_file()
             return active_id
 
@@ -112,7 +144,7 @@ class ContextManager:
             bucket["created_at"] = now_iso
             bucket["updated_at"] = now_iso
             self._activate_context(new_id)
-            if self.persist_path:
+            if self.persist_path and not self.read_only:
                 self._save_to_file()
             return new_id
 
@@ -123,7 +155,159 @@ class ContextManager:
     def list_context_ids(self) -> List[str]:
         """Return the list of known context identifiers."""
         return list(self._contexts.keys())
-    
+
+    def list_context_summaries(self) -> List[Dict[str, Any]]:
+        """Return safe, read-only summaries for all known context buckets."""
+        try:
+            with safe_lock(self._lock, timeout=5.0):
+                summaries = []
+                for context_id, bucket in self._contexts.items():
+                    summaries.append(
+                        self._build_context_summary_unlocked(
+                            context_id,
+                            bucket,
+                            is_active=context_id == self._current_context_id,
+                        )
+                    )
+                summaries.sort(
+                    key=lambda item: item.get("updated_at") or item.get("created_at") or "",
+                    reverse=True,
+                )
+                return summaries
+        except ContextError:
+            logger.warning("Lock timeout in list_context_summaries")
+            return []
+
+    def get_context_bucket(
+        self,
+        context_id: str,
+        *,
+        include_messages: bool = True,
+        include_executions: bool = True,
+        include_assembly: bool = True,
+        include_raw_metadata: bool = False,
+        preview_limit: int = 240,
+        include_full_messages: bool = False,
+        include_full_executions: bool = False,
+        include_full_runtime: bool = False,
+        max_messages: Optional[int] = None,
+        max_executions: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return a copied, redacted view of one context bucket."""
+        try:
+            with safe_lock(self._lock, timeout=5.0):
+                bucket = self._contexts.get(context_id)
+                if bucket is None:
+                    return None
+                return self._build_context_detail_unlocked(
+                    context_id,
+                    bucket,
+                    is_active=context_id == self._current_context_id,
+                    include_messages=include_messages,
+                    include_executions=include_executions,
+                    include_assembly=include_assembly,
+                    include_raw_metadata=include_raw_metadata,
+                    preview_limit=preview_limit,
+                    include_full_messages=include_full_messages,
+                    include_full_executions=include_full_executions,
+                    include_full_runtime=include_full_runtime,
+                    max_messages=max_messages,
+                    max_executions=max_executions,
+                )
+        except ContextError:
+            logger.warning("Lock timeout in get_context_bucket")
+            return None
+
+    def get_context_assembly(self, context_id: str) -> Optional[Dict[str, Any]]:
+        """Return last stored model-context assembly for a bucket."""
+        try:
+            with safe_lock(self._lock, timeout=5.0):
+                bucket = self._contexts.get(context_id)
+                if bucket is None:
+                    return None
+                metadata = bucket.get("metadata") or {}
+                assembly = metadata.get("last_context_assembly")
+                if not isinstance(assembly, dict):
+                    return {
+                        "context_id": context_id,
+                        "available": False,
+                        "assembly": None,
+                    }
+                return {
+                    "context_id": context_id,
+                    "available": True,
+                    "assembly": self._sanitize_assembly_unlocked(assembly),
+                }
+        except ContextError:
+            logger.warning("Lock timeout in get_context_assembly")
+            return None
+
+    def get_context_messages(
+        self,
+        context_id: str,
+        *,
+        limit: Optional[int] = None,
+        preview_limit: int = 500,
+        include_full: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Return sanitized conversation messages for one context."""
+        try:
+            with safe_lock(self._lock, timeout=5.0):
+                bucket = self._contexts.get(context_id)
+                if bucket is None:
+                    return None
+                messages = bucket.get("conversation") or []
+                if limit is not None and limit >= 0:
+                    messages = messages[-limit:]
+                return {
+                    "context_id": context_id,
+                    "count": len(bucket.get("conversation") or []),
+                    "messages": [
+                        self._sanitize_message_unlocked(
+                            msg,
+                            preview_limit=preview_limit,
+                            include_full=include_full,
+                        )
+                        for msg in messages
+                    ],
+                }
+        except ContextError:
+            logger.warning("Lock timeout in get_context_messages")
+            return None
+
+    def get_context_executions(
+        self,
+        context_id: str,
+        *,
+        limit: Optional[int] = None,
+        preview_limit: int = 500,
+        include_full: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Return sanitized execution history for one context."""
+        try:
+            with safe_lock(self._lock, timeout=5.0):
+                bucket = self._contexts.get(context_id)
+                if bucket is None:
+                    return None
+                executions = bucket.get("executions") or []
+                if limit is not None and limit >= 0:
+                    executions = executions[-limit:]
+                return {
+                    "context_id": context_id,
+                    "count": len(bucket.get("executions") or []),
+                    "executions": [
+                        self._sanitize_execution_unlocked(
+                            execution,
+                            preview_limit=preview_limit,
+                            include_full=include_full,
+                        )
+                        for execution in executions
+                    ],
+                }
+        except ContextError:
+            logger.warning("Lock timeout in get_context_executions")
+            return None
+
     def add_message(self, role: str, content: Union[str, List[Any]], metadata: Optional[Dict[str, Any]] = None) -> None:
         """
         Add message to conversation history.
@@ -159,7 +343,7 @@ class ContextManager:
                         active_bucket["updated_at"] = datetime.now().isoformat()
 
                     # Persist if configured
-                    if self.persist_path:
+                    if self.persist_path and not self.read_only:
                         self._save_to_file()
 
                 except Exception as e:
@@ -179,7 +363,7 @@ class ContextManager:
                 if active_bucket is not None:
                     active_bucket["updated_at"] = datetime.now().isoformat()
 
-                if self.persist_path:
+                if self.persist_path and not self.read_only:
                     self._save_to_file()
         except ContextError as exc:
             logger.error("Lock timeout in replace_conversation_history", exc_info=exc)
@@ -200,7 +384,7 @@ class ContextManager:
                     active_bucket["updated_at"] = datetime.now().isoformat()
 
                 # Persist if configured
-                if self.persist_path:
+                if self.persist_path and not self.read_only:
                     self._save_to_file()
         except ContextError:
             logger.warning(
@@ -418,7 +602,7 @@ class ContextManager:
             bucket = self._contexts.get(self._current_context_id)
             if bucket is not None:
                 bucket["updated_at"] = datetime.now().isoformat()
-            if self.persist_path:
+            if self.persist_path and not self.read_only:
                 self._save_to_file()
     
     def get_metadata(self, key: str, default: Any = None) -> Any:
@@ -455,7 +639,7 @@ class ContextManager:
             bucket = self._contexts.get(self._current_context_id)
             if bucket is not None:
                 bucket["updated_at"] = datetime.now().isoformat()
-            if self.persist_path:
+            if self.persist_path and not self.read_only:
                 self._save_to_file()
             return list(items)
 
@@ -623,6 +807,408 @@ class ContextManager:
             )
         return msg
 
+    @staticmethod
+    def _truncate_text(value: Any, limit: int) -> str:
+        text = "" if value is None else str(value)
+        if limit is not None and limit >= 0 and len(text) > limit:
+            return text[:limit] + "…"
+        return text
+
+    @classmethod
+    def _content_preview(
+        cls,
+        content: Any,
+        *,
+        preview_limit: int = 240,
+    ) -> Dict[str, Any]:
+        """Build a compact, image-safe preview of message content."""
+        has_image = False
+        image_count = 0
+        part_types: List[str] = []
+        text_parts: List[str] = []
+
+        if isinstance(content, str):
+            text_parts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    part_type = str(part.get("type") or "part")
+                    part_types.append(part_type)
+                    if part_type in {"image_url", "input_image", "image_file"}:
+                        has_image = True
+                        image_count += 1
+                        continue
+                    if part_type in {"text", "input_text"}:
+                        text_parts.append(str(part.get("text") or part.get("content") or ""))
+                    elif "text" in part:
+                        text_parts.append(str(part.get("text") or ""))
+                else:
+                    part_type = getattr(part, "type", None) or type(part).__name__
+                    part_types.append(str(part_type))
+                    if str(part_type) in {"image_url", "input_image", "image_file"}:
+                        has_image = True
+                        image_count += 1
+                        continue
+                    text_value = getattr(part, "text", None)
+                    if text_value is not None:
+                        text_parts.append(str(text_value))
+                    else:
+                        text_parts.append(str(part))
+        elif content is not None:
+            text_parts.append(str(content))
+
+        preview = "\n".join(part for part in text_parts if part).strip()
+        if not preview and has_image:
+            preview = f"[{image_count} image(s)]"
+        elif not preview:
+            preview = ""
+
+        return {
+            "preview": cls._truncate_text(preview, preview_limit),
+            "length": len(preview),
+            "has_image": has_image,
+            "image_count": image_count,
+            "part_types": part_types,
+            "is_multimodal": not isinstance(content, str),
+        }
+
+    def _sanitize_message_unlocked(
+        self,
+        msg: Any,
+        *,
+        preview_limit: int = 240,
+        include_full: bool = False,
+    ) -> Dict[str, Any]:
+        if hasattr(msg, "model_dump"):
+            payload = msg.model_dump()
+        elif isinstance(msg, dict):
+            payload = dict(msg)
+        else:
+            payload = {
+                "role": getattr(msg, "role", "unknown"),
+                "content": getattr(msg, "content", ""),
+                "timestamp": getattr(msg, "timestamp", None),
+                "metadata": getattr(msg, "metadata", None),
+            }
+
+        content = payload.get("content")
+        preview = self._content_preview(content, preview_limit=preview_limit)
+        result = {
+            "role": payload.get("role"),
+            "timestamp": payload.get("timestamp"),
+            "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            "preview": preview["preview"],
+            "content_length": preview["length"],
+            "has_image": preview["has_image"],
+            "image_count": preview["image_count"],
+            "is_multimodal": preview["is_multimodal"],
+        }
+        if include_full and isinstance(content, str) and not preview["has_image"]:
+            result["content"] = content
+        elif include_full and isinstance(content, list):
+            # Only return non-image textual parts to avoid shipping huge base64 blobs.
+            safe_parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    part_type = str(part.get("type") or "")
+                    if part_type in {"image_url", "input_image", "image_file"}:
+                        safe_parts.append(
+                            {
+                                "type": part_type,
+                                "omitted": True,
+                                "reason": "image_payload_omitted",
+                            }
+                        )
+                    else:
+                        safe_parts.append(part)
+                else:
+                    part_type = str(getattr(part, "type", type(part).__name__))
+                    if part_type in {"image_url", "input_image", "image_file"}:
+                        safe_parts.append(
+                            {
+                                "type": part_type,
+                                "omitted": True,
+                                "reason": "image_payload_omitted",
+                            }
+                        )
+                    elif hasattr(part, "model_dump"):
+                        safe_parts.append(part.model_dump())
+                    else:
+                        safe_parts.append(str(part))
+            result["content_parts"] = safe_parts
+        return result
+
+    def _sanitize_execution_unlocked(
+        self,
+        execution: Any,
+        *,
+        preview_limit: int = 500,
+        include_full: bool = False,
+    ) -> Dict[str, Any]:
+        if hasattr(execution, "model_dump"):
+            payload = execution.model_dump()
+        elif isinstance(execution, dict):
+            payload = dict(execution)
+        else:
+            payload = {
+                "agent_name": getattr(execution, "agent_name", None),
+                "start_time": getattr(execution, "start_time", None),
+                "end_time": getattr(execution, "end_time", None),
+                "input_message": getattr(execution, "input_message", None),
+                "output": getattr(execution, "output", None),
+                "error": getattr(execution, "error", None),
+                "context_id": getattr(execution, "context_id", None),
+            }
+
+        result = {
+            "agent_name": payload.get("agent_name"),
+            "start_time": payload.get("start_time"),
+            "end_time": payload.get("end_time"),
+            "duration": payload.get("duration"),
+            "context_id": payload.get("context_id"),
+            "error": self._truncate_text(payload.get("error"), preview_limit) if payload.get("error") else None,
+            "input_preview": self._truncate_text(payload.get("input_message"), preview_limit),
+            "output_preview": self._truncate_text(payload.get("output"), preview_limit),
+            "input_length": len(str(payload.get("input_message") or "")),
+            "output_length": len(str(payload.get("output") or "")),
+            "has_error": bool(payload.get("error")),
+        }
+        if include_full:
+            result["input"] = payload.get("input_message")
+            result["output"] = payload.get("output")
+            result["error_full"] = payload.get("error")
+        return result
+
+    def _sanitize_assembly_unlocked(self, assembly: Dict[str, Any]) -> Dict[str, Any]:
+        sections_in = assembly.get("sections") if isinstance(assembly.get("sections"), list) else []
+        sections: List[Dict[str, Any]] = []
+        total_from_sections = 0
+        for section in sections_in:
+            if not isinstance(section, dict):
+                continue
+            content = section.get("content")
+            length = section.get("length")
+            if length is None:
+                length = len(str(content or section.get("preview") or ""))
+            total_from_sections += int(length or 0)
+            preview = section.get("preview")
+            if preview is None and content is not None:
+                preview = self._truncate_text(content, 240)
+            sections.append(
+                {
+                    "key": section.get("key"),
+                    "scope": section.get("scope") or "dynamic",
+                    "length": int(length or 0),
+                    "preview": self._truncate_text(preview, 240),
+                    "content": content if isinstance(content, str) else None,
+                }
+            )
+
+        instruction_length = assembly.get("instruction_length")
+        if instruction_length is None:
+            instruction_length = total_from_sections
+
+        return {
+            "context_id": assembly.get("context_id"),
+            "history_strategy": assembly.get("history_strategy"),
+            "instruction_length": instruction_length,
+            "section_count": len(sections),
+            "sections": sections,
+            "metadata": dict(assembly.get("metadata") or {}) if isinstance(assembly.get("metadata"), dict) else {},
+        }
+
+    def _sanitize_pending_run_unlocked(
+        self,
+        pending: Any,
+        *,
+        include_full: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(pending, dict):
+            return None
+        events_in = pending.get("tool_events") if isinstance(pending.get("tool_events"), list) else []
+        events: List[Dict[str, Any]] = []
+        for item in events_in:
+            if not isinstance(item, dict):
+                continue
+            events.append(
+                {
+                    "event_type": item.get("event_type"),
+                    "timestamp": item.get("timestamp"),
+                    "tool_name": item.get("tool_name"),
+                    "arguments": self._truncate_text(item.get("arguments"), None if include_full else 500)
+                    if item.get("arguments") is not None
+                    else None,
+                    "output": self._truncate_text(item.get("output"), None if include_full else 500)
+                    if item.get("output") is not None
+                    else None,
+                }
+            )
+        return {
+            "agent": pending.get("agent"),
+            "context_id": pending.get("context_id"),
+            "status": pending.get("status"),
+            "retry_count": pending.get("retry_count"),
+            "updated_at": pending.get("updated_at"),
+            "input_preview": self._truncate_text(pending.get("input_preview"), 300)
+            if pending.get("input_preview") is not None
+            else None,
+            "last_error": self._truncate_text(pending.get("last_error"), 500)
+            if pending.get("last_error") is not None
+            else None,
+            "tool_events": events,
+            "tool_event_count": len(events),
+        }
+
+    def _build_context_summary_unlocked(
+        self,
+        context_id: str,
+        bucket: Dict[str, Any],
+        *,
+        is_active: bool,
+    ) -> Dict[str, Any]:
+        conversation = bucket.get("conversation") or []
+        executions = bucket.get("executions") or []
+        metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+
+        last_invocation = metadata.get("last_invocation") if isinstance(metadata.get("last_invocation"), dict) else {}
+        assembly = metadata.get("last_context_assembly") if isinstance(metadata.get("last_context_assembly"), dict) else None
+        pending = self._sanitize_pending_run_unlocked(metadata.get("pending_agent_run"))
+
+        agent = (
+            last_invocation.get("agent")
+            or (assembly or {}).get("metadata", {}).get("agent_key")
+            if isinstance((assembly or {}).get("metadata"), dict)
+            else last_invocation.get("agent")
+        )
+        if agent is None and isinstance(assembly, dict):
+            agent = (assembly.get("metadata") or {}).get("agent_key")
+
+        last_message_preview = None
+        last_message_role = None
+        if conversation:
+            last_msg = conversation[-1]
+            sanitized = self._sanitize_message_unlocked(last_msg, preview_limit=160)
+            last_message_preview = sanitized.get("preview")
+            last_message_role = sanitized.get("role")
+
+        return {
+            "id": context_id,
+            "is_active": is_active,
+            "created_at": bucket.get("created_at"),
+            "updated_at": bucket.get("updated_at"),
+            "message_count": len(conversation),
+            "execution_count": len(executions),
+            "agent": agent,
+            "user_id": metadata.get("user_id"),
+            "history_strategy": (assembly or {}).get("history_strategy") if assembly else None,
+            "instruction_length": (assembly or {}).get("instruction_length") if assembly else None,
+            "section_count": len((assembly or {}).get("sections") or []) if assembly else 0,
+            "has_assembly": assembly is not None,
+            "pending_status": pending.get("status") if pending else None,
+            "tool_event_count": pending.get("tool_event_count") if pending else 0,
+            "last_message_role": last_message_role,
+            "last_message_preview": last_message_preview,
+            "metadata_keys": sorted(str(key) for key in metadata.keys()),
+        }
+
+    def _build_context_detail_unlocked(
+        self,
+        context_id: str,
+        bucket: Dict[str, Any],
+        *,
+        is_active: bool,
+        include_messages: bool = True,
+        include_executions: bool = True,
+        include_assembly: bool = True,
+        include_raw_metadata: bool = False,
+        preview_limit: int = 240,
+        include_full_messages: bool = False,
+        include_full_executions: bool = False,
+        include_full_runtime: bool = False,
+        max_messages: Optional[int] = None,
+        max_executions: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        summary = self._build_context_summary_unlocked(
+            context_id,
+            bucket,
+            is_active=is_active,
+        )
+        metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+        detail: Dict[str, Any] = {
+            **summary,
+            "metadata_summary": {
+                "context_id": metadata.get("context_id") or context_id,
+                "user_id": metadata.get("user_id"),
+                "last_invocation": metadata.get("last_invocation")
+                if isinstance(metadata.get("last_invocation"), dict)
+                else None,
+                "has_agent_instructions": bool(metadata.get("agent_instructions")),
+                "metadata_keys": sorted(str(key) for key in metadata.keys()),
+            },
+            "pending_agent_run": self._sanitize_pending_run_unlocked(
+                metadata.get("pending_agent_run"),
+                include_full=include_full_runtime,
+            ),
+        }
+
+        if include_assembly:
+            assembly = metadata.get("last_context_assembly")
+            detail["assembly"] = (
+                self._sanitize_assembly_unlocked(assembly)
+                if isinstance(assembly, dict)
+                else None
+            )
+
+        if include_messages:
+            messages = list(bucket.get("conversation") or [])
+            if max_messages is not None and max_messages >= 0:
+                messages = messages[-max_messages:]
+            detail["messages"] = [
+                self._sanitize_message_unlocked(
+                    msg,
+                    preview_limit=preview_limit,
+                    include_full=include_full_messages,
+                )
+                for msg in messages
+            ]
+
+        if include_executions:
+            executions = list(bucket.get("executions") or [])
+            if max_executions is not None and max_executions >= 0:
+                executions = executions[-max_executions:]
+            detail["executions"] = [
+                self._sanitize_execution_unlocked(
+                    execution,
+                    preview_limit=preview_limit,
+                    include_full=include_full_executions,
+                )
+                for execution in executions
+            ]
+
+        if include_raw_metadata:
+            # Keep raw keys, but never ship huge base64 blobs / full image payloads.
+            safe_metadata: Dict[str, Any] = {}
+            for key, value in metadata.items():
+                if key == "last_context_assembly" and isinstance(value, dict):
+                    safe_metadata[key] = self._sanitize_assembly_unlocked(value)
+                elif key == "pending_agent_run":
+                    safe_metadata[key] = self._sanitize_pending_run_unlocked(value)
+                elif key == "agent_instructions" and isinstance(value, str):
+                    safe_metadata[key] = self._truncate_text(value, 2000)
+                else:
+                    try:
+                        dumped = json.dumps(value, ensure_ascii=False, default=str)
+                    except Exception:
+                        dumped = str(value)
+                    safe_metadata[key] = (
+                        json.loads(dumped)
+                        if len(dumped) <= 4000 and dumped not in {"", "null"}
+                        else self._truncate_text(dumped, 4000)
+                    )
+            detail["raw_metadata"] = safe_metadata
+
+        return detail
+
     def _get_role_emoji(self, role: str) -> str:
         """Get emoji for message role."""
         return {
@@ -646,6 +1232,8 @@ class ContextManager:
     
     def _save_to_file(self) -> None:
         """Save context to persistence file."""
+        if self.read_only or not self.persist_path:
+            return
         try:
             data = {
                 "active_context_id": self._current_context_id,
@@ -685,7 +1273,7 @@ class ContextManager:
             # Failed to save context
             logger.error(f"Failed to save context to {self.persist_path}: {e}")
     
-    def _load_from_file(self, auto_activate: bool = True) -> None:
+    def _load_from_file(self, auto_activate: bool = True, normalize_and_save: bool = True) -> None:
         """
         Load context from persistence file.
 
@@ -763,7 +1351,7 @@ class ContextManager:
 
             # Save normalized context back to file if we normalized any images
             # This ensures file images are converted to base64 in persistence
-            if self.persist_path and auto_activate:
+            if self.persist_path and auto_activate and normalize_and_save and not self.read_only:
                 self._save_to_file()
                 logger.info("Context loaded and normalized, saved back to persistence")
 
