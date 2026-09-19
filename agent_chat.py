@@ -16,6 +16,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+
+def _configure_utf8_console() -> None:
+    """Keep model output printable on Windows consoles with legacy code pages."""
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_configure_utf8_console()
+
 # Add grid package to path
 sys.path.insert(0, str(Path(__file__).parent))
 

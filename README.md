@@ -267,6 +267,12 @@ Coverage:
 pytest --cov=. --cov-report=html
 ```
 
+## Codex worker mode
+
+Codex can use Grid as a minimal background-agent tool backed by the configured
+OpenCode models and `claude-tools`. See [CODEX_WORKERS.md](CODEX_WORKERS.md) for
+the two-call launch contract and Codex MCP configuration.
+
 ## Troubleshooting
 - `ModuleNotFoundError: No module named 'api'` when running `pytest` in Windows — set `PYTHONPATH`:
   - For the session: `$env:PYTHONPATH = "."`

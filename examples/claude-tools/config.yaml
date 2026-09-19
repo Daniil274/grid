@@ -88,20 +88,6 @@ compact:
       max_tokens_per_skill: 5000
 
 providers:
-  opencode:
-    name: "opencode"
-    base_url: "https://opencode.ai/zen/go/v1"
-    api_key_env: "OPENCODE_API_KEY"
-    timeout: 300
-    max_retries: 3
-
-  multiai:
-    name: "multiai"
-    base_url: "https://multiai.store/v1"
-    api_key_env: "MULTIAI_API_KEY"
-    timeout: 300
-    max_retries: 3
-
   openrouter:
     name: "openrouter"
     base_url: "https://openrouter.ai/api/v1"
@@ -110,90 +96,41 @@ providers:
     max_retries: 3
 
 models:
-
-  gpt-5-5:
-    name: "gpt-5-5"
-    provider: "multiai"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "gpt5.5 via MultiAI"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
-  fable:
-    name: claude-fable-5
-    provider: "multiai"
-    temperature: 0.2
-  claude-opus-4-8:
-    name: "claude-opus-4-8"
-    provider: "multiai"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "Claude Opus 4 (8k) via MultiAI"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
-
-  kimi-k2.6-opencode:
-    name: "kimi-k2.6"
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "Kimi K2.5 via OpenCode"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
-
-  glm-5.1-opencode:
-    name: "glm-5.1"
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "GLM-5.1 via OpenCode"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
-
-  deepseek-v4-pro-opencode:
-    name: deepseek-v4-pro
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: deepseek-v4-pro
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
-
-  deepseek-v4-flash:
-    name: deepseek/deepseek-v4-flash
+  glm-latest:
+    name: "~z-ai/glm-latest"
     provider: "openrouter"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: deepseek-v4-flash
+    description: "Latest GLM via OpenRouter (currently GLM-5.3)"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+    reasoning:
+      effort: "high"
+
+  deepseek-flash-latest:
+    name: "~deepseek/deepseek-flash-latest"
+    provider: "openrouter"
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "Latest DeepSeek Flash via OpenRouter (currently DeepSeek V4.1 Flash)"
     streaming_enabled: true
     preserve_reasoning_content: true
     reasoning:
       effort: "low"
 
-  grok4.5:
-    name: x-ai/grok-4.5
-    provider: openrouter
+  mercury-2.5:
+    name: "inception/mercury-2.5"
+    provider: "openrouter"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: "Grok 4.5"
+    description: "Mercury 2.5 via OpenRouter"
     streaming_enabled: true
     preserve_reasoning_content: true
+    reasoning:
+      effort: "medium"
 
 tools:
   bash_tool:
@@ -378,7 +315,7 @@ tools:
     context_depth: 5
     include_tool_history: false
 
-  general_purpose_glm:
+  general_purpose:
     type: "agent"
     name: "Agent"
     description: "Launch a general-purpose subagent to research, search code, or execute a bounded multi-step task."
@@ -405,7 +342,7 @@ tools:
 agents:
   engineer:
     name: "Claude Engineer"
-    model: grok4.5
+    model: glm-latest
     mcp_enabled: true
     system_skills:
       - beads
@@ -424,9 +361,9 @@ agents:
       - notebook_read
       - notebook_edit
       - notebook_create
-      - general_purpose_glm
+      - general_purpose
       - web_spider
-    description: "GRID engineering agent on GLM via OpenCode"
+    description: "Main GRID engineering agent on the latest GLM via OpenRouter"
     custom_prompt: |
       You are GRID system agent .
 
@@ -475,9 +412,9 @@ agents:
       - Respond in the same language as the user unless they ask otherwise.
 
 
-  general_purpose_glm:
+  general_purpose:
     name: "General-purpose"
-    model: deepseek-v4-flash
+    model: deepseek-flash-latest
     mcp_enabled: true
     system_skills:
       - beads
@@ -509,7 +446,7 @@ agents:
           command: codegraph init -i
           working_dir: "."
           description: Initialize CodeGraph index in workspace
-    description: "General-purpose GRID subagent"
+    description: "General-purpose GRID probe agent on the latest DeepSeek Flash via OpenRouter"
     custom_prompt: |
       You are an agent for GRID system agent . Given the user's message, use the tools available to complete the task. Complete the task fully. Don't gold-plate, but don't leave it half-done.
 
@@ -531,7 +468,7 @@ agents:
 
   web_spider:
     name: "WebSpider"
-    model: deepseek-v4-flash
+    model: mercury-2.5
     system_skills:
       - beads
       - web_spider_research_skill
