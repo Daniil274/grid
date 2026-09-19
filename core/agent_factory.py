@@ -539,6 +539,7 @@ class ConsoleStreamObserver:
                         self._emit(f"[mcp] {server_label}: {count} tool(s)")
             elif isinstance(event, RawResponsesStreamEvent):
                 content: Optional[str] = None
+                data_type: Optional[str] = None
                 if hasattr(event, "content") and event.content:
                     content = event.content
                 elif hasattr(event, "delta") and event.delta:
@@ -561,8 +562,6 @@ class ConsoleStreamObserver:
                             return delta_text
                         return None
 
-                    self._flush_reasoning_now()
-
                     if hasattr(data, "delta") and data.delta:
                         content = data.delta
                     elif hasattr(data, "content") and data.content:
@@ -572,7 +571,16 @@ class ConsoleStreamObserver:
                     elif isinstance(data, dict):
                         content = data.get("content") or data.get("delta") or data.get("text")
 
-                if content and isinstance(content, str) and content.strip():
+                has_content = bool(content and isinstance(content, str) and content.strip())
+                # Flush buffered reasoning only when real (non-reasoning) content starts
+                # or the response reaches a terminal boundary. Some providers (e.g.
+                # OpenRouter GLM/DeepSeek) emit an interleaved empty
+                # `response.output_text.delta` after every reasoning delta; flushing on
+                # those printed reasoning one line per token.
+                if has_content or data_type == "response.completed":
+                    self._flush_reasoning_now()
+
+                if has_content:
                     if self._text_callback:
                         self._text_callback(content)
                     if self._render_text_deltas:
