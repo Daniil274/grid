@@ -6,7 +6,7 @@ import pytest
 
 
 def _load_search_tools_module():
-    module_path = Path(__file__).resolve().parents[1] / "examples" / "claude-tools" / "tools" / "search_tools.py"
+    module_path = Path(__file__).resolve().parents[1] / "examples" / "coder" / "tools" / "search_tools.py"
     spec = importlib.util.spec_from_file_location("claude_search_tools_for_test", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

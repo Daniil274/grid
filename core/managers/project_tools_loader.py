@@ -8,6 +8,7 @@ without modifying the system root directory.
 import os
 import sys
 import importlib
+import importlib.machinery
 import importlib.util
 import inspect
 import logging
@@ -81,6 +82,15 @@ class ProjectToolsLoader:
         logger.info(f"Loaded {len(self._loaded_tools)} project tools: {list(self._loaded_tools.keys())}")
         return self._loaded_tools
 
+    def _shadows_other_package(self, top_level: str) -> bool:
+        """Whether *top_level* is importable from somewhere other than config_dir."""
+        config_dir = self.config_dir.resolve()
+        search_path = [
+            entry for entry in sys.path
+            if entry and Path(entry).resolve() not in (config_dir, self.tools_dir.resolve())
+        ]
+        return importlib.machinery.PathFinder.find_spec(top_level, search_path) is not None
+
     def _load_module(self, module_name: str, file_path: Path) -> None:
         """
         Loads a module and extracts tools.
@@ -97,6 +107,11 @@ class ProjectToolsLoader:
                 relative_path = file_path.relative_to(self.config_dir)
                 parts = list(relative_path.parts[:-1]) + [relative_path.stem]
                 full_module_name = ".".join(parts)
+                if self._shadows_other_package(parts[0]):
+                    # e.g. examples/coder/tools/file_tools.py must not claim
+                    # 'tools.file_tools', which belongs to Grid's own tools package
+                    # (several systems can be loaded in one process by the router).
+                    raise ValueError(full_module_name)
             except ValueError:
                 digest = hashlib.sha1(str(file_path.resolve()).encode("utf-8")).hexdigest()[:12]
                 full_module_name = f"_project_tools_{digest}_{file_path.stem}"
@@ -239,6 +254,12 @@ def get_project_loader() -> Optional[ProjectToolsLoader]:
         Optional[ProjectToolsLoader]: Loader or None if not initialized
     """
     return _global_loader
+
+
+def set_project_loader(loader: Optional[ProjectToolsLoader]) -> None:
+    """Make *loader* the active one, e.g. when switching to another system's config."""
+    global _global_loader
+    _global_loader = loader
 
 
 def clear_project_tools() -> None:

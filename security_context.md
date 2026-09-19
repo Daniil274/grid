@@ -109,7 +109,7 @@
 │   └── ...
 │
 ├── examples/                       # Примеры конфигураций
-│   ├── claude-tools/               # Claude Code-совместимые тулы
+│   ├── coder/               # Claude Code-совместимые тулы
 │   │   ├── tools/bash_tool.py      # ** subprocess shell=True **
 │   │   ├── tools/shell.py          # ** PowerShell/CMD exec **
 │   │   ├── mcp_server.py           # ** exec() вызов **
@@ -172,10 +172,10 @@
 
 | Файл                                    | Строка | Тип                       | Контекст                           |
 |-----------------------------------------|--------|---------------------------|------------------------------------|
-| `examples/claude-tools/mcp_server.py`   | 164    | `exec(fn_src, globs)`     | Динамическая компиляция function tool |
+| `examples/coder/mcp_server.py`   | 164    | `exec(fn_src, globs)`     | Динамическая компиляция function tool |
 | `core/speech_processor.py`              | 151    | `.load_pickle(...)`       | Silero TTS модель через torch.package |
 | `scripts/clean_config.py`               | 9      | `yaml.load(f)`            | ruamel.yaml (НЕ safe_load!)         |
-| `examples/claude-tools/tools/bash_tool.py` | 121-122 | `shell=True`           | subprocess с shell-интерпретацией   |
+| `examples/coder/tools/bash_tool.py` | 121-122 | `shell=True`           | subprocess с shell-интерпретацией   |
 
 ---
 
@@ -185,8 +185,8 @@
 
 | Файл | Строка | Код | Уровень риска |
 |------|--------|-----|---------------|
-| `examples/claude-tools/mcp_server.py` | 164 | `exec(fn_src, globs)  # noqa: S102` | **CRITICAL** — динамическое исполнение кода |
-| `examples/claude-tools/tools/bash_tool.py` | 121-122 | `subprocess.run(shell_cmd, shell=True, ...)` | **CRITICAL** — shell injection risk |
+| `examples/coder/mcp_server.py` | 164 | `exec(fn_src, globs)  # noqa: S102` | **CRITICAL** — динамическое исполнение кода |
+| `examples/coder/tools/bash_tool.py` | 121-122 | `subprocess.run(shell_cmd, shell=True, ...)` | **CRITICAL** — shell injection risk |
 | `examples/windows-computer-use/tools/shell.py` | 23-25 | `subprocess.run(args, ...)` — Windows shell exec | **HIGH** — raw shell execution |
 | `examples/windows-computer-use/tools/_ps_uia.py` | 91-92 | `subprocess.run(["powershell", ...])` | **HIGH** — PowerShell subprocess |
 | `core/agent_factory.py` | 3594-3595 | `subprocess.run(["docker", "exec", self.container_id, "pkill", ...])` | **MEDIUM** — container escape vector |
@@ -195,7 +195,7 @@
 | `tools/git_tools.py` | 125, 133 | `subprocess.run(["git", ...], cwd=..., ...)` | MEDIUM — git commands (cwd from agent) |
 | `tools/beads_tools.py` | 121, 198, 206 | `subprocess.run(["bd", ...], cwd=..., ...)` | MEDIUM — bd commands |
 | `tools/ocr_tools.py` | 108, 148, 192 | `subprocess.run([tesseract...])` | LOW — OCR processing |
-| `examples/claude-tools/tools/search_tools.py` | 209, 353 | `subprocess.run([rg/grep...])` | MEDIUM — search commands |
+| `examples/coder/tools/search_tools.py` | 209, 353 | `subprocess.run([rg/grep...])` | MEDIUM — search commands |
 
 **Основные выводы:**
 - **`exec()` используется 1 раз** — в mcp_server.py для динамической компиляции function tool'ов из исходного кода. Хотя стоит `# noqa: S102`, это всё равно вектор code injection.
@@ -269,7 +269,7 @@
 | `tools/emergency_tools.py` | 91 | Валидация severity |
 | `tools/memory_tools_v2.py` | 167, 172, 249, 442, 447 | Валидация type, importance, action, entry_id |
 | `schemas/schemas.py` | 257-268 | Pydantic field_validator для agent_models и agent_tools |
-| `examples/claude-tools/tools/bash_tool.py` | 152 | Валидация timeout |
+| `examples/coder/tools/bash_tool.py` | 152 | Валидация timeout |
 
 > 🟢 Защита от path traversal реализована на хорошем уровне в `utils/path_utils.py`, но её применение зависит от каждого конкретного инструмента (не все используют `resolve_agent_path`).
 
@@ -343,14 +343,14 @@
    - Добавить `.env` в `.gitignore` (уже есть, но файл зачем-то закоммичен)
    - **Скомпрометированные ключи необходимо отозвать и перевыпустить!**
 
-2. **Заменить `exec()` в `examples/claude-tools/mcp_server.py:164`**
+2. **Заменить `exec()` в `examples/coder/mcp_server.py:164`**
    - Динамическое исполнение кода из строк — вектор code injection
    - Рекомендация: использовать `types.FunctionType` или предварительно скомпилированные модули
 
 3. **Заменить `yaml.load()` в `scripts/clean_config.py:9`**
    - Использовать `yaml.safe_load()` или `YAML(typ='safe')` для ruamel.yaml
 
-4. **Устранить `shell=True` в `examples/claude-tools/tools/bash_tool.py:121-122`**
+4. **Устранить `shell=True` в `examples/coder/tools/bash_tool.py:121-122`**
    - Текущая очистка `safe_path.replace('"', '')` недостаточна
    - Перейти на передачу команды списком: `["cmd", "/c", command]` с `shell=False`
 
@@ -409,8 +409,8 @@
 ## Приложение A: Полный список файлов с subprocess
 
 ```
-examples/claude-tools/tools/bash_tool.py        (shell=True!)
-examples/claude-tools/tools/search_tools.py     (rg/grep)
+examples/coder/tools/bash_tool.py        (shell=True!)
+examples/coder/tools/search_tools.py     (rg/grep)
 examples/windows-computer-use/tools/shell.py    (powershell/cmd)
 examples/windows-computer-use/tools/_ps_uia.py  (powershell)
 core/agent_factory.py                            (docker exec)

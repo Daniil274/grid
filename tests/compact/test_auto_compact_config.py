@@ -50,7 +50,7 @@ def test_global_compact_disable_turns_off_auto_compact():
 
 
 def test_claude_tools_example_uses_expected_compact_thresholds():
-    config = Config(str(Path("examples/claude-tools/config.yaml")))
+    config = Config(str(Path("examples/coder/config.yaml")))
 
     model_keys = ("glm-latest", "deepseek-flash-latest", "mercury-2.5")
     compact_cfg = config.config.compact

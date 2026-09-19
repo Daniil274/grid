@@ -166,7 +166,7 @@ def build_supervisor(
     *,
     config_path: str = "config.yaml",
     workdir: Optional[str] = None,
-    tools_directory: str = "examples/claude-tools/tools",
+    tools_directory: str = "examples/coder/tools",
     provider: str = "opencode",
     max_concurrency: int = 4,
     default_timeout_seconds: int = 300,

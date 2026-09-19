@@ -83,6 +83,10 @@ class AgentConfig(BaseModel):
     custom_prompt: Optional[str] = None
     system_skills: List[str] = Field(default_factory=list)
     description: str = ""
+    routable: bool = Field(
+        default=True,
+        description="Whether the router may pick this agent for a user message. Disable for background agents."
+    )
     mcp_enabled: bool = False
     auto_run_tools: Optional[List[Dict[str, Any]]] = Field(
         default=None, 
@@ -218,6 +222,33 @@ class EmbeddingsConfig(BaseModel):
     )
 
 
+class RoutedSystemConfig(BaseModel):
+    """A Grid system the router can send a user message to."""
+    config: str = Field(description="Path to the system's config.yaml, relative to this config file")
+    requires: List[str] = Field(default_factory=list, description="External programs that must be on PATH, e.g. ffmpeg")
+    description: str = Field(default="", description="What the system is for; the router picks by this text")
+
+
+class RoutingConfig(BaseModel):
+    """Automatic routing of a user message to a system and then to one of its agents."""
+    model: Optional[str] = Field(
+        default=None,
+        description="Key from models: used as the router. Routing is off while unset."
+    )
+    api: Literal["chat", "decisions"] = Field(
+        default="chat",
+        description="'decisions' for decisions models (e.g. typesafe/jev-1.13), 'chat' for regular chat models"
+    )
+    systems: Dict[str, RoutedSystemConfig] = Field(
+        default_factory=dict,
+        description="Systems to choose from. Empty means only this config's own agents are routed."
+    )
+    default_system: Optional[str] = Field(
+        default=None,
+        description="System used when the router fails. Defaults to the first listed system."
+    )
+
+
 class ImprovementConfig(BaseModel):
     """Configuration for the staged self-improvement loop."""
 
@@ -255,6 +286,7 @@ class GridConfig(BaseModel):
     memory_optimizer: Optional[MemoryOptimizerConfig] = Field(default=None, description="Memory optimizer configuration")
     embeddings: Optional[EmbeddingsConfig] = Field(default=None, description="Semantic search / embeddings configuration")
     improvement: ImprovementConfig = Field(default_factory=ImprovementConfig, description="Controlled self-improvement loop configuration")
+    routing: RoutingConfig = Field(default_factory=RoutingConfig, description="Automatic system and agent routing")
     
     @field_validator('agents')
     @classmethod

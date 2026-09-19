@@ -62,7 +62,7 @@ def main() -> int:
     )
     mcp_parser.add_argument("--config", default="config.yaml")
     mcp_parser.add_argument("--workdir", default=None)
-    mcp_parser.add_argument("--tools-dir", default="examples/claude-tools/tools")
+    mcp_parser.add_argument("--tools-dir", default="examples/coder/tools")
     mcp_parser.add_argument("--provider", default="opencode")
     mcp_parser.add_argument("--max-concurrency", type=int, default=4)
     mcp_parser.add_argument("--default-timeout", type=int, default=300)

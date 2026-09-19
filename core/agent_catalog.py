@@ -22,13 +22,13 @@ def _is_function_tool(value: Any) -> bool:
 
 
 class AgentCatalog:
-    """Expose the exact OpenCode models and claude-tools available to Codex."""
+    """Expose the exact OpenCode models and coder available to Codex."""
 
     def __init__(
         self,
         config: Config,
         *,
-        tools_directory: str = "examples/claude-tools/tools",
+        tools_directory: str = "examples/coder/tools",
         provider_key: str = "opencode",
     ) -> None:
         self.config = config

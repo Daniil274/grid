@@ -1,5 +1,5 @@
 # Coordinator Pipeline Example - Requirements
-# Наследует зависимости из claude-tools и основной системы
+# Наследует зависимости из coder и основной системы
 
 # Основные зависимости Grid (уже должны быть установлены)
 # См. requirements.txt в корне проекта

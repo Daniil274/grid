@@ -34,6 +34,7 @@ class Config:
         self.config_path = Path(config_path)
         self._config: Optional[GridConfig] = None
         self._cli_working_directory = working_directory
+        self.project_tools_loader = None
         self._working_directory = working_directory or os.getcwd()
         self._load_config()
 
@@ -212,6 +213,7 @@ class Config:
             from core.managers.project_tools_loader import initialize_project_tools
 
             loader = initialize_project_tools(config_dir, tools_directory)
+            self.project_tools_loader = loader
             loaded_tools = loader.get_all_tools()
 
             logger.info(f"[OK] Loaded {len(loaded_tools)} project tools: {list(loaded_tools.keys())}")

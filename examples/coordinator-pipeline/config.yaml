@@ -1,6 +1,6 @@
 # Coordinator Pipeline Example
 # Демонстрация автономного агентского пайплайна через orchestrate
-# с инструментами из claude-tools
+# с инструментами из coder
 
 isolation:
   enabled: true
@@ -34,7 +34,7 @@ settings:
 
   project_tools:
     enabled: true
-    tools_directory: "../../examples/claude-tools/tools"
+    tools_directory: "../../examples/coder/tools"
 
 compact:
   enabled: true
@@ -265,7 +265,7 @@ tools:
     env_vars:
       DEFAULT_MODEL: deepseek-v4-flash-opencode
 
-  # ── Claude-tools (function) ─────────────────────────────────────
+  # ── coder (function) ─────────────────────────────────────
   bash_tool:
     type: "function"
     description: "Выполняет shell-команды в рабочей директории с базовой проверкой безопасности."
@@ -423,6 +423,7 @@ agents:
   coordinator:
     name: Координатор
     model: grok4.5
+    description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
     tools:
       - orchestrate
       - call_coordinator
@@ -485,7 +486,8 @@ agents:
       - todo_list
       - todo_delete
       - todo_clear
-    description: "General-purpose GRID subagent for research and complex tasks"
+    description: "Worker the coordinator launches for research and implementation subtasks."
+    routable: false
     custom_prompt: |
       You are a subagent for the GRID Coordinator system. Complete the assigned task fully.
 
