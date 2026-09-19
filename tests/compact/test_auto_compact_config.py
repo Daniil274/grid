@@ -52,9 +52,20 @@ def test_global_compact_disable_turns_off_auto_compact():
 def test_claude_tools_example_uses_expected_compact_thresholds():
     config = Config(str(Path("examples/claude-tools/config.yaml")))
 
-    pro_model = config.get_model("deepseek-v4-opencode")
-    flash_model = config.get_model("deepseek-v4-flash-opencode")
+    model_keys = ("glm-latest", "deepseek-flash-latest", "mercury-2.5")
     compact_cfg = config.config.compact
 
-    assert get_auto_compact_threshold(pro_model.context_window, compact_cfg) == 64000
-    assert get_auto_compact_threshold(flash_model.context_window, compact_cfg) == 128000
+    for model_key in model_keys:
+        model = config.get_model(model_key)
+        assert model.provider == "openrouter"
+        assert get_auto_compact_threshold(model.context_window, compact_cfg) == 33000
+
+    assert config.get_model("glm-latest").name == "~z-ai/glm-latest"
+    assert (
+        config.get_model("deepseek-flash-latest").name
+        == "~deepseek/deepseek-flash-latest"
+    )
+    assert config.get_model("mercury-2.5").name == "inception/mercury-2.5"
+    assert config.get_agent("engineer").model == "glm-latest"
+    assert config.get_agent("general_purpose_glm").model == "deepseek-flash-latest"
+    assert config.get_agent("web_spider").model == "mercury-2.5"

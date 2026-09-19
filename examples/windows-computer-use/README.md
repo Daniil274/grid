@@ -50,8 +50,18 @@ UIA elements are read via PowerShell's built-in .NET `UIAutomationClient` — no
 ## Run
 
 ```bash
-cd examples/windows-computer-use
-python ../../grid.py
+python agent_chat.py \
+  --config examples/windows-computer-use/config.yaml \
+  --agent windows_operator
+```
+
+PowerShell one-shot smoke test:
+
+```powershell
+python agent_chat.py `
+  --config examples/windows-computer-use/config.yaml `
+  --agent windows_operator `
+  --message "Inspect the current screen and report the active window. Do not click or type."
 ```
 
 ## Key design decisions
