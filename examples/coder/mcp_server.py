@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP server exposing claude-tools FunctionTools via stdio.
+MCP server exposing coder FunctionTools via stdio.
 
 Wraps all @function_tool objects from the tools/ package and serves them
 as MCP tools, maintaining full compatibility with the AgentsSDK FunctionTool API.
@@ -14,8 +14,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# ── ensure claude-tools and grid root are importable ────────────────────────
-_HERE = Path(__file__).parent          # .../examples/claude-tools
+# ── ensure coder and grid root are importable ────────────────────────
+_HERE = Path(__file__).parent          # .../examples/coder
 _GRID_ROOT = _HERE.parent.parent       # .../grid
 
 for _p in [str(_HERE), str(_GRID_ROOT)]:
@@ -27,9 +27,9 @@ from agents.tool import ToolContext
 from mcp.server.fastmcp import FastMCP
 
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr, force=True)
-logger = logging.getLogger("claude-tools-mcp")
+logger = logging.getLogger("coder-mcp")
 
-mcp = FastMCP("claude-tools")
+mcp = FastMCP("coder")
 
 # ── tool module registry ─────────────────────────────────────────────────────
 # Loaded by file path to avoid shadowing conflicts with the grid `tools` package.
@@ -226,5 +226,5 @@ def _fix_logging() -> None:
 if __name__ == "__main__":
     n = register_tools()
     _fix_logging()
-    logger.warning("claude-tools MCP server: %d tools registered", n)
+    logger.warning("coder MCP server: %d tools registered", n)
     mcp.run(transport="stdio")

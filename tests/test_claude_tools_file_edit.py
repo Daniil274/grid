@@ -2,7 +2,7 @@ import importlib.util
 from pathlib import Path
 
 
-MODULE_PATH = Path("/home/user/grid/examples/claude-tools/tools/file_tools.py")
+MODULE_PATH = Path("/home/user/grid/examples/coder/tools/file_tools.py")
 
 
 def _load_module():

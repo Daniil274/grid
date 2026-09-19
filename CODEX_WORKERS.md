@@ -2,7 +2,7 @@
 
 Grid is exposed to Codex as a small local STDIO MCP server. Codex remains the
 planner and reviewer; OpenCode-backed Grid agents perform execution work using
-the tools from `examples/claude-tools/tools`.
+the tools from `examples/coder/tools`.
 
 ## Codex-side setup
 
@@ -44,7 +44,7 @@ independent and can be up to `--max-timeout`.
 Cold start requires exactly two Codex tool calls:
 
 1. `grid_get_system()` — returns the current OpenCode model keys, exact
-   `claude-tools` names/descriptions, and runtime limits. Cache this response.
+   `coder` names/descriptions, and runtime limits. Cache this response.
 2. `grid_start_agent(model, task, tools, timeout_seconds)` — validates the
    selection, creates a background task, and immediately returns `agent_id`,
    status, and deadline.
@@ -63,7 +63,7 @@ separate `grid_start_agent` calls and waited on together with `return_when =
 ## Why the catalog is strict
 
 The server publishes only models whose configured provider is `opencode` and
-only actual Agents SDK `FunctionTool` objects loaded from `claude-tools`. Unknown
+only actual Agents SDK `FunctionTool` objects loaded from `coder`. Unknown
 models or tool names fail before a worker is created. Grid's legacy orchestrator
 is not part of this path.
 

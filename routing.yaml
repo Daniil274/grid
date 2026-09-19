@@ -1,0 +1,55 @@
+# Grid system catalog for automatic routing.
+#
+# agent_chat.py started without --agent/--config reads this file: every user
+# message is sent to the best-fitting system below (chosen by its description)
+# and then to the best agent of that system (chosen by the agents' description
+# fields in the system's own config). Agents with `routable: false` are skipped.
+
+providers:
+  openrouter:
+    name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    timeout: 60
+    max_retries: 2
+
+models:
+  router:
+    name: typesafe/jev-1.13
+    provider: openrouter
+    description: Decisions model that picks the system and the agent
+
+routing:
+  model: router
+  api: decisions
+  default_system: engineering
+  systems:
+    engineering:
+      config: examples/coder/config.yaml
+      description: >-
+        The default choice. Hands-on software engineering in a code repository:
+        write, fix, debug, refactor and review code, run tests, shell commands and
+        git, explore a codebase. Also all internet research (news, prices,
+        documentation, comparisons summarized with sources) and general questions
+        and conversation. Pick for any concrete coding task up to a single feature.
+    pipeline:
+      config: examples/coordinator-pipeline/config.yaml
+      description: >-
+        Large multi-stage projects that need planning and delegation: a new
+        subsystem, a big feature or a migration across many files, where the work
+        is split into tracked tasks for researcher, executor and verifier agents.
+        Not for quick fixes or single-file changes.
+    video:
+      config: examples/video-editor/config.yaml
+      requires: [ffmpeg, ffprobe]
+      description: >-
+        Working with video files and footage (mp4, mov, clips): inspect footage,
+        detect scenes, annotate, cut and join clips, add subtitles, build cutlists
+        and edit lists, render previews and final versions, and quality-check
+        rendered output.
+    desktop:
+      config: examples/windows-computer-use/config.yaml
+      description: >-
+        Controlling this Windows computer through its GUI like a person: open
+        and use applications, click, type, press hotkeys, switch windows, fill
+        forms in programs. Pick when the task must be done on screen.

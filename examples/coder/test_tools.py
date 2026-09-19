@@ -3,7 +3,7 @@
 Test script for verifying Claude Tools.
 
 Run:
-    cd examples/claude-tools
+    cd examples/coder
     python test_tools.py
 """
 

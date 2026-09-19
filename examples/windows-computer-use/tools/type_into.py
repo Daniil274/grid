@@ -1,14 +1,19 @@
 """
 Smart text input: finds a field by name in UIA, focuses it, then types text.
-Handles Unicode/Cyrillic via clipboard. Replaces the old keyboard("text") pattern.
+Types via layout-independent Unicode input (works under any keyboard layout);
+long text goes through the clipboard.
 """
 
 import time
 import pyautogui
 import win32clipboard
 from agents import function_tool
+from _win_input import press_combo, type_unicode
 
 pyautogui.FAILSAFE = False
+
+# Above this length pasting is much faster than per-character input.
+_PASTE_THRESHOLD = 200
 
 
 def _field_score(el: dict, query: str) -> tuple:
@@ -39,7 +44,7 @@ def _paste_unicode(text: str) -> None:
             pass
         raise
 
-    pyautogui.hotkey("ctrl", "v")
+    press_combo("ctrl", "v")
     time.sleep(0.12)
 
     if prev is not None:
@@ -82,14 +87,13 @@ def type_into(text: str, target: str = None, clear: bool = False) -> str:
             )
 
     if clear:
-        pyautogui.hotkey("ctrl", "a")
+        press_combo("ctrl", "a")
         time.sleep(0.05)
 
-    is_ascii = all(ord(c) < 128 for c in text)
-    if is_ascii:
-        pyautogui.write(text, interval=0.018)
-    else:
+    if len(text) > _PASTE_THRESHOLD:
         _paste_unicode(text)
+    else:
+        type_unicode(text, interval=0.01)
 
     focus_note = f" into '{target}'" if target else ""
     clear_note = " (cleared first)" if clear else ""

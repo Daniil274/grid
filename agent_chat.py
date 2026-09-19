@@ -8,6 +8,7 @@ import signal
 import asyncio
 import argparse
 import sys
+import threading
 import time
 import logging
 import os
@@ -45,6 +46,8 @@ if sys.platform == "win32":
 from core.config import Config
 from core.agent_factory import AgentFactory, ConsoleStreamObserver
 from core.compact import compact_conversation, CompactMessage, estimate_messages_tokens
+from core.routing import AutoRouter
+from core.managers.project_tools_loader import set_project_loader
 from schemas import ContextMessage
 try:
     # Optional: only available when Docker SDK is installed and Docker is running
@@ -265,7 +268,7 @@ async def main():
         "--agent", "-a",
         type=str,
         default=None,
-        help="Agent name (default from config)"
+        help="Agent name (default: routed per message when routing.model is set, else default_agent)"
     )
     parser.add_argument(
         "--path", "-p",
@@ -288,8 +291,14 @@ async def main():
     parser.add_argument(
         "--config", "-c",
         type=str,
-        default="config.yaml",
-        help="Configuration file path"
+        default=None,
+        help="Config of a single system (default: route messages across the systems in --routing)"
+    )
+    parser.add_argument(
+        "--routing",
+        type=str,
+        default=str(Path(__file__).parent / "routing.yaml"),
+        help="System catalog used when neither --agent nor --config is given"
     )
     parser.add_argument(
         "--user-id", "-u",
@@ -321,7 +330,16 @@ async def main():
 
         # Load configuration
         print("Load Config")
-        config = Config(args.config, args.path)
+        # Without --agent/--config every message is routed across the systems in --routing;
+        # the session starts in the catalog's default system.
+        auto_router = None
+        if not args.agent and not args.config and Path(args.routing).exists():
+            auto_router = AutoRouter.from_config(Config(args.routing), working_directory=args.path)
+        if auto_router:
+            config_path = str(auto_router.system_config_path(auto_router.default_system()))
+        else:
+            config_path = args.config or "config.yaml"
+        config = Config(config_path, args.path)
         print("Load Config - Configuration loaded")
 
         # Container isolation (optional)
@@ -360,7 +378,7 @@ async def main():
                     print("⚠️ Container isolation enabled in config, but Docker SDK is unavailable. Falling back to local tools.")
 
                 # Reload config with per-user working directory (keeps CLI behavior deterministic)
-                config = Config(args.config, str(user_workspace))
+                config = Config(config_path, str(user_workspace))
 
         except Exception as e:
             print(f"⚠️ Failed to initialize container isolation: {e}. Falling back to local tools.")
@@ -419,6 +437,50 @@ async def main():
         agent_key = args.agent or config.get_default_agent()
         print_agent_skill_status(config, agent_key)
 
+        if auto_router:
+            # Broken systems must be visible at startup, not when a message lands in one.
+            problems = auto_router.check_systems()
+            for system_name, issues in problems.items():
+                chat_ui.print_status(f"System '{system_name}' has problems:", style="red")
+                for issue in issues:
+                    chat_ui.print_status(f"  - {issue}", style="yellow")
+            if not problems:
+                chat_ui.print_status(f"Systems checked: {', '.join(auto_router.systems())} - all healthy", style="green")
+            # check_systems() walks every system; put the loader back on the active one.
+            set_project_loader(config.project_tools_loader)
+
+        if auto_router is None and not args.agent:
+            # A single system can still route between its own agents (routing.model in its config)
+            auto_router = AutoRouter.from_config(config, working_directory=args.path)
+        factories = {config.config_path.resolve(): factory}
+
+        async def apply_route(text: str) -> None:
+            """Point factory, config and agent_key at the system and agent chosen for *text*."""
+            nonlocal factory, config, agent_key, selected_context_id
+            if auto_router is None:
+                return
+            route = await auto_router.route(text)
+            system_key = route.config.config_path.resolve()
+            if system_key not in factories:
+                factories[system_key] = AgentFactory(
+                    config=route.config,
+                    working_directory=route.config.get_working_directory(),
+                    container_id=container_id,
+                    stream_observer=stream_observer,
+                )
+            routed_factory = factories[system_key]
+            if routed_factory is not factory:
+                # Context ids belong to one factory; the routed system continues its own session.
+                factory = routed_factory
+                selected_context_id = None
+                if timeline_handle is not None:
+                    timeline_handle.update_factory(factory)
+            config = factory.config
+            agent_key = route.agent
+            chat_ui.print_status(f"Route: {route.system} -> {agent_key}", style="cyan")
+            if route.warning:
+                chat_ui.print_status(f"Routing warning: {route.warning}", style="yellow")
+
         activated_existing_context = False
         if is_context_id(args.context_path):
             try:
@@ -440,7 +502,7 @@ async def main():
         
         
         chat_ui.print_banner(
-            agent_key=agent_key,
+            agent_key="auto (routed per message)" if auto_router else agent_key,
             working_directory=config.get_working_directory(),
             context_path=args.context_path,
         )
@@ -452,14 +514,14 @@ async def main():
         _main_task = asyncio.current_task()
 
         def _on_sigint():
-            nonlocal _shutdown_flag, _main_task
+            nonlocal _shutdown_flag
             if _shutdown_flag:
                 print("\nForce exit...")
                 os._exit(1)
             _shutdown_flag = True
             # Cancel the main task to trigger CancelledError cleanly
             if _main_task:
-                _main_task.cancel()
+                loop.call_soon_threadsafe(_main_task.cancel)
 
         loop = asyncio.get_running_loop()
         try:
@@ -467,10 +529,9 @@ async def main():
         except NotImplementedError:
             # Windows ProactorEventLoop supports subprocesses but not
             # add_signal_handler; use the regular signal module there.
-            signal.signal(
-                signal.SIGINT,
-                lambda _signum, _frame: loop.call_soon_threadsafe(_on_sigint),
-            )
+            # Handle the press right in the signal handler, not via the loop:
+            # if the loop is blocked by sync code, a second Ctrl+C must still exit.
+            signal.signal(signal.SIGINT, lambda _signum, _frame: _on_sigint())
 
         if args.message:
             # Single message mode
@@ -496,6 +557,7 @@ async def main():
 
                 chat_ui.print_rule("Running")
                 chat_ui.print_user_message(text)
+                await apply_route(text)
                 chat_ui.print_status(f"Agent: {agent_key}", style="cyan")
 
                 start_time = time.time()
@@ -571,9 +633,27 @@ async def main():
             async def ainput(prompt: str = "") -> str:
                 print(prompt, end="", flush=True)
                 loop = asyncio.get_running_loop()
-                import sys
+                future = loop.create_future()
+
+                def deliver(setter, value) -> None:
+                    if not future.done():
+                        setter(value)
+
+                def read_line() -> None:
+                    try:
+                        result, setter = sys.stdin.readline(), future.set_result
+                    except BaseException as exc:
+                        result, setter = exc, future.set_exception
+                    try:
+                        loop.call_soon_threadsafe(deliver, setter, result)
+                    except RuntimeError:
+                        pass  # loop already closed
+
+                # A daemon thread instead of the default executor: asyncio.run() joins
+                # executor threads on exit, and one blocked in readline() hung Ctrl+C.
+                threading.Thread(target=read_line, name="stdin-reader", daemon=True).start()
                 try:
-                    line = await loop.run_in_executor(None, sys.stdin.readline)
+                    line = await future
                 except asyncio.CancelledError:
                     # Ctrl+C in run_in_executor manifests as CancelledError,
                     # translate to KeyboardInterrupt for uniform handling.
@@ -752,6 +832,7 @@ async def main():
                     try:
                         chat_ui.print_rule("Running")
                         chat_ui.print_user_message(text)
+                        await apply_route(text)
                         start_time = time.time()
                         use_streaming = True
                         inline_context_id = extract_context_id_from_text(text)
@@ -816,7 +897,8 @@ async def main():
         # Beautiful cleanup and session summary
         try:
             print("Cleanup")
-            await factory.cleanup()
+            for routed_factory in factories.values():
+                await routed_factory.cleanup()
             print("Cleanup - Resources freed")
         except (KeyboardInterrupt, asyncio.CancelledError):
             print("\nCleanup interrupted.")

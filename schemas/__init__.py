@@ -2,7 +2,7 @@
 from .schemas import (
     ToolType, GridConfig, ProviderConfig, ModelConfig, AgentConfig, ToolConfig,
     Settings, AgentLoggingConfig, ProjectToolsConfig, PlatformConfig, ContextMessage, AgentExecution, TextContent, ImageContent, ImageUrl, FileImageContent,
-    ImprovementConfig,
+    ImprovementConfig, RoutingConfig, RoutedSystemConfig,
     # Compact system
     CompactConfig, CompactSessionMemoryConfig, CompactMicroConfig, CompactAutoConfig,
     CompactRestoreConfig, CompactRestoreFilesConfig, CompactRestoreSkillsConfig,
@@ -37,7 +37,7 @@ from .system_builder import GeneratedToolSpec, BuilderBundleSpec, BuilderRunRepo
 __all__ = [
     'ToolType', 'GridConfig', 'ProviderConfig', 'ModelConfig', 'AgentConfig', 'ToolConfig',
     'Settings', 'AgentLoggingConfig', 'ProjectToolsConfig', 'PlatformConfig', 'ContextMessage', 'AgentExecution', 'TextContent', 'ImageContent', 'ImageUrl', 'FileImageContent',
-    'ImprovementConfig', 'ImprovementProblemStatus', 'ImprovementExperimentStatus',
+    'ImprovementConfig', 'RoutingConfig', 'RoutedSystemConfig', 'ImprovementProblemStatus', 'ImprovementExperimentStatus',
     'ImprovementReviewType', 'ImprovementReviewDecision', 'ImprovementRisk',
     'ImprovementConfigDiff',
     'ImprovementReview', 'ImprovementProblem', 'ImprovementExperiment',
