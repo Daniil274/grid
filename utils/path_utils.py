@@ -6,12 +6,23 @@ resolve_agent_path() or resolve_agent_path_auto() to convert them to absolute ho
 """
 
 import contextvars
+from contextlib import contextmanager
 import os
 from pathlib import Path
 from typing import Any
 
 # Current AgentFactory in the execution context (set by runner when starting agent).
 _current_factory: contextvars.ContextVar[Any] = contextvars.ContextVar("current_agent_factory", default=None)
+
+
+@contextmanager
+def factory_path_context(factory: Any):
+    """Bind path resolution for one invocation, restoring the caller's context."""
+    token = _current_factory.set(factory)
+    try:
+        yield
+    finally:
+        _current_factory.reset(token)
 
 
 def set_current_factory(factory: Any) -> None:
