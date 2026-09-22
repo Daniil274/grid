@@ -1,13 +1,3 @@
-# Coordinator Pipeline Example - Requirements
-# Наследует зависимости из coder и основной системы
-
-# Основные зависимости Grid (уже должны быть установлены)
-# См. requirements.txt в корне проекта
-
-# Дополнительные зависимости для инструментов
-Pillow>=10.0.0       # Обработка изображений
-pyserial>=3.5         # Serial порт (опционально)
-
-# Web tools
-requests>=2.31.0
-beautifulsoup4>=4.12.0
+# Run from the repository root: pip install -r examples/coordinator-pipeline/requirements.txt
+# The example adds no dependencies to Grid.
+-r ../../requirements.txt

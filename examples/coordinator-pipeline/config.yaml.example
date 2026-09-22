@@ -1,0 +1,29 @@
+# Copy to a local file and set the API endpoint, environment variable and model ID.
+# run.py builds the coordinator and task tools; no orchestrate/beads config needed.
+settings:
+  default_agent: coordinator
+  working_directory: .
+  allow_path_override: true
+  max_turns: 100
+  mcp_enabled: false
+
+providers:
+  compatible:
+    name: OpenAI-compatible API
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    timeout: 60
+    max_retries: 2
+
+models:
+  default:
+    name: YOUR_MODEL_ID
+    provider: compatible
+    max_tokens: 8192
+
+agents:
+  coordinator:
+    name: Pipeline coordinator
+    model: default
+
+tools: {}

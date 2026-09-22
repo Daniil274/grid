@@ -173,16 +173,6 @@ models:
     streaming_enabled: true
     preserve_reasoning_content: true
 
-  kimi-k2.6-opencode:
-    name: "kimi-k2.6"
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "Kimi K2.5 via OpenCode"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
   glm-5.1-opencode:
     name: "glm-5.1"
     provider: "opencode"
@@ -257,6 +247,36 @@ tools:
     type: function
     description: Read ONLY new log data for (channel, reader) since the last read (cursor-based).
   
+  # ── Worker pipeline (function) ──────────────────────────────────
+  # Shared engine: core/pipeline_runtime.py, also driven by run.py from the CLI.
+  pipeline_start:
+    type: function
+    description: Open a pipeline run for one goal and return the worker model/tool catalog and limits.
+  pipeline_task:
+    type: function
+    description: Launch one bounded worker (research, change or verification) under an explicit contract.
+  pipeline_wait:
+    type: function
+    description: Wait for the next worker of the given tasks to finish and read its state.
+  pipeline_inspect:
+    type: function
+    description: Read contracts, attempts, worker results and reviews of the open run.
+  pipeline_review:
+    type: function
+    description: Accept, reject or discard a finished task with concrete evidence.
+  pipeline_retry:
+    type: function
+    description: Start a correction of rejected work, keeping its contract and history.
+  pipeline_interrupt:
+    type: function
+    description: Cancel an unnecessary worker; its task still needs a disposition.
+  pipeline_finish:
+    type: function
+    description: Close the run with the result for the user after the required work is accepted.
+  pipeline_block:
+    type: function
+    description: Stop the run with an explicit blocker when the goal cannot be met within its limits.
+
   # ── Core orchestration ──────────────────────────────────────────
   orchestrate:
     type: "function"
@@ -420,10 +440,13 @@ tools:
 # ═════════════════════════════════════════════════════════════════════════════
 agents:
   # ── Координатор ─────────────────────────────────────────────────
+  # Beads/orchestrate coordinator. Kept for direct use (--agent coordinator);
+  # the router picks pipeline_coordinator so one system has one obvious entry.
   coordinator:
     name: Координатор
     model: grok4.5
-    description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
+    routable: false
+    description: "Beads-based coordinator: decomposes a goal into tracker tasks and runs orchestrate agents against them."
     tools:
       - orchestrate
       - call_coordinator
@@ -462,9 +485,43 @@ agents:
       4. **Закрытие** — Изучай результаты и верефицируй. 
       Категорически запрещается выполнять задачу самостоятельно. 
       Ты обязан передавать доступные тебе инструменты (в том числе для работы с трекером) и скиллы агентам вместе с указанием идентефикатора задачи и их предварительные вызовы инструментов, включая чтение самой задачи и одновления статуса задачи.
+  # ── Координатор пайплайна (движок runtime) ──────────────────────
+  pipeline_coordinator:
+    name: Координатор пайплайна
+    model: grok4.5
+    description: >-
+      Large multi-stage work in a repository that must be split into tracked,
+      verified tasks: a new subsystem, a broad feature, a migration across many
+      files. Opens a run, launches research, change and verification workers
+      under contracts, reviews their evidence and reports a verified result.
+      Not for a quick fix, a single-file change or a plain question.
+    tools:
+      - pipeline_start
+      - pipeline_task
+      - pipeline_wait
+      - pipeline_inspect
+      - pipeline_review
+      - pipeline_retry
+      - pipeline_interrupt
+      - pipeline_finish
+      - pipeline_block
+      - file_read
+      - glob_tool
+      - grep_tool
+    system_skills:
+      - coordinator
+    custom_prompt: |
+      Ты — координатор рабочего пайплайна Grid. Ты отвечаешь за результат: сам
+      решаешь, что нужно сделать, поручаешь работу фоновым исполнителям под
+      контрактом, проверяешь их доказательства и отвечаешь пользователю.
+
+      Сам не правишь продуктовый код: твои file_read, glob_tool и grep_tool
+      нужны, чтобы изучать артефакты и проверять отчёты исполнителей.
+      Протокол цикла и приёмки — в системном скилле ниже.
+
   general_purpose:
     name: "General-purpose"
-    model: deepseek-v4-pro-opencode
+    model: deepseek-v4-flash-opencode
     mcp_enabled: true
     system_skills:
       - codegraph
