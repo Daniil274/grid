@@ -1,70 +1,111 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
   <title>Grid Chat</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles/tokens.css">
+  <link rel="stylesheet" href="/static/styles/base.css">
+  <link rel="stylesheet" href="/static/styles/layout.css">
+  <link rel="stylesheet" href="/static/styles/chat.css">
+  <link rel="stylesheet" href="/static/styles/reasoning.css">
+  <link rel="stylesheet" href="/static/styles/settings.css">
+  <link rel="stylesheet" href="/static/styles/voice.css">
 </head>
 <body>
-  <div class="shell" id="shell">
-    <div class="sidebarBackdrop" id="sidebar-backdrop"></div>
-    <aside class="sidebar" id="sidebar">
-      <div class="sidebar__top">
-        <button class="sidebar__primary" id="new-chat-btn">
-          <span class="sidebar__primaryIcon">+</span>
-          <span>New chat</span>
-        </button>
-        <div class="sidebar__sectionLabel">Conversations</div>
+  <div class="app">
+    <div class="scrim" id="sidebar-scrim"></div>
+
+    <aside class="rail">
+      <div class="rail__head">
+        <button class="btn btn--primary rail__new" id="new-chat" type="button" data-icon="plus">New chat</button>
+        <div class="rail__search">
+          <label class="visuallyHidden" for="chat-search">Search conversations</label>
+          <span class="rail__searchIcon" data-icon="search" data-icon-size="15"></span>
+          <input id="chat-search" type="search" placeholder="Search conversations" autocomplete="off">
+        </div>
       </div>
-      <div class="sidebar__scroll" id="conversations-list"></div>
-      <div class="sidebar__bottom">
-        <button class="sidebar__ghost" id="open-settings-btn">System config</button>
-        <a class="sidebar__ghost" href="/timeline" target="_blank" rel="noreferrer">Timeline</a>
+
+      <nav class="rail__list" id="chat-list" aria-label="Conversations"></nav>
+
+      <div class="rail__foot">
+        <button class="btn btn--ghost" id="open-settings" type="button" data-icon="sliders">Configuration</button>
+        <a class="btn btn--ghost" href="/timeline" target="_blank" rel="noreferrer" data-icon="timeline">Timeline</a>
+        <button class="iconBtn" id="theme-toggle" type="button" data-icon="theme"></button>
       </div>
     </aside>
 
-    <main class="workspace">
+    <main class="main">
       <header class="topbar">
-        <div class="topbar__main">
-          <button class="iconBtn topbar__menuBtn" id="toggle-sidebar-btn" type="button" aria-label="Open conversation list">☰</button>
-          <button class="agentButton" id="agent-button" type="button">
-            <span class="agentButton__eyebrow">Active agent</span>
-            <span class="agentButton__title" id="active-agent-name">Loading...</span>
-            <span class="agentButton__meta" id="active-agent-meta"></span>
+        <button class="iconBtn topbar__menu" id="toggle-rail" type="button" aria-label="Show conversations" data-icon="menu"></button>
+
+        <div class="topbar__route">
+          <button class="routeChip" id="route-chip" type="button" aria-haspopup="dialog" data-mode="auto">
+            <span class="routeChip__text">
+              <span class="routeChip__name" id="route-name">Loading…</span>
+              <span class="routeChip__meta" id="route-meta"></span>
+            </span>
+            <span class="routeChip__chevron" data-icon="chevron" data-icon-size="14"></span>
           </button>
+
+          <div class="popover popover--route" id="route-popover" role="dialog" aria-label="Choose where messages run">
+            <div class="popover__head">
+              <h2>Where messages run</h2>
+              <p>Anything left on <strong>Auto</strong> is decided per message by the router.</p>
+            </div>
+            <div class="routeColumns">
+              <section class="routeColumn">
+                <h3 class="routeColumn__head">Systems</h3>
+                <div class="routeList" id="system-list"></div>
+              </section>
+              <section class="routeColumn">
+                <h3 class="routeColumn__head" id="agent-heading">Agents</h3>
+                <div class="routeList" id="agent-list"></div>
+              </section>
+            </div>
+          </div>
         </div>
+
         <div class="topbar__status">
-          <button class="secondaryBtn topbar__newChatBtn" id="topbar-new-chat-btn" type="button">New chat</button>
-          <span class="statusPill" id="runtime-pill">runtime</span>
-          <span class="statusText" id="workspace-pill"></span>
+          <span class="statusText" id="runtime-status" data-state="ready"></span>
+          <button class="pill" id="workspace-pill" type="button" title="Copy workspace path" hidden></button>
+          <button class="btn btn--ghost topbar__new" id="new-chat-top" type="button" data-icon="plus">New chat</button>
         </div>
       </header>
 
-      <section class="chatCanvas" id="messages-container">
-        <div class="welcome" id="empty-state">
-          <div class="welcome__eyebrow">Grid</div>
-          <h1>What to do?</h1>
-          <p>The web chat now runs on the same runtime as `agent_chat`: with context, agents, tools, and execution transparency.</p>
-          <div class="welcome__actions">
-            <button class="promptChip" type="button" data-prompt="Analyze the current project and suggest next steps.">Explore project</button>
-            <button class="promptChip" type="button" data-prompt="Review current changes and find risks.">Do a review</button>
-            <button class="promptChip" type="button" data-prompt="Help improve the UI/UX of the current interface.">Improve UI/UX</button>
+      <section class="chatScroll" id="chat-scroll">
+        <div class="welcome" id="welcome">
+          <h1>What should Grid work on?</h1>
+          <p>The same runtime as <code>agent_chat</code> - with context, tools, and every reasoning step on show.</p>
+          <div class="welcome__chips">
+            <button class="promptChip" type="button" data-prompt="Analyze the current project and suggest the next steps.">
+              Explore the project
+            </button>
+            <button class="promptChip" type="button" data-prompt="Review the current changes and find the risks.">
+              Review changes
+            </button>
+            <button class="promptChip" type="button" data-prompt="Walk me through how this codebase is structured.">
+              Explain the architecture
+            </button>
           </div>
         </div>
       </section>
 
+      <button class="jumpPill" id="jump-latest" type="button" data-icon="arrowDown" data-icon-size="14">Latest</button>
+
       <footer class="composerWrap">
-        <div class="composerCard">
-          <textarea id="message-input" class="composerInput" rows="1" placeholder="Message for Grid"></textarea>
-          <div class="composerActions">
-            <div class="composerHint">Enter - send, Shift+Enter - new line</div>
-            <div class="composerButtons">
-              <button class="secondaryBtn hidden" id="stop-btn" type="button">Stop</button>
-              <button class="primaryBtn" id="send-btn" type="button" disabled>Send</button>
+        <div class="composer">
+          <label class="visuallyHidden" for="composer-input">Message</label>
+          <textarea id="composer-input" class="composer__input" rows="1" placeholder="Message Grid…"></textarea>
+          <div class="composer__bar">
+            <span class="composer__hint"><kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line</span>
+            <div class="composer__buttons">
+              <button class="btn btn--ghost" id="stop" type="button" data-icon="stop" hidden>Stop</button>
+              <button class="btn btn--primary" id="send" type="button" data-icon="send" disabled>Send</button>
             </div>
           </div>
         </div>
@@ -72,106 +113,95 @@
     </main>
   </div>
 
-  <div class="popover hidden" id="agent-popover">
-    <div class="popover__header">
-      <div>
-        <div class="popover__eyebrow">Agent selection</div>
-        <div class="popover__title">Who responds to the request</div>
-      </div>
-      <button class="iconBtn" id="close-agent-popover" type="button" aria-label="Close agent selection">&times;</button>
-    </div>
-    <div class="agentGrid" id="agent-grid"></div>
-  </div>
-
-  <div class="drawer hidden" id="settings-drawer">
+  <div class="drawer" id="settings" role="dialog" aria-label="System configuration">
     <div class="drawer__backdrop" id="settings-backdrop"></div>
     <div class="drawer__panel">
-      <div class="drawer__header">
+      <header class="drawer__head">
         <div>
-          <div class="drawer__eyebrow">System config</div>
-          <h2>System Configuration</h2>
-          <p>Modify agents, tools, prompts, and system settings without manual YAML editing.</p>
+          <h2>System configuration</h2>
+          <p>Agents, tools, prompts and runtime settings - no manual YAML required.</p>
         </div>
-        <button class="iconBtn" id="close-settings-btn" type="button" aria-label="Close settings">&times;</button>
-      </div>
+        <button class="iconBtn" id="settings-close" type="button" aria-label="Close configuration" data-icon="close"></button>
+      </header>
 
-      <div class="drawer__tabs" id="settings-tabs">
-        <button class="drawerTab active" data-tab="system" type="button">System</button>
-        <button class="drawerTab" data-tab="agents" type="button">Agents</button>
-        <button class="drawerTab" data-tab="tools" type="button">Tools</button>
-        <button class="drawerTab" data-tab="prompts" type="button">Prompts</button>
-        <button class="drawerTab" data-tab="advanced" type="button">YAML</button>
+      <div class="tabs" id="settings-tabs" role="tablist">
+        <button class="tab is-active" data-tab="system" type="button">System</button>
+        <button class="tab" data-tab="agents" type="button">Agents</button>
+        <button class="tab" data-tab="tools" type="button">Tools</button>
+        <button class="tab" data-tab="prompts" type="button">Prompts</button>
+        <button class="tab" data-tab="yaml" type="button">YAML</button>
       </div>
 
       <div class="drawer__body">
-        <section class="settingsPane active" id="pane-system">
-          <div class="settingsCard">
-            <h3>General Settings</h3>
+        <section class="pane" id="pane-system">
+          <div class="card">
+            <h3>General</h3>
             <div class="formGrid" id="system-form"></div>
           </div>
-          <div class="settingsCard">
+          <div class="card">
             <h3>Runtime</h3>
-            <div class="runtimeFacts" id="runtime-facts"></div>
+            <div class="factGrid" id="runtime-facts"></div>
           </div>
         </section>
 
-        <section class="settingsPane" id="pane-agents">
-          <div class="editorLayout">
-            <div class="editorListWrap">
-              <div class="editorListHeader">
+        <section class="pane" id="pane-agents" hidden>
+          <div class="master">
+            <div class="master__list">
+              <div class="master__head">
                 <h3>Agents</h3>
-                <button class="secondaryBtn" id="add-agent-btn" type="button">Add agent</button>
+                <button class="btn btn--ghost" id="add-agent" type="button" data-icon="plus">Add</button>
               </div>
-              <div class="editorList" id="agents-list"></div>
+              <div class="recordList" id="agents-list"></div>
             </div>
-            <div class="editorPanel" id="agent-editor"></div>
+            <div class="master__detail" id="agent-editor"></div>
           </div>
         </section>
 
-        <section class="settingsPane" id="pane-tools">
-          <div class="editorLayout">
-            <div class="editorListWrap">
-              <div class="editorListHeader">
+        <section class="pane" id="pane-tools" hidden>
+          <div class="master">
+            <div class="master__list">
+              <div class="master__head">
                 <h3>Tools</h3>
-                <button class="secondaryBtn" id="add-tool-btn" type="button">Add tool</button>
+                <button class="btn btn--ghost" id="add-tool" type="button" data-icon="plus">Add</button>
               </div>
-              <div class="editorList" id="tools-list"></div>
+              <div class="recordList" id="tools-list"></div>
             </div>
-            <div class="editorPanel" id="tool-editor"></div>
+            <div class="master__detail" id="tool-editor"></div>
           </div>
         </section>
 
-        <section class="settingsPane" id="pane-prompts">
-          <div class="editorLayout">
-            <div class="editorListWrap">
-              <div class="editorListHeader">
+        <section class="pane" id="pane-prompts" hidden>
+          <div class="master">
+            <div class="master__list">
+              <div class="master__head">
                 <h3>Prompts</h3>
-                <button class="secondaryBtn" id="add-prompt-btn" type="button">Add prompt</button>
+                <button class="btn btn--ghost" id="add-prompt" type="button" data-icon="plus">Add</button>
               </div>
-              <div class="editorList" id="prompts-list"></div>
+              <div class="recordList" id="prompts-list"></div>
             </div>
-            <div class="editorPanel" id="prompt-editor"></div>
+            <div class="master__detail" id="prompt-editor"></div>
           </div>
         </section>
 
-        <section class="settingsPane" id="pane-advanced">
-          <div class="settingsCard settingsCard--full">
+        <section class="pane" id="pane-yaml" hidden>
+          <div class="card card--flush">
             <h3>Raw YAML</h3>
             <textarea id="yaml-editor" class="yamlEditor" spellcheck="false"></textarea>
           </div>
         </section>
       </div>
 
-      <div class="drawer__footer">
-        <div class="drawer__status" id="settings-status"></div>
-        <div class="drawer__footerActions">
-          <button class="secondaryBtn" id="reload-settings-btn" type="button">Reload</button>
-          <button class="primaryBtn" id="save-settings-btn" type="button">Save changes</button>
+      <footer class="drawer__foot">
+        <span class="drawer__status" id="settings-status"></span>
+        <div class="drawer__actions">
+          <button class="btn btn--ghost" id="settings-reload" type="button">Reload</button>
+          <button class="btn btn--primary" id="settings-save" type="button">Save changes</button>
         </div>
-      </div>
+      </footer>
     </div>
   </div>
 
-  <script src="/static/app.js?v=2"></script>
+  <script src="/static/voice.js"></script>
+  <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import secrets
 import sys
 from pathlib import Path
 
@@ -23,8 +24,13 @@ def main() -> None:
     parser.add_argument(
         "--config",
         "-c",
-        default="config.yaml",
-        help="Path to config.yaml",
+        default=None,
+        help="Run a single system from this config (default: route across --routing)",
+    )
+    parser.add_argument(
+        "--routing",
+        default="routing.yaml",
+        help="System catalog used when --config is not given",
     )
     parser.add_argument(
         "--path",
@@ -49,16 +55,25 @@ def main() -> None:
 
     from web_chat.runtime import WebChatRuntime
     from web_chat.server import create_app
+    from dotenv import load_dotenv
 
+    # Match CLI credentials without requiring a separate shell export.
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+    action_review_token = secrets.token_urlsafe(32)
     runtime = WebChatRuntime(
         config_path=args.config,
+        routing_path=args.routing,
         working_directory=args.path,
         user_id=args.user_id,
+        action_review_token=action_review_token,
     )
 
+    print(f"Systems: {', '.join(runtime.registry.keys())}")
     print(f"Config: {runtime.config_path}")
     print(f"Working directory: {runtime.workspace_path}")
     print(f"Sessions: {runtime.persist_path / 'context.json'}")
+    print(f"Action review token: {action_review_token}")
     print(f"Open http://{args.host}:{args.port}/")
 
     uvicorn.run(create_app(runtime), host=args.host, port=args.port)
