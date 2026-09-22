@@ -50,7 +50,6 @@ ehthumbs.db
 Thumbs.db
 
 # Grid specific
-config.yaml
 .env
 logs/
 *.log
