@@ -5,6 +5,16 @@
 # and then to the best agent of that system (chosen by the agents' description
 # fields in the system's own config). Agents with `routable: false` are skipped.
 
+# Policy gate. Enabled here, it governs every system the router picks, using the
+# router's own provider credentials for the validator. See ACTION_POLICY.md.
+settings:
+  action_policy:
+    policy_file: policies/action-policy.yaml
+    mode: "enforce"
+    validator:
+      model: router
+      timeout_seconds: 10
+
 providers:
   openrouter:
     name: openrouter

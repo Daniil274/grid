@@ -408,11 +408,15 @@ async def main():
 
         # Create factory
         print("Initialize SecurityAwareAgentFactory")
+        # An action policy enabled in the routing config governs every system it
+        # routes to, using the router's own model registry for the validator.
+        policy_config = auto_router.root_config if auto_router else None
         factory = AgentFactory(
             config=config,
             working_directory=config.get_working_directory(),
             container_id=container_id,
             stream_observer=stream_observer,
+            policy_config=policy_config,
         )
         print("Initialize SecurityAwareAgentFactory - Agent factory initialized")
         selected_context_id: Optional[str] = None
@@ -467,6 +471,7 @@ async def main():
                     working_directory=route.config.get_working_directory(),
                     container_id=container_id,
                     stream_observer=stream_observer,
+                    policy_config=policy_config,
                 )
             routed_factory = factories[system_key]
             if routed_factory is not factory:
