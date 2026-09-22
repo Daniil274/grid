@@ -101,8 +101,8 @@ nul
 tools/DeepSeek-OCR/
 ocr_cache/
 *.db
-# Local generated JSON/JSONL only. Source manifests and package metadata stay visible.
-/*.json
+# Generated JSON lives under the runtime directories below. Source manifests
+# and package metadata must stay visible to Git.
 examples/*/data/
 examples/*/workspace/
 tools/DeepSeek-OCR-2/
@@ -137,12 +137,9 @@ debug-*.log
 /*_bridge.py
 /*_smoke.py
 
-# Local indexes, caches, and generated binaries
-# .codegraph/ is a local index. Do not ignore *.exe: bv_windows_x86_64.exe is tracked.
+# Local indexes and caches
+# .codegraph/ is a local index. Executables and dependency lockfiles stay visible.
 .codegraph/
-node_modules/
-# Dependency lockfiles are source. Ignore only a root-level lock if one is generated locally.
-/package-lock.json
 
 # Local agent/editor state at repo root only.
 # Example-local instructions (.agents, .codex, .cursor/rules) stay committable.
