@@ -155,6 +155,7 @@ examples/*/.claude/
 examples/*/.codex/hooks.json
 examples/*/.cursor/hooks.json
 examples/*/**/*.gate.lock*
+examples/*/eval/**/manifest.jsonl
 examples/*/eval/**/stt-results.jsonl
 examples/*/eval/**/_source/
 examples/*/eval/**/*.wav
