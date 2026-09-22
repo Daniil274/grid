@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import errno
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,18 @@ class TimelineHandle:
             logger.warning("TimelineHandle.update_factory called but factory_holder not set yet")
 
 
+# Codes that mean "this port is taken" and we should try the next one.
+# Windows reports WSAEADDRINUSE (10048) and, for OS-reserved/excluded port
+# ranges, WSAEACCES (10013) instead of POSIX EADDRINUSE (98).
+_PORT_BUSY_ERRNOS = {
+    errno.EADDRINUSE,
+    errno.EACCES,
+    98,
+    10048,
+    10013,
+}
+
+
 def _find_free_port(host: str, start_port: int, max_attempts: int = 10) -> int:
     """Find the first free port starting from *start_port*."""
     for port in range(start_port, start_port + max_attempts):
@@ -51,10 +64,13 @@ def _find_free_port(host: str, start_port: int, max_attempts: int = 10) -> int:
                 s.bind((host, port))
                 return port
             except OSError as e:
-                if e.errno == 98:  # EADDRINUSE
+                if e.errno in _PORT_BUSY_ERRNOS or getattr(e, "winerror", None) in _PORT_BUSY_ERRNOS:
                     continue
                 raise
-    raise OSError(98, f"No free ports in range {start_port}–{start_port + max_attempts - 1}")
+    raise OSError(
+        errno.EADDRINUSE,
+        f"No free ports in range {start_port}–{start_port + max_attempts - 1}",
+    )
 
 
 async def run_timeline_server(
@@ -89,6 +105,7 @@ async def run_timeline_server(
         actual_port = _find_free_port(host, requested_port)
     except OSError as e:
         logger.warning("Timeline dashboard: %s", e)
+        print(f"Timeline dashboard not started: {e}")
         return
 
     config = uvicorn.Config(
