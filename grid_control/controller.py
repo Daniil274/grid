@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import Policy, Trial, decide
+from .repository import Repository
 from .store import Store
 
 
@@ -60,7 +61,26 @@ class Controller:
         with self.store.lease(experiment):
             record = self.store.get(experiment)
             self.store.start(experiment)
-            return self._run(experiment, record)
+            report = self._run(experiment, record)
+            if report["status"] == "accepted" and Policy.from_dict(report["policy"]).auto_promote:
+                try:
+                    self._promote(experiment, report, by="policy")
+                except (ValueError, RuntimeError) as error:
+                    self.store.event(experiment, {"promotion_error": str(error)})
+                report = self.store.get(experiment)
+            return report
+
+    def promote(self, experiment: str, *, by: str = "operator") -> dict:
+        """Move stable to an accepted candidate; refuses when stable moved meanwhile."""
+        with self.store.lease(experiment):
+            self._promote(experiment, self.store.get(experiment), by=by)
+            return self.store.get(experiment)
+
+    def _promote(self, experiment: str, record: dict, *, by: str) -> None:
+        if record["status"] != "accepted":
+            raise ValueError("Only an accepted experiment can be promoted")
+        Repository(Path(record["repository"])).promote(record["baseline"], record["candidate"])
+        self.store.promote(experiment, {"promoted_by": by, "stable": record["candidate"]})
 
     def _run(self, experiment: str, record: dict) -> dict:
         repo = Path(record["repository"])

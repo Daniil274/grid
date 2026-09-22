@@ -90,3 +90,43 @@ HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
         )
         for image in set(images):
             runtime.command(["docker", "image", "rm", "--force", image])
+
+
+def test_build_context_does_not_inherit_git_archive_headers(tmp_path):
+    """git archive's global pax header (commit ID) must not reach BuildKit."""
+    import io
+    import tarfile
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = ["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@local"]
+    subprocess.run([*git, "init", "--quiet"], check=True)
+    (repo / "run.sh").write_text("echo hi\n", encoding="utf-8")
+    (repo / "notes.md").write_text("x\n", encoding="utf-8")
+    subprocess.run([*git, "add", "--all"], check=True)
+    subprocess.run([*git, "update-index", "--chmod=+x", "run.sh"], check=True)
+    subprocess.run([*git, "commit", "--quiet", "-m", "c"], check=True)
+    commit = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+    contexts = []
+
+    class Recording(DockerRuntime):
+        def command(self, args, *, timeout=30, data=None):
+            if args[0] == "git":
+                return super().command(args, timeout=timeout, data=data)
+            if args[:2] == ["docker", "build"]:
+                contexts.append(data)
+                return b""
+            return b"sha256:" + b"0" * 64
+
+    Recording().build(repo, commit, "sha256:" + "a" * 64, "0" * 32, 60)
+
+    with tarfile.open(fileobj=io.BytesIO(contexts[0])) as context:
+        members = {member.name: member for member in context}
+        recipe = context.extractfile("Dockerfile").read().decode()
+    # BuildKit cannot use a bare image ID in FROM; the pinned tag carries it whole.
+    assert recipe.splitlines()[0] == "FROM grid-control-runtime:" + "a" * 64
+    assert set(members) == {"source/run.sh", "source/notes.md", "Dockerfile"}
+    assert all(not member.pax_headers for member in members.values())
+    assert members["source/run.sh"].mode == 0o755
+    assert members["source/notes.md"].mode == 0o644

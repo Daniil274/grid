@@ -13,13 +13,13 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterable, List, Optional
 
 import httpx
 
 from core.config.config import Config
 from core.managers.model_manager import ModelManager
-from core.managers.project_tools_loader import set_project_loader
+from core.managers.project_tools_loader import get_project_loader, set_project_loader
 from schemas import ToolType
 
 logger = logging.getLogger("grid.routing")
@@ -43,6 +43,51 @@ DECISION_INSTRUCTIONS = "Pick the single candidate best suited to handle the use
 
 MAX_TASK_CHARS = 4000
 DEFAULT_SYSTEM = "default"
+
+
+def check_system(config: Config, *, requires: Iterable[str] = ()) -> List[str]:
+    """Problems that would break one system at run time; empty when it is healthy.
+
+    Checks what config loading does not: routable agents are described, every
+    function tool has an implementation, agent tools target existing agents, MCP
+    servers and required programs are on PATH, and system skills exist.
+    """
+    from tools.function_tools import AVAILABLE_TOOLS, TOOL_ALIASES
+
+    issues: List[str] = []
+    declared = config.config.tools
+    loader = config.project_tools_loader
+    previous_loader = get_project_loader()
+    set_project_loader(loader)
+    try:
+        for agent_key, agent in config.config.agents.items():
+            if agent.routable and not agent.description:
+                issues.append(f"agent '{agent_key}' has no description, routing to it is blind")
+            for skill_name in agent.system_skills:
+                if config.skill_path(skill_name) is None:
+                    issues.append(f"agent '{agent_key}' uses missing skill '{skill_name}'")
+            for tool_name in agent.tools:
+                tool = declared.get(tool_name)
+                if tool is None:
+                    issues.append(f"agent '{agent_key}' uses undeclared tool '{tool_name}'")
+                elif tool.type == ToolType.AGENT:
+                    if tool.target_agent and tool.target_agent not in config.config.agents:
+                        issues.append(f"tool '{tool_name}' targets unknown agent '{tool.target_agent}'")
+                elif tool.type == ToolType.FUNCTION:
+                    resolved = TOOL_ALIASES.get(tool_name, tool_name)
+                    if not ((loader and loader.has_tool(tool_name)) or resolved in AVAILABLE_TOOLS):
+                        issues.append(f"tool '{tool_name}' of agent '{agent_key}' is not implemented")
+                elif tool.type == ToolType.MCP:
+                    command = (tool.server_command or [None])[0]
+                    if command and shutil.which(command) is None:
+                        issues.append(f"MCP tool '{tool_name}' requires '{command}' on PATH")
+    finally:
+        set_project_loader(previous_loader)
+
+    for program in requires:
+        if shutil.which(program) is None:
+            issues.append(f"required program '{program}' is not on PATH")
+    return issues
 
 
 class Router:
@@ -228,57 +273,29 @@ class AutoRouter:
                 self._configs[name] = Config(str(path), self.working_directory)
         return self._configs[name]
 
-    def check_systems(self) -> Dict[str, list[str]]:
+    def check_systems(self) -> Dict[str, List[str]]:
         """Report broken systems: unloadable configs, missing tools or required programs.
 
         Loading every system here is deliberate: a system that only breaks when a
         message is routed to it would otherwise stay invisible until then.
         """
-        from tools.function_tools import AVAILABLE_TOOLS, TOOL_ALIASES
-
-        problems: Dict[str, list[str]] = {}
+        problems: Dict[str, List[str]] = {}
         routing = self.root_config.config.routing
-        for name in self.systems():
-            issues: list[str] = []
-            try:
-                config = self.system_config(name)
-            except Exception as exc:
-                problems[name] = [f"config failed to load: {exc}"]
-                continue
-
-            declared = config.config.tools
-            set_project_loader(config.project_tools_loader)
-            loader = config.project_tools_loader
-            for agent_key, agent in config.config.agents.items():
-                if not agent.routable:
+        # Loading a config replaces the process-wide project tools loader.
+        previous_loader = get_project_loader()
+        try:
+            for name in self.systems():
+                try:
+                    config = self.system_config(name)
+                except Exception as exc:
+                    problems[name] = [f"config failed to load: {exc}"]
                     continue
-                if not agent.description:
-                    issues.append(f"agent '{agent_key}' has no description, routing to it is blind")
-                for tool_name in agent.tools:
-                    tool = declared.get(tool_name)
-                    if tool is None:
-                        issues.append(f"agent '{agent_key}' uses undeclared tool '{tool_name}'")
-                    elif tool.type == ToolType.AGENT:
-                        if tool.target_agent and tool.target_agent not in config.config.agents:
-                            issues.append(f"tool '{tool_name}' targets unknown agent '{tool.target_agent}'")
-                    elif tool.type == ToolType.FUNCTION:
-                        resolved = TOOL_ALIASES.get(tool_name, tool_name)
-                        if not ((loader and loader.has_tool(tool_name)) or resolved in AVAILABLE_TOOLS):
-                            issues.append(f"tool '{tool_name}' of agent '{agent_key}' is not implemented")
-                    elif tool.type == ToolType.MCP:
-                        command = (tool.server_command or [None])[0]
-                        if command and shutil.which(command) is None:
-                            issues.append(
-                                f"MCP tool '{tool_name}' requires '{command}' on PATH"
-                            )
-
-            system = routing.systems.get(name)
-            for program in (system.requires if system else []):
-                if shutil.which(program) is None:
-                    issues.append(f"required program '{program}' is not on PATH")
-
-            if issues:
-                problems[name] = issues
+                system = routing.systems.get(name)
+                issues = check_system(config, requires=system.requires if system else ())
+                if issues:
+                    problems[name] = issues
+        finally:
+            set_project_loader(previous_loader)
         return problems
 
     @staticmethod

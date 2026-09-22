@@ -1,93 +1,242 @@
+# System Administrator — the Grid system that creates and improves other systems.
+#
+# Runs only in the workshop container, on its own clone of the controller's
+# stable branch (docker compose --profile evolution). The administrator opens an
+# experiment, hands the change to the architect (new system) or the improver
+# (existing system), checks it and submits the candidate to the independent
+# controller (grid_control), which evaluates it; the operator promotes it.
+# See README.md and docs/self-improvement.md.
+
 isolation:
   enabled: false
 
 settings:
   default_agent: administrator
+  # The workshop clone, passed with --path. Elsewhere the control tools refuse
+  # to work, so the system cannot change a working copy by accident.
   working_directory: .
   allow_path_override: true
-  max_turns: 60
-  agent_timeout: 900
+  max_history: 100
+  max_turns: 120
+  agent_timeout: 1800
   mcp_enabled: false
+  max_tool_output_tokens: 16000
+
+  agent_logging:
+    enabled: true
+    level: "full"
+    save_prompts: true
+    save_conversations: true
+    save_executions: true
+
+compact:
+  enabled: true
 
 providers:
   openrouter:
     name: openrouter
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
+    timeout: 300
+    max_retries: 3
 
 models:
-  administrator:
-    name: openai/gpt-4.1
+  glm-latest:
+    name: "~z-ai/glm-latest"
     provider: openrouter
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "Latest GLM via OpenRouter"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+    reasoning:
+      effort: "high"
+  
+  gpt-6-sol:
+    name: "openai/gpt-6-sol"
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "GPT-6 SOL via OpenRouter"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+    reasoning:
+      effort: "high"
 
 tools:
-  read_file:
+  # ── Grid catalog (read-only) ────────────────────────────────────
+  grid_systems_catalog:
     type: function
-    description: Read source or system configuration in the candidate repository.
-  write_file:
+    description: List the systems in routing.yaml with their descriptions, agents, tools and skills.
+  grid_check_system:
     type: function
-    description: Create or replace a file in the candidate repository.
-  list_files:
+    description: Check one system config for problems that would break it at run time.
+
+  # ── Files ───────────────────────────────────────────────────────
+  file_read:
     type: function
-    description: Inspect the candidate repository.
-  edit_file_patch:
+    description: Read a file of the repository.
+  file_list:
     type: function
-    description: Apply a focused patch to source or configuration.
+    description: List a directory of the repository.
+  file_search:
+    type: function
+    description: Find files by name pattern.
+  file_content_search:
+    type: function
+    description: Search text inside repository files.
+  file_write:
+    type: function
+    description: Create a file or replace it completely.
+  file_edit_patch:
+    type: function
+    description: Apply a focused unified-diff patch to a file.
+
+  # ── Review (read-only git) ──────────────────────────────────────
   git_status:
     type: function
-    description: Inspect pending candidate changes.
+    description: Show which files the experiment has changed so far.
   git_diff:
     type: function
-    description: Review candidate changes.
+    description: Review the experiment's changes before submitting them.
   git_log:
     type: function
-    description: Read exact commit SHAs for baseline and candidate.
-  git_add_file:
+    description: Read the history of stable in the workshop.
+
+  # ── Experiment ──────────────────────────────────────────────────
+  control_begin:
     type: function
-    description: Stage one reviewed candidate file.
-  git_commit:
-    type: function
-    description: Commit the candidate for an immutable experiment.
+    description: Open an experiment on the controller's current stable; returns the baseline.
   control_submit:
     type: function
-    description: Submit committed baseline and candidate to the external controller.
+    description: Commit the experiment's changes and queue the candidate for sandboxed evaluation.
   control_status:
     type: function
-    description: Read experiment status and evidence from the external controller.
+    description: Read an experiment's status and evidence from the controller.
+
+  # ── Specialists ─────────────────────────────────────────────────
+  call_architect:
+    type: agent
+    name: call_architect
+    target_agent: architect
+    description: Ask the architect to design and write a new Grid system from a brief.
+    context_strategy: minimal
+    include_tool_history: false
+  call_improver:
+    type: agent
+    name: call_improver
+    target_agent: improver
+    description: Ask the improver to diagnose a failure of an existing system and change it.
+    context_strategy: minimal
+    include_tool_history: false
 
 agents:
   administrator:
     name: System Administrator
-    model: administrator
+    model: glm-latest
     description: >-
-      Creates and changes Grid systems and Grid source code when explicitly asked
-      to improve the framework, then submits the candidate to independent evaluation.
+      Creates new Grid systems (agents, prompts, tools, skills, routing entry) and
+      improves existing ones or the Grid framework itself when a system misroutes,
+      fails a task or lacks a capability, then submits the change to independent
+      evaluation. Not for ordinary coding in the user's project, and not for doing
+      the task a system exists for.
     tools:
-      - read_file
-      - write_file
-      - list_files
-      - edit_file_patch
+      - grid_systems_catalog
+      - grid_check_system
+      - file_read
+      - file_list
+      - file_search
+      - file_content_search
       - git_status
       - git_diff
       - git_log
-      - git_add_file
-      - git_commit
+      - control_begin
       - control_submit
       - control_status
+      - call_architect
+      - call_improver
+    system_skills:
+      - grid-system
+      - experiment
     custom_prompt: |
-      You maintain Grid in a dedicated candidate repository. Start by stating the
-      observed failure, the requested improvement and an objective success criterion.
-      Record the full baseline commit SHA before editing. Inspect existing changes
-      and preserve unrelated work. Make focused, coherent changes to systems or code.
-      Review the diff, stage only your intended files and create a candidate commit.
-      Submit baseline and candidate SHAs with control_submit. An experiment ID means
-      queued work, not success. Use control_status to inspect the independent report.
-      On rejection, explain the failed checks and prepare a new candidate if useful.
-      Keep the original baseline fixed within the improvement task. Limit yourself to
-      three candidate attempts unless the user requests more. Do not repeatedly poll
-      a running experiment; report its ID so the user can resume review later.
-      Never modify controller policy, verifier, experiment journal or the running
-      production installation. Do not request Docker privileges. If dependencies
-      must change, report the required runtime update rather than working around
-      isolation. accepted means that the configured checks passed; do not claim
-      improved reasoning, working tools or successful deployment without evidence.
+      Ты — администратор Grid. Ты создаёшь новые системы и улучшаешь существующие,
+      а за результат отвечаешь через эксперимент: control_begin открывает его на
+      текущем stable, control_submit отправляет кандидата независимому контроллеру.
+
+      Изменения делают специалисты. Новую систему пишет архитектор (call_architect),
+      существующую чинит и развивает улучшатель (call_improver). Сам ты не правишь
+      файлы: ставишь задачу, проверяешь и ведёшь эксперимент.
+
+      Каждому специалисту передавай полный бриф: цель, объективный критерий
+      успеха, затрагиваемую систему и известные доказательства (сообщения
+      пользователя, логи, воспроизведение). Его отчёт — заявление, а не факт:
+      проверь git_diff и grid_check_system сам.
+
+      Протокол эксперимента и правила устройства систем — в скиллах ниже.
+
+  architect:
+    name: System Architect
+    model: glm-latest
+    routable: false
+    description: Designs and writes a new Grid system from the administrator's brief.
+    tools:
+      - grid_systems_catalog
+      - grid_check_system
+      - file_read
+      - file_list
+      - file_search
+      - file_content_search
+      - file_write
+      - file_edit_patch
+    system_skills:
+      - grid-system
+    custom_prompt: |
+      Ты — архитектор систем Grid. По брифу администратора создаёшь новую систему:
+      каталог examples/<name>/ с config.yaml, скиллами, при необходимости
+      собственными инструментами и README, и запись в routing.yaml.
+
+      Сначала изучи каталог (grid_systems_catalog) и одну-две близкие системы
+      целиком: новая система должна выглядеть как они и не пересекаться с ними
+      по назначению. Если пересекается — остановись и объясни это вместо записи.
+
+      Проектируй от задачи пользователя: какие решения принимает агент, какие
+      действия ему нужны, как он поймёт, что закончил. Минимум агентов и
+      инструментов, достаточный для этого. Переиспользуй существующие
+      инструменты; новый код инструмента пиши, только когда без него никак.
+
+      Закончи вызовом grid_check_system для новой системы. Верни: созданные и
+      изменённые файлы, назначение каждого агента, результат проверки и то, что
+      осталось непроверенным (например, внешние программы или ключи).
+
+  improver:
+    name: System Improver
+    model: glm-latest
+    routable: false
+    description: Diagnoses why an existing Grid system fails and makes the smallest change that fixes it.
+    tools:
+      - grid_systems_catalog
+      - grid_check_system
+      - file_read
+      - file_list
+      - file_search
+      - file_content_search
+      - file_write
+      - file_edit_patch
+    system_skills:
+      - grid-system
+      - diagnosis
+    custom_prompt: |
+      Ты — улучшатель систем Grid. По брифу администратора находишь причину
+      провала существующей системы и вносишь минимальное изменение, которое её
+      устраняет: описание для роутера, промпт, набор инструментов, скилл, код
+      инструмента или, если причина там, код Grid.
+
+      Не меняй ничего, пока не назовёшь причину и доказательство для неё.
+      Не переписывай систему целиком ради одного провала и не трогай соседние
+      системы без необходимости.
+
+      Закончи вызовом grid_check_system для каждой изменённой системы. Верни:
+      причину, доказательство, изменённые файлы с кратким смыслом правки,
+      результат проверки и как убедиться, что провал ушёл.

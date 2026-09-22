@@ -40,6 +40,8 @@ class Policy:
     min_improvement: float = 0.0
     allow_network: bool = False
     environment_names: tuple[str, ...] = ()
+    # Promote an accepted candidate to stable without waiting for the operator.
+    auto_promote: bool = False
 
     def __post_init__(self) -> None:
         if not self.runtime_image or not self.verifier_image or not self.checks:

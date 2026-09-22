@@ -4,6 +4,9 @@
 # message is sent to the best-fitting system below (chosen by its description)
 # and then to the best agent of that system (chosen by the agents' description
 # fields in the system's own config). Agents with `routable: false` are skipped.
+#
+# The administrator system (examples/system-admin) is deliberately absent: it
+# changes Grid and runs only in the workshop container, never against this copy.
 
 # Policy gate. Enabled here, it governs every system the router picks, using the
 # router's own provider credentials for the validator. See ACTION_POLICY.md.

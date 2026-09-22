@@ -424,18 +424,26 @@ class Config:
             raise ConfigError(f"Prompt template '{template_key}' not found")
         return self.config.prompt_templates[template_key]
 
-    def _load_skill_file(self, skill_name: str) -> Optional[str]:
-        """Load a system skill .md file from the skills/ directory next to config."""
+    def skill_path(self, skill_name: str) -> Optional[Path]:
+        """Path of a system skill file in the skills/ directory next to config, if present."""
         skills_dir = self.config_path.parent / "skills"
         for ext in (".md", ".txt"):
-            skill_path = skills_dir / f"{skill_name}{ext}"
-            if skill_path.exists():
-                try:
-                    return skill_path.read_text(encoding="utf-8")
-                except Exception as exc:
-                    logger.warning(f"Failed to read skill file {skill_path}: {exc}")
-        logger.warning(f"System skill '{skill_name}' not found in {skills_dir}")
+            candidate = skills_dir / f"{skill_name}{ext}"
+            if candidate.exists():
+                return candidate
         return None
+
+    def _load_skill_file(self, skill_name: str) -> Optional[str]:
+        """Load a system skill .md file from the skills/ directory next to config."""
+        skill_path = self.skill_path(skill_name)
+        if skill_path is None:
+            logger.warning(f"System skill '{skill_name}' not found in {self.config_path.parent / 'skills'}")
+            return None
+        try:
+            return skill_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            logger.warning(f"Failed to read skill file {skill_path}: {exc}")
+            return None
 
     def build_agent_prompt_sections(self, agent_key: str) -> List[PromptSection]:
         """Build structured prompt sections for an agent."""

@@ -83,6 +83,7 @@ grid = "grid:main"
 grid-web-chat = "web_chat.__main__:main"
 grid-timeline = "timeline.__main__:main"
 grid-control = "grid_control.__main__:main"
+grid-workshop = "core.workshop:main"
 
 [project.urls]
 Homepage = "https://github.com/AgentsSDK/grid"

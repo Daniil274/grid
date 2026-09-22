@@ -6,7 +6,7 @@ settings:
   debug: true
   mcp_enabled: false
   working_directory: "./workspace"
-  log_directory: "C:/Users/danii/grid/logs"
+  logs_directory: "C:/Users/danii/grid/logs"
   config_directory: "."
   allow_path_override: true
   max_tool_output_tokens: 24000
