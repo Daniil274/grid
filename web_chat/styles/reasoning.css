@@ -1,0 +1,334 @@
+/**
+ * The reasoning timeline.
+ *
+ * Visual rules that keep it subordinate to the answer: it sits above the reply
+ * in muted type, it is collapsed by default once the turn lands, and the
+ * vertical rail through the step icons reads as one continuous process rather
+ * than a pile of log lines.
+ */
+
+.reasoning {
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+/* -- headline ------------------------------------------------------------- */
+.reasoning__toggle {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  padding: 3px 8px 3px 4px;
+  margin-left: -4px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.reasoning__toggle:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.reasoning__chevron {
+  display: flex;
+  color: var(--text-3);
+  transition: transform 160ms var(--ease);
+}
+
+.reasoning.is-expanded .reasoning__chevron {
+  transform: rotate(90deg);
+}
+
+.reasoning__headline {
+  font-weight: 500;
+}
+
+.reasoning__timer {
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A quiet shimmer while the turn is live - motion, not noise. */
+.reasoning[data-state="running"] .reasoning__headline {
+  background: linear-gradient(90deg, var(--text-3) 20%, var(--text) 45%, var(--text-3) 70%) 0 0 / 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 2.2s linear infinite;
+}
+
+@keyframes shimmer {
+  to { background-position: -220% 0; }
+}
+
+/* -- steps ---------------------------------------------------------------- */
+.reasoning__steps {
+  display: none;
+  padding: 4px 0 2px 10px;
+  margin: 4px 0 0;
+  list-style: none;
+}
+
+.reasoning.is-expanded .reasoning__steps {
+  display: block;
+}
+
+.step {
+  position: relative;
+  padding: 2px 0 2px 22px;
+}
+
+/* The connecting rail: drawn per step so it ends exactly at the last one. */
+.step::before {
+  position: absolute;
+  top: 22px;
+  bottom: -2px;
+  left: 9px;
+  width: 1px;
+  background: var(--line);
+  content: "";
+}
+
+.step:last-child::before {
+  display: none;
+}
+
+.step__head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 3px 6px 3px 0;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-2);
+  text-align: left;
+}
+
+.step__head:hover {
+  color: var(--text);
+}
+
+.step__icon {
+  position: absolute;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg-1);
+  color: var(--text-3);
+}
+
+.step[data-kind="reasoning"] .step__icon { color: var(--accent); }
+.step[data-kind="tool"] .step__icon { color: var(--text-2); }
+.step[data-kind="handoff"] .step__icon { color: var(--warn); }
+.step[data-kind="error"] .step__icon,
+.step[data-status="error"] .step__icon {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.step[data-status="running"] .step__icon {
+  border-color: var(--accent-line);
+  color: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.step__label {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+  flex: 1;
+}
+
+.step__title {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.step__subtitle {
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step__policy {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ok) 9%, transparent);
+  color: var(--ok);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.step__policy[data-decision="review"] {
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--line));
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn);
+}
+
+.step__policy[data-decision="deny"],
+.step__policy[data-decision="unavailable"] {
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.step__timing {
+  flex-shrink: 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.step__chevron {
+  display: none;
+  color: var(--text-3);
+  transition: transform 140ms var(--ease);
+}
+
+.step.has-detail .step__chevron {
+  display: flex;
+}
+
+.step.is-open .step__chevron {
+  transform: rotate(90deg);
+}
+
+/* -- context chips -------------------------------------------------------- */
+.step__refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 3px 0 5px;
+}
+
+.refChip {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  max-width: 220px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-size: 11.5px;
+  text-decoration: none;
+}
+
+.refChip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refChip svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+a.refChip:hover {
+  border-color: var(--accent-line);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.refChip--more {
+  color: var(--text-3);
+}
+
+/* -- reasoning prose ------------------------------------------------------ */
+.step__prose {
+  padding: 2px 0 6px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.62;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.step__prose > * + * {
+  margin-top: 0.7em;
+}
+
+.step__prose p {
+  margin: 0;
+}
+
+/* Streaming thinking is raw text, so it keeps the caret and its own wrapping. */
+.step__prose.is-streaming::after {
+  display: inline-block;
+  width: 6px;
+  height: 13px;
+  margin-left: 2px;
+  background: var(--accent);
+  content: "";
+  animation: caret 1s steps(2) infinite;
+  vertical-align: text-bottom;
+}
+
+@keyframes caret {
+  50% { opacity: 0; }
+}
+
+/* -- payloads ------------------------------------------------------------- */
+.step__detail {
+  display: none;
+  gap: 8px;
+  padding: 4px 0 10px;
+}
+
+.step.is-open .step__detail {
+  display: grid;
+}
+
+.payload {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+
+.payload__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 4px 3px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+}
+
+.payload__label {
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.payload__body {
+  max-height: 320px;
+  padding: 10px 12px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

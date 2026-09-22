@@ -1,0 +1,127 @@
+/**
+ * Design tokens.
+ *
+ * Dark is the default palette. An explicit choice stamps `data-theme` on the
+ * root and wins in both directions; with nothing stamped, a light system
+ * preference switches the palette. Every colour in the app comes from here, so
+ * a theme change never needs a component edit.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces, lowest to highest */
+  --bg: #0b0c10;
+  --bg-1: #111319;
+  --bg-2: #171a22;
+  --bg-3: #1e222c;
+  --bg-inset: #0d0f14;
+
+  --line: rgb(255 255 255 / 8%);
+  --line-strong: rgb(255 255 255 / 16%);
+
+  --text: #e9ebf2;
+  --text-2: #a7aec1;
+  --text-3: #727a8d;
+
+  --accent: #7b8ffb;
+  --accent-hover: #8fa0ff;
+  --accent-ink: #0a0d1c;
+  --accent-soft: rgb(123 143 251 / 14%);
+  --accent-line: rgb(123 143 251 / 38%);
+
+  --bubble: #3a5bd9;
+  --bubble-text: #f2f5ff;
+
+  --ok: #43cf95;
+  --warn: #f0b13d;
+  --danger: #ff7d7d;
+  --danger-soft: rgb(255 125 125 / 12%);
+
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-pill: 999px;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 30%);
+  --shadow-2: 0 18px 44px rgb(0 0 0 / 46%);
+
+  --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --rail-width: 268px;
+  --content-width: 768px;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* The light palette, applied on an explicit choice or a light system preference. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+
+    --bg: #f6f7fa;
+    --bg-1: #ffffff;
+    --bg-2: #ffffff;
+    --bg-3: #eef0f6;
+    --bg-inset: #f2f4f9;
+
+    --line: rgb(14 18 30 / 10%);
+    --line-strong: rgb(14 18 30 / 18%);
+
+    --text: #151822;
+    --text-2: #4e5666;
+    --text-3: #838b9c;
+
+    --accent: #3f57de;
+    --accent-hover: #3449c4;
+    --accent-ink: #ffffff;
+    --accent-soft: rgb(63 87 222 / 10%);
+    --accent-line: rgb(63 87 222 / 30%);
+
+    --bubble: #3f57de;
+    --bubble-text: #ffffff;
+
+    --ok: #12a06a;
+    --warn: #b7791f;
+    --danger: #d64545;
+    --danger-soft: rgb(214 69 69 / 10%);
+
+    --shadow-1: 0 1px 2px rgb(20 26 44 / 8%);
+    --shadow-2: 0 18px 44px rgb(20 26 44 / 14%);
+  }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f6f7fa;
+  --bg-1: #ffffff;
+  --bg-2: #ffffff;
+  --bg-3: #eef0f6;
+  --bg-inset: #f2f4f9;
+
+  --line: rgb(14 18 30 / 10%);
+  --line-strong: rgb(14 18 30 / 18%);
+
+  --text: #151822;
+  --text-2: #4e5666;
+  --text-3: #838b9c;
+
+  --accent: #3f57de;
+  --accent-hover: #3449c4;
+  --accent-ink: #ffffff;
+  --accent-soft: rgb(63 87 222 / 10%);
+  --accent-line: rgb(63 87 222 / 30%);
+
+  --bubble: #3f57de;
+  --bubble-text: #ffffff;
+
+  --ok: #12a06a;
+  --warn: #b7791f;
+  --danger: #d64545;
+  --danger-soft: rgb(214 69 69 / 10%);
+
+  --shadow-1: 0 1px 2px rgb(20 26 44 / 8%);
+  --shadow-2: 0 18px 44px rgb(20 26 44 / 14%);
+}
