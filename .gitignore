@@ -101,7 +101,10 @@ nul
 tools/DeepSeek-OCR/
 ocr_cache/
 *.db
-*.json
+# Local generated JSON/JSONL only. Source manifests and package metadata stay visible.
+/*.json
+examples/*/data/
+examples/*/workspace/
 tools/DeepSeek-OCR-2/
 *.ogg
 *.wav
@@ -122,3 +125,52 @@ plans/
 # bv (beads viewer) local config and caches
 .bv/
 tmp/
+
+# Local scratch, debug, and planning artifacts
+.tmp/
+/.tmp_*
+scratch/
+debug/
+debug-*.log
+/*.patch
+/*_debug.py
+/*_bridge.py
+/*_smoke.py
+
+# Local indexes, caches, and generated binaries
+# .codegraph/ is a local index. Do not ignore *.exe: bv_windows_x86_64.exe is tracked.
+.codegraph/
+node_modules/
+# Dependency lockfiles are source. Ignore only a root-level lock if one is generated locally.
+/package-lock.json
+
+# Local agent/editor state at repo root only.
+# Example-local instructions (.agents, .codex, .cursor/rules) stay committable.
+/.kilo/
+/.cursor/
+/.claude/
+/.codex/
+
+# Runtime artifacts under examples
+examples/*/runs/
+examples/*/.beads/
+examples/*/.claude/
+examples/*/.codex/hooks.json
+examples/*/.cursor/hooks.json
+examples/*/**/*.gate.lock*
+examples/*/eval/**/stt-results.jsonl
+examples/*/eval/**/_source/
+examples/*/eval/**/*.wav
+examples/*/eval/**/*.mp3
+examples/*/eval/**/*.ogg
+examples/*/eval/**/*.flac
+
+# One-off debug and smoke logs
+voice-*.log
+*-smoke.log
+*-stderr.log
+/voice-app.log
+/voice-grid-http.log
+/voice-grid-stderr.log
+/voice-model-smoke.log
+/voice-turns-app.log
