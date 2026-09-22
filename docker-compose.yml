@@ -1,0 +1,23 @@
+services:
+  grid:
+    build:
+      context: .
+    image: grid-agent-system:local
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${GRID_WORKSPACE:-.}:/workspace
+    command:
+      - grid-web-chat
+      - --routing
+      - /app/routing.yaml
+      - --path
+      - /workspace
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

@@ -35,6 +35,7 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "openai-agents>=0.2.6",
+    "mcp>=1.19,<2",
     "httpx>=0.25.0",
     "openai>=1.0.0",
     "pydantic>=2.0.0",
@@ -71,7 +72,7 @@ docs = [
 ]
 
 [project.scripts]
-agent-chat = "agent_chat:main"
+agent-chat = "agent_chat:cli"
 grid = "grid:main"
 grid-web-chat = "web_chat.__main__:main"
 grid-timeline = "timeline.__main__:main"
@@ -83,6 +84,23 @@ Documentation = "https://github.com/AgentsSDK/grid/blob/main/docs/index.md"
 
 [tool.hatch.version]
 path = "core/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "agent_chat.py",
+    "grid.py",
+    "grid_mcp.py",
+    "benchmarks",
+    "context_inspector",
+    "core",
+    "schemas",
+    "timeline",
+    "tools",
+    "utils",
+    "web_chat",
+    "examples/coordinator-pipeline",
+    "examples/coder",
+]
 
 [tool.black]
 line-length = 88

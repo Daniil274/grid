@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -25,7 +26,9 @@ from agents.tracing.spans import Span
 logger = logging.getLogger("grid.timeline")
 
 # ─── Default DB path ─────────────────────────────────────────────────────────
-_DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "timeline.db"
+_DEFAULT_DB = Path(
+    os.environ.get("GRID_TIMELINE_DB", Path.cwd() / ".grid" / "timeline.db")
+).expanduser()
 
 
 # ─── DDL ─────────────────────────────────────────────────────────────────────

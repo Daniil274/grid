@@ -114,7 +114,7 @@ def main() -> None:
         "--db",
         dest="db_path",
         default=None,
-        help="SQLite trace database (default: core/data/timeline.db)",
+        help="SQLite trace database (default: .grid/timeline.db)",
     )
     parser.add_argument(
         "--with-factory",
