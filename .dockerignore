@@ -16,3 +16,12 @@ workspace
 openai-agents-python
 bv_windows_x86_64.exe
 tests
+# Local runtime state: private data (timeline, traces, sessions) and caches must
+# never be baked into an image. None of it is tracked by git.
+traces
+**/data
+.grid
+.codegraph
+.kilo
+.tmp
+tmp
