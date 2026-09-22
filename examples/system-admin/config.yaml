@@ -109,6 +109,12 @@ tools:
   control_begin:
     type: function
     description: Open an experiment on the controller's current stable; returns the baseline.
+  control_scenarios:
+    type: function
+    description: List the open development scenarios and what each one expects.
+  control_trial:
+    type: function
+    description: Try the current work on the open development scenarios before submitting.
   control_submit:
     type: function
     description: Commit the experiment's changes and queue the candidate for sandboxed evaluation.
@@ -153,6 +159,8 @@ agents:
       - git_diff
       - git_log
       - control_begin
+      - control_scenarios
+      - control_trial
       - control_submit
       - control_status
       - call_architect

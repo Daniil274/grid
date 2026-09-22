@@ -1,0 +1,29 @@
+{
+  "runtime_image": "grid-agent-system:local",
+  "verifier_image": "python:3.11-slim",
+  "repetitions": 3,
+  "timeout_seconds": 180,
+  "min_improvement": 0.0,
+  "environment_names": ["OPENROUTER_API_KEY"],
+  "egress_hosts": ["openrouter.ai"],
+  "auto_promote": false,
+  "checks": [
+    {"name": "web", "path": "/"},
+    {"name": "autoroute", "path": "/api/chat/bootstrap", "json_pointer": "/routing_enabled", "expected": true},
+    {"name": "catalog", "path": "/api/chat/bootstrap", "json_pointer": "/multi_system", "expected": true}
+  ],
+  "dev_scenarios": [
+    {"name": "route-code-fix", "message": "В utils/stats.py функция mean падает на пустом списке. Почини и добавь тест.", "system": "engineering", "timeout_seconds": 90},
+    {"name": "route-video-highlights", "message": "Нарежь из inputs/event.mp4 превью лучших моментов на 30 секунд.", "system": "video", "timeout_seconds": 90},
+    {"name": "route-desktop", "message": "Открой Блокнот и напечатай в нём «привет».", "system": "desktop", "timeout_seconds": 90},
+    {"name": "route-pipeline", "message": "Переведи весь проект с requests на httpx: разбей работу на задачи для исполнителей, проверь каждую и отчитайся.", "system": "pipeline", "timeout_seconds": 90},
+    {"name": "answer-arithmetic", "message": "Сколько будет 17 умножить на 23? Ответь одним числом.", "system": "engineering", "output_matches": "\\b391\\b", "timeout_seconds": 240}
+  ],
+  "scenarios": [
+    {"name": "accept-code", "message": "Тесты в tests/test_parser.py падают после рефакторинга, разберись и исправь.", "system": "engineering", "timeout_seconds": 90},
+    {"name": "accept-video", "message": "Смонтируй ролик из clips/a.mov и clips/b.mov и наложи субтитры из subs.srt.", "system": "video", "timeout_seconds": 90},
+    {"name": "accept-desktop", "message": "Переключись на окно браузера и обнови страницу.", "system": "desktop", "timeout_seconds": 90},
+    {"name": "accept-pipeline", "message": "Спроектируй и внедри подсистему уведомлений по всему проекту, разбив работу на проверяемые задачи.", "system": "pipeline", "timeout_seconds": 90},
+    {"name": "accept-answer", "message": "Какая столица у Австралии? Ответь одним словом.", "output_matches": "(?i)canberra|канберр", "timeout_seconds": 240}
+  ]
+}
