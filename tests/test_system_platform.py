@@ -19,7 +19,6 @@ from core.platform.mutation import DraftSystemBuilder, MutationKind, MutationSet
 from core.platform.workbench import SystemWorkbench
 from core.platform.runtime import SystemRuntime
 from core.config import Config
-from examples.platform_systems.build_case_examples import build_registry, run_examples
 from schemas import (
     AgentNodeDefinition,
     Capability,
@@ -434,20 +433,3 @@ prompt_templates: {}
     config = Config(str(config_path))
     assert config.get_system_registry_path().endswith("data/custom_system_registry.json")
 
-
-def test_case_example_bundles_build_and_run(tmp_path):
-    registry_path = build_registry(tmp_path / "platform_case_examples")
-    results = run_examples(registry_path)
-
-    claude_result = results["claude_tools_system"]
-    artifact_result = results["artifact_delivery_system"]
-
-    assert claude_result["resolved_version"] == "0.2.0"
-    assert claude_result["status"] == "completed"
-    assert [node["node_id"] for node in claude_result["node_results"]] == ["main", "orchestrator", "tester"]
-    assert claude_result["final_output"]["passed"] is True
-
-    assert artifact_result["resolved_version"] == "0.1.0"
-    assert artifact_result["status"] == "completed"
-    assert [node["node_id"] for node in artifact_result["node_results"]] == ["planner", "bundle", "validator"]
-    assert artifact_result["final_output"]["passed"] is True

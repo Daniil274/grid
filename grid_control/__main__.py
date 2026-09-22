@@ -8,6 +8,7 @@ from pathlib import Path
 from .controller import Controller
 from .docker import DockerRuntime
 from .models import Policy
+from .repository import Repository
 from .store import Store
 
 
@@ -19,6 +20,12 @@ def main() -> None:
         "--state", type=Path, default=Path.home() / ".grid-control" / "experiments.db"
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    init = commands.add_parser(
+        "init", help="Create the evolution repository whose stable branch workshops start from"
+    )
+    init.add_argument("--repo", type=Path, required=True, help="New bare repository")
+    init.add_argument("--from", dest="source", type=Path, required=True, help="Grid checkout")
+    init.add_argument("--ref", default="HEAD", help="Commit of the source that becomes stable")
     evaluate = commands.add_parser("evaluate")
     evaluate.add_argument("--repo", type=Path, required=True)
     evaluate.add_argument("--baseline", required=True)
@@ -26,6 +33,10 @@ def main() -> None:
     evaluate.add_argument("--policy", type=Path, required=True)
     show = commands.add_parser("show")
     show.add_argument("experiment")
+    promote = commands.add_parser(
+        "promote", help="Move stable to an accepted candidate (operator confirmation)"
+    )
+    promote.add_argument("experiment")
     cleanup = commands.add_parser(
         "cleanup",
         help="Remove a stopped controller's experiment containers and networks",
@@ -39,6 +50,13 @@ def main() -> None:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8010)
     args = parser.parse_args()
+    if args.command == "init":
+        try:
+            repository = Repository.create(args.repo.resolve(), args.source, args.ref)
+        except (ValueError, RuntimeError, OSError) as error:
+            parser.exit(2, f"grid-control: {error}\n")
+        print(json.dumps({"repository": str(repository.path), "stable": repository.stable()}))
+        return
     store = Store(args.state)
     runtime = DockerRuntime()
     try:
@@ -66,6 +84,8 @@ def main() -> None:
             )
         elif args.command == "show":
             result = store.get(args.experiment)
+        elif args.command == "promote":
+            result = Controller(store, runtime).promote(args.experiment)
         else:
             with store.lease(args.experiment):
                 result = store.get(args.experiment)

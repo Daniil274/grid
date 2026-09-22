@@ -152,11 +152,16 @@ class DockerRuntime:
                         )
                     if member.name.startswith("/") or ".." in member.name.split("/"):
                         raise ValueError("Unsafe archive path")
-                    file = source.extractfile(member)
-                    member.name = "source/" + member.name
-                    target.addfile(member, file)
+                    # Fresh headers: git's global pax header (the commit ID) is
+                    # copied into every re-added member otherwise, and BuildKit
+                    # misreads such a context (Dockerfile parse and gRPC errors).
+                    copy = tarfile.TarInfo("source/" + member.name)
+                    copy.size = member.size
+                    copy.mode = 0o755 if member.mode & 0o111 else 0o644
+                    copy.mtime = member.mtime
+                    target.addfile(copy, source.extractfile(member))
                 recipe = (
-                    f"FROM {runtime}\n"
+                    f"FROM {self._pinned(runtime)}\n"
                     "COPY source/ /opt/grid/candidate/\n"
                     "ENV PYTHONPATH=/opt/grid/candidate PYTHONDONTWRITEBYTECODE=1 HOME=/workspace\n"
                     "WORKDIR /workspace\n"
@@ -184,6 +189,19 @@ class DockerRuntime:
                 data=context.getvalue(),
             )
             return self.image(tag)
+
+    def _pinned(self, image: str) -> str:
+        """A local tag naming *image* by its full ID, usable in FROM.
+
+        BuildKit reads ``FROM sha256:...`` as a registry name and tries to pull
+        it. The tag spells out the whole immutable ID, so it can only ever point
+        to that image.
+        """
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", image):
+            raise ValueError("Expected a local immutable image ID")
+        tag = "grid-control-runtime:" + image.removeprefix("sha256:")
+        self.command(["docker", "tag", image, tag])
+        return tag
 
     @staticmethod
     def limits() -> list[str]:

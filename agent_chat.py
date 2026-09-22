@@ -47,7 +47,6 @@ from core.config import Config
 from core.agent_factory import AgentFactory, ConsoleStreamObserver
 from core.compact import compact_conversation, CompactMessage, estimate_messages_tokens
 from core.routing import AutoRouter
-from core.managers.project_tools_loader import set_project_loader
 from schemas import ContextMessage
 try:
     # Optional: only available when Docker SDK is installed and Docker is running
@@ -450,8 +449,6 @@ async def main():
                     chat_ui.print_status(f"  - {issue}", style="yellow")
             if not problems:
                 chat_ui.print_status(f"Systems checked: {', '.join(auto_router.systems())} - all healthy", style="green")
-            # check_systems() walks every system; put the loader back on the active one.
-            set_project_loader(config.project_tools_loader)
 
         if auto_router is None and not args.agent:
             # A single system can still route between its own agents (routing.model in its config)

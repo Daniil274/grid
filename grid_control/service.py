@@ -2,23 +2,29 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from .controller import Controller
 from .models import Policy
+from .repository import MAX_BUNDLE_BYTES, Repository
 
 
 class Submission(BaseModel):
     model_config = ConfigDict(extra="forbid")
     baseline: str = Field(pattern=r"^[a-f0-9]{40,64}$")
     candidate: str = Field(pattern=r"^[a-f0-9]{40,64}$")
+    # Base64 git bundle with the candidate's new commits, for a workshop that
+    # has its own clone. Without it the candidate must already be in the repository.
+    bundle: str | None = Field(default=None, max_length=(MAX_BUNDLE_BYTES // 3 + 1) * 4)
 
 
 def create_app(
@@ -62,6 +68,13 @@ def create_app(
         redoc_url=None,
     )
 
+    @app.get("/source")
+    def source():
+        """Git bundle of stable: the starting point for a workshop's clone."""
+        return Response(
+            Repository(repository).export(), media_type="application/x-git-bundle"
+        )
+
     @app.post("/experiments", status_code=202)
     def submit(body: Submission):
         with admission:
@@ -71,6 +84,12 @@ def create_app(
                 >= 4
             ):
                 raise HTTPException(status_code=429, detail="Experiment queue is full")
+            if body.bundle is not None:
+                try:
+                    bundle = base64.b64decode(body.bundle, validate=True)
+                    Repository(repository).receive(bundle, body.baseline, body.candidate)
+                except (binascii.Error, ValueError, RuntimeError) as error:
+                    raise HTTPException(status_code=400, detail=str(error)) from error
             try:
                 experiment = controller.prepare(
                     repository, body.baseline, body.candidate, policy

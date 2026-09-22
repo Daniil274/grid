@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import yaml
 
 from core.config import Config
-from core.routing import AutoRouter, Router, _parse_choice
+from core.managers.project_tools_loader import get_project_loader, set_project_loader
+from core.routing import AutoRouter, Router, _parse_choice, check_system
 
 
 class FakeClient:
@@ -238,6 +239,30 @@ async def test_check_systems_reports_broken_systems(tmp_path):
     assert any("annotator" in issue and "no description" in issue for issue in problems["video"])
     assert any("definitely-not-a-real-program" in issue for issue in problems["video"])
 
+
+def test_check_system_reports_missing_skills_of_any_agent(tmp_path):
+    _make_systems(tmp_path)
+    video = yaml.safe_load((tmp_path / "video.yaml").read_text(encoding="utf-8"))
+    video["agents"]["annotator"]["routable"] = False
+    video["agents"]["annotator"]["system_skills"] = ["scenes"]
+    (tmp_path / "skills").mkdir()
+    config = Config(str(_write(tmp_path / "video.yaml", video)))
+
+    assert check_system(config) == ["agent 'annotator' uses missing skill 'scenes'"]
+
+    (tmp_path / "skills" / "scenes.md").write_text("# Scenes", encoding="utf-8")
+    assert check_system(config) == []
+
+
+def test_check_systems_keeps_the_active_project_loader(tmp_path):
+    root = _make_systems(tmp_path)
+    active = object()
+    set_project_loader(active)
+    try:
+        AutoRouter(root, Router(FakeClient(), "m")).check_systems()
+        assert get_project_loader() is active
+    finally:
+        set_project_loader(None)
 
 
 def test_empty_proxy_variables_mean_no_proxy(tmp_path, monkeypatch):

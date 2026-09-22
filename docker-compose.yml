@@ -27,6 +27,36 @@ services:
       - --port
       - "8000"
 
+  # Grid evolution workshop: the administrator system on its own clone of the
+  # controller's stable branch. Start the controller on the host first:
+  #   grid-control serve --repo <evolution.git> --policy <policy.json> --host 0.0.0.0
+  # then: docker compose --profile evolution up workshop  (UI on :8001)
+  workshop:
+    profiles: [evolution]
+    image: grid-agent-system:local
+    init: true
+    environment:
+      # Only what the administrator needs: no .env, no host files. Missing values
+      # stop `grid-workshop init` with a clear error (a required ${VAR:?} here
+      # would break every compose command, profiles notwithstanding).
+      GRID_CONTROL_URL: ${GRID_CONTROL_URL:-http://host.docker.internal:8010}
+      GRID_CONTROL_TOKEN: ${GRID_CONTROL_TOKEN:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8001:8000"
+    volumes:
+      - workshop-data:/workspace
+    command:
+      - sh
+      - -c
+      - >-
+        grid-workshop init /workspace/grid &&
+        exec grid-web-chat
+        --config /workspace/grid/examples/system-admin/config.yaml
+        --path /workspace/grid --host 0.0.0.0 --port 8000
+
   searxng:
     image: docker.io/searxng/searxng:latest
     restart: unless-stopped
@@ -54,3 +84,4 @@ services:
 volumes:
   searxng-data:
   valkey-data:
+  workshop-data:

@@ -83,6 +83,20 @@ class Store:
                 (experiment, json.dumps(result)),
             )
 
+    def promote(self, experiment: str, data: dict[str, Any]) -> None:
+        """Mark an accepted experiment as the one ``stable`` now points to."""
+        with self.connect() as db:
+            changed = db.execute(
+                "UPDATE experiments SET status='promoted' WHERE id=? AND status='accepted'",
+                (experiment,),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("Only an accepted experiment can be promoted")
+            db.execute(
+                "INSERT INTO events (experiment, data) VALUES (?, ?)",
+                (experiment, json.dumps(data)),
+            )
+
     def get(self, experiment: str) -> dict[str, Any]:
         with self.connect() as db:
             row = db.execute(

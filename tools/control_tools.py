@@ -1,55 +1,69 @@
-"""Narrow administrator client. Never exposes Docker or host commands to agents."""
+"""Experiment tools of the administrator system. Never expose Docker or host commands.
+
+The agent works in a workshop clone (see ``core/workshop.py``): ``control_begin``
+opens an experiment on the controller's current stable, ``control_submit``
+commits the changes and queues the candidate for evaluation, ``control_status``
+reads the verdict. The agent never handles commit SHAs itself, and all three
+refuse to run in a repository that is not a workshop.
+"""
 
 from __future__ import annotations
 
-import os
+import asyncio
 import re
+from pathlib import Path
+from typing import Any, Callable, Dict
 
-import httpx
 from agents import function_tool
 
+from core.workshop import ControlClient, Workshop, WorkshopError
+from utils.path_utils import resolve_agent_path_auto
 
-async def _request(method: str, path: str, body: dict | None = None) -> dict:
-    endpoint = os.environ.get("GRID_CONTROL_URL", "").rstrip("/")
-    token = os.environ.get("GRID_CONTROL_TOKEN", "")
-    if not endpoint or not token:
-        return {
-            "error": "Administrator requires GRID_CONTROL_URL and GRID_CONTROL_TOKEN"
-        }
-    async with httpx.AsyncClient(
-        timeout=90, trust_env=False, follow_redirects=False
-    ) as client:
-        try:
-            response = await client.request(
-                method,
-                endpoint + path,
-                json=body,
-                headers={"Authorization": "Bearer " + token},
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as error:
-            return {"error": str(error)}
+
+async def _run(action: Callable[[Workshop, ControlClient], Dict[str, Any]]) -> Dict[str, Any]:
+    workshop = Workshop(Path(resolve_agent_path_auto(".")))
+    try:
+        client = ControlClient.from_env()
+        return await asyncio.to_thread(action, workshop, client)
+    except WorkshopError as error:
+        return {"error": str(error)}
 
 
 @function_tool
-async def control_submit(baseline: str, candidate: str) -> dict:
-    """Submit two committed SHA revisions to the independent evaluator. Returns an experiment ID, not a verdict."""
-    if not all(
-        re.fullmatch(r"[a-f0-9]{40,64}", value) for value in (baseline, candidate)
-    ):
-        return {"error": "baseline and candidate must be full commit SHAs"}
-    return await _request(
-        "POST", "/experiments", {"baseline": baseline, "candidate": candidate}
-    )
+async def control_begin() -> dict:
+    """Open an experiment: reset the workshop to the controller's current stable commit.
+
+    Call it once before any change. Returns the baseline commit that the
+    candidate will be compared with. Refuses when unsubmitted changes exist.
+    Local to the workshop: changes nothing outside it.
+    """
+    return await _run(lambda workshop, client: {"baseline": workshop.begin(client)})
+
+
+@function_tool
+async def control_submit(message: str) -> dict:
+    """Commit all changes of the open experiment and queue the candidate for evaluation.
+
+    The controller evaluates it in its own sandboxed containers and never deploys
+    it by itself: an accepted candidate waits for the operator's promotion.
+    Returns the experiment ID, the baseline and the candidate commit.
+
+    Args:
+        message: Commit message: what changed and why, first line under 72 characters.
+    """
+    return await _run(lambda workshop, client: workshop.submit(client, message))
 
 
 @function_tool
 async def control_status(experiment_id: str) -> dict:
-    """Read durable evaluation evidence. accepted is a tested artifact, not a deployment."""
+    """Read an experiment's status and evidence. accepted means tested, not deployed."""
     if not re.fullmatch(r"[a-f0-9]{32}", experiment_id):
-        return {"error": "Invalid experiment ID"}
-    return await _request("GET", "/experiments/" + experiment_id)
+        return {"error": "Invalid experiment ID: use the id returned by control_submit"}
+    return await _run(lambda workshop, client: client.status(experiment_id))
 
 
-CONTROL_TOOLS = {"control_submit": control_submit, "control_status": control_status}
+CONTROL_TOOLS = {
+    "control_begin": control_begin,
+    "control_submit": control_submit,
+    "control_status": control_status,
+}
