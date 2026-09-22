@@ -81,6 +81,18 @@ def test_runtime_defaults_to_config_working_directory(
     assert runtime.persist_path.resolve() == (expected / "logs").resolve()
 
 
+def test_missing_routing_catalog_does_not_fall_back_to_root_config(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FileNotFoundError, match="Routing catalog not found"):
+        WebChatRuntime(routing_path=str(tmp_path / "missing.yaml"))
+
+
+def test_single_system_requires_explicit_config(minimal_config: Path) -> None:
+    runtime = WebChatRuntime(config_path=str(minimal_config), routing_path=None)
+    assert runtime.config_path == minimal_config.resolve()
+
+
 def test_catalog_action_policy_applies_to_web_factories(
     minimal_config: Path,
     monkeypatch: pytest.MonkeyPatch,

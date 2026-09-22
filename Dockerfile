@@ -1,20 +1,33 @@
+FROM node:22-bookworm-slim AS node-tools
+
+RUN npm install --global @colbymchenry/codegraph
+
 FROM python:3.11-slim
 
 ARG GRID_UID=1000
 ARG GRID_GID=1000
-ARG GRID_WITH_GIT=false
-ARG GRID_WITH_NODE=false
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SEARXNG_URL=http://searxng:8080
 
-RUN if [ "${GRID_WITH_GIT}" = "true" ] || [ "${GRID_WITH_NODE}" = "true" ]; then apt-get update; fi \
-    && if [ "${GRID_WITH_GIT}" = "true" ]; then apt-get install --no-install-recommends -y git; fi \
-    && if [ "${GRID_WITH_NODE}" = "true" ]; then apt-get install --no-install-recommends -y nodejs npm; fi \
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates curl ffmpeg git procps \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid "${GRID_GID}" grid \
     && useradd --create-home --uid "${GRID_UID}" --gid "${GRID_GID}" --shell /bin/bash grid
+
+COPY --from=node-tools /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-tools /usr/local/lib/node_modules/@colbymchenry /usr/local/lib/node_modules/@colbymchenry
+RUN ln -s /usr/local/lib/node_modules/@colbymchenry/codegraph/dist/cli.js /usr/local/bin/codegraph \
+    && curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | bash \
+    && curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash \
+    && if [ -f /root/.local/bin/bd ]; then mv /root/.local/bin/bd /usr/local/bin/bd; fi \
+    && command -v codegraph \
+    && command -v dolt \
+    && command -v bd \
+    && command -v ffmpeg \
+    && command -v ffprobe
 
 WORKDIR /app
 COPY . /app

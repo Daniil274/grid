@@ -20,6 +20,11 @@ if sys.platform == "win32":
 
 
 def main() -> None:
+    # Windows consoles commonly use cp1251 while Grid logs contain Unicode.
+    # Logging must never hide the actual startup error behind an encoding error.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser(description="Grid Web Chat")
     parser.add_argument(
         "--config",

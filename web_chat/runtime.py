@@ -91,13 +91,16 @@ class WebChatRuntime:
     # -- construction ------------------------------------------------------
     def _catalog_config(self) -> Optional[Config]:
         """The system catalog, unless a single system was requested explicitly."""
-        if self.requested_config_path or not self.routing_path or not self.routing_path.exists():
+        if self.requested_config_path:
             return None
-        try:
-            return Config(str(self.routing_path))
-        except Exception as exc:
-            logger.warning("System catalog %s could not be loaded: %s", self.routing_path, exc)
-            return None
+        if self.routing_path is None:
+            raise ValueError("A routing catalog is required when --config is not specified")
+        if not self.routing_path.is_file():
+            raise FileNotFoundError(
+                f"Routing catalog not found: {self.routing_path}. "
+                "Pass --routing or use --config for one system."
+            )
+        return Config(str(self.routing_path))
 
     def _base_config_path(self, catalog: Optional[Config]) -> Path:
         """The system whose workspace, logs and memory the session uses."""
