@@ -10,7 +10,8 @@ Grid. Работает только в **мастерской**: в контей
 мастерская (контейнер)          контроллер (хост)                оператор
 control_begin  ── bundle stable ◄─ GET /source
 правки специалистов
-control_submit ── bundle кандидата ─► refs/candidates/<sha> → оценка в Docker
+control_trial  ── снимок работы ──► POST /trials → открытые сценарии, подробности
+control_submit ── bundle кандидата ─► refs/candidates/<sha> → закрытые сценарии в Docker
 control_status ◄──────────────────── accepted / rejected / failed
                                      grid-control promote <id> ◄── подтверждение
                                      stable → кандидат
@@ -20,7 +21,7 @@ control_status ◄──────────────────── a
 
 | Агент | Роль | Инструменты |
 |---|---|---|
-| `administrator` | Вход системы. Ставит задачу и критерий успеха, открывает эксперимент, поручает изменение специалисту, проверяет его и отправляет кандидата | каталог и проверка систем, чтение файлов, просмотр git, `control_begin` / `control_submit` / `control_status`, вызов специалистов |
+| `administrator` | Вход системы. Ставит задачу и критерий успеха, открывает эксперимент, поручает изменение специалисту, проверяет его и отправляет кандидата | каталог и проверка систем, чтение файлов, просмотр git, `control_*` (begin, scenarios, trial, submit, status), вызов специалистов |
 | `architect` | Проектирует и пишет новую систему по образцу существующих и регистрирует её в `routing.yaml` | каталог и проверка систем, чтение и запись файлов |
 | `improver` | Находит причину провала существующей системы и вносит минимальную правку | каталог и проверка систем, чтение и запись файлов |
 
@@ -33,16 +34,18 @@ control_status ◄──────────────────── a
 | Скилл | Кому | О чём |
 |---|---|---|
 | `skills/grid-system.md` | всем | устройство системы: каталог, `config.yaml`, типы инструментов, описания для роутера, регистрация |
-| `skills/experiment.md` | администратору | цикл begin → изменение → проверка → submit, статусы, границы |
+| `skills/experiment.md` | администратору | цикл begin → изменение → проверка → trial → submit, статусы, границы |
 | `skills/diagnosis.md` | улучшателю | где искать причину провала и как её доказать |
 
 ## Инструменты
 
 - `tools/grid_systems_tools.py`: `grid_systems_catalog` и `grid_check_system`
   (та же проверка, что выполняет роутер при старте). Только читают.
-- `tools/control_tools.py`: `control_begin`, `control_submit`, `control_status`
-  поверх `core/workshop.py`. SHA агент не видит и не вводит, их вычисляет
-  мастерская.
+- `tools/control_tools.py`: `control_begin`, `control_scenarios`, `control_trial`,
+  `control_submit`, `control_status` поверх `core/workshop.py`. SHA агент не
+  видит и не вводит, их вычисляет мастерская. `control_trial` прогоняет
+  незавершённую работу на открытых сценариях и показывает подробности, а
+  приёмка идёт на закрытом наборе (`docs/self-improvement.md`).
 
 ## Запуск
 
@@ -51,6 +54,7 @@ control_status ◄──────────────────── a
 ```powershell
 grid-control init --repo C:/grid-evolution/evolution.git --from . --ref HEAD
 $env:GRID_CONTROL_TOKEN = "<не короче 32 символов>"
+# policy.json: начните с grid_control/policy.example.json, закрытый набор замените своим
 grid-control serve --repo C:/grid-evolution/evolution.git --policy C:/grid-evolution/policy.json --host 0.0.0.0
 ```
 
@@ -87,10 +91,9 @@ grid-control promote <id>
 
 ## Ограничения
 
-- Пока контроллер проверяет только то, что задано в политике: HTTP-проверки
-  запуска веб-чата и роутинга. `accepted` значит «кандидат запускается и проходит
-  проверки», а не «агенты стали лучше». Оценка по сценариям — следующий этап
-  (`docs/self-improvement.md`).
+- `accepted` значит, что кандидат прошёл проверки и сценарии оператора не хуже
+  baseline. Сценарии проверяют маршрут, вызванные инструменты и ответ, но не
+  качество работы целиком: что не описано в сценариях, то не оценено.
 - Логи рабочей установки мастерской не видны. Диагностика опирается на
   доказательства из запроса.
 - Новые зависимости Python и внешние программы требуют от оператора нового

@@ -69,7 +69,8 @@ class Store:
             )
 
     def finish(self, experiment: str, status: str, result: dict[str, Any]) -> None:
-        if status not in {"accepted", "rejected", "failed"}:
+        # completed: a development trial finished; it carries no verdict.
+        if status not in {"accepted", "rejected", "failed", "completed"}:
             raise ValueError("Invalid terminal status")
         with self.connect() as db:
             changed = db.execute(

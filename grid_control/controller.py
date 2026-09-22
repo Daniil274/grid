@@ -34,7 +34,24 @@ class Controller:
     ) -> dict:
         return self.run(self.prepare(repo, baseline, candidate, policy))
 
-    def prepare(self, repo: Path, baseline: str, candidate: str, policy: Policy) -> str:
+    def prepare(
+        self,
+        repo: Path,
+        baseline: str,
+        candidate: str,
+        policy: Policy,
+        *,
+        kind: str = "experiment",
+    ) -> str:
+        """Queue an acceptance experiment, or with ``kind="trial"`` a development trial.
+
+        A trial runs the candidate once on the open development scenarios and
+        reports every detail; it decides nothing and cannot be promoted.
+        """
+        if kind not in {"experiment", "trial"}:
+            raise ValueError("Unknown experiment kind")
+        if kind == "trial":
+            policy = policy.development()
         experiment = uuid.uuid4().hex
         old = self.runtime.revision(repo, baseline)
         new = self.runtime.revision(repo, candidate)
@@ -45,6 +62,7 @@ class Controller:
         self.store.create(
             experiment,
             {
+                "kind": kind,
                 "repository": str(repo.resolve()),
                 "baseline": old,
                 "candidate": new,
@@ -61,6 +79,8 @@ class Controller:
         with self.store.lease(experiment):
             record = self.store.get(experiment)
             self.store.start(experiment)
+            if record.get("kind") == "trial":
+                return self._run_trial(experiment, record)
             report = self._run(experiment, record)
             if report["status"] == "accepted" and Policy.from_dict(report["policy"]).auto_promote:
                 try:
@@ -129,11 +149,33 @@ class Controller:
             status = "accepted" if result["decision"]["accepted"] else "rejected"
         except Exception as error:
             result = {"error": str(error), "error_type": type(error).__name__}
-        finally:
-            try:
-                self.runtime.cleanup(experiment)
-            except Exception as error:
-                result["cleanup_error"] = str(error)
-                status = "failed"
-            self.store.finish(experiment, status, result)
+        return self._finish(experiment, status, result)
+
+    def _run_trial(self, experiment: str, record: dict) -> dict:
+        policy = Policy.from_dict(record["policy"])
+        result: dict = {}
+        status = "failed"
+        try:
+            image = self.runtime.build(
+                Path(record["repository"]),
+                record["candidate"],
+                record["runtime_image"],
+                experiment,
+                policy.build_timeout_seconds,
+            )
+            trial = self.runtime.trial(image, record["verifier_image"], experiment, 0, policy)
+            result = {"trial": asdict(trial), "images": {"candidate": image}}
+            status = "completed"
+        except Exception as error:
+            result = {"error": str(error), "error_type": type(error).__name__}
+        return self._finish(experiment, status, result)
+
+    def _finish(self, experiment: str, status: str, result: dict) -> dict:
+        """Release every container and network, then record the outcome."""
+        try:
+            self.runtime.cleanup(experiment)
+        except Exception as error:
+            result["cleanup_error"] = str(error)
+            status = "failed"
+        self.store.finish(experiment, status, result)
         return self.store.get(experiment)

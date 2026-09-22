@@ -8,62 +8,16 @@ import re
 import subprocess
 import tarfile
 import tempfile
-import time
 from dataclasses import asdict
 from pathlib import Path
 
 from .models import Policy, Trial
 
-# This code comes from the controller installation, never from the candidate.
-# It runs in a separate container without the candidate's filesystem or secrets.
-VERIFIER = r"""
-import json, time, urllib.request, urllib.error
-
-def request(check):
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    try:
-        response = opener.open("http://candidate:8000" + check["path"], timeout=3)
-    except urllib.error.HTTPError as error:
-        response = error
-    with response:
-        if response.status != check["expected_status"]:
-            return False
-        pointer = check["json_pointer"]
-        if pointer is None:
-            return True
-        body = response.read(1024 * 1024 + 1)
-        if len(body) > 1024 * 1024:
-            return False
-        value = json.loads(body)
-        if pointer:
-            for key in pointer[1:].split("/"):
-                key = key.replace("~1", "/").replace("~0", "~")
-                value = value[int(key)] if isinstance(value, list) else value[key]
-        return type(value) is type(check["expected"]) and value == check["expected"]
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-
-started = time.monotonic()
-deadline = started + PLAN["timeout_seconds"] - 5
-ready = False
-while time.monotonic() < deadline:
-    try:
-        ready = request({"path": "/", "expected_status": 200, "json_pointer": None})
-    except Exception:
-        pass
-    if ready:
-        break
-    time.sleep(0.25)
-results = {}
-for check in PLAN["checks"]:
-    try:
-        results[check["name"]] = ready and request(check)
-    except Exception:
-        results[check["name"]] = False
-print(json.dumps({"checks": results, "elapsed_seconds": time.monotonic() - started}))
-"""
+# Both scripts come from the controller installation, never from the candidate,
+# and run in containers without the candidate's filesystem or secrets.
+VERIFIER = (Path(__file__).with_name("verifier.py")).read_text(encoding="utf-8")
+EGRESS = (Path(__file__).with_name("egress.py")).read_text(encoding="utf-8")
+PROXY = "http://egress:3128"
 
 
 class DockerRuntime:
@@ -228,6 +182,13 @@ class DockerRuntime:
             ["docker", "network", "create", *network_args, "--label", label, name]
         )
         env = [part for key in policy.environment_names for part in ("--env", key)]
+        if policy.egress_hosts:
+            self._start_egress(name, label, verifier, policy.egress_hosts)
+            env += [
+                part
+                for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
+                for part in ("--env", f"{key}={PROXY}")
+            ] + ["--env", "NO_PROXY=localhost,127.0.0.1,candidate"]
         self.command(
             [
                 "docker",
@@ -247,6 +208,7 @@ class DockerRuntime:
         )
         plan = {
             "checks": [asdict(check) for check in policy.checks],
+            "scenarios": [asdict(scenario) for scenario in policy.scenarios],
             "timeout_seconds": policy.timeout_seconds,
         }
         script = "PLAN = " + repr(plan) + "\n" + VERIFIER
@@ -266,11 +228,37 @@ class DockerRuntime:
                 verifier,
                 "-",
             ],
-            timeout=policy.timeout_seconds,
+            timeout=policy.verifier_timeout(),
             data=script.encode(),
         )
         result = json.loads(output)
         return Trial(**result)
+
+    def _start_egress(
+        self, network: str, label: str, image: str, hosts: tuple[str, ...]
+    ) -> None:
+        """Run the allowlisting proxy: on the default bridge, reachable as ``egress``."""
+        proxy = network + "-egress"
+        script = "PLAN = " + repr({"hosts": list(hosts)}) + "\n" + EGRESS
+        self.command(
+            [
+                "docker",
+                "run",
+                "--detach",
+                "--name",
+                proxy,
+                "--label",
+                label,
+                *self.limits(),
+                "--entrypoint=python",
+                image,
+                "-c",
+                script,
+            ]
+        )
+        self.command(
+            ["docker", "network", "connect", "--alias", "egress", network, proxy]
+        )
 
     def cleanup(self, experiment: str) -> None:
         if not re.fullmatch(r"[a-f0-9]{32}", experiment):

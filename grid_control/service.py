@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hmac
+from dataclasses import asdict
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -25,6 +26,13 @@ class Submission(BaseModel):
     # Base64 git bundle with the candidate's new commits, for a workshop that
     # has its own clone. Without it the candidate must already be in the repository.
     bundle: str | None = Field(default=None, max_length=(MAX_BUNDLE_BYTES // 3 + 1) * 4)
+
+
+def _without_details(event: dict) -> dict:
+    trial = event.get("trial")
+    if not isinstance(trial, dict):
+        return event
+    return {**event, "trial": {k: v for k, v in trial.items() if k != "details"}}
 
 
 def create_app(
@@ -75,8 +83,7 @@ def create_app(
             Repository(repository).export(), media_type="application/x-git-bundle"
         )
 
-    @app.post("/experiments", status_code=202)
-    def submit(body: Submission):
+    def admit(body: Submission, kind: str) -> dict:
         with admission:
             if (
                 len(controller.store.pending("queued"))
@@ -84,20 +91,32 @@ def create_app(
                 >= 4
             ):
                 raise HTTPException(status_code=429, detail="Experiment queue is full")
-            if body.bundle is not None:
-                try:
+            try:
+                if body.bundle is not None:
                     bundle = base64.b64decode(body.bundle, validate=True)
                     Repository(repository).receive(bundle, body.baseline, body.candidate)
-                except (binascii.Error, ValueError, RuntimeError) as error:
-                    raise HTTPException(status_code=400, detail=str(error)) from error
-            try:
                 experiment = controller.prepare(
-                    repository, body.baseline, body.candidate, policy
+                    repository, body.baseline, body.candidate, policy, kind=kind
                 )
-            except (ValueError, RuntimeError) as error:
+            except (binascii.Error, ValueError, RuntimeError) as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
             executor.submit(controller.run, experiment)
-        return {"id": experiment, "status": "queued"}
+        return {"id": experiment, "kind": kind, "status": "queued"}
+
+    @app.post("/experiments", status_code=202)
+    def submit(body: Submission):
+        """Queue an acceptance experiment: baseline against candidate."""
+        return admit(body, "experiment")
+
+    @app.post("/trials", status_code=202)
+    def trial(body: Submission):
+        """Queue a development trial: the candidate alone on the open scenarios."""
+        return admit(body, "trial")
+
+    @app.get("/scenarios")
+    def scenarios():
+        """The open development scenarios. Acceptance scenarios stay private."""
+        return [asdict(scenario) for scenario in policy.dev_scenarios]
 
     @app.get("/experiments/{experiment}")
     def get(experiment: str):
@@ -106,16 +125,16 @@ def create_app(
         except ValueError as error:
             raise HTTPException(status_code=404, detail="Unknown experiment") from error
         # The administrator needs evidence, not controller host paths or policy.
-        return {
-            key: report[key]
-            for key in (
-                "id",
-                "status",
-                "baseline",
-                "candidate",
-                "policy_sha256",
-                "events",
-            )
+        view = {
+            key: report.get(key)
+            for key in ("id", "kind", "status", "baseline", "candidate", "policy_sha256")
         }
+        if report.get("kind") == "trial":
+            view["events"] = report["events"]
+        else:
+            # Acceptance scenarios are private: their verdicts leave, the
+            # explanations that would reveal the expectations do not.
+            view["events"] = [_without_details(event) for event in report["events"]]
+        return view
 
     return app
