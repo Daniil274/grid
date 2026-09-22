@@ -237,3 +237,13 @@ async def test_check_systems_reports_broken_systems(tmp_path):
     assert any("ghost_tool" in issue and "not implemented" in issue for issue in problems["video"])
     assert any("annotator" in issue and "no description" in issue for issue in problems["video"])
     assert any("definitely-not-a-real-program" in issue for issue in problems["video"])
+
+
+
+def test_empty_proxy_variables_mean_no_proxy(tmp_path, monkeypatch):
+    # Container images often export HTTP_PROXY=""; httpx rejects "" as a proxy URL.
+    for name in ("HTTPS_PROXY", "HTTP_PROXY"):
+        monkeypatch.setenv(name, "")
+    config = Config(str(_write(tmp_path / "config.yaml", _system_config({"a": ("A", {})}, "a"))))
+
+    assert config.get_proxy() is None
