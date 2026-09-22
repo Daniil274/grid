@@ -1,0 +1,312 @@
+isolation:
+  enabled: false
+
+settings:
+  default_agent: "video_director"
+  max_history: 80
+  max_turns: 160
+  agent_timeout: 1200
+  debug: true
+  mcp_enabled: false
+  max_tool_output_tokens: 12000
+  working_directory: "C:/Users/danii/Videos"
+  config_directory: "."
+  allow_path_override: true
+
+  agent_logging:
+    enabled: true
+    level: "full"
+    save_prompts: true
+    save_conversations: true
+    save_executions: true
+
+  image_processing:
+    enabled: true
+    auto_resize: true
+    max_width: 1920
+    max_height: 1080
+    max_file_size_mb: 20
+    jpeg_quality: 85
+
+  project_tools:
+    enabled: true
+    tools_directory: "./tools"
+    base_tools:
+      - orchestrate
+
+  tools_common_rules: |
+    Prefer the dedicated video tools over shell commands.
+    Keep all generated assets under annotations/, frames/, edits/, or renders/.
+    Never claim that a video was rendered unless a render tool returned an output path.
+    For non-trivial edits, create or read an annotation file before rendering.
+
+compact:
+  enabled: true
+  summary_max_output_tokens: 6000
+  auto:
+    enabled: true
+    max_output_tokens_for_summary: 6000
+    buffer_tokens: 5000
+    warning_buffer_tokens: 2000
+    error_buffer_tokens: 1000
+    manual_buffer_tokens: 500
+    max_consecutive_failures: 3
+  micro:
+    enabled: true
+    gap_threshold_minutes: 60
+    preserve_last_n: 5
+    compactable_tools:
+      - video_probe
+      - video_sample_frames
+      - video_detect_scenes
+      - video_create_annotation_template
+      - video_build_cutlist
+      - video_export_review_report
+  session_memory:
+    enabled: false
+  restore:
+    files:
+      enabled: true
+      max_files: 5
+      max_tokens_per_file: 5000
+      token_budget: 20000
+    skills:
+      enabled: true
+      token_budget: 12000
+      max_tokens_per_skill: 5000
+
+providers:
+  opencode:
+    name: "opencode"
+    base_url: "https://opencode.ai/zen/go/v1"
+    api_key_env: "OPENCODE_API_KEY"
+    timeout: 300
+    max_retries: 3
+  openrouter:
+    name: "openrouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout: 300
+    max_retries: 3
+
+models:
+  video-pro:
+    name: minimax/minimax-m3
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "Primary planning model for video workflow coordination"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+
+  video-fast:
+    name: z-ai/glm-5.3-flashx
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "Fast worker model for bounded video subtasks"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+
+tools:
+  orchestrate:
+    type: "function"
+    name: "orchestrate"
+    description: "Launch a dynamic subagent for a bounded video workflow task."
+    env_vars:
+      DEFAULT_MODEL: video-fast
+
+  list_files:
+    type: "function"
+    description: "List files in a directory of the workspace."
+
+  read_file:
+    type: "function"
+    description: "Read a file from the workspace."
+
+  write_file:
+    type: "function"
+    description: "Write a file into the workspace."
+
+  video_probe:
+    type: "function"
+    description: "Inspect a media file with ffprobe and return concise JSON metadata."
+
+  video_sample_frames:
+    type: "function"
+    description: "Extract evenly spaced review frames and return a contact sheet."
+
+  video_detect_scenes:
+    type: "function"
+    description: "Detect scene cuts and write shot ranges to annotations/*.json."
+
+  video_create_annotation_template:
+    type: "function"
+    description: "Create a structured video annotation template seeded by scene detection."
+
+  video_build_cutlist:
+    type: "function"
+    description: "Normalize annotation or segment JSON into an edit decision list."
+
+  video_make_preview:
+    type: "function"
+    description: "Render a short preview clip from a source video."
+
+  video_write_srt:
+    type: "function"
+    description: "Write captions/subtitles to an SRT sidecar file."
+
+  video_render_cutlist:
+    type: "function"
+    description: "Render a final MP4 from a cutlist by extracting and concatenating segments, each from its own source file."
+
+  video_concat:
+    type: "function"
+    description: "Join several video files end to end into one MP4; whole files of matching format are copied without re-encoding."
+
+  video_export_review_report:
+    type: "function"
+    description: "Convert annotation or cutlist JSON into a Markdown review report."
+
+  call_video_annotator:
+    type: "agent"
+    name: "call_video_annotator"
+    target_agent: "video_annotator"
+    description: "Ask the video annotator to inspect media, sample frames, detect scenes, and produce annotation notes."
+    context_strategy: "conversation"
+    context_depth: 6
+    include_tool_history: true
+
+  call_video_editor:
+    type: "agent"
+    name: "call_video_editor"
+    target_agent: "video_editor"
+    description: "Ask the video editor to build cutlists, previews, captions, and final renders."
+    context_strategy: "conversation"
+    context_depth: 6
+    include_tool_history: true
+
+  call_video_qc:
+    type: "agent"
+    name: "call_video_qc"
+    target_agent: "video_qc"
+    description: "Ask the QC agent to inspect rendered outputs and report risks or fixes."
+    context_strategy: "conversation"
+    context_depth: 6
+    include_tool_history: true
+
+agents:
+  video_director:
+    name: "Video Director"
+    model: "video-pro"
+    system_skills:
+      - video_pipeline
+    tools:
+      - orchestrate
+      - call_video_annotator
+      - call_video_editor
+      - call_video_qc
+      - video_probe
+      - video_sample_frames
+      - video_detect_scenes
+      - video_create_annotation_template
+      - video_build_cutlist
+      - video_make_preview
+      - video_write_srt
+      - video_render_cutlist
+      - video_concat
+      - video_export_review_report
+      - list_files
+      - read_file
+      - write_file
+    description: "Video director: runs a whole video job from raw source to checked result (inspect, detect scenes, annotate, cut, subtitle, render, QC). Use whenever the request combines several steps, e.g. split a video by scenes and add subtitles."
+    custom_prompt: |
+      You are Video Director, the coordinator for an agentic video annotation and editing system.
+
+      Default workflow:
+      1. Clarify the user's intent only when the edit target is genuinely ambiguous.
+      2. Inspect the source with video_probe.
+      3. Ask video_annotator to sample frames, detect scenes, and create or update annotation JSON.
+         For a plain join of whole files, skip annotation and ask video_editor to call video_concat.
+      4. Ask video_editor to build a cutlist and render previews/finals.
+      5. Ask video_qc to inspect the result before reporting completion.
+
+      Work in files, not memory-only notes. Keep all intermediate assets in the workspace:
+      inputs/ for user media, annotations/ for analysis, frames/ for stills, edits/ for cutlists/SRT, renders/ for outputs.
+
+      Report concise outcomes with paths to the important files. If FFmpeg is missing, say that clearly and stop after creating any non-render artifacts that are still useful.
+
+  video_annotator:
+    name: "Video Annotator"
+    model: "video-fast"
+    system_skills:
+      - video_pipeline
+    tools:
+      - video_probe
+      - video_sample_frames
+      - video_detect_scenes
+      - video_create_annotation_template
+      - video_export_review_report
+      - list_files
+      - read_file
+      - write_file
+    description: "Video analysis only: probes media info, samples frames, detects scenes and shots, writes annotation notes. Does not render or edit."
+    custom_prompt: |
+      You are Video Annotator. Your job is to turn raw media into useful structured annotation.
+
+      Always start with video_probe. For visual review, call video_sample_frames with a contact sheet. Use video_detect_scenes or video_create_annotation_template to create shot ranges. When asked for notes, write them into a JSON-compatible structure and export a review report.
+
+      Do not render final videos. Return paths, shot counts, key observations, and any uncertainty.
+
+  video_editor:
+    name: "Video Editor"
+    model: "video-fast"
+    system_skills:
+      - video_pipeline
+    tools:
+      - video_probe
+      - video_build_cutlist
+      - video_make_preview
+      - video_write_srt
+      - video_render_cutlist
+      - video_concat
+      - video_export_review_report
+      - list_files
+      - read_file
+      - write_file
+    description: "Single editing step on prepared material: join several video files into one, render a final or preview from an existing cutlist, trim given time ranges, or write SRT subtitles. Not for raw footage that first needs scene analysis."
+    custom_prompt: |
+      You are Video Editor. Your job is to convert annotations and user intent into concrete edit decision lists and rendered files.
+
+      To join whole files, call video_concat with the paths in order; no cutlist is needed. A cutlist segment may also carry its own `source`, so one render can mix several files, and a segment without start/end covers its whole source.
+
+      Before rendering partial ranges, ensure a valid cutlist exists. Prefer video_make_preview for quick checks and video_render_cutlist for final output. Keep outputs under renders/. When creating subtitles, write SRT sidecars under edits/.
+
+      Return exact paths and render settings. If a render fails, explain the tool error and suggest the smallest next correction.
+
+  video_qc:
+    name: "Video QC"
+    model: "video-fast"
+    system_skills:
+      - video_pipeline
+    tools:
+      - video_probe
+      - video_sample_frames
+      - video_make_preview
+      - video_export_review_report
+      - list_files
+      - read_file
+      - write_file
+    description: "Video QC: checks a rendered file (duration, format, audio, visual continuity) against the requested edit and reports pass or fail with fixes."
+    custom_prompt: |
+      You are Video QC. Your job is to verify rendered outputs before the user receives them.
+
+      Inspect the final file with video_probe, sample frames when visual review is needed, and create a short report covering duration, format, obvious visual continuity issues, missing audio risk, and whether the output matches the requested edit.
+
+      Do not rerender unless specifically asked by the director. Return pass/fail, evidence, and recommended fixes.
+
+prompt_templates:
+  base: |
+    You are a helpful GRID agent.
