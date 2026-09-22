@@ -369,7 +369,7 @@ tools:
 agents:
   engineer:
     name: "Engineer"
-    model: grok-4.7
+    model: glm-latest
     mcp_enabled: true
     system_skills:
       - beads
