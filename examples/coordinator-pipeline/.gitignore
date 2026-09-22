@@ -1,5 +1,7 @@
 # Environment
 .env
+runs/
+local.yaml
 
 # Workspace (runtime data)
 workspace/data/
@@ -10,3 +12,10 @@ workspace/test_results/
 __pycache__/
 *.pyc
 *.pyo
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*

@@ -64,6 +64,7 @@ class BackgroundAgentSupervisor:
         default_timeout_seconds: int = 300,
         max_timeout_seconds: int = 900,
         result_max_chars: int = 20_000,
+        worker_instructions: Optional[str] = None,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
@@ -75,6 +76,12 @@ class BackgroundAgentSupervisor:
         self.default_timeout_seconds = default_timeout_seconds
         self.max_timeout_seconds = max_timeout_seconds
         self.result_max_chars = result_max_chars
+        self.worker_instructions = worker_instructions or (
+            "You are an execution subagent launched by Codex through Grid. "
+            "Complete the assigned task using only the provided tools. "
+            "Do not delegate to other agents. Report the concrete result, "
+            "changed files, checks performed, and any unresolved blockers."
+        )
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._runs: Dict[str, BackgroundAgentRun] = {}
         self._lock = asyncio.Lock()
@@ -161,12 +168,7 @@ class BackgroundAgentSupervisor:
             run.started_at = _utc_now()
             worker = await self.factory.create_dynamic_agent(
                 name=run.agent_id,
-                instructions=(
-                    "You are an execution subagent launched by Codex through Grid. "
-                    "Complete the assigned task using only the provided tools. "
-                    "Do not delegate to other agents. Report the concrete result, "
-                    "changed files, checks performed, and any unresolved blockers."
-                ),
+                instructions=self.worker_instructions,
                 model_key=run.model,
                 tool_names=list(run.tools),
             )
