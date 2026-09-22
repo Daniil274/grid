@@ -1,0 +1,93 @@
+isolation:
+  enabled: false
+
+settings:
+  default_agent: administrator
+  working_directory: .
+  allow_path_override: true
+  max_turns: 60
+  agent_timeout: 900
+  mcp_enabled: false
+
+providers:
+  openrouter:
+    name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+
+models:
+  administrator:
+    name: openai/gpt-4.1
+    provider: openrouter
+
+tools:
+  read_file:
+    type: function
+    description: Read source or system configuration in the candidate repository.
+  write_file:
+    type: function
+    description: Create or replace a file in the candidate repository.
+  list_files:
+    type: function
+    description: Inspect the candidate repository.
+  edit_file_patch:
+    type: function
+    description: Apply a focused patch to source or configuration.
+  git_status:
+    type: function
+    description: Inspect pending candidate changes.
+  git_diff:
+    type: function
+    description: Review candidate changes.
+  git_log:
+    type: function
+    description: Read exact commit SHAs for baseline and candidate.
+  git_add_file:
+    type: function
+    description: Stage one reviewed candidate file.
+  git_commit:
+    type: function
+    description: Commit the candidate for an immutable experiment.
+  control_submit:
+    type: function
+    description: Submit committed baseline and candidate to the external controller.
+  control_status:
+    type: function
+    description: Read experiment status and evidence from the external controller.
+
+agents:
+  administrator:
+    name: System Administrator
+    model: administrator
+    description: >-
+      Creates and changes Grid systems and Grid source code when explicitly asked
+      to improve the framework, then submits the candidate to independent evaluation.
+    tools:
+      - read_file
+      - write_file
+      - list_files
+      - edit_file_patch
+      - git_status
+      - git_diff
+      - git_log
+      - git_add_file
+      - git_commit
+      - control_submit
+      - control_status
+    custom_prompt: |
+      You maintain Grid in a dedicated candidate repository. Start by stating the
+      observed failure, the requested improvement and an objective success criterion.
+      Record the full baseline commit SHA before editing. Inspect existing changes
+      and preserve unrelated work. Make focused, coherent changes to systems or code.
+      Review the diff, stage only your intended files and create a candidate commit.
+      Submit baseline and candidate SHAs with control_submit. An experiment ID means
+      queued work, not success. Use control_status to inspect the independent report.
+      On rejection, explain the failed checks and prepare a new candidate if useful.
+      Keep the original baseline fixed within the improvement task. Limit yourself to
+      three candidate attempts unless the user requests more. Do not repeatedly poll
+      a running experiment; report its ID so the user can resume review later.
+      Never modify controller policy, verifier, experiment journal or the running
+      production installation. Do not request Docker privileges. If dependencies
+      must change, report the required runtime update rather than working around
+      isolation. accepted means that the configured checks passed; do not claim
+      improved reasoning, working tools or successful deployment without evidence.

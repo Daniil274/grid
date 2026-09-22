@@ -37,6 +37,14 @@ docker>=7.0.0
 
 #tools
 pyautogui>=0.9.0     # Mouse and keyboard control
+Pillow>=10.0.0
+
+# Built-in coder tools
+aiohttp>=3.9.0
+beautifulsoup4>=4.12.0
+markdownify>=0.13.0
+trafilatura>=1.12.0
+nbformat>=5.10.0
 
 # ChromaDB for vector storage and similarity search
 chromadb>=0.4.0

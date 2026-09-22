@@ -265,6 +265,12 @@ class AutoRouter:
                         resolved = TOOL_ALIASES.get(tool_name, tool_name)
                         if not ((loader and loader.has_tool(tool_name)) or resolved in AVAILABLE_TOOLS):
                             issues.append(f"tool '{tool_name}' of agent '{agent_key}' is not implemented")
+                    elif tool.type == ToolType.MCP:
+                        command = (tool.server_command or [None])[0]
+                        if command and shutil.which(command) is None:
+                            issues.append(
+                                f"MCP tool '{tool_name}' requires '{command}' on PATH"
+                            )
 
             system = routing.systems.get(name)
             for program in (system.requires if system else []):
