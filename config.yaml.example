@@ -3,6 +3,15 @@
 
 # Global settings
 settings:
+  # Opt-in policy gate for every mediated call. See ACTION_POLICY.md.
+  # shadow records verdicts and keeps running; enforce blocks on anything but allow.
+  action_policy:
+    mode: "off"  # off | shadow | enforce
+    # The external file owns semantic rules and classifier prompts. Inline
+    # values can override it, but no per-tool policy inventory is required.
+    policy_file: action-policy.yaml.example
+    validator:
+      model: null  # Existing key from models for a Decisions API model
   default_agent: "coordinator"
   max_history: 50
   max_turns: 100  # Increase turn limit for agents

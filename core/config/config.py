@@ -9,6 +9,7 @@ from pathlib import Path
 from functools import lru_cache
 import logging
 import ipaddress
+import copy
 from urllib.parse import urlparse
 
 from schemas import GridConfig, ProviderConfig, ModelConfig, AgentConfig, ToolConfig
@@ -48,6 +49,46 @@ class Config:
             return str(raw_path.resolve(strict=False))
 
         return str((self.config_path.parent.resolve() / raw_path).resolve(strict=False))
+
+    @staticmethod
+    def _merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """Recursively merge config mappings without mutating either input."""
+        merged = copy.deepcopy(base)
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = Config._merge_dicts(merged[key], value)
+            else:
+                merged[key] = copy.deepcopy(value)
+        return merged
+
+    def _load_action_policy_file(self, raw_config: Dict[str, Any]) -> None:
+        """Merge an external action-policy YAML before Pydantic validation."""
+        settings = raw_config.setdefault("settings", {})
+        policy = settings.get("action_policy")
+        if isinstance(policy, str):
+            policy = {"policy_file": policy}
+            settings["action_policy"] = policy
+        if not isinstance(policy, dict) or not policy.get("policy_file"):
+            return
+        policy_path = Path(
+            self._resolve_config_relative_path(str(policy["policy_file"])) or ""
+        )
+        if not policy_path.is_file():
+            raise ConfigError(f"Action policy file {policy_path} not found")
+        if policy_path.stat().st_size > 1024 * 1024:
+            raise ConfigError(f"Action policy file {policy_path} exceeds 1 MiB")
+        document = yaml.safe_load(policy_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(document, dict):
+            raise ConfigError("Action policy file must contain a YAML mapping")
+        if "settings" in document:
+            document = (document.get("settings") or {}).get("action_policy") or {}
+        elif "action_policy" in document:
+            document = document.get("action_policy") or {}
+        if not isinstance(document, dict):
+            raise ConfigError("External action_policy must be a YAML mapping")
+        if document.get("policy_file"):
+            raise ConfigError("Nested action policy files are not supported")
+        settings["action_policy"] = self._merge_dicts(document, policy)
     
     def _load_config(self) -> None:
         """Load and validate configuration from YAML file."""
@@ -57,6 +98,10 @@ class Config:
 
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 raw_config = yaml.safe_load(f)
+
+            if not isinstance(raw_config, dict):
+                raise ConfigError("Configuration root must be a YAML mapping")
+            self._load_action_policy_file(raw_config)
 
             # -----------------------------------------------------------------
             # Auto-attach base system tools for project configs

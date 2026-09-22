@@ -47,6 +47,7 @@ from agents.mcp.util import MCPUtil as _MCPUtil
 from core.managers.mcp_manager import ResilientMCPServerStdio
 
 from core.config.config import Config
+from core.action_policy import ActionGate, ActionRunState, ActionValidator
 from .context import ContextManager, safe_lock
 from schemas import AgentConfig, AgentExecution, ContextMessage
 from tools import get_tools_by_names
@@ -76,14 +77,32 @@ from core.compact import (
 # which kills the entire run. We wrap it so errors are returned as tool output.
 _original_invoke_mcp_tool = _MCPUtil.__dict__["invoke_mcp_tool"].__func__
 
+
 @classmethod  # type: ignore[misc]
 async def _invoke_mcp_tool_safe(cls, server, tool, context, input_json):  # type: ignore[override]
+    async def _invoke(ctx, args):
+        return await _original_invoke_mcp_tool(cls, server, tool, ctx, args)
+
+    raw_ctx = getattr(context, "context", None)
+    gate = getattr(getattr(raw_ctx, "factory", None), "action_gate", None)
     try:
-        result = await _original_invoke_mcp_tool(cls, server, tool, context, input_json)
+        if gate is not None:
+            result = await gate.invoke(
+                getattr(tool, "name", "mcp_tool"),
+                "mcp",
+                context,
+                input_json,
+                _invoke,
+                descriptor=ActionGate.describe_tool(
+                    tool, getattr(tool, "name", "mcp_tool"), "mcp"
+                ),
+            )
+        else:
+            result = await _invoke(context, input_json)
         # Log the full result of the MCP tool call in verbose mode
         Logger("agent_factory").log_verbose(
             f"MCP TOOL RESULT: {tool.name}",
-            result if isinstance(result, str) else str(result)
+            result if isinstance(result, str) else str(result),
         )
         return result
     except ModelBehaviorError as e:
@@ -94,8 +113,13 @@ async def _invoke_mcp_tool_safe(cls, server, tool, context, input_json):  # type
             msg = f"Invalid JSON for tool '{tool.name}': {cause.msg} (input was: {input_json!r})"
         else:
             msg = f"Invalid JSON for tool '{tool.name}': {msg}"
-        logger.warning("MCP tool '%s' got invalid JSON from model — returning error to agent: %s", tool.name, msg)
+        logger.warning(
+            "MCP tool '%s' got invalid JSON from model — returning error to agent: %s",
+            tool.name,
+            msg,
+        )
         return msg
+
 
 _MCPUtil.invoke_mcp_tool = _invoke_mcp_tool_safe
 # -------------------------------------------------------------------------
@@ -222,6 +246,7 @@ def _patch_run_impl_tool_name_normalization() -> None:
     except Exception:
         pass  # Patch is best-effort; do not break startup if SDK internals change
 
+
 _patch_run_impl_tool_name_normalization()
 logger = logging.getLogger("grid.agent_factory")
 verbose_logger = logging.getLogger("grid.verbose")
@@ -243,16 +268,103 @@ def _get_runner() -> Any:
 class StreamObserver(Protocol):
     """Protocol for components that render streaming events."""
 
-    def handle_event(self, event: Any, *, agent_key: Optional[str] = None) -> Optional[str]:
+    def handle_event(
+        self, event: Any, *, agent_key: Optional[str] = None
+    ) -> Optional[str]:
         """Render a streaming event. Return text fragments to append to buffers if any."""
 
 
 # Helper class to mock the SDK's ToolContext for auto-run tools
 class AutoRunToolContext:
     """Mock context that mimics SDK's ToolContext for direct tool invocation."""
+
     def __init__(self, context: Any, tool_name: str = ""):
         self.context = context
         self.tool_name = tool_name
+
+
+REASONING_DELTA_EVENTS = (
+    "response.reasoning_text.delta",
+    "response.reasoning_summary_text.delta",
+)
+
+#: Stream events whose ``delta`` is text the user is meant to read. Several
+#: other events carry a ``delta`` too - most importantly
+#: ``response.function_call_arguments.delta``, which streams a tool call's JSON
+#: arguments - so a text sink has to name what it accepts rather than take
+#: whatever has a delta on it.
+OUTPUT_DELTA_EVENTS = (
+    "response.output_text.delta",
+    "response.refusal.delta",
+)
+
+
+def is_output_delta(data_type: Optional[str]) -> bool:
+    """True when a raw event's delta belongs in the answer.
+
+    An event that names itself must be on the list. An event that does not name
+    itself is a provider shape the SDK did not normalize; those are still
+    accepted, because dropping them would silence that provider entirely.
+    """
+    return data_type is None or data_type in OUTPUT_DELTA_EVENTS
+
+
+def field_of(obj: Any, *names: str) -> Any:
+    """First non-empty attribute/key among ``names``, on an object or a dict."""
+    for name in names:
+        if obj is None:
+            continue
+        if isinstance(obj, dict) and name in obj:
+            return obj.get(name)
+        value = getattr(obj, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def append_action_reasoning(action_state: Any, event: Any) -> None:
+    """Append one reasoning delta to the state of this run only."""
+    if not isinstance(action_state, ActionRunState) or not isinstance(
+        event, RawResponsesStreamEvent
+    ):
+        return
+    data = getattr(event, "data", None)
+    if getattr(data, "type", None) not in REASONING_DELTA_EVENTS:
+        return
+    delta = getattr(data, "delta", None)
+    if isinstance(delta, str) and delta:
+        action_state.reasoning_text += delta
+
+
+def tool_event_info(item: Any) -> dict[str, Any]:
+    """Normalize a ``tool_called``/``tool_output`` stream item.
+
+    The SDK exposes tool identity in different shapes depending on the provider
+    (function call, MCP call, hosted tool), so every consumer needs the same
+    defensive unwrapping.
+    """
+    raw_item = getattr(item, "raw_item", None)
+    function_data = field_of(raw_item, "function") or field_of(item, "function")
+    tool_name = (
+        field_of(raw_item, "name", "tool_name")
+        or field_of(function_data, "name")
+        or field_of(item, "name", "tool_name")
+    )
+    raw_type = field_of(raw_item, "type") or field_of(item, "type")
+    if not tool_name and raw_type not in {"function_call_output", "tool_call_output"}:
+        tool_name = raw_type
+    call_id = field_of(raw_item, "call_id", "id") or field_of(item, "call_id", "id")
+    output = field_of(item, "output")
+    if output is None:
+        output = field_of(raw_item, "output")
+    return {
+        "tool_name": tool_name,
+        "server_label": field_of(raw_item, "server_label")
+        or field_of(item, "server_label"),
+        "call_id": str(call_id) if call_id else None,
+        "arguments": field_of(raw_item, "arguments") or field_of(item, "arguments"),
+        "output": output,
+    }
 
 
 class ConsoleStreamObserver:
@@ -315,44 +427,6 @@ class ConsoleStreamObserver:
         if seconds < 1:
             return f"{seconds * 1000:.0f}ms"
         return f"{seconds:.2f}s"
-
-    @staticmethod
-    def _get_value(obj: Any, *names: str) -> Any:
-        for name in names:
-            if obj is None:
-                continue
-            if isinstance(obj, dict) and name in obj:
-                return obj.get(name)
-            value = getattr(obj, name, None)
-            if value is not None:
-                return value
-        return None
-
-    @classmethod
-    def _extract_tool_event_info(cls, item: Any) -> dict[str, Any]:
-        raw_item = getattr(item, "raw_item", None)
-        function_data = cls._get_value(raw_item, "function") or cls._get_value(item, "function")
-        tool_name = (
-            cls._get_value(raw_item, "name", "tool_name")
-            or cls._get_value(function_data, "name")
-            or cls._get_value(item, "name", "tool_name")
-        )
-        raw_type = cls._get_value(raw_item, "type") or cls._get_value(item, "type")
-        if not tool_name and raw_type not in {"function_call_output", "tool_call_output"}:
-            tool_name = raw_type
-        server_label = cls._get_value(raw_item, "server_label") or cls._get_value(item, "server_label")
-        call_id = cls._get_value(raw_item, "call_id", "id") or cls._get_value(item, "call_id", "id")
-        arguments = cls._get_value(raw_item, "arguments") or cls._get_value(item, "arguments")
-        output = cls._get_value(item, "output")
-        if output is None:
-            output = cls._get_value(raw_item, "output")
-        return {
-            "tool_name": tool_name,
-            "server_label": server_label,
-            "call_id": str(call_id) if call_id else None,
-            "arguments": arguments,
-            "output": output,
-        }
 
     def _remember_tool_call(
         self,
@@ -428,7 +502,9 @@ class ConsoleStreamObserver:
         call_id: Optional[str] = None,
     ) -> None:
         args_str = self._format_args(arguments)
-        self._remember_tool_call(agent_key, tool_display_name, arguments, call_id=call_id)
+        self._remember_tool_call(
+            agent_key, tool_display_name, arguments, call_id=call_id
+        )
         if self._renderer:
             self._renderer.print_tool_call(
                 tool_display_name,
@@ -468,33 +544,41 @@ class ConsoleStreamObserver:
         else:
             self._emit(f"[tool-result] {display_name} -> {output_str}")
 
-    def handle_event(self, event: Any, *, agent_key: Optional[str] = None) -> Optional[str]:
+    def handle_event(
+        self, event: Any, *, agent_key: Optional[str] = None
+    ) -> Optional[str]:
         try:
             if isinstance(event, RunItemStreamEvent):
                 self._flush_reasoning_now()
                 name = getattr(event, "name", "")
                 item = getattr(event, "item", None)
                 if name == "tool_called" and item is not None:
-                    info = self._extract_tool_event_info(item)
+                    info = tool_event_info(item)
                     tool_name = info.get("tool_name") or "tool"
                     arguments = info.get("arguments")
                     args_str = self._format_args(arguments)
                     server_label = info.get("server_label")
-                    tool_display_name = f"{server_label}.{tool_name}" if server_label else tool_name
+                    tool_display_name = (
+                        f"{server_label}.{tool_name}" if server_label else tool_name
+                    )
                     self.tool_call_started(
                         agent_key,
                         tool_display_name,
                         arguments,
                         call_id=info.get("call_id"),
                     )
-                    Logger("stream").log_verbose(f"STREAM TOOL CALL: {tool_display_name}", arguments)
+                    Logger("stream").log_verbose(
+                        f"STREAM TOOL CALL: {tool_display_name}", arguments
+                    )
 
                 elif name == "tool_output" and item is not None:
-                    info = self._extract_tool_event_info(item)
+                    info = tool_event_info(item)
                     tool_name = info.get("tool_name")
                     server_label = info.get("server_label")
                     event_tool_display_name = (
-                        f"{server_label}.{tool_name}" if server_label and tool_name else tool_name
+                        f"{server_label}.{tool_name}"
+                        if server_label and tool_name
+                        else tool_name
                     )
                     output_val = info.get("output")
                     if output_val is None:
@@ -505,7 +589,10 @@ class ConsoleStreamObserver:
                         output_val,
                         call_id=info.get("call_id"),
                     )
-                    Logger("stream").log_verbose(f"STREAM TOOL OUTPUT: {event_tool_display_name or 'tool'}", output_val)
+                    Logger("stream").log_verbose(
+                        f"STREAM TOOL OUTPUT: {event_tool_display_name or 'tool'}",
+                        output_val,
+                    )
 
                 elif name == "handoff_requested" and item is not None:
                     src = getattr(item, "agent", None)
@@ -550,7 +637,7 @@ class ConsoleStreamObserver:
                     data = event.data
                     data_type = getattr(data, "type", None)
 
-                    if data_type in ("response.reasoning_text.delta", "response.reasoning_summary_text.delta"):
+                    if data_type in REASONING_DELTA_EVENTS:
                         delta_text = getattr(data, "delta", None)
                         if isinstance(delta_text, str) and delta_text.strip():
                             self.reasoning_text += delta_text
@@ -569,9 +656,18 @@ class ConsoleStreamObserver:
                     elif hasattr(data, "text") and data.text:
                         content = data.text
                     elif isinstance(data, dict):
-                        content = data.get("content") or data.get("delta") or data.get("text")
+                        content = (
+                            data.get("content") or data.get("delta") or data.get("text")
+                        )
 
-                has_content = bool(content and isinstance(content, str) and content.strip())
+                if not is_output_delta(data_type):
+                    # A delta from a non-text event (tool call arguments, audio,
+                    # code interpreter) is not part of the answer.
+                    return None
+
+                has_content = bool(
+                    content and isinstance(content, str) and content.strip()
+                )
                 # Flush buffered reasoning only when real (non-reasoning) content starts
                 # or the response reaches a terminal boundary. Some providers (e.g.
                 # OpenRouter GLM/DeepSeek) emit an interleaved empty
@@ -611,10 +707,18 @@ class GridRunContext:
     agent_id: Optional[str] = None  # Agent identifier for isolation
     metadata: Optional[dict] = None  # Additional metadata from context manager
     container_id: Optional[str] = None  # Docker container ID for isolation
-    pipeline_id: Optional[str] = None  # Shared serial pipeline for nested agent/tool trees
+    pipeline_id: Optional[str] = (
+        None  # Shared serial pipeline for nested agent/tool trees
+    )
     step_id: Optional[str] = None  # Current serialized execution step
     parent_step_id: Optional[str] = None  # Parent serialized execution step
     execution_mode: Optional[str] = None  # Runtime execution mode (e.g. serial_subtree)
+    action_state: Optional[Any] = (
+        None  # Trusted task and call chain for the policy gate
+    )
+    action_depth: int = (
+        0  # Context-local delegation depth (safe across parallel branches)
+    )
 
 
 class AgentFactory:
@@ -627,7 +731,7 @@ class AgentFactory:
     - Comprehensive logging and tracing
     - Session-based memory for agents
     """
-    
+
     def __init__(
         self,
         config: Optional[Config] = None,
@@ -639,6 +743,7 @@ class AgentFactory:
         unified_memory: Optional[Any] = None,
         memory_store: Optional[Any] = None,
         container_id: Optional[str] = None,
+        policy_config: Optional[Config] = None,
     ):
         """
         Initialize Agent Factory.
@@ -652,14 +757,17 @@ class AgentFactory:
             unified_memory: UnifiedMemory instance for hybrid memory management (deprecated)
             memory_store: MemoryStore instance for SQLite-based memory (new)
             container_id: Docker container ID for isolation
+            policy_config: Config whose action policy and model registry win over
+                this factory's own config (the root routing config when the CLI
+                routes a message between systems)
         """
         if tracing_level is not None:
             self._configure_tracing_once(tracing_level)
-        
+
         # Set up minimal logging for agents SDK to avoid spam
         agents_logger = logging.getLogger("openai.agents")
         agents_logger.setLevel(logging.WARNING)
-        
+
         self.config = config or Config()
         self.container_id = container_id
         if working_directory:
@@ -669,13 +777,15 @@ class AgentFactory:
         # so they use the correct working directory and model settings
         try:
             from tools.semantic_tools import set_semantic_config
+
             set_semantic_config(self.config)
         except ImportError:
             pass
 
         # Initialize image processing config
         from utils.image_utils import ImageUtils
-        if hasattr(self.config.config, 'settings'):
+
+        if hasattr(self.config.config, "settings"):
             ImageUtils.set_config(self.config.config.settings.image_processing)
 
         # Initialize managers
@@ -686,7 +796,7 @@ class AgentFactory:
         else:
             self.context_manager = ContextManager(
                 max_history=self.config.get_max_history(),
-                persist_path="logs/context.json"  # Saving context to file for persistence
+                persist_path="logs/context.json",  # Saving context to file for persistence
             )
             self.unified_memory = None
 
@@ -707,48 +817,57 @@ class AgentFactory:
             # Create default memory store
             from core.memory.store import MemoryStore
             from pathlib import Path
+
             db_path = Path(self.config.get_working_directory()) / "data" / "memory.db"
             self.memory_store = MemoryStore(db_path=str(db_path), config=self.config)
             logger.info("MemoryStore initialized: %s", db_path)
 
         # Initialize MemoryOptimizer
         from core.memory.optimizer import MemoryOptimizer
-        
+
         self.memory_optimizer = MemoryOptimizer(
-            memory_store=self.memory_store,
-            config=self.config,
-            agent_factory=self
+            memory_store=self.memory_store, config=self.config, agent_factory=self
         )
         logger.info("MemoryOptimizer initialized")
 
         # Initialize SkillManager
         from pathlib import Path
+
         self.skill_manager = SkillManager(
             memory_store=self.memory_store,
-            workspace_root=Path(self.config.get_working_directory())
+            workspace_root=Path(self.config.get_working_directory()),
         )
         logger.info("SkillManager initialized")
 
         # Initialize ContainerManager
         from core.managers.container_manager import ContainerManager, CONTAINER_WORKDIR
+
         self.container_manager = ContainerManager(self.config)
         self._container_workdir = CONTAINER_WORKDIR
         if self.container_id:
-            logger.info("AgentFactory initialized with container isolation: %s", self.container_id)
+            logger.info(
+                "AgentFactory initialized with container isolation: %s",
+                self.container_id,
+            )
 
         # Telegram integration components
         self.broadcaster = broadcaster
-        
+
         # Caches
         self._agent_cache: Dict[str, Agent] = {}
         self._tool_cache: Dict[str, List[Any]] = {}
         self._mcp_servers: Dict[str, Any] = {}
-        
+
         # Session management for agent memory (per agent/context pair)
         self._agent_sessions = self._runtime_support.agent_sessions
         # Track emitted warnings to avoid log spam (e.g., Responses API fallbacks)
         self._responses_warning_keys: set[str] = set()
-        self._stream_observer: StreamObserver = stream_observer or ConsoleStreamObserver()
+        self._stream_observer: StreamObserver = (
+            stream_observer or ConsoleStreamObserver()
+        )
+
+        # One policy gate per factory, snapshotted from operator configuration.
+        self.action_gate = self._build_action_gate(policy_config)
 
         # Track logged agents to log prompt only once
         self._logged_agents: set[str] = set()
@@ -761,10 +880,137 @@ class AgentFactory:
 
         # Initialize pipeline registry for emergency shutdown
         from core.tracing.pipeline_registry import PipelineRegistry
+
         self._pipeline_registry = PipelineRegistry()
         # Link memory_store to registry for persistence
         self._pipeline_registry._memory_store = self.memory_store
         logger.info("PipelineRegistry initialized")
+
+    def _build_action_gate(
+        self, policy_config: Optional[Config]
+    ) -> Optional[ActionGate]:
+        """Snapshot the policy for this factory. Operator configuration only.
+
+        The routing config wins when it enables a policy, so a routed system is
+        mediated by the host's policy and validator model without repeating them
+        in every system config. Unknown validator model keys fail here.
+        """
+        for candidate in (policy_config, self.config):
+            if candidate is None:
+                continue
+            policy = getattr(candidate.config.settings, "action_policy", None)
+            if policy is None or policy.mode == "off":
+                continue
+            gate = ActionGate(policy, validator=ActionValidator.from_config(candidate))
+            logger.info(
+                "Action policy enabled: mode=%s version=%s kinds=%s chain=%s",
+                policy.mode,
+                policy.version,
+                ",".join(policy.kinds),
+                policy.check_chain,
+            )
+            return gate
+        return None
+
+    def _action_state(self, task: str, parent: Any = None) -> Optional[ActionRunState]:
+        """Trusted task for a run: one chain and one budget per user task."""
+        if self.action_gate is None:
+            return None
+        if isinstance(parent, ActionRunState):
+            return parent
+        return ActionRunState(task=task if isinstance(task, str) else str(task))
+
+    @staticmethod
+    def _policy_message_text(content: Any) -> str:
+        """Extract user-authored text without carrying image payloads."""
+        if not isinstance(content, str):
+            return str(content)
+        stripped = content.strip()
+        if not stripped.startswith(("{", "[")):
+            return content
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            return content
+        messages = payload if isinstance(payload, list) else [payload]
+        parts: list[str] = []
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            body = item.get("content")
+            if isinstance(body, str):
+                parts.append(body)
+            elif isinstance(body, list):
+                for part in body:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") in {"text", "input_text"}:
+                        text = part.get("text")
+                        if isinstance(text, str):
+                            parts.append(text)
+        return "\n".join(parts) or "[multimodal user request]"
+
+    def _policy_task(self, message: Any, context_id: Optional[str]) -> str:
+        """Build trusted task context from user messages, newest first on trim."""
+        if self.action_gate is None:
+            return str(message)
+        policy = self.action_gate.config
+        prior: list[str] = []
+        if context_id:
+            snapshot = self.context_manager.get_context_messages(
+                context_id,
+                limit=policy.max_task_context_messages * 2,
+                preview_limit=policy.max_task_context_bytes,
+                include_full=True,
+            )
+            for item in (snapshot or {}).get("messages", []):
+                if item.get("role") != "user":
+                    continue
+                content = item.get("content", item.get("preview", ""))
+                text = self._policy_message_text(content).strip()
+                if text:
+                    prior.append(text)
+        current = self._policy_message_text(message).strip()
+        if not prior or prior[-1] != current:
+            prior.append(current)
+        prior = prior[-policy.max_task_context_messages :]
+        while prior:
+            task = "\n\n".join(
+                f"User instruction {index + 1}:\n{text}"
+                for index, text in enumerate(prior)
+            )
+            if len(task.encode("utf-8")) <= policy.max_task_context_bytes:
+                return task
+            prior.pop(0)
+        encoded = current.encode("utf-8")[-policy.max_task_context_bytes :]
+        return encoded.decode("utf-8", "ignore")
+
+    def _wrap_tool_with_policy(self, tool: Any, tool_name: str, kind: str) -> Any:
+        """Route a call through the policy gate of the factory that runs it.
+
+        Tool objects are shared between agents and factories, so the gate is
+        resolved from the run context and the wrapper is applied once.
+        """
+        if not hasattr(tool, "on_invoke_tool") or getattr(
+            tool, "_grid_policy_gated", False
+        ):
+            return tool
+        inner = tool.on_invoke_tool
+        descriptor = ActionGate.describe_tool(tool, tool_name, kind)
+
+        async def gated_invoke(ctx, args):
+            raw_ctx = getattr(ctx, "context", None)
+            factory = getattr(raw_ctx, "factory", None) or self
+            gate = getattr(factory, "action_gate", None)
+            if gate is None:
+                return await inner(ctx, args)
+            return await gate.invoke(
+                tool_name, kind, ctx, args, inner, descriptor=descriptor
+            )
+
+        tool.on_invoke_tool = gated_invoke
+        tool._grid_policy_gated = True
+        return tool
 
     def _build_agent_session_db_path(self) -> str:
         """Return durable SQLite path for agent sessions."""
@@ -866,7 +1112,9 @@ class AgentFactory:
         if extra:
             for key, value in extra.items():
                 if value is not None:
-                    event[key] = self._safe_preview(value, max_length=preview_limit or 300)
+                    event[key] = self._safe_preview(
+                        value, max_length=preview_limit or 300
+                    )
         pending = self.context_manager.get_metadata("pending_agent_run")
         if not isinstance(pending, dict):
             pending = {}
@@ -953,14 +1201,23 @@ class AgentFactory:
                 return
             tracing_config.configure_console_tracing(level)
             # Timeline tracer: same DB path as serve_timeline / configure_tracing_from_env
-            if os.getenv("GRID_TIMELINE_ENABLED", "true").lower() not in ("0", "false", "no"):
+            if os.getenv("GRID_TIMELINE_ENABLED", "true").lower() not in (
+                "0",
+                "false",
+                "no",
+            ):
                 try:
                     from core.tracing.tracer import get_tracer
+
                     timeline_exporter = get_tracer()
-                    timeline_processor = ImmediateTraceProcessor(timeline_exporter, export_span_start=True)
+                    timeline_processor = ImmediateTraceProcessor(
+                        timeline_exporter, export_span_start=True
+                    )
                     tracing_config._processors.append(timeline_processor)
                 except Exception as e:
-                    logging.getLogger("grid.tracing").warning(f"Timeline tracer init failed: {e}")
+                    logging.getLogger("grid.tracing").warning(
+                        f"Timeline tracer init failed: {e}"
+                    )
             tracing_config.apply()
             _TRACING_CONFIGURED = True
 
@@ -974,7 +1231,7 @@ class AgentFactory:
         content: str,
         parent_id: Optional[str] = None,
         status: str = "running",
-        details: Optional[Dict[str, Any]] = None
+        details: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Emit progress event to LiveTransparencyBroadcaster.
@@ -1001,7 +1258,7 @@ class AgentFactory:
                 parent_id=parent_id,
                 status=status,
                 timestamp=datetime.now().isoformat(),
-                details=details or {}
+                details=details or {},
             )
 
             await self.broadcaster.emit_event(event)
@@ -1031,7 +1288,7 @@ class AgentFactory:
     async def initialize(self) -> None:
         """Async init hook for compatibility with API lifespan."""
         return None
-    
+
     # ---------------------------------------------------------------------
     # Lightweight model resolution helpers for API (e.g., Cline endpoint)
     # ---------------------------------------------------------------------
@@ -1047,8 +1304,12 @@ class AgentFactory:
         """
         try:
             # Get allowed_models from settings
-            if hasattr(self.config, 'config') and hasattr(self.config.config, 'settings'):
-                allowed_models = getattr(self.config.config.settings, 'allowed_models', None)
+            if hasattr(self.config, "config") and hasattr(
+                self.config.config, "settings"
+            ):
+                allowed_models = getattr(
+                    self.config.config.settings, "allowed_models", None
+                )
 
                 # If no whitelist configured or empty list, allow all models
                 if allowed_models is None or len(allowed_models) == 0:
@@ -1072,7 +1333,9 @@ class AgentFactory:
             )
             return True
         except Exception as e:
-            logger.warning(f"Failed to check model whitelist: {e}, allowing model by default")
+            logger.warning(
+                f"Failed to check model whitelist: {e}, allowing model by default"
+            )
             return True
 
     def resolve_model_key(self, key: Optional[str]) -> str:
@@ -1113,11 +1376,11 @@ class AgentFactory:
     def get_openai_client_for_model(self, model_key: str) -> tuple[AsyncOpenAI, str]:
         """Create OpenAI client and return (client, model_name) using configuration."""
         return self._runtime_support.get_openai_client_for_model(model_key)
-    
+
     def _get_agent_session(self, agent_key: str, context_id: str) -> SQLiteSession:
         """Get or create a session scoped to an agent/context pair."""
         return self._runtime_support.get_agent_session(agent_key, context_id)
-    
+
     def _is_reasoning_model_name(self, model_name: str) -> bool:
         """Heuristic check for reasoning-style models requiring Responses API."""
         return self._runtime_support.is_reasoning_model_name(model_name)
@@ -1143,7 +1406,9 @@ class AgentFactory:
           reasoning: {enabled: false}    → extra_body {"reasoning": {"enabled": false}} (OpenRouter etc.)
         """
         max_tokens = getattr(model_config, "max_tokens", None)
-        reasoning_cfg: Optional[Dict[str, Any]] = getattr(model_config, "reasoning", None)
+        reasoning_cfg: Optional[Dict[str, Any]] = getattr(
+            model_config, "reasoning", None
+        )
         if not reasoning_cfg:
             return ModelSettings(
                 max_tokens=max_tokens,
@@ -1169,34 +1434,34 @@ class AgentFactory:
             extra_body=extra_body,
             parallel_tool_calls=False,
         )
-    
+
     async def create_agent(
-        self, 
-        agent_key: str, 
+        self,
+        agent_key: str,
         context_path: Optional[str] = None,
-        force_reload: bool = False
+        force_reload: bool = False,
     ) -> Agent:
         """
         Create or retrieve cached agent.
-        
+
         Args:
             agent_key: Agent configuration key
             context_path: Optional context path for agent
             force_reload: Force recreation even if cached
-            
+
         Returns:
             Configured Agent instance
-            
+
         Raises:
             AgentError: If agent creation fails
             ConfigError: If configuration is invalid
         """
         # Use agent_key only for caching to ensure consistent sessions
         cache_key = agent_key
-        
+
         if not force_reload and cache_key in self._agent_cache:
             return self._agent_cache[cache_key]
-        
+
         try:
             # Get configurations
             agent_config = self.config.get_agent(agent_key)
@@ -1210,10 +1475,10 @@ class AgentFactory:
                     f"API key not found for provider '{model_config.provider}'",
                     details={
                         "provider": model_config.provider,
-                        "env_var": provider_config.api_key_env
-                    }
+                        "env_var": provider_config.api_key_env,
+                    },
                 )
-            
+
             # Create OpenAI client (with optional proxy for API requests)
             client = self._make_openai_client(
                 api_key=api_key,
@@ -1222,7 +1487,7 @@ class AgentFactory:
                 max_retries=provider_config.max_retries,
                 provider_key=model_config.provider,
             )
-            
+
             # Create model (auto-switch to Responses API for reasoning models if available)
             model = None
             use_responses = False
@@ -1230,7 +1495,7 @@ class AgentFactory:
                 use_responses = bool(getattr(model_config, "use_responses_api", False))
             except Exception:
                 use_responses = False
-            
+
             # Allow Responses API only for OpenAI provider
             base_url_lower = (provider_config.base_url or "").lower()
             provider_supports_responses = "api.openai.com" in base_url_lower
@@ -1252,9 +1517,9 @@ class AgentFactory:
                 try:
                     # Lazy import to not require newer SDK if not installed
                     from agents import OpenAIResponsesModel  # type: ignore
+
                     model = OpenAIResponsesModel(
-                        model=model_config.name,
-                        openai_client=client
+                        model=model_config.name, openai_client=client
                     )
 
                 except Exception as e:
@@ -1262,7 +1527,8 @@ class AgentFactory:
                     if warn_key not in self._responses_warning_keys:
                         self._responses_warning_keys.add(warn_key)
                         logger.warning(
-                            "Failed to initialize Responses model: %s", e,
+                            "Failed to initialize Responses model: %s",
+                            e,
                             extra={
                                 "provider": model_config.provider,
                                 "base_url": provider_config.base_url,
@@ -1270,21 +1536,23 @@ class AgentFactory:
                             },
                         )
                     use_responses = False
-            
+
             if model is None:
                 model = VisionChatCompletionsModel(
                     model=model_config.name,
                     openai_client=client,
-                    preserve_reasoning_content=getattr(model_config, "preserve_reasoning_content", False),
+                    preserve_reasoning_content=getattr(
+                        model_config, "preserve_reasoning_content", False
+                    ),
                 )
-            
+
             # Build instructions with context (include conversation context for agents)
             instructions = self._build_agent_instructions(
                 agent_key,
                 context_path,
                 include_conversation_context=False,
             )
-            
+
             # Get tools (function and agent tools only; MCP tools handled via mcp_servers)
             tools = await self._get_agent_tools(agent_config, agent_key=agent_key)
 
@@ -1299,7 +1567,9 @@ class AgentFactory:
                     continue
 
             mcp_servers_list: list[Any] = []
-            if mcp_server_names and (agent_config.mcp_enabled or self.config.is_mcp_enabled()):
+            if mcp_server_names and (
+                agent_config.mcp_enabled or self.config.is_mcp_enabled()
+            ):
                 mcp_servers_list = await self._create_mcp_servers(mcp_server_names)
 
             # Create agent
@@ -1317,14 +1587,16 @@ class AgentFactory:
             # in run_agent() when handling the first request — see _initialized_agents.
 
             self._agent_cache[cache_key] = agent
-            
+
             return agent
-            
+
         except Exception as e:
             error_msg = f"Failed to create agent '{agent_key}': {e}"
             raise AgentError(error_msg, details={"agent_key": agent_key}) from e
 
-    def _substitute_tool_params(self, tool_params: dict, working_dir: str, user_message: str = "") -> dict:
+    def _substitute_tool_params(
+        self, tool_params: dict, working_dir: str, user_message: str = ""
+    ) -> dict:
         """Substitute template variables in tool parameters."""
         result = {}
         for k, v in tool_params.items():
@@ -1361,29 +1633,47 @@ class AgentFactory:
             tool_params = self._substitute_tool_params(
                 dict(auto_tool.get("parameters", {})), working_dir, user_message
             )
-            target_tool = next((t for t in tools if getattr(t, "name", "") == tool_name), None)
+            target_tool = next(
+                (t for t in tools if getattr(t, "name", "") == tool_name), None
+            )
             if target_tool and hasattr(target_tool, "on_invoke_tool"):
-                logger.info(f"Auto-running tool '{tool_name}' for agent '{agent_key}' (cwd={working_dir}, every_run={every_run})")
+                logger.info(
+                    f"Auto-running tool '{tool_name}' for agent '{agent_key}' (cwd={working_dir}, every_run={every_run})"
+                )
                 try:
                     if hasattr(self._stream_observer, "tool_call_started"):
-                        self._stream_observer.tool_call_started(agent_key, tool_name, tool_params)
-                    tool_ctx_wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
+                        self._stream_observer.tool_call_started(
+                            agent_key, tool_name, tool_params
+                        )
+                    tool_ctx_wrapper = AutoRunToolContext(
+                        run_context, tool_name=tool_name
+                    )
                     tool_result = await target_tool.on_invoke_tool(
                         tool_ctx_wrapper, json.dumps(tool_params)
                     )
                     if hasattr(self._stream_observer, "tool_call_finished"):
-                        self._stream_observer.tool_call_finished(agent_key, tool_name, tool_result)
+                        self._stream_observer.tool_call_finished(
+                            agent_key, tool_name, tool_result
+                        )
                     # Log the full result of the auto-run tool call in verbose mode
                     Logger("agent_factory").log_verbose(
                         f"AUTO-RUN TOOL RESULT: {tool_name}",
-                        tool_result if isinstance(tool_result, str) else str(tool_result)
+                        (
+                            tool_result
+                            if isinstance(tool_result, str)
+                            else str(tool_result)
+                        ),
                     )
                     result_parts.append(
                         f"\n\n=== AUTO-RUN TOOL RESULT '{tool_name}' ===\n{tool_result}\n"
                     )
-                    logger.debug(f"Injected auto-run result of '{tool_name}' into instructions")
+                    logger.debug(
+                        f"Injected auto-run result of '{tool_name}' into instructions"
+                    )
                 except Exception as tool_err:
-                    logger.warning(f"⚠️ Error in auto-run tool '{tool_name}': {tool_err}")
+                    logger.warning(
+                        f"⚠️ Error in auto-run tool '{tool_name}': {tool_err}"
+                    )
         return "".join(result_parts)
 
     async def _execute_init_tools(
@@ -1407,7 +1697,11 @@ class AgentFactory:
             Combined result string ready to be prepended to agent instructions.
         """
         result_parts: List[str] = []
-        working_dir = "/" if getattr(self, "container_id", None) else self.config.get_working_directory()
+        working_dir = (
+            "/"
+            if getattr(self, "container_id", None)
+            else self.config.get_working_directory()
+        )
         for spec in init_tools:
             tool_name = spec.get("name")
             tool_params = self._substitute_tool_params(
@@ -1425,19 +1719,27 @@ class AgentFactory:
                         or getattr(run_context, "agent_id", None)
                     )
                     if not agent_key:
-                        agent_key = getattr(getattr(run_context, "context", None), "agent_key", None)
+                        agent_key = getattr(
+                            getattr(run_context, "context", None), "agent_key", None
+                        )
                     if not agent_key:
                         agent_key = "dynamic-agent"
                     if hasattr(self._stream_observer, "tool_call_started"):
-                        self._stream_observer.tool_call_started(agent_key, tool_name, tool_params)
+                        self._stream_observer.tool_call_started(
+                            agent_key, tool_name, tool_params
+                        )
                     wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
-                    result = await target_tool.on_invoke_tool(wrapper, json.dumps(tool_params))
+                    result = await target_tool.on_invoke_tool(
+                        wrapper, json.dumps(tool_params)
+                    )
                     if hasattr(self._stream_observer, "tool_call_finished"):
-                        self._stream_observer.tool_call_finished(agent_key, tool_name, result)
+                        self._stream_observer.tool_call_finished(
+                            agent_key, tool_name, result
+                        )
                     # Log the full result of the init tool call in verbose mode
                     Logger("agent_factory").log_verbose(
                         f"INIT TOOL RESULT: {tool_name}",
-                        result if isinstance(result, str) else str(result)
+                        result if isinstance(result, str) else str(result),
                     )
                     result_parts.append(
                         f"\n\n=== CONTEXT [{tool_name}] ===\n{result}\n"
@@ -1445,7 +1747,9 @@ class AgentFactory:
                 except Exception as e:
                     logger.warning(f"⚠️ init_tool '{tool_name}' error: {e}")
             else:
-                logger.warning(f"⚠️ init_tool '{tool_name}' not found in agent's tool list")
+                logger.warning(
+                    f"⚠️ init_tool '{tool_name}' not found in agent's tool list"
+                )
         return "".join(result_parts)
 
     # ---------------------------------------------------------------------
@@ -1472,8 +1776,12 @@ class AgentFactory:
         # Get allowed models list for logging
         allowed_models = []
         try:
-            if hasattr(self.config, 'config') and hasattr(self.config.config, 'settings'):
-                allowed_models = getattr(self.config.config.settings, 'allowed_models', [])
+            if hasattr(self.config, "config") and hasattr(
+                self.config.config, "settings"
+            ):
+                allowed_models = getattr(
+                    self.config.config.settings, "allowed_models", []
+                )
         except Exception:
             pass
 
@@ -1500,7 +1808,7 @@ class AgentFactory:
                     "agent_name": name,
                     "allowed_models": allowed_models,
                     "validation_status": "FAILED",
-                }
+                },
             )
             raise AgentError(
                 error_msg,
@@ -1508,7 +1816,7 @@ class AgentFactory:
                     "model_key": resolved_model_key,
                     "agent_name": name,
                     "allowed_models": allowed_models,
-                }
+                },
             )
 
         # Log successful validation
@@ -1539,7 +1847,9 @@ class AgentFactory:
             model = VisionChatCompletionsModel(
                 model=model_name,
                 openai_client=client,
-                preserve_reasoning_content=getattr(model_cfg, "preserve_reasoning_content", False),
+                preserve_reasoning_content=getattr(
+                    model_cfg, "preserve_reasoning_content", False
+                ),
             )
 
         tools: List[Any] = []
@@ -1550,8 +1860,11 @@ class AgentFactory:
         try:
             context_id = self.get_active_context_id()
             if context_id:
-                pipeline = await self._pipeline_registry.get_pipeline_by_context(context_id)
+                pipeline = await self._pipeline_registry.get_pipeline_by_context(
+                    context_id
+                )
                 from core.tracing.pipeline_registry import PipelineStatus
+
                 if pipeline and pipeline.status == PipelineStatus.RUNNING:
                     if "emergency_shutdown" not in effective_tool_names:
                         effective_tool_names.append("emergency_shutdown")
@@ -1560,7 +1873,9 @@ class AgentFactory:
                         )
         except Exception as e:
             # Don't fail agent creation if pipeline check fails
-            logger.warning(f"Failed to check pipeline for emergency_shutdown auto-add: {e}")
+            logger.warning(
+                f"Failed to check pipeline for emergency_shutdown auto-add: {e}"
+            )
 
         # Gather all tool names (including MCP)
         all_tool_names = list(effective_tool_names)
@@ -1568,9 +1883,13 @@ class AgentFactory:
             all_tool_names.extend(mcp_tool_names)
 
         if effective_tool_names:
-            tools, inferred_mcp = await self._resolve_tools_for_names(effective_tool_names)
+            tools, inferred_mcp = await self._resolve_tools_for_names(
+                effective_tool_names
+            )
             if inferred_mcp:
-                mcp_tool_names = list(dict.fromkeys([*(mcp_tool_names or []), *inferred_mcp]))
+                mcp_tool_names = list(
+                    dict.fromkeys([*(mcp_tool_names or []), *inferred_mcp])
+                )
                 # Add inferred_mcp to all_tool_names, removing duplicates
                 for mcp_name in inferred_mcp:
                     if mcp_name not in all_tool_names:
@@ -1582,16 +1901,16 @@ class AgentFactory:
                 mcp_servers_list = await self._create_mcp_servers(mcp_tool_names)
 
         # Add prompt_addition from tool configuration to instructions
-        enhanced_instructions = self._build_dynamic_agent_instructions(instructions, all_tool_names)
+        enhanced_instructions = self._build_dynamic_agent_instructions(
+            instructions, all_tool_names
+        )
 
         # Load system_skills and prepend to instructions
         if system_skills:
             for skill_name in system_skills:
                 skill_content = self._load_system_skill(skill_name)
                 if skill_content:
-                    enhanced_instructions = (
-                        f"## System Skill: {skill_name}\n\n{skill_content}\n\n{enhanced_instructions}"
-                    )
+                    enhanced_instructions = f"## System Skill: {skill_name}\n\n{skill_content}\n\n{enhanced_instructions}"
 
         # Run init_tools and prepend results to instructions
         if init_tools:
@@ -1606,12 +1925,14 @@ class AgentFactory:
                 init_info = await self._execute_init_tools(init_tools, tools, temp_ctx)
                 if init_info:
                     enhanced_instructions = init_info + "\n\n" + enhanced_instructions
-                    logger.info(f"init_tools: injected {len(init_tools)} context result(s) into '{name}'")
+                    logger.info(
+                        f"init_tools: injected {len(init_tools)} context result(s) into '{name}'"
+                    )
             except Exception as e:
                 logger.warning(f"⚠️ init_tools failed for agent '{name}': {e}")
 
         # Log final tool configuration
-        function_tool_names = [getattr(t, '__name__', str(t)) for t in tools]
+        function_tool_names = [getattr(t, "__name__", str(t)) for t in tools]
         logger.info(
             f"Dynamic agent '{name}' created with {len(tools)} function tools and {len(mcp_servers_list)} MCP servers"
         )
@@ -1636,14 +1957,16 @@ class AgentFactory:
         )
         setattr(agent, "_grid_model_key", resolved_model_key)
         return agent
- 
+
     # ---------------------------------------------------------------------
     def _load_system_skill(self, skill_name: str) -> Optional[str]:
         """Load a system skill file, delegating to config."""
         return self.config._load_skill_file(skill_name)
 
     # ---------------------------------------------------------------------
-    async def _resolve_tools_for_names(self, tool_names: List[str]) -> tuple[List[Any], List[str]]:
+    async def _resolve_tools_for_names(
+        self, tool_names: List[str]
+    ) -> tuple[List[Any], List[str]]:
         """
         Resolve a mixed list of tool keys (function/agent/mcp from config) into:
         - tools: SDK tool instances (function tools + agent tools)
@@ -1680,13 +2003,18 @@ class AgentFactory:
 
         if agent_tools:
             try:
-                resolved.extend(await self._create_agent_tools(agent_tools))
+                resolved.extend(
+                    self._wrap_tool_with_policy(t, getattr(t, "name", "agent"), "agent")
+                    for t in await self._create_agent_tools(agent_tools)
+                )
             except Exception as exc:
                 logger.debug("Failed to resolve agent tools: %s", exc, exc_info=exc)
 
         return resolved, mcp_tools
 
-    def _build_dynamic_agent_instructions(self, base_instructions: str, tool_names: List[str]) -> str:
+    def _build_dynamic_agent_instructions(
+        self, base_instructions: str, tool_names: List[str]
+    ) -> str:
         """
         Build complete instructions for dynamic agent including tool prompt_additions.
 
@@ -1707,7 +2035,9 @@ class AgentFactory:
                     tool_descriptions.append(tool_config.prompt_addition)
             except Exception:
                 # Ignore unknown tools (for compatibility)
-                logger.debug(f"Tool '{tool_name}' not found in config, skipping prompt_addition")
+                logger.debug(
+                    f"Tool '{tool_name}' not found in config, skipping prompt_addition"
+                )
                 continue
 
         # If no tool descriptions, return base instructions + memory
@@ -1715,7 +2045,7 @@ class AgentFactory:
             return "\n\n".join(parts)
 
         # General rules for tools (if set)
-        common_rules = getattr(self.config.config.settings, 'tools_common_rules', None)
+        common_rules = getattr(self.config.config.settings, "tools_common_rules", None)
         if common_rules:
             parts.append("\nRules for using tools (general):")
             parts.append(str(common_rules))
@@ -1753,7 +2083,9 @@ class AgentFactory:
             )
         return compact_messages
 
-    def _compact_to_context_messages(self, messages: List[CompactMessage]) -> List[ContextMessage]:
+    def _compact_to_context_messages(
+        self, messages: List[CompactMessage]
+    ) -> List[ContextMessage]:
         """Convert CompactMessage objects back into persisted context messages."""
         context_messages: List[ContextMessage] = []
         for msg in messages:
@@ -1767,7 +2099,11 @@ class AgentFactory:
             if msg.is_compact_boundary:
                 metadata["is_compact_boundary"] = True
 
-            timestamp = msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat()
+            timestamp = (
+                msg.timestamp.isoformat()
+                if msg.timestamp
+                else datetime.now().isoformat()
+            )
             context_messages.append(
                 ContextMessage(
                     role=msg.role,
@@ -1778,13 +2114,17 @@ class AgentFactory:
             )
         return context_messages
 
-    def _replace_context_with_compact_messages(self, messages: List[CompactMessage]) -> None:
+    def _replace_context_with_compact_messages(
+        self, messages: List[CompactMessage]
+    ) -> None:
         """Persist compacted/truncated history into the active context."""
         self.context_manager.replace_conversation_history(
             self._compact_to_context_messages(messages)
         )
 
-    def _get_compact_client_and_model(self, key: Optional[str]) -> tuple[Optional[AsyncOpenAI], Optional[str]]:
+    def _get_compact_client_and_model(
+        self, key: Optional[str]
+    ) -> tuple[Optional[AsyncOpenAI], Optional[str]]:
         """Resolve the client/model to use for full compact."""
         compact_cfg = self.config.config.compact
         summary_model_key = getattr(compact_cfg, "summary_model", None)
@@ -1812,24 +2152,38 @@ class AgentFactory:
         # Compact integration: check token usage before running
         try:
             # Get current context messages for token check
-            current_context_id = context_id or self.context_manager.get_current_context_id()
+            current_context_id = (
+                context_id or self.context_manager.get_current_context_id()
+            )
             messages = self.context_manager._conversation_history
-            
+
             # Estimate current token usage
             compact_messages = self._context_to_compact_messages(messages)
-            current_tokens = estimate_messages_tokens(compact_messages) if compact_messages else 0
-            
+            current_tokens = (
+                estimate_messages_tokens(compact_messages) if compact_messages else 0
+            )
+
             # Get model context window and compact config from config.yaml
             agent_model_key = getattr(agent, "_grid_model_key", None)
             if not agent_model_key:
-                agent_identifier = getattr(agent, "_grid_agent_key", None) or (agent.name if hasattr(agent, 'name') else None)
+                agent_identifier = getattr(agent, "_grid_agent_key", None) or (
+                    agent.name if hasattr(agent, "name") else None
+                )
                 agent_model_key = self.resolve_model_key(agent_identifier)
-            model_config = self.config.get_model(agent_model_key) if agent_model_key else None
-            max_tokens = getattr(model_config, 'context_window', 128000) if model_config else 128000
+            model_config = (
+                self.config.get_model(agent_model_key) if agent_model_key else None
+            )
+            max_tokens = (
+                getattr(model_config, "context_window", 128000)
+                if model_config
+                else 128000
+            )
             compact_cfg = self.config.config.compact
 
             # Check if auto-compact is needed
-            warning_state = calculate_token_warning_state(current_tokens, max_tokens, compact_cfg)
+            warning_state = calculate_token_warning_state(
+                current_tokens, max_tokens, compact_cfg
+            )
             if warning_state.is_above_auto_compact_threshold:
                 logger.info(
                     f"Auto-compact triggered: {current_tokens}/{max_tokens} tokens "
@@ -1837,7 +2191,9 @@ class AgentFactory:
                 )
                 # Get LLM client and model for full compact fallback
                 try:
-                    compact_client, compact_model = self._get_compact_client_and_model(agent_model_key)
+                    compact_client, compact_model = self._get_compact_client_and_model(
+                        agent_model_key
+                    )
                 except Exception:
                     compact_client, compact_model = None, None
 
@@ -1856,7 +2212,9 @@ class AgentFactory:
                 if compact_outcome.get("was_compacted"):
                     compact_result = compact_outcome.get("compaction_result")
                     if compact_result and compact_result.compacted_messages:
-                        self._replace_context_with_compact_messages(compact_result.compacted_messages)
+                        self._replace_context_with_compact_messages(
+                            compact_result.compacted_messages
+                        )
                     logger.info(
                         "Auto-compact complete"
                         + (
@@ -1870,24 +2228,33 @@ class AgentFactory:
         except Exception as compact_error:
             # Don't fail if compact fails - log and continue
             logger.warning(f"Auto-compact check failed: {compact_error}")
-        
+
         # Create session for this agent/context pair
         session = self._get_agent_session(
-            agent.name if hasattr(agent, 'name') else 'default',
-            context_id or self.context_manager.get_current_context_id()
+            agent.name if hasattr(agent, "name") else "default",
+            context_id or self.context_manager.get_current_context_id(),
         )
-        
+
         # Original implementation continues here...
         agent._session = session
-        
+
         # Create GridRunContext
+        policy_context_id = context_id or self.context_manager.get_current_context_id()
+        action_state = self._action_state(
+            self._policy_task(input_message, policy_context_id)
+        )
+        if action_state is not None and hasattr(
+            self._stream_observer, "handle_policy_event"
+        ):
+            action_state.policy_event = self._stream_observer.handle_policy_event
         run_ctx = GridRunContext(
             factory=self,
-            context_id=context_id or self.context_manager.get_current_context_id(),
+            context_id=policy_context_id,
             session=session,
             pipeline_id=pipeline_id,
+            action_state=action_state,
         )
-        
+
         # Execute init_tools if provided
         if init_tools:
             # ... existing init_tools code ...
@@ -1904,10 +2271,11 @@ class AgentFactory:
             )
 
             async for event in run_result_streaming.stream_events():
-                if hasattr(self, '_stream_observer'):
+                append_action_reasoning(run_ctx.action_state, event)
+                if hasattr(self, "_stream_observer"):
                     fragment = self._stream_observer.handle_event(
                         event,
-                        agent_key=getattr(agent, 'name', 'dynamic-agent'),
+                        agent_key=getattr(agent, "name", "dynamic-agent"),
                     )
                     if fragment:
                         streaming_text_parts.append(fragment)
@@ -1917,12 +2285,14 @@ class AgentFactory:
                 if getattr(run_result_streaming, "final_output", None) is not None
                 else ""
             )
-            if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
+            if (
+                not result_output or str(result_output).strip() == ""
+            ) and streaming_text_parts:
                 buffered_text = "".join(streaming_text_parts).strip()
                 if buffered_text:
                     result_output = buffered_text
             return str(result_output)
-        
+
         # Run the agent with infinite retry for transient provider errors
         set_current_factory(self)
         retry_count = 0
@@ -1934,22 +2304,39 @@ class AgentFactory:
                     retriable = self._is_retriable_agent_exception(e)
                     if not retriable:
                         error_str = str(e).lower()
-                        if 'context_length_exceeded' in error_str or 'prompt_too_long' in error_str or 'max_tokens' in error_str:
-                            logger.warning(f"Context overflow detected, attempting reactive compact: {e}")
+                        if (
+                            "context_length_exceeded" in error_str
+                            or "prompt_too_long" in error_str
+                            or "max_tokens" in error_str
+                        ):
+                            logger.warning(
+                                f"Context overflow detected, attempting reactive compact: {e}"
+                            )
                             try:
                                 # Get messages for reactive compact
                                 messages = self.context_manager._conversation_history
-                                compact_messages = self._context_to_compact_messages(messages)
-
-                                # Try reactive compact (synchronous truncation, no LLM call)
-                                reactive_result = await reactive_compact_on_prompt_too_long(
-                                    messages=compact_messages,
-                                    error=e,
+                                compact_messages = self._context_to_compact_messages(
+                                    messages
                                 )
 
-                                if reactive_result.status.value in ('trimmed', 'success'):
-                                    self._replace_context_with_compact_messages(reactive_result.messages)
-                                    run_post_compact_cleanup(context_id=current_context_id)
+                                # Try reactive compact (synchronous truncation, no LLM call)
+                                reactive_result = (
+                                    await reactive_compact_on_prompt_too_long(
+                                        messages=compact_messages,
+                                        error=e,
+                                    )
+                                )
+
+                                if reactive_result.status.value in (
+                                    "trimmed",
+                                    "success",
+                                ):
+                                    self._replace_context_with_compact_messages(
+                                        reactive_result.messages
+                                    )
+                                    run_post_compact_cleanup(
+                                        context_id=current_context_id
+                                    )
                                     logger.info(
                                         f"Reactive compact: trimmed to {len(reactive_result.messages)} messages "
                                         f"(tokens {reactive_result.tokens_before} -> {reactive_result.tokens_after}, "
@@ -1964,14 +2351,16 @@ class AgentFactory:
                                     finally:
                                         reset_current_factory()
                             except Exception as reactive_error:
-                                logger.error(f"Reactive compact failed: {reactive_error}")
+                                logger.error(
+                                    f"Reactive compact failed: {reactive_error}"
+                                )
                         raise
 
                     retry_count += 1
                     delay = self._retry_backoff_seconds(retry_count)
                     logger.warning(
                         "Retriable sub-agent failure for %s (attempt %d, retry in %.1fs): %s",
-                        getattr(agent, 'name', 'dynamic-agent'),
+                        getattr(agent, "name", "dynamic-agent"),
                         retry_count,
                         delay,
                         e,
@@ -1992,11 +2381,12 @@ class AgentFactory:
         but it *does* pass a `GridRunContext` so tools can access the AgentFactory.
         """
         import time as _time
+
         _start = _time.time()
-        agent_name = getattr(agent, 'name', 'unknown')
+        agent_name = getattr(agent, "name", "unknown")
 
         # --- Log input ---
-        input_preview = message[:200] + ('...' if len(message) > 200 else '')
+        input_preview = message[:200] + ("..." if len(message) > 200 else "")
         logger.info(
             f"DYNAMIC_AGENT_INPUT | agent={agent_name} | input_len={len(message)} | preview={input_preview}"
         )
@@ -2012,7 +2402,11 @@ class AgentFactory:
         if max_turns is None:
             max_turns = self.config.get_max_turns()
 
-        active_context_id = context_id or self.context_manager.get_current_context_id() or self.context_manager.start_new_context()
+        active_context_id = (
+            context_id
+            or self.context_manager.get_current_context_id()
+            or self.context_manager.start_new_context()
+        )
 
         # Provide a session by default to enable memory for dynamic agents
         if session is None:
@@ -2021,7 +2415,11 @@ class AgentFactory:
 
         # Create run context with session access
         # Get user_id from context metadata if available
-        ctx_user_id = self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, 'get_metadata') else None
+        ctx_user_id = (
+            self.context_manager.get_metadata("user_id")
+            if hasattr(self.context_manager, "get_metadata")
+            else None
+        )
         run_ctx = GridRunContext(
             factory=self,
             context_id=active_context_id,
@@ -2048,7 +2446,7 @@ class AgentFactory:
             # Process streaming events and log tool calls
             async for event in run_result_streaming.stream_events():
                 # Use the factory's stream observer to log events
-                if hasattr(self, '_stream_observer'):
+                if hasattr(self, "_stream_observer"):
                     self._stream_observer.handle_event(event, agent_key=agent_name)
 
                 if isinstance(event, RunItemStreamEvent):
@@ -2063,7 +2461,9 @@ class AgentFactory:
                         # Format arguments for logging
                         args_str = ""
                         if isinstance(arguments, str):
-                            args_str = arguments[:200] + ('...' if len(arguments) > 200 else '')
+                            args_str = arguments[:200] + (
+                                "..." if len(arguments) > 200 else ""
+                            )
                         elif isinstance(arguments, dict):
                             args_str = json.dumps(arguments, ensure_ascii=False)[:200]
 
@@ -2080,7 +2480,9 @@ class AgentFactory:
                         tool_name = getattr(raw_item, "name", None) or "tool"
                         tool_output = getattr(raw_item, "output", None)
 
-                        output_str = str(tool_output)[:500] + ('...' if len(str(tool_output)) > 500 else '')
+                        output_str = str(tool_output)[:500] + (
+                            "..." if len(str(tool_output)) > 500 else ""
+                        )
 
                         logger.info(
                             f"DYNAMIC_AGENT_TOOL_OUTPUT | agent={agent_name} | tool={tool_name} | output_len={len(str(tool_output))}"
@@ -2092,11 +2494,20 @@ class AgentFactory:
 
             # Extract final output from streaming result
             try:
-                if hasattr(run_result_streaming, "final_output") and run_result_streaming.final_output:
+                if (
+                    hasattr(run_result_streaming, "final_output")
+                    and run_result_streaming.final_output
+                ):
                     output = run_result_streaming.final_output
-                elif hasattr(run_result_streaming, "output") and run_result_streaming.output:
+                elif (
+                    hasattr(run_result_streaming, "output")
+                    and run_result_streaming.output
+                ):
                     output = run_result_streaming.output
-                elif hasattr(run_result_streaming, "content") and run_result_streaming.content:
+                elif (
+                    hasattr(run_result_streaming, "content")
+                    and run_result_streaming.content
+                ):
                     output = run_result_streaming.content
                 else:
                     output = str(run_result_streaming)
@@ -2118,16 +2529,14 @@ class AgentFactory:
             # so the calling agent can see and potentially fix it
             output = f"ERROR: Model behavior error — {e}. Please retry with corrected tool call arguments."
             error_occurred = e
-            logger.error(
-                f"DYNAMIC_AGENT_MODEL_ERROR | agent={agent_name} | error={e}"
-            )
+            logger.error(f"DYNAMIC_AGENT_MODEL_ERROR | agent={agent_name} | error={e}")
         except AgentsUserError as e:
             # SDK user/tool error — return as recoverable error string
-            output = f"ERROR: Tool execution error — {e}. Please check tool call and retry."
-            error_occurred = e
-            logger.error(
-                f"DYNAMIC_AGENT_TOOL_ERROR | agent={agent_name} | error={e}"
+            output = (
+                f"ERROR: Tool execution error — {e}. Please check tool call and retry."
             )
+            error_occurred = e
+            logger.error(f"DYNAMIC_AGENT_TOOL_ERROR | agent={agent_name} | error={e}")
         except Exception as e:
             error_occurred = e
             raise
@@ -2144,7 +2553,9 @@ class AgentFactory:
                     f"Error: {error_occurred}\n{'='*80}\n"
                 )
             else:
-                output_preview = (output or '')[:200] + ('...' if len(output or '') > 200 else '')
+                output_preview = (output or "")[:200] + (
+                    "..." if len(output or "") > 200 else ""
+                )
                 logger.info(
                     f"DYNAMIC_AGENT_OUTPUT | agent={agent_name} | elapsed={elapsed:.2f}s | "
                     f"output_len={len(output or '')} | preview={output_preview}"
@@ -2159,7 +2570,7 @@ class AgentFactory:
                 )
 
         return output
-    
+
     async def run_agent(
         self,
         agent_key: str,
@@ -2192,21 +2603,23 @@ class AgentFactory:
         """
         start_time = time.time()
         execution = AgentExecution(
-            agent_name=agent_key,
-            start_time=start_time,
-            input_message=message
+            agent_name=agent_key, start_time=start_time, input_message=message
         )
         active_context_id: Optional[str] = None
         context_marker_line: Optional[str] = None
+        action_state: Optional[ActionRunState] = None
+        policy_observer = stream_observer or self._stream_observer
 
         if streaming is not None:
             stream = streaming
-        
+
         try:
 
             try:
                 if context_id:
-                    active_context_id = self.context_manager.activate_context(context_id)
+                    active_context_id = self.context_manager.activate_context(
+                        context_id
+                    )
                 elif use_active_context:
                     # Use active context if available, otherwise create a new one
                     current_id = self.context_manager.get_current_context_id()
@@ -2218,6 +2631,16 @@ class AgentFactory:
                     active_context_id = self.context_manager.start_new_context()
             except ContextError as exc:
                 raise AgentError("Failed to prepare conversation context") from exc
+
+            # The trusted task includes the bounded user-authored conversation,
+            # not only a context-free follow-up such as "commit" or "continue".
+            action_state = self._action_state(
+                self._policy_task(message, active_context_id)
+            )
+            if action_state is not None and hasattr(
+                policy_observer, "handle_policy_event"
+            ):
+                action_state.policy_event = policy_observer.handle_policy_event
 
             execution.context_id = active_context_id
             if active_context_id:
@@ -2233,7 +2656,9 @@ class AgentFactory:
                 if user_id:
                     self.context_manager.set_metadata("user_id", user_id)
 
-                agent_logging = getattr(self.config.config.settings, "agent_logging", None)
+                agent_logging = getattr(
+                    self.config.config.settings, "agent_logging", None
+                )
                 if agent_logging and getattr(agent_logging, "enabled", True):
                     Logger.configure_agent_logging(
                         enabled=True,
@@ -2241,12 +2666,16 @@ class AgentFactory:
                         log_dir=str(self._logs_directory_path()),
                     )
                     Logger.activate_session_log(active_context_id)
-                    if getattr(agent_logging, "save_conversations", True) and message and not skip_input_add:
+                    if (
+                        getattr(agent_logging, "save_conversations", True)
+                        and message
+                        and not skip_input_add
+                    ):
                         Logger("agent_factory").log_verbose(
                             f"USER INPUT: {agent_key}",
                             message,
                         )
-            
+
             # Create agent (or get from cache)
             agent = await self.create_agent(agent_key, context_path)
 
@@ -2258,7 +2687,7 @@ class AgentFactory:
             parsed_message = message
             is_multimodal = False
             try:
-                if isinstance(message, str) and message.strip().startswith('{'):
+                if isinstance(message, str) and message.strip().startswith("{"):
                     # Try to parse as JSON - might be a multimodal message
                     parsed_message = json.loads(message)
                     # If it's a single message dict, wrap in list (as per SDK examples)
@@ -2267,7 +2696,10 @@ class AgentFactory:
                         content = parsed_message.get("content", [])
                         if isinstance(content, list):
                             for part in content:
-                                if isinstance(part, dict) and part.get("type") in ("input_image", "image_url"):
+                                if isinstance(part, dict) and part.get("type") in (
+                                    "input_image",
+                                    "image_url",
+                                ):
                                     is_multimodal = True
                                     break
                         parsed_message = [parsed_message]
@@ -2278,7 +2710,9 @@ class AgentFactory:
                                 content = msg.get("content", [])
                                 if isinstance(content, list):
                                     for part in content:
-                                        if isinstance(part, dict) and part.get("type") in ("input_image", "image_url"):
+                                        if isinstance(part, dict) and part.get(
+                                            "type"
+                                        ) in ("input_image", "image_url"):
                                             is_multimodal = True
                                             break
             except (json.JSONDecodeError, ValueError):
@@ -2289,8 +2723,14 @@ class AgentFactory:
             run_agent_config = self.config.get_agent(agent_key)
             model_config = self.config.get_model(run_agent_config.model)
             init_key = f"{agent_key}:{user_id or 'default'}"
-            working_dir = "/" if self.container_id else self.config.get_working_directory()
-            ctx_user_id = user_id or (self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, "get_metadata") else None)
+            working_dir = (
+                "/" if self.container_id else self.config.get_working_directory()
+            )
+            ctx_user_id = user_id or (
+                self.context_manager.get_metadata("user_id")
+                if hasattr(self.context_manager, "get_metadata")
+                else None
+            )
 
             if getattr(run_agent_config, "auto_run_tools", None):
                 agent_tools = getattr(agent, "tools", []) or []
@@ -2299,7 +2739,8 @@ class AgentFactory:
                     context_id=active_context_id or "run",
                     user_id=ctx_user_id,
                     agent_id=agent_key,
-                    container_id=self.container_id
+                    container_id=self.container_id,
+                    action_state=action_state,
                 )
                 raw_message = message if isinstance(parsed_message, str) else ""
 
@@ -2307,8 +2748,13 @@ class AgentFactory:
                 if init_key not in self._initialized_agents:
                     try:
                         auto_run_info = await self._execute_auto_run_tools(
-                            agent_key, run_agent_config, agent_tools, working_dir, temp_run_ctx,
-                            every_run=False, user_message=raw_message
+                            agent_key,
+                            run_agent_config,
+                            agent_tools,
+                            working_dir,
+                            temp_run_ctx,
+                            every_run=False,
+                            user_message=raw_message,
                         )
                         if auto_run_info and isinstance(parsed_message, str):
                             parsed_message = (
@@ -2317,15 +2763,22 @@ class AgentFactory:
                                 + parsed_message
                             )
                         self._initialized_agents.add(init_key)
-                        logger.info(f"✅ One-time auto-run tools executed for {init_key}")
+                        logger.info(
+                            f"✅ One-time auto-run tools executed for {init_key}"
+                        )
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to run one-time auto_run_tools: {e}")
 
                 # Per-message tools (every_run=True): run on EVERY request.
                 try:
                     every_run_info = await self._execute_auto_run_tools(
-                        agent_key, run_agent_config, agent_tools, working_dir, temp_run_ctx,
-                        every_run=True, user_message=raw_message
+                        agent_key,
+                        run_agent_config,
+                        agent_tools,
+                        working_dir,
+                        temp_run_ctx,
+                        every_run=True,
+                        user_message=raw_message,
                     )
                     if every_run_info and isinstance(parsed_message, str):
                         parsed_message = (
@@ -2341,10 +2794,10 @@ class AgentFactory:
             # 1. Explicit context_id is provided (user wants to continue the dialogue)
             # 2. Active context is used (interactive mode)
             include_conversation_context = (
-                context_id is not None or  # Explicit context_id provided
-                use_active_context  # Use active context
+                context_id is not None  # Explicit context_id provided
+                or use_active_context  # Use active context
             )
-            
+
             # Check if conversation history contains images
             # If yes, we need to use list format instead of session for ALL messages
             # (because session doesn't preserve images from previous messages)
@@ -2364,22 +2817,34 @@ class AgentFactory:
                             if isinstance(msg.content, list):
                                 for part in msg.content:
                                     if isinstance(part, dict):
-                                        if part.get("type") in ("input_image", "image_url", "image_file"):
+                                        if part.get("type") in (
+                                            "input_image",
+                                            "image_url",
+                                            "image_file",
+                                        ):
                                             history_has_images = True
                                             break
-                                    elif hasattr(part, "type") and part.type in ("input_image", "image_url", "image_file"):
+                                    elif hasattr(part, "type") and part.type in (
+                                        "input_image",
+                                        "image_url",
+                                        "image_file",
+                                    ):
                                         history_has_images = True
                                         break
                         if history_has_images:
                             break
             except Exception as e:
                 logger.debug(f"Failed to check history for images: {e}")
-            
+
             # If current message is multimodal, history has images, or the model
             # requires provider-specific reasoning replay, use manual history.
-            model_requires_manual_history = self._model_requires_manual_history(model_config)
-            needs_list_format = is_multimodal or history_has_images or model_requires_manual_history
-            
+            model_requires_manual_history = self._model_requires_manual_history(
+                model_config
+            )
+            needs_list_format = (
+                is_multimodal or history_has_images or model_requires_manual_history
+            )
+
             # Do not add agent instructions to dialogue; store in metadata for internal use
             if not self.context_manager.get_conversation_context():
                 initial_instructions = self._build_agent_instructions(
@@ -2387,7 +2852,9 @@ class AgentFactory:
                     context_path,
                     include_conversation_context=False,
                 )
-                self.context_manager.set_metadata("agent_instructions", initial_instructions)
+                self.context_manager.set_metadata(
+                    "agent_instructions", initial_instructions
+                )
                 try:
                     initial_context = self.instructions_builder.assemble_model_context(
                         agent_key,
@@ -2413,49 +2880,70 @@ class AgentFactory:
                     "last_context_assembly",
                     initial_payload,
                 )
-            
+
             # For messages that need list format, get history BEFORE adding current message
             # (so we can prepend it to the input list)
             history_messages = []
             if needs_list_format:
-                history_messages = self.context_manager.get_conversation_history_as_sdk_messages()
-            
+                history_messages = (
+                    self.context_manager.get_conversation_history_as_sdk_messages()
+                )
+
             # Add message to context for current session
             # For multimodal messages, we need to parse JSON and create proper ContextMessage
             if not skip_input_add:
-                if is_multimodal and isinstance(parsed_message, list) and len(parsed_message) > 0:
+                if (
+                    is_multimodal
+                    and isinstance(parsed_message, list)
+                    and len(parsed_message) > 0
+                ):
                     # Extract content from parsed message
-                    msg_dict = parsed_message[0] if isinstance(parsed_message[0], dict) else {}
+                    msg_dict = (
+                        parsed_message[0] if isinstance(parsed_message[0], dict) else {}
+                    )
                     msg_content = msg_dict.get("content", [])
-                    
+
                     # Convert SDK format content parts to ContextMessage format
                     # SDK uses: [{"type": "input_text", "text": "..."}, {"type": "input_image", "image_url": "..."}]
                     # ContextMessage needs: [TextContent(...), ImageContent(...)]
-                    from schemas import ContextMessage, TextContent, ImageContent, ImageUrl
+                    from schemas import (
+                        ContextMessage,
+                        TextContent,
+                        ImageContent,
+                        ImageUrl,
+                    )
                     from datetime import datetime
-                    
+
                     content_parts = []
                     for part in msg_content:
                         if isinstance(part, dict):
                             part_type = part.get("type")
                             if part_type == "input_text":
-                                content_parts.append(TextContent(type="text", text=part.get("text", "")))
+                                content_parts.append(
+                                    TextContent(type="text", text=part.get("text", ""))
+                                )
                             elif part_type == "input_image":
                                 image_url = part.get("image_url", "")
                                 detail = part.get("detail", "auto")
                                 # image_url should already be base64 data URL from prepare_agent_message
                                 # Store it as ImageContent so it can be converted back to SDK format
-                                content_parts.append(ImageContent(
-                                    type="image_url",
-                                    image_url=ImageUrl(url=image_url, detail=detail)
-                                ))
-                                logger.debug(f"Storing image in context: {len(image_url)} chars (base64 URL)")
+                                content_parts.append(
+                                    ImageContent(
+                                        type="image_url",
+                                        image_url=ImageUrl(
+                                            url=image_url, detail=detail
+                                        ),
+                                    )
+                                )
+                                logger.debug(
+                                    f"Storing image in context: {len(image_url)} chars (base64 URL)"
+                                )
                             # Pass through other types as dict
                             else:
                                 content_parts.append(part)
                         else:
                             content_parts.append(part)
-                    
+
                     # Create ContextMessage with multimodal content
                     multimodal_msg = ContextMessage(
                         role="user",
@@ -2470,16 +2958,25 @@ class AgentFactory:
                     # Add directly to context history using safe_lock
                     try:
                         with safe_lock(self.context_manager._lock, timeout=5.0):
-                            self.context_manager._conversation_history.append(multimodal_msg)
+                            self.context_manager._conversation_history.append(
+                                multimodal_msg
+                            )
                             # Trim history if needed
-                            if len(self.context_manager._conversation_history) > self.context_manager.max_history:
+                            if (
+                                len(self.context_manager._conversation_history)
+                                > self.context_manager.max_history
+                            ):
                                 self.context_manager._conversation_history.pop(0)
                             # Update context bucket
-                            active_bucket = self.context_manager._contexts.get(self.context_manager._current_context_id)
+                            active_bucket = self.context_manager._contexts.get(
+                                self.context_manager._current_context_id
+                            )
                             if active_bucket is not None:
                                 active_bucket["updated_at"] = datetime.now().isoformat()
                     except Exception as e:
-                        logger.warning(f"Failed to add multimodal message to context: {e}, falling back to string")
+                        logger.warning(
+                            f"Failed to add multimodal message to context: {e}, falling back to string"
+                        )
                         self.context_manager.add_message(
                             "user",
                             message,
@@ -2501,10 +2998,9 @@ class AgentFactory:
                         },
                     )
             elif skip_input_add and not message:
-                 # If we are skipping input add (recursive call) and message is empty,
-                 # we ensure parsed_message is empty list so we only send history
-                 parsed_message = []
-            
+                # If we are skipping input add (recursive call) and message is empty,
+                # we ensure parsed_message is empty list so we only send history
+                parsed_message = []
 
             agent_instructions = self._build_agent_instructions(
                 agent_key,
@@ -2522,7 +3018,9 @@ class AgentFactory:
             except Exception:
                 context_payload = {
                     "context_id": active_context_id,
-                    "history_strategy": "prompt" if include_conversation_context else "none",
+                    "history_strategy": (
+                        "prompt" if include_conversation_context else "none"
+                    ),
                     "instruction_length": len(agent_instructions),
                     "sections": [],
                     "metadata": {
@@ -2537,36 +3035,42 @@ class AgentFactory:
                 context_payload,
             )
             agent.instructions = agent_instructions
-            
+
             # Log full prompt at startup (only once per agent per session)
             if agent_key not in self._logged_agents:
-                Logger("agent_factory").log_verbose(f"FULL PROMPT STARTUP: {agent_key}", agent_instructions)
+                Logger("agent_factory").log_verbose(
+                    f"FULL PROMPT STARTUP: {agent_key}", agent_instructions
+                )
                 self._logged_agents.add(agent_key)
-            
+
             # Run agent with max_turns configuration and timeout
             max_turns = self.config.get_max_turns()
             timeout_seconds = self.config.get_agent_timeout()
-            
+
             # Prepare session scoped to the active context
             # IMPORTANT: Session cannot be used with list input (multimodal messages)
             # For multimodal messages, we disable session and manage history manually via context
             if not active_context_id:
                 raise AgentError("Failed to prepare conversation context")
-            
+
             # For multimodal messages OR if history has images, don't use session (SDK limitation)
             # We'll manage history by prepending it to the input message list
             if needs_list_format:
                 session = None
                 if is_multimodal:
-                    logger.debug("Multimodal message detected - disabling session, prepending history to input")
+                    logger.debug(
+                        "Multimodal message detected - disabling session, prepending history to input"
+                    )
                 elif history_has_images:
-                    logger.debug("History contains images - disabling session, prepending history to input")
+                    logger.debug(
+                        "History contains images - disabling session, prepending history to input"
+                    )
                 elif model_requires_manual_history:
                     logger.debug(
                         "Model '%s' requires manual history replay - disabling session",
                         getattr(model_config, "name", run_agent_config.model),
                     )
-                
+
                 # Convert current message to list format if it's a string
                 if isinstance(parsed_message, str):
                     # Simple text message - convert to SDK format
@@ -2574,7 +3078,7 @@ class AgentFactory:
                 elif isinstance(parsed_message, dict):
                     parsed_message = [parsed_message]
                 # If already a list, keep it as is
-                
+
                 # Prepend history to current message (history was fetched before adding current message)
                 parsed_message = history_messages + parsed_message
             else:
@@ -2582,8 +3086,16 @@ class AgentFactory:
                 agent._session = session
 
             # Get user_id and metadata from context
-            ctx_user_id = user_id or (self.context_manager.get_metadata("user_id") if hasattr(self.context_manager, 'get_metadata') else None)
-            ctx_metadata = self.context_manager.get_all_metadata() if hasattr(self.context_manager, 'get_all_metadata') else {}
+            ctx_user_id = user_id or (
+                self.context_manager.get_metadata("user_id")
+                if hasattr(self.context_manager, "get_metadata")
+                else None
+            )
+            ctx_metadata = (
+                self.context_manager.get_all_metadata()
+                if hasattr(self.context_manager, "get_all_metadata")
+                else {}
+            )
 
             run_ctx = GridRunContext(
                 factory=self,
@@ -2592,7 +3104,8 @@ class AgentFactory:
                 user_id=ctx_user_id,
                 agent_id=agent_key,
                 metadata=ctx_metadata,
-                container_id=self.container_id
+                container_id=self.container_id,
+                action_state=action_state,
             )
 
             input_preview = self._safe_preview(parsed_message, max_length=700)
@@ -2639,14 +3152,24 @@ class AgentFactory:
                             )
                             async for event in run_result_streaming.stream_events():
                                 try:
+                                    append_action_reasoning(action_state, event)
                                     if isinstance(event, RunItemStreamEvent):
                                         event_name = getattr(event, "name", "")
                                         item = getattr(event, "item", None)
-                                        if item is not None and event_name in {"tool_called", "tool_output"}:
+                                        if item is not None and event_name in {
+                                            "tool_called",
+                                            "tool_output",
+                                        }:
                                             raw_item = getattr(item, "raw_item", None)
-                                            tool_name = getattr(raw_item, "name", None) or getattr(raw_item, "type", None) or "tool"
+                                            tool_name = (
+                                                getattr(raw_item, "name", None)
+                                                or getattr(raw_item, "type", None)
+                                                or "tool"
+                                            )
                                             if event_name == "tool_called":
-                                                arguments = getattr(raw_item, "arguments", None)
+                                                arguments = getattr(
+                                                    raw_item, "arguments", None
+                                                )
                                                 self._record_runtime_event(
                                                     event_type="tool_called",
                                                     tool_name=tool_name,
@@ -2654,9 +3177,13 @@ class AgentFactory:
                                                     extra={"retry_count": retry_count},
                                                 )
                                             else:
-                                                tool_output = getattr(item, "output", None)
+                                                tool_output = getattr(
+                                                    item, "output", None
+                                                )
                                                 if tool_output is None:
-                                                    tool_output = getattr(raw_item, "output", None)
+                                                    tool_output = getattr(
+                                                        raw_item, "output", None
+                                                    )
                                                 self._record_runtime_event(
                                                     event_type="tool_output",
                                                     tool_name=tool_name,
@@ -2665,18 +3192,30 @@ class AgentFactory:
                                                 )
 
                                     obs = stream_observer or self._stream_observer
-                                    fragment = obs.handle_event(event, agent_key=agent_key)
+                                    fragment = obs.handle_event(
+                                        event, agent_key=agent_key
+                                    )
                                     if fragment:
                                         streaming_text_parts.append(fragment)
 
-                                    if self.broadcaster and isinstance(event, RunItemStreamEvent):
+                                    if self.broadcaster and isinstance(
+                                        event, RunItemStreamEvent
+                                    ):
                                         event_name = getattr(event, "name", "")
                                         item = getattr(event, "item", None)
 
-                                        if event_name == "tool_called" and item is not None:
+                                        if (
+                                            event_name == "tool_called"
+                                            and item is not None
+                                        ):
                                             raw_item = getattr(item, "raw_item", None)
-                                            tool_name = getattr(raw_item, "name", None) or "tool"
-                                            arguments = getattr(raw_item, "arguments", None)
+                                            tool_name = (
+                                                getattr(raw_item, "name", None)
+                                                or "tool"
+                                            )
+                                            arguments = getattr(
+                                                raw_item, "arguments", None
+                                            )
 
                                             await self.emit_progress_event(
                                                 event_type="tool_call_start",
@@ -2685,12 +3224,22 @@ class AgentFactory:
                                                 status="running",
                                                 details={
                                                     "tool_name": tool_name,
-                                                    "arguments": arguments if isinstance(arguments, dict) else str(arguments)
-                                                }
+                                                    "arguments": (
+                                                        arguments
+                                                        if isinstance(arguments, dict)
+                                                        else str(arguments)
+                                                    ),
+                                                },
                                             )
-                                        elif event_name == "tool_output" and item is not None:
+                                        elif (
+                                            event_name == "tool_output"
+                                            and item is not None
+                                        ):
                                             raw_item = getattr(item, "raw_item", None)
-                                            tool_name = getattr(raw_item, "name", None) or "tool"
+                                            tool_name = (
+                                                getattr(raw_item, "name", None)
+                                                or "tool"
+                                            )
                                             output = getattr(raw_item, "output", None)
 
                                             await self.emit_progress_event(
@@ -2700,12 +3249,17 @@ class AgentFactory:
                                                 status="completed",
                                                 details={
                                                     "tool_name": tool_name,
-                                                    "output": str(output)[:500] if output else ""
-                                                }
+                                                    "output": (
+                                                        str(output)[:500]
+                                                        if output
+                                                        else ""
+                                                    ),
+                                                },
                                             )
                                 except Exception:
                                     logger.exception(
-                                        "Stream observer failed for %s", type(event).__name__
+                                        "Stream observer failed for %s",
+                                        type(event).__name__,
                                     )
 
                             result_output = (
@@ -2713,13 +3267,19 @@ class AgentFactory:
                                 if run_result_streaming.final_output is not None
                                 else ""
                             )
-                            if (not result_output or str(result_output).strip() == "") and streaming_text_parts:
+                            if (
+                                not result_output or str(result_output).strip() == ""
+                            ) and streaming_text_parts:
                                 try:
-                                    buffered_text = "".join(streaming_text_parts).strip()
+                                    buffered_text = "".join(
+                                        streaming_text_parts
+                                    ).strip()
                                     if buffered_text:
                                         result_output = buffered_text
                                 except Exception:
-                                    logger.exception("Failed to merge streaming text fragments")
+                                    logger.exception(
+                                        "Failed to merge streaming text fragments"
+                                    )
                             result = result_output
                         else:
                             result = await asyncio.wait_for(
@@ -2728,23 +3288,30 @@ class AgentFactory:
                                     parsed_message,
                                     context=run_ctx,
                                     max_turns=max_turns,
-                                    session=session
+                                    session=session,
                                 ),
-                                timeout=timeout_seconds
+                                timeout=timeout_seconds,
                             )
                         break
                     except MaxTurnsExceeded as e:
                         partial = self._extract_partial_output(e)
                         if stream and not partial:
-                            partial = "".join(streaming_text_parts).strip() if streaming_text_parts else None
+                            partial = (
+                                "".join(streaming_text_parts).strip()
+                                if streaming_text_parts
+                                else None
+                            )
                         if partial:
                             logger.warning(
-                                "Agent reached max turns; returning partial output (%d chars)", len(partial)
+                                "Agent reached max turns; returning partial output (%d chars)",
+                                len(partial),
                             )
                             result = partial
                         else:
                             result = f"⚠️ Agent reached max turns limit ({max_turns}). No final output produced."
-                            logger.warning("Agent reached max turns with no partial output")
+                            logger.warning(
+                                "Agent reached max turns with no partial output"
+                            )
                         break
                     except ModelBehaviorError as e:
                         logger.error("Model behavior error during agent run: %s", e)
@@ -2813,41 +3380,43 @@ class AgentFactory:
                 # Check if result is a string (already processed)
                 if isinstance(result, str):
                     output = result
-                elif hasattr(result, 'final_output') and result.final_output:
+                elif hasattr(result, "final_output") and result.final_output:
                     output = result.final_output
-                elif hasattr(result, 'output') and result.output:
+                elif hasattr(result, "output") and result.output:
                     output = result.output
-                elif hasattr(result, 'content') and result.content:
+                elif hasattr(result, "content") and result.content:
                     output = result.content
                 # Fallback for RunResult if final_output is missing but we have raw responses
-                elif hasattr(result, 'new_items') and result.new_items:
-                     # Try to find the last message content
-                     try:
-                         last_item = result.new_items[-1]
-                         if hasattr(last_item, 'content') and last_item.content:
-                             output = str(last_item.content)
-                             logger.info(f"Recovered output from last new item: {output[:50]}...")
-                     except Exception:
-                         pass
-                     
-                     # If still None, convert result to string
-                     if output is None:
-                         output = str(result)
+                elif hasattr(result, "new_items") and result.new_items:
+                    # Try to find the last message content
+                    try:
+                        last_item = result.new_items[-1]
+                        if hasattr(last_item, "content") and last_item.content:
+                            output = str(last_item.content)
+                            logger.info(
+                                f"Recovered output from last new item: {output[:50]}..."
+                            )
+                    except Exception:
+                        pass
+
+                    # If still None, convert result to string
+                    if output is None:
+                        output = str(result)
                 else:
                     output = str(result)
-                
+
                 # Ensure we have a non-empty response
                 if not output or output.strip() == "":
                     output = "Agent completed the task but did not provide a text response. Check logs for execution details."
             except Exception as e:
                 logger.error(f"Error processing agent result: {e}", exc_info=True)
                 output = f"An error occurred while processing the agent result: {e}"
-            
+
             # Add agent response to context for current session
             # Post-process potential manual tool call before storing response
             try:
                 # Ensure output is defined before using it
-                if 'output' not in locals():
+                if "output" not in locals():
                     output = "Error: output variable is not defined."
 
                 manual_tool_result = await self._execute_first_tool_call_in_text(output)
@@ -2858,7 +3427,9 @@ class AgentFactory:
 
             # Check for malformed tool calls and retry with correction
             MAX_RETRY_COUNT = 2
-            if _retry_count < MAX_RETRY_COUNT and self._detect_malformed_tool_calls(output):
+            if _retry_count < MAX_RETRY_COUNT and self._detect_malformed_tool_calls(
+                output
+            ):
                 logger.warning(
                     f"Detected malformed tool call in agent output (attempt {_retry_count + 1}/{MAX_RETRY_COUNT}). "
                     "Retrying with correction prompt..."
@@ -2869,7 +3440,7 @@ class AgentFactory:
                         "output_preview": output[:500],
                         "context_id": active_context_id,
                         "agent": agent_key,
-                    }
+                    },
                 )
 
                 # Add the malformed response to context first
@@ -2912,7 +3483,9 @@ DO NOT write XML tags manually!"""
 
                 # Retry with same context (use_active_context=True to preserve history)
                 # Skip adding new input since we already added correction prompt
-                logger.info(f"Retrying agent execution with correction (attempt {_retry_count + 2}/{MAX_RETRY_COUNT + 1})")
+                logger.info(
+                    f"Retrying agent execution with correction (attempt {_retry_count + 2}/{MAX_RETRY_COUNT + 1})"
+                )
                 self._update_pending_agent_run(
                     agent_key=agent_key,
                     active_context_id=active_context_id,
@@ -2937,7 +3510,10 @@ DO NOT write XML tags manually!"""
                 context_marker_line = f"\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442 ID: {active_context_id}"
                 english_marker_line = f"Context ID: {active_context_id}"
                 normalized_output = output or ""
-                has_marker = context_marker_line in normalized_output or english_marker_line in normalized_output
+                has_marker = (
+                    context_marker_line in normalized_output
+                    or english_marker_line in normalized_output
+                )
                 if not has_marker:
                     trimmed_output = normalized_output.rstrip()
                     if trimmed_output:
@@ -2970,10 +3546,12 @@ DO NOT write XML tags manually!"""
                 execution.tools_used = tools_used
             except Exception as e:
                 execution.tools_used = []
-                logger.debug("Failed to extract tools used from result: %s", e, exc_info=e)
-            
+                logger.debug(
+                    "Failed to extract tools used from result: %s", e, exc_info=e
+                )
+
             duration = execution.end_time - start_time
-            
+
             self.context_manager.add_execution(execution)
             self._record_runtime_event(
                 event_type="attempt_completed",
@@ -2987,19 +3565,21 @@ DO NOT write XML tags manually!"""
                 status="completed",
                 retry_count=retry_count,
             )
-            
+
             # Ensure we log the final output for debugging
             if not output:
-                logger.warning(f"⚠️ Agent '{agent_key}' returned empty output. Result type: {type(result)}")
+                logger.warning(
+                    f"⚠️ Agent '{agent_key}' returned empty output. Result type: {type(result)}"
+                )
                 if isinstance(result, str):
                     logger.warning(f"Result (str): '{result}'")
-                elif hasattr(result, '__dict__'):
+                elif hasattr(result, "__dict__"):
                     logger.warning(f"Result attrs: {result.__dict__}")
-            
+
             Logger("agent_factory").log_verbose(f"FULL RESPONSE: {agent_key}", output)
-            
+
             return output
-            
+
         except Exception as e:
             execution.end_time = time.time()
             execution.error = str(e)
@@ -3007,7 +3587,9 @@ DO NOT write XML tags manually!"""
                 self._update_pending_agent_run(
                     agent_key=agent_key,
                     active_context_id=locals().get("active_context_id"),
-                    input_preview=locals().get("input_preview", self._safe_preview(message, max_length=700)),
+                    input_preview=locals().get(
+                        "input_preview", self._safe_preview(message, max_length=700)
+                    ),
                     status="failed",
                     retry_count=locals().get("retry_count", 0),
                     last_error=self._safe_preview(str(e), max_length=700),
@@ -3018,15 +3600,22 @@ DO NOT write XML tags manually!"""
                     extra={"exception_type": type(e).__name__},
                 )
             except Exception:
-                logger.debug("Failed to persist pending run failure state", exc_info=True)
-            
+                logger.debug(
+                    "Failed to persist pending run failure state", exc_info=True
+                )
+
             self.context_manager.add_execution(execution)
-            
+
             raise
         finally:
             Logger.deactivate_session_log()
-    
-    def _build_agent_instructions(self, agent_key: str, context_path: Optional[str] = None, include_conversation_context: bool = True) -> str:
+
+    def _build_agent_instructions(
+        self,
+        agent_key: str,
+        context_path: Optional[str] = None,
+        include_conversation_context: bool = True,
+    ) -> str:
         """Build complete agent instructions with context."""
         base_instructions = self.config.build_agent_prompt(agent_key)
 
@@ -3045,22 +3634,22 @@ DO NOT write XML tags manually!"""
                 parts.append(conversation_context)
 
         return "\n\n".join(parts)
-    
+
     def _build_path_context(self, context_path: Optional[str] = None) -> str:
         """Build path context information."""
         # In container mode the agent sees "/" as its root.
         working_dir = "/" if self.container_id else self.config.get_working_directory()
         config_dir = self.config.get_config_directory()
-        
+
         context_parts = [
             "Path information:",
             f"Working directory: {working_dir}",
         ]
-        
+
         # Only add config dir if not in container (or if we decide to map it later)
         if not self.container_id:
             context_parts.append(f"Configuration directory: {config_dir}")
-        
+
         if context_path:
             # If in container, we try to make the path relative to the workspace
             if self.container_id:
@@ -3080,19 +3669,25 @@ DO NOT write XML tags manually!"""
             else:
                 absolute_path = self.config.get_absolute_path(context_path)
 
-            context_parts.extend([
-                f"Context path: {context_path}",
-                f"Absolute context path: {absolute_path}"
-            ])
-        
-        context_parts.extend([
-            "",
-            "Use these paths for working with files and directories."
-        ])
-        
+            context_parts.extend(
+                [
+                    f"Context path: {context_path}",
+                    f"Absolute context path: {absolute_path}",
+                ]
+            )
+
+        context_parts.extend(
+            ["", "Use these paths for working with files and directories."]
+        )
+
         return "\n".join(context_parts)
 
-    def _legacy_build_agent_instructions(self, agent_key: str, context_path: Optional[str] = None, include_conversation_context: bool = True) -> str:
+    def _legacy_build_agent_instructions(
+        self,
+        agent_key: str,
+        context_path: Optional[str] = None,
+        include_conversation_context: bool = True,
+    ) -> str:
         """Build complete agent instructions with context."""
         return self.instructions_builder.build_agent_instructions(
             agent_key,
@@ -3111,23 +3706,26 @@ DO NOT write XML tags manually!"""
     @staticmethod
     def _extract_partial_output(exc: AgentsException) -> Optional[str]:
         """Extract the last assistant text from an AgentsException's run_data.new_items."""
-        run_data = getattr(exc, 'run_data', None)
+        run_data = getattr(exc, "run_data", None)
         if not run_data:
             return None
-        new_items = getattr(run_data, 'new_items', []) or []
+        new_items = getattr(run_data, "new_items", []) or []
         for item in reversed(new_items):
             if isinstance(item, MessageOutputItem):
                 try:
                     raw = item.raw_item
-                    content = getattr(raw, 'content', None) or []
+                    content = getattr(raw, "content", None) or []
                     texts = []
                     for part in content:
-                        if hasattr(part, 'text'):
+                        if hasattr(part, "text"):
                             texts.append(part.text)
-                        elif isinstance(part, dict) and part.get('type') in ('output_text', 'text'):
-                            texts.append(part.get('text', ''))
+                        elif isinstance(part, dict) and part.get("type") in (
+                            "output_text",
+                            "text",
+                        ):
+                            texts.append(part.get("text", ""))
                     if texts:
-                        return ' '.join(texts)
+                        return " ".join(texts)
                 except Exception:
                     pass
         return None
@@ -3150,13 +3748,15 @@ DO NOT write XML tags manually!"""
         output_str = str(output) if not isinstance(output, str) else output
 
         # Token check — return error without truncation
-        max_tokens = getattr(settings, 'max_tool_output_tokens', None)
+        max_tokens = getattr(settings, "max_tool_output_tokens", None)
         if max_tokens is not None and isinstance(output, str):
             estimated = self._estimate_tokens(output_str)
             if estimated > max_tokens:
                 logger.warning(
                     "Tool output rejected (token limit): %s (~%d tokens > %d limit)",
-                    tool_name, estimated, max_tokens,
+                    tool_name,
+                    estimated,
+                    max_tokens,
                 )
                 return (
                     f"ERROR: Tool output is too large (~{estimated} tokens, limit {max_tokens} tokens). "
@@ -3165,8 +3765,12 @@ DO NOT write XML tags manually!"""
                 )
 
         # Character check — truncate with warning
-        max_chars = getattr(settings, 'max_tool_output', None)
-        if max_chars is not None and isinstance(output, str) and len(output) > max_chars:
+        max_chars = getattr(settings, "max_tool_output", None)
+        if (
+            max_chars is not None
+            and isinstance(output, str)
+            and len(output) > max_chars
+        ):
             original_length = len(output)
             truncated = output[:max_chars]
             truncated += (
@@ -3175,7 +3779,9 @@ DO NOT write XML tags manually!"""
             )
             logger.info(
                 "Tool output truncated: %s (%d -> %d chars)",
-                tool_name, original_length, max_chars,
+                tool_name,
+                original_length,
+                max_chars,
             )
             return truncated
 
@@ -3209,41 +3815,53 @@ DO NOT write XML tags manually!"""
                 user_id=user_id,
             )
 
-        if hasattr(raw_ctx, "context_id") and getattr(raw_ctx, "context_id", None) is None:
+        if (
+            hasattr(raw_ctx, "context_id")
+            and getattr(raw_ctx, "context_id", None) is None
+        ):
             raw_ctx.context_id = active_context_id
         if hasattr(raw_ctx, "pipeline_id"):
             raw_ctx.pipeline_id = pipeline_id
         if hasattr(raw_ctx, "step_id"):
             raw_ctx.step_id = registry.get_current_step_id(pipeline_id)
-        if hasattr(raw_ctx, "execution_mode") and getattr(raw_ctx, "execution_mode", None) is None:
+        if (
+            hasattr(raw_ctx, "execution_mode")
+            and getattr(raw_ctx, "execution_mode", None) is None
+        ):
             raw_ctx.execution_mode = "serial_subtree"
 
         return registry, pipeline_id, active_context_id
 
-    def _wrap_tool_with_output_limit(self, tool: Any, tool_key: Optional[str] = None) -> Any:
+    def _wrap_tool_with_output_limit(
+        self, tool: Any, tool_key: Optional[str] = None
+    ) -> Any:
         """Wraps FunctionTool with pipeline serialization and output limits."""
         settings = self.config.config.settings
-        max_tokens = getattr(settings, 'max_tool_output_tokens', None)
-        max_chars = getattr(settings, 'max_tool_output', None)
-        if not hasattr(tool, 'on_invoke_tool'):
+        max_tokens = getattr(settings, "max_tool_output_tokens", None)
+        max_chars = getattr(settings, "max_tool_output", None)
+        if not hasattr(tool, "on_invoke_tool"):
             return tool
 
         original_invoke = tool.on_invoke_tool
         factory_ref = self
-        tool_name = tool_key or getattr(tool, 'name', '') or getattr(tool, '__name__', 'tool')
+        tool_name = (
+            tool_key or getattr(tool, "name", "") or getattr(tool, "__name__", "tool")
+        )
 
         async def invoke_original(ctx, args):
             result = await original_invoke(ctx, args)
             if max_tokens is None and max_chars is None:
                 return result
             return factory_ref._truncate_tool_output(
-                result, getattr(tool, 'name', '') or tool_name
+                result, getattr(tool, "name", "") or tool_name
             )
 
         async def limited_invoke(ctx, args):
-            registry, pipeline_id, active_context_id = await factory_ref._ensure_pipeline_for_run_context(
-                ctx,
-                f"tool:{tool_name}",
+            registry, pipeline_id, active_context_id = (
+                await factory_ref._ensure_pipeline_for_run_context(
+                    ctx,
+                    f"tool:{tool_name}",
+                )
             )
             raw_ctx = getattr(ctx, "context", None)
             if raw_ctx is not None:
@@ -3265,22 +3883,24 @@ DO NOT write XML tags manually!"""
             )
 
         tool.on_invoke_tool = limited_invoke
-        return tool
+        return self._wrap_tool_with_policy(tool, tool_name, "function")
 
-    async def _get_agent_tools(self, agent_config: AgentConfig, agent_key: Optional[str] = None) -> List[Any]:
+    async def _get_agent_tools(
+        self, agent_config: AgentConfig, agent_key: Optional[str] = None
+    ) -> List[Any]:
         """Get all tools for agent with caching."""
         cache_key = f"{agent_config.name}:{hash(tuple(agent_config.tools))}"
-        
+
         if cache_key in self._tool_cache:
             return self._tool_cache[cache_key]
-        
+
         tools = []
-        
+
         # Categorize tools
         function_tools = []
         mcp_tools = []
         agent_tools = []
-        
+
         for tool_name in agent_config.tools:
             try:
                 tool_config = self.config.get_tool(tool_name)
@@ -3294,9 +3914,11 @@ DO NOT write XML tags manually!"""
 
             except ConfigError as exc:
                 logger.warning(
-                    "Tool configuration missing for agent", extra={"agent": agent_config.name, "tool": tool_name}, exc_info=exc
+                    "Tool configuration missing for agent",
+                    extra={"agent": agent_config.name, "tool": tool_name},
+                    exc_info=exc,
                 )
-        
+
         # Add function tools
         if function_tools:
             try:
@@ -3308,47 +3930,74 @@ DO NOT write XML tags manually!"""
                 tools.extend(func_tools)
 
             except Exception as e:
-                logger.error("Failed to load function tools %s: %s", function_tools, e, exc_info=e)
-        
+                logger.error(
+                    "Failed to load function tools %s: %s",
+                    function_tools,
+                    e,
+                    exc_info=e,
+                )
+
         # Add agent tools
         if agent_tools:
             try:
-                agent_tool_instances = await self._create_agent_tools(agent_tools, current_agent_key=agent_key)
-                tools.extend(agent_tool_instances)
+                agent_tool_instances = await self._create_agent_tools(
+                    agent_tools, current_agent_key=agent_key
+                )
+                tools.extend(
+                    self._wrap_tool_with_policy(t, getattr(t, "name", "agent"), "agent")
+                    for t in agent_tool_instances
+                )
 
             except Exception as e:
-                logger.error("Failed to create agent tools %s: %s", agent_tools, e, exc_info=e)
- 
+                logger.error(
+                    "Failed to create agent tools %s: %s", agent_tools, e, exc_info=e
+                )
 
         # Cache tools
         self._tool_cache[cache_key] = tools
-        
+
         return tools
-    
-    async def _create_agent_tools(self, agent_keys: List[str], current_agent_key: Optional[str] = None) -> List[Any]:
+
+    async def _create_agent_tools(
+        self, agent_keys: List[str], current_agent_key: Optional[str] = None
+    ) -> List[Any]:
         """Create agent tools with proper logging and context sharing."""
         tools = []
-        
+
         for agent_tool_key in agent_keys:
             try:
                 # Get tool configuration
                 tool_config = self.config.get_tool(agent_tool_key)
-                target_agent_key = getattr(tool_config, "target_agent", None) or agent_tool_key
+                target_agent_key = (
+                    getattr(tool_config, "target_agent", None) or agent_tool_key
+                )
                 target_agent_config = self.config.get_agent(target_agent_key)
                 tool_name = tool_config.name or f"call_{target_agent_key}"
 
                 # Self-referential coordinator tools must be lazy. Creating the
                 # target eagerly while the parent agent is still being assembled
                 # recurses through _get_agent_tools indefinitely.
-                sub_agent = None if target_agent_key == current_agent_key else await self.create_agent(target_agent_key)
-                target_agent_name = getattr(sub_agent, "name", None) or target_agent_config.name
-                tool_description = tool_config.description or f"Calls {target_agent_name}"
-                
+                sub_agent = (
+                    None
+                    if target_agent_key == current_agent_key
+                    else await self.create_agent(target_agent_key)
+                )
+                target_agent_name = (
+                    getattr(sub_agent, "name", None) or target_agent_config.name
+                )
+                tool_description = (
+                    tool_config.description or f"Calls {target_agent_name}"
+                )
+
                 # Get context sharing parameters from tool config
-                context_strategy = getattr(tool_config, 'context_strategy', 'conversation')
-                context_depth = getattr(tool_config, 'context_depth', 5)
-                include_tool_history = getattr(tool_config, 'include_tool_history', True)
-                
+                context_strategy = getattr(
+                    tool_config, "context_strategy", "conversation"
+                )
+                context_depth = getattr(tool_config, "context_depth", 5)
+                include_tool_history = getattr(
+                    tool_config, "include_tool_history", True
+                )
+
                 # Create context-aware tool (primary name)
                 main_tool = self._create_context_aware_agent_tool(
                     agent_key=target_agent_key,
@@ -3357,13 +4006,13 @@ DO NOT write XML tags manually!"""
                     tool_description=tool_description,
                     context_strategy=context_strategy,
                     context_depth=context_depth,
-                    include_tool_history=include_tool_history
+                    include_tool_history=include_tool_history,
                 )
-                
+
                 # Wrap for logging
                 wrapped_main = self._wrap_agent_tool(main_tool, target_agent_name)
                 tools.append(wrapped_main)
-                
+
                 # Add channel aliases to avoid errors when model appends channel suffixes
                 channel_suffixes = ("_commentary", "_tool", "_final")
                 for suffix in channel_suffixes:
@@ -3374,25 +4023,27 @@ DO NOT write XML tags manually!"""
                         tool_description=tool_description,
                         context_strategy=context_strategy,
                         context_depth=context_depth,
-                        include_tool_history=include_tool_history
+                        include_tool_history=include_tool_history,
                     )
                     wrapped_alias = self._wrap_agent_tool(alias_tool, target_agent_name)
                     tools.append(wrapped_alias)
-                
+
             except Exception as e:
                 logger.error(
-                    "Failed to configure agent tool", extra={"agent_tool": agent_tool_key}, exc_info=e
+                    "Failed to configure agent tool",
+                    extra={"agent_tool": agent_tool_key},
+                    exc_info=e,
                 )
 
         return tools
-    
+
     def _wrap_agent_tool(self, agent_tool: Any, agent_name: str) -> Any:
         """Wrap agent tool for proper logging and execution tracking."""
-        if not hasattr(agent_tool, 'on_invoke_tool'):
+        if not hasattr(agent_tool, "on_invoke_tool"):
             return agent_tool
-        
+
         original_invoke = agent_tool.on_invoke_tool
-        
+
         async def wrapped_invoke_tool(tool_context, tool_call_arguments):
             start_time = time.time()
             # Normalize and log tool arguments
@@ -3401,7 +4052,7 @@ DO NOT write XML tags manually!"""
             preferred_text: Optional[str] = None
             if isinstance(tool_call_arguments, dict):
                 # Prioritize text aliases over input to avoid losing the task
-                for alias in ('task', 'message', 'prompt', 'input'):
+                for alias in ("task", "message", "prompt", "input"):
                     value = tool_call_arguments.get(alias)
                     if isinstance(value, str) and value.strip():
                         preferred_text = value.strip()
@@ -3409,11 +4060,13 @@ DO NOT write XML tags manually!"""
                 # If null/None or empty strings — replace with empty string
                 if not isinstance(preferred_text, str):
                     preferred_text = ""
-                normalized_args = { 'input': preferred_text }
+                normalized_args = {"input": preferred_text}
             else:
                 # If unstructured form received, convert to string
-                preferred_text = str(tool_call_arguments) if tool_call_arguments is not None else ""
-                normalized_args = { 'input': preferred_text }
+                preferred_text = (
+                    str(tool_call_arguments) if tool_call_arguments is not None else ""
+                )
+                normalized_args = {"input": preferred_text}
 
             # Safely convert arguments to string for logging
             requested_context_id = self._extract_context_id_from_text(preferred_text)
@@ -3423,23 +4076,25 @@ DO NOT write XML tags manually!"""
             input_data = str(normalized_args)
 
             execution = AgentExecution(
-                agent_name=agent_name,
-                start_time=start_time,
-                input_message=input_data
+                agent_name=agent_name, start_time=start_time, input_message=input_data
             )
             execution.context_id = sub_context_id
 
             try:
                 # Log tool call with a nice name
-                tool_display_name = getattr(agent_tool, 'name', agent_name)
+                tool_display_name = getattr(agent_tool, "name", agent_name)
                 # Add prefix for agent-tools
                 formatted_tool_name = f"Agent-Tool: {tool_display_name}"
-                
-                Logger("agent_factory").log_verbose(f"TOOL CALL: {tool_display_name}", normalized_args)
 
-                registry, pipeline_id, active_context_id = await self._ensure_pipeline_for_run_context(
-                    tool_context,
-                    formatted_tool_name,
+                Logger("agent_factory").log_verbose(
+                    f"TOOL CALL: {tool_display_name}", normalized_args
+                )
+
+                registry, pipeline_id, active_context_id = (
+                    await self._ensure_pipeline_for_run_context(
+                        tool_context,
+                        formatted_tool_name,
+                    )
                 )
                 raw_ctx = getattr(tool_context, "context", None)
                 if raw_ctx is not None:
@@ -3449,7 +4104,7 @@ DO NOT write XML tags manually!"""
 
                 async def execute_original():
                     result = original_invoke(tool_context, **normalized_args)
-                    if hasattr(result, '__await__'):
+                    if hasattr(result, "__await__"):
                         return await result
                     return result
 
@@ -3470,7 +4125,7 @@ DO NOT write XML tags manually!"""
                 # Multimodal data (images) stays inside the sub-agent and does NOT leak upward.
 
                 execution.end_time = time.time()
-                
+
                 # Prepare text representation for logs/history
                 if isinstance(result, str):
                     result_text = result
@@ -3485,7 +4140,9 @@ DO NOT write XML tags manually!"""
 
                 marker_line = f"Context ID: {sub_context_id}"
                 if marker_line not in result_text:
-                    result_text_for_history = result_text.rstrip() + "\n\n" + marker_line
+                    result_text_for_history = (
+                        result_text.rstrip() + "\n\n" + marker_line
+                    )
                 else:
                     result_text_for_history = result_text
 
@@ -3498,7 +4155,7 @@ DO NOT write XML tags manually!"""
                 # Log the full tool call result in verbose mode
                 Logger("agent_factory").log_verbose(
                     f"TOOL RESULT: {tool_display_name}",
-                    result if isinstance(result, str) else str(result)
+                    result if isinstance(result, str) else str(result),
                 )
 
                 result = self._truncate_tool_output(result, tool_display_name)
@@ -3509,12 +4166,12 @@ DO NOT write XML tags manually!"""
                 execution.error = str(e)
 
                 self.context_manager.add_execution(execution)
-                
+
                 raise
-        
+
         agent_tool.on_invoke_tool = wrapped_invoke_tool
         return agent_tool
-    
+
     def _create_context_aware_agent_tool(
         self,
         agent_key: str,
@@ -3523,12 +4180,12 @@ DO NOT write XML tags manually!"""
         tool_description: str,
         context_strategy: str = "minimal",
         context_depth: int = 5,
-        include_tool_history: bool = False
+        include_tool_history: bool = False,
     ) -> Any:
         """Create an agent tool that can share context with the sub-agent."""
-        
+
         # Enhance tool description, but move common rules to the shared prompt (see settings.tools_common_rules)
-        effective_description = (tool_description or "")
+        effective_description = tool_description or ""
         # Key local rules kept brief (one line), the rest in the shared block
         local_rule = "Call: pass a single field input (string). Allowed aliases: task, message, prompt."
         if effective_description:
@@ -3552,32 +4209,35 @@ DO NOT write XML tags manually!"""
             # At this level, input must be a string, as normalization happened in `wrapped_invoke_tool`
             if not isinstance(input, str) or not input.strip():
                 return f"❌ Empty input for tool '{tool_name}'. Please provide a non-empty 'input' (string)."
-            
+
             raw_input = input.strip()
-            
+
             # Context is passed ONLY if:
             # 1. context_id is explicitly specified in the request
             should_include_context = (
-                self._extract_context_id_from_text(raw_input) is not None  # context_id explicitly specified in request
+                self._extract_context_id_from_text(raw_input)
+                is not None  # context_id explicitly specified in request
             )
-            
+
             if should_include_context:
                 enhanced_input = self.context_manager.get_context_for_agent_tool(
                     strategy=context_strategy,
                     depth=context_depth,
                     include_tools=include_tool_history,
-                    task_input=raw_input
+                    task_input=raw_input,
                 )
             else:
                 # For new sessions, pass only the original request without context
                 enhanced_input = raw_input
-            
+
             # Sub-agent session is tied to the selected context
             # If no context is passed, create a new context for the sub-agent
             if should_include_context:
                 # Use current context if context is being passed
                 current_context_id = self.context_manager.get_current_context_id()
-                session = self._get_agent_session(agent_key, current_context_id or f"ctx-{uuid.uuid4().hex[:8]}")
+                session = self._get_agent_session(
+                    agent_key, current_context_id or f"ctx-{uuid.uuid4().hex[:8]}"
+                )
             else:
                 # Create a new context for the sub-agent if no context is passed
                 new_context_id = f"ctx-{uuid.uuid4().hex[:8]}"
@@ -3586,13 +4246,35 @@ DO NOT write XML tags manually!"""
 
             # Create GridRunContext for sub-agent with LOCAL session access
             # Inherit user_id from parent context
-            parent_user_id = context.context.user_id if hasattr(context, 'context') and hasattr(context.context, 'user_id') else None
-            parent_pipeline_id = context.context.pipeline_id if hasattr(context, 'context') and hasattr(context.context, 'pipeline_id') else None
-            parent_step_id = context.context.step_id if hasattr(context, 'context') and hasattr(context.context, 'step_id') else None
+            parent_user_id = (
+                context.context.user_id
+                if hasattr(context, "context") and hasattr(context.context, "user_id")
+                else None
+            )
+            parent_pipeline_id = (
+                context.context.pipeline_id
+                if hasattr(context, "context")
+                and hasattr(context.context, "pipeline_id")
+                else None
+            )
+            parent_step_id = (
+                context.context.step_id
+                if hasattr(context, "context") and hasattr(context.context, "step_id")
+                else None
+            )
             sub_run_ctx = GridRunContext(
                 factory=self,
-                context_id=new_context_id if not should_include_context else current_context_id,
+                context_id=(
+                    new_context_id if not should_include_context else current_context_id
+                ),
                 session=session,
+                action_state=getattr(
+                    getattr(context, "context", None), "action_state", None
+                ),
+                action_depth=(
+                    getattr(getattr(context, "context", None), "action_depth", 0) or 0
+                )
+                + 1,
                 user_id=parent_user_id,
                 container_id=self.container_id,
                 pipeline_id=parent_pipeline_id,
@@ -3604,41 +4286,73 @@ DO NOT write XML tags manually!"""
             sub_agent_config = self.config.get_agent(agent_key)
             if getattr(sub_agent_config, "auto_run_tools", None):
                 sub_agent_tools = getattr(local_sub_agent, "tools", []) or []
-                working_dir = "/" if self.container_id else self.config.get_working_directory()
+                working_dir = (
+                    "/" if self.container_id else self.config.get_working_directory()
+                )
                 init_key = f"{agent_key}:{parent_user_id or 'default'}"
 
                 # One-time tools: run once per user/agent session
                 if init_key not in self._initialized_agents:
                     try:
                         auto_run_info = await self._execute_auto_run_tools(
-                            agent_key, sub_agent_config, sub_agent_tools, working_dir, sub_run_ctx,
-                            every_run=False, user_message=enhanced_input if isinstance(enhanced_input, str) else ""
+                            agent_key,
+                            sub_agent_config,
+                            sub_agent_tools,
+                            working_dir,
+                            sub_run_ctx,
+                            every_run=False,
+                            user_message=(
+                                enhanced_input
+                                if isinstance(enhanced_input, str)
+                                else ""
+                            ),
                         )
                         if auto_run_info:
                             enhanced_input = (
                                 auto_run_info
                                 + "\n\n[Current user request]\n\n"
-                                + (enhanced_input if isinstance(enhanced_input, str) else "")
+                                + (
+                                    enhanced_input
+                                    if isinstance(enhanced_input, str)
+                                    else ""
+                                )
                             )
                         self._initialized_agents.add(init_key)
-                        logger.info(f"✅ One-time auto-run tools executed for sub-agent {init_key}")
+                        logger.info(
+                            f"✅ One-time auto-run tools executed for sub-agent {init_key}"
+                        )
                     except Exception as e:
-                        logger.warning(f"⚠️ Failed to run one-time auto_run_tools for sub-agent {agent_key}: {e}")
+                        logger.warning(
+                            f"⚠️ Failed to run one-time auto_run_tools for sub-agent {agent_key}: {e}"
+                        )
 
                 # Per-message tools: run on every call
                 try:
                     every_run_info = await self._execute_auto_run_tools(
-                        agent_key, sub_agent_config, sub_agent_tools, working_dir, sub_run_ctx,
-                        every_run=True, user_message=enhanced_input if isinstance(enhanced_input, str) else ""
+                        agent_key,
+                        sub_agent_config,
+                        sub_agent_tools,
+                        working_dir,
+                        sub_run_ctx,
+                        every_run=True,
+                        user_message=(
+                            enhanced_input if isinstance(enhanced_input, str) else ""
+                        ),
                     )
                     if every_run_info:
                         enhanced_input = (
                             every_run_info
                             + "\n\n[Current user request]\n\n"
-                            + (enhanced_input if isinstance(enhanced_input, str) else "")
+                            + (
+                                enhanced_input
+                                if isinstance(enhanced_input, str)
+                                else ""
+                            )
                         )
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to run per-message auto_run_tools for sub-agent {agent_key}: {e}")
+                    logger.warning(
+                        f"⚠️ Failed to run per-message auto_run_tools for sub-agent {agent_key}: {e}"
+                    )
 
             # Run the sub-agent with enhanced input and session
             # Use streaming to capture tool calls for logging
@@ -3655,10 +4369,11 @@ DO NOT write XML tags manually!"""
                 # Process streaming events and log tool calls
                 output = None
                 async for event in run_result_streaming.stream_events():
+                    append_action_reasoning(sub_run_ctx.action_state, event)
                     # Use the factory's stream observer to log events
-                    if hasattr(self, '_stream_observer'):
+                    if hasattr(self, "_stream_observer"):
                         self._stream_observer.handle_event(event, agent_key=agent_key)
-                    
+
                     # Also log specific events to file logs if needed (redundant if observer does it, but good for safety)
                     if isinstance(event, RunItemStreamEvent):
                         event_name = getattr(event, "name", "")
@@ -3668,25 +4383,38 @@ DO NOT write XML tags manually!"""
                             raw_item = getattr(item, "raw_item", None)
                             tool_name = getattr(raw_item, "name", None) or "tool"
                             arguments = getattr(raw_item, "arguments", None)
-                            
+
                             # Format arguments for logging
                             args_str = ""
                             if isinstance(arguments, str):
-                                args_str = arguments[:200] + ('...' if len(arguments) > 200 else '')
+                                args_str = arguments[:200] + (
+                                    "..." if len(arguments) > 200 else ""
+                                )
                             elif isinstance(arguments, dict):
-                                args_str = json.dumps(arguments, ensure_ascii=False)[:200]
-                                
+                                args_str = json.dumps(arguments, ensure_ascii=False)[
+                                    :200
+                                ]
+
                             logger.info(
                                 f"SUB_AGENT_TOOL_CALL | agent={agent_key} | tool={tool_name} | args={args_str}"
                             )
 
                 # Extract final output
                 try:
-                    if hasattr(run_result_streaming, "final_output") and run_result_streaming.final_output:
+                    if (
+                        hasattr(run_result_streaming, "final_output")
+                        and run_result_streaming.final_output
+                    ):
                         output = run_result_streaming.final_output
-                    elif hasattr(run_result_streaming, "output") and run_result_streaming.output:
+                    elif (
+                        hasattr(run_result_streaming, "output")
+                        and run_result_streaming.output
+                    ):
                         output = run_result_streaming.output
-                    elif hasattr(run_result_streaming, "content") and run_result_streaming.content:
+                    elif (
+                        hasattr(run_result_streaming, "content")
+                        and run_result_streaming.content
+                    ):
                         output = run_result_streaming.content
                     else:
                         output = str(run_result_streaming)
@@ -3699,12 +4427,14 @@ DO NOT write XML tags manually!"""
             try:
                 self.context_manager.add_tool_result_as_message(tool_name, output)
             except Exception as exc:
-                logger.debug("Failed to record tool result in context: %s", exc, exc_info=exc)
+                logger.debug(
+                    "Failed to record tool result in context: %s", exc, exc_info=exc
+                )
 
             return output
-        
+
         return run_agent_with_context
-    
+
     async def _create_mcp_servers(self, mcp_tool_names: List[str]) -> List[Any]:
         """Create and connect MCP servers using the Agents SDK."""
         logger.info(f"Creating MCP servers for tools: {mcp_tool_names}")
@@ -3722,23 +4452,31 @@ DO NOT write XML tags manually!"""
                     logger.warning(f"❌ MCP server creation returned None: {name}")
             except Exception as e:
                 unavailable.append(name)
-                logger.error(f"❌ MCP server creation failed: {name} - {e}", exc_info=True)
+                logger.error(
+                    f"❌ MCP server creation failed: {name} - {e}", exc_info=True
+                )
 
         if unavailable:
             logger.warning(f"Unavailable MCP servers: {unavailable}")
             try:
                 self.context_manager.set_metadata("mcp_unavailable", unavailable)
             except Exception as exc:
-                logger.warning("Failed to store MCP availability metadata: %s", exc, exc_info=exc)
+                logger.warning(
+                    "Failed to store MCP availability metadata: %s", exc, exc_info=exc
+                )
 
-        logger.info(f"Created {len(servers)} MCP servers out of {len(mcp_tool_names)} requested")
+        logger.info(
+            f"Created {len(servers)} MCP servers out of {len(mcp_tool_names)} requested"
+        )
         return servers
 
     async def _get_mcp_server(self, tool_name: str) -> Optional[Any]:
         """Get or create an SDK-based MCP server (MCPServerStdio)."""
         tool_config = self.config.get_tool(tool_name)
         if tool_config.type != "mcp":
-            logger.warning(f"Tool '{tool_name}' is not of type 'mcp' (type={tool_config.type})")
+            logger.warning(
+                f"Tool '{tool_name}' is not of type 'mcp' (type={tool_config.type})"
+            )
             return None
 
         cwd = self.config.get_working_directory()
@@ -3748,10 +4486,14 @@ DO NOT write XML tags manually!"""
         # If we cache only by tool_name, then per-user TG runs can reuse a server created
         # for a different cwd, breaking the "cwd is always user workspace" invariant.
         # Also include container_id in cache key
-        cache_key = f"{tool_name}::{cwd}" if getattr(tool_config, "add_working_directory", False) else tool_name
+        cache_key = (
+            f"{tool_name}::{cwd}"
+            if getattr(tool_config, "add_working_directory", False)
+            else tool_name
+        )
         if self.container_id:
             cache_key += f"::{self.container_id}"
-            
+
         if cache_key in self._mcp_servers:
             logger.debug("Reusing cached MCP server: %s", cache_key)
             return self._mcp_servers[cache_key]
@@ -3770,7 +4512,7 @@ DO NOT write XML tags manually!"""
         env = dict(tool_config.env_vars or {})
 
         # Add working directory to args if configured (CRITICAL FIX for filesystem MCP)
-        if getattr(tool_config, 'add_working_directory', False):
+        if getattr(tool_config, "add_working_directory", False):
             # Agent sees root as "/". In container pass "/" as the allowed root so MCP
             # filesystem accepts any absolute agent path (e.g. /docs, /sub/file).
             # The docker exec still runs with -w /workspace so relative ops work correctly.
@@ -3817,22 +4559,28 @@ DO NOT write XML tags manually!"""
             # Pass environment variables
             for k, v in env.items():
                 args.extend(["-e", f"{k}={v}"])
-                
+
             args.extend([self.container_id, orig_cmd])
             args.extend(orig_args)
-            
+
             command = "docker"
-            
+
             logger.info(
                 f"Wrapping MCP server in container {self.container_id}",
-                extra={"tool_name": tool_name, "mcp_command": command, "mcp_args": args}
+                extra={
+                    "tool_name": tool_name,
+                    "mcp_command": command,
+                    "mcp_args": args,
+                },
             )
 
         logger.info(
             f"Creating MCP server: {tool_name} | command={command} | args={args} | cwd={cwd}"
         )
 
-        max_output_tokens = getattr(self.config.config.settings, "max_tool_output_tokens", None)
+        max_output_tokens = getattr(
+            self.config.config.settings, "max_tool_output_tokens", None
+        )
         server = ResilientMCPServerStdio(
             params={
                 "command": command,
@@ -3850,11 +4598,11 @@ DO NOT write XML tags manually!"""
         logger.info(f"MCP server connected successfully: {tool_name}")
         self._mcp_servers[cache_key] = server
         return server
-    
+
     def _extract_tools_used(self, result: Any) -> List[str]:
         """
         Extract the names of tools invoked during the run.
-        
+
         The SDK `Runner.run` returns an object that (as of v0.2.x) contains
         a ``tool_calls`` attribute – a list of ``ToolCall`` objects with a
         ``name`` field.  If the attribute is missing we fall back to an empty
@@ -3875,25 +4623,27 @@ DO NOT write XML tags manually!"""
         except Exception as e:
             logger.debug("Failed to extract tool call metadata: %s", e, exc_info=e)
         return []
-    
+
     def _extract_context_id_from_text(self, text: Optional[str]) -> Optional[str]:
         """Extract context identifier (ctx-XXXXXXXX) from arbitrary text."""
         if not text:
             return None
         match = CONTEXT_ID_REGEX.search(text)
         return match.group(0).lower() if match else None
-    
+
     # Context management methods
-    def add_to_context(self, role: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    def add_to_context(
+        self, role: str, content: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
         """Add message to conversation context."""
         if metadata is None:
             metadata = {"context_id": self.context_manager.get_current_context_id()}
         self.context_manager.add_message(role, content, metadata=metadata)
-    
+
     def clear_context(self) -> str:
         """Clear conversation context and start a new session."""
         return self.context_manager.clear_history()
-    
+
     def get_active_context_id(self) -> Optional[str]:
         """Return the current active context identifier."""
         return self.context_manager.get_current_context_id()
@@ -3905,22 +4655,21 @@ DO NOT write XML tags manually!"""
     def list_context_ids(self) -> List[str]:
         """Return the list of known context identifiers."""
         return self.context_manager.list_context_ids()
-    
+
     def get_context_info(self) -> Dict[str, Any]:
         """Get context information."""
         return self.context_manager.get_context_stats()
-    
+
     def get_recent_executions(self, limit: int = 3) -> List[Any]:
         """Get recent executions from context manager."""
         return self.context_manager.get_recent_executions(limit=limit)
-    
+
     # Cache management
     def clear_cache(self) -> None:
         """Clear all caches."""
         self._agent_cache.clear()
         self._tool_cache.clear()
 
-    
     async def cleanup(self) -> None:
         """Cleanup resources."""
         # Disconnect MCP clients
@@ -3942,18 +4691,20 @@ DO NOT write XML tags manually!"""
                     e,
                     exc_info=e,
                 )
-        
+
         # Clear agent sessions
         await self._runtime_support.cleanup_sessions()
-        
+
         # Kill stale dolt server started by beads inside the container (network_mode=host
         # makes container ports visible on the host, so orphaned dolt processes persist).
         if self.container_id:
             try:
                 import subprocess
+
                 subprocess.run(
                     ["docker", "exec", self.container_id, "pkill", "-f", "dolt"],
-                    capture_output=True, timeout=5,
+                    capture_output=True,
+                    timeout=5,
                 )
                 logger.debug("Sent pkill dolt to container %s", self.container_id[:12])
             except Exception as e:
@@ -3963,9 +4714,7 @@ DO NOT write XML tags manually!"""
         self.clear_cache()
         self._mcp_servers.clear()
         self._agent_sessions.clear()
-        
 
-    
     # Fallback: stub for manual tool call parsing from response text
     async def _execute_first_tool_call_in_text(self, output: str) -> Optional[str]:
         """Safely ignore manual tool call parsing until fully implemented."""
@@ -3981,13 +4730,15 @@ DO NOT write XML tags manually!"""
         """
         # Pattern for malformed tool_call format
         malformed_patterns = [
-            r'<tool_call>\s*<function=',  # <tool_call><function=...>
-            r'<function=[^>]+>\s*<parameter=',  # <function=name><parameter=...>
+            r"<tool_call>\s*<function=",  # <tool_call><function=...>
+            r"<function=[^>]+>\s*<parameter=",  # <function=name><parameter=...>
         ]
 
         for pattern in malformed_patterns:
             if re.search(pattern, output):
-                logger.warning(f"Detected malformed tool call format in output: {pattern}")
+                logger.warning(
+                    f"Detected malformed tool call format in output: {pattern}"
+                )
                 return True
 
         return False

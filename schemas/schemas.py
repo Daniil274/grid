@@ -6,6 +6,7 @@ These are copies of the main schemas to avoid circular imports.
 from typing import List, Dict, Any, Optional, Union, Literal
 from pydantic import BaseModel, Field, field_validator
 from enum import Enum
+from .action_policy import ActionPolicyConfig
 
 
 class ToolType(str, Enum):
@@ -153,6 +154,7 @@ class PlatformConfig(BaseModel):
 
 class Settings(BaseModel):
     """Global system settings."""
+    action_policy: ActionPolicyConfig = Field(default_factory=ActionPolicyConfig)
     default_agent: str = "assistant"
     max_history: int = Field(default=15, ge=1, le=1000)
     max_turns: int = Field(default=10, ge=1, le=300)
@@ -283,6 +285,7 @@ class GridConfig(BaseModel):
     prompt_templates: Dict[str, str] = Field(default_factory=dict)
     scenarios: Optional[Dict[str, Any]] = None
     telegram: Optional[Dict[str, Any]] = None  # telegram bot config, incl. proxy for API requests
+    voice: Dict[str, Any] = Field(default_factory=dict, description="Local web speech and voice routing settings")
     memory_optimizer: Optional[MemoryOptimizerConfig] = Field(default=None, description="Memory optimizer configuration")
     embeddings: Optional[EmbeddingsConfig] = Field(default=None, description="Semantic search / embeddings configuration")
     improvement: ImprovementConfig = Field(default_factory=ImprovementConfig, description="Controlled self-improvement loop configuration")

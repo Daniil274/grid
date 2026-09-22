@@ -223,6 +223,7 @@ This mechanism prevents accidental cross-talk between independent requests while
 keeping it trivial to stitch conversations back together when needed.
 
 ## Security
+- Opt-in [action policy](ACTION_POLICY.md): every tool, delegation and MCP call is judged against operator-declared rules by a Decisions model, together with the chain of calls and the agent reasoning behind it, with run budgets and audit records. A judgment layer, not a sandbox.
 - Security-aware factory applies guardrails to specified agents.
 - Middleware: authentication, request security, rate limiting.
 - Git commands run with parameter validation and timeouts; filesystem operations verify path existence/type.
