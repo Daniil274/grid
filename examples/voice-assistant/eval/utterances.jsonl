@@ -1,0 +1,36 @@
+{"id":"everyday_01","set":"everyday","text":"Привет! Расскажи, что нового произошло в проекте за сегодня.","decision":"respond","difficulty":["colloquial"]}
+{"id":"everyday_02","set":"everyday","text":"Напомни мне через десять минут проверить результаты тестов.","decision":"respond","difficulty":["time","command"]}
+{"id":"everyday_03","set":"everyday","text":"Какая сейчас нагрузка на видеокарту и сколько памяти свободно?","decision":"respond","difficulty":["question"]}
+{"id":"everyday_04","set":"everyday","text":"Объясни это проще, буквально в двух предложениях.","decision":"respond","difficulty":["follow_up"]}
+{"id":"everyday_05","set":"everyday","text":"Спасибо, всё понятно, можешь продолжать.","decision":"respond","difficulty":["dialogue"]}
+{"id":"everyday_06","set":"everyday","text":"Нет, пока ничего не запускай, я ещё думаю.","decision":"wait","difficulty":["negation","dialogue"]}
+{"id":"project_01","set":"project","text":"Открой файл web chat slash voice точка py и найди функцию синтеза речи.","decision":"respond","difficulty":["mixed_language","path"]}
+{"id":"project_02","set":"project","text":"Запусти pytest только для тестов голосового интерфейса.","decision":"respond","difficulty":["english_term","command"]}
+{"id":"project_03","set":"project","text":"Сравни Mercury два и Jev один точка тринадцать по задержке ответа.","decision":"respond","difficulty":["proper_names","numbers"]}
+{"id":"project_04","set":"project","text":"Проверь, что OpenRouter API key загружается из файла dot env, но не показывай его.","decision":"respond","difficulty":["mixed_language","security"]}
+{"id":"project_05","set":"project","text":"Создай ветку codex slash voice quality и сохрани текущие изменения.","decision":"respond","difficulty":["mixed_language","path"]}
+{"id":"project_06","set":"project","text":"Найди все упоминания beam size и condition on previous text.","decision":"respond","difficulty":["mixed_language","technical"]}
+{"id":"numbers_01","set":"numbers","text":"Видеокарта использует семь целых восемь десятых гигабайта из двенадцати.","decision":"respond","difficulty":["decimal","units"]}
+{"id":"numbers_02","set":"numbers","text":"Поставь частоту дискретизации сорок восемь тысяч герц, а не двадцать четыре.","decision":"respond","difficulty":["large_number","units","negation"]}
+{"id":"numbers_03","set":"numbers","text":"Запиши адрес: сто двадцать семь точка ноль точка ноль точка один, порт восемь семь шесть пять.","decision":"respond","difficulty":["address","digits"]}
+{"id":"numbers_04","set":"numbers","text":"Версия два точка ноль точка один вышла двадцать первого сентября две тысячи двадцать шестого года.","decision":"respond","difficulty":["version","date"]}
+{"id":"numbers_05","set":"numbers","text":"Оставь порог ноль целых двадцать пять сотых и задержку семьсот пятьдесят миллисекунд.","decision":"respond","difficulty":["decimal","technical"]}
+{"id":"numbers_06","set":"numbers","text":"Файл весит четыре миллиона сто девяносто четыре тысячи триста четыре байта.","decision":"respond","difficulty":["large_number","units"]}
+{"id":"disfluency_01","set":"disfluency","text":"Так, подожди… я хотел сначала проверить микрофон, а потом уже запускать тест.","decision":"respond","difficulty":["hesitation","pause"]}
+{"id":"disfluency_02","set":"disfluency","text":"Эм… открой, пожалуйста… нет, не конфиг, а файл с голосовым клиентом.","decision":"respond","difficulty":["hesitation","self_correction"]}
+{"id":"disfluency_03","set":"disfluency","text":"Я думаю, что… секунду… возможно, нужно увеличить модель распознавания.","decision":"respond","difficulty":["long_pause","hesitation"]}
+{"id":"disfluency_04","set":"disfluency","text":"Сделай это, ну, как бы аккуратно, без изменения чужих файлов.","decision":"respond","difficulty":["fillers"]}
+{"id":"disfluency_05","set":"disfluency","text":"Мне нужен отчёт за… за последние три запуска.","decision":"respond","difficulty":["repetition"]}
+{"id":"disfluency_06","set":"disfluency","text":"Если получится… хотя нет, сначала просто покажи план.","decision":"respond","difficulty":["self_correction","pause"]}
+{"id":"floor_01","set":"floor_control","text":"Я хотел бы, чтобы ты…","decision":"wait","difficulty":["incomplete"]}
+{"id":"floor_02","set":"floor_control","text":"Ещё секунду, я не закончил.","decision":"wait","difficulty":["explicit_wait"]}
+{"id":"floor_03","set":"floor_control","text":"Стоп, ничего больше не делай.","decision":"interrupt","replacement":false,"difficulty":["cancel"]}
+{"id":"floor_04","set":"floor_control","text":"Нет, отмени это и вместо него проверь тесты.","decision":"interrupt","replacement":true,"difficulty":["replacement"]}
+{"id":"floor_05","set":"floor_control","text":"Ага.","decision":"ignore","difficulty":["acknowledgement"]}
+{"id":"floor_06","set":"floor_control","text":"Угу, продолжай.","decision":"ignore","difficulty":["acknowledgement"]}
+{"id":"phonetic_01","set":"phonetic","text":"Шесть шустрых шиншилл шуршат в широкой коробке.","decision":"respond","difficulty":["sibilants"]}
+{"id":"phonetic_02","set":"phonetic","text":"Карл клал кораллы в карман, а Клара закрывала кран.","decision":"respond","difficulty":["consonants"]}
+{"id":"phonetic_03","set":"phonetic","text":"В четверг четвёртого числа в четыре с четвертью часа.","decision":"respond","difficulty":["consonant_clusters","numbers"]}
+{"id":"phonetic_04","set":"phonetic","text":"Илья, Юлия и Дарья обсуждали аудиовизуальный интерфейс.","decision":"respond","difficulty":["names","vowels"]}
+{"id":"phonetic_05","set":"phonetic","text":"Съешь ещё этих мягких французских булок, да выпей чаю.","decision":"respond","difficulty":["pangram"]}
+{"id":"phonetic_06","set":"phonetic","text":"Распознавание речи должно различать шёпот, быстрый темп и фоновый шум.","decision":"respond","difficulty":["domain","consonants"]}
