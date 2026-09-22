@@ -74,6 +74,9 @@ class SpeechProcessor:
         self._config = config
         self._whisper = None    # lazy / warmed up via warmup()
         self._silero = None     # lazy / warmed up via warmup()
+        self.stt_model = None
+        self.stt_device = None
+        self.tts_device = None
 
     # ── Private model loading methods ────────────────────────────────────
 
@@ -84,12 +87,20 @@ class SpeechProcessor:
         logger.info("Loading Whisper model...")
         from faster_whisper import WhisperModel
         stt = self._config.get("stt", {})
+        device = stt.get("device", "cuda")
+        device_index = stt.get("device_index")
+        model_kwargs = {}
+        if device_index is not None:
+            model_kwargs["device_index"] = device_index
         self._whisper = WhisperModel(
             stt.get("model_size", "large-v3"),
-            device=stt.get("device", "cuda"),
+            device=device,
             compute_type=stt.get("compute_type", "float16"),
+            **model_kwargs,
         )
-        logger.info("Whisper loaded.")
+        self.stt_model = stt.get("model_size", "large-v3")
+        self.stt_device = device
+        logger.info(f"Whisper loaded (model={self.stt_model}, device={device}).")
 
     def _wav_to_ogg(self, wav_path: str) -> Optional[str]:
         """
@@ -147,12 +158,14 @@ class SpeechProcessor:
         if not Path(model_path).exists():
             raise FileNotFoundError(f"Silero model not found: {model_path}")
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device_str = tts_cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device(device_str)
         self._silero = torch.package.PackageImporter(str(model_path)).load_pickle(
             "tts_models", "model"
         )
         self._silero.to(device)
-        logger.info(f"Silero TTS loaded, device={device}.")
+        self.tts_device = device_str
+        logger.info(f"Silero TTS loaded, device={device_str}.")
 
         # JIT warmup: first apply_tts compiles the graph — do it now,
         # not during the user's request.
@@ -181,16 +194,24 @@ class SpeechProcessor:
             return ""
 
     def _sync_transcribe(self, path: str) -> str:
-        """Synchronous Whisper call (called in executor)."""
+        """Synchronous Whisper call (called in executor). Errors propagate to the caller."""
         self._load_whisper_model()
-        segments, info = self._whisper.transcribe(path, beam_size=5)
+        stt = self._config.get("stt", {})
+        language = stt.get("language")
+        segments, info = self._whisper.transcribe(
+            path,
+            beam_size=int(stt.get("beam_size", 5)),
+            language=language or None,
+            condition_on_previous_text=False,
+            initial_prompt=stt.get("initial_prompt") or None,
+        )
         text = " ".join(s.text.strip() for s in segments).strip()
         logger.info(f"STT: '{info.language}' ({info.language_probability:.2f}) → {len(text)} chars")
         return text
 
     # ── TTS ──────────────────────────────────────────────────────────────────
 
-    async def synthesize(self, text: str, out_dir: str, speaker: Optional[str] = None) -> str:
+    async def synthesize(self, text: str, out_dir: str, speaker: Optional[str] = None, format: str = "ogg") -> str:
         """
         Synthesizes speech from text.
         Returns the path to the audio file (OGG Opus or WAV as fallback).
@@ -200,12 +221,19 @@ class SpeechProcessor:
             text: Text to synthesize
             out_dir: Directory to save the file
             speaker: Voice (overrides config). None = use config.
+            format: "ogg" (default, Telegram voice bubble) or "wav" (raw WAV output).
         """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._sync_synthesize, text, out_dir, speaker)
+        return await loop.run_in_executor(None, self._sync_synthesize, text, out_dir, speaker, format)
 
-    def _sync_synthesize(self, text: str, out_dir: str, speaker: Optional[str] = None) -> str:
-        """Synchronous Silero call (called in executor)."""
+    def _sync_synthesize(
+        self,
+        text: str,
+        out_dir: str,
+        speaker: Optional[str] = None,
+        format: str = "ogg",
+    ) -> str:
+        """Synchronous Silero call (called in executor); format="wav" skips OGG conversion."""
         import numpy as np
         import re
 
@@ -288,6 +316,9 @@ class SpeechProcessor:
             sf.write(wav_path, audio, sample_rate)
 
         # Convert to OGG Opus (Telegram voice message)
+        if format == "wav":
+            logger.info(f"TTS synthesis → WAV: {wav_path}")
+            return wav_path
         ogg_path = self._wav_to_ogg(wav_path)
         if ogg_path:
             logger.info(f"TTS synthesis → OGG: {ogg_path}")

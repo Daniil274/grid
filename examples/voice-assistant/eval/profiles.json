@@ -1,0 +1,13 @@
+{
+  "sample_rate": 16000,
+  "profiles": [
+    {"id": "clean", "speed": 1.0, "gain_db": 0, "noise_snr_db": null, "echo_delay_ms": null, "codec": "pcm_s16le"},
+    {"id": "fast", "speed": 1.22, "gain_db": 0, "noise_snr_db": null, "echo_delay_ms": null, "codec": "pcm_s16le"},
+    {"id": "slow", "speed": 0.82, "gain_db": 0, "noise_snr_db": null, "echo_delay_ms": null, "codec": "pcm_s16le"},
+    {"id": "quiet", "speed": 1.0, "gain_db": -14, "noise_snr_db": null, "echo_delay_ms": null, "codec": "pcm_s16le"},
+    {"id": "noise_12db", "speed": 1.0, "gain_db": 0, "noise_snr_db": 12, "echo_delay_ms": null, "codec": "pcm_s16le"},
+    {"id": "room_echo", "speed": 1.0, "gain_db": -2, "noise_snr_db": null, "echo_delay_ms": 75, "echo_decay": 0.28, "codec": "pcm_s16le"},
+    {"id": "phone", "speed": 1.0, "gain_db": -3, "noise_snr_db": 18, "echo_delay_ms": null, "codec": "pcm_s16le", "bandpass_hz": [300, 3400], "transport_simulation": "narrowband"}
+  ],
+  "assignment": "Every utterance gets clean plus one deterministic stress profile. IDs ending in 01 are fast, 02 slow, 03 quiet, 04 noise_12db, 05 room_echo, 06 phone. The six anchor utterances floor_01..floor_06 receive every profile."
+}
