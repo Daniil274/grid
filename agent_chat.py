@@ -925,7 +925,8 @@ async def main():
         traceback.print_exc()
         sys.exit(1)
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Run the asynchronous chat entry point from a console script."""
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
@@ -933,3 +934,7 @@ if __name__ == "__main__":
         # The inner loop already printed "Interrupted. Goodbye!" so just exit.
         print()
         sys.exit(0)
+
+
+if __name__ == "__main__":
+    cli()
