@@ -42,20 +42,23 @@ class Controller:
         policy: Policy,
         *,
         kind: str = "experiment",
+        repetitions: int = 1,
     ) -> str:
         """Queue an acceptance experiment, or with ``kind="trial"`` a development trial.
 
-        A trial runs the candidate once on the open development scenarios and
-        reports every detail; it decides nothing and cannot be promoted.
+        A trial runs the candidate on the open development scenarios
+        (``repetitions`` times) and reports every detail; it decides nothing and
+        cannot be promoted. A trial may run the baseline itself, to see how the
+        current stable behaves before anything is changed.
         """
         if kind not in {"experiment", "trial"}:
             raise ValueError("Unknown experiment kind")
         if kind == "trial":
-            policy = policy.development()
+            policy = policy.development(repetitions)
         experiment = uuid.uuid4().hex
         old = self.runtime.revision(repo, baseline)
         new = self.runtime.revision(repo, candidate)
-        if old == new:
+        if old == new and kind == "experiment":
             raise ValueError("Baseline and candidate must be different commits")
         runtime = self.runtime.image(policy.runtime_image)
         verifier = self.runtime.image(policy.verifier_image)
@@ -163,8 +166,22 @@ class Controller:
                 experiment,
                 policy.build_timeout_seconds,
             )
-            trial = self.runtime.trial(image, record["verifier_image"], experiment, 0, policy)
-            result = {"trial": asdict(trial), "images": {"candidate": image}}
+            rates: dict[str, list[bool]] = {}
+            for repetition in range(policy.repetitions):
+                trial = self.runtime.trial(
+                    image, record["verifier_image"], experiment, repetition, policy
+                )
+                self.store.event(
+                    experiment,
+                    {"role": "candidate", "repetition": repetition, "trial": asdict(trial)},
+                )
+                self.runtime.cleanup(experiment)
+                for name, passed in trial.checks.items():
+                    rates.setdefault(name, []).append(passed)
+            result = {
+                "pass_rates": {name: sum(v) / len(v) for name, v in rates.items()},
+                "images": {"candidate": image},
+            }
             status = "completed"
         except Exception as error:
             result = {"error": str(error), "error_type": type(error).__name__}

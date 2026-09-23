@@ -11,7 +11,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 
-from core.workshop import ControlClient, Workshop
+from core.workshop import ControlClient, Workshop, WorkshopError
 from grid_control import egress, verifier
 from grid_control.controller import Controller
 from grid_control.docker import DockerRuntime
@@ -226,6 +226,9 @@ def test_development_policy_runs_the_open_suite_once():
     development = _policy(repetitions=3, auto_promote=True).development()
     assert [s.name for s in development.scenarios] == ["route-code"]
     assert development.repetitions == 1 and not development.auto_promote
+    assert _policy(repetitions=3).development(3).repetitions == 3
+    with pytest.raises(ValueError, match="1 to 3 repetitions"):
+        _policy(repetitions=3).development(4)
     with pytest.raises(ValueError, match="development scenarios"):
         _policy(dev_scenarios=()).development()
 
@@ -308,9 +311,31 @@ def test_trial_tries_unfinished_work_and_shows_its_details(tmp_path, control):
     assert (trial["kind"], trial["status"]) == ("trial", "completed")
     with http:
         view = ControlClient(http).status(report["id"])
-    assert view["events"][-1]["trial"]["details"] == {
+    runs = [event["trial"] for event in view["events"] if "trial" in event]
+    assert len(runs) == 1 and runs[0]["details"] == {
         "scenario:route-code": "expected detail of scenario:route-code"
     }
+    assert view["events"][-1]["pass_rates"]["scenario:route-code"] in (0.0, 1.0)
+
+
+def test_trial_repeats_and_runs_the_baseline_without_changes(tmp_path, control):
+    store, _ = control
+    repository = Repository(tmp_path / "evolution.git")
+    app = create_app(
+        Controller(store, ScriptedRuntime()), repository.path, _policy(repetitions=2), TOKEN
+    )
+    http = TestClient(app, headers={"Authorization": "Bearer " + TOKEN})
+    workshop = Workshop(tmp_path / "workshop")
+    with http:
+        client = ControlClient(http)
+        baseline = workshop.init(client)
+        report = workshop.trial(client, repetitions=2)
+        assert (report["candidate"], report["files"]) == (baseline, [])
+        with pytest.raises(WorkshopError, match="1 to 2 repetitions"):
+            workshop.trial(client, repetitions=5)
+    trial = store.get(report["id"])
+    assert trial["status"] == "completed" and trial["candidate"] == baseline
+    assert len([e for e in trial["events"] if "trial" in e]) == 2
 
 
 def test_acceptance_details_stay_private(tmp_path, control):

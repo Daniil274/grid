@@ -26,6 +26,8 @@ import httpx
 BRANCH = "experiment"
 MARKER = "grid.workshop"
 BASELINE = "grid.baseline"
+# Candidates already sent for acceptance in the open experiment.
+SUBMITTED = "grid.submitted"
 CONTROLLER_STABLE = "refs/remotes/controller/stable"
 TRIAL_REF = "refs/trials/latest"
 # What the running administrator writes into its own working directory: trace
@@ -80,13 +82,19 @@ class ControlClient:
         return self._call("GET", "/source").content
 
     def submit(
-        self, baseline: str, candidate: str, bundle: bytes, *, trial: bool = False
+        self,
+        baseline: str,
+        candidate: str,
+        bundle: bytes | None,
+        *,
+        trial: bool = False,
+        repetitions: int = 1,
     ) -> Dict[str, Any]:
-        body = {
-            "baseline": baseline,
-            "candidate": candidate,
-            "bundle": base64.b64encode(bundle).decode("ascii"),
-        }
+        body: Dict[str, Any] = {"baseline": baseline, "candidate": candidate}
+        if bundle is not None:
+            body["bundle"] = base64.b64encode(bundle).decode("ascii")
+        if trial:
+            body["repetitions"] = repetitions
         return self._call("POST", "/trials" if trial else "/experiments", json=body).json()
 
     def scenarios(self) -> list:
@@ -123,6 +131,14 @@ class Workshop:
 
     def _text(self, *args: str, env: Dict[str, str] | None = None) -> str:
         return self.git(*args, env=env).decode("utf-8", errors="replace").strip()
+
+    def _config_all(self, key: str) -> list[str]:
+        result = subprocess.run(
+            ["git", "-C", str(self.path), "config", "--local", "--get-all", key],
+            capture_output=True,
+            check=False,
+        )
+        return result.stdout.decode().split() if result.returncode == 0 else []
 
     def _config(self, key: str) -> str:
         result = subprocess.run(
@@ -268,6 +284,12 @@ class Workshop:
         baseline = self._fetch_stable(client)
         self.git("checkout", "--quiet", "--force", "-B", BRANCH, baseline)
         self.git("config", "--local", BASELINE, baseline)
+        # A new experiment: nothing of it has been submitted yet (fails harmlessly
+        # when the key is absent).
+        subprocess.run(
+            ["git", "-C", str(self.path), "config", "--local", "--unset-all", SUBMITTED],
+            capture_output=True, check=False,
+        )
         return baseline
 
     def _open_experiment(self) -> str:
@@ -279,30 +301,40 @@ class Workshop:
             raise WorkshopError(f"The workshop must stay on the '{BRANCH}' branch")
         return baseline
 
-    def trial(self, client: ControlClient) -> Dict[str, Any]:
+    def trial(self, client: ControlClient, repetitions: int = 1) -> Dict[str, Any]:
         """Send the current work, committed or not, to a development trial.
 
         The snapshot is a commit built in a throwaway index: the experiment
-        branch, the index and the files stay exactly as they are.
+        branch, the index and the files stay exactly as they are. Without any
+        change the trial runs the baseline itself, which shows how the current
+        stable behaves before deciding what to change.
         """
         baseline = self._open_experiment()
         tree = self._snapshot_tree()
         head = self._text("rev-parse", "HEAD")
         if head == baseline and tree == self._text("rev-parse", "HEAD^{tree}"):
-            raise WorkshopError("Nothing to try: the experiment has no changes")
+            report = client.submit(baseline, baseline, None, trial=True, repetitions=repetitions)
+            return {**report, "baseline": baseline, "candidate": baseline, "files": []}
         snapshot = self._text(
             "commit-tree", tree, "-p", head, "-m", "Development trial snapshot"
         )
         self.git("update-ref", TRIAL_REF, snapshot)
         bundle = self.git("bundle", "create", "-", TRIAL_REF, f"^{baseline}")
         files = self.files()
-        report = client.submit(baseline, snapshot, bundle, trial=True)
+        report = client.submit(baseline, snapshot, bundle, trial=True, repetitions=repetitions)
         return {**report, "baseline": baseline, "candidate": snapshot, "files": files}
 
     def submit(self, client: ControlClient, message: str) -> Dict[str, Any]:
         """Commit every change of the experiment and send the candidate to the controller."""
         baseline = self._open_experiment()
         message = message.strip()
+        # Before committing: a refused submission must leave the workshop as it was.
+        if self._snapshot_tree() in self._config_all(SUBMITTED):
+            raise WorkshopError(
+                "This exact content was already submitted in this experiment. Evaluating "
+                "it again is not new evidence: change the candidate first, or report the "
+                "verdict you have."
+            )
         if self._changes():
             if len(message) < 10:
                 raise WorkshopError("Describe the change: what and why, at least 10 characters")
@@ -311,9 +343,11 @@ class Workshop:
         candidate = self._text("rev-parse", "HEAD")
         if candidate == baseline:
             raise WorkshopError("Nothing to submit: the experiment has no changes")
+        tree = self._text("rev-parse", "HEAD^{tree}")
         files = self.files()
         bundle = self.git("bundle", "create", "-", f"refs/heads/{BRANCH}", f"^{baseline}")
         report = client.submit(baseline, candidate, bundle)
+        self.git("config", "--local", "--add", SUBMITTED, tree)
         return {**report, "baseline": baseline, "candidate": candidate, "files": files}
 
 
