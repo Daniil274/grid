@@ -128,6 +128,8 @@ TOOL_ALIASES = {
     "get_file_info": "file_info",
     "search_files": "file_search",
     "edit_file_patch": "file_edit_patch",
+    "replace_in_file": "file_replace",
+    "delete_file": "file_delete",
     "append_to_file": "file_append",
     
     # Git operations - main

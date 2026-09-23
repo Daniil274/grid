@@ -18,6 +18,7 @@ from typing import List, Any
 from agents import function_tool
 from utils.logger import Logger
 from utils.path_utils import display_agent_path_auto, resolve_agent_path_auto
+from utils.text_patch import PatchError, apply_patch, keep_newlines, replace_once
 
 
 tool_logger = Logger("tool")
@@ -75,13 +76,45 @@ def _resolve_tool_path(raw_path: str) -> tuple[str, str]:
     return visible_path, resolved_path
 
 
+MAX_MATCHES = 200
+_SKIPPED_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+
+
+def _refuse_git_internals(visible_path: str, resolved: str) -> str | None:
+    """Git's own files are never changed by file tools: an edited .git/config or
+    hook runs commands the next time git does. Returns the refusal, if any."""
+    if ".git" in Path(resolved).parts:
+        return f"❌ {visible_path} is inside .git: git internals cannot be changed with file tools"
+    return None
+
+
+def _read_existing(path: Path) -> str | None:
+    """Current text with its own line endings, or None for a missing file."""
+    if not path.is_file():
+        return None
+    with open(path, encoding="utf-8", newline="") as file:
+        return file.read()
+
+
+def _write(path: Path, text: str) -> None:
+    """Write text exactly as given: no newline translation on Windows."""
+    with open(path, "w", encoding="utf-8", newline="") as file:
+        file.write(text)
+
+
 @function_tool
 def edit_file_patch(filepath: str, patch_content: str) -> str:
-    """Apply a diff/patch to a file.
+    """Apply a unified diff to a file.
+
+    Each changed block starts with an ``@@`` line (line numbers are optional)
+    followed by lines prefixed with ' ' (unchanged context), '-' (remove) or
+    '+' (add). A block is found by its context and removed lines, so copy them
+    exactly from the file. The file keeps its line endings. To replace one
+    exact fragment, file_replace is simpler.
 
     Args:
         filepath: Path to the file
-        patch_content: The diff/patch content to apply
+        patch_content: The unified diff
 
     Returns:
         str: Result message
@@ -90,20 +123,90 @@ def edit_file_patch(filepath: str, patch_content: str) -> str:
     log_tool_call("edit_file_patch", {"filepath": visible_path, "patch_length": len(patch_content)})
     try:
         visible_path, filepath = _resolve_tool_path(filepath)
+        refused = _refuse_git_internals(visible_path, filepath)
+        if refused:
+            return refused
         path = Path(filepath)
-        if not path.exists():
+        original = _read_existing(path)
+        if original is None:
             return f"❌ File {visible_path} not found"
-        original = path.read_text(encoding='utf-8')
-        import difflib
-        patched = difflib.restore(original.splitlines(keepends=True), patch_content)
-        if patched is None:
-            return f"❌ Could not apply patch to {visible_path}"
-        path.write_text("".join(patched), encoding='utf-8')
-        log_tool_result("edit_file_patch", "Patch applied")
-        return f"✅ Applied patch to {visible_path}"
+        updated = apply_patch(original, patch_content)
+        _write(path, updated)
+        delta = updated.count("\n") - original.count("\n")
+        log_tool_result("edit_file_patch", f"Patch applied ({delta:+d} lines)")
+        return f"✅ Applied patch to {visible_path} ({delta:+d} lines)"
+    except PatchError as e:
+        log_tool_error("edit_file_patch", str(e))
+        return f"❌ Patch not applied to {visible_path}: {e}"
     except Exception as e:
         log_tool_error("edit_file_patch", str(e))
         return f"❌ Error applying patch to {visible_path}: {str(e)}"
+
+
+@function_tool
+def replace_in_file(filepath: str, old_text: str, new_text: str) -> str:
+    """Replace one exact fragment of a file with new text.
+
+    old_text must occur exactly once: copy it from the file with its
+    indentation, and add neighbouring lines if it is not unique. The rest of the
+    file, its formatting and its line endings stay untouched. Prefer this to
+    rewriting a file for a focused change.
+
+    Args:
+        filepath: Path to the file
+        old_text: The exact text to replace (whole or partial lines)
+        new_text: The text to put in its place
+    """
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("replace_in_file", {"filepath": visible_path, "old_length": len(old_text),
+                                      "new_length": len(new_text)})
+    try:
+        visible_path, filepath = _resolve_tool_path(filepath)
+        refused = _refuse_git_internals(visible_path, filepath)
+        if refused:
+            return refused
+        path = Path(filepath)
+        original = _read_existing(path)
+        if original is None:
+            return f"❌ File {visible_path} not found"
+        _write(path, replace_once(original, old_text, new_text))
+        log_tool_result("replace_in_file", "Replaced")
+        return f"✅ Replaced text in {visible_path}"
+    except PatchError as e:
+        log_tool_error("replace_in_file", str(e))
+        return f"❌ Nothing replaced in {visible_path}: {e}"
+    except Exception as e:
+        log_tool_error("replace_in_file", str(e))
+        return f"❌ Error editing {visible_path}: {str(e)}"
+
+
+@function_tool
+def delete_file(filepath: str) -> str:
+    """Delete one file of the working directory (not a directory).
+
+    Use it for files created by mistake, such as scratch or test files.
+
+    Args:
+        filepath: Path to the file
+    """
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("delete_file", {"filepath": visible_path})
+    try:
+        visible_path, filepath = _resolve_tool_path(filepath)
+        refused = _refuse_git_internals(visible_path, filepath)
+        if refused:
+            return refused
+        path = Path(filepath)
+        if not path.exists():
+            return f"❌ File {visible_path} not found"
+        if not path.is_file():
+            return f"❌ {visible_path} is a directory: only files can be deleted"
+        path.unlink()
+        log_tool_result("delete_file", "Deleted")
+        return f"✅ Deleted {visible_path}"
+    except Exception as e:
+        log_tool_error("delete_file", str(e))
+        return f"❌ Error deleting {visible_path}: {str(e)}"
 
 
 @function_tool
@@ -189,16 +292,25 @@ def get_file_info(filepath: str) -> str:
 
 @function_tool
 def write_file(filepath: str, content: str) -> str:
-    """Write content to a file."""
+    """Create a file or replace its whole content.
+
+    An existing file keeps its line endings. To change part of a file use
+    file_replace or file_edit_patch rather than rewriting it.
+    """
     visible_path = display_agent_path_auto(filepath)
     log_tool_call("write_file", {"filepath": visible_path, "content_length": len(content)})
     try:
         visible_path, filepath = _resolve_tool_path(filepath)
+        refused = _refuse_git_internals(visible_path, filepath)
+        if refused:
+            return refused
         path = Path(filepath)
+        existing = _read_existing(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding='utf-8')
+        _write(path, keep_newlines(existing, content))
         log_tool_result("write_file", f"Wrote {len(content)} chars")
-        return f"✅ Wrote file {visible_path}"
+        verb = "Replaced" if existing is not None else "Created"
+        return f"✅ {verb} file {visible_path}"
     except Exception as e:
         log_tool_error("write_file", str(e))
         return f"❌ Error writing {visible_path}: {str(e)}"
@@ -211,6 +323,9 @@ def append_file(filepath: str, content: str) -> str:
     log_tool_call("append_file", {"filepath": visible_path, "content_length": len(content)})
     try:
         visible_path, filepath = _resolve_tool_path(filepath)
+        refused = _refuse_git_internals(visible_path, filepath)
+        if refused:
+            return refused
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'a', encoding='utf-8') as f:
@@ -255,7 +370,7 @@ def list_files(directory: str = ".") -> str:
 
 @function_tool
 def search_files(directory: str, pattern: str) -> str:
-    """Search file names by regex pattern."""
+    """Find files whose name matches a regex below a directory (skips .git and caches)."""
     visible_dir = display_agent_path_auto(directory)
     log_tool_call("search_files", {"directory": visible_dir, "pattern": pattern})
     try:
@@ -266,16 +381,21 @@ def search_files(directory: str, pattern: str) -> str:
 
         regex = re.compile(pattern, re.IGNORECASE)
         matches: List[str] = []
-        for root, _, files in os.walk(path):
-            for file in files:
+        for root, dirs, files in os.walk(path):
+            dirs[:] = sorted(d for d in dirs if d not in _SKIPPED_DIRS)
+            for file in sorted(files):
                 if regex.search(file):
-                    matches.append(str(Path(root) / file))
+                    # Relative to the searched directory: host paths stay private.
+                    matches.append((Path(root) / file).relative_to(path).as_posix())
 
         if not matches:
             return f"🔍 No files matching '{pattern}' in {visible_dir}"
 
         log_tool_result("search_files", f"Found {len(matches)} matches")
-        return "🔍 Matching files:\n" + "\n".join(matches)
+        shown = matches[:MAX_MATCHES]
+        more = (f"\n... and {len(matches) - len(shown)} more: narrow the pattern"
+                if len(matches) > len(shown) else "")
+        return f"🔍 Matching files in {visible_dir}:\n" + "\n".join(shown) + more
     except Exception as e:
         log_tool_error("search_files", str(e))
         return f"❌ Error searching in {visible_dir}: {str(e)}"
@@ -283,7 +403,7 @@ def search_files(directory: str, pattern: str) -> str:
 
 @function_tool
 def search_content(filepath: str, query: str) -> str:
-    """Search text content in a file."""
+    """Find the lines of one file that contain a text (case-insensitive), with line numbers."""
     visible_path = display_agent_path_auto(filepath)
     log_tool_call("search_content", {"filepath": visible_path, "query": query})
     try:
@@ -293,12 +413,22 @@ def search_content(filepath: str, query: str) -> str:
             return f"❌ File {visible_path} not found"
 
         content = path.read_text(encoding='utf-8')
-        matches = [line for line in content.splitlines() if query.lower() in line.lower()]
+        needle = query.lower()
+        matches = [
+            f"{number}: {line}"
+            for number, line in enumerate(content.splitlines(), start=1)
+            if needle in line.lower()
+        ]
         if not matches:
             return f"🔍 No matches for '{query}' in {visible_path}"
 
         log_tool_result("search_content", f"Found {len(matches)} matching lines")
-        return "🔍 Matching lines:\n" + "\n".join(matches)
+        shown = matches[:MAX_MATCHES]
+        more = (f"\n... and {len(matches) - len(shown)} more: use a more specific query"
+                if len(matches) > len(shown) else "")
+        return f"🔍 Matching lines in {visible_path}:\n" + "\n".join(shown) + more
+    except UnicodeDecodeError:
+        return f"❌ {visible_path} is not a text file"
     except Exception as e:
         log_tool_error("search_content", str(e))
         return f"❌ Error searching content in {visible_path}: {str(e)}"
@@ -313,6 +443,8 @@ FILE_TOOLS = {
     "file_search": search_files,
     "file_content_search": search_content,
     "file_edit_patch": edit_file_patch,
+    "file_replace": replace_in_file,
+    "file_delete": delete_file,
 }
 
 
