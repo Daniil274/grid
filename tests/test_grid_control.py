@@ -7,7 +7,7 @@ import pytest
 
 from grid_control.controller import Controller
 from grid_control.docker import DockerRuntime
-from grid_control.models import Check, Policy, Trial, decide
+from grid_control.models import Check, Policy, Scenario, Trial, decide
 from grid_control.store import Store
 
 
@@ -155,3 +155,22 @@ def test_source_ref_is_not_a_git_option():
             return b"a" * 40
 
     RecordingDocker().revision(Path("."), "--output=unexpected")
+
+
+def test_scenario_pass_rate_tolerates_one_noisy_repetition_but_not_a_regression():
+    policy = Policy(
+        "runtime", "verifier", (Check("web", "/"),), repetitions=3,
+        scenarios=(Scenario("route", "hello", system="engineering"),),
+    )
+    def trials(*outcomes):
+        return [Trial({"web": True, "scenario:route": ok}, 1) for ok in outcomes]
+    noisy = trials(True, False, True)
+    assert not decide(policy, noisy, noisy)["accepted"], "default stays strict"
+    lenient = replace(policy, scenario_pass_rate=0.66)
+    assert decide(lenient, noisy, noisy)["accepted"]
+    decision = decide(lenient, noisy, trials(False, True, False))
+    assert not decision["accepted"] and decision["failing"] == ["scenario:route"]
+    web_down = [Trial({"web": False, "scenario:route": True}, 1)] + trials(True, True)
+    assert not decide(lenient, noisy, web_down)["accepted"], "HTTP checks stay strict"
+    with pytest.raises(ValueError):
+        replace(policy, scenario_pass_rate=0.5)

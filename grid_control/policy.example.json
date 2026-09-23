@@ -4,6 +4,7 @@
   "repetitions": 3,
   "timeout_seconds": 180,
   "min_improvement": 0.0,
+  "scenario_pass_rate": 0.66,
   "environment_names": ["OPENROUTER_API_KEY"],
   "egress_hosts": ["openrouter.ai"],
   "auto_promote": false,
