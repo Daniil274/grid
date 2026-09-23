@@ -54,6 +54,7 @@ def _answer(message):
             {"type": "step", "step": {"id": "s1", "kind": "tool", "title": "call_video_annotator"}},
             {"type": "step", "step": {"id": "s1", "kind": "tool", "title": "call_video_annotator"}},
             {"type": "step", "step": {"id": "s2", "kind": "reasoning", "title": "Thinking"}},
+            {"type": "step", "step": {"id": "s3", "kind": "tool", "title": "Video Editor › video_make_preview"}},
             {"type": "token", "content": "Preview "},
             {"type": "token", "content": "is ready"},
             {"type": "done"},
@@ -103,7 +104,8 @@ def test_verifier_judges_routing_tools_and_answer(chat_server):
         "scenarios": [
             _scenario(
                 name="video", message="cut the video", system="video", agent="video_director",
-                tools_called=("call_video_annotator",), tools_not_called=("video_render_cutlist",),
+                tools_called=("call_video_annotator", "video_make_preview"),
+                tools_not_called=("video_render_cutlist",),
                 output_matches="(?i)preview",
             ),
             _scenario(name="mcp-tool", message="run it", tools_called=("bash_tool",), output_matches="42"),
@@ -128,7 +130,7 @@ def test_verifier_judges_routing_tools_and_answer(chat_server):
         "scenario:slow": False,
         "scenario:routing": True,
     }
-    assert "tools=call_video_annotator;" in details["scenario:video"]
+    assert "tools=Video Editor › video_make_preview,call_video_annotator;" in details["scenario:video"]
     assert "'Preview is ready'" in details["scenario:video"]
     assert "routed to system video, expected engineering" in details["scenario:misrouted"]
     assert "tool bash_tool was called" in details["scenario:forbidden"]
