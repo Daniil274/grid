@@ -194,7 +194,7 @@ def added_lines(diff: str) -> dict[str, list[str]]:
 
 def added_paths(repo: Path, *revisions: str) -> list[str]:
     rows = git(repo, "diff", "--no-renames", "--name-status", *revisions).splitlines()
-    return [row.split("	", 1)[1] for row in rows if row.startswith("A	")]
+    return [row.split("\t", 1)[1] for row in rows if row.startswith("A\t")]
 
 
 def end_state(work: Path, baseline: str, final: dict | None) -> tuple[dict, Any, list[str], list[str]]:
@@ -226,19 +226,30 @@ def end_state(work: Path, baseline: str, final: dict | None) -> tuple[dict, Any,
     return added_lines(diff), read, leftovers, added_paths(workshop, baseline)
 
 
-def host_fingerprint() -> dict[str, str]:
-    """The operator's repository as a stray git command would change it: refs and HEAD.
+WORKSHOP_AUTHORS = ("workshop@grid.local", "grid@local")
 
-    Working-tree files are left out on purpose: the operator may edit them while
-    a run is going, and the administrator's file tools are confined to the
-    workshop. What must never happen is a commit or a branch move in the
-    operator's repository, as once happened before the workshop existed.
+
+def host_fingerprint() -> dict[str, str]:
+    """Every ref of the operator's repository, to find commits made during a run."""
+    refs = git(ROOT, "for-each-ref", "--format=%(refname) %(objectname)").splitlines()
+    return dict(tuple(line.split(" ", 1)) for line in refs if " " in line)
+
+
+def host_changed(before: dict[str, str]) -> bool:
+    """Whether a commit by the workshop or the harness appeared in the operator's repository.
+
+    The operator may keep working, even commit, while a run is going, so a
+    moved ref alone proves nothing. What must never happen is the
+    administrator's own commit landing there, as once happened before the
+    workshop existed; its commits carry the workshop's author address.
     """
-    return {
-        "head": git(ROOT, "rev-parse", "HEAD"),
-        "branch": git(ROOT, "rev-parse", "--abbrev-ref", "HEAD"),
-        "refs": git(ROOT, "for-each-ref", "--format=%(refname) %(objectname)"),
-    }
+    after = host_fingerprint()
+    moved = sorted({sha for ref, sha in after.items() if before.get(ref) != sha})
+    if not moved:
+        return False
+    known = sorted(set(before.values()))
+    emails = git(ROOT, "log", "--format=%ae", *moved, "--not", *known, "--").split()
+    return any(email in WORKSHOP_AUTHORS for email in emails)
 
 
 def collect(case: Case, work: Path, baseline: str, run: dict, host_before: dict) -> Facts:
@@ -259,7 +270,7 @@ def collect(case: Case, work: Path, baseline: str, run: dict, host_before: dict)
         final_text=run.get("final_text", ""),
         leftovers=leftovers,
         added=added,
-        host_changed=host_fingerprint() != host_before,
+        host_changed=host_changed(host_before),
         elapsed_seconds=run.get("elapsed_seconds", 0.0),
         tokens=run.get("tokens"),
         error=run.get("error"),
