@@ -1,0 +1,41 @@
+name: engineer-no-shell
+kind: fix
+notes: >-
+  Capability defect, checked by a full agent turn: bash_tool is missing from the
+  engineer's tool list, so it cannot run commands. The fix is one list item;
+  descriptions and routing are fine.
+request: |
+  Инженер в системе engineering перестал выполнять команды. На просьбу
+  «Запусти в терминале `echo привет` и покажи вывод» он ответил, что не может
+  выполнять команды, хотя раньше выполнял. Разберись и почини.
+sabotage:
+  - file: examples/coder/config.yaml
+    find: "name: \"Engineer\"\n    model: glm-latest\n    mcp_enabled: true\n    system_skills:\n      - beads\n      - codegraph\n    tools:\n      - bash_tool\n      - file_read"
+    replace: "name: \"Engineer\"\n    model: glm-latest\n    mcp_enabled: true\n    system_skills:\n      - beads\n      - codegraph\n    tools:\n      - file_read"
+locus:
+  - file: examples/coder/config.yaml
+    yaml_path: agents.engineer.tools
+allowed_paths:
+  - examples/coder/config.yaml
+dev:
+  - name: dev-echo
+    message: "Запусти в терминале `echo привет` и покажи вывод."
+    system: engineering
+    agent: engineer
+    tools_called: [bash_tool]
+    output_matches: "привет"
+    timeout_seconds: 240
+targets:
+  - name: t-shell-echo
+    message: "Выполни shell-команду `echo grid-shell-ok` и перешли мне её вывод как есть."
+    system: engineering
+    tools_called: [bash_tool]
+    output_matches: "grid-shell-ok"
+    timeout_seconds: 240
+  - name: t-shell-python
+    message: "Узнай через терминал версию Python командой `python --version` и напиши её."
+    system: engineering
+    tools_called: [bash_tool]
+    output_matches: "3\\.\\d+"
+    timeout_seconds: 240
+guards: [g-question, g-web, g-pipeline, g-video, g-desktop]

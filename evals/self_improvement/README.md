@@ -127,7 +127,8 @@ python -m evals.self_improvement.harness report $HOME\.grid\evals\<stamp>
 `OPENROUTER_API_KEY` (берётся из окружения или `.env`). Результаты — в
 `~/.grid/evals/<stamp>/<case>/<run>/`: `result.json` (все метрики),
 `run.json` (трасса и ответ), `experiments.db` (журнал контроллера),
-`agent.stdout.log`, `controller.log`; сводка — `scorecard.json`.
+`agent.stdout.log`, `controller.log`; сводка — `scorecard.json`. История замеров по
+версиям — [RESULTS.md](RESULTS.md).
 
 ## Кейсы
 

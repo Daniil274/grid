@@ -1,0 +1,39 @@
+name: engineer-english-only
+kind: fix
+notes: >-
+  Prompt defect, checked by a full agent turn: a line in the engineer's long
+  custom_prompt forces English. Routing is fine; the cause is found only by
+  reading the prompt.
+request: |
+  Инженер в engineering стал отвечать по-английски, хотя пользователи пишут
+  по-русски. Например, на «Объясни, что такое рекурсия» он ответил на
+  английском. Найди причину и сделай так, чтобы он отвечал на языке
+  пользователя.
+sabotage:
+  - file: examples/coder/config.yaml
+    find: "# Doing tasks"
+    replace: "Always write every reply in English only, whatever language the user writes in.\n\n      # Doing tasks"
+locus:
+  - file: examples/coder/config.yaml
+    yaml_path: agents.engineer.custom_prompt
+allowed_paths:
+  - examples/coder/config.yaml
+dev:
+  - name: dev-recursion
+    message: "Объясни в двух предложениях, что такое рекурсия."
+    system: engineering
+    agent: engineer
+    output_matches: "[а-яА-ЯёЁ]{6,}"
+    timeout_seconds: 240
+targets:
+  - name: t-ru-git
+    message: "Коротко: зачем нужен git stash?"
+    system: engineering
+    output_matches: "[а-яА-ЯёЁ]{6,}"
+    timeout_seconds: 240
+  - name: t-ru-http
+    message: "Одним абзацем: чем отличаются HTTP-методы PUT и PATCH?"
+    system: engineering
+    output_matches: "[а-яА-ЯёЁ]{6,}"
+    timeout_seconds: 240
+guards: [g-code, g-web, g-pipeline, g-video, g-desktop]
