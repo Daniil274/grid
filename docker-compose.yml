@@ -29,7 +29,9 @@ services:
 
   # Grid evolution workshop: the administrator system on its own clone of the
   # controller's stable branch. Start the controller on the host first:
-  #   grid-control serve --repo <evolution.git> --policy <policy.json> --host 0.0.0.0
+  #   grid-control serve --repo <evolution.git> --policy <policy.json> --port 8010
+  # (Docker Desktop reaches the host's 127.0.0.1 as host.docker.internal; on
+  # Linux bind the controller to the docker bridge address instead)
   # then: docker compose --profile evolution up workshop  (UI on :8001)
   workshop:
     profiles: [evolution]

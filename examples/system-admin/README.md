@@ -55,8 +55,12 @@ control_status ◄──────────────────── a
 grid-control init --repo C:/grid-evolution/evolution.git --from . --ref HEAD
 $env:GRID_CONTROL_TOKEN = "<не короче 32 символов>"
 # policy.json: начните с grid_control/policy.example.json, закрытый набор замените своим
-grid-control serve --repo C:/grid-evolution/evolution.git --policy C:/grid-evolution/policy.json --host 0.0.0.0
+grid-control serve --repo C:/grid-evolution/evolution.git --policy C:/grid-evolution/policy.json --port 8010
 ```
+
+Docker Desktop пробрасывает `127.0.0.1` хоста в контейнеры как
+`host.docker.internal`, поэтому открывать контроллер наружу не нужно. На Linux
+привяжите его к адресу моста Docker (`--host 172.17.0.1`).
 
 Мастерская, интерфейс на http://localhost:8001:
 
