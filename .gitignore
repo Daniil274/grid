@@ -100,6 +100,11 @@ nul
 tools/DeepSeek-OCR/
 ocr_cache/
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
+# Agent runtime state (trace database) written into the working directory
+.grid/
 # Generated JSON lives under the runtime directories below. Source manifests
 # and package metadata must stay visible to Git.
 examples/*/data/
