@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from .controller import Controller
-from .models import Policy
+from .models import MAX_OWN_SCENARIOS, Policy, Scenario
 from .repository import MAX_BUNDLE_BYTES, Repository
 
 
@@ -26,8 +26,10 @@ class Submission(BaseModel):
     # Base64 git bundle with the candidate's new commits, for a workshop that
     # has its own clone. Without it the candidate must already be in the repository.
     bundle: str | None = Field(default=None, max_length=(MAX_BUNDLE_BYTES // 3 + 1) * 4)
-    # Development trials only: how many times to run the open scenarios.
+    # Development trials only: how many times to run the open scenarios, and
+    # scenarios of the workshop's own (for instance a user's exact message).
     repetitions: int = Field(default=1, ge=1, le=20)
+    scenarios: list[dict] = Field(default_factory=list, max_length=MAX_OWN_SCENARIOS)
 
 
 def _without_details(event: dict) -> dict:
@@ -97,11 +99,14 @@ def create_app(
                 if body.bundle is not None:
                     bundle = base64.b64decode(body.bundle, validate=True)
                     Repository(repository).receive(bundle, body.baseline, body.candidate)
+                if body.scenarios and kind != "trial":
+                    raise ValueError("Only a development trial takes scenarios of its own")
+                own = tuple(Scenario.from_dict(item) for item in body.scenarios)
                 experiment = controller.prepare(
                     repository, body.baseline, body.candidate, policy,
-                    kind=kind, repetitions=body.repetitions,
+                    kind=kind, repetitions=body.repetitions, scenarios=own,
                 )
-            except (binascii.Error, ValueError, RuntimeError) as error:
+            except (binascii.Error, ValueError, TypeError, RuntimeError) as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
             executor.submit(controller.run, experiment)
         return {"id": experiment, "kind": kind, "status": "queued"}

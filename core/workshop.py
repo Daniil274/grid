@@ -89,12 +89,14 @@ class ControlClient:
         *,
         trial: bool = False,
         repetitions: int = 1,
+        scenarios: list | None = None,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"baseline": baseline, "candidate": candidate}
         if bundle is not None:
             body["bundle"] = base64.b64encode(bundle).decode("ascii")
         if trial:
             body["repetitions"] = repetitions
+            body["scenarios"] = list(scenarios or [])
         return self._call("POST", "/trials" if trial else "/experiments", json=body).json()
 
     def scenarios(self) -> list:
@@ -301,7 +303,9 @@ class Workshop:
             raise WorkshopError(f"The workshop must stay on the '{BRANCH}' branch")
         return baseline
 
-    def trial(self, client: ControlClient, repetitions: int = 1) -> Dict[str, Any]:
+    def trial(
+        self, client: ControlClient, repetitions: int = 1, scenarios: list | None = None
+    ) -> Dict[str, Any]:
         """Send the current work, committed or not, to a development trial.
 
         The snapshot is a commit built in a throwaway index: the experiment
@@ -313,7 +317,9 @@ class Workshop:
         tree = self._snapshot_tree()
         head = self._text("rev-parse", "HEAD")
         if head == baseline and tree == self._text("rev-parse", "HEAD^{tree}"):
-            report = client.submit(baseline, baseline, None, trial=True, repetitions=repetitions)
+            report = client.submit(
+                baseline, baseline, None, trial=True, repetitions=repetitions, scenarios=scenarios
+            )
             return {**report, "baseline": baseline, "candidate": baseline, "files": []}
         snapshot = self._text(
             "commit-tree", tree, "-p", head, "-m", "Development trial snapshot"
@@ -321,7 +327,9 @@ class Workshop:
         self.git("update-ref", TRIAL_REF, snapshot)
         bundle = self.git("bundle", "create", "-", TRIAL_REF, f"^{baseline}")
         files = self.files()
-        report = client.submit(baseline, snapshot, bundle, trial=True, repetitions=repetitions)
+        report = client.submit(
+            baseline, snapshot, bundle, trial=True, repetitions=repetitions, scenarios=scenarios
+        )
         return {**report, "baseline": baseline, "candidate": snapshot, "files": files}
 
     def submit(self, client: ControlClient, message: str) -> Dict[str, Any]:
