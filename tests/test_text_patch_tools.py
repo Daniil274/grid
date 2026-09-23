@@ -153,3 +153,17 @@ def test_searches_are_relative_bounded_and_numbered(workdir):
     assert "2: route me" in lines
     assert "more" in call(search_content, filepath="routing.yaml", query="route")
     assert "File content" in call(read_file, filepath="routing.yaml")
+
+
+def test_content_search_covers_a_directory(workdir):
+    (workdir / "examples" / "invoices" / "tools").mkdir(parents=True)
+    (workdir / "examples" / "invoices" / "config.yaml").write_text("model: opencode\n", encoding="utf-8")
+    (workdir / "examples" / "invoices" / "tools" / "a.py").write_text("x = 1\n# opencode\n", encoding="utf-8")
+    (workdir / "examples" / "invoices" / "logo.png").write_bytes(b"\x89PNG\xff\xfe opencode")
+    (workdir / ".git").mkdir()
+    (workdir / ".git" / "opencode").write_text("opencode\n", encoding="utf-8")
+    found = call(search_content, filepath="examples/invoices", query="OpenCode")
+    assert "config.yaml:1: model: opencode" in found
+    assert "tools/a.py:2: # opencode" in found
+    assert "logo.png" not in found
+    assert ".git" not in call(search_content, filepath=".", query="opencode")

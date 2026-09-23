@@ -403,32 +403,53 @@ def search_files(directory: str, pattern: str) -> str:
 
 @function_tool
 def search_content(filepath: str, query: str) -> str:
-    """Find the lines of one file that contain a text (case-insensitive), with line numbers."""
+    """Find lines containing a text (case-insensitive), with line numbers.
+
+    The path may be one file or a directory: a directory is searched
+    recursively (skipping .git, caches and binary files) and every match is
+    shown as path:line.
+    """
     visible_path = display_agent_path_auto(filepath)
     log_tool_call("search_content", {"filepath": visible_path, "query": query})
     try:
         visible_path, filepath = _resolve_tool_path(filepath)
         path = Path(filepath)
-        if not path.exists() or not path.is_file():
-            return f"❌ File {visible_path} not found"
-
-        content = path.read_text(encoding='utf-8')
+        if not path.exists():
+            return f"❌ {visible_path} not found"
         needle = query.lower()
-        matches = [
-            f"{number}: {line}"
-            for number, line in enumerate(content.splitlines(), start=1)
-            if needle in line.lower()
-        ]
+
+        def lines_of(file: Path) -> list[tuple[int, str]]:
+            try:
+                text = file.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                return []
+            return [(n, line) for n, line in enumerate(text.splitlines(), start=1)
+                    if needle in line.lower()]
+
+        if path.is_file():
+            try:
+                path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return f"❌ {visible_path} is not a text file"
+            matches = [f"{n}: {line}" for n, line in lines_of(path)]
+        else:
+            matches = []
+            for root, dirs, files in os.walk(path):
+                dirs[:] = sorted(d for d in dirs if d not in _SKIPPED_DIRS)
+                for name in sorted(files):
+                    file = Path(root) / name
+                    relative = file.relative_to(path).as_posix()
+                    matches += [f"{relative}:{n}: {line}" for n, line in lines_of(file)]
+                    if len(matches) > MAX_MATCHES:
+                        break
         if not matches:
             return f"🔍 No matches for '{query}' in {visible_path}"
 
         log_tool_result("search_content", f"Found {len(matches)} matching lines")
         shown = matches[:MAX_MATCHES]
-        more = (f"\n... and {len(matches) - len(shown)} more: use a more specific query"
+        more = (f"\n... and more: use a more specific query or path"
                 if len(matches) > len(shown) else "")
         return f"🔍 Matching lines in {visible_path}:\n" + "\n".join(shown) + more
-    except UnicodeDecodeError:
-        return f"❌ {visible_path} is not a text file"
     except Exception as e:
         log_tool_error("search_content", str(e))
         return f"❌ Error searching content in {visible_path}: {str(e)}"

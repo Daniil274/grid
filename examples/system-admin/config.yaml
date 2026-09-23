@@ -86,7 +86,7 @@ tools:
     description: Find files by name pattern (skips .git and caches).
   file_content_search:
     type: function
-    description: Find the lines of one file that contain a text, with line numbers.
+    description: Find lines containing a text in a file or, recursively, a directory, with line numbers.
   file_replace:
     type: function
     description: Replace one exact fragment of a file; the rest of the file stays byte for byte.
