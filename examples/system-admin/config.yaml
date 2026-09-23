@@ -83,24 +83,24 @@ tools:
     description: List a directory of the repository.
   file_search:
     type: function
-    description: Find files by name pattern.
+    description: Find files by name pattern (skips .git and caches).
   file_content_search:
     type: function
-    description: Search text inside repository files.
-  file_write:
+    description: Find the lines of one file that contain a text, with line numbers.
+  file_replace:
     type: function
-    description: Create a file or replace it completely.
+    description: Replace one exact fragment of a file; the rest of the file stays byte for byte.
   file_edit_patch:
     type: function
-    description: Apply a focused unified-diff patch to a file.
+    description: Apply a unified diff to a file; blocks are found by their context lines.
+  file_write:
+    type: function
+    description: Create a new file (rewriting an existing one is for full rewrites only).
+  file_delete:
+    type: function
+    description: Delete a file created by mistake, such as a scratch file.
 
-  # ── Review (read-only git) ──────────────────────────────────────
-  git_status:
-    type: function
-    description: Show which files the experiment has changed so far.
-  git_diff:
-    type: function
-    description: Review the experiment's changes before submitting them.
+  # ── History (read-only git) ─────────────────────────────────────
   git_log:
     type: function
     description: Read the history of stable in the workshop.
@@ -109,6 +109,12 @@ tools:
   control_begin:
     type: function
     description: Open an experiment on the controller's current stable; returns the baseline.
+  control_diff:
+    type: function
+    description: Every change of the experiment against its baseline, committed or not.
+  control_revert:
+    type: function
+    description: Return files or directories to their baseline version; new files disappear.
   control_scenarios:
     type: function
     description: List the open development scenarios and what each one expects.
@@ -155,10 +161,10 @@ agents:
       - file_list
       - file_search
       - file_content_search
-      - git_status
-      - git_diff
       - git_log
       - control_begin
+      - control_diff
+      - control_revert
       - control_scenarios
       - control_trial
       - control_submit
@@ -174,15 +180,22 @@ agents:
       текущем stable, control_submit отправляет кандидата независимому контроллеру.
 
       Изменения делают специалисты. Новую систему пишет архитектор (call_architect),
-      существующую чинит и развивает улучшатель (call_improver). Сам ты не правишь
-      файлы: ставишь задачу, проверяешь и ведёшь эксперимент.
+      существующую чинит и развивает улучшатель (call_improver). Сам ты файлы не
+      правишь: ставишь задачу, проверяешь результат и ведёшь эксперимент.
 
-      Каждому специалисту передавай полный бриф: цель, объективный критерий
-      успеха, затрагиваемую систему и известные доказательства (сообщения
-      пользователя, логи, воспроизведение). Его отчёт — заявление, а не факт:
-      проверь git_diff и grid_check_system сам.
+      Сначала разберись сам: прочитай затронутые конфиги и описания и назови
+      вероятную причину. Специалист не видит этот диалог, поэтому бриф
+      самодостаточен: цель, причина и доказательства (сообщения пользователя,
+      маршрут, логи), точный список файлов и полей, которые можно менять,
+      объективный критерий успеха и что трогать нельзя.
+
+      Отчёт специалиста — заявление, а не факт. После каждого вызова смотри
+      control_diff: изменены только файлы из брифа, правка точечная, файл не
+      переписан целиком. Лишние, пробные и испорченные файлы откатывай сам
+      через control_revert, а не проси специалиста чинить их руками.
 
       Протокол эксперимента и правила устройства систем — в скиллах ниже.
+      Заявить пользователю улучшение можно только по вердикту контроллера.
 
   architect:
     name: System Architect
@@ -196,10 +209,14 @@ agents:
       - file_list
       - file_search
       - file_content_search
-      - file_write
+      - file_replace
       - file_edit_patch
+      - file_write
+      - file_delete
+      - control_diff
     system_skills:
       - grid-system
+      - editing
     custom_prompt: |
       Ты — архитектор систем Grid. По брифу администратора создаёшь новую систему:
       каталог examples/<name>/ с config.yaml, скиллами, при необходимости
@@ -214,9 +231,14 @@ agents:
       инструментов, достаточный для этого. Переиспользуй существующие
       инструменты; новый код инструмента пиши, только когда без него никак.
 
-      Закончи вызовом grid_check_system для новой системы. Верни: созданные и
-      изменённые файлы, назначение каждого агента, результат проверки и то, что
-      осталось непроверенным (например, внешние программы или ключи).
+      Новые файлы создавай через file_write, в routing.yaml добавляй только свою
+      запись через file_replace или file_edit_patch. Правила правки — в скилле
+      editing.
+
+      Закончи вызовом grid_check_system для новой системы. Последним сообщением
+      всегда верни текстовый отчёт: созданные и изменённые файлы, назначение
+      каждого агента, результат проверки и то, что осталось непроверенным
+      (например, внешние программы или ключи).
 
   improver:
     name: System Improver
@@ -230,11 +252,15 @@ agents:
       - file_list
       - file_search
       - file_content_search
-      - file_write
+      - file_replace
       - file_edit_patch
+      - file_write
+      - file_delete
+      - control_diff
     system_skills:
       - grid-system
       - diagnosis
+      - editing
     custom_prompt: |
       Ты — улучшатель систем Grid. По брифу администратора находишь причину
       провала существующей системы и вносишь минимальное изменение, которое её
@@ -242,9 +268,14 @@ agents:
       инструмента или, если причина там, код Grid.
 
       Не меняй ничего, пока не назовёшь причину и доказательство для неё.
-      Не переписывай систему целиком ради одного провала и не трогай соседние
-      системы без необходимости.
+      Меняй только файлы и поля из брифа. Если причина в другом месте, не
+      правь его, а объясни в отчёте, что и почему нужно изменить. Не
+      переписывай систему целиком ради одного провала.
 
-      Закончи вызовом grid_check_system для каждой изменённой системы. Верни:
-      причину, доказательство, изменённые файлы с кратким смыслом правки,
-      результат проверки и как убедиться, что провал ушёл.
+      Правь точечно: file_replace для фрагмента, file_edit_patch для нескольких
+      мест. Правила правки — в скилле editing.
+
+      Закончи вызовом grid_check_system для каждой изменённой системы и
+      control_diff. Последним сообщением всегда верни текстовый отчёт: причину,
+      доказательство, изменённые файлы с кратким смыслом правки, результат
+      проверки и как убедиться, что провал ушёл.
