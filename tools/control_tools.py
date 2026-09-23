@@ -73,6 +73,34 @@ async def control_trial() -> dict:
 
 
 @function_tool
+async def control_diff(path: str = "") -> dict:
+    """Review the whole experiment against its baseline: changed files and the diff.
+
+    Unlike git_diff, which compares with the last commit, this covers every
+    change since control_begin, including earlier submitted candidates. Each
+    file is listed as added, modified or deleted; binary files are flagged.
+
+    Args:
+        path: Optional file or directory to limit the diff to.
+    """
+    return await _run(lambda workshop, client: workshop.diff(path))
+
+
+@function_tool
+async def control_revert(paths: list[str]) -> dict:
+    """Undo the experiment's changes to some paths: back to the baseline version.
+
+    A file the experiment created is removed; a changed or deleted one is
+    restored exactly. Use it for stray, scratch or damaged files instead of
+    asking a specialist to repair them by hand. Returns the remaining changes.
+
+    Args:
+        paths: Files or directories of the repository, relative to its root.
+    """
+    return await _run(lambda workshop, client: workshop.revert(paths))
+
+
+@function_tool
 async def control_scenarios() -> dict:
     """List the open development scenarios: messages and what each one expects.
 
@@ -105,6 +133,8 @@ async def control_status(experiment_id: str, wait_seconds: int = 0) -> dict:
 
 CONTROL_TOOLS = {
     "control_begin": control_begin,
+    "control_diff": control_diff,
+    "control_revert": control_revert,
     "control_trial": control_trial,
     "control_scenarios": control_scenarios,
     "control_submit": control_submit,
