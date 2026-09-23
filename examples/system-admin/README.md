@@ -49,40 +49,16 @@ control_status ◄──────────────────── a
 
 ## Запуск
 
-Разовая подготовка на хосте (нужны Docker и собранный образ `grid-agent-system:local`):
+Установка и настройка контура целиком (образы, репозиторий эволюции, политика и
+сценарии, токен, контроллер, мастерская, выкатка, обслуживание) описаны в
+[docs/evolution-setup.md](../../docs/evolution-setup.md). Коротко:
 
 ```powershell
-grid-control init --repo C:/grid-evolution/evolution.git --from . --ref HEAD
-$env:GRID_CONTROL_TOKEN = "<не короче 32 символов>"
-# policy.json: начните с grid_control/policy.example.json, закрытый набор замените своим
-grid-control serve --repo C:/grid-evolution/evolution.git --policy C:/grid-evolution/policy.json --port 8010
+grid-control init --repo C:\grid-evolution\evolution.git --from . --ref HEAD
+grid-control --state C:\grid-evolution\experiments.db serve --repo C:\grid-evolution\evolution.git --policy C:\grid-evolution\policy.json --port 8010
+docker compose --profile evolution up -d workshop     # http://localhost:8001
+grid-control --state C:\grid-evolution\experiments.db promote <id>
 ```
-
-Docker Desktop пробрасывает `127.0.0.1` хоста в контейнеры как
-`host.docker.internal`, поэтому открывать контроллер наружу не нужно. На Linux
-привяжите его к адресу моста Docker (`--host 172.17.0.1`).
-
-Мастерская, интерфейс на http://localhost:8001:
-
-```powershell
-$env:OPENROUTER_API_KEY = "..."   # тот же GRID_CONTROL_TOKEN в окружении
-docker compose --profile evolution up workshop
-```
-
-При первом старте `grid-workshop init` клонирует `stable` в том
-`workshop-data:/workspace/grid`. В контейнер передаются только адрес и токен
-контроллера и ключ провайдера модели. Ни `.env`, ни файлы хоста туда не попадают.
-
-Оценённого кандидата оператор просматривает и переносит в `stable`:
-
-```powershell
-grid-control show <id>
-grid-control promote <id>
-```
-
-`promote` отказывается, если `stable` сдвинулся после baseline эксперимента.
-Такого кандидата нужно оценить заново. Флаг политики `"auto_promote": true`
-переносит принятых кандидатов без оператора, по умолчанию он выключен.
 
 В роутере хоста (`routing.yaml`) этой системы нет намеренно: она меняет Grid и
 не должна работать с рабочей копией.

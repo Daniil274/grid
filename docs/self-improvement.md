@@ -101,7 +101,8 @@ Grid эволюционирует на ветке `stable` голого репо
 Инструменты `control_*` работают только в репозитории с меткой
 `grid.workshop=true`, у агентов нет git-инструментов записи, а в `routing.yaml`
 хоста администратора нет. Поэтому изменить рабочую копию он не может.
-Подробности в `examples/system-admin/README.md`.
+Установка и эксплуатация — в [evolution-setup.md](evolution-setup.md), агенты
+мастерской — в `examples/system-admin/README.md`.
 
 ## Оценка по сценариям
 
