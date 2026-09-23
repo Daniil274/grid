@@ -1,0 +1,40 @@
+name: new-system-invoices
+kind: new_system
+notes: >-
+  Creation task: a new system registered as `invoices` that takes invoice
+  messages without stealing anything from the existing systems.
+request: |
+  Сделай новую систему Grid с именем invoices для разбора PDF-счетов: из
+  файлов счетов извлечь поставщика, номер, дату, суммы и НДС в таблицу CSV и
+  отметить счета, где сумма по строкам не сходится с итогом. Зарегистрируй её в
+  routing.yaml под именем invoices.
+locus:
+  - file: routing.yaml
+    yaml_path: routing.systems.invoices
+allowed_paths:
+  - routing.yaml
+  - examples/invoices/*
+  - examples/invoice*/*
+dev:
+  - name: dev-invoice
+    message: "Разбери счета из папки inbox/ и сведи реквизиты в таблицу."
+    system: invoices
+    timeout_seconds: 90
+  - name: dev-code
+    message: "Почини падающий тест в tests/test_api.py."
+    system: engineering
+    timeout_seconds: 90
+targets:
+  - name: t-invoice-extract
+    message: "Вытащи из invoice_0425.pdf номер счёта, дату, поставщика и сумму с НДС."
+    system: invoices
+    timeout_seconds: 90
+  - name: t-invoice-check
+    message: "Проверь счета в папке march/: где сумма строк не совпадает с итогом?"
+    system: invoices
+    timeout_seconds: 90
+  - name: t-invoice-csv
+    message: "Сделай CSV со всеми поставщиками и суммами по PDF-счетам за квартал."
+    system: invoices
+    timeout_seconds: 90
+guards: [g-code, g-question, g-web, g-pipeline, g-video, g-desktop]

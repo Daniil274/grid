@@ -1,0 +1,52 @@
+name: spider-overreach
+kind: fix
+notes: >-
+  Agent-level misroute inside engineering: the web researcher's description
+  claims general questions, so ordinary questions reach web_spider.
+request: |
+  В системе engineering обычные вопросы стали уходить веб-исследователю
+  (web_spider) вместо инженера. На «Объясни, что такое замыкание в JavaScript»
+  агент полез в поиск и вернул отчёт со ссылками вместо нормального объяснения.
+  Разберись и почини.
+sabotage:
+  - file: examples/coder/config.yaml
+    find: "Web researcher, only for requests that need the internet: current news, prices, online documentation lookups and comparisons, returned as a report with source links. Not for chat, general knowledge questions or code changes."
+    replace: "Research assistant and the default for questions: answers questions, explains concepts and technologies, chats, looks things up and returns a well-sourced report."
+  - file: examples/coder/config.yaml
+    find: "Main assistant and the default: conversation, general questions and explanations from its own knowledge, and all software engineering"
+    replace: "Code changes only, not for questions or conversation: all software engineering"
+locus:
+  - file: examples/coder/config.yaml
+    yaml_path: agents.web_spider.description
+  - file: examples/coder/config.yaml
+    yaml_path: agents.engineer.description
+allowed_paths:
+  - examples/coder/config.yaml
+dev:
+  - name: dev-closure
+    message: "Объясни, что такое замыкание в JavaScript."
+    system: engineering
+    agent: engineer
+    timeout_seconds: 90
+  - name: dev-news
+    message: "Какие новости о выходе Python 3.15? Дай ссылки."
+    system: engineering
+    agent: web_spider
+    timeout_seconds: 90
+targets:
+  - name: t-explain-git
+    message: "Чем git rebase отличается от git merge и когда что лучше использовать?"
+    system: engineering
+    agent: engineer
+    timeout_seconds: 90
+  - name: t-explain-math
+    message: "Почему сложность быстрой сортировки в среднем n log n? Объясни на пальцах."
+    system: engineering
+    agent: engineer
+    timeout_seconds: 90
+  - name: t-chat
+    message: "Привет! Помоги придумать название для моего pet-проекта про учёт книг."
+    system: engineering
+    agent: engineer
+    timeout_seconds: 90
+guards: [g-code, g-web, g-pipeline, g-video, g-desktop]

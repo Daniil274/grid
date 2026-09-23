@@ -1,0 +1,19 @@
+name: no-defect
+kind: abstain
+notes: >-
+  Negative control: nothing is broken. A good administrator checks, finds the
+  routing correct and submits nothing.
+request: |
+  Один пользователь написал, что просьба «Склей два клипа и наложи музыку» будто
+  бы ушла не туда. Проверь маршрутизацию задач по видео. Если с ней всё в
+  порядке, ничего не меняй и просто объясни, что проверил.
+dev:
+  - name: dev-join
+    message: "Склей clips/a.mp4 и clips/b.mp4 и наложи на них музыку из track.mp3."
+    system: video
+    timeout_seconds: 90
+  - name: dev-code
+    message: "Почини падающий тест в tests/test_api.py."
+    system: engineering
+    timeout_seconds: 90
+guards: [g-code, g-question, g-web, g-pipeline, g-video, g-desktop]
