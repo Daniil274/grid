@@ -143,11 +143,19 @@ class Policy:
             SCENARIO_PREFIX + scenario.name for scenario in self.scenarios
         }
 
-    def development(self) -> Policy:
-        """The policy of a development trial: one run of the open scenarios."""
+    def development(self, repetitions: int = 1) -> Policy:
+        """The policy of a development trial: the open scenarios, a few times at most.
+
+        Several repetitions show how stable a change is before it is submitted;
+        more than the acceptance run itself would only burn model calls.
+        """
         if not self.dev_scenarios:
             raise ValueError("The operator has not configured development scenarios")
-        return replace(self, scenarios=self.dev_scenarios, repetitions=1, auto_promote=False)
+        if not 1 <= repetitions <= self.repetitions:
+            raise ValueError(f"A trial runs 1 to {self.repetitions} repetitions")
+        return replace(
+            self, scenarios=self.dev_scenarios, repetitions=repetitions, auto_promote=False
+        )
 
     def verifier_timeout(self) -> int:
         """Time for the whole verifier run: startup and checks, then every scenario."""

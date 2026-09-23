@@ -26,6 +26,8 @@ class Submission(BaseModel):
     # Base64 git bundle with the candidate's new commits, for a workshop that
     # has its own clone. Without it the candidate must already be in the repository.
     bundle: str | None = Field(default=None, max_length=(MAX_BUNDLE_BYTES // 3 + 1) * 4)
+    # Development trials only: how many times to run the open scenarios.
+    repetitions: int = Field(default=1, ge=1, le=20)
 
 
 def _without_details(event: dict) -> dict:
@@ -96,7 +98,8 @@ def create_app(
                     bundle = base64.b64decode(body.bundle, validate=True)
                     Repository(repository).receive(bundle, body.baseline, body.candidate)
                 experiment = controller.prepare(
-                    repository, body.baseline, body.candidate, policy, kind=kind
+                    repository, body.baseline, body.candidate, policy,
+                    kind=kind, repetitions=body.repetitions,
                 )
             except (binascii.Error, ValueError, RuntimeError) as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error

@@ -236,3 +236,28 @@ def test_revert_refuses_paths_outside_the_repository(tmp_path, control):
     for path in ("../outside", ".git/config", "."):
         with pytest.raises(WorkshopError):
             workshop.revert([path])
+
+
+def test_the_same_content_cannot_be_submitted_twice(tmp_path, control):
+    """Re-evaluating unchanged code only re-rolls the noise of the scenarios."""
+    repository, store, serve = control
+    workshop = Workshop(tmp_path / "workshop")
+    with serve(_policy()) as http:
+        client = ControlClient(http)
+        workshop.init(client)
+        (workshop.path / "routing.yaml").write_text("routing: {a: 1}\n", encoding="utf-8")
+        workshop.submit(client, "First candidate of the experiment")
+        with pytest.raises(WorkshopError, match="already submitted"):
+            workshop.submit(client, "Same candidate again")
+        # Changing and changing back is the same content too.
+        (workshop.path / "routing.yaml").write_text("routing: {a: 2}\n", encoding="utf-8")
+        workshop.submit(client, "Second candidate")
+        (workshop.path / "routing.yaml").write_text("routing: {a: 1}\n", encoding="utf-8")
+        with pytest.raises(WorkshopError, match="already submitted"):
+            workshop.submit(client, "Back to the first candidate")
+        # A new experiment starts with a clean slate.
+        assert _git(workshop.path, "log", "-1", "--format=%s") == "Second candidate",             "a refused submission commits nothing"
+        (workshop.path / "routing.yaml").write_text("routing: {a: 2}" + chr(10), encoding="utf-8")
+        workshop.begin(client)
+        (workshop.path / "routing.yaml").write_text("routing: {a: 1}\n", encoding="utf-8")
+        workshop.submit(client, "Same change in a new experiment")

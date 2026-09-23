@@ -52,7 +52,8 @@ async def control_submit(message: str) -> dict:
 
     The controller evaluates it in its own sandboxed containers and never deploys
     it by itself: an accepted candidate waits for the operator's promotion.
-    Returns the experiment ID, the baseline and the candidate commit.
+    Returns the experiment ID, the baseline and the candidate commit. The same
+    content cannot be submitted twice in one experiment: change it first.
 
     Args:
         message: Commit message: what changed and why, first line under 72 characters.
@@ -61,15 +62,22 @@ async def control_submit(message: str) -> dict:
 
 
 @function_tool
-async def control_trial() -> dict:
+async def control_trial(repetitions: int = 1) -> dict:
     """Try the current work on the open development scenarios, before submitting.
 
     Sends a snapshot of every change (committed or not) to a one-off run in the
     controller's sandbox; the experiment itself stays open and unchanged. The
     result (read it with control_status) shows, per scenario, where the message
     was routed, which tools ran and the start of the answer. It decides nothing.
+    Without changes it runs the current stable: use that to confirm a reported
+    problem before changing anything.
+
+    Args:
+        repetitions: Runs of the scenarios (up to the acceptance run's count).
+            Routing is decided by a model and varies a little; 3 repetitions
+            show whether a change passes reliably or only by luck.
     """
-    return await _run(lambda workshop, client: workshop.trial(client))
+    return await _run(lambda workshop, client: workshop.trial(client, repetitions))
 
 
 @function_tool
