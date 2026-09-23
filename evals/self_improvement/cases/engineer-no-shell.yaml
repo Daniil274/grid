@@ -32,10 +32,10 @@ targets:
     tools_called: [bash_tool]
     output_matches: "grid-shell-ok"
     timeout_seconds: 240
-  - name: t-shell-python
-    message: "Узнай через терминал версию Python командой `python --version` и напиши её."
+  - name: t-shell-listing
+    message: "Выполни в терминале команду `echo grid-$((6*7))-done` и покажи ровно то, что она вывела."
     system: engineering
     tools_called: [bash_tool]
-    output_matches: "3\\.\\d+"
+    output_matches: "grid-42-done"
     timeout_seconds: 240
 guards: [g-question, g-web, g-pipeline, g-video, g-desktop]

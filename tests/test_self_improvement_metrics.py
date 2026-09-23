@@ -254,3 +254,11 @@ def test_resubmitting_the_same_candidate_is_counted():
     assert result["process"]["no_blind_resubmit"] is False
     assert result["process"]["max_trial_repetitions"] == 3
     assert metrics.score(case(), facts())["process"]["blind_resubmits"] == 0
+
+
+def test_an_answer_check_that_matches_the_grid_footer_is_refused():
+    footer_check = {"name": "t-a", "message": "a", "system": "video", "output_matches": "[а-яА-Я]{6,}"}
+    with pytest.raises(ValueError, match="footer"):
+        case(targets=(footer_check,))
+    ok = {**footer_check, "output_matches": "(?:[а-яА-Я]{3,}[\s,.]+){4}"}
+    assert case(targets=(ok,)).targets == (ok,)
