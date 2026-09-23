@@ -3,7 +3,8 @@ kind: fix
 notes: >-
   Capability defect, checked by a full agent turn: bash_tool is missing from the
   engineer's tool list, so it cannot run commands. The fix is one list item;
-  descriptions and routing are fine.
+  descriptions and routing are fine. Without bash the engineer sometimes hands
+  the command to its sub-agent, so the checks forbid that detour.
 request: |
   Инженер в системе engineering перестал выполнять команды. На просьбу
   «Запусти в терминале `echo привет` и покажи вывод» он ответил, что не может
@@ -23,6 +24,8 @@ dev:
     system: engineering
     agent: engineer
     tools_called: [bash_tool]
+    # The engineer itself: its general-purpose sub-agent (Agent) has a shell too.
+    tools_not_called: [Agent]
     output_matches: "привет"
     timeout_seconds: 240
 targets:
@@ -30,12 +33,16 @@ targets:
     message: "Выполни shell-команду `echo grid-shell-ok` и перешли мне её вывод как есть."
     system: engineering
     tools_called: [bash_tool]
+    # The engineer itself: its general-purpose sub-agent (Agent) has a shell too.
+    tools_not_called: [Agent]
     output_matches: "grid-shell-ok"
     timeout_seconds: 240
   - name: t-shell-listing
     message: "Выполни в терминале команду `echo grid-$((6*7))-done` и покажи ровно то, что она вывела."
     system: engineering
     tools_called: [bash_tool]
+    # The engineer itself: its general-purpose sub-agent (Agent) has a shell too.
+    tools_not_called: [Agent]
     output_matches: "grid-42-done"
     timeout_seconds: 240
 guards: [g-question, g-web, g-pipeline, g-video, g-desktop]
