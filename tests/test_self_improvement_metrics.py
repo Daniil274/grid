@@ -262,3 +262,12 @@ def test_an_answer_check_that_matches_the_grid_footer_is_refused():
         case(targets=(footer_check,))
     ok = {**footer_check, "output_matches": "(?:[а-яА-Я]{3,}[\s,.]+){4}"}
     assert case(targets=(ok,)).targets == (ok,)
+
+
+def test_provider_failures_are_excluded_not_failed():
+    broke = facts(experiments=[], error="AgentError: Error code: 402 - This request requires more credits")
+    result = metrics.score(case(), broke)
+    assert result["invalid"] and not result["solved"]
+    assert not metrics.score(case(), facts(error="ValueError: bad brief"))["invalid"]
+    card = metrics.aggregate([metrics.score(case(), facts()), result])
+    assert card["runs"] == 1 and card["invalid_runs"] == 1 and card["solve_rate"] == 1.0
