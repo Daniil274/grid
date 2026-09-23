@@ -42,6 +42,8 @@ EXCLUDED = ("evals",)
 # The system under test comes from the working tree, like the Python code that
 # runs it: its config, prompts and skills must match the tools being evaluated.
 UNDER_TEST = ("examples/system-admin",)
+# What Grid appends to every final answer; an answer check must not match it alone.
+ANSWER_FOOTER = "An answer in any language.\n\nКонтекст ID: ctx-0a1b2c3d"
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,13 @@ class Case:
         for scenario in self.guards:
             if not scenario["name"].startswith("g-"):
                 raise ValueError(f"{self.name}: guard names start with g-")
+        for scenario in (*self.dev, *self.holdout):
+            pattern = scenario.get("output_matches")
+            if pattern and re.search(pattern, ANSWER_FOOTER):
+                raise ValueError(
+                    f"{self.name}: {scenario['name']} output_matches matches the footer Grid "
+                    "appends to every answer, so it passes whatever the agent says"
+                )
 
     @property
     def holdout(self) -> tuple[dict, ...]:

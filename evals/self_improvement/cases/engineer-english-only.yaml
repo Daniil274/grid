@@ -1,6 +1,8 @@
 name: engineer-english-only
 kind: fix
 notes: >-
+  Grid appends "Контекст ID: …" to every answer, so a check for any Cyrillic
+  word passes an English answer; four Cyrillic words in a row do not.
   Prompt defect, checked by a full agent turn: a line in the engineer's long
   custom_prompt forces English. Routing is fine; the cause is found only by
   reading the prompt.
@@ -23,17 +25,17 @@ dev:
     message: "Объясни в двух предложениях, что такое рекурсия."
     system: engineering
     agent: engineer
-    output_matches: "[а-яА-ЯёЁ]{6,}"
+    output_matches: '(?:[а-яА-ЯёЁ]{3,}[\s,.:;()-]+){4}'
     timeout_seconds: 240
 targets:
   - name: t-ru-git
     message: "Коротко: зачем нужен git stash?"
     system: engineering
-    output_matches: "[а-яА-ЯёЁ]{6,}"
+    output_matches: '(?:[а-яА-ЯёЁ]{3,}[\s,.:;()-]+){4}'
     timeout_seconds: 240
   - name: t-ru-http
     message: "Одним абзацем: чем отличаются HTTP-методы PUT и PATCH?"
     system: engineering
-    output_matches: "[а-яА-ЯёЁ]{6,}"
+    output_matches: '(?:[а-яА-ЯёЁ]{3,}[\s,.:;()-]+){4}'
     timeout_seconds: 240
 guards: [g-code, g-web, g-pipeline, g-video, g-desktop]
