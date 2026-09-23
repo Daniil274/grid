@@ -135,6 +135,13 @@ given to the agent. Embedders can call `pending_action_reviews()` and
 A validator timeout, a transport error, a malformed answer or a nonfinite
 probability all become `unavailable`, which blocks in `enforce`.
 
+A failed judgment is retried once within `validator.timeout_seconds`. Set
+`request_timeout` on the validator's model entry to bound a single request: a
+stalled one is then dropped and retried instead of consuming the whole budget.
+Keep it under half of `timeout_seconds` so the retry fits. Give the validator
+its own model entry when the same model also routes, so routing keeps its
+provider timeout.
+
 ## Audit
 
 The `grid.action_policy` logger emits one JSON `ACTION_POLICY` line per decision:

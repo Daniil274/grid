@@ -19,7 +19,9 @@ settings:
     mode: "enforce"
     validator:
       model: policy-validator
-      timeout_seconds: 10
+      # The whole judgment, retry included; one request is bounded by the
+      # model's request_timeout.
+      timeout_seconds: 15
 
   agent_logging:
     enabled: true
@@ -110,6 +112,9 @@ models:
     temperature: 0
     max_tokens: 1024
     description: "Decisions model for action-policy checks"
+    # A stalled request is dropped after this long and retried within
+    # validator.timeout_seconds.
+    request_timeout: 6
 
   glm-latest:
     name: "~z-ai/glm-latest"

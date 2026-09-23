@@ -346,6 +346,26 @@ async def orchestrate(
             system_skills=coerced_system_skills,
         )
 
+        # The executor reports into the caller's view (the web trace, not the
+        # console) as a block of its own under this orchestrate call.
+        observer = getattr(raw_ctx, "stream_observer", None)
+        if hasattr(observer, "nested"):
+            observer = observer.nested(
+                "Executor", call_id=getattr(context, "tool_call_id", None)
+            )
+        else:
+            observer = None
+        run_error: Optional[str] = None
+        # The executor acts under the caller's trusted task; the task text here
+        # was written by an agent and reaches the policy only as its purpose.
+        from core.action_policy import delegated_state
+
+        action_state = delegated_state(
+            getattr(raw_ctx, "action_state", None), "orchestrate", task
+        )
+        caller_depth = getattr(raw_ctx, "action_depth", 0)
+        action_depth = (caller_depth if isinstance(caller_depth, int) else 0) + 1
+
         # Execute with emergency shutdown handling
         try:
             async def run_executor() -> Any:
@@ -354,6 +374,9 @@ async def orchestrate(
                     task,
                     context_id=active_context_id,
                     pipeline_id=pipeline_id,
+                    stream_observer=observer,
+                    action_state=action_state,
+                    action_depth=action_depth,
                 )
 
             draft = await registry.run_serialized_step(
@@ -363,6 +386,7 @@ async def orchestrate(
                 metadata={"model_key": resolved_model_key, "tools": coerced_executor_tools},
             )
         except asyncio.CancelledError:
+            run_error = "Cancelled"
             # Task was cancelled - check if it was emergency shutdown
             status = await registry.get_pipeline_status(pipeline_id)
 
@@ -390,8 +414,15 @@ async def orchestrate(
             # Re-raise if not emergency shutdown
             raise
         except Exception as exec_err:
+            run_error = f"Executor failed: {exec_err}"
             logger.error(f"orchestrate: executor failed | error={exec_err}")
             draft = f"❌ Executor failed: {exec_err}"
+        finally:
+            if observer is not None and hasattr(observer, "finish"):
+                try:
+                    observer.finish(error=run_error)
+                except Exception:
+                    logger.debug("orchestrate: failed to settle the trace", exc_info=True)
 
         result = {
             "task": task,

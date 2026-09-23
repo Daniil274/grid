@@ -23,7 +23,7 @@ class DecisionsModel:
             url=f"{base_url}/alpha/decisions",
             api_key=config.get_api_key(model.provider) or "",
             model_name=model.name,
-            timeout=float(provider.timeout),
+            timeout=float(model.request_timeout or provider.timeout),
             proxy=config.get_proxy_for_provider(model.provider),
         )
 

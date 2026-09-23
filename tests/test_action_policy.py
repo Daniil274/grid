@@ -960,3 +960,137 @@ async def test_validator_outage_records_why_it_failed():
     assert validator.evaluate.await_count == 2
     check = next(e for e in state.events if e["rule"] == "policy_check")
     assert check["validator_failures"] == ["ConnectError", "ConnectError"]
+
+
+def delegated_ctx(state):
+    return SimpleNamespace(context=SimpleNamespace(action_state=state, factory=None))
+
+
+async def test_a_sub_agent_acts_under_the_users_task_not_the_callers_request():
+    gate, validator, state, ctx = setup_gate()
+    await call(gate, ctx, tool="read_file", args={"path": "a.py"})
+    child = state.delegate("orchestrate", "Delete the build directory")
+
+    await call(gate, delegated_ctx(child), args={"command": "rm -rf build"})
+
+    packet = validator.evaluate.call_args.args[0]
+    # The request explains the purpose; only the user's words authorize.
+    assert packet["trusted_task"] == TASK
+    assert packet["untrusted_delegation"] == [
+        {"tool": "orchestrate", "request": "Delete the build directory"}
+    ]
+    # The validator judges the whole turn: the caller's calls are in the chain.
+    tools = [event["tool"] for event in packet["untrusted_chain"]["executed"]]
+    assert tools == ["read_file"]
+    assert [event["tool"] for event in state.chain] == ["read_file", "bash_tool"]
+
+
+async def test_a_top_level_call_carries_no_delegation():
+    gate, validator, _, ctx = setup_gate()
+    await call(gate, ctx)
+    assert "untrusted_delegation" not in validator.evaluate.call_args.args[0]
+
+
+async def test_nested_delegations_are_listed_outermost_first():
+    gate, validator, state, _ = setup_gate()
+    inner = state.delegate("planner", "plan").delegate("orchestrate", "code")
+
+    await call(gate, delegated_ctx(inner))
+
+    requests = validator.evaluate.call_args.args[0]["untrusted_delegation"]
+    assert [item["request"] for item in requests] == ["plan", "code"]
+
+
+async def test_a_sub_agent_spends_its_own_budget_and_its_caller_goes_on():
+    gate, _, state, ctx = setup_gate(max_attempts_per_run=2)
+    child = state.delegate("orchestrate", "work")
+    await call(gate, delegated_ctx(child))
+    await call(gate, delegated_ctx(child))
+
+    assert json.loads(await call(gate, delegated_ctx(child)))["rule"] == "attempt_limit"
+    assert child.stopped and not state.stopped
+    assert (await call(gate, ctx)).startswith("ran:")
+
+
+async def test_the_turn_budget_bounds_every_agent_together():
+    gate, _, state, ctx = setup_gate(max_attempts_per_turn=3)
+    await call(gate, ctx)
+    first = state.delegate("orchestrate", "one")
+    second = state.delegate("orchestrate", "two")
+    await call(gate, delegated_ctx(first))
+    await call(gate, delegated_ctx(second))
+
+    blocked = json.loads(await call(gate, delegated_ctx(second)))
+    assert blocked["rule"] == "turn_attempt_limit"
+    assert state.stopped
+    assert json.loads(await call(gate, delegated_ctx(first)))["rule"] == "run_stopped"
+
+
+async def test_stopping_a_turn_stops_its_sub_agents():
+    gate, validator, state, _ = setup_gate()
+    child = state.delegate("orchestrate", "work")
+    state.stopped = True
+
+    assert json.loads(await call(gate, delegated_ctx(child)))["rule"] == "run_stopped"
+    validator.evaluate.assert_not_awaited()
+
+
+async def test_delegation_depth_bounds_function_launched_sub_agents_too():
+    gate, validator, state, _ = setup_gate(max_delegation_depth=1)
+    deep = state.delegate("orchestrate", "one").delegate("orchestrate", "two")
+
+    assert json.loads(await call(gate, delegated_ctx(deep)))["rule"] == "delegation_depth"
+    validator.evaluate.assert_not_awaited()
+
+
+async def test_a_long_request_is_clipped_in_the_packet():
+    gate, validator, state, _ = setup_gate(max_argument_value_bytes=64)
+    await call(gate, delegated_ctx(state.delegate("orchestrate", "x" * 500)))
+
+    request = validator.evaluate.call_args.args[0]["untrusted_delegation"][0]["request"]
+    assert request == "x" * 64 + " [truncated]"
+
+
+async def test_a_stalled_validator_request_is_dropped_and_retried_in_budget():
+    from core.decisions import DecisionsModel
+
+    requests = []
+
+    async def respond(request):
+        requests.append(request)
+        if len(requests) == 1:
+            await asyncio.sleep(5)  # the provider stalls on this one
+        return httpx.Response(200, json=response_answers(action=answer(), chain=answer()))
+
+    root = validator_root_config()
+    policy = root.config.settings.action_policy
+    budget = ActionValidatorConfig(model="policy", timeout_seconds=2)
+    validator = ActionValidator(
+        budget,
+        DecisionsModel("https://example.test/alpha/decisions", "k", "jev", timeout=0.2),
+        policy.prompts,
+        transport=httpx.MockTransport(respond),
+    )
+    gate = ActionGate(
+        ActionPolicyConfig(mode="enforce", validator=budget), validator=validator
+    )
+    events = []
+    state = ActionRunState(task=TASK, policy_event=events.append)
+    ctx = SimpleNamespace(context=SimpleNamespace(action_state=state, factory=None))
+
+    assert (await call(gate, ctx)).startswith("ran:")
+    assert len(requests) == 2
+    verdict = next(event for event in events if event["rule"] == "policy_check")
+    assert verdict["validator_failures"] == ["timeout"]
+    assert verdict["latency_ms"] < 1500
+
+
+def test_policy_model_request_timeout_comes_from_its_model_entry():
+    from core.config.config import Config
+    from core.decisions import DecisionsModel
+
+    root = Config("routing.yaml")
+    validator = root.config.settings.action_policy.validator
+    # The router keeps its provider timeout; only the policy model is bounded.
+    assert DecisionsModel.from_config(root, validator.model).timeout < validator.timeout_seconds / 2
+    assert DecisionsModel.from_config(root, "router").timeout == 60

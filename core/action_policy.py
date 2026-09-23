@@ -14,8 +14,10 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Iterator, Optional
 from uuid import uuid4
+
+import httpx
 
 from core.decisions import DecisionsModel
 from schemas.action_policy import ActionPolicyConfig, ActionValidatorConfig
@@ -30,8 +32,11 @@ VERDICTS = ("allow", "deny", "review")
 class ActionRunState:
     """One trusted task and the chain of calls made under it.
 
-    Shared by the agents of a run, so budgets and the chain are global to the
-    task rather than per agent. Never constructed from tool arguments.
+    Never constructed from tool arguments. A sub-agent runs under a delegated
+    state (:meth:`delegate`): the same trusted task, trajectory, event log and
+    lock as its caller - so the validator judges the whole turn, and text the
+    caller wrote for the sub-agent never becomes a user instruction - with an
+    attempt budget of its own inside the turn's total.
     """
 
     task: str
@@ -48,6 +53,57 @@ class ActionRunState:
     reasoning: Optional[Callable[[], str]] = None
     policy_event: Optional[Callable[[dict], None]] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Set on a delegated state: the run that started it, and what that run
+    # asked for. The request explains the purpose; it grants no authority.
+    parent: Optional["ActionRunState"] = None
+    delegation: Optional[dict] = None
+    # Calls made in the whole turn, delegated runs included; kept on the root.
+    turn_attempts: int = 0
+
+    def lineage(self) -> Iterator["ActionRunState"]:
+        """This run, then the runs that delegated to it, outermost last."""
+        state: Optional[ActionRunState] = self
+        while state is not None:
+            yield state
+            state = state.parent
+
+    @property
+    def root(self) -> "ActionRunState":
+        return list(self.lineage())[-1]
+
+    @property
+    def depth(self) -> int:
+        return len(list(self.lineage())) - 1
+
+    @property
+    def halted(self) -> bool:
+        """Stopped itself, or inside a run that was stopped."""
+        return any(state.stopped for state in self.lineage())
+
+    def delegate(self, tool: str, request: Any) -> "ActionRunState":
+        """A state for a sub-agent this run starts through ``tool``."""
+        return ActionRunState(
+            task=self.task,
+            run_id=self.run_id,
+            events=self.events,
+            chain=self.chain,
+            policy_event=self.policy_event,
+            lock=self.lock,
+            parent=self,
+            delegation={"tool": tool, "request": request},
+        )
+
+
+def delegated_state(parent: Any, tool: str, request: Any) -> Any:
+    """A sub-agent's policy state: its caller's trusted task and trajectory.
+
+    What the caller asked for travels as untrusted context, so a sub-agent can
+    never be authorized by text an agent wrote. Without a policy state (the
+    gate is off) there is nothing to delegate.
+    """
+    if isinstance(parent, ActionRunState):
+        return parent.delegate(tool, request)
+    return parent
 
 
 class PolicyDenied(Exception):
@@ -148,11 +204,15 @@ class ActionValidator:
     async def evaluate(self, state: dict, *, chain: bool = True) -> dict:
         """Return a verdict per question; a missing or malformed answer raises."""
         questions = self.questions(chain)
+        # One request may take the model's request timeout, never the whole
+        # budget: a stalled request is dropped and the gate tries again.
+        timeout = min(self.config.timeout_seconds, self.model.timeout)
         async with self.model.http_client(
-            timeout=min(self.config.timeout_seconds, self.model.timeout),
-            transport=self.transport,
+            timeout=timeout, transport=self.transport
         ) as client:
-            answers = await self.model.evaluate(client, state, questions)
+            answers = await asyncio.wait_for(
+                self.model.evaluate(client, state, questions), timeout=timeout
+            )
         return {key: self._verdict(answers[key]) for key in questions}
 
 
@@ -161,7 +221,7 @@ VALIDATOR_ATTEMPTS = 2
 
 def failure_reason(exc: BaseException) -> str:
     """Why a validator call failed, without provider bodies or action content."""
-    if isinstance(exc, asyncio.TimeoutError):
+    if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException)):
         return "timeout"
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
@@ -359,6 +419,25 @@ class ActionGate:
                 metadata["annotations"] = annotations
         return metadata
 
+    def _delegation(self, run: ActionRunState) -> list:
+        """What each caller asked of its sub-agent, outermost first.
+
+        Written by agents, not by the user: it tells the validator why the
+        sub-agent acts, never that it may.
+        """
+        requests = []
+        for state in reversed(list(run.lineage())):
+            if state.delegation is None:
+                continue
+            request = state.delegation.get("request")
+            if isinstance(request, str):
+                limit = self.config.max_argument_value_bytes
+                encoded = request.encode("utf-8", "ignore")
+                if len(encoded) > limit:
+                    request = encoded[:limit].decode("utf-8", "ignore") + " [truncated]"
+            requests.append({"tool": state.delegation.get("tool"), "request": request})
+        return requests
+
     def _chain(self, run: ActionRunState) -> dict:
         # Only actions that actually ran belong to the execution trajectory.
         # Feeding blocked/reviewed attempts back into the semantic chain makes
@@ -421,7 +500,7 @@ class ActionGate:
         payload = {
             "status": "blocked",
             "rule": rule,
-            "run_stopped": run.stopped,
+            "run_stopped": run.halted,
             "next_step": "Revise the action within the task and policy; review requires the host.",
         }
         if approval_id is not None:
@@ -458,12 +537,25 @@ class ActionGate:
         call_meta = {"call_id": call_id} if isinstance(call_id, str) and call_id else {}
         try:
             async with run.lock:
-                if run.stopped:
+                if run.halted:
                     raise PolicyDenied("run_stopped")
+                root = run.root
                 run.attempts += 1
+                root.turn_attempts += 1
                 if run.attempts > self.config.max_attempts_per_run:
+                    # A delegated run spends its own budget; its caller goes on.
                     run.stopped = True
                     raise PolicyDenied("attempt_limit")
+                if root.turn_attempts > self.config.max_attempts_per_turn:
+                    root.stopped = True
+                    raise PolicyDenied("turn_attempt_limit")
+                if (
+                    self.config.max_delegation_depth is not None
+                    and run.depth > self.config.max_delegation_depth
+                ):
+                    # However the sub-agent was started - agent tool or a
+                    # function such as orchestrate - nesting stays bounded.
+                    raise PolicyDenied("delegation_depth")
                 if not isinstance(run.task, str) or not run.task.strip():
                     raise PolicyDenied("missing_trusted_task")
                 arguments = self._as_data(raw_args)
@@ -503,6 +595,11 @@ class ActionGate:
                         "tool_metadata": descriptor or {},
                     },
                     "untrusted_chain": self._chain(run),
+                    **(
+                        {"untrusted_delegation": delegation}
+                        if (delegation := self._delegation(run))
+                        else {}
+                    ),
                     "run": {
                         "attempt": run.attempts,
                         "denials": run.denials,
@@ -572,7 +669,7 @@ class ActionGate:
                     **decision_meta,
                     **call_meta,
                 )
-                if run.stopped:
+                if run.halted:
                     raise PolicyDenied("run_stopped")
                 if verdict != "allow" and self.config.mode == "enforce":
                     approval_id = (

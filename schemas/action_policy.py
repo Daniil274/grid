@@ -89,6 +89,9 @@ class ActionPolicyConfig(BaseModel):
     max_reasoning_bytes: int = Field(default=8192, ge=0, le=262144)
     max_task_context_messages: int = Field(default=8, ge=1, le=50)
     max_task_context_bytes: int = Field(default=16384, ge=256, le=262144)
+    # Per agent run: the top-level agent and each sub-agent have their own.
     max_attempts_per_run: int = Field(default=100, ge=1)
+    # Every call in the turn, sub-agents included.
+    max_attempts_per_turn: int = Field(default=1000, ge=1)
     max_denials_per_run: int = Field(default=3, ge=1)
     validator: ActionValidatorConfig = Field(default_factory=ActionValidatorConfig)
