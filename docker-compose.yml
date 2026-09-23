@@ -44,6 +44,8 @@ services:
       GRID_CONTROL_URL: ${GRID_CONTROL_URL:-http://host.docker.internal:8010}
       GRID_CONTROL_TOKEN: ${GRID_CONTROL_TOKEN:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # The administrator's own traces stay outside the clone it commits from.
+      GRID_TIMELINE_DB: /workspace/.grid-runtime/timeline.db
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

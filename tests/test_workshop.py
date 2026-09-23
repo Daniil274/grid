@@ -179,3 +179,60 @@ async def test_control_tools_refuse_without_a_configured_controller(monkeypatch,
     monkeypatch.chdir(tmp_path)
     result = await control_begin.on_invoke_tool(None, "{}")
     assert "GRID_CONTROL_URL" in result["error"]
+
+
+def test_runtime_files_never_reach_a_candidate(tmp_path, control):
+    """The running administrator writes its trace database into the workshop."""
+    repository, store, serve = control
+    workshop = Workshop(tmp_path / "workshop")
+    with serve(_policy()) as http:
+        client = ControlClient(http)
+        workshop.init(client)
+        (workshop.path / ".grid").mkdir()
+        (workshop.path / ".grid" / "timeline.db-wal").write_bytes(b"\x82\x00")
+        (workshop.path / "logs").mkdir()
+        (workshop.path / "logs" / "context.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(WorkshopError, match="no changes"):
+            workshop.submit(client, "Only runtime files changed")
+        (workshop.path / "routing.yaml").write_text("routing: {x: 1}\n", encoding="utf-8")
+        report = workshop.submit(client, "Change routing only")
+    assert report["files"] == [{"path": "routing.yaml", "change": "modified"}]
+    committed = _git(workshop.path, "show", "--name-only", "--format=", report["candidate"])
+    assert committed.split() == ["routing.yaml"]
+
+
+def test_review_covers_the_whole_experiment_and_revert_restores_baseline(tmp_path, control):
+    repository, store, serve = control
+    workshop = Workshop(tmp_path / "workshop")
+    with serve(_policy()) as http:
+        client = ControlClient(http)
+        workshop.init(client)
+        (workshop.path / "routing.yaml").write_text("routing: {a: 1}\n", encoding="utf-8")
+        workshop.submit(client, "First candidate of the experiment")
+        # Second round: a stray scratch file and a damaged committed file.
+        (workshop.path / "_test_patch.txt").write_text("alpha\n", encoding="utf-8")
+        (workshop.path / "examples").mkdir()
+        (workshop.path / "examples" / "new.yaml").write_text("x: 1\n", encoding="utf-8")
+
+        review = workshop.diff()
+        assert {f["path"]: f["change"] for f in review["files"]} == {
+            "routing.yaml": "modified", "_test_patch.txt": "added", "examples/new.yaml": "added"}
+        assert "+routing: {a: 1}" in review["diff"], "diff is against the baseline, not HEAD"
+        assert set(workshop.diff("routing.yaml")["diff"].split("diff --git")[1:]).__len__() == 1
+
+        left = workshop.revert(["_test_patch.txt", "routing.yaml"])
+        assert [f["path"] for f in left["files"]] == ["examples/new.yaml"]
+        assert not (workshop.path / "_test_patch.txt").exists()
+        assert (workshop.path / "routing.yaml").read_text(encoding="utf-8") == "routing: {}\n"
+        report = workshop.submit(client, "Second candidate without the stray files")
+    assert [f["path"] for f in report["files"]] == ["examples/new.yaml"]
+
+
+def test_revert_refuses_paths_outside_the_repository(tmp_path, control):
+    repository, store, serve = control
+    workshop = Workshop(tmp_path / "workshop")
+    with serve(_policy()) as http:
+        workshop.init(ControlClient(http))
+    for path in ("../outside", ".git/config", "."):
+        with pytest.raises(WorkshopError):
+            workshop.revert([path])

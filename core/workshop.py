@@ -28,6 +28,13 @@ MARKER = "grid.workshop"
 BASELINE = "grid.baseline"
 CONTROLLER_STABLE = "refs/remotes/controller/stable"
 TRIAL_REF = "refs/trials/latest"
+# What the running administrator writes into its own working directory: trace
+# databases, logs, caches. Never part of a candidate, whatever stable ignores.
+RUNTIME_EXCLUDES = (
+    ".grid/", "logs/", "traces/", "__pycache__/", ".pytest_cache/",
+    "*.pyc", "*.db", "*.db-shm", "*.db-wal", "*.db-journal",
+)
+MAX_DIFF_CHARS = 30_000
 
 
 class WorkshopError(RuntimeError):
@@ -137,7 +144,88 @@ class Workshop:
             )
 
     def _changes(self) -> list[str]:
+        self._exclude_runtime()
         return self._text("status", "--porcelain", "--untracked-files=all").splitlines()
+
+    def _exclude_runtime(self) -> None:
+        """Keep the administrator's own runtime files out of every commit."""
+        exclude = self.path / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        present = exclude.read_text(encoding="utf-8").splitlines() if exclude.exists() else []
+        missing = [pattern for pattern in RUNTIME_EXCLUDES if pattern not in present]
+        if missing:
+            with exclude.open("a", encoding="utf-8") as file:
+                file.write("\n# Grid workshop runtime files\n" + "\n".join(missing) + "\n")
+
+    def _snapshot_tree(self) -> str:
+        """Tree of the work as it is now, committed or not, via a throwaway index."""
+        self._exclude_runtime()
+        with tempfile.TemporaryDirectory(prefix="grid-tree-") as temp:
+            env = {**os.environ, "GIT_INDEX_FILE": str(Path(temp) / "index")}
+            self.git("read-tree", "HEAD", env=env)
+            self.git("add", "--all", env=env)
+            return self._text("write-tree", env=env)
+
+    def _relative(self, raw: str) -> str:
+        """A repository path the agent named, refused when it leaves the workshop."""
+        root = self.path.resolve()
+        target = (root / raw).resolve()
+        if target != root and root not in target.parents:
+            raise WorkshopError(f"{raw} is outside the workshop")
+        relative = target.relative_to(root).as_posix()
+        if relative in {"", "."} or relative.split("/")[0] == ".git":
+            raise WorkshopError(f"{raw} cannot be reverted: name files or directories of the repository")
+        return relative
+
+    # -- review ------------------------------------------------------------
+    def files(self) -> list[Dict[str, str]]:
+        """Every path the experiment changes against its baseline, committed or not."""
+        baseline = self._open_experiment()
+        tree = self._snapshot_tree()
+        rows = self._text("diff", "--no-renames", "--name-status", baseline, tree).splitlines()
+        binary = {
+            line.split("\t")[-1]
+            for line in self._text("diff", "--no-renames", "--numstat", baseline, tree).splitlines()
+            if line.startswith("-\t-\t")
+        }
+        names = {"A": "added", "M": "modified", "D": "deleted", "T": "type changed"}
+        return [
+            {"path": path, "change": names.get(status[:1], status), **({"binary": "yes"} if path in binary else {})}
+            for status, path in (row.split("\t", 1) for row in rows)
+        ]
+
+    def diff(self, path: str = "") -> Dict[str, Any]:
+        """The whole experiment against its baseline, or one path of it."""
+        baseline = self._open_experiment()
+        tree = self._snapshot_tree()
+        args = ["diff", "--no-renames", "--no-color", baseline, tree]
+        if path:
+            args += ["--", self._relative(path)]
+        text = self.git(*args).decode("utf-8", errors="replace")
+        report: Dict[str, Any] = {"baseline": baseline, "files": self.files()}
+        if len(text) > MAX_DIFF_CHARS:
+            report["diff"] = text[:MAX_DIFF_CHARS]
+            report["truncated"] = f"{len(text)} characters; ask for one path at a time"
+        else:
+            report["diff"] = text
+        return report
+
+    def revert(self, paths: list[str]) -> Dict[str, Any]:
+        """Return paths to their baseline state; paths new in the experiment disappear."""
+        baseline = self._open_experiment()
+        if not paths:
+            raise WorkshopError("Name the files or directories to revert")
+        for raw in paths:
+            path = self._relative(raw)
+            in_baseline = subprocess.run(
+                ["git", "-C", str(self.path), "cat-file", "-e", f"{baseline}:{path}"],
+                capture_output=True, check=False,
+            ).returncode == 0
+            self.git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", path)
+            if in_baseline:
+                self.git("checkout", baseline, "--", path)
+            self.git("clean", "-f", "-d", "-q", "--", path)
+        return {"reverted": list(paths), "files": self.files()}
 
     # -- lifecycle ---------------------------------------------------------
     def init(self, client: ControlClient) -> str:
@@ -198,11 +286,7 @@ class Workshop:
         branch, the index and the files stay exactly as they are.
         """
         baseline = self._open_experiment()
-        with tempfile.TemporaryDirectory(prefix="grid-trial-") as temp:
-            env = {**os.environ, "GIT_INDEX_FILE": str(Path(temp) / "index")}
-            self.git("read-tree", "HEAD", env=env)
-            self.git("add", "--all", env=env)
-            tree = self._text("write-tree", env=env)
+        tree = self._snapshot_tree()
         head = self._text("rev-parse", "HEAD")
         if head == baseline and tree == self._text("rev-parse", "HEAD^{tree}"):
             raise WorkshopError("Nothing to try: the experiment has no changes")
@@ -211,8 +295,9 @@ class Workshop:
         )
         self.git("update-ref", TRIAL_REF, snapshot)
         bundle = self.git("bundle", "create", "-", TRIAL_REF, f"^{baseline}")
+        files = self.files()
         report = client.submit(baseline, snapshot, bundle, trial=True)
-        return {**report, "baseline": baseline, "candidate": snapshot}
+        return {**report, "baseline": baseline, "candidate": snapshot, "files": files}
 
     def submit(self, client: ControlClient, message: str) -> Dict[str, Any]:
         """Commit every change of the experiment and send the candidate to the controller."""
@@ -226,9 +311,10 @@ class Workshop:
         candidate = self._text("rev-parse", "HEAD")
         if candidate == baseline:
             raise WorkshopError("Nothing to submit: the experiment has no changes")
+        files = self.files()
         bundle = self.git("bundle", "create", "-", f"refs/heads/{BRANCH}", f"^{baseline}")
         report = client.submit(baseline, candidate, bundle)
-        return {**report, "baseline": baseline, "candidate": candidate}
+        return {**report, "baseline": baseline, "candidate": candidate, "files": files}
 
 
 def main() -> None:
