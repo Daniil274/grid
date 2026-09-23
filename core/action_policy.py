@@ -156,6 +156,23 @@ class ActionValidator:
         return {key: self._verdict(answers[key]) for key in questions}
 
 
+VALIDATOR_ATTEMPTS = 2
+
+
+def failure_reason(exc: BaseException) -> str:
+    """Why a validator call failed, without provider bodies or action content."""
+    if isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return f"http_{status}"
+    if isinstance(exc, (ValueError, KeyError, TypeError)):
+        # Our own answer-shape checks; their messages carry no payload.
+        return f"invalid_answer: {type(exc).__name__}: {str(exc)[:80]}"
+    return type(exc).__name__
+
+
 def merge(verdicts: dict) -> str:
     """The strictest verdict wins; a call executes only when nothing objects."""
     values = set(verdicts.values())
@@ -435,6 +452,10 @@ class ActionGate:
                 "missing_trusted_task",
             )
         digest = "unparsed"
+        # Parallel calls to one tool are judged concurrently; the call id lets an
+        # event sink attach each verdict to the exact call it belongs to.
+        call_id = getattr(ctx, "tool_call_id", None)
+        call_meta = {"call_id": call_id} if isinstance(call_id, str) and call_id else {}
         try:
             async with run.lock:
                 if run.stopped:
@@ -489,17 +510,36 @@ class ActionGate:
                 }
             # Judged outside the lock: a mediated call may itself make mediated calls.
             validator_started = time.monotonic()
+            failures: list[str] = []
+
+            async def judge() -> dict:
+                # A transient failure (rate limit, dropped connection, a malformed
+                # sample) is retried once inside the same time budget; only a
+                # validator that keeps failing leaves the call unjudged.
+                for attempt in range(VALIDATOR_ATTEMPTS):
+                    try:
+                        answer = await self.validator.evaluate(
+                            packet, chain=self.config.check_chain
+                        )
+                        if not isinstance(answer, dict) or not answer:
+                            raise ValueError("Invalid validator answer set")
+                        if any(v not in VERDICTS for v in answer.values()):
+                            raise ValueError("Invalid validator verdict")
+                        return answer
+                    except Exception as exc:
+                        failures.append(failure_reason(exc))
+                        if attempt + 1 == VALIDATOR_ATTEMPTS:
+                            raise
+                raise AssertionError("unreachable")
+
             try:
                 verdicts = await asyncio.wait_for(
-                    self.validator.evaluate(packet, chain=self.config.check_chain),
-                    timeout=self.config.validator.timeout_seconds,
+                    judge(), timeout=self.config.validator.timeout_seconds
                 )
-                if not isinstance(verdicts, dict) or not verdicts:
-                    raise ValueError("Invalid validator answer set")
-                if any(v not in VERDICTS for v in verdicts.values()):
-                    raise ValueError("Invalid validator verdict")
                 verdict = merge(verdicts)
-            except Exception:
+            except Exception as exc:
+                if not failures or isinstance(exc, asyncio.TimeoutError):
+                    failures.append(failure_reason(exc))
                 verdicts, verdict = {"action": "unavailable"}, "unavailable"
             decision_meta = {
                 "source": "validator",
@@ -508,6 +548,14 @@ class ActionGate:
                     getattr(self.validator, "model", None), "model_name", None
                 ),
             }
+            if failures:
+                decision_meta["validator_failures"] = failures
+                if verdict == "unavailable":
+                    logger.warning(
+                        "Action-policy validator unavailable for %s: %s",
+                        tool_name,
+                        "; ".join(failures),
+                    )
             if verdict == "review" and self._consume_approval(run.run_id, digest):
                 verdicts = {**verdicts, "host_approval": "allow"}
                 verdict = "allow"
@@ -522,6 +570,7 @@ class ActionGate:
                     "policy_check",
                     **verdicts,
                     **decision_meta,
+                    **call_meta,
                 )
                 if run.stopped:
                     raise PolicyDenied("run_stopped")
@@ -558,7 +607,9 @@ class ActionGate:
                         "verdict": verdict,
                     }
                 )
-                self._record(run, tool_name, kind, digest, "executed", "policy_check")
+                self._record(
+                    run, tool_name, kind, digest, "executed", "policy_check", **call_meta
+                )
             return result
         except PolicyDenied as exc:
             async with run.lock:

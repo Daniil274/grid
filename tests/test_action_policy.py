@@ -928,3 +928,35 @@ agents:
 
     assert policy.mode == "shadow"
     assert policy.version == "inline-v1"
+
+
+async def test_policy_events_carry_the_tool_call_id():
+    gate, _, state, ctx = setup_gate()
+    ctx.tool_call_id = "call-7"
+    await call(gate, ctx)
+    checks = [e for e in state.events if e["rule"] == "policy_check"]
+    assert checks and all(e["call_id"] == "call-7" for e in checks)
+
+
+async def test_transient_validator_failure_is_retried_once():
+    gate, validator, state, ctx = setup_gate()
+    request = httpx.Request("POST", "https://validator.test")
+    validator.evaluate = AsyncMock(
+        side_effect=[
+            httpx.HTTPStatusError("busy", request=request, response=httpx.Response(429, request=request)),
+            {"action": "allow", "chain": "allow"},
+        ]
+    )
+    assert (await call(gate, ctx)).startswith("ran:")
+    check = next(e for e in state.events if e["rule"] == "policy_check")
+    assert check["decision"] == "allow"
+    assert check["validator_failures"] == ["http_429"]
+
+
+async def test_validator_outage_records_why_it_failed():
+    gate, validator, state, ctx = setup_gate()
+    validator.evaluate = AsyncMock(side_effect=httpx.ConnectError("no provider"))
+    await call(gate, ctx)
+    assert validator.evaluate.await_count == 2
+    check = next(e for e in state.events if e["rule"] == "policy_check")
+    assert check["validator_failures"] == ["ConnectError", "ConnectError"]

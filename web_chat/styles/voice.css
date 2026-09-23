@@ -25,7 +25,54 @@
   font-weight: 600;
 }
 
-.voice-panel__header span,
+#voice-panel[hidden] {
+  display: none;
+}
+
+.voice-panel__header {
+  align-items: center;
+}
+
+.voice-panel__title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.voice-panel__collapse {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin: -4px -6px -4px 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-3);
+}
+
+.voice-panel__collapse:hover {
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+/* The composer's entry point: quiet until the microphone is live. */
+.composer__mic.active {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.composer__mic:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.voice-panel__title span,
 .voice-panel__details {
   color: var(--text-3);
   font-size: 11.5px;
@@ -128,7 +175,7 @@
     flex-basis: 60%;
   }
 
-  .voice-panel__header span {
+  .voice-panel__title span {
     display: none;
   }
 }

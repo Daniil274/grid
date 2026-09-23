@@ -20,6 +20,10 @@ export const api = {
   listConversations: () => request("/api/chat/conversations"),
   getConversation: (id) => request(`/api/chat/conversations/${encodeURIComponent(id)}`),
   createConversation: (selection) => request("/api/chat/conversations", json("POST", selection)),
+  renameConversation: (id, title) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}`, json("PATCH", { title })),
+  deleteConversation: (id) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
   prepareAgent: (systemKey, agentKey) =>
     request("/api/chat/prepare-agent", json("POST", { system_key: systemKey, agent_key: agentKey })),
   getSettings: () => request("/api/settings"),

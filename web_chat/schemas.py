@@ -20,6 +20,10 @@ class SettingsYamlUpdateRequest(BaseModel):
     yaml_content: str
 
 
+class ConversationRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
 class ConversationCreateRequest(BaseModel):
     """``None`` on either key means the router decides per message."""
 

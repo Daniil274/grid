@@ -15,21 +15,37 @@ from web_chat.runtime import WebChatRuntime
 from web_chat.schemas import (
     ActionReviewRequest,
     ConversationCreateRequest,
+    ConversationRenameRequest,
     PrepareAgentRequest,
     SettingsStructuredUpdateRequest,
     SettingsYamlUpdateRequest,
 )
-from web_chat.trace import normalize_steps
+from web_chat.trace import is_tool_result, normalize_steps
 
 logger = logging.getLogger("grid.web_chat.server")
 ROOT = Path(__file__).resolve().parent
 INDEX_HTML = ROOT / "index.html"
 
 
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files the browser must revalidate before reuse.
+
+    The UI is ES modules importing each other. Left to heuristic caching, a
+    browser mixes a fresh ``chat.js`` with a stale module it imports after an
+    update. ``no-cache`` still allows cheap 304s via ETag/Last-Modified.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
 class WebChatServer:
     def __init__(self, runtime: WebChatRuntime) -> None:
         self.runtime = runtime
         self._active_chat_contexts: set[str] = set()
+        # Running turns by conversation; they outlive the sockets watching them.
+        self._chat_turns: dict[str, Any] = {}
         self.app = FastAPI(title="Grid Web Chat", docs_url=None, redoc_url=None)
         self._mount_static()
         self._register_routes()
@@ -39,7 +55,7 @@ class WebChatServer:
         self._register_lifecycle()
 
     def _mount_static(self) -> None:
-        self.app.mount("/static", StaticFiles(directory=str(ROOT)), name="static")
+        self.app.mount("/static", RevalidatedStaticFiles(directory=str(ROOT)), name="static")
 
     def _register_lifecycle(self) -> None:
         @self.app.on_event("startup")
@@ -50,6 +66,15 @@ class WebChatServer:
         async def _shutdown() -> None:
             if hasattr(self.runtime, "close"):
                 await self.runtime.close()
+
+    def turn_is_running(self, context_id: str) -> bool:
+        active = self._chat_turns.get(context_id)
+        return active is not None and not active[1].done()
+
+    @staticmethod
+    def _persist(context_manager: Any) -> None:
+        if getattr(context_manager, "persist_path", None) and not getattr(context_manager, "read_only", False):
+            context_manager._save_to_file()
 
     def _conversation_title(self, bucket: dict[str, Any]) -> str:
         metadata = bucket.get("metadata") or {}
@@ -254,7 +279,10 @@ class WebChatServer:
                             "agent_key": metadata.get("agent_key"),
                             "routed_system": metadata.get("routed_system"),
                             "routed_agent": metadata.get("routed_agent"),
-                            "message_count": len(bucket.get("conversation") or []),
+                            "message_count": sum(
+                                1 for msg in bucket.get("conversation") or [] if not is_tool_result(msg)
+                            ),
+                            "active": self.turn_is_running(context_id),
                         }
                     )
             items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
@@ -273,6 +301,35 @@ class WebChatServer:
             )
             return JSONResponse({"id": context_id, **selection})
 
+        @app.patch("/api/chat/conversations/{context_id}")
+        async def rename_conversation(context_id: str, body: ConversationRenameRequest) -> JSONResponse:
+            title = " ".join(body.title.split())
+            if not title:
+                raise HTTPException(status_code=400, detail="Title must not be empty")
+            context_manager = self.runtime.context_manager()
+            with safe_lock(context_manager._lock):
+                bucket = context_manager._contexts.get(context_id)
+                if not bucket:
+                    raise HTTPException(status_code=404, detail="Conversation not found")
+                # A title the user chose outranks the one derived from messages.
+                bucket.setdefault("metadata", {}).update(title=title, title_locked=True)
+                self._persist(context_manager)
+            return JSONResponse({"id": context_id, "title": title})
+
+        @app.delete("/api/chat/conversations/{context_id}")
+        async def delete_conversation(context_id: str) -> JSONResponse:
+            if self.turn_is_running(context_id):
+                raise HTTPException(status_code=409, detail="Stop the running turn before deleting this chat")
+            context_manager = self.runtime.context_manager()
+            with safe_lock(context_manager._lock):
+                if context_manager._contexts.pop(context_id, None) is None:
+                    raise HTTPException(status_code=404, detail="Conversation not found")
+                if context_manager._current_context_id == context_id:
+                    # Never leave the manager pointing at buffers that are gone.
+                    context_manager._activate_context(context_manager._create_context())
+                self._persist(context_manager)
+            return JSONResponse({"id": context_id, "deleted": True})
+
         @app.get("/api/chat/conversations/{context_id}")
         async def get_conversation(context_id: str) -> JSONResponse:
             context_manager = self.runtime.context_manager()
@@ -280,9 +337,24 @@ class WebChatServer:
                 bucket = context_manager._contexts.get(context_id)
                 if not bucket:
                     raise HTTPException(status_code=404, detail="Conversation not found")
-                messages = [self._serialize_message(msg) for msg in bucket.get("conversation") or []]
+                messages = [
+                    self._serialize_message(msg)
+                    for msg in bucket.get("conversation") or []
+                    if not is_tool_result(msg)
+                ]
                 metadata = dict(bucket.get("metadata") or {})
-            return JSONResponse({"id": context_id, "messages": messages, "metadata": metadata})
+            active = self._chat_turns.get(context_id)
+            active_turn = (
+                {"message": active[0].message, "elapsed_ms": active[0].elapsed_ms}
+                if active is not None and not active[1].done()
+                else None
+            )
+            return JSONResponse({
+                "id": context_id,
+                "messages": messages,
+                "metadata": metadata,
+                "active_turn": active_turn,
+            })
 
         @app.get("/api/settings")
         async def get_settings() -> JSONResponse:

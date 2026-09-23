@@ -115,6 +115,16 @@
       els.mic.textContent = enabled ? "Выключить микрофон" : "Начать разговор";
       els.mic.setAttribute("aria-pressed", String(enabled));
       els.mic.classList.toggle("active", enabled);
+      if (els.open) {
+        els.open.classList.toggle("active", enabled);
+        els.open.setAttribute("aria-pressed", String(enabled));
+        els.open.title = enabled ? "Голосовой режим включён" : "Голосовой режим";
+      }
+    }
+    function showPanel(visible) {
+      if (!els) return;
+      els.panel.hidden = !visible;
+      els.open?.setAttribute("aria-expanded", String(visible));
     }
     async function responseError(res) {
       const data = await res.json().catch(() => null);
@@ -158,6 +168,7 @@
           els.details.textContent = voiceStatus.issues?.join(" · ") ||
             `Распознавание: ${voiceStatus.stt_model} · ${voiceStatus.stt_device}. Звук обрабатывается на этом компьютере.`;
           els.mic.disabled = !voiceStatus.enabled || !voiceStatus.stt_available;
+          if (els.open) els.open.disabled = els.mic.disabled;
         }
       } catch (error) { if (els) els.details.textContent = error.message; }
     }
@@ -361,8 +372,15 @@
       hooks = callbacks;
       const panel = document.createElement("section"); panel.id = "voice-panel";
       panel.setAttribute("aria-label", "Голосовой помощник");
+      // Hidden until the composer's mic button asks for it.
+      panel.hidden = true;
       panel.innerHTML = `
-        <div class="voice-panel__header">Голосовой помощник <span>Локальная обработка звука</span></div>
+        <div class="voice-panel__header">
+          <span class="voice-panel__title">Голосовой помощник <span>Локальная обработка звука</span></span>
+          <button class="voice-panel__collapse" id="voice-collapse-btn" type="button" title="Свернуть" aria-label="Свернуть голосовую панель">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+        </div>
         <div class="voice-panel__body">
           <button class="voice-panel__mic" id="voice-mic-btn" type="button" aria-pressed="false">Начать разговор</button>
           <div class="voice-panel__controls">
@@ -375,12 +393,26 @@
         <div class="voice-panel__transcript" id="voice-transcript" aria-live="polite"></div>`;
       document.querySelector(".composerWrap").prepend(panel);
       const get = id => document.getElementById(`voice-${id}`);
-      els = {mic: get("mic-btn"), status: get("status"), details: get("details"), time: get("rec-time"),
-        level: get("level-bar"), transcript: get("transcript")};
+      const open = document.createElement("button");
+      open.id = "voice-open-btn"; open.type = "button"; open.className = "iconBtn composer__mic";
+      open.title = "Голосовой режим"; open.setAttribute("aria-label", "Голосовой режим");
+      open.setAttribute("aria-pressed", "false"); open.setAttribute("aria-expanded", "false");
+      open.innerHTML = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3"/></svg>`;
+      document.querySelector(".composer__buttons")?.prepend(open);
+      els = {panel, open, mic: get("mic-btn"), collapse: get("collapse-btn"), status: get("status"), details: get("details"),
+        time: get("rec-time"), level: get("level-bar"), transcript: get("transcript")};
       els.mic.addEventListener("click", () => {
         if (enabled) cleanup();
         else void startRecording();
       });
+      // The composer button opens the panel straight into listening; a second
+      // press on a visible, live panel turns the microphone off.
+      open.addEventListener("click", () => {
+        if (enabled && !panel.hidden) { cleanup(); return; }
+        showPanel(true);
+        if (!enabled) void startRecording();
+      });
+      els.collapse.addEventListener("click", () => showPanel(false));
       root.addEventListener("pagehide", cleanup);
       void checkStatus();
     }

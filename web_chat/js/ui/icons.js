@@ -9,6 +9,7 @@ export const ICONS = {
   copy: "M9 9h10v11H9zM5 15V4h10",
   check: "M5 13l4 4L19 7",
   edit: "M4 20h4L20 8l-4-4L4 16z",
+  trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
   sliders: "M4 7h10M18 7h2M4 17h4M12 17h8M15 4v6M8 14v6",
   clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4",
@@ -30,5 +31,6 @@ export const ICONS = {
   file: "M14 3v5h5M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z",
   url: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.6 2.8 2.6 15.2 0 18M12 3c-2.6 2.8-2.6 15.2 0 18",
   query: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4",
+  message: "M4 5h16v11H9l-5 4z",
   agent: "M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 21a8 8 0 0 1 16 0",
 };

@@ -6,6 +6,53 @@ import { duration, dayBucket, plural } from "../web_chat/js/lib/format.js";
 import { createStore } from "../web_chat/js/lib/store.js";
 import { SpeechPlayer, takeSentences } from "../web_chat/js/ui/speech.js";
 import { humanizePath, speakableText } from "../web_chat/js/lib/speakable.js";
+import { createScrollFollower } from "../web_chat/js/ui/transcript.js";
+
+test("live trace follows growth until the reader scrolls away", () => {
+  let top = 0;
+  const container = {
+    scrollHeight: 100,
+    clientHeight: 100,
+    get scrollTop() { return top; },
+    set scrollTop(value) { top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); },
+  };
+  const follower = createScrollFollower(container);
+
+  follower.scrollToBottom(true);
+  container.scrollHeight = 280;
+  follower.scrollToBottom();
+  assert.equal(container.scrollTop, 180);
+  container.scrollHeight = 320;
+  follower.onScroll(); // the browser reports our own scroll
+  assert.equal(follower.following, true);
+  follower.scrollToBottom();
+  assert.equal(container.scrollTop, 220);
+
+  // Content growth and programmatic scroll events are not user interception.
+  container.scrollHeight = 360;
+  follower.onScroll();
+  assert.equal(follower.following, true);
+  follower.scrollToBottom();
+  assert.equal(container.scrollTop, 260);
+
+  follower.onUserScrollIntent(true);
+  container.scrollTop = 190;
+  follower.onScroll(); // the reader scrolls up, even within the old 140px margin
+  assert.equal(follower.following, false);
+  container.scrollHeight = 420;
+  follower.scrollToBottom();
+  assert.equal(container.scrollTop, 190);
+
+  container.scrollTop = 300;
+  follower.onScroll(); // the reader has not yet returned to the end
+  assert.equal(follower.following, false);
+  container.scrollTop = 320;
+  follower.onScroll(); // the reader returns to the end
+  assert.equal(follower.following, true);
+  container.scrollHeight = 520;
+  follower.scrollToBottom();
+  assert.equal(container.scrollTop, 420);
+});
 
 test("model output can never inject markup", () => {
   const html = renderMarkdown('<img src=x onerror="alert(1)"> and <script>alert(2)</script>');

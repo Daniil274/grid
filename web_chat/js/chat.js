@@ -9,7 +9,6 @@
 
 import { api } from "./net/api.js";
 import { ChatConnection } from "./net/chat-socket.js";
-import { toast } from "./ui/toast.js";
 
 export class ChatController {
   /**
@@ -60,7 +59,9 @@ export class ChatController {
     });
     message.setWaiting(true);
     message.reasoning.start();
+    this._transcript.follow();
     this._store.set({ streaming: true });
+    void this._refreshConversations(); // the rail shows this chat as working
 
     // A dictated turn reads its answer back once the answer is settled. It
     // cannot read the token stream as it arrives: `run_streamed` emits every
@@ -74,8 +75,8 @@ export class ChatController {
       this._bind(this._connection, turn);
       this._connection.send(text, { system_key: systemKey, agent_key: agentKey });
     } catch (error) {
+      turn.failed = true;
       message.setFailed(error.message);
-      toast(error.message, { tone: "error" });
       this._settle(turn);
     }
   }
@@ -102,7 +103,7 @@ export class ChatController {
 
   /** Start a fresh conversation and clear the transcript. */
   async startConversation() {
-    if (this.isStreaming) return;
+    this._detach();
     this._voice?.cleanup();
     const { systemKey, agentKey } = this._store.get();
     const conversation = await api.createConversation({ system_key: systemKey, agent_key: agentKey });
@@ -113,7 +114,10 @@ export class ChatController {
 
   /** Load a stored conversation, including its reasoning traces. */
   async openConversation(contextId) {
-    if (!contextId || this.isStreaming) return;
+    if (!contextId) return;
+    // Leaving a chat mid-turn only stops watching it: the turn runs on the
+    // server and is replayed when the chat is opened again.
+    this._detach();
     this._voice?.cleanup();
     const payload = await api.getConversation(contextId);
     // A conversation remembers what was pinned when it ran, including "nothing".
@@ -123,6 +127,60 @@ export class ChatController {
       agentKey: payload.metadata?.agent_key ?? null,
     });
     this._transcript.render(payload.messages);
+    // The agent kept working while the page was away: pick the turn back up.
+    if (payload.active_turn) await this._resume(payload.id, payload.active_turn);
+  }
+
+  /** Stop following the turn on screen without stopping the agent. */
+  _detach() {
+    if (!this._activeTurn && !this._connection) return;
+    this._connection?.close();
+    this._connection = null;
+    this._activeTurn = null;
+    this._store.set({ streaming: false });
+  }
+
+  /** Forget a chat; if it is the one on screen, move to the newest other one. */
+  async deleteConversation(contextId) {
+    await api.deleteConversation(contextId);
+    if (contextId === this._store.get().contextId) {
+      this._detach();
+      this._store.set({ contextId: null });
+      this._transcript.clear();
+    }
+    await this._refreshConversations();
+    const next = this._store.get().conversations[0];
+    if (!this._store.get().contextId && next) await this.openConversation(next.id);
+  }
+
+  async renameConversation(contextId, title) {
+    await api.renameConversation(contextId, title);
+    await this._refreshConversations();
+  }
+
+  /** Attach to a turn already running on the server and replay it in place. */
+  async _resume(contextId, { message: userText, elapsed_ms: elapsedMs }) {
+    const last = this._transcript.last();
+    if (!(last?.role === "user" && last.text === userText)) {
+      this._transcript.add({ role: "user", content: userText, timestamp: Date.now() - elapsedMs });
+    }
+    const message = this._transcript.add({ role: "assistant", author: "Grid", timestamp: Date.now() - elapsedMs });
+    message.setWaiting(true);
+    message.reasoning.start(elapsedMs);
+    this._transcript.scrollToBottom(true);
+    this._store.set({ streaming: true });
+
+    const turn = { message, contextId, failed: false, finalText: "", spoken: false };
+    this._activeTurn = turn;
+    try {
+      this._connection = await ChatConnection.open(contextId);
+      this._bind(this._connection, turn);
+      this._connection.attach();
+    } catch (error) {
+      turn.failed = true;
+      message.setFailed(error.message);
+      this._settle(turn);
+    }
   }
 
   // -- streaming ---------------------------------------------------------
@@ -133,6 +191,8 @@ export class ChatController {
         message.appendText(content);
         this._transcript.follow();
       })
+      // The streamed text was narration before an action; the trace now holds it.
+      .on("answer_reset", () => message.setText(""))
       .on("final_output", ({ content }) => {
         turn.finalText = content;
         message.setText(content);
@@ -152,15 +212,19 @@ export class ChatController {
         turn.failed = true;
         turn.spoken = false;
         message.setFailed(content);
-        toast(content, { tone: "error" });
       })
       .on("busy", ({ content }) => {
         turn.failed = true;
         message.setFailed(content);
-        toast(content, { tone: "error" });
       })
-      .on("done", ({ duration_ms: durationMs, stopped }) => {
-        message.reasoning.finish(durationMs);
+      .on("done", ({ duration_ms: durationMs, stopped, detached }) => {
+        if (detached) {
+          // The turn finished before we could attach: show what was stored.
+          turn.detached = true;
+          this._settle(turn);
+          return;
+        }
+        message.reasoning.finish(durationMs, this._transcript.isFollowing());
         this._settle(turn);
         if (!turn.failed && !stopped && !message.text) {
           // The run ended on tool calls with no closing message. The trace above
@@ -177,15 +241,18 @@ export class ChatController {
 
   /** Idempotent: `done` and the socket closing both land here. */
   _settle(turn) {
-    if (!this.isStreaming) return;
+    if (!this.isStreaming || turn !== this._activeTurn) return;
     this._store.set({ streaming: false });
     turn.message.setWaiting(false);
-    turn.message.reasoning.finish();
+    turn.message.reasoning.finish(undefined, this._transcript.isFollowing());
+    this._transcript.follow();
     this._connection?.close();
     this._connection = null;
     this._activeTurn = null;
     void this._refreshConversations();
-    void this._reconcile(turn.contextId);
+    // A failed turn stores no answer, so reconciling would re-render the
+    // transcript without it and wipe the error the reader has to see.
+    if (!turn.failed) void this._reconcile(turn.contextId, { force: turn.detached });
   }
 
   /**
@@ -193,11 +260,11 @@ export class ChatController {
    * only when the stored conversation no longer matches what is on screen, so
    * an expanded reasoning panel is not collapsed for no reason.
    */
-  async _reconcile(contextId) {
+  async _reconcile(contextId, { force = false } = {}) {
     if (contextId !== this._store.get().contextId) return;
     try {
       const payload = await api.getConversation(contextId);
-      if (payload.messages.length !== this._transcript.count()) this._transcript.render(payload.messages);
+      if (force || payload.messages.length !== this._transcript.count()) this._transcript.render(payload.messages);
     } catch (error) {
       console.warn("Could not reconcile the conversation", error);
     }

@@ -129,7 +129,27 @@ async function boot() {
       closeRail();
       await chat.openConversation(contextId);
     },
+    onRename: async (contextId, title) => {
+      try {
+        await chat.renameConversation(contextId, title);
+      } catch (error) {
+        toast(error.message, { tone: "error" });
+      }
+    },
+    onDelete: async (contextId) => {
+      try {
+        await chat.deleteConversation(contextId);
+      } catch (error) {
+        toast(error.message, { tone: "error" });
+      }
+    },
   });
+
+  // Agents keep working in chats that are not on screen; poll while any is
+  // running so their spinners stop when they finish.
+  setInterval(() => {
+    if (store.get().conversations.some((conversation) => conversation.active)) void refreshConversations();
+  }, 4000);
 
   createRoutePicker({
     button: $("#route-chip"),
