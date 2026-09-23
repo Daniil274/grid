@@ -341,6 +341,35 @@ def append_action_reasoning(action_state: Any, event: Any) -> None:
         action_state.reasoning_text += delta
 
 
+def run_output_text(result: Any, agent_label: str = "The agent") -> Any:
+    """What a finished run hands back: its final output, never the run object's repr.
+
+    A model may end its last turn with tool calls or reasoning and no text. Then
+    the last text message of the run is the answer; failing that, an explicit
+    note, so the caller knows there is no report instead of reading a dump.
+    """
+    for attribute in ("final_output", "output", "content"):
+        value = getattr(result, attribute, None)
+        if value is not None and value != "":
+            return value
+    items = list(getattr(result, "new_items", None) or [])
+    for item in reversed(items):
+        if isinstance(item, MessageOutputItem):
+            text = ItemHelpers.text_message_output(item)
+            if text.strip():
+                return text
+    tools = [
+        tool_event_info(item).get("tool_name")
+        for item in items
+        if getattr(item, "type", "") == "tool_call_item"
+    ]
+    called = f" after {len(tools)} tool call(s): {', '.join(dict.fromkeys(t for t in tools if t))}" if tools else ""
+    return (
+        f"[{agent_label} finished without a written report{called}. "
+        "Check its changes yourself or ask it for the report.]"
+    )
+
+
 def tool_event_info(item: Any) -> dict[str, Any]:
     """Normalize a ``tool_called``/``tool_output`` stream item.
 
@@ -2519,26 +2548,7 @@ class AgentFactory:
                         )
 
             # Extract final output from streaming result
-            try:
-                if (
-                    hasattr(run_result_streaming, "final_output")
-                    and run_result_streaming.final_output
-                ):
-                    output = run_result_streaming.final_output
-                elif (
-                    hasattr(run_result_streaming, "output")
-                    and run_result_streaming.output
-                ):
-                    output = run_result_streaming.output
-                elif (
-                    hasattr(run_result_streaming, "content")
-                    and run_result_streaming.content
-                ):
-                    output = run_result_streaming.content
-                else:
-                    output = str(run_result_streaming)
-            except Exception:
-                output = str(run_result_streaming)
+            output = run_output_text(run_result_streaming)
         except MaxTurnsExceeded as e:
             # Max turns hit — extract partial output so the caller can work with it
             partial = self._extract_partial_output(e)
@@ -4443,26 +4453,7 @@ DO NOT write XML tags manually!"""
                             )
 
                 # Extract final output
-                try:
-                    if (
-                        hasattr(run_result_streaming, "final_output")
-                        and run_result_streaming.final_output
-                    ):
-                        output = run_result_streaming.final_output
-                    elif (
-                        hasattr(run_result_streaming, "output")
-                        and run_result_streaming.output
-                    ):
-                        output = run_result_streaming.output
-                    elif (
-                        hasattr(run_result_streaming, "content")
-                        and run_result_streaming.content
-                    ):
-                        output = run_result_streaming.content
-                    else:
-                        output = str(run_result_streaming)
-                except Exception:
-                    output = str(run_result_streaming)
+                output = run_output_text(run_result_streaming, f"Agent {agent_key}")
             except BaseException as exc:
                 run_error = str(exc) or type(exc).__name__
                 raise
