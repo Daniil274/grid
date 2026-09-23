@@ -171,3 +171,8 @@ voice-*.log
 /voice-grid-stderr.log
 /voice-model-smoke.log
 /voice-turns-app.log
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
