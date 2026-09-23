@@ -43,6 +43,7 @@ class Controller:
         *,
         kind: str = "experiment",
         repetitions: int = 1,
+        scenarios: tuple = (),
     ) -> str:
         """Queue an acceptance experiment, or with ``kind="trial"`` a development trial.
 
@@ -54,7 +55,7 @@ class Controller:
         if kind not in {"experiment", "trial"}:
             raise ValueError("Unknown experiment kind")
         if kind == "trial":
-            policy = policy.development(repetitions)
+            policy = policy.development(repetitions, tuple(scenarios))
         experiment = uuid.uuid4().hex
         old = self.runtime.revision(repo, baseline)
         new = self.runtime.revision(repo, candidate)

@@ -392,3 +392,39 @@ def test_example_policy_is_valid():
     policy = Policy.from_dict(json.loads(path.read_text(encoding="utf-8")))
     assert policy.scenarios and policy.dev_scenarios and policy.egress_hosts
     assert not {s.name for s in policy.scenarios} & {s.name for s in policy.dev_scenarios}
+
+
+def test_a_trial_runs_messages_of_its_own(tmp_path, control):
+    """The administrator reproduces the exact message a user complained about."""
+    store, http = control
+    workshop = Workshop(tmp_path / "workshop")
+    own = [{"name": "own-1", "message": "Склей два клипа и наложи музыку", "system": "video"}]
+    with http:
+        client = ControlClient(http)
+        workshop.init(client)
+        report = workshop.trial(client, scenarios=own)
+        with pytest.raises(WorkshopError, match="own-"):
+            workshop.trial(client, scenarios=[{**own[0], "name": "route-video"}])
+        with pytest.raises(WorkshopError, match="at most 5"):
+            workshop.trial(client, scenarios=[{**own[0], "name": f"own-{i}"} for i in range(6)])
+        with pytest.raises(WorkshopError, match="400"):
+            workshop.trial(client, scenarios=[{**own[0], "unknown": 1}])
+        with pytest.raises(WorkshopError, match="Only a development trial"):
+            client.submit(report["baseline"], report["baseline"], None, trial=False) if False else \
+                client._call("POST", "/experiments", json={
+                    "baseline": report["baseline"], "candidate": report["baseline"], "scenarios": own})
+    trial = store.get(report["id"])
+    assert {s["name"] for s in trial["policy"]["scenarios"]} == {"route-code", "own-1"}
+    checks = [e["trial"]["checks"] for e in trial["events"] if "trial" in e][0]
+    assert "scenario:own-1" in checks
+
+
+def test_trial_messages_are_validated_by_the_tool():
+    import asyncio
+    import json as _json
+
+    from tools.control_tools import control_trial
+
+    out = asyncio.run(control_trial.on_invoke_tool(None, _json.dumps(
+        {"repetitions": 1, "messages": [{"message": "hi", "system": None, "agent": None}]})))
+    assert "needs the system or agent" in str(out)

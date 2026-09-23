@@ -14,9 +14,10 @@ import asyncio
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from agents import function_tool
+from pydantic import BaseModel
 
 from core.workshop import ControlClient, Workshop, WorkshopError
 from utils.path_utils import resolve_agent_path_auto
@@ -61,8 +62,18 @@ async def control_submit(message: str) -> dict:
     return await _run(lambda workshop, client: workshop.submit(client, message))
 
 
+class TrialMessage(BaseModel):
+    """A message of the trial's own: what a user wrote and where it should go."""
+
+    message: str
+    system: Optional[str] = None
+    agent: Optional[str] = None
+
+
 @function_tool
-async def control_trial(repetitions: int = 1) -> dict:
+async def control_trial(
+    repetitions: int = 1, messages: Optional[list[TrialMessage]] = None
+) -> dict:
     """Try the current work on the open development scenarios, before submitting.
 
     Sends a snapshot of every change (committed or not) to a one-off run in the
@@ -76,8 +87,22 @@ async def control_trial(repetitions: int = 1) -> dict:
         repetitions: Runs of the scenarios (up to the acceptance run's count).
             Routing is decided by a model and varies a little; 3 repetitions
             show whether a change passes reliably or only by luck.
+        messages: Up to 5 messages of your own, each with the system (and
+            optionally the agent) it should reach, e.g. the exact message a
+            user complained about. They run as scenarios own-1, own-2, ...
     """
-    return await _run(lambda workshop, client: workshop.trial(client, repetitions))
+    scenarios = [
+        {
+            "name": f"own-{index}",
+            "message": item.message,
+            **({"system": item.system} if item.system else {}),
+            **({"agent": item.agent} if item.agent else {}),
+        }
+        for index, item in enumerate(messages or [], start=1)
+    ]
+    if any(not ("system" in s or "agent" in s) for s in scenarios):
+        return {"error": "Each message needs the system or agent it should reach"}
+    return await _run(lambda workshop, client: workshop.trial(client, repetitions, scenarios))
 
 
 @function_tool

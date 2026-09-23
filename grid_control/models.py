@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 SCENARIO_PREFIX = "scenario:"
+# Scenarios a workshop may add to one development trial.
+MAX_OWN_SCENARIOS = 5
 _HOST = re.compile(r"(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+")
 
 
@@ -143,18 +145,29 @@ class Policy:
             SCENARIO_PREFIX + scenario.name for scenario in self.scenarios
         }
 
-    def development(self, repetitions: int = 1) -> Policy:
+    def development(
+        self, repetitions: int = 1, extra: tuple[Scenario, ...] = ()
+    ) -> Policy:
         """The policy of a development trial: the open scenarios, a few times at most.
 
         Several repetitions show how stable a change is before it is submitted;
-        more than the acceptance run itself would only burn model calls.
+        more than the acceptance run itself would only burn model calls. The
+        workshop may add a few scenarios of its own, such as the exact message a
+        user complained about; they are named ``own-*`` and decide nothing.
         """
-        if not self.dev_scenarios:
+        if not self.dev_scenarios and not extra:
             raise ValueError("The operator has not configured development scenarios")
         if not 1 <= repetitions <= self.repetitions:
             raise ValueError(f"A trial runs 1 to {self.repetitions} repetitions")
+        if len(extra) > MAX_OWN_SCENARIOS:
+            raise ValueError(f"A trial takes at most {MAX_OWN_SCENARIOS} scenarios of its own")
+        if any(not scenario.name.startswith("own-") for scenario in extra):
+            raise ValueError("Scenarios of a trial are named own-*")
         return replace(
-            self, scenarios=self.dev_scenarios, repetitions=repetitions, auto_promote=False
+            self,
+            scenarios=self.dev_scenarios + tuple(extra),
+            repetitions=repetitions,
+            auto_promote=False,
         )
 
     def verifier_timeout(self) -> int:
