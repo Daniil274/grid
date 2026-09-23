@@ -91,6 +91,8 @@ class Case:
     # Paths a new system must create, e.g. examples/invoices/config.yaml.
     must_create: tuple[str, ...] = ()
     notes: str = ""
+    # Why the case is left out of suite runs (failed calibration), if it is.
+    disabled: str = ""
     extra: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -156,6 +158,7 @@ def load_case(path: Path, guards: dict[str, dict] | None = None) -> Case:
         allowed_paths=tuple(data.get("allowed_paths", ())),
         must_create=tuple(data.get("must_create", ())),
         notes=data.get("notes", ""),
+        disabled=data.get("disabled", ""),
     )
 
 
@@ -170,8 +173,9 @@ def load_cases(names: list[str] | None = None) -> list[Case]:
         missing = set(names) - {case.name for case in cases}
         if missing:
             raise ValueError(f"Unknown cases: {', '.join(sorted(missing))}")
-        cases = [case for case in cases if case.name in names]
-    return cases
+        # A case named explicitly runs even when disabled: that is how it is recalibrated.
+        return [case for case in cases if case.name in names]
+    return [case for case in cases if not case.disabled]
 
 
 # -- snapshots -----------------------------------------------------------------

@@ -1,5 +1,8 @@
 name: pipeline-overreach
 kind: fix
+disabled: >-
+  probe: even an explicit "default for every change" description does not move
+  small fixes away from engineering, so the targets pass on the sabotaged tree.
 notes: >-
   The pipeline description lost its "not for quick fixes" boundary and invites
   every planned change, so small fixes go to the heavy pipeline.
