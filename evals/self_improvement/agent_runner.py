@@ -21,7 +21,7 @@ OUTPUT_LIMIT = 4000
 
 
 def make_recorder(log_path: Path):
-    from agents import RunItemStreamEvent
+    from agents import RawResponsesStreamEvent, RunItemStreamEvent
 
     from core.agent_factory import ConsoleStreamObserver, tool_event_info
 
@@ -37,8 +37,24 @@ def make_recorder(log_path: Path):
             super().__init__(output_writer=write, render_text_deltas=False)
             self.started = time.monotonic()
             self.events: list[dict[str, Any]] = []
+            # agent -> {"input": n, "output": n}, from each model response's usage.
+            self.tokens: dict[str, dict[str, int]] = {}
+
+        def _count_tokens(self, event: Any, agent_key: Optional[str]) -> None:
+            if not isinstance(event, RawResponsesStreamEvent):
+                return
+            data = getattr(event, "data", None)
+            if getattr(data, "type", None) != "response.completed":
+                return
+            usage = getattr(getattr(data, "response", None), "usage", None)
+            if usage is None:
+                return
+            total = self.tokens.setdefault(agent_key or "?", {"input": 0, "output": 0})
+            total["input"] += int(getattr(usage, "input_tokens", 0) or 0)
+            total["output"] += int(getattr(usage, "output_tokens", 0) or 0)
 
         def handle_event(self, event: Any, *, agent_key: Optional[str] = None) -> Optional[str]:
+            self._count_tokens(event, agent_key)
             if isinstance(event, RunItemStreamEvent) and event.name in {"tool_called", "tool_output"}:
                 info = tool_event_info(event.item)
                 output = info.get("output")
@@ -92,24 +108,15 @@ async def run(workshop: Path, message: str, out: Path) -> None:
         for event in recorder.events:
             event["agent"] = by_name.get(event["agent"], event["agent"])
         result["trace"] = recorder.events
-        result["tokens"] = _tokens(factory)
+        by_agent = {by_name.get(k, k): v for k, v in recorder.tokens.items()}
+        result["tokens_by_agent"] = by_agent
+        result["tokens"] = sum(v["input"] + v["output"] for v in by_agent.values()) or None
         out.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
         log.close()
         try:
             await factory.cleanup()
         except Exception:
             pass
-
-
-def _tokens(factory: Any) -> int | None:
-    try:
-        total = 0
-        for execution in factory.get_recent_executions(limit=1000):
-            usage = getattr(execution, "token_usage", None) or {}
-            total += int(usage.get("total_tokens") or 0) if isinstance(usage, dict) else 0
-        return total or None
-    except Exception:
-        return None
 
 
 def main() -> None:
