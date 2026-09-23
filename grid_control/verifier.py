@@ -142,7 +142,7 @@ class WebSocket:
 
 
 def _tool_matches(title, name):
-    # A sub-agent's call is titled "agent › tool"; an MCP tool "server.tool".
+    # Older builds titled a sub-agent's call "agent › tool"; an MCP tool is "server.tool".
     title = title.rsplit(" › ", 1)[-1]
     return title == name or title.endswith("." + name)
 
@@ -180,8 +180,10 @@ def run_scenario(host, port, scenario):
                     break
             elif kind == "step":
                 step = event.get("step") or {}
-                if step.get("kind") == "tool":
-                    tools[step.get("id")] = str(step.get("title") or "")
+                # A sub-agent's run is an ``agent`` step titled by the agent;
+                # ``tool`` names the call either way (absent in older builds).
+                if step.get("kind") in {"tool", "agent"}:
+                    tools[step.get("id")] = str(step.get("tool") or step.get("title") or "")
             elif kind == "token":
                 tokens.append(str(event.get("content") or ""))
             elif kind == "final_output":

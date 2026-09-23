@@ -135,16 +135,19 @@
   color: var(--text-3);
 }
 
-.step[data-kind="reasoning"] .step__icon { color: var(--accent); }
-.step[data-kind="tool"] .step__icon { color: var(--text-2); }
-.step[data-kind="handoff"] .step__icon { color: var(--warn); }
-.step[data-kind="error"] .step__icon,
-.step[data-status="error"] .step__icon {
+/* State selectors reach through the row's own head only: a sub-agent block
+   holds steps of its own, which must not inherit its state. */
+.step[data-kind="reasoning"] > .step__head .step__icon { color: var(--accent); }
+.step[data-kind="tool"] > .step__head .step__icon { color: var(--text-2); }
+.step[data-kind="handoff"] > .step__head .step__icon { color: var(--warn); }
+.step[data-kind="agent"] > .step__head .step__icon { color: var(--accent); }
+.step[data-kind="error"] > .step__head .step__icon,
+.step[data-status="error"] > .step__head .step__icon {
   border-color: var(--danger);
   color: var(--danger);
 }
 
-.step[data-status="running"] .step__icon {
+.step[data-status="running"] > .step__head .step__icon {
   border-color: var(--accent-line);
   color: var(--accent);
   animation: pulse 1.4s ease-in-out infinite;
@@ -216,12 +219,60 @@
   transition: transform 140ms var(--ease);
 }
 
-.step.has-detail .step__chevron {
+.step.has-detail > .step__head .step__chevron {
   visibility: visible;
 }
 
-.step.is-open .step__chevron {
+.step.is-open > .step__head .step__chevron {
   transform: rotate(90deg);
+}
+
+/* -- sub-agent blocks ----------------------------------------------------- */
+/* The panel in miniature: the sub-agent's own timeline between the task it
+   was given and the report it returned. */
+.step[data-kind="agent"] > .step__head .step__title {
+  color: var(--text);
+}
+
+.step[data-status="running"][data-kind="agent"] > .step__head .step__subtitle {
+  color: var(--text-2);
+}
+
+.step__agent {
+  display: none;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 2px 0 8px;
+}
+
+.step.is-open > .step__agent {
+  display: grid;
+}
+
+.agent__steps {
+  padding: 2px 0 0;
+  margin: 0;
+  list-style: none;
+}
+
+.agent__steps:empty,
+.agent__task:empty,
+.agent__report:empty {
+  display: none;
+}
+
+.payload__body--prose {
+  font-family: inherit;
+  font-size: 13px;
+  white-space: normal;
+}
+
+.payload__body--prose > * + * {
+  margin-top: 0.6em;
+}
+
+.payload__body--prose p {
+  margin: 0;
 }
 
 /* -- context chips -------------------------------------------------------- */
@@ -278,7 +329,7 @@ a.refChip:hover {
   overflow-wrap: anywhere;
 }
 
-.step.is-open .step__prose {
+.step.is-open > .step__prose {
   display: block;
 }
 
@@ -309,11 +360,12 @@ a.refChip:hover {
 /* -- payloads ------------------------------------------------------------- */
 .step__detail {
   display: none;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   padding: 4px 0 10px;
 }
 
-.step.is-open .step__detail {
+.step.is-open > .step__detail {
   display: grid;
 }
 

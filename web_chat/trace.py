@@ -15,8 +15,14 @@ Wire protocol (one JSON object per event; the transport adds ``run_id``):
 ``{"type": "reasoning", "id": ..., "delta": "..."}``
     Append a fragment to a reasoning step already announced by a ``step`` event.
     Keeps live thinking cheap: the full step is only re-sent when it closes.
+``{"type": "step_removed", "id": ...}``
+    Drop a step announced earlier (thinking that turned out to be empty).
 ``{"type": "token", "content": "..."}``
     A fragment of the user-visible answer.
+
+Steps form a tree through ``parent_id``: a sub-agent's work is a timeline of its
+own, nested under the ``agent`` step of the call that started it. The wire and
+the stored trace stay flat lists; the client assembles the tree.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ class StepKind(str, Enum):
     REASONING = "reasoning"
     TOOL = "tool"
     HANDOFF = "handoff"
+    AGENT = "agent"  # a sub-agent run; its steps nest under it
     MCP = "mcp"
     MESSAGE = "message"  # narration the agent wrote between its actions
     ERROR = "error"
@@ -86,6 +93,8 @@ class Step:
     duration_ms: Optional[int] = None
     tone: str = "neutral"
     policy: Optional[dict[str, Any]] = None
+    parent_id: Optional[str] = None  # the ``agent`` step this one runs under
+    tool: str = ""  # the tool a ``tool`` or ``agent`` step called, as titled
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -101,6 +110,8 @@ class Step:
             "duration_ms": self.duration_ms,
             "tone": self.tone,
             "policy": self.policy,
+            "parent_id": self.parent_id,
+            "tool": self.tool,
         }
 
 
@@ -202,7 +213,9 @@ class TraceRecorder:
         self._origin = clock()
         self._ids = itertools.count(1)
         self._steps: dict[str, Step] = {}
-        self._open_reasoning: Optional[Step] = None
+        # One live thinking step per agent: a sub-agent thinks alongside its
+        # caller (and its siblings), keyed by the ``agent`` step it runs under.
+        self._open_reasoning: dict[Optional[str], Step] = {}
 
     @property
     def elapsed_ms(self) -> int:
@@ -251,16 +264,18 @@ class TraceRecorder:
         )
 
     # -- reasoning ---------------------------------------------------------
-    def reasoning_delta(self, delta: str) -> None:
+    def reasoning_delta(self, delta: str, *, parent_id: Optional[str] = None) -> None:
         """Append a fragment of model reasoning, opening a step on first use."""
-        if self._open_reasoning is None:
-            self._open_reasoning = self.open(StepKind.REASONING, "Thinking")
-        self._open_reasoning.body += delta
-        self._emit({"type": "reasoning", "id": self._open_reasoning.id, "delta": delta})
+        step = self._open_reasoning.get(parent_id)
+        if step is None:
+            step = self.open(StepKind.REASONING, "Thinking", parent_id=parent_id)
+            self._open_reasoning[parent_id] = step
+        step.body += delta
+        self._emit({"type": "reasoning", "id": step.id, "delta": delta})
 
-    def end_reasoning(self) -> None:
-        """Close the live reasoning step, if any: the agent moved on."""
-        step, self._open_reasoning = self._open_reasoning, None
+    def end_reasoning(self, *, parent_id: Optional[str] = None) -> None:
+        """Close an agent's live reasoning step, if any: the agent moved on."""
+        step = self._open_reasoning.pop(parent_id, None)
         if step is None:
             return
         step.body = step.body.strip()
@@ -268,6 +283,11 @@ class TraceRecorder:
             self._discard(step)
             return
         self.close(step, subtitle=clip(step.body, 120))
+
+    def end_all_reasoning(self) -> None:
+        """The turn is over: settle every agent's thinking."""
+        for parent_id in list(self._open_reasoning):
+            self.end_reasoning(parent_id=parent_id)
 
     # -- persistence -------------------------------------------------------
     def snapshot(self) -> list[dict[str, Any]]:

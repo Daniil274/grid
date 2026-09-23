@@ -12,6 +12,11 @@
  *   3. **The payloads** - a step expands to its exact input and result; model
  *      reasoning is prose and always readable in place.
  *
+ * A sub-agent's run is a step of kind `agent` that holds a timeline of its
+ * own, and behaves like this panel in miniature: it shows what the sub-agent is
+ * doing while it runs, folds away once it reports, and ends with that report.
+ * Steps name their block with `parent_id`; the wire stays a flat list.
+ *
  * Steps are addressed by id and updated in place: the server re-sends a step
  * when it completes, and reasoning arrives as deltas appended to a text node,
  * so a long turn never re-renders what the reader is already looking at.
@@ -49,8 +54,8 @@ function refsRow(refs) {
   return h("div.step__refs", {}, visible);
 }
 
-/** A labelled, copyable payload block. */
-function payload(label, text) {
+/** A labelled, copyable payload block; `markdown` renders prose instead of raw text. */
+function payload(label, text, { markdown = false } = {}) {
   if (!text) return null;
   return h(
     "div.payload",
@@ -65,8 +70,56 @@ function payload(label, text) {
         on: { click: () => copyText(text, `${label} copied`) },
       }, icon(ICONS.copy, { size: 13 })),
     ),
-    h("pre.payload__body", {}, h("code", { text })),
+    markdown
+      ? h("div.payload__body.payload__body--prose", { html: renderMarkdown(text) })
+      : h("pre.payload__body", {}, h("code", { text })),
   );
+}
+
+/** The parts every row shares: icon, title, subtitle, policy badge, timing. */
+function stepHead(step) {
+  const parts = {
+    glyph: h("span.step__icon", {}, icon(stepIcon(step.kind), { size: 14 })),
+    title: h("span.step__title", { text: step.title }),
+    subtitle: h("span.step__subtitle"),
+    policy: h("span.step__policy", { hidden: true }),
+    timing: h("span.step__timing"),
+  };
+  parts.head = h(
+    "button.step__head",
+    { type: "button", "aria-expanded": "false" },
+    parts.glyph,
+    h("span.step__label", {}, parts.title, parts.subtitle),
+    parts.policy,
+    parts.timing,
+    h("span.step__chevron", {}, icon(ICONS.chevron, { size: 14 })),
+  );
+  return parts;
+}
+
+function applyPolicy(policy, next) {
+  policy.hidden = !next.policy;
+  policy.textContent = next.policy?.label || "";
+  policy.title = next.policy?.title || "";
+  policy.dataset.decision = next.policy?.decision || "";
+}
+
+/** Open/close state a reader can take over: once they click, auto-management stops. */
+function disclosure(root, head) {
+  let pinned = false;
+  const setOpen = (open) => {
+    root.classList.toggle("is-open", open);
+    head.setAttribute("aria-expanded", String(open));
+  };
+  head.addEventListener("click", () => {
+    pinned = true;
+    setOpen(!root.classList.contains("is-open"));
+  });
+  /** Open or close on the panel's behalf, unless the reader has decided. */
+  const suggest = (open) => {
+    if (!pinned) setOpen(open);
+  };
+  return { setOpen, suggest };
 }
 
 /**
@@ -75,43 +128,18 @@ function payload(label, text) {
  */
 function createStepRow(step) {
   const inlineBody = INLINE_BODY_KINDS.has(step.kind);
-  const glyph = h("span.step__icon", {}, icon(stepIcon(step.kind), { size: 14 }));
-  const title = h("span.step__title", { text: step.title });
-  const subtitle = h("span.step__subtitle");
-  const policy = h("span.step__policy", { hidden: true });
-  const timing = h("span.step__timing");
+  const { head, title, subtitle, policy, timing } = stepHead(step);
   const detail = h("div.step__detail");
   const refs = h("div.step__refsSlot");
   const body = inlineBody ? h("div.step__prose") : null;
 
-  const head = h(
-    "button.step__head",
-    { type: "button", "aria-expanded": "false" },
-    glyph,
-    h("span.step__label", {}, title, subtitle),
-    policy,
-    timing,
-    h("span.step__chevron", {}, icon(ICONS.chevron, { size: 14 })),
-  );
-
   const root = h("li.step", { dataset: { kind: step.kind, status: step.status, tone: step.tone || "neutral" } }, head, refs, body, detail);
-
-  let pinned = false; // the reader toggled this step; stop auto-managing it
-
-  const setOpen = (open) => {
-    root.classList.toggle("is-open", open);
-    head.setAttribute("aria-expanded", String(open));
-  };
-
-  head.addEventListener("click", () => {
-    pinned = true;
-    setOpen(!root.classList.contains("is-open"));
-  });
+  const { suggest } = disclosure(root, head);
 
   /** Thinking stays open while it streams and folds away once it lands. */
   const settle = () => {
     if (body) body.classList.remove("is-streaming");
-    if (inlineBody && !pinned) setOpen(false);
+    if (inlineBody) suggest(false);
   };
 
   /** Live reasoning: append text without re-parsing what is already rendered. */
@@ -127,10 +155,7 @@ function createStepRow(step) {
     title.textContent = next.title;
     // Reasoning has no summary until it lands; a running call keeps its arguments.
     subtitle.textContent = inlineBody && next.status === "running" ? "" : next.subtitle || "";
-    policy.hidden = !next.policy;
-    policy.textContent = next.policy?.label || "";
-    policy.title = next.policy?.title || "";
-    policy.dataset.decision = next.policy?.decision || "";
+    applyPolicy(policy, next);
     timing.textContent = next.duration_ms == null ? "" : duration(next.duration_ms);
     replace(refs, refsRow(next.refs));
     if (body && next.status !== "running") {
@@ -140,19 +165,131 @@ function createStepRow(step) {
     const blocks = [payload("Input", next.detail), inlineBody ? null : payload("Result", next.body)].filter(Boolean);
     replace(detail, blocks);
     root.classList.toggle("has-detail", blocks.length > 0 || Boolean(inlineBody && (next.status === "running" || next.body)));
-    if (inlineBody && !pinned) setOpen(next.status === "running");
+    if (inlineBody) suggest(next.status === "running");
   };
 
   update(step);
-  return { root, update, appendDelta, settle };
+  return { root, kind: step.kind, update, appendDelta, settle, activity: () => title.textContent, tick() {} };
+}
+
+/**
+ * The rows directly inside one list - the panel's, or a sub-agent block's -
+ * and what they add up to: the latest activity for a live headline, the step
+ * count for a settled one.
+ */
+function createTimeline(list) {
+  const rows = new Map();
+  return {
+    list,
+    rows,
+    get size() {
+      return rows.size;
+    },
+    /** What is happening right now, reaching into a running sub-agent. */
+    activity() {
+      return [...rows.values()].at(-1)?.activity() || "";
+    },
+    tick(now) {
+      for (const row of rows.values()) row.tick(now);
+    },
+  };
+}
+
+/** A sub-agent is asked in words; show them, not the JSON envelope they came in. */
+function taskText(detail) {
+  try {
+    const args = JSON.parse(detail);
+    const values = Object.values(args ?? {});
+    if (values.length === 1 && typeof values[0] === "string") return values[0];
+    // Agent tools take `input`; orchestrate takes `task` beside its settings.
+    for (const key of ["input", "task"]) if (typeof args?.[key] === "string") return args[key];
+  } catch {
+    // Not JSON: already plain text.
+  }
+  return detail;
+}
+
+/**
+ * A sub-agent's run: a row whose detail is the sub-agent's own timeline, framed
+ * by the task it was given and the report it returned.
+ *
+ * @param {() => number} turnStart - when the turn began, for a live duration.
+ */
+function createAgentRow(step, turnStart) {
+  const { head, title, subtitle, policy, timing } = stepHead(step);
+  const timeline = createTimeline(h("ol.agent__steps"));
+  const task = h("div.agent__task");
+  const report = h("div.agent__report");
+  const refs = h("div.step__refsSlot");
+  const root = h(
+    "li.step.has-detail",
+    { dataset: { kind: "agent", status: step.status, tone: step.tone || "neutral" } },
+    head,
+    refs,
+    h("div.step__agent", {}, task, timeline.list, report),
+  );
+  const { suggest } = disclosure(root, head);
+  let current = step;
+
+  const renderSubtitle = () => {
+    const asked = taskText(current.detail || "").replace(/\s+/g, " ").trim() || current.subtitle;
+    if (current.status === "running") {
+      subtitle.textContent = timeline.activity() || asked || "Starting";
+      return;
+    }
+    const count = timeline.size ? plural(timeline.size, "step") : "";
+    subtitle.textContent = [count, asked].filter(Boolean).join(" · ");
+  };
+
+  const update = (next) => {
+    const wasRunning = current.status === "running";
+    current = next;
+    root.dataset.status = next.status;
+    root.dataset.tone = next.tone || "neutral";
+    title.textContent = next.title;
+    applyPolicy(policy, next);
+    if (next.duration_ms != null) timing.textContent = duration(next.duration_ms);
+    replace(refs, refsRow(next.refs));
+    const asked = taskText(next.detail);
+    replace(task, payload("Task", asked, { markdown: asked !== next.detail }));
+    replace(report, payload(next.status === "error" ? "Error" : "Report", next.body, { markdown: next.status !== "error" }));
+    renderSubtitle();
+    // Like the panel: open while the sub-agent works, out of the way once it reports.
+    if (next.status === "running") suggest(true);
+    else if (wasRunning) suggest(false);
+  };
+
+  update(step);
+  return {
+    root,
+    kind: "agent",
+    timeline,
+    update,
+    appendDelta() {},
+    settle: () => suggest(false),
+    activity: () => {
+      const inner = current.status === "running" ? timeline.activity() : "";
+      return inner ? `${title.textContent} › ${inner}` : title.textContent;
+    },
+    /** Called on the panel's ticker: a running block keeps its clock moving. */
+    tick(now) {
+      if (current.status !== "running") return;
+      timing.textContent = duration(Math.max(now - turnStart() - (current.at_ms ?? 0), 0));
+      renderSubtitle();
+      timeline.tick(now);
+    },
+    /** A child changed: refresh what the collapsed head says about it. */
+    refresh: renderSubtitle,
+  };
 }
 
 /**
  * @returns the panel's element plus the handles the transcript drives it with.
  */
 export function createReasoningPanel() {
-  const rows = new Map();
-  const list = h("ol.reasoning__steps");
+  const top = createTimeline(h("ol.reasoning__steps"));
+  // Every row at any depth, by step id, with the timeline that holds it.
+  const index = new Map();
   const headline = h("span.reasoning__headline", { text: "Thinking" });
   const timer = h("span.reasoning__timer");
 
@@ -164,7 +301,7 @@ export function createReasoningPanel() {
     timer,
   );
 
-  const root = h("section.reasoning", { hidden: true, dataset: { state: "idle" } }, toggle, list);
+  const root = h("section.reasoning", { hidden: true, dataset: { state: "idle" } }, toggle, top.list);
 
   let running = false;
   let startedAt = 0;
@@ -184,22 +321,35 @@ export function createReasoningPanel() {
 
   const renderHeadline = () => {
     if (running) {
-      const latest = [...rows.values()].at(-1);
-      headline.textContent = latest?.title || "Thinking";
-      timer.textContent = duration(Date.now() - startedAt);
+      const now = Date.now();
+      headline.textContent = top.activity() || "Thinking";
+      timer.textContent = duration(now - startedAt);
+      top.tick(now);
       return;
     }
-    const count = rows.size;
+    // Sub-agent steps live inside their blocks; the headline counts what the
+    // agent itself did, so a delegation reads as one step, not twenty.
+    const count = top.size;
     if (!count) return;
     headline.textContent = totalMs == null ? plural(count, "step") : `Worked for ${duration(totalMs)}`;
     timer.textContent = totalMs == null ? "" : `· ${plural(count, "step")}`;
   };
 
+  /** The block a step belongs in: its sub-agent's, or the top when unknown. */
+  const timelineFor = (step) => index.get(step.parent_id)?.row.timeline ?? top;
+
+  /** Every sub-agent block above a row, innermost first. */
+  const ancestors = function* (id) {
+    for (let entry = index.get(index.get(id)?.parentId); entry; entry = index.get(entry.parentId)) yield entry.row;
+  };
+
+  const makeRow = (step) => (step.kind === "agent" ? createAgentRow(step, () => startedAt) : createStepRow(step));
+
   return {
     el: root,
 
     get isEmpty() {
-      return rows.size === 0;
+      return index.size === 0;
     },
 
     /** A turn started (or, when reattaching, started `elapsedMs` ago): show it live and open. */
@@ -215,32 +365,42 @@ export function createReasoningPanel() {
       ticker = setInterval(renderHeadline, 200);
     },
 
-    /** Create or patch a step, addressed by `step.id`. */
+    /** Create or patch a step, addressed by `step.id`, inside its sub-agent's block. */
     upsert(step) {
       root.hidden = false;
-      const existing = rows.get(step.id);
-      if (existing) {
-        existing.title = step.title;
+      const existing = index.get(step.id);
+      if (existing && (existing.row.kind === "agent") === (step.kind === "agent")) {
         existing.row.update(step);
       } else {
-        const row = createStepRow(step);
-        rows.set(step.id, { row, title: step.title });
-        list.append(row.root);
+        // A call becomes an agent block once its sub-agent starts: rebuild the
+        // row in place, keeping its position.
+        const row = makeRow(step);
+        const timeline = existing?.timeline ?? timelineFor(step);
+        if (existing) existing.row.root.replaceWith(row.root);
+        else timeline.list.append(row.root);
+        timeline.rows.set(step.id, row);
+        index.set(step.id, { row, timeline, parentId: existing?.parentId ?? step.parent_id });
       }
+      for (const block of ancestors(step.id)) block.refresh();
       renderHeadline();
     },
 
     /** Drop a step the server retracted (an empty reasoning block). */
     remove(id) {
-      rows.get(id)?.row.root.remove();
-      rows.delete(id);
-      if (!rows.size) root.hidden = true;
+      const entry = index.get(id);
+      if (!entry) return;
+      entry.row.root.remove();
+      entry.timeline.rows.delete(id);
+      const parents = [...ancestors(id)];
+      index.delete(id);
+      for (const block of parents) block.refresh();
+      if (!index.size) root.hidden = true;
       renderHeadline();
     },
 
-    /** Stream a fragment into an open reasoning step. */
+    /** Stream a fragment into an open reasoning step, at any depth. */
     appendReasoning(id, delta) {
-      rows.get(id)?.row.appendDelta(delta);
+      index.get(id)?.row.appendDelta(delta);
     },
 
     /** The turn ended: settle the headline and step back out of the way.
@@ -252,8 +412,8 @@ export function createReasoningPanel() {
       ticker = null;
       totalMs = durationMs ?? Date.now() - startedAt;
       root.dataset.state = "idle";
-      root.hidden = rows.size === 0;
-      for (const { row } of rows.values()) row.settle();
+      root.hidden = index.size === 0;
+      for (const { row } of index.values()) row.settle();
       if (!pinnedOpen && autoCollapse) setExpanded(false);
       renderHeadline();
     },
@@ -262,8 +422,8 @@ export function createReasoningPanel() {
     hydrate(steps) {
       if (!steps?.length) return;
       for (const step of steps) this.upsert(step);
-      const last = steps.at(-1);
-      this.finish((last.at_ms ?? 0) + (last.duration_ms ?? 0));
+      // The last step listed may be a short one inside a block that ran on.
+      this.finish(Math.max(...steps.map((step) => (step.at_ms ?? 0) + (step.duration_ms ?? 0))));
       setExpanded(false);
     },
   };
