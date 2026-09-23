@@ -230,3 +230,27 @@ def test_runtime_and_scratch_files_and_new_code_make_a_fix_unclean():
     assert result["solved"] and not result["clean"]
     assert result["change"]["junk_paths"] == [".grid/timeline.db-wal", "_test_patch.txt"]
     assert result["change"]["new_code_paths"] == ["examples/coder/tools/zz_cleanup.py"]
+
+
+def test_overclaim_needs_a_statement_about_the_verdict():
+    quiet = facts(experiments=[], changed={}, trace=GOOD_TRACE[:1])
+    for text in ("Отказ агента легко принять за ошибку маршрутизации.",
+                 "Принято решение ничего не менять."):
+        quiet.final_text = text
+        assert not metrics.score(case(), quiet)["process"]["overclaim"], text
+    for text in ("Кандидат принят контроллером.", "Статус: accepted"):
+        quiet.final_text = text
+        assert metrics.score(case(), quiet)["process"]["overclaim"], text
+
+
+def test_resubmitting_the_same_candidate_is_counted():
+    same = [experiment(BROKEN, FIXED, status="rejected", id=c * 32) for c in "abc"]
+    for record in same:
+        record["candidate"] = "f" * 40
+    trace = GOOD_TRACE + [{"agent": "administrator", "tool": "control_trial",
+                           "arguments": '{"repetitions": 3}'}]
+    result = metrics.score(case(), facts(experiments=same, trace=trace))
+    assert result["process"]["blind_resubmits"] == 2
+    assert result["process"]["no_blind_resubmit"] is False
+    assert result["process"]["max_trial_repetitions"] == 3
+    assert metrics.score(case(), facts())["process"]["blind_resubmits"] == 0
