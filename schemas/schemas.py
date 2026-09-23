@@ -48,6 +48,13 @@ class ModelConfig(BaseModel):
     Examples: ["vision", "text", "code", "audio", "reasoning"]
     Models without this field are treated as ["text"] only.
     """
+    request_timeout: Optional[float] = Field(default=None, gt=0, le=300)
+    """Seconds one Decisions API request to this model may take (the action
+    policy validator, the router). A slower request is abandoned, so a caller
+    that retries - the policy validator does, within its own budget - gets a
+    fresh attempt instead of waiting out a stalled one. Defaults to the
+    provider's timeout.
+    """
     preserve_reasoning_content: bool = False
     """When True, reasoning_content from thinking-enabled models is preserved in
     assistant messages that contain tool_calls. Required for providers like

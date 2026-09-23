@@ -15,8 +15,10 @@ settings:
     policy_file: policies/action-policy.yaml
     mode: "enforce"
     validator:
-      model: router
-      timeout_seconds: 10
+      model: policy
+      # The whole judgment, retry included; one request is bounded by the
+      # model's request_timeout below.
+      timeout_seconds: 15
 
 providers:
   openrouter:
@@ -31,6 +33,14 @@ models:
     name: typesafe/jev-1.13
     provider: openrouter
     description: Decisions model that picks the system and the agent
+
+  policy:
+    name: typesafe/jev-1.13
+    provider: openrouter
+    description: Decisions model that judges agent actions for the policy gate
+    # Most judgments take 1-2 s, a few stall past 10 s. A stalled request is
+    # dropped after this long and retried within validator.timeout_seconds.
+    request_timeout: 6
 
 routing:
   model: router

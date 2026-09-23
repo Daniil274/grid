@@ -197,3 +197,49 @@ async def test_orchestrate_ignores_invalid_context_id_and_reuses_active():
 
 
 
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_executor_reports_into_the_callers_trace_under_its_task():
+    from core.action_policy import ActionRunState
+    from web_chat.observer import WebStreamObserver
+    from web_chat.trace import TraceRecorder
+
+    events = []
+    recorder = TraceRecorder(events.append)
+    caller = WebStreamObserver(recorder, emit_token=lambda _text: None)
+
+    factory = Mock()
+    factory.get_active_context_id = Mock(return_value="ctx-12345678")
+    factory.config = Mock()
+    factory.config.get_tool.side_effect = Exception("Not found")
+    factory.resolve_model_key = Mock(return_value="gpt-4")
+    fake_agent = Mock()
+    fake_agent.name = "executor-abc123"
+    factory.create_dynamic_agent = AsyncMock(return_value=fake_agent)
+    factory.run_agent_object_simple = AsyncMock(return_value="DRAFT")
+
+    ctx = Mock()
+    ctx.context = SimpleNamespace(
+        factory=factory, user_id="user-1", context_id="ctx-12345678",
+        pipeline_id=None, stream_observer=caller,
+        action_state=ActionRunState(task="Study the current changes"), action_depth=0,
+    )
+    ctx.tool_call_id = "call-7"
+
+    out = await ORCHESTRATOR_TOOLS["orchestrate"].on_invoke_tool(ctx, input='{"task": "goal"}')
+
+    assert "DRAFT" in out
+    observer = factory.run_agent_object_simple.await_args.kwargs["stream_observer"]
+    (block,) = recorder.snapshot()
+    assert block["kind"] == "agent"
+    assert observer._parent_id == block["id"]
+    assert block["status"] == "done"  # settled even before the caller sees the output
+
+    # The executor acts under the user's task; the text the coordinator wrote
+    # for it is its purpose, not its authority.
+    kwargs = factory.run_agent_object_simple.await_args.kwargs
+    assert kwargs["action_state"].parent is ctx.context.action_state
+    assert kwargs["action_state"].task == "Study the current changes"
+    assert kwargs["action_state"].delegation == {"tool": "orchestrate", "request": "goal"}
+    assert kwargs["action_depth"] == 1

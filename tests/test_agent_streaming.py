@@ -359,3 +359,90 @@ agents:
 
     assert result == "done"
     assert ("tool_called", "executor-123") in seen
+
+    # A caller's view takes the run instead: the dynamic agent reports into the
+    # trace of the turn that launched it, not the factory's console.
+    seen.clear()
+    caller_seen = []
+
+    class CallerObserver:
+        def handle_event(self, event, *, agent_key=None):
+            caller_seen.append((getattr(event, "name", ""), agent_key))
+            return None
+
+    result = await factory.run_agent_object_simple(
+        SimpleNamespace(name="executor-123"), "task", stream_observer=CallerObserver()
+    )
+
+    assert result == "done"
+    assert caller_seen == [("tool_called", "executor-123")]
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_runs_under_a_delegated_policy_state(tmp_path, monkeypatch):
+    from agents.tool_context import ToolContext
+    from core.action_policy import ActionRunState
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+settings:
+  default_agent: "test_agent"
+  max_turns: 2
+  working_directory: "."
+  config_directory: "."
+  mcp_enabled: false
+  agent_logging:
+    enabled: false
+providers:
+  openai:
+    name: "openai"
+    base_url: "https://api.openai.com/v1"
+models:
+  gpt-4:
+    name: "gpt-4"
+    provider: "openai"
+prompt_templates:
+  base: |
+    You are a helpful assistant.
+agents:
+  test_agent:
+    name: "Test Agent"
+    model: "gpt-4"
+    tools: []
+    base_prompt: "base"
+    description: "Test agent"
+""",
+        encoding="utf-8",
+    )
+    started = {}
+
+    class DummyRunner:
+        @staticmethod
+        def run_streamed(**kwargs):
+            started.update(kwargs)
+            return DummyStream(events=[], final_output="report")
+
+    monkeypatch.setattr(agents, "Runner", DummyRunner)
+    factory = AgentFactory(Config(str(config_path)))
+    tool = factory._create_context_aware_agent_tool(
+        "test_agent", SimpleNamespace(name="Test Agent"), "call_test_agent", "Delegate"
+    )
+    caller = ActionRunState(task="Review the diff")
+    ctx = ToolContext(
+        context=SimpleNamespace(action_state=caller, action_depth=0),
+        tool_name="call_test_agent",
+        tool_call_id="call-1",
+        tool_arguments='{"input": "Check core/"}',
+    )
+
+    await tool.on_invoke_tool(ctx, '{"input": "Check core/"}')
+
+    state = started["context"].action_state
+    # The caller's task and trajectory; its request is context, not authority.
+    assert state.parent is caller
+    assert state.task == "Review the diff"
+    assert state.chain is caller.chain
+    assert state.delegation == {"tool": "call_test_agent", "request": "Check core/"}
+    assert started["context"].action_depth == 1

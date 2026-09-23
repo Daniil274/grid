@@ -47,7 +47,12 @@ from agents.mcp.util import MCPUtil as _MCPUtil
 from core.managers.mcp_manager import ResilientMCPServerStdio
 
 from core.config.config import Config
-from core.action_policy import ActionGate, ActionRunState, ActionValidator
+from core.action_policy import (
+    ActionGate,
+    ActionRunState,
+    ActionValidator,
+    delegated_state,
+)
 from .context import ContextManager, safe_lock
 from schemas import AgentConfig, AgentExecution, ContextMessage
 from tools import get_tools_by_names
@@ -2150,8 +2155,22 @@ class AgentFactory:
         context_id: Optional[str] = None,
         pipeline_id: Optional[str] = None,
         init_tools: Optional[List[Dict[str, Any]]] = None,
+        stream_observer: Optional[Any] = None,
+        action_state: Optional[Any] = None,
+        action_depth: int = 0,
     ) -> str:
-        """Run agent and return simple text output (for subagents)."""
+        """Run agent and return simple text output (for subagents).
+
+        ``stream_observer`` is the view the run reports into - the caller's, so a
+        dynamic agent shows up in the trace of the turn that launched it rather
+        than on the server console. Defaults to the factory's own observer.
+
+        ``action_state`` is the policy state of a run started by another agent
+        (see ``core.action_policy.delegated_state``). Without it the run is its own task: the
+        input message becomes the trusted instruction, which is right only for
+        callers that speak for the user (background workers, the CLI).
+        """
+        observer = stream_observer or self._stream_observer
         # Compact integration: check token usage before running
         try:
             # Get current context messages for token check
@@ -2243,19 +2262,23 @@ class AgentFactory:
 
         # Create GridRunContext
         policy_context_id = context_id or self.context_manager.get_current_context_id()
-        action_state = self._action_state(
-            self._policy_task(input_message, policy_context_id)
-        )
-        if action_state is not None and hasattr(
-            self._stream_observer, "handle_policy_event"
-        ):
-            action_state.policy_event = self._stream_observer.handle_policy_event
+        if action_state is None:
+            action_state = self._action_state(
+                self._policy_task(input_message, policy_context_id)
+            )
+            if action_state is not None and hasattr(observer, "handle_policy_event"):
+                action_state.policy_event = observer.handle_policy_event
+        # A delegated state keeps its caller's event sink: verdicts land on the
+        # rows of the view the whole turn reports into.
         run_ctx = GridRunContext(
             factory=self,
             context_id=policy_context_id,
             session=session,
             pipeline_id=pipeline_id,
             action_state=action_state,
+            action_depth=action_depth,
+            # Agents this one delegates to report into the same view.
+            stream_observer=stream_observer,
         )
 
         # Execute init_tools if provided
@@ -2275,8 +2298,8 @@ class AgentFactory:
 
             async for event in run_result_streaming.stream_events():
                 append_action_reasoning(run_ctx.action_state, event)
-                if hasattr(self, "_stream_observer"):
-                    fragment = self._stream_observer.handle_event(
+                if observer is not None:
+                    fragment = observer.handle_event(
                         event,
                         agent_key=getattr(agent, "name", "dynamic-agent"),
                     )
@@ -4272,8 +4295,10 @@ DO NOT write XML tags manually!"""
                     new_context_id if not should_include_context else current_context_id
                 ),
                 session=session,
-                action_state=getattr(
-                    getattr(context, "context", None), "action_state", None
+                action_state=delegated_state(
+                    getattr(getattr(context, "context", None), "action_state", None),
+                    tool_name,
+                    raw_input,
                 ),
                 action_depth=(
                     getattr(getattr(context, "context", None), "action_depth", 0) or 0
@@ -4286,13 +4311,17 @@ DO NOT write XML tags manually!"""
                 execution_mode="serial_subtree" if parent_pipeline_id else None,
             )
             # A sub-agent reports into its caller's view (the web trace, not the
-            # console), through a child that keeps its prose out of the answer.
+            # console), through a child that keeps its prose out of the answer
+            # and nests its steps under the call that started it.
             sub_observer = (
                 getattr(getattr(context, "context", None), "stream_observer", None)
                 or self._stream_observer
             )
-            if hasattr(sub_observer, "nested"):
-                sub_observer = sub_observer.nested(agent_key)
+            nested_observer = hasattr(sub_observer, "nested")
+            if nested_observer:
+                sub_observer = sub_observer.nested(
+                    agent_key, call_id=getattr(context, "tool_call_id", None)
+                )
             sub_run_ctx.stream_observer = sub_observer
 
             # Execute auto_run_tools for sub-agent (mirrors logic in run_agent())
@@ -4370,6 +4399,7 @@ DO NOT write XML tags manually!"""
             # Run the sub-agent with enhanced input and session
             # Use streaming to capture tool calls for logging
             set_current_factory(self)
+            run_error: Optional[str] = None
             try:
                 run_result_streaming = _get_runner().run_streamed(
                     starting_agent=local_sub_agent,
@@ -4433,8 +4463,16 @@ DO NOT write XML tags manually!"""
                         output = str(run_result_streaming)
                 except Exception:
                     output = str(run_result_streaming)
+            except BaseException as exc:
+                run_error = str(exc) or type(exc).__name__
+                raise
             finally:
                 reset_current_factory()
+                if nested_observer and hasattr(sub_observer, "finish"):
+                    try:
+                        sub_observer.finish(error=run_error)
+                    except Exception:
+                        logger.debug("Failed to settle sub-agent trace", exc_info=True)
 
             # Record the result as an assistant message so the main agent can discuss and provide corrections
             try:
