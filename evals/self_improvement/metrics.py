@@ -309,7 +309,8 @@ def aggregate(results: Iterable[dict]) -> dict[str, Any]:
     gaps = [r["generalization_gap"] for r in work if r["generalization_gap"] is not None]
     regress = [r["outcome"]["guard_regression_rate"] for r in results
                if r["outcome"]["guard_regression_rate"] is not None]
-    solved_costs = [r["cost"]["elapsed_seconds"] for r in results if r["solved"]]
+    # Only changes: a quick refusal on a negative case says nothing about fixing speed.
+    solved_costs = [r["cost"]["elapsed_seconds"] for r in work if r["solved"]]
     return {
         "runs": len(results),
         "cases": len(by_case),
