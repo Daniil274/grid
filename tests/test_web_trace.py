@@ -342,7 +342,96 @@ def test_subagent_work_lands_in_the_trace_but_not_in_the_answer():
     )
 
     parent, nested = harness.steps()
-    assert nested["title"] == "general-purpose › bash_tool"
+    assert nested["title"] == "bash_tool"
+    assert nested["parent_id"] == parent["id"]
     assert nested["policy"]["decision"] == "allow"
     assert parent["policy"] is None
     assert harness.tokens == []
+
+
+def test_subagent_run_becomes_the_block_of_its_call():
+    harness = Harness()
+    harness.feed(tool_called("Agent", "call-1", '{"input": "analyze"}'))
+    child = harness.observer.nested("general-purpose", call_id="call-1")
+    child.handle_event(tool_called("bash_tool", "call-2", '{"command": "ls"}'))
+    child.handle_event(tool_output("call-2", "files"))
+    child.finish()
+    harness.feed(tool_output("call-1", "sub-agent report"))
+
+    block, nested = harness.steps()
+    assert block["kind"] == StepKind.AGENT.value
+    assert block["title"] == "general-purpose"
+    assert block["tool"] == "Agent"  # the call keeps its name for scenario checks
+    assert block["detail"]  # what the sub-agent was asked stays on its block
+    assert block["body"] == "sub-agent report"
+    assert block["status"] == StepStatus.DONE.value
+    assert block["parent_id"] is None
+    assert nested["parent_id"] == block["id"]
+
+
+def test_subagent_block_opened_before_its_call_is_streamed_is_not_duplicated():
+    harness = Harness()
+    child = harness.observer.nested("general-purpose", call_id="call-1")
+    harness.feed(tool_called("Agent", "call-1", '{"input": "analyze"}'))
+    harness.observer.handle_policy_event(
+        {"rule": "policy_check", "decision": "allow", "tool": "Agent", "call_id": "call-1"}
+    )
+    child.handle_event(tool_called("bash_tool", "call-2", '{"command": "ls"}'))
+    harness.feed(tool_output("call-1", "report"))
+
+    block, nested = harness.steps()
+    assert block["kind"] == StepKind.AGENT.value
+    assert '"analyze"' in block["detail"]
+    assert block["policy"]["decision"] == "allow"
+    assert block["body"] == "report"
+    assert nested["parent_id"] == block["id"]
+
+
+def test_parallel_subagents_think_in_their_own_steps():
+    harness = Harness()
+    harness.feed(
+        tool_called("Agent", "call-a", '{"input": "a"}'),
+        tool_called("Agent", "call-b", '{"input": "b"}'),
+    )
+    first = harness.observer.nested("alpha", call_id="call-a")
+    second = harness.observer.nested("beta", call_id="call-b")
+    first.handle_event(raw("response.reasoning_text.delta", "alpha thinks"))
+    second.handle_event(raw("response.reasoning_text.delta", "beta thinks"))
+    # One sub-agent acting must not cut the other one's thinking short.
+    first.handle_event(tool_called("bash_tool", "call-c", '{"command": "ls"}'))
+    second.handle_event(raw("response.reasoning_text.delta", " more"))
+    harness.recorder.end_all_reasoning()
+
+    blocks = {step["id"]: step["title"] for step in harness.steps() if step["kind"] == "agent"}
+    thoughts = {
+        blocks[step["parent_id"]]: step["body"]
+        for step in harness.steps()
+        if step["kind"] == StepKind.REASONING.value
+    }
+    assert thoughts == {"alpha": "alpha thinks", "beta": "beta thinks more"}
+
+
+def test_nested_subagents_form_a_tree():
+    harness = Harness()
+    harness.feed(tool_called("Agent", "call-1", '{"input": "plan"}'))
+    child = harness.observer.nested("planner", call_id="call-1")
+    child.handle_event(tool_called("Agent", "call-2", '{"input": "code"}'))
+    grandchild = child.nested("coder", call_id="call-2")
+    grandchild.handle_event(tool_called("bash_tool", "call-3", '{"command": "ls"}'))
+
+    outer, inner, leaf = harness.steps()
+    assert (outer["kind"], inner["kind"]) == ("agent", "agent")
+    assert inner["parent_id"] == outer["id"]
+    assert leaf["parent_id"] == inner["id"]
+
+
+def test_failed_subagent_run_does_not_spin_forever():
+    harness = Harness()
+    child = harness.observer.nested("general-purpose", call_id="call-1")
+    child.handle_event(raw("response.reasoning_text.delta", "hmm"))
+    child.finish(error="Max turns exceeded")
+
+    block, thinking = harness.steps()
+    assert block["status"] == StepStatus.ERROR.value
+    assert block["body"] == "Max turns exceeded"
+    assert thinking["status"] == StepStatus.DONE.value

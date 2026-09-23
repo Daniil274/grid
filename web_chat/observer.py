@@ -87,16 +87,22 @@ class WebStreamObserver:
         # id when the gate knows it, otherwise per tool name in call order.
         self._pending_by_call: dict[str, dict[str, Any]] = {}
         self._pending_policies: dict[str, deque[dict[str, Any]]] = {}
-        # Bare tool name per open call row; row titles may carry a sub-agent label.
+        # Bare tool name per open call row, for verdicts that carry no call id.
         self._tool_names: dict[str, str] = {}
-        self._nested = False
+        # The ``agent`` step this observer's steps nest under; None at the top.
+        self._parent_id: Optional[str] = None
+        self._block: Optional[Step] = None
 
-    def nested(self, agent_label: str) -> "WebStreamObserver":
+    def nested(
+        self, agent_label: str, call_id: Optional[str] = None
+    ) -> "WebStreamObserver":
         """A view for a sub-agent run inside this turn.
 
-        Its calls land in the same trace and share the call registry, so policy
-        verdicts for the sub-agent's actions find their rows. Its output text is
-        the tool result the caller receives, never the user-facing answer.
+        The run becomes an ``agent`` step - the very row of the call that
+        started it, found by ``call_id`` - and everything the sub-agent does
+        nests under it. The call registry is shared, so policy verdicts for the
+        sub-agent's actions find their rows. Its output text is the tool result
+        the caller receives, never the user-facing answer.
         """
         child = WebStreamObserver(
             self._recorder, emit_token=lambda _text: None, agent_label=agent_label
@@ -106,8 +112,46 @@ class WebStreamObserver:
         child._pending_by_call = self._pending_by_call
         child._pending_policies = self._pending_policies
         child._tool_names = self._tool_names
-        child._nested = True
+        block = self._calls_by_id.get(call_id) if call_id else None
+        if block is None and call_id is None:
+            # Without an id, adopt the caller's call only when it is unambiguous.
+            candidates = [
+                step
+                for step in self._calls_in_order
+                if step.status is StepStatus.RUNNING
+                and step.kind is StepKind.TOOL
+                and step.parent_id == self._parent_id
+            ]
+            block = candidates[0] if len(candidates) == 1 else None
+        if block is not None:
+            self._recorder.update(block, kind=StepKind.AGENT, title=agent_label)
+        else:
+            # The call can start before the SDK streams its ``tool_called``
+            # item; the block opens now and that item fills it in later.
+            block = self._recorder.open(
+                StepKind.AGENT, agent_label, parent_id=self._parent_id
+            )
+            if call_id:
+                self._calls_by_id[call_id] = block
+                self._calls_in_order.append(block)
+        child._parent_id = block.id
+        child._block = block
         return child
+
+    def finish(self, error: Optional[str] = None) -> None:
+        """The sub-agent run ended: settle its thinking and its block.
+
+        The caller's ``tool_output`` normally closes the block with the report;
+        this makes sure a failed or cancelled run does not spin forever.
+        """
+        self._recorder.end_reasoning(parent_id=self._parent_id)
+        block = self._block
+        if block is None or block.status is not StepStatus.RUNNING:
+            return
+        if error:
+            self._recorder.close(block, status=StepStatus.ERROR, body=error)
+        else:
+            self._recorder.close(block)
 
     def handle_policy_event(self, event: dict[str, Any]) -> None:
         """Attach an argument-free policy badge to the matching action row."""
@@ -203,10 +247,10 @@ class WebStreamObserver:
         if data_type in REASONING_DELTA_EVENTS:
             # Forward whitespace too: paragraph breaks are part of the thinking.
             if isinstance(text, str) and text:
-                self._recorder.reasoning_delta(text)
+                self._recorder.reasoning_delta(text, parent_id=self._parent_id)
             return None
         if data_type == "response.completed":
-            self._recorder.end_reasoning()
+            self._recorder.end_reasoning(parent_id=self._parent_id)
         if not is_output_delta(data_type):
             # Tool call arguments stream as deltas of their own; they belong to
             # the step that is already showing them, never to the answer.
@@ -217,7 +261,7 @@ class WebStreamObserver:
             # Only *visible* output means the model stopped thinking and started
             # answering. Some providers interleave blank output deltas with
             # reasoning; ending the step on those would shred it into fragments.
-            self._recorder.end_reasoning()
+            self._recorder.end_reasoning(parent_id=self._parent_id)
         self._narration += text
         self._emit_token(text)
         return text
@@ -228,7 +272,7 @@ class WebStreamObserver:
         item = getattr(event, "item", None)
         if item is None:
             return
-        self._recorder.end_reasoning()
+        self._recorder.end_reasoning(parent_id=self._parent_id)
         if name in {"tool_called", "handoff_requested"}:
             self._flush_narration()
         handler = {
@@ -245,27 +289,38 @@ class WebStreamObserver:
         text, self._narration = self._narration.strip(), ""
         if not text:
             return
-        title = f"{self.agent_label} › Message" if self._nested else "Message"
-        self._recorder.note(StepKind.MESSAGE, title, subtitle=clip(text, 120), body=text)
+        self._recorder.note(
+            StepKind.MESSAGE,
+            "Message",
+            subtitle=clip(text, 120),
+            body=text,
+            parent_id=self._parent_id,
+        )
         if self._reset_answer is not None:
             self._reset_answer()
 
     def _on_tool_called(self, item: Any, agent_key: Optional[str]) -> None:
         info = tool_event_info(item)
         arguments = info.get("arguments")
-        title = _tool_display_name(info)
-        if self._nested and self.agent_label:
-            title = f"{self.agent_label} › {title}"
+        call_id = info.get("call_id")
+        fields = {
+            # A sub-agent's block is titled by the agent; the call keeps its name.
+            "tool": _tool_display_name(info),
+            "subtitle": clip(summarize(arguments, 160).replace("\n", " "), 120),
+            "detail": summarize(arguments),
+            "refs": context_refs(arguments),
+        }
+        block = self._calls_by_id.get(call_id) if call_id else None
+        if block is not None and block.kind is StepKind.AGENT:
+            # The sub-agent already opened this call's block; add what it was asked.
+            self._recorder.update(block, **fields)
+            self._tool_names[block.id] = str(info.get("tool_name") or "")
+            return
         step = self._recorder.open(
-            StepKind.TOOL,
-            title,
-            subtitle=clip(summarize(arguments, 160).replace("\n", " "), 120),
-            detail=summarize(arguments),
-            refs=context_refs(arguments),
+            StepKind.TOOL, fields["tool"], parent_id=self._parent_id, **fields
         )
         self._calls_in_order.append(step)
         self._tool_names[step.id] = str(info.get("tool_name") or "")
-        call_id = info.get("call_id")
         badge = self._pending_by_call.pop(call_id, None) if call_id else None
         if badge is None:
             waiting = self._pending_policies.get(str(info.get("tool_name") or ""))
@@ -282,7 +337,10 @@ class WebStreamObserver:
         if step is None:
             # Output without a matching call (resumed run, auto-run tool): still
             # worth showing, just without a duration.
-            self._recorder.note(StepKind.TOOL, _tool_display_name(info), body=output)
+            name = _tool_display_name(info)
+            self._recorder.note(
+                StepKind.TOOL, name, tool=name, body=output, parent_id=self._parent_id
+            )
             return
         self._recorder.close(step, body=output)
 
@@ -293,6 +351,7 @@ class WebStreamObserver:
             f"Delegating to {target}",
             subtitle=self.agent_label,
             body="The agent is handing the next part of the task to a sub-agent.",
+            parent_id=self._parent_id,
         )
 
     def _on_handoff_occured(self, item: Any, agent_key: Optional[str]) -> None:
@@ -303,7 +362,10 @@ class WebStreamObserver:
         )
         target = field_of(getattr(item, "target_agent", None), "name") or "agent"
         self._recorder.note(
-            StepKind.HANDOFF, f"{source} → {target}", subtitle="Control transferred"
+            StepKind.HANDOFF,
+            f"{source} → {target}",
+            subtitle="Control transferred",
+            parent_id=self._parent_id,
         )
 
     def _on_mcp_list_tools(self, item: Any, agent_key: Optional[str]) -> None:
@@ -316,6 +378,7 @@ class WebStreamObserver:
             f"Connected to {server}",
             subtitle=f"{len(names)} tools available",
             body="\n".join(names),
+            parent_id=self._parent_id,
         )
 
     def _take_pending_call(self, call_id: Optional[str]) -> Optional[Step]:

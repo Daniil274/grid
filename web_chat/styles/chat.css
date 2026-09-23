@@ -61,6 +61,9 @@
 /* -- messages ------------------------------------------------------------- */
 .msg {
   display: grid;
+  /* One column that never outgrows the message: a long unbroken line inside
+     (a trace subtitle, a sub-agent's task) truncates instead of widening it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   max-width: var(--content-width);
   margin: 0 auto 26px;

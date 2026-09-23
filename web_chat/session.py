@@ -156,7 +156,7 @@ class AgentTurn:
                 user_id=runtime.user_id,
                 stream_observer=self._observer,
             )
-            self._recorder.end_reasoning()
+            self._recorder.end_all_reasoning()
             if result:
                 self._queue.put_nowait({"type": "final_output", "content": str(result)})
         except asyncio.CancelledError:

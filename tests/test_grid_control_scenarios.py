@@ -52,7 +52,8 @@ def _answer(message):
         return [
             {"type": "routed", "system": "video", "agent": "video_director"},
             {"type": "step", "step": {"id": "s1", "kind": "tool", "title": "call_video_annotator"}},
-            {"type": "step", "step": {"id": "s1", "kind": "tool", "title": "call_video_annotator"}},
+            # The call becomes the sub-agent's block, titled by the agent.
+            {"type": "step", "step": {"id": "s1", "kind": "agent", "title": "video_annotator", "tool": "call_video_annotator"}},
             {"type": "step", "step": {"id": "s2", "kind": "reasoning", "title": "Thinking"}},
             {"type": "step", "step": {"id": "s3", "kind": "tool", "title": "Video Editor › video_make_preview"}},
             {"type": "token", "content": "Preview "},
@@ -84,8 +85,12 @@ def chat_server():
             break
         time.sleep(0.05)
     yield port
+    # A scenario leaves a turn hanging; do not wait for it, or the server thread
+    # outlives the module and spins in whatever test patches asyncio.sleep next.
     server.should_exit = True
+    server.force_exit = True
     thread.join(5)
+    assert not thread.is_alive()
 
 
 def _scenario(**fields):
