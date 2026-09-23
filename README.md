@@ -161,14 +161,31 @@ docker run --rm -it \
 
 ```bash
 docker compose run --rm grid grid --help
-docker compose run --rm grid agent-chat --config /config/config.yaml
+docker compose run --rm grid agent-chat --config /app/examples/coder/config.yaml
 ```
+
+Конфигурации систем лежат в образе в `/app/examples/<система>/config.yaml`.
 
 Docker socket намеренно не подключается к контейнеру. Если конкретная конфигурация запускает дочерние Docker-контейнеры, доступ к сокету нужно настраивать отдельно с учётом связанных рисков безопасности.
 
-Система управления экспериментами самоулучшения запускается отдельно от Grid и
-не получает доступ из контейнера кандидата. Её устройство и первый рабочий
-контракт описаны в `docs/self-improvement.md`.
+В контекст сборки не попадают `.env`, логи, трассировки и локальные базы данных
+(`.dockerignore`). Версии CodeGraph, Dolt и Beads зафиксированы в `Dockerfile`.
+
+### Эволюция Grid в контейнерах
+
+Grid улучшает себя сам: система администратора в контейнере-мастерской готовит
+изменения, а контроллер на хосте оценивает их в изолированных контейнерах по
+сценариям и после подтверждения оператора переносит в ветку `stable`.
+
+```powershell
+grid-control init --repo C:\grid-evolution\evolution.git --from . --ref HEAD
+grid-control --state C:\grid-evolution\experiments.db serve --repo C:\grid-evolution\evolution.git --policy C:\grid-evolution\policy.json --port 8010
+docker compose --profile evolution up -d workshop     # интерфейс на http://localhost:8001
+```
+
+Полная установка, настройка политики и сценариев, работа и обслуживание описаны в
+[docs/evolution-setup.md](docs/evolution-setup.md), устройство и гарантии — в
+[docs/self-improvement.md](docs/self-improvement.md).
 
 ## Сборка пакета
 
@@ -217,6 +234,7 @@ Grid способен читать и изменять файлы, выполн�
 - [Пример полной конфигурации](config.yaml.example)
 - [Примеры сценариев](examples)
 - [Контроллер самоулучшения](docs/self-improvement.md)
+- [Эволюция в контейнерах: руководство оператора](docs/evolution-setup.md)
 
 ## Лицензия
 
