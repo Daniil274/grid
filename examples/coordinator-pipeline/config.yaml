@@ -101,114 +101,59 @@ providers:
     api_key_env: "MULTIAI_API_KEY"
     timeout: 300
     max_retries: 20
+providers:
+  openrouter:
+    name: "openrouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout: 300
+    max_retries: 3
 
 models:
-  gpt-5.5:
-    name: "gpt-5.5"
-    provider: "multiai"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: GPT-5.5 via Multiai
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
-  claude-opus-4-8:
-    name: "claude-opus-4-8"
-    provider: "multiai"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: Claude Opus 4-8 via Multiai
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
-  kimi-k2.6-opencode:
-    name: "kimi-k2.6"
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "Kimi K2.6 via OpenCode — for workers"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
-  deepseek-v4-pro-opencode:
-    name: deepseek-v4-pro
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "DeepSeek V4 Pro — for lightweight workers"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
-  deepseek-v4-flash-opencode:
-    name: deepseek-v4-flash
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: deepseek-v4-flash
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
-  owl-alpha:
-    name: openrouter/owl-alpha
+  glm-latest:
+    name: "~z-ai/glm-latest"
     provider: "openrouter"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: Owl Alpha
+    description: "Latest GLM via OpenRouter (currently GLM-5.3)"
     streaming_enabled: true
     preserve_reasoning_content: true
+    reasoning:
+      effort: "high"
 
-  gpt-5.4-mini:
-    name: openai/gpt-5.4-mini
+  deepseek-flash-latest:
+    name: "~deepseek/deepseek-flash-latest"
     provider: "openrouter"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: GPT-4o
+    description: "Latest DeepSeek Flash via OpenRouter (currently DeepSeek V4.1 Flash)"
     streaming_enabled: true
     preserve_reasoning_content: true
+    reasoning:
+      effort: "low"
 
-  glm-5.1-opencode:
-    name: "glm-5.1"
-    provider: "opencode"
+  mercury-2.5:
+    name: "inception/mercury-2.5"
+    provider: "openrouter"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: "GLM-5.1 via OpenCode"
+    description: "Mercury 2.5 via OpenRouter"
     streaming_enabled: true
     preserve_reasoning_content: true
+    reasoning:
+      effort: "medium"
 
-  qwen3.7-max:
-    name: qwen/qwen3.7-max
-    provider: openrouter
-    temperature: 0.5
-    max_tokens: 8000
-    description: Qwen 3.7 Max model
-    streaming_enabled: true
-    preserve_reasoning_content: true
 
-  glm-5.2-opencode:
-    name: "glm-5.2"
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "GLM-5.2 via OpenCode"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
-  grok4.5:
-    name: x-ai/grok-4.5
+  grok-4.7:
+    name: x-ai/grok-4.7
     provider: openrouter
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: "Grok 4.5"
+    description: "Grok 4.7"
     streaming_enabled: true
     preserve_reasoning_content: true
 
@@ -247,43 +192,13 @@ tools:
     type: function
     description: Read ONLY new log data for (channel, reader) since the last read (cursor-based).
   
-  # ── Worker pipeline (function) ──────────────────────────────────
-  # Shared engine: core/pipeline_runtime.py, also driven by run.py from the CLI.
-  pipeline_start:
-    type: function
-    description: Open a pipeline run for one goal and return the worker model/tool catalog and limits.
-  pipeline_task:
-    type: function
-    description: Launch one bounded worker (research, change or verification) under an explicit contract.
-  pipeline_wait:
-    type: function
-    description: Wait for the next worker of the given tasks to finish and read its state.
-  pipeline_inspect:
-    type: function
-    description: Read contracts, attempts, worker results and reviews of the open run.
-  pipeline_review:
-    type: function
-    description: Accept, reject or discard a finished task with concrete evidence.
-  pipeline_retry:
-    type: function
-    description: Start a correction of rejected work, keeping its contract and history.
-  pipeline_interrupt:
-    type: function
-    description: Cancel an unnecessary worker; its task still needs a disposition.
-  pipeline_finish:
-    type: function
-    description: Close the run with the result for the user after the required work is accepted.
-  pipeline_block:
-    type: function
-    description: Stop the run with an explicit blocker when the goal cannot be met within its limits.
-
   # ── Core orchestration ──────────────────────────────────────────
   orchestrate:
     type: "function"
     name: "orchestrate"
     description: "Meta-tool: запускает динамического агента для решения подзадачи."
     env_vars:
-      DEFAULT_MODEL: deepseek-v4-flash-opencode
+      DEFAULT_MODEL: mercury-2.5
 
   # ── coder (function) ─────────────────────────────────────
   bash_tool:
@@ -440,13 +355,10 @@ tools:
 # ═════════════════════════════════════════════════════════════════════════════
 agents:
   # ── Координатор ─────────────────────────────────────────────────
-  # Beads/orchestrate coordinator. Kept for direct use (--agent coordinator);
-  # the router picks pipeline_coordinator so one system has one obvious entry.
   coordinator:
     name: Координатор
-    model: grok4.5
-    routable: false
-    description: "Beads-based coordinator: decomposes a goal into tracker tasks and runs orchestrate agents against them."
+    model: grok-4.7
+    description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
     tools:
       - orchestrate
       - call_coordinator
@@ -485,43 +397,9 @@ agents:
       4. **Закрытие** — Изучай результаты и верефицируй. 
       Категорически запрещается выполнять задачу самостоятельно. 
       Ты обязан передавать доступные тебе инструменты (в том числе для работы с трекером) и скиллы агентам вместе с указанием идентефикатора задачи и их предварительные вызовы инструментов, включая чтение самой задачи и одновления статуса задачи.
-  # ── Координатор пайплайна (движок runtime) ──────────────────────
-  pipeline_coordinator:
-    name: Координатор пайплайна
-    model: grok4.5
-    description: >-
-      Large multi-stage work in a repository that must be split into tracked,
-      verified tasks: a new subsystem, a broad feature, a migration across many
-      files. Opens a run, launches research, change and verification workers
-      under contracts, reviews their evidence and reports a verified result.
-      Not for a quick fix, a single-file change or a plain question.
-    tools:
-      - pipeline_start
-      - pipeline_task
-      - pipeline_wait
-      - pipeline_inspect
-      - pipeline_review
-      - pipeline_retry
-      - pipeline_interrupt
-      - pipeline_finish
-      - pipeline_block
-      - file_read
-      - glob_tool
-      - grep_tool
-    system_skills:
-      - coordinator
-    custom_prompt: |
-      Ты — координатор рабочего пайплайна Grid. Ты отвечаешь за результат: сам
-      решаешь, что нужно сделать, поручаешь работу фоновым исполнителям под
-      контрактом, проверяешь их доказательства и отвечаешь пользователю.
-
-      Сам не правишь продуктовый код: твои file_read, glob_tool и grep_tool
-      нужны, чтобы изучать артефакты и проверять отчёты исполнителей.
-      Протокол цикла и приёмки — в системном скилле ниже.
-
   general_purpose:
     name: "General-purpose"
-    model: deepseek-v4-flash-opencode
+    model: deepseek-flash-latest
     mcp_enabled: true
     system_skills:
       - codegraph
