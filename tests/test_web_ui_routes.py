@@ -179,3 +179,49 @@ def test_action_review_routes_require_the_operator_token():
     client = TestClient(WebChatServer(_DummyRuntime()).app)
 
     assert client.get("/api/action-policy/reviews").status_code == 403
+
+
+def _chat_server_with_contexts():
+    from core.context import ContextManager
+
+    runtime = _DummyRuntime()
+    manager = ContextManager()
+    runtime._context_manager = manager
+    for context_id, text in (("ctx-a", "first chat"), ("ctx-b", "second chat")):
+        manager.start_new_context(context_id)
+        manager.add_message("user", text)
+    manager.add_tool_result_as_message("Agent", "sub-agent report")
+    server = WebChatServer(runtime)
+    return server, manager, TestClient(server.app)
+
+
+def test_web_chat_renames_a_conversation_and_keeps_the_title():
+    server, manager, client = _chat_server_with_contexts()
+
+    response = client.patch("/api/chat/conversations/ctx-a", json={"title": "  My   chat "})
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "My chat"
+    listed = {item["id"]: item for item in client.get("/api/chat/conversations").json()}
+    assert listed["ctx-a"]["title"] == "My chat"
+    assert client.patch("/api/chat/conversations/missing", json={"title": "x"}).status_code == 404
+
+
+def test_web_chat_deletes_a_conversation_but_not_a_running_one():
+    server, manager, client = _chat_server_with_contexts()
+
+    class Running:
+        def done(self):
+            return False
+
+    server._chat_turns["ctx-a"] = (SimpleNamespace(message="m", elapsed_ms=5), Running())
+    assert client.delete("/api/chat/conversations/ctx-a").status_code == 409
+    listed = {item["id"]: item for item in client.get("/api/chat/conversations").json()}
+    assert listed["ctx-a"]["active"] is True and listed["ctx-b"]["active"] is False
+    # The sub-agent report is context for the model, not a chat message.
+    assert listed["ctx-b"]["message_count"] == 1
+
+    assert client.delete("/api/chat/conversations/ctx-b").status_code == 200
+    assert "ctx-b" not in manager._contexts
+    assert manager._current_context_id != "ctx-b"
+    assert client.delete("/api/chat/conversations/ctx-b").status_code == 404

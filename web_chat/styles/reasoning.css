@@ -31,6 +31,14 @@
   color: var(--text);
 }
 
+/* Keep the close control reachable while the reader is inside a long trace. */
+.reasoning.is-expanded .reasoning__toggle {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-1);
+}
+
 .reasoning__chevron {
   display: flex;
   color: var(--text-3);
@@ -165,6 +173,7 @@
 
 .step__policy {
   flex-shrink: 0;
+  align-self: center;
   padding: 1px 6px;
   border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line));
   border-radius: 999px;
@@ -188,21 +197,27 @@
   color: var(--danger);
 }
 
+/* Timing and chevron are fixed-width columns, so the policy badges before
+   them line up on one right edge whatever the duration or detail. */
 .step__timing {
   flex-shrink: 0;
+  min-width: 46px;
+  text-align: right;
   color: var(--text-3);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }
 
 .step__chevron {
-  display: none;
+  display: flex;
+  flex-shrink: 0;
+  visibility: hidden;
   color: var(--text-3);
   transition: transform 140ms var(--ease);
 }
 
 .step.has-detail .step__chevron {
-  display: flex;
+  visibility: visible;
 }
 
 .step.is-open .step__chevron {
@@ -254,12 +269,17 @@ a.refChip:hover {
 
 /* -- reasoning prose ------------------------------------------------------ */
 .step__prose {
+  display: none;
   padding: 2px 0 6px;
   color: var(--text-2);
   font-size: 13px;
   line-height: 1.62;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.step.is-open .step__prose {
+  display: block;
 }
 
 .step__prose > * + * {

@@ -1531,4 +1531,9 @@ class ContextManager:
         """Record tool result into conversation as assistant message for follow-ups."""
         if not output_text:
             return
-        self.add_message("assistant", f"Tool result of {tool_name}: {output_text}")
+        # Tagged so chat views can tell a sub-agent report from an answer.
+        self.add_message(
+            "assistant",
+            f"Tool result of {tool_name}: {output_text}",
+            metadata={"kind": "tool_result", "tool": tool_name},
+        )

@@ -270,3 +270,79 @@ def test_unknown_provider_shapes_are_still_accepted():
     )
 
     assert harness.tokens == ["raw text"]
+
+
+def test_policy_decision_before_tool_called_waits_for_its_row():
+    harness = Harness()
+
+    harness.observer.handle_policy_event(
+        {"rule": "policy_check", "decision": "allow", "tool": "bash_tool"}
+    )
+    harness.feed(tool_called("bash_tool", "call-1", '{"command": "ls"}'))
+    harness.feed(tool_called("bash_tool", "call-2", '{"command": "pwd"}'))
+
+    first, second = harness.steps()
+    assert first["policy"]["decision"] == "allow"
+    assert second["policy"] is None
+
+
+def test_parallel_calls_each_get_their_own_policy_badge():
+    harness = Harness()
+    harness.feed(tool_called("bash_tool", "call-1", '{"command": "ls"}'))
+    harness.feed(tool_called("bash_tool", "call-2", '{"command": "pwd"}'))
+
+    for decision in ("allow", "review"):
+        harness.observer.handle_policy_event(
+            {"rule": "policy_check", "decision": decision, "tool": "bash_tool"}
+        )
+
+    assert [step["policy"]["decision"] for step in harness.steps()] == ["allow", "review"]
+
+
+def test_parallel_verdicts_follow_their_call_id_not_arrival_order():
+    harness = Harness()
+    harness.observer.handle_policy_event(
+        {"rule": "policy_check", "decision": "review", "tool": "bash_tool", "call_id": "call-2"}
+    )
+    harness.feed(tool_called("bash_tool", "call-1", '{"command": "ls"}'))
+    harness.feed(tool_called("bash_tool", "call-2", '{"command": "rm x"}'))
+    harness.observer.handle_policy_event(
+        {"rule": "policy_check", "decision": "allow", "tool": "bash_tool", "call_id": "call-1"}
+    )
+
+    assert [step["policy"]["decision"] for step in harness.steps()] == ["allow", "review"]
+
+
+def test_narration_before_an_action_moves_into_the_trace():
+    harness = Harness()
+    resets = []
+    harness.observer._reset_answer = lambda: resets.append(True)
+    harness.feed(
+        raw("response.output_text.delta", "Delegating to a subagent."),
+        tool_called("Agent", "call-1", '{"input": "analyze"}'),
+        raw("response.output_text.delta", "Final answer."),
+    )
+
+    message, call = harness.steps()
+    assert message["kind"] == StepKind.MESSAGE.value
+    assert message["body"] == "Delegating to a subagent."
+    assert call["title"] == "Agent"
+    assert resets == [True]
+    assert harness.tokens[-1] == "Final answer."
+
+
+def test_subagent_work_lands_in_the_trace_but_not_in_the_answer():
+    harness = Harness()
+    harness.feed(tool_called("Agent", "call-1", '{"input": "analyze"}'))
+    child = harness.observer.nested("general-purpose")
+    child.handle_event(tool_called("bash_tool", "call-2", '{"command": "git diff"}'))
+    child.handle_event(raw("response.output_text.delta", "sub-agent report"))
+    harness.observer.handle_policy_event(
+        {"rule": "policy_check", "decision": "allow", "tool": "bash_tool"}
+    )
+
+    parent, nested = harness.steps()
+    assert nested["title"] == "general-purpose › bash_tool"
+    assert nested["policy"]["decision"] == "allow"
+    assert parent["policy"] is None
+    assert harness.tokens == []

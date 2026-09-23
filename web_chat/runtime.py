@@ -305,4 +305,7 @@ class WebChatRuntime:
                 context_id,
                 {"conversation": [], "executions": [], "metadata": {}, "created_at": "", "updated_at": ""},
             )
-            bucket.setdefault("metadata", {}).update({k: v for k, v in updates.items() if v is not None})
+            metadata = bucket.setdefault("metadata", {})
+            if metadata.get("title_locked"):
+                updates.pop("title", None)  # the user renamed it; keep their title
+            metadata.update({k: v for k, v in updates.items() if v is not None})

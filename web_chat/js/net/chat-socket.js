@@ -1,12 +1,13 @@
 /**
  * Chat websocket.
  *
- * One connection per turn, closed when the turn ends. The server's event
+ * One connection per turn, closed when the turn ends. The turn itself lives on
+ * the server: a reloaded page attaches to it again and gets it replayed. The server's event
  * vocabulary (see `web_chat/trace.py`) is dispatched by `type` to handlers the
  * caller registers, so no component has to parse raw frames.
  */
 
-/** @typedef {"token"|"step"|"step_removed"|"reasoning"|"routed"|"final_output"|"error"|"busy"|"done"} ChatEventType */
+/** @typedef {"token"|"step"|"step_removed"|"reasoning"|"routed"|"final_output"|"answer_reset"|"attached"|"error"|"busy"|"done"} ChatEventType */
 
 export class ChatConnection {
   /**
@@ -52,6 +53,11 @@ export class ChatConnection {
 
   stop() {
     this._post({ action: "stop" });
+  }
+
+  /** Follow the conversation's running turn: the server replays it, then streams live. */
+  attach() {
+    this._post({ action: "attach" });
   }
 
   close() {

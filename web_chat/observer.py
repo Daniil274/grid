@@ -70,13 +70,44 @@ class WebStreamObserver:
         recorder: TraceRecorder,
         *,
         emit_token: Callable[[str], None],
+        reset_answer: Optional[Callable[[], None]] = None,
         agent_label: str = "",
     ) -> None:
         self._recorder = recorder
         self._emit_token = emit_token
+        self._reset_answer = reset_answer
+        # Text streamed since the last action. If another action follows, it was
+        # narration ("let me check the diff"), not the answer, and moves to the trace.
+        self._narration = ""
         self.agent_label = agent_label
         self._calls_by_id: dict[str, Step] = {}
         self._calls_in_order: deque[Step] = deque()
+        # The validator judges a call while it executes, which can be before the
+        # SDK streams its ``tool_called`` item. Such verdicts wait here - by call
+        # id when the gate knows it, otherwise per tool name in call order.
+        self._pending_by_call: dict[str, dict[str, Any]] = {}
+        self._pending_policies: dict[str, deque[dict[str, Any]]] = {}
+        # Bare tool name per open call row; row titles may carry a sub-agent label.
+        self._tool_names: dict[str, str] = {}
+        self._nested = False
+
+    def nested(self, agent_label: str) -> "WebStreamObserver":
+        """A view for a sub-agent run inside this turn.
+
+        Its calls land in the same trace and share the call registry, so policy
+        verdicts for the sub-agent's actions find their rows. Its output text is
+        the tool result the caller receives, never the user-facing answer.
+        """
+        child = WebStreamObserver(
+            self._recorder, emit_token=lambda _text: None, agent_label=agent_label
+        )
+        child._calls_by_id = self._calls_by_id
+        child._calls_in_order = self._calls_in_order
+        child._pending_by_call = self._pending_by_call
+        child._pending_policies = self._pending_policies
+        child._tool_names = self._tool_names
+        child._nested = True
+        return child
 
     def handle_policy_event(self, event: dict[str, Any]) -> None:
         """Attach an argument-free policy badge to the matching action row."""
@@ -103,17 +134,13 @@ class WebStreamObserver:
         )
         if isinstance(latency, (int, float)):
             subtitle_parts.append(f"{latency:g} ms")
-        step = next(
-            (
-                candidate
-                for candidate in reversed(self._calls_in_order)
-                if candidate.status is StepStatus.RUNNING
-                and candidate.title.rsplit(".", 1)[-1] == str(event.get("tool") or "")
-            ),
-            None,
-        )
-        if step is None:
-            return
+        failures = event.get("validator_failures")
+        if isinstance(failures, list) and failures:
+            label_reason = "; ".join(str(item) for item in failures[-2:])
+            subtitle_parts.append(
+                f"validator {'retried' if decision != 'unavailable' else 'failed'}: {label_reason}"
+            )
+        tool = str(event.get("tool") or "")
         label = {
             "allow": "Policy ✓",
             "review": "Policy: review",
@@ -122,15 +149,38 @@ class WebStreamObserver:
         }[decision]
         if shadow and decision != "allow":
             label += " · shadow"
-        self._recorder.update(
-            step,
-            tone=tone,
-            policy={
+        badge = {
+            "tone": tone,
+            "policy": {
                 "decision": decision,
                 "label": label,
                 "title": " · ".join(subtitle_parts),
             },
+        }
+        call_id = event.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            # Parallel calls finish validation in any order, so only the id
+            # pins a verdict to the right row.
+            step = self._calls_by_id.get(call_id)
+            if step is None:
+                self._pending_by_call[call_id] = badge
+            else:
+                self._recorder.update(step, **badge)
+            return
+        step = next(
+            (
+                candidate
+                for candidate in self._calls_in_order
+                if candidate.status is StepStatus.RUNNING
+                and candidate.policy is None
+                and self._tool_names.get(candidate.id) == tool
+            ),
+            None,
         )
+        if step is None:
+            self._pending_policies.setdefault(tool, deque()).append(badge)
+            return
+        self._recorder.update(step, **badge)
 
     # -- entry point -------------------------------------------------------
     def handle_event(
@@ -168,6 +218,7 @@ class WebStreamObserver:
             # answering. Some providers interleave blank output deltas with
             # reasoning; ending the step on those would shred it into fragments.
             self._recorder.end_reasoning()
+        self._narration += text
         self._emit_token(text)
         return text
 
@@ -178,6 +229,8 @@ class WebStreamObserver:
         if item is None:
             return
         self._recorder.end_reasoning()
+        if name in {"tool_called", "handoff_requested"}:
+            self._flush_narration()
         handler = {
             "tool_called": self._on_tool_called,
             "tool_output": self._on_tool_output,
@@ -188,18 +241,37 @@ class WebStreamObserver:
         if handler is not None:
             handler(item, agent_key)
 
+    def _flush_narration(self) -> None:
+        text, self._narration = self._narration.strip(), ""
+        if not text:
+            return
+        title = f"{self.agent_label} › Message" if self._nested else "Message"
+        self._recorder.note(StepKind.MESSAGE, title, subtitle=clip(text, 120), body=text)
+        if self._reset_answer is not None:
+            self._reset_answer()
+
     def _on_tool_called(self, item: Any, agent_key: Optional[str]) -> None:
         info = tool_event_info(item)
         arguments = info.get("arguments")
+        title = _tool_display_name(info)
+        if self._nested and self.agent_label:
+            title = f"{self.agent_label} › {title}"
         step = self._recorder.open(
             StepKind.TOOL,
-            _tool_display_name(info),
+            title,
             subtitle=clip(summarize(arguments, 160).replace("\n", " "), 120),
             detail=summarize(arguments),
             refs=context_refs(arguments),
         )
         self._calls_in_order.append(step)
+        self._tool_names[step.id] = str(info.get("tool_name") or "")
         call_id = info.get("call_id")
+        badge = self._pending_by_call.pop(call_id, None) if call_id else None
+        if badge is None:
+            waiting = self._pending_policies.get(str(info.get("tool_name") or ""))
+            badge = waiting.popleft() if waiting else None
+        if badge is not None:
+            self._recorder.update(step, **badge)
         if call_id:
             self._calls_by_id[call_id] = step
 

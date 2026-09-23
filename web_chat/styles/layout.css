@@ -102,15 +102,76 @@
 }
 
 .chatRow {
+  position: relative;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: background 120ms var(--ease);
+}
+
+.chatRow__main {
   display: grid;
   gap: 3px;
   width: 100%;
   padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border: none;
+  border-radius: inherit;
   background: transparent;
   text-align: left;
-  transition: background 120ms var(--ease);
+}
+
+.chatRow__head {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+}
+
+/* Running agent: a small ring, so a busy chat is visible from anywhere. */
+.chatRow__spinner {
+  flex-shrink: 0;
+  width: 11px;
+  height: 11px;
+  border: 1.6px solid var(--accent-line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: chatRowSpin 0.8s linear infinite;
+}
+
+@keyframes chatRowSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* Rename / delete surface on hover or keyboard focus, over the timestamp. */
+.chatRow__actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: none;
+  gap: 2px;
+  padding: 1px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-3);
+}
+
+.chatRow:hover .chatRow__actions,
+.chatRow:focus-within .chatRow__actions {
+  display: flex;
+}
+
+.chatRow__actions .iconBtn:hover {
+  background: var(--bg-2);
+}
+
+.chatRow__rename {
+  width: 100%;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-xs);
+  background: var(--bg-1);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
 }
 
 .chatRow:hover {
@@ -123,6 +184,7 @@
 }
 
 .chatRow__title {
+  min-width: 0;
   overflow: hidden;
   color: var(--text);
   font-size: 13.5px;

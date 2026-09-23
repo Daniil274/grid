@@ -24,7 +24,7 @@ import { ICONS } from "./icons.js";
 import { copyText } from "./toast.js";
 
 /** Steps whose body is prose the reader should see without clicking. */
-const INLINE_BODY_KINDS = new Set(["reasoning"]);
+const INLINE_BODY_KINDS = new Set(["reasoning", "message"]);
 const MAX_VISIBLE_REFS = 6;
 
 const stepIcon = (kind) => ICONS[kind] ?? ICONS.prepare;
@@ -88,17 +88,31 @@ function createStepRow(step) {
     "button.step__head",
     { type: "button", "aria-expanded": "false" },
     glyph,
-    h("span.step__label", {}, title, subtitle, policy),
+    h("span.step__label", {}, title, subtitle),
+    policy,
     timing,
     h("span.step__chevron", {}, icon(ICONS.chevron, { size: 14 })),
   );
 
   const root = h("li.step", { dataset: { kind: step.kind, status: step.status, tone: step.tone || "neutral" } }, head, refs, body, detail);
 
-  head.addEventListener("click", () => {
-    const open = root.classList.toggle("is-open");
+  let pinned = false; // the reader toggled this step; stop auto-managing it
+
+  const setOpen = (open) => {
+    root.classList.toggle("is-open", open);
     head.setAttribute("aria-expanded", String(open));
+  };
+
+  head.addEventListener("click", () => {
+    pinned = true;
+    setOpen(!root.classList.contains("is-open"));
   });
+
+  /** Thinking stays open while it streams and folds away once it lands. */
+  const settle = () => {
+    if (body) body.classList.remove("is-streaming");
+    if (inlineBody && !pinned) setOpen(false);
+  };
 
   /** Live reasoning: append text without re-parsing what is already rendered. */
   const appendDelta = (delta) => {
@@ -111,7 +125,8 @@ function createStepRow(step) {
     root.dataset.status = next.status;
     root.dataset.tone = next.tone || "neutral";
     title.textContent = next.title;
-    subtitle.textContent = next.status === "running" ? "" : next.subtitle || "";
+    // Reasoning has no summary until it lands; a running call keeps its arguments.
+    subtitle.textContent = inlineBody && next.status === "running" ? "" : next.subtitle || "";
     policy.hidden = !next.policy;
     policy.textContent = next.policy?.label || "";
     policy.title = next.policy?.title || "";
@@ -124,11 +139,12 @@ function createStepRow(step) {
     }
     const blocks = [payload("Input", next.detail), inlineBody ? null : payload("Result", next.body)].filter(Boolean);
     replace(detail, blocks);
-    root.classList.toggle("has-detail", blocks.length > 0);
+    root.classList.toggle("has-detail", blocks.length > 0 || Boolean(inlineBody && (next.status === "running" || next.body)));
+    if (inlineBody && !pinned) setOpen(next.status === "running");
   };
 
   update(step);
-  return { root, update, appendDelta };
+  return { root, update, appendDelta, settle };
 }
 
 /**
@@ -186,10 +202,10 @@ export function createReasoningPanel() {
       return rows.size === 0;
     },
 
-    /** A turn started: show the panel live and open it. */
-    start() {
+    /** A turn started (or, when reattaching, started `elapsedMs` ago): show it live and open. */
+    start(elapsedMs = 0) {
       running = true;
-      startedAt = Date.now();
+      startedAt = Date.now() - elapsedMs;
       totalMs = null;
       pinnedOpen = false;
       root.hidden = false;
@@ -229,7 +245,7 @@ export function createReasoningPanel() {
 
     /** The turn ended: settle the headline and step back out of the way.
      * Idempotent - both `done` and the socket closing settle the same turn. */
-    finish(durationMs) {
+    finish(durationMs, autoCollapse = true) {
       if (!running && totalMs != null) return;
       running = false;
       clearInterval(ticker);
@@ -237,7 +253,8 @@ export function createReasoningPanel() {
       totalMs = durationMs ?? Date.now() - startedAt;
       root.dataset.state = "idle";
       root.hidden = rows.size === 0;
-      if (!pinnedOpen) setExpanded(false);
+      for (const { row } of rows.values()) row.settle();
+      if (!pinnedOpen && autoCollapse) setExpanded(false);
       renderHeadline();
     },
 

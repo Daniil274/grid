@@ -101,6 +101,7 @@ export function createMessage({ role, content = "", author = "", timestamp, onEd
   return {
     el: root,
     id,
+    role,
     reasoning,
 
     get text() {
@@ -160,7 +161,11 @@ export function createMessage({ role, content = "", author = "", timestamp, onEd
     setFailed(message) {
       root.classList.add("is-failed");
       root.classList.remove("is-waiting");
-      if (!text) body.replaceChildren(h("p.msg__error", { text: message }));
+      const notice = h("div.msg__error", { role: "alert" }, h("strong", { text: "Error" }), h("p", { text: message }));
+      if (text) {
+        body.querySelector(".msg__error")?.remove();
+        body.append(notice);
+      } else body.replaceChildren(notice);
     },
   };
 }

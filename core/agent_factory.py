@@ -719,6 +719,9 @@ class GridRunContext:
     action_depth: int = (
         0  # Context-local delegation depth (safe across parallel branches)
     )
+    stream_observer: Optional[Any] = (
+        None  # The run's own observer, so sub-agents report into the same view
+    )
 
 
 class AgentFactory:
@@ -3106,6 +3109,7 @@ class AgentFactory:
                 metadata=ctx_metadata,
                 container_id=self.container_id,
                 action_state=action_state,
+                stream_observer=policy_observer,
             )
 
             input_preview = self._safe_preview(parsed_message, max_length=700)
@@ -4281,6 +4285,15 @@ DO NOT write XML tags manually!"""
                 parent_step_id=parent_step_id,
                 execution_mode="serial_subtree" if parent_pipeline_id else None,
             )
+            # A sub-agent reports into its caller's view (the web trace, not the
+            # console), through a child that keeps its prose out of the answer.
+            sub_observer = (
+                getattr(getattr(context, "context", None), "stream_observer", None)
+                or self._stream_observer
+            )
+            if hasattr(sub_observer, "nested"):
+                sub_observer = sub_observer.nested(agent_key)
+            sub_run_ctx.stream_observer = sub_observer
 
             # Execute auto_run_tools for sub-agent (mirrors logic in run_agent())
             sub_agent_config = self.config.get_agent(agent_key)
@@ -4370,9 +4383,7 @@ DO NOT write XML tags manually!"""
                 output = None
                 async for event in run_result_streaming.stream_events():
                     append_action_reasoning(sub_run_ctx.action_state, event)
-                    # Use the factory's stream observer to log events
-                    if hasattr(self, "_stream_observer"):
-                        self._stream_observer.handle_event(event, agent_key=agent_key)
+                    sub_observer.handle_event(event, agent_key=agent_key)
 
                     # Also log specific events to file logs if needed (redundant if observer does it, but good for safety)
                     if isinstance(event, RunItemStreamEvent):
@@ -4381,7 +4392,9 @@ DO NOT write XML tags manually!"""
 
                         if event_name == "tool_called" and item is not None:
                             raw_item = getattr(item, "raw_item", None)
-                            tool_name = getattr(raw_item, "name", None) or "tool"
+                            # Not `tool_name`: that names this agent tool and
+                            # labels the result recorded below.
+                            sub_tool_name = getattr(raw_item, "name", None) or "tool"
                             arguments = getattr(raw_item, "arguments", None)
 
                             # Format arguments for logging
@@ -4396,7 +4409,7 @@ DO NOT write XML tags manually!"""
                                 ]
 
                             logger.info(
-                                f"SUB_AGENT_TOOL_CALL | agent={agent_key} | tool={tool_name} | args={args_str}"
+                                f"SUB_AGENT_TOOL_CALL | agent={agent_key} | tool={sub_tool_name} | args={args_str}"
                             )
 
                 # Extract final output

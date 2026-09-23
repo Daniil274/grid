@@ -44,6 +44,7 @@ class StepKind(str, Enum):
     TOOL = "tool"
     HANDOFF = "handoff"
     MCP = "mcp"
+    MESSAGE = "message"  # narration the agent wrote between its actions
     ERROR = "error"
 
 
@@ -280,6 +281,20 @@ class TraceRecorder:
     def _discard(self, step: Step) -> None:
         self._steps.pop(step.id, None)
         self._emit({"type": "step_removed", "id": step.id})
+
+
+def is_tool_result(message: Any) -> bool:
+    """A sub-agent report kept for the model's context, not a chat answer."""
+    metadata = getattr(message, "metadata", None) or {}
+    if metadata.get("kind") == "tool_result":
+        return True
+    # Stored before results were tagged.
+    content = getattr(message, "content", None)
+    return (
+        getattr(message, "role", None) == "assistant"
+        and isinstance(content, str)
+        and content.startswith("Tool result of ")
+    )
 
 
 _LEGACY_KINDS = {

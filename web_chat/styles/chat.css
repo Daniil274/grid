@@ -5,7 +5,6 @@
   padding: 28px 20px 8px;
   overflow-y: auto;
   overflow-x: hidden;
-  scroll-behavior: smooth;
 }
 
 /* -- welcome -------------------------------------------------------------- */
@@ -142,9 +141,31 @@
   padding-left: 12px;
 }
 
+/* A failed turn: a system notice in place of the answer, never auto-hidden. */
 .msg__error {
+  padding: 10px 14px;
+  margin-top: 4px;
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--line));
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 13.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.msg__error strong {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.msg__error p {
+  margin: 0;
+  color: var(--text);
 }
 
 .msg__notice {

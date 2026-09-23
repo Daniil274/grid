@@ -1,4 +1,9 @@
-"""Chat websocket transport: one socket, one turn at a time, always responsive.
+"""Chat websocket transport: one turn at a time per conversation, always responsive.
+
+A turn belongs to the server, not to the socket that started it. Closing or
+reloading the page only detaches that socket; the agent keeps working, and a
+socket that attaches later receives the turn's events so far and then follows
+it live. Only an explicit ``stop`` cancels a turn.
 
 Commands (``stop``, the next message) are read on a loop that never awaits
 inference, so a running turn can always be cancelled. Inference itself runs in a
@@ -15,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from contextlib import suppress
 from typing import Any, Optional
@@ -24,7 +30,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from core.context import safe_lock
 from web_chat.observer import WebStreamObserver
 from web_chat.systems import Resolution
-from web_chat.trace import StepKind, TraceRecorder
+from web_chat.trace import StepKind, TraceRecorder, is_tool_result
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +39,12 @@ _FINISHED = "_finished"
 
 
 class AgentTurn:
-    """A single agent run, streamed to one client.
+    """A single agent run, streamed to every socket attached to it.
 
     Owns the recorder for this turn and knows how to persist its trace. The
     producer/consumer split keeps the socket writable while the agent works.
+    Every event is also kept, so a socket attaching mid-turn can be replayed
+    to exactly where the others are.
     """
 
     def __init__(
@@ -51,12 +59,46 @@ class AgentTurn:
         self._message = message
         self._requested = (system_key, agent_key)
         self.run_id = uuid.uuid4().hex
+        self._started = time.monotonic()
+        self._log: list[dict[str, Any]] = []
+        self._subscribers: set["ChatSession"] = {session}
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._recorder = TraceRecorder(self._queue.put_nowait)
         self._observer = WebStreamObserver(
             self._recorder,
             emit_token=lambda text: self._queue.put_nowait({"type": "token", "content": text}),
+            reset_answer=lambda: self._queue.put_nowait({"type": "answer_reset"}),
         )
+
+    @property
+    def message(self) -> str:
+        return self._message
+
+    @property
+    def elapsed_ms(self) -> int:
+        return int((time.monotonic() - self._started) * 1000)
+
+    async def attach(self, session: "ChatSession") -> None:
+        """Replay the turn so far to *session*, then stream to it live.
+
+        Snapshotting the log and subscribing happen with no await in between,
+        so every event lands exactly once: in the replay or in the live stream.
+        The session's send lock keeps live events queued behind the replay.
+        """
+        async with session.send_lock:
+            replay = list(self._log)
+            self._subscribers.add(session)
+            header = {
+                "type": "attached",
+                "message": self._message,
+                "elapsed_ms": self.elapsed_ms,
+                "run_id": self.run_id,
+            }
+            for event in (header, *replay):
+                await session.send_unlocked(event)
+
+    def detach(self, session: "ChatSession") -> None:
+        self._subscribers.discard(session)
 
     async def run(self) -> None:
         producer = asyncio.create_task(self._produce())
@@ -169,7 +211,14 @@ class AgentTurn:
             await self._emit(event)
 
     async def _emit(self, event: dict[str, Any]) -> None:
-        await self._session.send({**event, "run_id": self.run_id})
+        frame = {**event, "run_id": self.run_id}
+        self._log.append(frame)
+        for session in list(self._subscribers):
+            try:
+                await session.send(frame)
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                # A closed tab must not stall the agent or the other viewers.
+                self._subscribers.discard(session)
 
     # -- persistence -------------------------------------------------------
     def _persist_trace(self) -> None:
@@ -180,7 +229,9 @@ class AgentTurn:
             if not conversation:
                 return
             last = conversation[-1]
-            if getattr(last, "role", None) != "assistant":
+            if getattr(last, "role", None) != "assistant" or is_tool_result(last):
+                # No answer of this turn was stored (it was stopped); the only
+                # assistant entries are sub-agent reports, which are not answers.
                 return
             last.metadata = {**(last.metadata or {}), "trace": self._recorder.snapshot()}
             if manager.persist_path:
@@ -196,8 +247,11 @@ class ChatSession:
         self.context_id = context_id
         self.runtime = server.runtime
         self.manager = self.runtime.context_manager()
-        self._send_lock = asyncio.Lock()
-        self._turn: Optional[asyncio.Task] = None
+        self.send_lock = asyncio.Lock()
+
+    @property
+    def _turns(self) -> dict[str, tuple[AgentTurn, asyncio.Task]]:
+        return self._server._chat_turns
 
     async def serve(self) -> None:
         await self._socket.accept()
@@ -210,11 +264,18 @@ class ChatSession:
         except (WebSocketDisconnect, RuntimeError, OSError):
             pass
         finally:
-            await self._cancel_turn()
+            # Leaving the page detaches; the turn keeps running for later viewers.
+            active = self._turns.get(self.context_id)
+            if active is not None:
+                active[0].detach(self)
 
     async def send(self, event: dict[str, Any]) -> None:
-        async with self._send_lock:
+        async with self.send_lock:
             await self._socket.send_json(event)
+
+    async def send_unlocked(self, event: dict[str, Any]) -> None:
+        """Send while the caller already holds :attr:`send_lock`."""
+        await self._socket.send_json(event)
 
     def agent_label(self, system_key: str, agent_key: str) -> str:
         return self._server.agent_label(system_key, agent_key)
@@ -235,15 +296,28 @@ class ChatSession:
         if payload.get("action") == "stop":
             await self._stop()
             return
+        if payload.get("action") == "attach":
+            await self._attach()
+            return
 
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
             return
         await self._start(message.strip(), payload.get("system_key"), payload.get("agent_key"))
 
+    async def _attach(self) -> None:
+        active = self._turns.get(self.context_id)
+        if active is None:
+            # The turn ended between the page loading and attaching; the stored
+            # conversation already holds its result.
+            await self.send({"type": "done", "detached": True})
+            return
+        await active[0].attach(self)
+
     async def _stop(self) -> None:
-        if self._turn and not self._turn.done():
-            await self._cancel_turn()
+        active = self._turns.get(self.context_id)
+        if active is not None and not active[1].done():
+            await self._cancel(active[1])
         else:
             await self.send({"type": "done", "stopped": True})
 
@@ -257,14 +331,22 @@ class ChatSession:
             return
         self._server._active_chat_contexts.add(self.context_id)
         turn = AgentTurn(self, message, system_key=system_key or None, agent_key=agent_key or None)
-        self._turn = asyncio.create_task(turn.run())
+        task = asyncio.create_task(turn.run())
+        self._turns[self.context_id] = (turn, task)
+        task.add_done_callback(lambda _task: self._forget(turn))
 
-    async def _cancel_turn(self) -> None:
-        if self._turn is None or self._turn.done():
+    def _forget(self, turn: AgentTurn) -> None:
+        active = self._turns.get(self.context_id)
+        if active is not None and active[0] is turn:
+            del self._turns[self.context_id]
+
+    @staticmethod
+    async def _cancel(task: asyncio.Task) -> None:
+        if task.done():
             return
-        self._turn.cancel()
+        task.cancel()
         with suppress(asyncio.CancelledError):
-            await self._turn
+            await task
 
 
 async def chat_session(server: Any, websocket: WebSocket, context_id: str) -> None:
