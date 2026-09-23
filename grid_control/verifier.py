@@ -142,6 +142,8 @@ class WebSocket:
 
 
 def _tool_matches(title, name):
+    # A sub-agent's call is titled "agent › tool"; an MCP tool "server.tool".
+    title = title.rsplit(" › ", 1)[-1]
     return title == name or title.endswith("." + name)
 
 
