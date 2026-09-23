@@ -1,0 +1,31 @@
+# Hidden guard scenarios shared by the cases: routing that works on clean stable
+# and must keep working after any candidate. A case lists the ones it keeps; a
+# guard that contradicts the case's defect is left out of that case.
+guards:
+  - name: g-code
+    message: "В модуле billing/invoice.py округление суммы даёт лишнюю копейку. Найди ошибку и поправь."
+    system: engineering
+    agent: engineer
+    timeout_seconds: 90
+  - name: g-question
+    message: "Объясни простыми словами, чем процесс отличается от потока в операционной системе."
+    system: engineering
+    agent: engineer
+    timeout_seconds: 90
+  - name: g-web
+    message: "Найди в интернете актуальную цену GitHub Copilot Business и дай ссылки на источники."
+    system: engineering
+    agent: web_spider
+    timeout_seconds: 90
+  - name: g-pipeline
+    message: "Нужно перевести весь бэкенд с Flask на FastAPI: спланируй этапы, раздай задачи исполнителям и проверь каждую."
+    system: pipeline
+    timeout_seconds: 90
+  - name: g-video
+    message: "Обрежь первые десять секунд у ролика footage/talk.mp4 и отрендери превью."
+    system: video
+    timeout_seconds: 90
+  - name: g-desktop
+    message: "Открой калькулятор Windows и посчитай в нём 15% от 2400."
+    system: desktop
+    timeout_seconds: 90

@@ -1,0 +1,57 @@
+name: pipeline-overreach
+kind: fix
+notes: >-
+  The pipeline description lost its "not for quick fixes" boundary and invites
+  every planned change, so small fixes go to the heavy pipeline.
+request: |
+  Мелкие правки стали уходить в систему pipeline: на «Поправь опечатку в
+  сообщении об ошибке в cli/main.py» координатор завёл эпик и пять задач для
+  исполнителей. Такие задачи должен делать engineering. Найди причину и почини.
+sabotage:
+  - file: routing.yaml
+    find: "Large multi-stage projects that need planning and delegation: a new
+        subsystem, a big feature or a migration across many files, where the work
+        is split into tracked tasks for researcher, executor and verifier agents.
+        Not for quick fixes or single-file changes."
+    replace: "The default choice for changing code: every fix, feature or refactor,
+        however small, is planned as tracked tasks for researcher, executor and
+        verifier agents, so each change is verified before it lands."
+  - file: routing.yaml
+    find: "The default choice. Hands-on software engineering in a code repository:"
+    replace: "Reading and exploring a code repository without changing it:"
+locus:
+  - file: routing.yaml
+    yaml_path: routing.systems.pipeline.description
+  - file: routing.yaml
+    yaml_path: routing.systems.engineering.description
+allowed_paths:
+  - routing.yaml
+  - examples/coder/config.yaml
+  - examples/coordinator-pipeline/config.yaml
+dev:
+  - name: dev-typo
+    message: "Поправь опечатку в сообщении об ошибке в cli/main.py."
+    system: engineering
+    timeout_seconds: 90
+  - name: dev-rename
+    message: "Переименуй функцию get_usr в get_user в файле users.py и обнови её вызовы."
+    system: engineering
+    timeout_seconds: 90
+  - name: dev-migration
+    message: "Перенеси все сервисы проекта с Python 3.8 на 3.12: составь план, распредели работу и проверь каждую часть."
+    system: pipeline
+    timeout_seconds: 90
+targets:
+  - name: t-small-bug
+    message: "Функция parse_date в utils/dates.py падает на пустой строке — исправь, пожалуйста, и проверь, что тесты проходят."
+    system: engineering
+    timeout_seconds: 90
+  - name: t-small-feature
+    message: "Добавь в cli/main.py флаг --verbose, который включает подробный вывод."
+    system: engineering
+    timeout_seconds: 90
+  - name: t-small-refactor
+    message: "Вынеси повторяющийся код подключения к базе из reports.py в отдельную функцию."
+    system: engineering
+    timeout_seconds: 90
+guards: [g-question, g-web, g-pipeline, g-video, g-desktop]

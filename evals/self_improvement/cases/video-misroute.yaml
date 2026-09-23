@@ -1,0 +1,57 @@
+name: video-misroute
+kind: fix
+notes: >-
+  The engineering description claims video work, so video tasks land in
+  engineering. The cause is the overlap in routing.yaml, not the video system.
+request: |
+  Пользователи жалуются: просьбы смонтировать ролик уходят в engineering, а не в
+  систему video. Пример: «Склей clips/intro.mp4 и clips/main.mp4 в один ролик» —
+  ответил инженер и начал писать скрипт на ffmpeg. Разберись, почему так, и почини.
+sabotage:
+  - file: routing.yaml
+    find: "git, explore a codebase. Also all internet research"
+    replace: "git, explore a codebase. Also video and audio files (mp4, mov, clips): trimming, joining, subtitles, previews and rendering with ffmpeg. Also all internet research"
+  - file: routing.yaml
+    find: "Working with video files and footage (mp4, mov, clips): inspect footage,
+        detect scenes, annotate, cut and join clips, add subtitles, build cutlists
+        and edit lists, render previews and final versions, and quality-check
+        rendered output."
+    replace: "Catalogue of the video team's published renders: list finished videos
+        and their metadata. Not for editing footage: cutting, joining, subtitles
+        and rendering belong to engineering."
+locus:
+  - file: routing.yaml
+    yaml_path: routing.systems.engineering.description
+  - file: routing.yaml
+    yaml_path: routing.systems.video.description
+allowed_paths:
+  - routing.yaml
+  - examples/coder/config.yaml
+  - examples/video-editor/config.yaml
+dev:
+  - name: dev-join
+    message: "Склей clips/intro.mp4 и clips/main.mp4 в один ролик."
+    system: video
+    timeout_seconds: 90
+  - name: dev-subtitles
+    message: "Добавь к ролику talk.mp4 субтитры из talk.srt."
+    system: video
+    timeout_seconds: 90
+  - name: dev-code
+    message: "Почини падающий тест в tests/test_api.py."
+    system: engineering
+    timeout_seconds: 90
+targets:
+  - name: t-video-cut
+    message: "Вырежи из interview.mov фрагмент с 01:20 до 02:05 и сохрани его отдельным клипом."
+    system: video
+    timeout_seconds: 90
+  - name: t-video-highlights
+    message: "Найди в footage/match.mp4 смены сцен и собери короткий ролик из лучших моментов."
+    system: video
+    timeout_seconds: 90
+  - name: t-video-qc
+    message: "Проверь готовый рендер out/final.mp4: нет ли рассинхрона звука и чёрных кадров."
+    system: video
+    timeout_seconds: 90
+guards: [g-code, g-question, g-web, g-pipeline, g-desktop]

@@ -1,0 +1,47 @@
+name: desktop-underreach
+kind: fix
+notes: >-
+  The desktop description was narrowed to screencasts, so GUI tasks fall back
+  to engineering.
+request: |
+  Задачи вида «открой программу и сделай в ней что-то» перестали попадать в
+  систему desktop. Например, «Открой Блокнот и напечатай в нём список покупок»
+  ушло в engineering, и инженер ответил, что не может управлять экраном.
+  Почини маршрутизацию.
+sabotage:
+  - file: routing.yaml
+    find: "Controlling this Windows computer through its GUI like a person: open\n        and use applications, click, type, press hotkeys, switch windows, fill\n        forms in programs. Pick when the task must be done on screen."
+    replace: "Recording screencasts and taking screenshots of this Windows computer for documentation. Not for operating programs: opening applications, clicking, typing, switching windows and changing settings belong to engineering."
+locus:
+  - file: routing.yaml
+    yaml_path: routing.systems.desktop.description
+allowed_paths:
+  - routing.yaml
+  - examples/windows-computer-use/config.yaml
+dev:
+  - name: dev-notepad
+    message: "Открой Блокнот и напечатай в нём список покупок."
+    system: desktop
+    timeout_seconds: 90
+  - name: dev-paint
+    message: "Запусти Paint и нарисуй в нём красный круг."
+    system: desktop
+    timeout_seconds: 90
+  - name: dev-code
+    message: "Почини падающий тест в tests/test_api.py."
+    system: engineering
+    timeout_seconds: 90
+targets:
+  - name: t-desktop-settings
+    message: "Зайди в параметры Windows и включи тёмную тему."
+    system: desktop
+    timeout_seconds: 90
+  - name: t-desktop-window
+    message: "Открой Word и создай в нём новый документ с заголовком «Отчёт за март»."
+    system: desktop
+    timeout_seconds: 90
+  - name: t-desktop-form
+    message: "В открытой программе учёта заполни форму нового клиента: имя Иван Петров, телефон 555-12-34."
+    system: desktop
+    timeout_seconds: 90
+guards: [g-code, g-question, g-web, g-pipeline, g-video]
