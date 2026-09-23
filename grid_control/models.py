@@ -92,6 +92,11 @@ class Policy:
     dev_scenarios: tuple[Scenario, ...] = ()
     # Hosts the candidate may reach over HTTPS through the controller's proxy.
     egress_hosts: tuple[str, ...] = ()
+    # Share of repetitions a scenario must pass. 1.0 demands every repetition;
+    # a model-driven router misroutes borderline messages now and then, so with
+    # several repetitions a majority (e.g. 0.66 of 3) separates noise from a
+    # regression. HTTP checks are deterministic and always need every repetition.
+    scenario_pass_rate: float = 1.0
 
     def __post_init__(self) -> None:
         if not self.runtime_image or not self.verifier_image:
@@ -114,6 +119,8 @@ class Policy:
             raise ValueError("Timeouts must be between 1 and 3600 seconds")
         if not 0 <= self.min_improvement <= 1:
             raise ValueError("min_improvement must be a fraction between 0 and 1")
+        if not 0.5 < self.scenario_pass_rate <= 1:
+            raise ValueError("scenario_pass_rate must be above 0.5 and at most 1")
         if any(
             not re.fullmatch(r"[A-Z][A-Z0-9_]*", name)
             for name in self.environment_names
@@ -177,11 +184,25 @@ def decide(
     size = policy.repetitions * len(names)
     old = sum(sum(trial.checks.values()) for trial in baseline) / size
     new = sum(sum(trial.checks.values()) for trial in candidate) / size
-    passed = all(all(trial.checks.values()) for trial in candidate)
+    rates = {
+        name: sum(trial.checks[name] for trial in candidate) / policy.repetitions
+        for name in names
+    }
+    failing = sorted(
+        name for name, rate in rates.items()
+        if rate < (policy.scenario_pass_rate if name.startswith(SCENARIO_PREFIX) else 1.0)
+    )
+    rule = (
+        "All candidate checks must pass in every repetition"
+        if policy.scenario_pass_rate == 1.0
+        else f"HTTP checks must pass in every repetition and scenarios in at least "
+        f"{policy.scenario_pass_rate:.0%} of them"
+    )
     return {
-        "accepted": passed and new - old >= policy.min_improvement,
+        "accepted": not failing and new - old >= policy.min_improvement,
         "baseline_success": old,
         "candidate_success": new,
         "improvement": new - old,
-        "reason": "All candidate checks must pass in every repetition and meet the improvement threshold",
+        "failing": failing,
+        "reason": rule + " and meet the improvement threshold",
     }
