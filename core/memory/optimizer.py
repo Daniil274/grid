@@ -236,7 +236,7 @@ class MemoryOptimizer:
         """Get the AsyncOpenAI client and model name from the configured agent."""
         try:
             agent_config = self.config.get_agent(self.agent_key)
-            model_name = agent_config.model
+            model_name = agent_config.primary_model
             client, resolved_model = self.agent_factory.get_openai_client_for_model(model_name)
             return client, resolved_model
         except Exception as e:

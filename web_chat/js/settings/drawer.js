@@ -209,7 +209,22 @@ export class SettingsDrawer {
         "div.formGrid",
         {},
         field("Display name", textInput(agent, "name")),
-        field("Model", select(agent, "model", optionsFrom(this.config.models, (key, value) => value?.description || value?.name || key))),
+        field(
+          "Models (fallback order)",
+          lineListArea(
+            {
+              get model() {
+                return Array.isArray(agent.model) ? agent.model : agent.model ? [agent.model] : [];
+              },
+              set model(value) {
+                agent.model = value;
+              },
+            },
+            "model",
+            { rows: 3, placeholder: Object.keys(this.config.models ?? {}).join("\n") },
+          ),
+          "One model key per line. Requests try them from top to bottom.",
+        ),
         field("Base prompt", select(agent, "base_prompt", optionsFrom(this.config.prompt_templates, (key) => key))),
         field("Description", textInput(agent, "description", { placeholder: "Shown in the agent picker" })),
         h("div.field", {}, toggle(agent, "mcp_enabled", "MCP enabled")),

@@ -20,6 +20,8 @@ from uuid import uuid4
 import httpx
 
 from core.decisions import DecisionsModel
+from core.chat_policy import ChatPolicyModel
+from core.policy_resilience import PolicyRunner
 from schemas.action_policy import ActionPolicyConfig, ActionValidatorConfig
 from utils.exceptions import ConfigError
 
@@ -106,6 +108,17 @@ def delegated_state(parent: Any, tool: str, request: Any) -> Any:
     return parent
 
 
+def is_policy_block(result: Any) -> bool:
+    """True when a tool result is the gate's own ``blocked`` answer."""
+    if not isinstance(result, str) or '"blocked"' not in result:
+        return False
+    try:
+        payload = json.loads(result)
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("status") == "blocked"
+
+
 class PolicyDenied(Exception):
     """An operator rule blocked a call."""
 
@@ -138,6 +151,8 @@ class ActionValidator:
         self.model = model
         self.prompts = prompts
         self.transport = transport
+        self.fallbacks: list[ActionValidator] = []
+        self._client: httpx.AsyncClient | None = None
 
     @classmethod
     def from_config(cls, root_config, *, transport=None):
@@ -156,12 +171,24 @@ class ActionValidator:
                     f"settings.action_policy.prompts.{name} must define instructions "
                     "and allow/deny/review criteria"
                 )
-        return cls(
-            config,
-            DecisionsModel.from_config(root_config, config.model),
-            policy.prompts,
-            transport=transport,
-        )
+
+        def build(key, route_config):
+            chat = root_config.get_model(key).policy_api == "chat"
+            validator_type = ChatActionValidator if chat else cls
+            model_type = ChatPolicyModel if chat else DecisionsModel
+            return validator_type(
+                route_config,
+                model_type.from_config(root_config, key),
+                policy.prompts,
+                transport=transport,
+            )
+
+        validator = build(config.model, config)
+        validator.fallbacks = [
+            build(key, config.model_copy(update={"model": key, "fallback_models": ()}))
+            for key in config.fallback_models
+        ]
+        return validator
 
     def questions(self, chain: bool) -> dict:
         action = self.prompts.action
@@ -207,30 +234,32 @@ class ActionValidator:
         # One request may take the model's request timeout, never the whole
         # budget: a stalled request is dropped and the gate tries again.
         timeout = min(self.config.timeout_seconds, self.model.timeout)
-        async with self.model.http_client(
-            timeout=timeout, transport=self.transport
-        ) as client:
-            answers = await asyncio.wait_for(
-                self.model.evaluate(client, state, questions), timeout=timeout
+        if self._client is None:
+            self._client = self.model.http_client(
+                timeout=timeout, transport=self.transport
             )
+        answers = await asyncio.wait_for(
+            self.model.evaluate(self._client, state, questions), timeout=timeout
+        )
+        if not isinstance(answers, dict) or set(answers) != set(questions):
+            raise ValueError("Invalid validator answer set")
         return {key: self._verdict(answers[key]) for key in questions}
 
+    async def aclose(self):
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+        for validator in self.fallbacks:
+            await validator.aclose()
 
-VALIDATOR_ATTEMPTS = 2
 
+class ChatActionValidator(ActionValidator):
+    """Same questions and lifetime, with direct verdicts instead of probabilities."""
 
-def failure_reason(exc: BaseException) -> str:
-    """Why a validator call failed, without provider bodies or action content."""
-    if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException)):
-        return "timeout"
-    response = getattr(exc, "response", None)
-    status = getattr(response, "status_code", None)
-    if isinstance(status, int):
-        return f"http_{status}"
-    if isinstance(exc, (ValueError, KeyError, TypeError)):
-        # Our own answer-shape checks; their messages carry no payload.
-        return f"invalid_answer: {type(exc).__name__}: {str(exc)[:80]}"
-    return type(exc).__name__
+    def _verdict(self, answer: Any) -> str:
+        if not isinstance(answer, str) or answer not in VERDICTS:
+            raise ValueError("Invalid chat policy verdict")
+        return answer
 
 
 def merge(verdicts: dict) -> str:
@@ -247,9 +276,17 @@ class ActionGate:
     def __init__(self, config: ActionPolicyConfig, *, validator=None):
         self.config = config.model_copy(deep=True)
         self.validator = validator
+        self._runner = PolicyRunner(
+            self.config.validator,
+            [validator, *getattr(validator, "fallbacks", ())],
+        )
         self._reviews: dict[str, PendingApproval] = {}
         self._approved: dict[tuple[str, str], float] = {}
         self._review_lock = threading.Lock()
+
+    async def aclose(self):
+        if self.validator is not None and hasattr(self.validator, "aclose"):
+            await self.validator.aclose()
 
     @property
     def enabled(self) -> bool:
@@ -487,25 +524,74 @@ class ActionGate:
         logger.info("ACTION_POLICY %s", json.dumps(event, ensure_ascii=True))
 
     def _deny(self, run, tool, kind, digest, rule, approval_id=None):
-        # A pending human review is neither approval nor denial. Attempts still
-        # bound repeated retries, while the denial budget remains meaningful.
-        if rule != "policy_review":
+        # Neither pending review nor an infrastructure outage is a violation.
+        # Attempt budgets still bound repeated calls.
+        if rule not in ("policy_review", "policy_unavailable"):
             run.denials += 1
             if run.denials >= self.config.max_denials_per_run:
                 run.stopped = True
         run.chain.append(
             {"kind": kind, "tool": tool, "outcome": "blocked", "rule": rule}
         )
-        self._record(run, tool, kind, digest, "deny", rule)
+        decision = "unavailable" if rule == "policy_unavailable" else "deny"
+        self._record(run, tool, kind, digest, decision, rule)
         payload = {
             "status": "blocked",
             "rule": rule,
             "run_stopped": run.halted,
-            "next_step": "Revise the action within the task and policy; review requires the host.",
+            # Probing the gate reads as drift to the chain check and blocks the
+            # rest of the run, so the agent is told to go on with the task.
+            "next_step": (
+                "Do not probe or work around the policy. Continue with the other "
+                "steps the task needs, and name the blocked step in your final "
+                "report; review requires the host."
+            ),
         }
         if approval_id is not None:
             payload["approval_id"] = approval_id
+        if rule == "policy_unavailable":
+            payload["infrastructure_error"] = True
+            payload["next_step"] = (
+                "The policy validator is unavailable; this action did not execute. "
+                "This is not a policy violation. The host has already attempted "
+                "bounded recovery. Continue independent work and report this step "
+                "as blocked by validator availability. Do not probe or work around "
+                "the gate. The host can retry after service recovery."
+            )
         return json.dumps(payload)
+
+    async def _operator_call(self, run, tool_name, kind, ctx, raw_args, invoke):
+        """Run a call the operator configured, such as an agent's auto_run_tools.
+
+        Its tool and arguments come from host configuration, not from a model,
+        so there is no proposed action to judge against the user's task: asking
+        whether the user requested it would deny every setup step. It is audited,
+        stays out of the agent's chain, and a stopped run still refuses it.
+        """
+        if not isinstance(run, ActionRunState):
+            run = ActionRunState(task="")
+        serialized = json.dumps(
+            {"kind": kind, "tool": tool_name, "arguments": self._as_data(raw_args)},
+            sort_keys=True,
+            ensure_ascii=True,
+            default=str,
+        )
+        digest = hashlib.sha256(serialized.encode()).hexdigest()
+        async with run.lock:
+            if run.halted:
+                return self._deny(run, tool_name, kind, digest, "run_stopped")
+        result = await invoke(ctx, raw_args)
+        async with run.lock:
+            self._record(
+                run,
+                tool_name,
+                kind,
+                digest,
+                "executed",
+                "operator_config",
+                source="operator_config",
+            )
+        return result
 
     async def invoke(
         self,
@@ -521,6 +607,10 @@ class ActionGate:
             return await invoke(ctx, raw_args)
         raw_ctx = getattr(ctx, "context", None)
         run = getattr(raw_ctx, "action_state", None)
+        if getattr(ctx, "operator_configured", False):
+            return await self._operator_call(
+                run, tool_name, kind, ctx, raw_args, invoke
+            )
         if not isinstance(run, ActionRunState):
             # A call outside a trusted task carries no authorization to act.
             return self._deny(
@@ -607,42 +697,20 @@ class ActionGate:
                 }
             # Judged outside the lock: a mediated call may itself make mediated calls.
             validator_started = time.monotonic()
-            failures: list[str] = []
-
-            async def judge() -> dict:
-                # A transient failure (rate limit, dropped connection, a malformed
-                # sample) is retried once inside the same time budget; only a
-                # validator that keeps failing leaves the call unjudged.
-                for attempt in range(VALIDATOR_ATTEMPTS):
-                    try:
-                        answer = await self.validator.evaluate(
-                            packet, chain=self.config.check_chain
-                        )
-                        if not isinstance(answer, dict) or not answer:
-                            raise ValueError("Invalid validator answer set")
-                        if any(v not in VERDICTS for v in answer.values()):
-                            raise ValueError("Invalid validator verdict")
-                        return answer
-                    except Exception as exc:
-                        failures.append(failure_reason(exc))
-                        if attempt + 1 == VALIDATOR_ATTEMPTS:
-                            raise
-                raise AssertionError("unreachable")
-
-            try:
-                verdicts = await asyncio.wait_for(
-                    judge(), timeout=self.config.validator.timeout_seconds
-                )
-                verdict = merge(verdicts)
-            except Exception as exc:
-                if not failures or isinstance(exc, asyncio.TimeoutError):
-                    failures.append(failure_reason(exc))
-                verdicts, verdict = {"action": "unavailable"}, "unavailable"
+            judgment = await self._runner.evaluate(
+                packet, chain=self.config.check_chain
+            )
+            failures = judgment.failures
+            verdicts = judgment.verdicts or {"action": "unavailable"}
+            verdict = merge(verdicts) if judgment.verdicts else "unavailable"
             decision_meta = {
                 "source": "validator",
                 "latency_ms": round((time.monotonic() - validator_started) * 1000, 3),
-                "validator_model": getattr(
-                    getattr(self.validator, "model", None), "model_name", None
+                "validator_model": judgment.model,
+                "validator_attempts": judgment.attempts,
+                "queue_ms": judgment.queue_ms,
+                "packet_bytes": len(
+                    json.dumps(packet, ensure_ascii=False).encode("utf-8")
                 ),
             }
             if failures:
@@ -678,7 +746,10 @@ class ActionGate:
                         else None
                     )
                     raise PolicyDenied("policy_" + verdict, approval_id)
-                if verdict != "allow" and self.config.mode == "shadow":
+                if (
+                    verdict not in ("allow", "unavailable")
+                    and self.config.mode == "shadow"
+                ):
                     run.denials += 1
                     stop_after_shadow_call = (
                         run.denials >= self.config.max_denials_per_run
@@ -705,7 +776,13 @@ class ActionGate:
                     }
                 )
                 self._record(
-                    run, tool_name, kind, digest, "executed", "policy_check", **call_meta
+                    run,
+                    tool_name,
+                    kind,
+                    digest,
+                    "executed",
+                    "policy_check",
+                    **call_meta,
                 )
             return result
         except PolicyDenied as exc:

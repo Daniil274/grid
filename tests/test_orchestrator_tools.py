@@ -243,3 +243,6 @@ async def test_orchestrate_executor_reports_into_the_callers_trace_under_its_tas
     assert kwargs["action_state"].task == "Study the current changes"
     assert kwargs["action_state"].delegation == {"tool": "orchestrate", "request": "goal"}
     assert kwargs["action_depth"] == 1
+    # Its init_tools are judged under the same state, not refused as taskless.
+    created = factory.create_dynamic_agent.await_args.kwargs
+    assert created["action_state"] is kwargs["action_state"]

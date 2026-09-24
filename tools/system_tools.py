@@ -320,7 +320,7 @@ class SystemIntrospector:
                     key=key,
                     name=agent_cfg.name,
                     description=agent_cfg.description or "No description",
-                    model=agent_cfg.model if include_details else "",
+                    model=agent_cfg.primary_model if include_details else "",
                     tools_count=len(agent_cfg.tools) if include_details else 0,
                     mcp_enabled=agent_cfg.mcp_enabled if include_details else False,
                 )
@@ -375,18 +375,19 @@ class SystemIntrospector:
             agent_cfg = agents_config[agent_key]
 
             # Get model info
+            primary_model = agent_cfg.primary_model
             model_info = ModelInfo(
-                key=agent_cfg.model,
+                key=primary_model,
                 name="Unknown",
                 provider="Unknown",
                 temperature=0.7,
                 max_tokens=4000,
             )
 
-            if agent_cfg.model in self.config.config.models:
-                model_cfg = self.config.config.models[agent_cfg.model]
+            if primary_model in self.config.config.models:
+                model_cfg = self.config.config.models[primary_model]
                 model_info = ModelInfo(
-                    key=agent_cfg.model,
+                    key=primary_model,
                     name=model_cfg.name,
                     provider=model_cfg.provider,
                     temperature=model_cfg.temperature,

@@ -277,8 +277,10 @@ class Config:
         # 2. Agents
         if getattr(self.config, 'agents', None):
             for agent_key, agent_config in self.config.agents.items():
-                if getattr(agent_config, 'model', None) and agent_config.model not in self.config.models:
-                    raise ConfigError(f"System validation failed: Agent '{agent_key}' references unknown model '{agent_config.model}'")
+                if getattr(agent_config, 'model', None):
+                    for model_key in agent_config.model_keys():
+                        if model_key not in self.config.models:
+                            raise ConfigError(f"System validation failed: Agent '{agent_key}' references unknown model '{model_key}'")
                 
                 if getattr(agent_config, 'tools', None):
                     for tool in agent_config.tools:

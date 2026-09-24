@@ -8,7 +8,7 @@ import logging
 import threading
 import sys
 import json
-from typing import Callable, List, Dict, Any, Optional, Protocol
+from typing import Callable, List, Dict, Any, Optional, Protocol, Tuple
 from dotenv import load_dotenv
 import httpx
 from openai import AsyncOpenAI
@@ -52,6 +52,7 @@ from core.action_policy import (
     ActionRunState,
     ActionValidator,
     delegated_state,
+    is_policy_block,
 )
 from .context import ContextManager, safe_lock
 from schemas import AgentConfig, AgentExecution, ContextMessage
@@ -63,6 +64,7 @@ from utils.path_utils import set_current_factory, reset_current_factory
 from core.tracing.config import get_tracing_config, ImmediateTraceProcessor
 from core.managers.skill_manager import SkillManager
 from core.application.agent_runtime_support import AgentRuntimeSupport
+from core.fallback_model import AllModelsFailedError, FallbackModel, ModelCandidate
 
 # Compact system integration
 from core.compact import (
@@ -283,9 +285,14 @@ class StreamObserver(Protocol):
 class AutoRunToolContext:
     """Mock context that mimics SDK's ToolContext for direct tool invocation."""
 
-    def __init__(self, context: Any, tool_name: str = ""):
+    def __init__(
+        self, context: Any, tool_name: str = "", operator_configured: bool = False
+    ):
         self.context = context
         self.tool_name = tool_name
+        # True only for calls taken verbatim from host configuration
+        # (auto_run_tools); the action policy then runs them unjudged.
+        self.operator_configured = operator_configured
 
 
 REASONING_DELTA_EVENTS = (
@@ -1196,6 +1203,8 @@ class AgentFactory:
 
     def _is_retriable_agent_exception(self, exc: Exception) -> bool:
         """Decide whether agent execution should be retried indefinitely."""
+        if isinstance(exc, AllModelsFailedError):
+            return False
         if isinstance(
             exc,
             (
@@ -1395,6 +1404,10 @@ class AgentFactory:
             timeout=timeout,
             max_retries=max_retries,
         )
+        if provider_key:
+            default_headers = self.config.get_provider(provider_key).default_headers
+            if default_headers:
+                kwargs["default_headers"] = dict(default_headers)
         proxy_url = self.config.get_proxy_for_provider(provider_key)
         # We control proxy selection explicitly; disable env proxy usage in httpx.
         if proxy_url:
@@ -1435,8 +1448,13 @@ class AgentFactory:
         """
         return bool(getattr(model_config, "preserve_reasoning_content", False))
 
-    def _build_model_settings(self, model_config: Any) -> ModelSettings:
+    def _build_model_settings(
+        self, model_config: Any, parallel_tool_calls: bool = False
+    ) -> ModelSettings:
         """Build ModelSettings from model config, applying reasoning overrides if configured.
+
+        ``parallel_tool_calls`` lets the model emit several calls in one response;
+        they are still executed one after another by the serial pipeline.
 
         Config examples:
           reasoning: {effort: "none"}    → SDK-native reasoning_effort (OpenAI)
@@ -1449,7 +1467,7 @@ class AgentFactory:
         if not reasoning_cfg:
             return ModelSettings(
                 max_tokens=max_tokens,
-                parallel_tool_calls=False,
+                parallel_tool_calls=parallel_tool_calls,
             )
 
         sdk_reasoning: Optional[Reasoning] = None
@@ -1469,8 +1487,85 @@ class AgentFactory:
             max_tokens=max_tokens,
             reasoning=sdk_reasoning,
             extra_body=extra_body,
-            parallel_tool_calls=False,
+            parallel_tool_calls=parallel_tool_calls,
         )
+
+    def _create_sdk_model(self, model_key: str) -> tuple[Any, Any]:
+        """Create one Agents SDK model and return it with its config."""
+        model_config = self.config.get_model(model_key)
+        provider_config = self.config.get_provider(model_config.provider)
+        api_key = self.config.get_api_key(model_config.provider)
+        if not api_key:
+            raise AgentError(
+                f"API key not found for provider '{model_config.provider}'",
+                details={
+                    "provider": model_config.provider,
+                    "env_var": provider_config.api_key_env,
+                },
+            )
+
+        client = self._make_openai_client(
+            api_key=api_key,
+            base_url=provider_config.base_url,
+            timeout=provider_config.timeout,
+            max_retries=provider_config.max_retries,
+            provider_key=model_config.provider,
+        )
+
+        model = None
+        use_responses = False
+        try:
+            use_responses = bool(getattr(model_config, "use_responses_api", False))
+        except Exception:
+            use_responses = False
+
+        base_url_lower = (provider_config.base_url or "").lower()
+        provider_supports_responses = "api.openai.com" in base_url_lower
+        if use_responses and not provider_supports_responses:
+            warn_key = f"{model_config.provider}|{provider_config.base_url}|{model_config.name}|no_support"
+            if warn_key not in self._responses_warning_keys:
+                self._responses_warning_keys.add(warn_key)
+                logger.warning(
+                    "Responses API requested for provider without support",
+                    extra={
+                        "provider": model_config.provider,
+                        "base_url": provider_config.base_url,
+                        "model": model_config.name,
+                    },
+                )
+            use_responses = False
+
+        if use_responses and provider_supports_responses:
+            try:
+                from agents import OpenAIResponsesModel  # type: ignore
+
+                model = OpenAIResponsesModel(
+                    model=model_config.name, openai_client=client
+                )
+            except Exception as e:
+                warn_key = f"{model_config.provider}|{provider_config.base_url}|{model_config.name}|init_fail"
+                if warn_key not in self._responses_warning_keys:
+                    self._responses_warning_keys.add(warn_key)
+                    logger.warning(
+                        "Failed to initialize Responses model: %s",
+                        e,
+                        extra={
+                            "provider": model_config.provider,
+                            "base_url": provider_config.base_url,
+                            "model": model_config.name,
+                        },
+                    )
+                use_responses = False
+
+        if model is None:
+            model = VisionChatCompletionsModel(
+                model=model_config.name,
+                openai_client=client,
+                preserve_reasoning_content=getattr(
+                    model_config, "preserve_reasoning_content", False
+                ),
+            )
+        return model, model_config
 
     async def create_agent(
         self,
@@ -1502,86 +1597,25 @@ class AgentFactory:
         try:
             # Get configurations
             agent_config = self.config.get_agent(agent_key)
-            model_config = self.config.get_model(agent_config.model)
-            provider_config = self.config.get_provider(model_config.provider)
-
-            # Validate API key
-            api_key = self.config.get_api_key(model_config.provider)
-            if not api_key:
-                raise AgentError(
-                    f"API key not found for provider '{model_config.provider}'",
-                    details={
-                        "provider": model_config.provider,
-                        "env_var": provider_config.api_key_env,
-                    },
+            model_keys = agent_config.model_keys()
+            candidates: list[ModelCandidate] = []
+            for model_key in model_keys:
+                sdk_model, candidate_config = self._create_sdk_model(model_key)
+                candidates.append(
+                    ModelCandidate(
+                        key=model_key,
+                        model=sdk_model,
+                        settings=self._build_model_settings(
+                            candidate_config, agent_config.parallel_tool_calls
+                        ),
+                    )
                 )
-
-            # Create OpenAI client (with optional proxy for API requests)
-            client = self._make_openai_client(
-                api_key=api_key,
-                base_url=provider_config.base_url,
-                timeout=provider_config.timeout,
-                max_retries=provider_config.max_retries,
-                provider_key=model_config.provider,
+            model_config = self.config.get_model(agent_config.primary_model)
+            model = (
+                candidates[0].model
+                if len(candidates) == 1
+                else FallbackModel(candidates)
             )
-
-            # Create model (auto-switch to Responses API for reasoning models if available)
-            model = None
-            use_responses = False
-            try:
-                use_responses = bool(getattr(model_config, "use_responses_api", False))
-            except Exception:
-                use_responses = False
-
-            # Allow Responses API only for OpenAI provider
-            base_url_lower = (provider_config.base_url or "").lower()
-            provider_supports_responses = "api.openai.com" in base_url_lower
-            if use_responses and not provider_supports_responses:
-                warn_key = f"{model_config.provider}|{provider_config.base_url}|{model_config.name}|no_support"
-                if warn_key not in self._responses_warning_keys:
-                    self._responses_warning_keys.add(warn_key)
-                    logger.warning(
-                        "Responses API requested for provider without support",
-                        extra={
-                            "provider": model_config.provider,
-                            "base_url": provider_config.base_url,
-                            "model": model_config.name,
-                        },
-                    )
-                use_responses = False
-
-            if use_responses and provider_supports_responses:
-                try:
-                    # Lazy import to not require newer SDK if not installed
-                    from agents import OpenAIResponsesModel  # type: ignore
-
-                    model = OpenAIResponsesModel(
-                        model=model_config.name, openai_client=client
-                    )
-
-                except Exception as e:
-                    warn_key = f"{model_config.provider}|{provider_config.base_url}|{model_config.name}|init_fail"
-                    if warn_key not in self._responses_warning_keys:
-                        self._responses_warning_keys.add(warn_key)
-                        logger.warning(
-                            "Failed to initialize Responses model: %s",
-                            e,
-                            extra={
-                                "provider": model_config.provider,
-                                "base_url": provider_config.base_url,
-                                "model": model_config.name,
-                            },
-                        )
-                    use_responses = False
-
-            if model is None:
-                model = VisionChatCompletionsModel(
-                    model=model_config.name,
-                    openai_client=client,
-                    preserve_reasoning_content=getattr(
-                        model_config, "preserve_reasoning_content", False
-                    ),
-                )
 
             # Build instructions with context (include conversation context for agents)
             instructions = self._build_agent_instructions(
@@ -1614,12 +1648,15 @@ class AgentFactory:
                 name=agent_config.name,
                 instructions=instructions,
                 model=model,
-                model_settings=self._build_model_settings(model_config),
+                model_settings=self._build_model_settings(
+                    model_config, agent_config.parallel_tool_calls
+                ),
                 tools=tools,
                 mcp_servers=mcp_servers_list,
             )
             setattr(agent, "_grid_agent_key", agent_key)
-            setattr(agent, "_grid_model_key", agent_config.model)
+            setattr(agent, "_grid_model_key", agent_config.primary_model)
+            setattr(agent, "_grid_model_keys", model_keys)
             # Auto-run tools (beads_init, beads_ready, etc.) run only once per user/agent
             # in run_agent() when handling the first request — see _initialized_agents.
 
@@ -1654,14 +1691,20 @@ class AgentFactory:
         run_context: GridRunContext,
         every_run: bool = False,
         user_message: str = "",
-    ) -> str:
-        """Run auto_run_tools with given working_dir; return combined result string to inject.
+    ) -> Tuple[str, bool]:
+        """Run auto_run_tools with given working_dir.
 
         Args:
             every_run: If True, only run tools marked every_run=True.
                        If False, only run one-time tools (every_run not set or False).
+
+        Returns:
+            The combined result string to inject, and whether every tool ran:
+            a call the action policy blocked is neither injected nor counted
+            as done, so one-time tools are tried again on the next run.
         """
         result_parts: List[str] = []
+        complete = True
         for auto_tool in agent_config.auto_run_tools or []:
             tool_every_run = bool(auto_tool.get("every_run", False))
             if tool_every_run != every_run:
@@ -1683,7 +1726,7 @@ class AgentFactory:
                             agent_key, tool_name, tool_params
                         )
                     tool_ctx_wrapper = AutoRunToolContext(
-                        run_context, tool_name=tool_name
+                        run_context, tool_name=tool_name, operator_configured=True
                     )
                     tool_result = await target_tool.on_invoke_tool(
                         tool_ctx_wrapper, json.dumps(tool_params)
@@ -1701,6 +1744,12 @@ class AgentFactory:
                             else str(tool_result)
                         ),
                     )
+                    if is_policy_block(tool_result):
+                        complete = False
+                        logger.warning(
+                            f"⚠️ Auto-run tool '{tool_name}' blocked by action policy"
+                        )
+                        continue
                     result_parts.append(
                         f"\n\n=== AUTO-RUN TOOL RESULT '{tool_name}' ===\n{tool_result}\n"
                     )
@@ -1711,7 +1760,7 @@ class AgentFactory:
                     logger.warning(
                         f"⚠️ Error in auto-run tool '{tool_name}': {tool_err}"
                     )
-        return "".join(result_parts)
+        return "".join(result_parts), complete
 
     async def _execute_init_tools(
         self,
@@ -1778,6 +1827,13 @@ class AgentFactory:
                         f"INIT TOOL RESULT: {tool_name}",
                         result if isinstance(result, str) else str(result),
                     )
+                    if is_policy_block(result):
+                        # A refusal is not context: injected into the
+                        # instructions it only misleads the agent.
+                        logger.warning(
+                            f"⚠️ init_tool '{tool_name}' blocked by action policy"
+                        )
+                        continue
                     result_parts.append(
                         f"\n\n=== CONTEXT [{tool_name}] ===\n{result}\n"
                     )
@@ -1802,11 +1858,14 @@ class AgentFactory:
         mcp_tool_names: Optional[List[str]] = None,
         init_tools: Optional[List[Dict[str, Any]]] = None,
         system_skills: Optional[List[str]] = None,
+        action_state: Optional[Any] = None,
     ) -> Agent:
         """
         Create an ad-hoc Agent instance not backed by config.yaml.
 
         This is the core building block for orchestration/meta-agent patterns.
+        ``action_state`` is the policy state the agent will run under; its
+        ``init_tools`` are judged under it too, since an agent wrote them.
         """
         resolved_model_key = self.resolve_model_key(model_key)
 
@@ -1958,6 +2017,7 @@ class AgentFactory:
                     user_id=None,
                     agent_id=name,
                     container_id=getattr(self, "container_id", None),
+                    action_state=action_state,
                 )
                 init_info = await self._execute_init_tools(init_tools, tools, temp_ctx)
                 if init_info:
@@ -2757,7 +2817,7 @@ class AgentFactory:
 
             # Run auto_run_tools with current working_dir.
             run_agent_config = self.config.get_agent(agent_key)
-            model_config = self.config.get_model(run_agent_config.model)
+            model_config = self.config.get_model(run_agent_config.primary_model)
             init_key = f"{agent_key}:{user_id or 'default'}"
             working_dir = (
                 "/" if self.container_id else self.config.get_working_directory()
@@ -2783,7 +2843,7 @@ class AgentFactory:
                 # One-time tools (every_run=False): run ONCE per user/agent session.
                 if init_key not in self._initialized_agents:
                     try:
-                        auto_run_info = await self._execute_auto_run_tools(
+                        auto_run_info, complete = await self._execute_auto_run_tools(
                             agent_key,
                             run_agent_config,
                             agent_tools,
@@ -2798,16 +2858,17 @@ class AgentFactory:
                                 + "\n\n[Current user request]\n\n"
                                 + parsed_message
                             )
-                        self._initialized_agents.add(init_key)
-                        logger.info(
-                            f"✅ One-time auto-run tools executed for {init_key}"
-                        )
+                        if complete:
+                            self._initialized_agents.add(init_key)
+                            logger.info(
+                                f"✅ One-time auto-run tools executed for {init_key}"
+                            )
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to run one-time auto_run_tools: {e}")
 
                 # Per-message tools (every_run=True): run on EVERY request.
                 try:
-                    every_run_info = await self._execute_auto_run_tools(
+                    every_run_info, _ = await self._execute_auto_run_tools(
                         agent_key,
                         run_agent_config,
                         agent_tools,
@@ -3104,7 +3165,7 @@ class AgentFactory:
                 elif model_requires_manual_history:
                     logger.debug(
                         "Model '%s' requires manual history replay - disabling session",
-                        getattr(model_config, "name", run_agent_config.model),
+                        getattr(model_config, "name", run_agent_config.primary_model),
                     )
 
                 # Convert current message to list format if it's a string
@@ -4346,7 +4407,7 @@ DO NOT write XML tags manually!"""
                 # One-time tools: run once per user/agent session
                 if init_key not in self._initialized_agents:
                     try:
-                        auto_run_info = await self._execute_auto_run_tools(
+                        auto_run_info, complete = await self._execute_auto_run_tools(
                             agent_key,
                             sub_agent_config,
                             sub_agent_tools,
@@ -4369,10 +4430,11 @@ DO NOT write XML tags manually!"""
                                     else ""
                                 )
                             )
-                        self._initialized_agents.add(init_key)
-                        logger.info(
-                            f"✅ One-time auto-run tools executed for sub-agent {init_key}"
-                        )
+                        if complete:
+                            self._initialized_agents.add(init_key)
+                            logger.info(
+                                f"✅ One-time auto-run tools executed for sub-agent {init_key}"
+                            )
                     except Exception as e:
                         logger.warning(
                             f"⚠️ Failed to run one-time auto_run_tools for sub-agent {agent_key}: {e}"
@@ -4380,7 +4442,7 @@ DO NOT write XML tags manually!"""
 
                 # Per-message tools: run on every call
                 try:
-                    every_run_info = await self._execute_auto_run_tools(
+                    every_run_info, _ = await self._execute_auto_run_tools(
                         agent_key,
                         sub_agent_config,
                         sub_agent_tools,
@@ -4714,6 +4776,9 @@ DO NOT write XML tags manually!"""
 
     async def cleanup(self) -> None:
         """Cleanup resources."""
+        gate = getattr(self, "action_gate", None)
+        if gate is not None:
+            await gate.aclose()
         # Disconnect MCP clients
         for mcp_client in self._mcp_servers.values():
             try:

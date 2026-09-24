@@ -48,7 +48,7 @@ def _get_model_capabilities(context: RunContextWrapper) -> List[str]:
         factory = context.context.factory
         agent_id = context.context.agent_id
         agent_cfg = factory.config.get_agent(agent_id)
-        model_key = agent_cfg.model if agent_cfg else None
+        model_key = agent_cfg.primary_model if agent_cfg else None
         if model_key:
             model_cfg = factory.config.get_model(model_key)
             caps = getattr(model_cfg, "capabilities", None)

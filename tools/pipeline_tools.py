@@ -90,7 +90,7 @@ def _worker_provider(factory: Any, context: Any) -> str:
         agent = config.get_agent(agent_id or config.get_default_agent())
     except Exception:
         agent = config.get_agent(config.get_default_agent())
-    return config.get_model(agent.model).provider
+    return config.get_model(agent.primary_model).provider
 
 
 def _tools_directory(factory: Any) -> str:

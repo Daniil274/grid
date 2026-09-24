@@ -22,6 +22,7 @@ class ProviderConfig(BaseModel):
     base_url: str
     api_key_env: Optional[str] = None
     api_key: Optional[str] = None
+    default_headers: Dict[str, str] = Field(default_factory=dict)
     timeout: int = Field(default=30, ge=1, le=300)
     max_retries: int = Field(default=2, ge=0, le=1000)
 
@@ -30,6 +31,7 @@ class ModelConfig(BaseModel):
     """Configuration for LLM models."""
     name: str
     provider: str
+    policy_api: Literal["decisions", "chat"] = "decisions"
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4000, ge=1, le=100000)
     context_window: int = Field(
@@ -85,7 +87,7 @@ class ToolConfig(BaseModel):
 class AgentConfig(BaseModel):
     """Configuration for agents."""
     name: str
-    model: str
+    model: Union[str, List[str]]
     tools: List[str] = Field(default_factory=list)
     base_prompt: str = "base"
     custom_prompt: Optional[str] = None
@@ -100,6 +102,37 @@ class AgentConfig(BaseModel):
         default=None, 
         description="List of tools to run automatically on agent startup. Each item: {'name': 'tool_name', 'parameters': {}}"
     )
+    parallel_tool_calls: bool = Field(
+        default=False,
+        description=(
+            "Let the model emit several tool calls in one response. The calls "
+            "still run one after another; the gain is one model turn per batch."
+        ),
+    )
+
+    @field_validator("model")
+    @classmethod
+    def validate_model_chain(cls, value):
+        """Accept one model key or a non-empty ordered fallback chain."""
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError("Agent model must not be empty")
+            return value
+        cleaned = [str(model).strip() for model in value]
+        if not cleaned or any(not model for model in cleaned):
+            raise ValueError("Agent model fallback list must contain model keys")
+        if len(cleaned) != len(set(cleaned)):
+            raise ValueError("Agent model fallback list must not contain duplicates")
+        return cleaned
+
+    def model_keys(self) -> List[str]:
+        """Return the configured model chain in request order."""
+        return [self.model] if isinstance(self.model, str) else list(self.model)
+
+    @property
+    def primary_model(self) -> str:
+        """Model key used for metadata and context-window defaults."""
+        return self.model_keys()[0]
 
 
 class AgentLoggingConfig(BaseModel):
@@ -304,8 +337,9 @@ class GridConfig(BaseModel):
         """Validate that all agent models exist."""
         models = info.data.get('models', {})
         for agent_key, agent_config in v.items():
-            if agent_config.model not in models:
-                raise ValueError(f"Model '{agent_config.model}' for agent '{agent_key}' not found")
+            for model_key in agent_config.model_keys():
+                if model_key not in models:
+                    raise ValueError(f"Model '{model_key}' for agent '{agent_key}' not found")
         return v
     
     @field_validator('agents')

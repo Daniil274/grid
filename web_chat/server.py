@@ -110,14 +110,15 @@ class WebChatServer:
         models = registry.config(system).config.models or {}
         options: list[dict[str, Any]] = []
         for agent_key, agent in registry.agents(system).items():
-            model = models.get(agent.model)
+            model = models.get(agent.primary_model)
             options.append(
                 {
                     "key": agent_key,
                     "name": agent.name or agent_key,
                     "description": agent.description or "",
-                    "model_key": agent.model,
-                    "model_name": getattr(model, "name", None) or agent.model,
+                    "model_key": agent.primary_model,
+                    "model_keys": agent.model_keys(),
+                    "model_name": getattr(model, "name", None) or agent.primary_model,
                     "model_description": getattr(model, "description", "") or "",
                     "tool_count": len(agent.tools or []),
                     "mcp_enabled": bool(getattr(agent, "mcp_enabled", False)),

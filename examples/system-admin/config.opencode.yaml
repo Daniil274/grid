@@ -1,0 +1,279 @@
+# System Administrator — the Grid system that creates and improves other systems.
+#
+# Runs only in the workshop container, on its own clone of the controller's
+# stable branch (docker compose --profile evolution). The administrator opens an
+# experiment, hands the change to the architect (new system) or the improver
+# (existing system), checks it and submits the candidate to the independent
+# controller (grid_control), which evaluates it; the operator promotes it.
+# See README.md and docs/self-improvement.md.
+
+isolation:
+  enabled: false
+
+settings:
+  default_agent: administrator
+  # The workshop clone, passed with --path. Elsewhere the control tools refuse
+  # to work, so the system cannot change a working copy by accident.
+  working_directory: .
+  allow_path_override: true
+  max_history: 100
+  max_turns: 120
+  agent_timeout: 1800
+  mcp_enabled: false
+  max_tool_output_tokens: 16000
+
+  agent_logging:
+    enabled: true
+    level: "full"
+    save_prompts: true
+    save_conversations: true
+    save_executions: true
+
+compact:
+  enabled: true
+
+providers:
+  opencode-go:
+    name: opencode-go
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: OPENCODE_API_KEY
+    default_headers:
+      User-Agent: "grid-agent-system/1.0"
+      x-opencode-session: "grid-system-admin"
+    timeout: 300
+    max_retries: 3
+
+models:
+  strong:
+    name: glm-5.3-flash
+    provider: opencode-go
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "Strong low-cost primary model included in OpenCode Go"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+  backup:
+    name: deepseek-v4.1-flash
+    provider: opencode-go
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: "Low-cost paid fallback included in OpenCode Go"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+
+tools:
+  # ── Grid catalog (read-only) ────────────────────────────────────
+  grid_systems_catalog:
+    type: function
+    description: List the systems in routing.yaml with their descriptions, agents, tools and skills.
+  grid_check_system:
+    type: function
+    description: Check one system config for problems that would break it at run time.
+
+  # ── Files ───────────────────────────────────────────────────────
+  file_read:
+    type: function
+    description: Read a file of the repository.
+  file_list:
+    type: function
+    description: List a directory of the repository.
+  file_search:
+    type: function
+    description: Find files by name pattern (skips .git and caches).
+  file_content_search:
+    type: function
+    description: Find lines containing a text in a file or, recursively, a directory, with line numbers.
+  file_replace:
+    type: function
+    description: Replace one exact fragment of a file; the rest of the file stays byte for byte.
+  file_edit_patch:
+    type: function
+    description: Apply a unified diff to a file; blocks are found by their context lines.
+  file_write:
+    type: function
+    description: Create a new file (rewriting an existing one is for full rewrites only).
+  file_delete:
+    type: function
+    description: Delete a file created by mistake, such as a scratch file.
+
+  # ── History (read-only git) ─────────────────────────────────────
+  git_log:
+    type: function
+    description: Read the history of stable in the workshop.
+
+  # ── Experiment ──────────────────────────────────────────────────
+  control_begin:
+    type: function
+    description: Open an experiment on the controller's current stable; returns the baseline.
+  control_diff:
+    type: function
+    description: Every change of the experiment against its baseline, committed or not.
+  control_revert:
+    type: function
+    description: Return files or directories to their baseline version; new files disappear.
+  control_scenarios:
+    type: function
+    description: List the open development scenarios and what each one expects.
+  control_trial:
+    type: function
+    description: Try the current work on the open development scenarios before submitting.
+  control_submit:
+    type: function
+    description: Commit the experiment's changes and queue the candidate for sandboxed evaluation.
+  control_status:
+    type: function
+    description: Read an experiment's status and evidence from the controller.
+
+  # ── Specialists ─────────────────────────────────────────────────
+  call_architect:
+    type: agent
+    name: call_architect
+    target_agent: architect
+    description: Ask the architect to design and write a new Grid system from a brief.
+    context_strategy: minimal
+    include_tool_history: false
+  call_improver:
+    type: agent
+    name: call_improver
+    target_agent: improver
+    description: Ask the improver to diagnose a failure of an existing system and change it.
+    context_strategy: minimal
+    include_tool_history: false
+
+agents:
+  administrator:
+    name: System Administrator
+    model: [strong, backup]
+    description: >-
+      Creates new Grid systems (agents, prompts, tools, skills, routing entry) and
+      improves existing ones or the Grid framework itself when a system misroutes,
+      fails a task or lacks a capability, then submits the change to independent
+      evaluation. Not for ordinary coding in the user's project, and not for doing
+      the task a system exists for.
+    tools:
+      - grid_systems_catalog
+      - grid_check_system
+      - file_read
+      - file_list
+      - file_search
+      - file_content_search
+      - git_log
+      - control_begin
+      - control_diff
+      - control_revert
+      - control_scenarios
+      - control_trial
+      - control_submit
+      - control_status
+      - call_architect
+      - call_improver
+    system_skills:
+      - grid-system
+      - experiment
+    custom_prompt: |
+      Ты — администратор Grid. Ты создаёшь новые системы и улучшаешь существующие,
+      а за результат отвечаешь через эксперимент: control_begin открывает его на
+      текущем stable, control_submit отправляет кандидата независимому контроллеру.
+
+      Изменения делают специалисты. Новую систему пишет архитектор (call_architect),
+      существующую чинит и развивает улучшатель (call_improver). Сам ты файлы не
+      правишь: ставишь задачу, проверяешь результат и ведёшь эксперимент.
+
+      Сначала разберись сам: прочитай затронутые конфиги и описания и назови
+      вероятную причину. Специалист не видит этот диалог, поэтому бриф
+      самодостаточен: цель, причина и доказательства (сообщения пользователя,
+      маршрут, логи), точный список файлов и полей, которые можно менять,
+      объективный критерий успеха и что трогать нельзя.
+
+      Отчёт специалиста — заявление, а не факт. После каждого вызова смотри
+      control_diff: изменены только файлы из брифа, правка точечная, файл не
+      переписан целиком. Лишние, пробные и испорченные файлы откатывай сам
+      через control_revert, а не проси специалиста чинить их руками.
+
+      Протокол эксперимента и правила устройства систем — в скиллах ниже.
+      Заявить пользователю улучшение можно только по вердикту контроллера.
+
+  architect:
+    name: System Architect
+    model: [strong, backup]
+    routable: false
+    description: Designs and writes a new Grid system from the administrator's brief.
+    tools:
+      - grid_systems_catalog
+      - grid_check_system
+      - file_read
+      - file_list
+      - file_search
+      - file_content_search
+      - file_replace
+      - file_edit_patch
+      - file_write
+      - file_delete
+      - control_diff
+    system_skills:
+      - grid-system
+      - editing
+    custom_prompt: |
+      Ты — архитектор систем Grid. По брифу администратора создаёшь новую систему:
+      каталог examples/<name>/ с config.yaml, скиллами, при необходимости
+      собственными инструментами и README, и запись в routing.yaml.
+
+      Сначала изучи каталог (grid_systems_catalog) и одну-две близкие системы
+      целиком: новая система должна выглядеть как они и не пересекаться с ними
+      по назначению. Если пересекается — остановись и объясни это вместо записи.
+
+      Проектируй от задачи пользователя: какие решения принимает агент, какие
+      действия ему нужны, как он поймёт, что закончил. Минимум агентов и
+      инструментов, достаточный для этого. Переиспользуй существующие
+      инструменты; новый код инструмента пиши, только когда без него никак.
+
+      Новые файлы создавай через file_write, в routing.yaml добавляй только свою
+      запись через file_replace или file_edit_patch. Правила правки — в скилле
+      editing.
+
+      Закончи вызовом grid_check_system для новой системы. Последним сообщением
+      всегда верни текстовый отчёт: созданные и изменённые файлы, назначение
+      каждого агента, результат проверки и то, что осталось непроверенным
+      (например, внешние программы или ключи).
+
+  improver:
+    name: System Improver
+    model: [strong, backup]
+    routable: false
+    description: Diagnoses why an existing Grid system fails and makes the smallest change that fixes it.
+    tools:
+      - grid_systems_catalog
+      - grid_check_system
+      - file_read
+      - file_list
+      - file_search
+      - file_content_search
+      - file_replace
+      - file_edit_patch
+      - file_write
+      - file_delete
+      - control_diff
+    system_skills:
+      - grid-system
+      - diagnosis
+      - editing
+    custom_prompt: |
+      Ты — улучшатель систем Grid. По брифу администратора находишь причину
+      провала существующей системы и вносишь минимальное изменение, которое её
+      устраняет: описание для роутера, промпт, набор инструментов, скилл, код
+      инструмента или, если причина там, код Grid.
+
+      Не меняй ничего, пока не назовёшь причину и доказательство для неё.
+      Меняй только файлы и поля из брифа. Если причина в другом месте, не
+      правь его, а объясни в отчёте, что и почему нужно изменить. Не
+      переписывай систему целиком ради одного провала.
+
+      Правь точечно: file_replace для фрагмента, file_edit_patch для нескольких
+      мест. Правила правки — в скилле editing.
+
+      Закончи вызовом grid_check_system для каждой изменённой системы и
+      control_diff. Последним сообщением всегда верни текстовый отчёт: причину,
+      доказательство, изменённые файлы с кратким смыслом правки, результат
+      проверки и как убедиться, что провал ушёл.

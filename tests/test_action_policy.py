@@ -127,6 +127,81 @@ async def test_kinds_not_configured_run_unchecked():
     assert not state.chain
 
 
+async def test_operator_configured_call_runs_unjudged_and_is_audited(caplog):
+    gate, validator, state, ctx = setup_gate(("deny", "deny"))
+    ctx.operator_configured = True
+    with caplog.at_level("INFO", logger="grid.action_policy"):
+        assert await call(gate, ctx) == 'ran:{"command": "pytest -q"}'
+    validator.evaluate.assert_not_awaited()
+    assert not state.chain
+    assert state.attempts == state.denials == 0
+    [event] = state.events
+    assert event["decision"] == "executed"
+    assert event["rule"] == "operator_config"
+    assert any("operator_config" in r.getMessage() for r in caplog.records)
+
+
+async def test_operator_configured_call_is_refused_in_a_stopped_run():
+    gate, validator, state, ctx = setup_gate()
+    ctx.operator_configured = True
+    state.stopped = True
+    invoke = AsyncMock()
+    blocked = json.loads(await call(gate, ctx, invoke=invoke))
+    assert blocked["rule"] == "run_stopped"
+    invoke.assert_not_awaited()
+    validator.evaluate.assert_not_awaited()
+
+
+def auto_run_factory(gate):
+    from core.agent_factory import AgentFactory
+
+    factory = object.__new__(AgentFactory)
+    factory.action_gate = gate
+    factory._stream_observer = None
+    tool = SimpleNamespace(name="setup", on_invoke_tool=AsyncMock(return_value="ready"))
+    tool = AgentFactory._wrap_tool_with_policy(factory, tool, "setup", "function")
+    agent_config = SimpleNamespace(auto_run_tools=[{"name": "setup"}])
+    return factory, tool, agent_config
+
+
+async def test_auto_run_tools_are_not_judged_against_the_user_task():
+    """Setup steps from the config are not something the user asked for."""
+    gate, validator, state, ctx = setup_gate(("deny", "deny"))
+    factory, tool, agent_config = auto_run_factory(gate)
+    info, complete = await factory._execute_auto_run_tools(
+        "agent", agent_config, [tool], ".", ctx.context
+    )
+    assert "ready" in info and complete
+    validator.evaluate.assert_not_awaited()
+
+
+async def test_blocked_auto_run_tool_is_neither_injected_nor_done():
+    gate, _, state, ctx = setup_gate()
+    state.stopped = True
+    factory, tool, agent_config = auto_run_factory(gate)
+    info, complete = await factory._execute_auto_run_tools(
+        "agent", agent_config, [tool], ".", ctx.context
+    )
+    assert info == "" and not complete
+
+
+async def test_init_tools_are_judged_and_a_block_is_not_injected():
+    """init_tools are written by an agent: gated, and a refusal is not context."""
+    from core.agent_factory import GridRunContext
+
+    gate, validator, state, _ = setup_gate(("deny", "deny"))
+    factory, tool, _ = auto_run_factory(gate)
+    factory.container_id = None
+    factory.config = SimpleNamespace(get_working_directory=lambda: ".")
+    run_ctx = GridRunContext(factory=factory, context_id="init", action_state=state)
+
+    info = await factory._execute_init_tools([{"name": "setup"}], [tool], run_ctx)
+
+    assert info == ""
+    validator.evaluate.assert_awaited_once()
+    assert validator.evaluate.call_args.args[0]["trusted_task"] == TASK
+
+
 async def test_denied_call_is_blocked_and_reported_to_the_agent():
     gate, _, state, ctx = setup_gate(("deny", "allow"))
     blocked = json.loads(await call(gate, ctx))
@@ -608,8 +683,8 @@ async def test_factory_routes_real_tool_calls_through_the_gate(tmp_path, monkeyp
             GridRunContext(factory=factory, context_id="ctx-test", action_state=state)
         )
 
-        gate.validator = SimpleNamespace(
-            evaluate=AsyncMock(return_value={"action": "deny", "chain": "deny"})
+        gate.validator.evaluate = AsyncMock(
+            return_value={"action": "deny", "chain": "deny"}
         )
         blocked = json.loads(
             await by_name["file_write"].on_invoke_tool(
@@ -619,8 +694,8 @@ async def test_factory_routes_real_tool_calls_through_the_gate(tmp_path, monkeyp
         assert blocked["rule"] == "policy_deny"
         assert not (tmp_path / "notes.md").exists()
 
-        gate.validator = SimpleNamespace(
-            evaluate=AsyncMock(return_value={"action": "allow", "chain": "allow"})
+        gate.validator.evaluate = AsyncMock(
+            return_value={"action": "allow", "chain": "allow"}
         )
         await by_name["file_write"].on_invoke_tool(
             ctx, json.dumps({"filepath": "notes.md", "content": "hi"})

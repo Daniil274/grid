@@ -38,7 +38,7 @@ class ModelManager:
         try:
             if not key:
                 default_agent_key = self.config.get_default_agent()
-                return self.config.get_agent(default_agent_key).model
+                return self.config.get_agent(default_agent_key).primary_model
             # Try as model key
             try:
                 _ = self.config.get_model(key)
@@ -46,15 +46,15 @@ class ModelManager:
             except Exception:
                 # Try as agent key
                 try:
-                    return self.config.get_agent(key).model
+                    return self.config.get_agent(key).primary_model
                 except Exception:
                     # Fallback
                     default_agent_key = self.config.get_default_agent()
-                    return self.config.get_agent(default_agent_key).model
+                    return self.config.get_agent(default_agent_key).primary_model
         except Exception:
             # Hard fallback
             default_agent_key = self.config.get_default_agent()
-            return self.config.get_agent(default_agent_key).model
+            return self.config.get_agent(default_agent_key).primary_model
 
     def _make_openai_client(
         self,
@@ -72,6 +72,10 @@ class ModelManager:
             timeout=timeout,
             max_retries=max_retries,
         )
+        if provider_key:
+            default_headers = self.config.get_provider(provider_key).default_headers
+            if default_headers:
+                kwargs["default_headers"] = dict(default_headers)
         proxy_url = self.config.get_proxy_for_provider(provider_key)
         # We control proxy selection explicitly; disable env proxy usage in httpx.
         if proxy_url:

@@ -597,7 +597,7 @@ async def main():
                     _tokens = estimate_messages_tokens(_context_to_compact_messages(_msgs)) if _msgs else 0
                     try:
                         _agent_cfg = config.get_agent(agent_key)
-                        _model_cfg = config.get_model(_agent_cfg.model)
+                        _model_cfg = config.get_model(_agent_cfg.primary_model)
                         _ctx_window = getattr(_model_cfg, "context_window", None)
                     except Exception:
                         _ctx_window = None
@@ -694,7 +694,7 @@ async def main():
                         context_pct = None
                         try:
                             agent_config = config.get_agent(agent_key)
-                            model_cfg = config.get_model(agent_config.model)
+                            model_cfg = config.get_model(agent_config.primary_model)
                             context_window = getattr(model_cfg, "context_window", None)
                             if context_window:
                                 context_pct = round((estimated_tokens / max(1, context_window)) * 100, 1)
@@ -870,7 +870,7 @@ async def main():
                             _tokens = estimate_messages_tokens(_context_to_compact_messages(_msgs)) if _msgs else 0
                             try:
                                 _agent_cfg = config.get_agent(agent_key)
-                                _model_cfg = config.get_model(_agent_cfg.model)
+                                _model_cfg = config.get_model(_agent_cfg.primary_model)
                                 _ctx_window = getattr(_model_cfg, "context_window", None)
                             except Exception:
                                 _ctx_window = None

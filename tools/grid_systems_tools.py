@@ -53,7 +53,8 @@ def _describe_agents(config: Config) -> List[Dict[str, Any]]:
         {
             "key": key,
             "name": agent.name,
-            "model": agent.model,
+            "model": agent.primary_model,
+            "models": agent.model_keys(),
             "routable": agent.routable,
             "description": agent.description,
             "tools": list(agent.tools),

@@ -83,12 +83,30 @@ cp config.yaml.example config.yaml
 
 Секреты не следует добавлять в `config.yaml`, Docker-образ или Git. Передавайте их через переменные окружения.
 
+### OpenCode Go
+
+Для подписки OpenCode Go укажите `OPENCODE_API_KEY` в `.env` и используйте
+`routing.opencode.yaml`. Все системные конфиги с суффиксом `.opencode.yaml`
+содержат только модели OpenCode. В `agents.<имя>.model` можно задать строку или
+упорядоченный массив: каждый запрос сначала идёт в первую модель, а при ошибке —
+в следующую.
+
+```yaml
+model: [paid-strong, paid-backup]
+```
+
 ## Запуск
 
 ### Браузерный интерфейс
 
 ```bash
 grid-web-chat --routing routing.yaml --path . --host 127.0.0.1 --port 8000
+```
+
+Для набора OpenCode:
+
+```bash
+grid-web-chat --routing routing.opencode.yaml --path . --host 127.0.0.1 --port 8000
 ```
 
 После запуска откройте <http://127.0.0.1:8000>.
