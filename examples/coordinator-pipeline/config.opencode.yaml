@@ -81,79 +81,33 @@ compact:
       max_tokens_per_skill: 5000
 
 providers:
-  opencode:
-    name: "opencode"
+  opencode-go:
+    name: "opencode-go"
     base_url: "https://opencode.ai/zen/go/v1"
     api_key_env: "OPENCODE_API_KEY"
-    timeout: 300
-    max_retries: 3
-
-  openrouter:
-    name: "openrouter"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
-    timeout: 300
-    max_retries: 3
-
-  multiai:
-    name: "multiai"
-    base_url: "https://multiai.store/v1"
-    api_key_env: "MULTIAI_API_KEY"
-    timeout: 300
-    max_retries: 20
-providers:
-  openrouter:
-    name: "openrouter"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    default_headers:
+      User-Agent: "grid-agent-system/1.0"
+      x-opencode-session: "grid-coordinator"
     timeout: 300
     max_retries: 3
 
 models:
-  glm-latest:
-    name: "~z-ai/glm-latest"
-    provider: "openrouter"
+  strong:
+    name: "glm-5.3-flash"
+    provider: "opencode-go"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: "Latest GLM via OpenRouter (currently GLM-5.3)"
+    description: "Strong low-cost primary model included in OpenCode Go"
     streaming_enabled: true
     preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
-
-  deepseek-flash-latest:
-    name: "~deepseek/deepseek-flash-latest"
-    provider: "openrouter"
+  backup:
+    name: "deepseek-v4.1-flash"
+    provider: "opencode-go"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: "Latest DeepSeek Flash via OpenRouter (currently DeepSeek V4.1 Flash)"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "low"
-
-  mercury-2.5:
-    name: "inception/mercury-2.5"
-    provider: "openrouter"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "Mercury 2.5 via OpenRouter"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "medium"
-
-
-  grok-4.7:
-    name: x-ai/grok-4.7
-    provider: openrouter
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "Grok 4.7"
+    description: "Low-cost paid fallback included in OpenCode Go"
     streaming_enabled: true
     preserve_reasoning_content: true
 
@@ -198,7 +152,7 @@ tools:
     name: "orchestrate"
     description: "Meta-tool: запускает динамического агента для решения подзадачи."
     env_vars:
-      DEFAULT_MODEL: mercury-2.5
+      DEFAULT_MODEL: backup
 
   # ── coder (function) ─────────────────────────────────────
   bash_tool:
@@ -357,7 +311,7 @@ agents:
   # ── Координатор ─────────────────────────────────────────────────
   coordinator:
     name: Координатор
-    model: grok-4.7
+    model: [strong]
     description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
     tools:
       - orchestrate
@@ -412,7 +366,7 @@ agents:
       - Ведение задачи в трекере (чтение, смена статуса, запись результата) поручай самому агенту, а не выполняй отдельными ходами за него.
   general_purpose:
     name: "General-purpose"
-    model: deepseek-flash-latest
+    model: [backup]
     mcp_enabled: true
     system_skills:
       - codegraph

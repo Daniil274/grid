@@ -43,6 +43,7 @@ class TestProviderConfig:
         assert config.base_url == "https://api.example.com"
         assert config.api_key_env is None
         assert config.api_key is None
+        assert config.default_headers == {}
         assert config.timeout == 30  # default
         assert config.max_retries == 2  # default
     
@@ -53,6 +54,7 @@ class TestProviderConfig:
             base_url="https://api.example.com",
             api_key_env="API_KEY",
             api_key="secret_key",
+            default_headers={"User-Agent": "test-client/1.0"},
             timeout=60,
             max_retries=5
         )
@@ -61,6 +63,7 @@ class TestProviderConfig:
         assert config.base_url == "https://api.example.com"
         assert config.api_key_env == "API_KEY"
         assert config.api_key == "secret_key"
+        assert config.default_headers == {"User-Agent": "test-client/1.0"}
         assert config.timeout == 60
         assert config.max_retries == 5
     
@@ -250,6 +253,21 @@ class TestAgentConfig:
         assert config.custom_prompt == "Custom prompt text"
         assert config.description == "Full agent description"
         assert config.mcp_enabled is True
+
+    def test_agent_config_ordered_model_fallbacks(self):
+        config = AgentConfig(
+            name="fallback-agent",
+            model=["primary-model", "backup-model"],
+        )
+
+        assert config.model_keys() == ["primary-model", "backup-model"]
+        assert config.primary_model == "primary-model"
+
+    def test_agent_config_rejects_empty_or_duplicate_model_fallbacks(self):
+        with pytest.raises(ValidationError):
+            AgentConfig(name="empty", model=[])
+        with pytest.raises(ValidationError):
+            AgentConfig(name="duplicate", model=["same", "same"])
 
 
 class TestAgentLoggingConfig:

@@ -10,12 +10,48 @@ from pathlib import Path
 from core.agent_factory import AgentFactory
 from core.config import Config
 from core.config.prompt_sections import ModelContextAssembly
+from core.fallback_model import AllModelsFailedError, FallbackModel
 from utils.exceptions import AgentError, ConfigError
 from schemas import AgentExecution
 
 
 class TestAgentFactory:
     """Test AgentFactory class functionality."""
+
+    @pytest.mark.parametrize("reasoning", [None, {"effort": "low"}])
+    def test_parallel_tool_calls_follow_the_agent_setting(self, reasoning):
+        """Off unless the agent opts in, with or without reasoning overrides."""
+        factory = object.__new__(AgentFactory)
+        model_config = Mock(max_tokens=100, reasoning=reasoning)
+
+        assert factory._build_model_settings(model_config).parallel_tool_calls is False
+        assert (
+            factory._build_model_settings(model_config, True).parallel_tool_calls
+            is True
+        )
+
+    def test_coordinator_example_batches_tool_calls(self):
+        config = Config("examples/coordinator-pipeline/config.yaml")
+        assert config.get_agent("coordinator").parallel_tool_calls is True
+        assert config.get_agent("general_purpose").parallel_tool_calls is False
+
+    def test_openai_client_uses_configured_provider_headers(self):
+        factory = object.__new__(AgentFactory)
+        provider = Mock(default_headers={"User-Agent": "grid-test/1.0"})
+        factory.config = Mock()
+        factory.config.get_provider.return_value = provider
+        factory.config.get_proxy_for_provider.return_value = None
+
+        with patch("core.agent_factory.AsyncOpenAI") as client_class:
+            factory._make_openai_client(
+                api_key="test-key",
+                base_url="https://api.example.com/v1",
+                provider_key="example",
+            )
+
+        assert client_class.call_args.kwargs["default_headers"] == {
+            "User-Agent": "grid-test/1.0"
+        }
     
     def test_agent_factory_init(self, config_file):
         """Test agent factory initialization."""
@@ -164,6 +200,12 @@ class TestAgentFactory:
         assert factory._is_retriable_agent_exception(AgentError("upstream unavailable"))
         assert factory._is_retriable_agent_exception(Exception("server_error: Сервис временно недоступен"))
         assert not factory._is_retriable_agent_exception(Exception("tool arguments are invalid"))
+
+    def test_all_models_failed_is_not_retried(self):
+        factory = object.__new__(AgentFactory)
+        assert not factory._is_retriable_agent_exception(
+            AllModelsFailedError("all failed")
+        )
     
     def test_is_reasoning_model_name(self, config_file):
         """Test reasoning model detection."""
@@ -229,6 +271,38 @@ class TestAgentFactory:
             assert call_args[1]['name'] == "Test Agent"
             assert call_args[1]['instructions'] == "Test instructions"
             assert call_args[1]['model'] is mock_model_instance
+
+    @pytest.mark.asyncio
+    async def test_create_agent_builds_ordered_model_fallback(self, config_file):
+        """A model list becomes one SDK model that preserves configured order."""
+        config = Config(str(config_file))
+        config.config.models["gpt-4-backup"] = config.config.models["gpt-4"].model_copy(
+            update={"name": "gpt-4-backup"}
+        )
+        config.config.agents["test_agent"].model = ["gpt-4", "gpt-4-backup"]
+        factory = AgentFactory(config, str(config_file.parent))
+
+        first_model = Mock()
+        backup_model = Mock()
+        with patch('core.agent_factory.VisionChatCompletionsModel', side_effect=[first_model, backup_model]), \
+             patch('core.agent_factory.Agent') as mock_agent_class, \
+             patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
+             patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
+             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
+             patch.object(factory, '_create_mcp_servers', return_value=[], new_callable=AsyncMock):
+            mock_agent_class.return_value = Mock()
+            await factory.create_agent("test_agent")
+
+        fallback = mock_agent_class.call_args.kwargs["model"]
+        assert isinstance(fallback, FallbackModel)
+        assert [candidate.key for candidate in fallback.candidates] == [
+            "gpt-4",
+            "gpt-4-backup",
+        ]
+        assert [candidate.model for candidate in fallback.candidates] == [
+            first_model,
+            backup_model,
+        ]
 
     @pytest.mark.asyncio
     async def test_create_dynamic_agent_passes_model_config_flags(self, config_file):

@@ -30,7 +30,9 @@ class DecisionsModel:
     def http_client(self, *, transport=None, timeout=None):
         return httpx.AsyncClient(
             timeout=self.timeout if timeout is None else timeout,
-            proxy=self.proxy,
+            # An injected transport owns delivery (including tests). A proxy
+            # mount would otherwise bypass it and make real network requests.
+            proxy=self.proxy if transport is None else None,
             transport=transport,
             follow_redirects=False,
             trust_env=False,

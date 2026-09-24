@@ -337,6 +337,15 @@ async def orchestrate(
 
         coerced_system_skills = _coerce_tool_list(system_skills)
 
+        # The executor acts under the caller's trusted task; the task text here
+        # was written by an agent and reaches the policy only as its purpose.
+        # Its init_tools run under the same state as the executor itself.
+        from core.action_policy import delegated_state
+
+        action_state = delegated_state(
+            getattr(raw_ctx, "action_state", None), "orchestrate", task
+        )
+
         executor = await factory.create_dynamic_agent(
             name=f"executor-{uuid.uuid4().hex[:6]}",
             instructions=base_instructions,
@@ -344,6 +353,7 @@ async def orchestrate(
             tool_names=coerced_executor_tools,
             init_tools=parsed_init_tools,
             system_skills=coerced_system_skills,
+            action_state=action_state,
         )
 
         # The executor reports into the caller's view (the web trace, not the
@@ -356,13 +366,6 @@ async def orchestrate(
         else:
             observer = None
         run_error: Optional[str] = None
-        # The executor acts under the caller's trusted task; the task text here
-        # was written by an agent and reaches the policy only as its purpose.
-        from core.action_policy import delegated_state
-
-        action_state = delegated_state(
-            getattr(raw_ctx, "action_state", None), "orchestrate", task
-        )
         caller_depth = getattr(raw_ctx, "action_depth", 0)
         action_depth = (caller_depth if isinstance(caller_depth, int) else 0) + 1
 

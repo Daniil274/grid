@@ -35,7 +35,7 @@ providers:
       User-Agent: grid-agent-system/1.0
       x-opencode-session: grid-policy
     timeout: 60
-    max_retries: 2
+    max_retries: 3
   openrouter:
     name: openrouter
     base_url: https://openrouter.ai/api/v1
@@ -47,18 +47,18 @@ models:
   router:
     name: typesafe/jev-1.13
     provider: openrouter
-    description: Decisions model that picks the system and the agent
+    description: JEV decisions model used to pick the system and agent
 
   policy:
     name: typesafe/jev-1.13
     provider: openrouter
-    description: Decisions model that judges agent actions for the policy gate
+    description: JEV decisions model used by the action-policy gate
     # Most judgments take 1-2 s, a few stall past 10 s. A stalled request is
     # dropped after this long and retried within validator.timeout_seconds.
     request_timeout: 6
 
   policy_chat:
-    name: glm-5.3-flash
+    name: mimo-v2.6-flash
     provider: opencode-go
     policy_api: chat
     description: Chat policy reserve used only after a technical Decisions failure
@@ -72,7 +72,7 @@ routing:
   default_system: engineering
   systems:
     engineering:
-      config: examples/coder/config.yaml
+      config: examples/coder/config.opencode.yaml
       description: >-
         The default choice. Hands-on software engineering in a code repository:
         write, fix, debug, refactor and review code, run tests, shell commands and
@@ -80,14 +80,14 @@ routing:
         documentation, comparisons summarized with sources) and general questions
         and conversation. Pick for any concrete coding task up to a single feature.
     pipeline:
-      config: examples/coordinator-pipeline/config.yaml
+      config: examples/coordinator-pipeline/config.opencode.yaml
       description: >-
         Large multi-stage projects that need planning and delegation: a new
         subsystem, a big feature or a migration across many files, where the work
         is split into tracked tasks for researcher, executor and verifier agents.
         Not for quick fixes or single-file changes.
     video:
-      config: examples/video-editor/config.yaml
+      config: examples/video-editor/config.opencode.yaml
       requires: [ffmpeg, ffprobe]
       description: >-
         Working with video files and footage (mp4, mov, clips): inspect footage,
@@ -95,7 +95,7 @@ routing:
         and edit lists, render previews and final versions, and quality-check
         rendered output.
     desktop:
-      config: examples/windows-computer-use/config.yaml
+      config: examples/windows-computer-use/config.opencode.yaml
       description: >-
         Controlling this Windows computer through its GUI like a person: open
         and use applications, click, type, press hotkeys, switch windows, fill
