@@ -168,22 +168,6 @@ class ProjectToolsConfig(BaseModel):
     base_tools: List[str] = Field(default_factory=list)
 
 
-class SerialConfig(BaseModel):
-    """Configuration for serial communication (retries and delay after command)."""
-    retries: int = Field(default=3, ge=1, le=50, description="Number of retries per command (ISKOR_RETRIES)")
-    command_timeout_sec: float = Field(default=0.5, ge=0.0, le=60.0, description="Pause in seconds after executing command (ISKOR_COMMAND_TIMEOUT)")
-    # Extra fields from project config (baud, timeout, etc.) are allowed via model_config
-    model_config = {"extra": "ignore"}
-
-
-class WindowConfig(BaseModel):
-    """Configuration for GUI window automation."""
-    title_pattern: str = Field(default="ISKOR", description="Window title search pattern (ISKOR_WINDOW_TITLE)")
-    key_delay_sec: float = Field(default=0.3, ge=0.0, le=10.0, description="Pause after key press (ISKOR_KEY_DELAY)")
-    screenshot_delay_sec: float = Field(default=0.2, ge=0.0, le=10.0, description="Additional pause before screenshot (ISKOR_SCREEN_DELAY)")
-    model_config = {"extra": "ignore"}
-
-
 class Settings(BaseModel):
     """Global system settings."""
     action_policy: ActionPolicyConfig = Field(default_factory=ActionPolicyConfig)
@@ -220,15 +204,7 @@ class Settings(BaseModel):
     )
     proxy: Optional[str] = Field(
         default=None,
-        description="Proxy for all outgoing requests (API, Telegram). Example: http://127.0.0.1:10809"
-    )
-    serial: Optional[SerialConfig] = Field(
-        default=None,
-        description="Serial settings for ISKOR: number of retries per command and command timeout"
-    )
-    window: Optional[WindowConfig] = Field(
-        default=None,
-        description="GUI automation settings: window title search, delays"
+        description="Proxy for all outgoing requests. Example: http://127.0.0.1:10809"
     )
 
 
@@ -270,7 +246,6 @@ class GridConfig(BaseModel):
     agents: Dict[str, AgentConfig] = Field(default_factory=dict)
     prompt_templates: Dict[str, str] = Field(default_factory=dict)
     scenarios: Optional[Dict[str, Any]] = None
-    telegram: Optional[Dict[str, Any]] = None  # telegram bot config, incl. proxy for API requests
     voice: Dict[str, Any] = Field(default_factory=dict, description="Local web speech and voice routing settings")
     routing: RoutingConfig = Field(default_factory=RoutingConfig, description="Automatic system and agent routing")
     

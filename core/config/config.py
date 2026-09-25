@@ -6,7 +6,6 @@ import os
 import yaml
 from typing import Dict, Any, List, Optional
 from pathlib import Path
-from functools import lru_cache
 import logging
 import ipaddress
 import copy
@@ -220,33 +219,6 @@ class Config:
             if not project_tools_config.enabled:
                 logger.info("Project tools loader is disabled in config")
                 return
-
-            # Set ISKOR serial retries and command timeout for project tools (get_screen, key_press, key_sequence)
-            serial_cfg = getattr(self.config.settings, "serial", None)
-            if serial_cfg is not None:
-                if getattr(serial_cfg, "retries", None) is not None:
-                    os.environ["ISKOR_RETRIES"] = str(serial_cfg.retries)
-                    logger.debug(f"ISKOR_RETRIES set to {serial_cfg.retries} from config")
-                if getattr(serial_cfg, "command_timeout_sec", None) is not None:
-                    os.environ["ISKOR_COMMAND_TIMEOUT"] = str(serial_cfg.command_timeout_sec)
-                    logger.debug(f"ISKOR_COMMAND_TIMEOUT set to {serial_cfg.command_timeout_sec} from config")
-            if "ISKOR_RETRIES" not in os.environ:
-                os.environ.setdefault("ISKOR_RETRIES", "3")
-            if "ISKOR_COMMAND_TIMEOUT" not in os.environ:
-                os.environ.setdefault("ISKOR_COMMAND_TIMEOUT", "0.5")
-
-            # Set ISKOR window automation settings for project tools (get_screen, key_press via xdotool)
-            window_cfg = getattr(self.config.settings, "window", None)
-            if window_cfg is not None:
-                if getattr(window_cfg, "title_pattern", None) is not None:
-                    os.environ["ISKOR_WINDOW_TITLE"] = str(window_cfg.title_pattern)
-                    logger.debug(f"ISKOR_WINDOW_TITLE set to {window_cfg.title_pattern} from config")
-                if getattr(window_cfg, "key_delay_sec", None) is not None:
-                    os.environ["ISKOR_KEY_DELAY"] = str(window_cfg.key_delay_sec)
-                    logger.debug(f"ISKOR_KEY_DELAY set to {window_cfg.key_delay_sec} from config")
-                if getattr(window_cfg, "screenshot_delay_sec", None) is not None:
-                    os.environ["ISKOR_SCREEN_DELAY"] = str(window_cfg.screenshot_delay_sec)
-                    logger.debug(f"ISKOR_SCREEN_DELAY set to {window_cfg.screenshot_delay_sec} from config")
 
             # Get tools directory
             tools_directory = project_tools_config.tools_directory
@@ -567,12 +539,9 @@ class Config:
         return self.config.settings.agent_timeout
 
     def get_proxy(self) -> Optional[str]:
-        """Get proxy URL for outgoing requests (API, Telegram, etc.).
-        Priority: settings.proxy -> telegram.proxy -> HTTPS_PROXY -> HTTP_PROXY."""
-        if getattr(self.config.settings, "proxy", None):
+        """Proxy URL for outgoing requests: settings.proxy, then HTTPS_PROXY, then HTTP_PROXY."""
+        if self.config.settings.proxy:
             return self.config.settings.proxy
-        if self.config.telegram and self.config.telegram.get("proxy"):
-            return self.config.telegram["proxy"]
         # An empty variable (common in container images) means no proxy, not "".
         return os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or None
 
@@ -609,7 +578,7 @@ class Config:
 
         Rule:
         - For providers with local/private base_url host (LAN/localhost), return None.
-        - Otherwise return global proxy (settings.proxy / telegram.proxy / env).
+        - Otherwise return the global proxy (settings.proxy / env).
         """
         if not provider_key:
             return self.get_proxy()
