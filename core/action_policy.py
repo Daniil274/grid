@@ -479,9 +479,12 @@ class ActionGate:
         # Only actions that actually ran belong to the execution trajectory.
         # Feeding blocked/reviewed attempts back into the semantic chain makes
         # one uncertain verdict self-reinforcing: the next check sees the old
-        # review and repeats it even though no side effect occurred.
+        # review and repeats it even though no side effect occurred. A call that
+        # failed while running did run and may have had effects, so it stays.
         executed_chain = [
-            event for event in run.chain if event.get("outcome") == "executed"
+            event
+            for event in run.chain
+            if event.get("outcome") in ("executed", "failed")
         ]
         window = executed_chain[-self.config.max_chain_events :]
         executed = self._fit(window, self.config.max_chain_bytes)
@@ -754,37 +757,6 @@ class ActionGate:
                     stop_after_shadow_call = (
                         run.denials >= self.config.max_denials_per_run
                     )
-            try:
-                result = await invoke(ctx, raw_args)
-            except BaseException:
-                async with run.lock:
-                    run.stopped = True
-                    self._record(
-                        run, tool_name, kind, digest, "stopped", "execution_interrupted"
-                    )
-                raise
-            async with run.lock:
-                if stop_after_shadow_call:
-                    run.stopped = True
-                run.chain.append(
-                    {
-                        "kind": kind,
-                        "tool": tool_name,
-                        "arguments": projected_arguments,
-                        "outcome": "executed",
-                        "verdict": verdict,
-                    }
-                )
-                self._record(
-                    run,
-                    tool_name,
-                    kind,
-                    digest,
-                    "executed",
-                    "policy_check",
-                    **call_meta,
-                )
-            return result
         except PolicyDenied as exc:
             async with run.lock:
                 return self._deny(
@@ -798,3 +770,53 @@ class ActionGate:
         except (ValueError, TypeError, KeyError, OSError):
             async with run.lock:
                 return self._deny(run, tool_name, kind, digest, "invalid_call")
+
+        # Executed outside the judgment: a tool's own error is neither a policy
+        # denial nor a reason to stop the run - the agent sees it and goes on.
+        # Only an interruption (cancellation, shutdown) stops the run.
+        try:
+            result = await invoke(ctx, raw_args)
+        except Exception:
+            async with run.lock:
+                run.chain.append(
+                    {
+                        "kind": kind,
+                        "tool": tool_name,
+                        "arguments": projected_arguments,
+                        "outcome": "failed",
+                        "verdict": verdict,
+                    }
+                )
+                self._record(
+                    run, tool_name, kind, digest, "failed", "execution_error", **call_meta
+                )
+            raise
+        except BaseException:
+            async with run.lock:
+                run.stopped = True
+                self._record(
+                    run, tool_name, kind, digest, "stopped", "execution_interrupted"
+                )
+            raise
+        async with run.lock:
+            if stop_after_shadow_call:
+                run.stopped = True
+            run.chain.append(
+                {
+                    "kind": kind,
+                    "tool": tool_name,
+                    "arguments": projected_arguments,
+                    "outcome": "executed",
+                    "verdict": verdict,
+                }
+            )
+            self._record(
+                run,
+                tool_name,
+                kind,
+                digest,
+                "executed",
+                "policy_check",
+                **call_meta,
+            )
+        return result

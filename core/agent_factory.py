@@ -126,6 +126,25 @@ async def _invoke_mcp_tool_safe(cls, server, tool, context, input_json):  # type
             msg,
         )
         return msg
+    except Exception as e:
+        # Server-side failures (unknown tool, timeout, dropped connection) arrive
+        # as AgentsException/UserError, which would abort the run as well.
+        return tool_error_output(getattr(tool, "name", "mcp_tool"), e)
+
+
+def tool_error_output(tool_name: str, exc: BaseException) -> str:
+    """The text an agent gets when a tool call fails, instead of a dead run."""
+    logger.warning(
+        "Tool '%s' failed — returning error to agent: %s: %s",
+        tool_name,
+        type(exc).__name__,
+        exc,
+    )
+    detail = str(exc) or type(exc).__name__
+    return (
+        f"Error: tool '{tool_name}' failed: {detail}. "
+        "Check the tool name and arguments, then retry or continue without it."
+    )
 
 
 _MCPUtil.invoke_mcp_tool = _invoke_mcp_tool_safe
@@ -156,6 +175,11 @@ _MODEL_TOOL_SHORTCUTS = {
 }
 
 
+_CHANNEL_SUFFIX = re.compile(
+    r"(?:<\|channel\|>|[._])(?:commentary|analysis|final|tool)$", re.IGNORECASE
+)
+
+
 def _resolve_model_tool_name(name: str, function_map: dict) -> str:
     """Map model-generated tool names to registered agent tools."""
     name = name.strip()
@@ -175,6 +199,15 @@ def _resolve_model_tool_name(name: str, function_map: dict) -> str:
     for candidate in candidates:
         if candidate and candidate in function_map:
             return candidate
+
+    # Harmony-format models sometimes glue the channel onto the tool name:
+    # "call_worker<|channel|>commentary", "call_worker_commentary". Checked
+    # after the aliases, some of which legitimately end in such a word.
+    bare = _CHANNEL_SUFFIX.sub("", name).strip()
+    if bare and bare != name:
+        resolved = _resolve_model_tool_name(bare, function_map)
+        if resolved in function_map:
+            return resolved
     return name
 
 
@@ -182,11 +215,16 @@ def _build_missing_tool_stub(tool_name: str, available: list[str]):
     """Create a stub FunctionTool that returns an error message to the agent."""
     from agents.tool import FunctionTool
 
+    import difflib
+
+    close = difflib.get_close_matches(tool_name, available, n=3, cutoff=0.5)
+
     async def _on_invoke_tool(_ctx, _input: str) -> str:
-        preview = ", ".join(sorted(available)[:25])
-        suffix = "..." if len(available) > 25 else ""
+        preview = ", ".join(sorted(available)[:40])
+        suffix = "..." if len(available) > 40 else ""
+        hint = f" Did you mean: {', '.join(close)}?" if close else ""
         return (
-            f"Error: Tool '{tool_name}' is not available. "
+            f"Error: Tool '{tool_name}' is not available.{hint} "
             f"Available tools include: {preview}{suffix}"
         )
 
@@ -375,6 +413,41 @@ def run_output_text(result: Any, agent_label: str = "The agent") -> Any:
         f"[{agent_label} finished without a written report{called}. "
         "Check its changes yourself or ask it for the report.]"
     )
+
+
+def interrupted_run_report(result: Any, agent_label: str, exc: BaseException) -> str:
+    """What a run that stopped on an SDK error still hands back to its caller.
+
+    The reason, the tools it called and its last text, so the caller can go on
+    or retry without repeating work that was already done.
+    """
+    items = list(getattr(result, "new_items", None) or [])
+    if not items:
+        run_data = getattr(exc, "run_data", None)
+        items = list(getattr(run_data, "new_items", None) or [])
+    if isinstance(exc, MaxTurnsExceeded):
+        reason = "reached its turn limit"
+    else:
+        reason = f"stopped on an error: {exc}"
+    lines = [f"[{agent_label} {reason}]"]
+    tools = [
+        tool_event_info(item).get("tool_name")
+        for item in items
+        if getattr(item, "type", "") == "tool_call_item"
+    ]
+    if tools:
+        called = ", ".join(dict.fromkeys(t for t in tools if t))
+        lines.append(
+            f"It made {len(tools)} tool call(s) before stopping: {called}. "
+            "Their effects may already be in place - check before retrying."
+        )
+    for item in reversed(items):
+        if isinstance(item, MessageOutputItem):
+            text = ItemHelpers.text_message_output(item)
+            if text.strip():
+                lines.append(f"Its last message:\n{text.strip()}")
+                break
+    return "\n".join(lines)
 
 
 def tool_event_info(item: Any) -> dict[str, Any]:
@@ -1046,11 +1119,16 @@ class AgentFactory:
             raw_ctx = getattr(ctx, "context", None)
             factory = getattr(raw_ctx, "factory", None) or self
             gate = getattr(factory, "action_gate", None)
-            if gate is None:
-                return await inner(ctx, args)
-            return await gate.invoke(
-                tool_name, kind, ctx, args, inner, descriptor=descriptor
-            )
+            try:
+                if gate is None:
+                    return await inner(ctx, args)
+                return await gate.invoke(
+                    tool_name, kind, ctx, args, inner, descriptor=descriptor
+                )
+            except Exception as exc:
+                # Outermost wrapper: anything raised past the tool's own error
+                # handler would make the SDK abort the whole run.
+                return tool_error_output(tool_name, exc)
 
         tool.on_invoke_tool = gated_invoke
         tool._grid_policy_gated = True
@@ -2385,15 +2463,31 @@ class AgentFactory:
                 max_turns=self.config.get_max_turns(),
             )
 
-            async for event in run_result_streaming.stream_events():
-                append_action_reasoning(run_ctx.action_state, event)
-                if observer is not None:
-                    fragment = observer.handle_event(
-                        event,
-                        agent_key=getattr(agent, "name", "dynamic-agent"),
-                    )
-                    if fragment:
-                        streaming_text_parts.append(fragment)
+            agent_label = getattr(agent, "name", "dynamic-agent")
+            try:
+                async for event in run_result_streaming.stream_events():
+                    try:
+                        append_action_reasoning(run_ctx.action_state, event)
+                        if observer is not None:
+                            fragment = observer.handle_event(
+                                event, agent_key=agent_label
+                            )
+                            if fragment:
+                                streaming_text_parts.append(fragment)
+                    except Exception:
+                        logger.exception("Stream observer failed for %s", agent_label)
+            except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
+                # Not transient: retrying would repeat the work. The caller gets
+                # what the agent did so far.
+                logger.warning(
+                    "DYNAMIC_AGENT_STOPPED | agent=%s | %s: %s",
+                    agent_label,
+                    type(exc).__name__,
+                    exc,
+                )
+                return interrupted_run_report(
+                    run_result_streaming, f"Agent {agent_label}", exc
+                )
 
             result_output = (
                 run_result_streaming.final_output
@@ -2483,189 +2577,6 @@ class AgentFactory:
                     await asyncio.sleep(delay)
         finally:
             reset_current_factory()
-
-    async def run_agent_object_simple_original(
-        max_turns: Optional[int] = None,
-        session: Optional[SQLiteSession] = None,
-        pipeline_id: Optional[str] = None,
-    ) -> str:
-        """
-        Run an Agent instance directly (useful for dynamic agents).
-
-        This method is intentionally lightweight: it does not persist full dialogue,
-        but it *does* pass a `GridRunContext` so tools can access the AgentFactory.
-        """
-        import time as _time
-
-        _start = _time.time()
-        agent_name = getattr(agent, "name", "unknown")
-
-        # --- Log input ---
-        input_preview = message[:200] + ("..." if len(message) > 200 else "")
-        logger.info(
-            f"DYNAMIC_AGENT_INPUT | agent={agent_name} | input_len={len(message)} | preview={input_preview}"
-        )
-        verbose_logger.debug(
-            f"\n{'='*80}\nDYNAMIC AGENT INPUT\n{'='*80}\n"
-            f"Agent: {agent_name}\n"
-            f"Instructions: {getattr(agent, 'instructions', '<n/a>')[:1000]}{'...' if len(str(getattr(agent, 'instructions', ''))) > 1000 else ''}\n"
-            f"{'─'*80}\n"
-            f"Input message:\n{message}\n"
-            f"{'='*80}\n"
-        )
-
-        if max_turns is None:
-            max_turns = self.config.get_max_turns()
-
-        active_context_id = (
-            context_id
-            or self.context_manager.get_current_context_id()
-            or self.context_manager.start_new_context()
-        )
-
-        # Provide a session by default to enable memory for dynamic agents
-        if session is None:
-            session = self._get_agent_session(f"dyn:{agent.name}", active_context_id)
-        agent._session = session
-
-        # Create run context with session access
-        # Get user_id from context metadata if available
-        ctx_user_id = (
-            self.context_manager.get_metadata("user_id")
-            if hasattr(self.context_manager, "get_metadata")
-            else None
-        )
-        run_ctx = GridRunContext(
-            factory=self,
-            context_id=active_context_id,
-            session=session,
-            user_id=ctx_user_id,
-            container_id=self.container_id,
-            pipeline_id=pipeline_id,
-            execution_mode="serial_subtree" if pipeline_id else None,
-        )
-
-        output = None
-        error_occurred = None
-        set_current_factory(self)
-        try:
-            # Use streaming to capture tool calls for logging
-            run_result_streaming = _get_runner().run_streamed(
-                agent,
-                message,
-                context=run_ctx,
-                max_turns=max_turns,
-                session=session,
-            )
-
-            # Process streaming events and log tool calls
-            async for event in run_result_streaming.stream_events():
-                # Use the factory's stream observer to log events
-                if hasattr(self, "_stream_observer"):
-                    self._stream_observer.handle_event(event, agent_key=agent_name)
-
-                if isinstance(event, RunItemStreamEvent):
-                    event_name = getattr(event, "name", "")
-                    item = getattr(event, "item", None)
-
-                    if event_name == "tool_called" and item is not None:
-                        raw_item = getattr(item, "raw_item", None)
-                        tool_name = getattr(raw_item, "name", None) or "tool"
-                        arguments = getattr(raw_item, "arguments", None)
-
-                        # Format arguments for logging
-                        args_str = ""
-                        if isinstance(arguments, str):
-                            args_str = arguments[:200] + (
-                                "..." if len(arguments) > 200 else ""
-                            )
-                        elif isinstance(arguments, dict):
-                            args_str = json.dumps(arguments, ensure_ascii=False)[:200]
-
-                        logger.info(
-                            f"DYNAMIC_AGENT_TOOL_CALL | agent={agent_name} | tool={tool_name} | args={args_str}"
-                        )
-                        verbose_logger.debug(
-                            f"\n{'─'*80}\n🔧 TOOL CALL: {tool_name}\n"
-                            f"Arguments: {arguments}\n{'─'*80}\n"
-                        )
-
-                    elif event_name == "tool_output" and item is not None:
-                        raw_item = getattr(item, "raw_item", None)
-                        tool_name = getattr(raw_item, "name", None) or "tool"
-                        tool_output = getattr(raw_item, "output", None)
-
-                        output_str = str(tool_output)[:500] + (
-                            "..." if len(str(tool_output)) > 500 else ""
-                        )
-
-                        logger.info(
-                            f"DYNAMIC_AGENT_TOOL_OUTPUT | agent={agent_name} | tool={tool_name} | output_len={len(str(tool_output))}"
-                        )
-                        verbose_logger.debug(
-                            f"\n{'─'*80}\n✅ TOOL OUTPUT: {tool_name}\n"
-                            f"Output: {output_str}\n{'─'*80}\n"
-                        )
-
-            # Extract final output from streaming result
-            output = run_output_text(run_result_streaming)
-        except MaxTurnsExceeded as e:
-            # Max turns hit — extract partial output so the caller can work with it
-            partial = self._extract_partial_output(e)
-            if partial:
-                output = partial
-                logger.warning(
-                    f"DYNAMIC_AGENT_MAX_TURNS | agent={agent_name} | partial_output_len={len(partial)}"
-                )
-            else:
-                output = f"⚠️ Agent reached max turns limit. No final output produced."
-                error_occurred = e
-        except ModelBehaviorError as e:
-            # Model produced malformed JSON or called non-existent tool — return error string
-            # so the calling agent can see and potentially fix it
-            output = f"ERROR: Model behavior error — {e}. Please retry with corrected tool call arguments."
-            error_occurred = e
-            logger.error(f"DYNAMIC_AGENT_MODEL_ERROR | agent={agent_name} | error={e}")
-        except AgentsUserError as e:
-            # SDK user/tool error — return as recoverable error string
-            output = (
-                f"ERROR: Tool execution error — {e}. Please check tool call and retry."
-            )
-            error_occurred = e
-            logger.error(f"DYNAMIC_AGENT_TOOL_ERROR | agent={agent_name} | error={e}")
-        except Exception as e:
-            error_occurred = e
-            raise
-        finally:
-            reset_current_factory()
-            elapsed = _time.time() - _start
-            if error_occurred:
-                logger.error(
-                    f"DYNAMIC_AGENT_ERROR | agent={agent_name} | elapsed={elapsed:.2f}s | error={error_occurred}"
-                )
-                verbose_logger.debug(
-                    f"\n{'='*80}\nDYNAMIC AGENT ERROR\n{'='*80}\n"
-                    f"Agent: {agent_name}\nElapsed: {elapsed:.2f}s\n"
-                    f"Error: {error_occurred}\n{'='*80}\n"
-                )
-            else:
-                output_preview = (output or "")[:200] + (
-                    "..." if len(output or "") > 200 else ""
-                )
-                logger.info(
-                    f"DYNAMIC_AGENT_OUTPUT | agent={agent_name} | elapsed={elapsed:.2f}s | "
-                    f"output_len={len(output or '')} | preview={output_preview}"
-                )
-                verbose_logger.debug(
-                    f"\n{'='*80}\nDYNAMIC AGENT OUTPUT\n{'='*80}\n"
-                    f"Agent: {agent_name}\nElapsed: {elapsed:.2f}s\n"
-                    f"Output length: {len(output or '')} chars\n"
-                    f"{'─'*80}\n"
-                    f"Full output:\n{output}\n"
-                    f"{'='*80}\n"
-                )
-
-        return output
 
     async def run_agent(
         self,
@@ -4108,23 +4019,10 @@ DO NOT write XML tags manually!"""
                 )
 
                 # Wrap for logging
+                # Channel suffixes the model glues onto the name
+                # ("<name>_commentary") are resolved by _resolve_model_tool_name.
                 wrapped_main = self._wrap_agent_tool(main_tool, target_agent_name)
                 tools.append(wrapped_main)
-
-                # Add channel aliases to avoid errors when model appends channel suffixes
-                channel_suffixes = ("_commentary", "_tool", "_final")
-                for suffix in channel_suffixes:
-                    alias_tool = self._create_context_aware_agent_tool(
-                        agent_key=target_agent_key,
-                        sub_agent=sub_agent,
-                        tool_name=f"{tool_name}{suffix}",
-                        tool_description=tool_description,
-                        context_strategy=context_strategy,
-                        context_depth=context_depth,
-                        include_tool_history=include_tool_history,
-                    )
-                    wrapped_alias = self._wrap_agent_tool(alias_tool, target_agent_name)
-                    tools.append(wrapped_alias)
 
             except Exception as e:
                 logger.error(
@@ -4145,26 +4043,31 @@ DO NOT write XML tags manually!"""
         async def wrapped_invoke_tool(tool_context, tool_call_arguments):
             start_time = time.time()
             # Normalize and log tool arguments
-            normalized_args = tool_call_arguments
-            # Convert to dict and map all aliases to a single required 'input' field
+            # The SDK passes the model's arguments as a JSON string; map every
+            # allowed alias onto the single required 'input' field.
+            arguments = tool_call_arguments
+            if isinstance(arguments, str):
+                try:
+                    parsed = json.loads(arguments) if arguments.strip() else {}
+                except ValueError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    arguments = parsed
             preferred_text: Optional[str] = None
-            if isinstance(tool_call_arguments, dict):
+            if isinstance(arguments, dict):
                 # Prioritize text aliases over input to avoid losing the task
                 for alias in ("task", "message", "prompt", "input"):
-                    value = tool_call_arguments.get(alias)
+                    value = arguments.get(alias)
                     if isinstance(value, str) and value.strip():
                         preferred_text = value.strip()
                         break
                 # If null/None or empty strings — replace with empty string
                 if not isinstance(preferred_text, str):
                     preferred_text = ""
-                normalized_args = {"input": preferred_text}
             else:
-                # If unstructured form received, convert to string
-                preferred_text = (
-                    str(tool_call_arguments) if tool_call_arguments is not None else ""
-                )
-                normalized_args = {"input": preferred_text}
+                # Not a JSON object (plain text or malformed JSON): the text is the task
+                preferred_text = str(arguments) if arguments is not None else ""
+            normalized_args = {"input": preferred_text}
 
             # Safely convert arguments to string for logging
             requested_context_id = self._extract_context_id_from_text(preferred_text)
@@ -4201,7 +4104,9 @@ DO NOT write XML tags manually!"""
                     raw_ctx.execution_mode = "serial_subtree"
 
                 async def execute_original():
-                    result = original_invoke(tool_context, **normalized_args)
+                    result = original_invoke(
+                        tool_context, json.dumps(normalized_args, ensure_ascii=False)
+                    )
                     if hasattr(result, "__await__"):
                         return await result
                     return result
@@ -4236,15 +4141,15 @@ DO NOT write XML tags manually!"""
                 else:
                     result_text = str(result)
 
-                marker_line = f"Context ID: {sub_context_id}"
-                if marker_line not in result_text:
-                    result_text_for_history = (
-                        result_text.rstrip() + "\n\n" + marker_line
-                    )
+                # The sub-agent reports the session it actually ran in.
+                reported = re.findall(r"Context ID: (ctx-[0-9a-fA-F]{8,})", result_text)
+                if reported:
+                    execution.context_id = reported[-1]
+                    execution.output = result_text
                 else:
-                    result_text_for_history = result_text
-
-                execution.output = result_text_for_history
+                    execution.output = (
+                        result_text.rstrip() + "\n\nContext ID: " + sub_context_id
+                    )
 
                 duration = execution.end_time - execution.start_time
 
@@ -4310,12 +4215,10 @@ DO NOT write XML tags manually!"""
 
             raw_input = input.strip()
 
-            # Context is passed ONLY if:
-            # 1. context_id is explicitly specified in the request
-            should_include_context = (
-                self._extract_context_id_from_text(raw_input)
-                is not None  # context_id explicitly specified in request
-            )
+            # Context is passed ONLY if a context_id is explicitly specified in
+            # the request; it names the sub-agent session to continue.
+            requested_context_id = self._extract_context_id_from_text(raw_input)
+            should_include_context = requested_context_id is not None
 
             if should_include_context:
                 enhanced_input = self.context_manager.get_context_for_agent_tool(
@@ -4328,27 +4231,24 @@ DO NOT write XML tags manually!"""
                 # For new sessions, pass only the original request without context
                 enhanced_input = raw_input
 
-            # Sub-agent session is tied to the selected context
-            # If no context is passed, create a new context for the sub-agent
-            if should_include_context:
-                # Use current context if context is being passed
-                current_context_id = self.context_manager.get_current_context_id()
-                session = self._get_agent_session(
-                    agent_key, current_context_id or f"ctx-{uuid.uuid4().hex[:8]}"
-                )
-            else:
-                # Create a new context for the sub-agent if no context is passed
-                new_context_id = f"ctx-{uuid.uuid4().hex[:8]}"
-                session = self._get_agent_session(agent_key, new_context_id)
-            local_sub_agent._session = session
-
-            # Create GridRunContext for sub-agent with LOCAL session access
             # Inherit user_id from parent context
             parent_user_id = (
                 context.context.user_id
                 if hasattr(context, "context") and hasattr(context.context, "user_id")
                 else None
             )
+
+            # The sub-agent session is the requested context, or a new one. Its id
+            # is reported back with the result, so the caller can continue it.
+            # The id comes from model-written text, so the session is also keyed
+            # by user: a named id never opens another user's session.
+            sub_context_id = requested_context_id or f"ctx-{uuid.uuid4().hex[:8]}"
+            session = self._get_agent_session(
+                agent_key,
+                f"{sub_context_id}@{parent_user_id}" if parent_user_id else sub_context_id,
+            )
+
+            # Create GridRunContext for sub-agent with LOCAL session access
             parent_pipeline_id = (
                 context.context.pipeline_id
                 if hasattr(context, "context")
@@ -4362,9 +4262,7 @@ DO NOT write XML tags manually!"""
             )
             sub_run_ctx = GridRunContext(
                 factory=self,
-                context_id=(
-                    new_context_id if not should_include_context else current_context_id
-                ),
+                context_id=sub_context_id,
                 session=session,
                 action_state=delegated_state(
                     getattr(getattr(context, "context", None), "action_state", None),
@@ -4472,6 +4370,7 @@ DO NOT write XML tags manually!"""
             # Use streaming to capture tool calls for logging
             set_current_factory(self)
             run_error: Optional[str] = None
+            run_result_streaming = None
             try:
                 run_result_streaming = _get_runner().run_streamed(
                     starting_agent=local_sub_agent,
@@ -4484,8 +4383,14 @@ DO NOT write XML tags manually!"""
                 # Process streaming events and log tool calls
                 output = None
                 async for event in run_result_streaming.stream_events():
-                    append_action_reasoning(sub_run_ctx.action_state, event)
-                    sub_observer.handle_event(event, agent_key=agent_key)
+                    # Rendering the trace must never stop the sub-agent itself.
+                    try:
+                        append_action_reasoning(sub_run_ctx.action_state, event)
+                        sub_observer.handle_event(event, agent_key=agent_key)
+                    except Exception:
+                        logger.exception(
+                            "Stream observer failed for sub-agent %s", agent_key
+                        )
 
                     # Also log specific events to file logs if needed (redundant if observer does it, but good for safety)
                     if isinstance(event, RunItemStreamEvent):
@@ -4516,6 +4421,20 @@ DO NOT write XML tags manually!"""
 
                 # Extract final output
                 output = run_output_text(run_result_streaming, f"Agent {agent_key}")
+            except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
+                # The sub-agent stopped, but its caller goes on: it gets what the
+                # sub-agent did so far instead of a bare error, and can decide
+                # whether to retry without repeating work already done.
+                run_error = str(exc) or type(exc).__name__
+                logger.warning(
+                    "SUB_AGENT_STOPPED | agent=%s | %s: %s",
+                    agent_key,
+                    type(exc).__name__,
+                    run_error,
+                )
+                output = interrupted_run_report(
+                    run_result_streaming, f"Agent {agent_key}", exc
+                )
             except BaseException as exc:
                 run_error = str(exc) or type(exc).__name__
                 raise
@@ -4526,6 +4445,9 @@ DO NOT write XML tags manually!"""
                         sub_observer.finish(error=run_error)
                     except Exception:
                         logger.debug("Failed to settle sub-agent trace", exc_info=True)
+
+            if isinstance(output, str):
+                output = f"{output.rstrip()}\n\nContext ID: {sub_context_id}"
 
             # Record the result as an assistant message so the main agent can discuss and provide corrections
             try:
