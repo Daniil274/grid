@@ -6,22 +6,14 @@ working directory, so the workspace sandbox is part of what is tested.
 """
 
 import json
-from types import SimpleNamespace
-
 import pytest
 
 from tools.file_tools import FILE_TOOLS, get_file_tools
-from utils.path_utils import factory_path_context
 
 
 @pytest.fixture
-def workspace(tmp_path):
-    factory = SimpleNamespace(
-        config=SimpleNamespace(get_working_directory=lambda: str(tmp_path)),
-        container_id=None,
-    )
-    with factory_path_context(factory):
-        yield tmp_path
+def workspace(agent_workspace):
+    return agent_workspace
 
 
 async def run(tool_name, **arguments):

@@ -6,7 +6,7 @@ import pytest
 import tempfile
 import shutil
 from pathlib import Path
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 import yaml
 import os
 import time
@@ -172,3 +172,22 @@ class MockSQLiteSession:
 def mock_session():
     """Mock session for testing."""
     return MockSQLiteSession()
+
+
+@pytest.fixture
+def agent_workspace(tmp_path):
+    """Run the test as an agent whose working directory is ``tmp_path``.
+
+    Tool paths are confined to the agent's working directory, so tools called
+    with paths under ``tmp_path`` need it bound as that directory.
+    """
+    from types import SimpleNamespace
+
+    from utils.path_utils import factory_path_context
+
+    factory = SimpleNamespace(
+        config=SimpleNamespace(get_working_directory=lambda: str(tmp_path)),
+        container_id=None,
+    )
+    with factory_path_context(factory):
+        yield tmp_path

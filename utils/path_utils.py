@@ -43,14 +43,16 @@ def get_current_factory() -> Any:
     return _current_factory.get(None)
 
 
-def _get_working_dir(factory: Any) -> Path | None:
-    """Return the resolved working directory for the current factory."""
+def _sandbox_root(factory: Any) -> Path:
+    """The directory an agent's paths are confined to.
+
+    The factory's working directory; outside an agent run (no factory bound),
+    the process working directory. There is always a root: a path is never
+    resolved without one.
+    """
     if factory is None:
-        return None
-    try:
-        return Path(factory.config.get_working_directory()).resolve()
-    except Exception:
-        return None
+        return Path.cwd().resolve()
+    return Path(factory.config.get_working_directory()).resolve()
 
 
 def _is_within(base: Path, candidate: Path) -> bool:
@@ -98,18 +100,12 @@ def resolve_agent_path(file_path: str, factory: Any) -> str:
 
     Args:
         file_path: Path as supplied by the agent.
-        factory:   AgentFactory instance (or None).
+        factory:   AgentFactory instance, or None outside an agent run.
 
     Returns:
         Absolute host path string.
     """
-    if factory is None:
-        return file_path
-
-    working_dir = _get_working_dir(factory)
-    if working_dir is None:
-        return file_path
-
+    working_dir = _sandbox_root(factory)
     container_id = getattr(factory, "container_id", None)
     return str(_resolve_inside_working_dir(file_path, working_dir, container_id))
 
@@ -118,13 +114,7 @@ def resolve_agent_path_from_ctx(file_path: str, ctx: Any) -> str:
     """
     Convenience wrapper: extract factory from RunContextWrapper and resolve path.
     """
-    factory = None
-    try:
-        raw = getattr(ctx, "context", None)
-        if raw is not None:
-            factory = getattr(raw, "factory", None)
-    except Exception:
-        pass
+    factory = getattr(getattr(ctx, "context", None), "factory", None)
     return resolve_agent_path(file_path, factory)
 
 
@@ -142,13 +132,7 @@ def display_agent_path(file_path: str, factory: Any) -> str:
 
     Never reveals directories above the working directory.
     """
-    if factory is None:
-        return file_path
-
-    working_dir = _get_working_dir(factory)
-    if working_dir is None:
-        return file_path
-
+    working_dir = _sandbox_root(factory)
     try:
         resolved = _resolve_inside_working_dir(file_path, working_dir, getattr(factory, "container_id", None))
     except Exception:
@@ -162,13 +146,7 @@ def display_agent_path(file_path: str, factory: Any) -> str:
 
 def display_agent_path_from_ctx(file_path: str, ctx: Any) -> str:
     """Context-based wrapper for safe agent-visible paths."""
-    factory = None
-    try:
-        raw = getattr(ctx, "context", None)
-        if raw is not None:
-            factory = getattr(raw, "factory", None)
-    except Exception:
-        pass
+    factory = getattr(getattr(ctx, "context", None), "factory", None)
     return display_agent_path(file_path, factory)
 
 
@@ -181,12 +159,10 @@ def sanitize_text_for_agent(text: str, factory: Any) -> str:
     """
     Best-effort scrub absolute workspace paths from human-facing tool output.
     """
-    if not text or factory is None:
+    if not text:
         return text
 
-    working_dir = _get_working_dir(factory)
-    if working_dir is None:
-        return text
+    working_dir = _sandbox_root(factory)
 
     sanitized = str(text)
     variants = {
@@ -207,11 +183,5 @@ def sanitize_text_for_agent(text: str, factory: Any) -> str:
 
 def sanitize_text_for_agent_from_ctx(text: str, ctx: Any) -> str:
     """Context-based wrapper for output sanitization."""
-    factory = None
-    try:
-        raw = getattr(ctx, "context", None)
-        if raw is not None:
-            factory = getattr(raw, "factory", None)
-    except Exception:
-        pass
+    factory = getattr(getattr(ctx, "context", None), "factory", None)
     return sanitize_text_for_agent(text, factory)

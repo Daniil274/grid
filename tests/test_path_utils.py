@@ -60,3 +60,10 @@ def test_sanitize_text_for_agent_scrubs_absolute_paths(tmp_path: Path):
 
     assert str(tmp_path) not in sanitized
     assert "./.git" in sanitized
+
+
+def test_without_an_agent_paths_stay_inside_the_process_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert resolve_agent_path("notes.txt", None) == str(tmp_path.resolve() / "notes.txt")
+    with pytest.raises(ValueError):
+        resolve_agent_path("../outside.txt", None)

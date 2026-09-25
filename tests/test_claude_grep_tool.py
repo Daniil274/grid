@@ -22,7 +22,8 @@ def test_grep_tool_schema_keeps_default_arguments_optional():
 
 
 @pytest.mark.asyncio
-async def test_grep_tool_invocation_accepts_minimal_arguments(tmp_path):
+async def test_grep_tool_invocation_accepts_minimal_arguments(agent_workspace):
+    tmp_path = agent_workspace
     module = _load_search_tools_module()
     sample = tmp_path / "sample.py"
     sample.write_text("def useful_function():\n    return 42\n", encoding="utf-8")
@@ -49,7 +50,8 @@ async def test_grep_tool_rejects_empty_pattern(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_glob_tool_finds_directories_recursively(tmp_path):
+async def test_glob_tool_finds_directories_recursively(agent_workspace):
+    tmp_path = agent_workspace
     module = _load_search_tools_module()
     (tmp_path / "ocr_output_TLV_123").mkdir()
     (tmp_path / "ocr_output_TLV_123" / "file.txt").write_text("x", encoding="utf-8")
