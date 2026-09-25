@@ -30,7 +30,7 @@
 | Что | Зачем |
 |---|---|
 | Docker Desktop (Windows, macOS) или Docker Engine с Compose v2 (Linux) | образы, мастерская, испытания |
-| Python 3.10+ и Git на хосте | контроллер `grid-control` |
+| Python 3.11+ и Git на хосте | контроллер `grid-control` |
 | Grid, установленный на хосте: `pip install -e .` в корне репозитория | даёт команды `grid-control`, `grid-workshop` |
 | Ключ провайдера моделей, например `OPENROUTER_API_KEY` | администратор, роутер и агенты кандидатов |
 | 15 ГБ свободного места | образы (~2,3 ГБ каждый), кандидаты, кэш сборки |
