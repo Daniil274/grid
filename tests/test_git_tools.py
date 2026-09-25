@@ -127,7 +127,6 @@ class TestGitCommandRunner:
             assert mock_log_custom.call_count >= 2
 
 
-@pytest.mark.skip(reason="Git integration tests - temporarily disabled")
 class TestGitToolsIntegration:
     """Integration tests for Git tools with real Git operations."""
     
@@ -170,7 +169,6 @@ class TestGitToolsIntegration:
                 assert result["success"] is True
 
 
-@pytest.mark.skip(reason="Edge case Git tests - temporarily disabled")
 class TestGitToolsEdgeCases:
     """Test edge cases and error conditions for Git tools."""
     
@@ -204,7 +202,7 @@ class TestGitToolsEdgeCases:
             result = _run_git_command(["git", "log"])
             
             assert result["success"] is True
-            assert len(result["output"]) > 50000
+            assert result["output"] == large_output.strip()  # nothing is cut off
     
     def test_git_command_partial_dangerous_match(self):
         """Test that partial matches don't trigger dangerous command block."""
@@ -240,7 +238,8 @@ class TestGitToolsEdgeCases:
         
         def git_operation(thread_id):
             try:
-                result = git_status(str(mock_git_repo))
+                result = _run_git_command(["git", "status"], cwd=str(mock_git_repo))
+                assert result["success"], result
                 results.append(("success", result))
             except Exception as e:
                 results.append(("error", str(e)))

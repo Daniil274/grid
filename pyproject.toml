@@ -99,7 +99,6 @@ only-include = [
     "grid.py",
     "grid_mcp.py",
     "grid_control",
-    "benchmarks",
     "context_inspector",
     "core",
     "schemas",

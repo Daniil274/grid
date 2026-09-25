@@ -1,9 +1,0 @@
-id: get-context
-agent: chat_agent
-owner: system
-source: manual-stage1
-tags: [introspection, context]
-prompt: "Show the current execution context and tell me what environment you are running in."
-required_tools: ["system_get_context"]
-forbidden_substrings: ["ERROR:"]
-max_latency_ms: 120000

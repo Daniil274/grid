@@ -562,20 +562,6 @@ class Config:
         """Get maximum turns limit for agents."""
         return self.config.settings.max_turns
 
-    def get_improvement_config(self):
-        """Get controlled self-improvement configuration."""
-        return self.config.improvement
-
-    def get_system_registry_path(self) -> str:
-        """Get absolute path to the system platform registry."""
-        registry_path = self.config.settings.platform.registry_path
-        return self.get_absolute_path(registry_path)
-
-    def get_pattern_registry_path(self) -> str:
-        """Get absolute path to the pattern registry used by the platform."""
-        registry_path = self.config.settings.platform.pattern_registry_path
-        return self.get_absolute_path(registry_path)
-    
     def get_agent_timeout(self) -> int:
         """Get agent execution timeout in seconds."""
         return self.config.settings.agent_timeout

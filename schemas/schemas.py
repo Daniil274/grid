@@ -184,14 +184,6 @@ class WindowConfig(BaseModel):
     model_config = {"extra": "ignore"}
 
 
-class PlatformConfig(BaseModel):
-    """Configuration for the self-organizing system platform."""
-    enabled: bool = False
-    registry_path: str = "data/system_registry.json"
-    pattern_registry_path: str = "data/pattern_registry.json"
-    default_actor_role: str = "builder_agent"
-
-
 class Settings(BaseModel):
     """Global system settings."""
     action_policy: ActionPolicyConfig = Field(default_factory=ActionPolicyConfig)
@@ -230,7 +222,6 @@ class Settings(BaseModel):
         default=None,
         description="Proxy for all outgoing requests (API, Telegram). Example: http://127.0.0.1:10809"
     )
-    platform: PlatformConfig = Field(default_factory=PlatformConfig)
     serial: Optional[SerialConfig] = Field(
         default=None,
         description="Serial settings for ISKOR: number of retries per command and command timeout"
@@ -268,28 +259,6 @@ class RoutingConfig(BaseModel):
     )
 
 
-class ImprovementConfig(BaseModel):
-    """Configuration for the staged self-improvement loop."""
-
-    enabled: bool = False
-    registry_path: str = "data/improvement_registry.json"
-    plans_directory: str = "plans"
-    require_human_requirements_review: bool = True
-    require_human_final_review: bool = True
-    auto_promote_safe_changes: bool = False
-    auto_evaluate_proposed_experiments: bool = False
-    allowed_change_types: List[str] = Field(
-        default_factory=lambda: ["tests", "logging", "refactor", "diagnostics"]
-    )
-    allowed_paths: List[str] = Field(default_factory=list)
-    allowed_config_keys: List[str] = Field(default_factory=list)
-    max_open_experiments: int = Field(default=5, ge=1, le=100)
-    require_benchmark_before_promotion: bool = False
-    promotion_threshold: float = Field(default=0.0, ge=-1.0, le=1.0)
-    rollback_threshold: float = Field(default=-0.03, ge=-1.0, le=1.0)
-    canary_window_minutes: int = Field(default=30, ge=1, le=1440)
-
-
 class GridConfig(BaseModel):
     """Complete Grid system configuration."""
     settings: Settings = Field(default_factory=Settings)
@@ -303,7 +272,6 @@ class GridConfig(BaseModel):
     scenarios: Optional[Dict[str, Any]] = None
     telegram: Optional[Dict[str, Any]] = None  # telegram bot config, incl. proxy for API requests
     voice: Dict[str, Any] = Field(default_factory=dict, description="Local web speech and voice routing settings")
-    improvement: ImprovementConfig = Field(default_factory=ImprovementConfig, description="Controlled self-improvement loop configuration")
     routing: RoutingConfig = Field(default_factory=RoutingConfig, description="Automatic system and agent routing")
     
     @field_validator('agents')
@@ -414,156 +382,6 @@ class AgentExecution(BaseModel):
     error: Optional[str] = None
     tools_used: List[str] = Field(default_factory=list)
     token_usage: Optional[Dict[str, int]] = None
-
-
-# =============================================================================
-# Social Intelligence Framework Schemas
-# =============================================================================
-
-
-class BlackboardConfig(BaseModel):
-    """Configuration for blackboard shared memory."""
-    enabled: bool = True
-    persist_path: str = "logs/blackboard.json"
-    max_entries: int = Field(default=1000, ge=100, le=10000)
-    entry_ttl_hours: int = Field(default=24, ge=1, le=168)
-
-
-class PipelineMemoryConfig(BaseModel):
-    """Configuration for pipeline memory."""
-    enabled: bool = True
-    persist_path: str = "logs/pipeline_memory.json"
-    similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
-    min_success_score: float = Field(default=0.6, ge=0.0, le=1.0)
-    max_pipelines: int = Field(default=500, ge=10, le=5000)
-
-
-class PrimitivesConfig(BaseModel):
-    """Configuration for pipeline primitives."""
-    default_validation: bool = True
-    critique_model: Optional[str] = None
-    validator_model: Optional[str] = None
-    max_parallel_branches: int = Field(default=5, ge=1, le=20)
-
-
-class MetaOrchestratorConfig(BaseModel):
-    """Configuration for meta-orchestrator behavior."""
-    auto_learn: bool = True
-    reuse_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
-    exploration_rate: float = Field(default=0.2, ge=0.0, le=1.0)
-
-
-class RefinementConfig(BaseModel):
-    """Configuration for iterative refinement."""
-    max_iterations: int = Field(default=2, ge=0, le=5)
-    enabled: bool = True
-    revise_model: Optional[str] = None
-
-
-class SocialIntelligenceConfig(BaseModel):
-    """Configuration for Social Intelligence Framework."""
-    enabled: bool = True
-    blackboard: BlackboardConfig = Field(default_factory=BlackboardConfig)
-    pipeline_memory: PipelineMemoryConfig = Field(default_factory=PipelineMemoryConfig)
-    primitives: PrimitivesConfig = Field(default_factory=PrimitivesConfig)
-    meta_orchestrator: MetaOrchestratorConfig = Field(default_factory=MetaOrchestratorConfig)
-    refinement: RefinementConfig = Field(default_factory=RefinementConfig)
-
-
-class PipelineStepSchema(BaseModel):
-    """Schema for a pipeline step."""
-    primitive: str = Field(..., description="Primitive operation: execute, critique, validate, synthesize, branch, vote")
-    params: Dict[str, Any] = Field(default_factory=dict)
-    input_from: Optional[str] = Field(default=None, description="Reference to previous step output")
-    output_key: str = Field(default="output", description="Key for storing this step's output")
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class PipelineRecordSchema(BaseModel):
-    """Schema for a recorded pipeline."""
-    id: str
-    name: str
-    description: str
-    task_pattern: str
-    task_examples: List[str] = Field(default_factory=list)
-    steps: List[PipelineStepSchema]
-    success_score: float = Field(ge=0.0, le=1.0)
-    usage_count: int = Field(ge=0)
-    success_count: int = Field(ge=0)
-    failure_count: int = Field(ge=0)
-    created_at: str
-    last_used: str
-    parent_id: Optional[str] = None
-    tags: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class BlackboardEntrySchema(BaseModel):
-    """Schema for a blackboard entry."""
-    id: str
-    entry_type: str = Field(..., description="Type: hypothesis, fact, critique, vote, artifact, signal, decision, pipeline")
-    author: str
-    content: Any
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    timestamp: str
-    parent_id: Optional[str] = None
-    tags: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class PrimitiveResultSchema(BaseModel):
-    """Schema for primitive operation result."""
-    primitive: str
-    success: bool
-    output: Any
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    error: Optional[str] = None
-    execution_time_ms: int = Field(default=0, ge=0)
-    agent_name: Optional[str] = None
-
-
-class CritiqueResultSchema(BaseModel):
-    """Schema for critique operation result."""
-    issues: List[str] = Field(default_factory=list)
-    strengths: List[str] = Field(default_factory=list)
-    suggestions: List[str] = Field(default_factory=list)
-    severity: str = Field(default="none", description="none, minor, major, critical")
-    overall_score: float = Field(ge=0.0, le=1.0)
-    raw_output: str = ""
-
-
-class VoteResultSchema(BaseModel):
-    """Schema for vote operation result."""
-    vote: str = Field(..., description="approve, reject, abstain")
-    confidence: float = Field(ge=0.0, le=1.0)
-    reasoning: str = ""
-    perspective: str
-    conditions: List[str] = Field(default_factory=list)
-
-
-class ValidationResultSchema(BaseModel):
-    """Schema for validation operation result."""
-    valid: bool
-    issues: List[Dict[str, Any]] = Field(default_factory=list)
-    confidence: float = Field(ge=0.0, le=1.0)
-    checks_performed: List[str] = Field(default_factory=list)
-    raw_output: str = ""
-
-
-class OrchestrateResultSchema(BaseModel):
-    """Schema for orchestrate tool result."""
-    task: str
-    mode: str
-    model_key: str
-    executor_tools: List[str] = Field(default_factory=list)
-    final: str
-    pipeline_id: Optional[str] = None
-    pipeline_used: Optional[str] = None
-    blackboard_entries: List[str] = Field(default_factory=list)
-    validation: Optional[ValidationResultSchema] = None
-    committee: Optional[Dict[str, Any]] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 # =============================================================================
