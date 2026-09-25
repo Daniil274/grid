@@ -9,7 +9,7 @@ settings:
   debug: true
   mcp_enabled: true
   max_tool_output_tokens: 12000
-  working_directory: "/home/user/grid/examples/coder/workspace"
+  working_directory: "./workspace"
   config_directory: "."
   allow_path_override: true
   agent_logging:

@@ -9,7 +9,7 @@ settings:
   debug: true
   mcp_enabled: false
   max_tool_output_tokens: 12000
-  working_directory: "C:/Users/danii/Videos"
+  working_directory: "~/Videos"
   config_directory: "."
   allow_path_override: true
 
