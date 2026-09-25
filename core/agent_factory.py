@@ -43,7 +43,6 @@ from agents.exceptions import (
 )
 from core.vision_model import VisionChatCompletionsModel
 from agents.mcp import MCPServerStdio
-from agents.mcp.util import MCPUtil as _MCPUtil
 from core.managers.mcp_manager import ResilientMCPServerStdio
 
 from core.config.config import Config
@@ -65,6 +64,8 @@ from core.tracing.config import get_tracing_config, ImmediateTraceProcessor
 from core.managers.skill_manager import SkillManager
 from core.application.agent_runtime_support import AgentRuntimeSupport
 from core.fallback_model import AllModelsFailedError, FallbackModel, ModelCandidate
+from core import sdk_patches
+from core.sdk_patches import tool_error_output
 
 # Compact system integration
 from core.compact import (
@@ -78,77 +79,6 @@ from core.compact import (
     estimate_messages_tokens,
 )
 
-# --- Patch: MCP tools must return errors to the agent, not crash the run ---
-# Unlike function_tool() which has failure_error_function wrapper,
-# MCPUtil.invoke_mcp_tool raises ModelBehaviorError (e.g. invalid JSON) directly,
-# which kills the entire run. We wrap it so errors are returned as tool output.
-_original_invoke_mcp_tool = _MCPUtil.__dict__["invoke_mcp_tool"].__func__
-
-
-@classmethod  # type: ignore[misc]
-async def _invoke_mcp_tool_safe(cls, server, tool, context, input_json):  # type: ignore[override]
-    async def _invoke(ctx, args):
-        return await _original_invoke_mcp_tool(cls, server, tool, ctx, args)
-
-    raw_ctx = getattr(context, "context", None)
-    gate = getattr(getattr(raw_ctx, "factory", None), "action_gate", None)
-    try:
-        if gate is not None:
-            result = await gate.invoke(
-                getattr(tool, "name", "mcp_tool"),
-                "mcp",
-                context,
-                input_json,
-                _invoke,
-                descriptor=ActionGate.describe_tool(
-                    tool, getattr(tool, "name", "mcp_tool"), "mcp"
-                ),
-            )
-        else:
-            result = await _invoke(context, input_json)
-        # Log the full result of the MCP tool call in verbose mode
-        Logger("agent_factory").log_verbose(
-            f"MCP TOOL RESULT: {tool.name}",
-            result if isinstance(result, str) else str(result),
-        )
-        return result
-    except ModelBehaviorError as e:
-        msg = str(e)
-        # Try to extract the underlying JSON decode error for a clearer hint
-        cause = getattr(e, "__cause__", None)
-        if cause and hasattr(cause, "msg"):
-            msg = f"Invalid JSON for tool '{tool.name}': {cause.msg} (input was: {input_json!r})"
-        else:
-            msg = f"Invalid JSON for tool '{tool.name}': {msg}"
-        logger.warning(
-            "MCP tool '%s' got invalid JSON from model — returning error to agent: %s",
-            tool.name,
-            msg,
-        )
-        return msg
-    except Exception as e:
-        # Server-side failures (unknown tool, timeout, dropped connection) arrive
-        # as AgentsException/UserError, which would abort the run as well.
-        return tool_error_output(getattr(tool, "name", "mcp_tool"), e)
-
-
-def tool_error_output(tool_name: str, exc: BaseException) -> str:
-    """The text an agent gets when a tool call fails, instead of a dead run."""
-    logger.warning(
-        "Tool '%s' failed — returning error to agent: %s: %s",
-        tool_name,
-        type(exc).__name__,
-        exc,
-    )
-    detail = str(exc) or type(exc).__name__
-    return (
-        f"Error: tool '{tool_name}' failed: {detail}. "
-        "Check the tool name and arguments, then retry or continue without it."
-    )
-
-
-_MCPUtil.invoke_mcp_tool = _invoke_mcp_tool_safe
-# -------------------------------------------------------------------------
 
 import os
 import re
@@ -157,142 +87,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+sdk_patches.install()
 load_dotenv()
 tracing_config = get_tracing_config()
 
 CONTEXT_ID_REGEX = re.compile(r"ctx-[0-9a-fA-F]{8,}")
 
-# Monkey-patch: resolve tool names and return missing-tool errors to the agent.
-# The SDK raises ModelBehaviorError for unknown tool names, which aborts the run.
-# MCP tools already have a similar patch above; this covers function tool calls.
-_MODEL_TOOL_SHORTCUTS = {
-    "read": "file_read",
-    "write": "file_write",
-    "edit": "file_edit",
-    "grep": "grep_tool",
-    "glob": "glob_tool",
-    "bash": "bash_tool",
-}
-
-
-_CHANNEL_SUFFIX = re.compile(
-    r"(?:<\|channel\|>|[._])(?:commentary|analysis|final|tool)$", re.IGNORECASE
-)
-
-
-def _resolve_model_tool_name(name: str, function_map: dict) -> str:
-    """Map model-generated tool names to registered agent tools."""
-    name = name.strip()
-    if name in function_map:
-        return name
-
-    try:
-        from tools.function_tools import TOOL_ALIASES
-    except ImportError:
-        TOOL_ALIASES = {}
-
-    candidates = (
-        TOOL_ALIASES.get(name),
-        _MODEL_TOOL_SHORTCUTS.get(name),
-        TOOL_ALIASES.get(_MODEL_TOOL_SHORTCUTS.get(name, "")),
-    )
-    for candidate in candidates:
-        if candidate and candidate in function_map:
-            return candidate
-
-    # Harmony-format models sometimes glue the channel onto the tool name:
-    # "call_worker<|channel|>commentary", "call_worker_commentary". Checked
-    # after the aliases, some of which legitimately end in such a word.
-    bare = _CHANNEL_SUFFIX.sub("", name).strip()
-    if bare and bare != name:
-        resolved = _resolve_model_tool_name(bare, function_map)
-        if resolved in function_map:
-            return resolved
-    return name
-
-
-def _build_missing_tool_stub(tool_name: str, available: list[str]):
-    """Create a stub FunctionTool that returns an error message to the agent."""
-    from agents.tool import FunctionTool
-
-    import difflib
-
-    close = difflib.get_close_matches(tool_name, available, n=3, cutoff=0.5)
-
-    async def _on_invoke_tool(_ctx, _input: str) -> str:
-        preview = ", ".join(sorted(available)[:40])
-        suffix = "..." if len(available) > 40 else ""
-        hint = f" Did you mean: {', '.join(close)}?" if close else ""
-        return (
-            f"Error: Tool '{tool_name}' is not available.{hint} "
-            f"Available tools include: {preview}{suffix}"
-        )
-
-    return FunctionTool(
-        name=tool_name,
-        description=f"Missing tool stub for {tool_name}",
-        params_json_schema={},
-        on_invoke_tool=_on_invoke_tool,
-        strict_json_schema=False,
-        is_enabled=True,
-    )
-
-
-def _patch_run_impl_tool_name_normalization() -> None:
-    try:
-        from agents import _run_impl
-        from agents.tool import FunctionTool
-        from openai.types.responses import ResponseFunctionToolCall
-
-        original_process = _run_impl.RunImpl.process_model_response.__func__  # type: ignore[attr-defined]
-
-        @classmethod  # type: ignore[misc]
-        def _patched_process(cls, *, agent, all_tools, response, output_schema, handoffs):  # type: ignore[override]
-            function_map = {
-                tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)
-            }
-            handoff_names = {handoff.tool_name for handoff in handoffs}
-            extra_tools = []
-
-            for item in getattr(response, "output", []):
-                if not isinstance(item, ResponseFunctionToolCall):
-                    continue
-
-                name = getattr(item, "name", None)
-                if not isinstance(name, str):
-                    continue
-
-                resolved = _resolve_model_tool_name(name, function_map)
-                if resolved != name:
-                    try:
-                        object.__setattr__(item, "name", resolved)
-                    except (AttributeError, TypeError):
-                        pass
-                    name = resolved
-
-                if name in function_map or name in handoff_names:
-                    continue
-
-                stub = _build_missing_tool_stub(name, list(function_map.keys()))
-                extra_tools.append(stub)
-                function_map[name] = stub
-
-            extended_tools = list(all_tools) + extra_tools
-            return original_process(
-                cls,
-                agent=agent,
-                all_tools=extended_tools,
-                response=response,
-                output_schema=output_schema,
-                handoffs=handoffs,
-            )
-
-        _run_impl.RunImpl.process_model_response = _patched_process
-    except Exception:
-        pass  # Patch is best-effort; do not break startup if SDK internals change
-
-
-_patch_run_impl_tool_name_normalization()
 logger = logging.getLogger("grid.agent_factory")
 verbose_logger = logging.getLogger("grid.verbose")
 _TRACING_CONFIGURED = False
@@ -3990,7 +3790,7 @@ DO NOT write XML tags manually!"""
 
                 # Wrap for logging
                 # Channel suffixes the model glues onto the name
-                # ("<name>_commentary") are resolved by _resolve_model_tool_name.
+                # ("<name>_commentary") are resolved by sdk_patches.resolve_model_tool_name.
                 wrapped_main = self._wrap_agent_tool(main_tool, target_agent_name)
                 tools.append(wrapped_main)
 

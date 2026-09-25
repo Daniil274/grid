@@ -24,11 +24,8 @@ from openai.types.responses import (
 )
 
 from core.action_policy import ActionRunState
-from core.agent_factory import (
-    AgentFactory,
-    _build_missing_tool_stub,
-    _resolve_model_tool_name,
-)
+from core.agent_factory import AgentFactory
+from core.sdk_patches import missing_tool_stub, resolve_model_tool_name
 from core.config import Config
 from tests.test_action_policy import call, setup_gate
 
@@ -167,7 +164,7 @@ async def test_an_unknown_tool_is_reported_with_the_closest_names():
     ["call_worker<|channel|>commentary", "call_worker_commentary", "call_worker.final"],
 )
 def test_a_channel_suffix_resolves_to_the_tool(called):
-    assert _resolve_model_tool_name(called, {"call_worker": object()}) == "call_worker"
+    assert resolve_model_tool_name(called, {"call_worker": object()}) == "call_worker"
 
 
 def test_an_alias_is_resolved_before_a_suffix_is_stripped(monkeypatch):
@@ -177,17 +174,17 @@ def test_an_alias_is_resolved_before_a_suffix_is_stripped(monkeypatch):
     )
     tools = {"record_final_review": object(), "improvement_review": object()}
     assert (
-        _resolve_model_tool_name("improvement_review_final", tools)
+        resolve_model_tool_name("improvement_review_final", tools)
         == "record_final_review"
     )
 
 
 def test_an_unresolvable_name_is_kept_for_the_error_message():
-    assert _resolve_model_tool_name("nothing_final", {"x": object()}) == "nothing_final"
+    assert resolve_model_tool_name("nothing_final", {"x": object()}) == "nothing_final"
 
 
 async def test_missing_tool_stub_without_close_names_lists_the_tools():
-    stub = _build_missing_tool_stub("zzz", ["alpha", "beta"])
+    stub = missing_tool_stub("zzz", ["alpha", "beta"])
     text = await stub.on_invoke_tool(None, "{}")
     assert "Did you mean" not in text and "alpha, beta" in text
 
@@ -338,3 +335,12 @@ async def test_agent_tool_accepts_the_documented_argument_aliases(
         assert "report" in output
 
     assert inputs == ["Check core/", "Check core/"]
+
+
+def test_patches_fail_loudly_when_the_sdk_internals_move(monkeypatch):
+    from agents import _run_impl
+    from core import sdk_patches
+
+    monkeypatch.delattr(_run_impl.RunImpl, "process_model_response")
+    with pytest.raises(RuntimeError, match="openai-agents internals changed"):
+        sdk_patches.install()

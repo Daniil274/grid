@@ -1,7 +1,7 @@
 # Grid Agent System Dependencies
 
 # Core AI framework
-openai-agents>=0.2.6  # AGENTS SDK
+openai-agents>=0.7,<0.8  # core/sdk_patches.py replaces SDK internals: bump only with it
 mcp>=1.19,<2  # FastMCP v1 API used by grid_mcp.py
 
 # HTTP and API clients

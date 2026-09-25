@@ -707,24 +707,24 @@ async def test_factory_routes_real_tool_calls_through_the_gate(tmp_path, monkeyp
         await factory.cleanup()
 
 
-async def test_mcp_sdk_hook_routes_calls_through_the_context_gate(monkeypatch):
-    import core.agent_factory as agent_factory_module
+async def test_mcp_sdk_hook_routes_calls_through_the_context_gate():
+    from agents.mcp.util import MCPUtil
+
+    import core.agent_factory  # noqa: F401  installs the SDK patches
 
     gate, _, _, ctx = setup_gate(("deny", "deny"))
     ctx.context.factory = SimpleNamespace(action_gate=gate)
-    original = AsyncMock(return_value="executed")
-    monkeypatch.setattr(agent_factory_module, "_original_invoke_mcp_tool", original)
+    server = SimpleNamespace(name="server", call_tool=AsyncMock())
 
-    result = await agent_factory_module._invoke_mcp_tool_safe.__func__(
-        object,
-        SimpleNamespace(name="server"),
-        SimpleNamespace(name="remote_delete"),
+    result = await MCPUtil.invoke_mcp_tool(
+        server,
+        SimpleNamespace(name="remote_delete", annotations=None, description=""),
         ctx,
         json.dumps({"path": "out.txt"}),
     )
 
     assert json.loads(result)["rule"] == "policy_deny"
-    original.assert_not_awaited()
+    server.call_tool.assert_not_awaited()
 
 
 async def test_agent_tool_wrapper_routes_delegation_through_the_gate():
