@@ -1,11 +1,12 @@
 """Commands must remain responsive while agent inference is suspended."""
 
 import asyncio
-import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+from core.context import ContextManager
 from fastapi import WebSocketDisconnect
 
 from web_chat.session import chat_session
@@ -38,7 +39,8 @@ class Socket:
 
 def server_for(run):
     """A server whose single system 's' holds one agent 'a' running *run*."""
-    manager = SimpleNamespace(_lock=threading.RLock(), _contexts={'ctx': {'conversation': []}}, persist_path=None)
+    manager = ContextManager()
+    manager.ensure_context('ctx')
     factory = SimpleNamespace(run_agent=run)
 
     async def resolve_turn(message, **kwargs):

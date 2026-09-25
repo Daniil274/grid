@@ -1007,7 +1007,8 @@ class AgentFactory:
         tool_events.append(event)
         pending["tool_events"] = tool_events[-100:]
         pending["updated_at"] = datetime.now().isoformat()
-        self.context_manager.set_metadata("pending_agent_run", pending)
+        # Saved with the next status change, not once per tool call.
+        self.context_manager.set_metadata("pending_agent_run", pending, persist=False)
 
     @staticmethod
     def _message_looks_transient_provider_error(message: str) -> bool:

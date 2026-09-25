@@ -257,7 +257,7 @@ def test_resubmitting_the_same_candidate_is_counted():
 
 
 def test_an_answer_check_that_matches_the_grid_footer_is_refused():
-    footer_check = {"name": "t-a", "message": "a", "system": "video", "output_matches": "[а-яА-Я]{6,}"}
+    footer_check = {"name": "t-a", "message": "a", "system": "video", "output_matches": "[A-Za-z]{6,}"}
     with pytest.raises(ValueError, match="footer"):
         case(targets=(footer_check,))
     ok = {**footer_check, "output_matches": "(?:[а-яА-Я]{3,}[\s,.]+){4}"}

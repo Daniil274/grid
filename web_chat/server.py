@@ -9,7 +9,6 @@ from fastapi import FastAPI, Header, HTTPException, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.context import safe_lock
 from core.tool_check import summarize
 from web_chat.runtime import WebChatRuntime
 from web_chat.schemas import (
@@ -71,16 +70,11 @@ class WebChatServer:
         active = self._chat_turns.get(context_id)
         return active is not None and not active[1].done()
 
-    @staticmethod
-    def _persist(context_manager: Any) -> None:
-        if getattr(context_manager, "persist_path", None) and not getattr(context_manager, "read_only", False):
-            context_manager._save_to_file()
-
-    def _conversation_title(self, bucket: dict[str, Any]) -> str:
-        metadata = bucket.get("metadata") or {}
+    def _conversation_title(self, view: dict[str, Any]) -> str:
+        metadata = view["metadata"]
         if metadata.get("title") and metadata.get("title") != "New chat":
             return metadata["title"]
-        for msg in bucket.get("conversation", []):
+        for msg in view["messages"]:
             if getattr(msg, "role", None) == "user":
                 text = msg.get_text_content() if hasattr(msg, "get_text_content") else str(getattr(msg, "content", ""))
                 text = " ".join(text.split())
@@ -283,29 +277,27 @@ class WebChatServer:
         @app.get("/api/chat/conversations")
         async def list_conversations() -> JSONResponse:
             items: list[dict[str, Any]] = []
-            context_manager = self.runtime.context_manager()
-            with safe_lock(context_manager._lock):
-                for context_id, bucket in context_manager._contexts.items():
-                    metadata = bucket.get("metadata") or {}
-                    if not bucket.get("conversation") and not metadata.get("created_by_web"):
-                        continue
-                    # The pinned selection is what the user chose; the routed pair
-                    # is who actually answered last - the rail shows the latter.
-                    items.append(
-                        {
-                            "id": context_id,
-                            "title": self._conversation_title(bucket),
-                            "updated_at": bucket.get("updated_at"),
-                            "system_key": metadata.get("system_key"),
-                            "agent_key": metadata.get("agent_key"),
-                            "routed_system": metadata.get("routed_system"),
-                            "routed_agent": metadata.get("routed_agent"),
-                            "message_count": sum(
-                                1 for msg in bucket.get("conversation") or [] if not is_tool_result(msg)
-                            ),
-                            "active": self.turn_is_running(context_id),
-                        }
-                    )
+            for view in self.runtime.context_manager().conversation_views():
+                metadata = view["metadata"]
+                if not view["messages"] and not metadata.get("created_by_web"):
+                    continue
+                # The pinned selection is what the user chose; the routed pair
+                # is who actually answered last - the rail shows the latter.
+                items.append(
+                    {
+                        "id": view["id"],
+                        "title": self._conversation_title(view),
+                        "updated_at": view["updated_at"],
+                        "system_key": metadata.get("system_key"),
+                        "agent_key": metadata.get("agent_key"),
+                        "routed_system": metadata.get("routed_system"),
+                        "routed_agent": metadata.get("routed_agent"),
+                        "message_count": sum(
+                            1 for msg in view["messages"] if not is_tool_result(msg)
+                        ),
+                        "active": self.turn_is_running(view["id"]),
+                    }
+                )
             items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
             return JSONResponse(items)
 
@@ -327,43 +319,32 @@ class WebChatServer:
             title = " ".join(body.title.split())
             if not title:
                 raise HTTPException(status_code=400, detail="Title must not be empty")
-            context_manager = self.runtime.context_manager()
-            with safe_lock(context_manager._lock):
-                bucket = context_manager._contexts.get(context_id)
-                if not bucket:
-                    raise HTTPException(status_code=404, detail="Conversation not found")
-                # A title the user chose outranks the one derived from messages.
-                bucket.setdefault("metadata", {}).update(title=title, title_locked=True)
-                self._persist(context_manager)
+            # A title the user chose outranks the one derived from messages.
+            if not self.runtime.context_manager().update_context_metadata(
+                context_id, {"title": title, "title_locked": True}, create=False
+            ):
+                raise HTTPException(status_code=404, detail="Conversation not found")
             return JSONResponse({"id": context_id, "title": title})
 
         @app.delete("/api/chat/conversations/{context_id}")
         async def delete_conversation(context_id: str) -> JSONResponse:
             if self.turn_is_running(context_id):
                 raise HTTPException(status_code=409, detail="Stop the running turn before deleting this chat")
-            context_manager = self.runtime.context_manager()
-            with safe_lock(context_manager._lock):
-                if context_manager._contexts.pop(context_id, None) is None:
-                    raise HTTPException(status_code=404, detail="Conversation not found")
-                if context_manager._current_context_id == context_id:
-                    # Never leave the manager pointing at buffers that are gone.
-                    context_manager._activate_context(context_manager._create_context())
-                self._persist(context_manager)
+            if not self.runtime.context_manager().delete_context(context_id):
+                raise HTTPException(status_code=404, detail="Conversation not found")
             return JSONResponse({"id": context_id, "deleted": True})
 
         @app.get("/api/chat/conversations/{context_id}")
         async def get_conversation(context_id: str) -> JSONResponse:
-            context_manager = self.runtime.context_manager()
-            with safe_lock(context_manager._lock):
-                bucket = context_manager._contexts.get(context_id)
-                if not bucket:
-                    raise HTTPException(status_code=404, detail="Conversation not found")
-                messages = [
-                    self._serialize_message(msg)
-                    for msg in bucket.get("conversation") or []
-                    if not is_tool_result(msg)
-                ]
-                metadata = dict(bucket.get("metadata") or {})
+            view = self.runtime.context_manager().conversation_view(context_id)
+            if view is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            messages = [
+                self._serialize_message(msg)
+                for msg in view["messages"]
+                if not is_tool_result(msg)
+            ]
+            metadata = view["metadata"]
             active = self._chat_turns.get(context_id)
             active_turn = (
                 {"message": active[0].message, "elapsed_ms": active[0].elapsed_ms}

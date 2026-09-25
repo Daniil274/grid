@@ -27,7 +27,6 @@ from typing import Any, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from core.context import safe_lock
 from core.tool_check import summarize
 from web_chat.observer import WebStreamObserver
 from web_chat.systems import Resolution
@@ -250,20 +249,13 @@ class AgentTurn:
 
     # -- persistence -------------------------------------------------------
     def _persist_trace(self) -> None:
-        manager = self._session.manager
-        with safe_lock(manager._lock):
-            bucket = manager._contexts.get(self._session.context_id)
-            conversation = (bucket or {}).get("conversation")
-            if not conversation:
-                return
-            last = conversation[-1]
-            if getattr(last, "role", None) != "assistant" or is_tool_result(last):
-                # No answer of this turn was stored (it was stopped); the only
-                # assistant entries are sub-agent reports, which are not answers.
-                return
-            last.metadata = {**(last.metadata or {}), "trace": self._recorder.snapshot()}
-            if manager.persist_path:
-                manager._save_to_file()
+        # Only onto this turn's answer: a stopped turn stored none, and the other
+        # assistant entries are sub-agent reports, which are not answers.
+        self._session.manager.update_last_message_metadata(
+            self._session.context_id,
+            {"trace": self._recorder.snapshot()},
+            when=lambda last: last.role == "assistant" and not is_tool_result(last),
+        )
 
 
 class ChatSession:
@@ -283,9 +275,7 @@ class ChatSession:
 
     async def serve(self) -> None:
         await self._socket.accept()
-        with safe_lock(self.manager._lock):
-            if self.context_id not in self.manager._contexts:
-                self.manager._create_context(self.context_id)
+        self.manager.ensure_context(self.context_id)
         try:
             while True:
                 await self._dispatch(await self._socket.receive_text())

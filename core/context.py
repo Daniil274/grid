@@ -2,7 +2,8 @@
 Advanced context management for Grid agents with memory and persistence.
 """
 
-from typing import List, Dict, Optional, Any, Union
+import os
+from typing import Callable, List, Dict, Optional, Any, Union
 from datetime import datetime
 from threading import Lock
 from contextlib import contextmanager
@@ -60,6 +61,7 @@ class ContextManager:
 
         self._lock = Lock()
         self._contexts: Dict[str, Dict[str, Any]] = {}
+        self._encoded: Dict[str, str] = {}  # context id -> JSON, for unchanged contexts
         self._current_context_id: Optional[str] = None
 
         # Active buffers are assigned via _activate_context
@@ -129,8 +131,7 @@ class ContextManager:
         """Public helper to switch to a specific context ID, creating it if needed."""
         with safe_lock(self._lock, timeout=5.0):
             active_id = self._activate_context(context_id)
-            if self.persist_path and not self.read_only:
-                self._save_to_file()
+            self._save_to_file()
             return active_id
 
     def start_new_context(self, context_id: Optional[str] = None) -> str:
@@ -145,8 +146,7 @@ class ContextManager:
             bucket["created_at"] = now_iso
             bucket["updated_at"] = now_iso
             self._activate_context(new_id)
-            if self.persist_path and not self.read_only:
-                self._save_to_file()
+            self._save_to_file()
             return new_id
 
     def get_current_context_id(self) -> Optional[str]:
@@ -344,8 +344,7 @@ class ContextManager:
                         active_bucket["updated_at"] = datetime.now().isoformat()
 
                     # Persist if configured
-                    if self.persist_path and not self.read_only:
-                        self._save_to_file()
+                    self._save_to_file()
 
                 except Exception as e:
                     raise ContextError(f"Failed to add message: {e}")
@@ -374,8 +373,7 @@ class ContextManager:
                 if active_bucket is not None:
                     active_bucket["updated_at"] = datetime.now().isoformat()
 
-                if self.persist_path and not self.read_only:
-                    self._save_to_file()
+                self._save_to_file()
         except ContextError as exc:
             logger.error("Lock timeout in replace_conversation_history", exc_info=exc)
             raise
@@ -395,8 +393,7 @@ class ContextManager:
                     active_bucket["updated_at"] = datetime.now().isoformat()
 
                 # Persist if configured
-                if self.persist_path and not self.read_only:
-                    self._save_to_file()
+                self._save_to_file()
         except ContextError:
             logger.warning(
                 "Execution history record dropped due to lock timeout",
@@ -606,14 +603,19 @@ class ContextManager:
             logger.warning("Lock timeout in get_last_assistant_message")
             return None
     
-    def set_metadata(self, key: str, value: Any) -> None:
-        """Set context metadata."""
+    def set_metadata(self, key: str, value: Any, *, persist: bool = True) -> None:
+        """Set metadata of the active context.
+
+        ``persist=False`` keeps frequent bookkeeping (per tool call) in memory
+        until the next save instead of rewriting the file each time.
+        """
         with safe_lock(self._lock, timeout=5.0):
             self._metadata[key] = value
+            self._mark_changed(self._current_context_id)
             bucket = self._contexts.get(self._current_context_id)
             if bucket is not None:
                 bucket["updated_at"] = datetime.now().isoformat()
-            if self.persist_path and not self.read_only:
+            if persist:
                 self._save_to_file()
     
     def get_metadata(self, key: str, default: Any = None) -> Any:
@@ -632,11 +634,75 @@ class ContextManager:
             bucket = self._contexts.get(context_id)
             return copy.deepcopy(bucket["metadata"]) if bucket else {}
 
-    def update_context_metadata(self, context_id: str, updates: Dict[str, Any]) -> None:
-        """Merge *updates* into one context's metadata, creating the context."""
+    def update_context_metadata(
+        self, context_id: str, updates: Dict[str, Any], *, create: bool = True
+    ) -> bool:
+        """Merge *updates* into one context's metadata and persist it.
+
+        Returns False for an unknown context when ``create`` is False.
+        """
         with safe_lock(self._lock, timeout=5.0):
-            key = self._create_context(context_id)
-            self._contexts[key]["metadata"].update(updates)
+            if context_id not in self._contexts and not create:
+                return False
+            self._create_context(context_id)
+            self._contexts[context_id]["metadata"].update(updates)
+            self._mark_changed(context_id)
+            self._save_to_file()
+            return True
+
+    def ensure_context(self, context_id: str) -> None:
+        """Create *context_id* if it does not exist, without activating it."""
+        with safe_lock(self._lock, timeout=5.0):
+            self._create_context(context_id)
+
+    def conversation_view(self, context_id: str) -> Optional[Dict[str, Any]]:
+        """Copies of one context's messages and metadata, or None if unknown."""
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return None
+            return {
+                "id": context_id,
+                "messages": list(bucket["conversation"]),
+                "metadata": copy.deepcopy(bucket["metadata"]),
+                "updated_at": bucket.get("updated_at"),
+            }
+
+    def conversation_views(self) -> List[Dict[str, Any]]:
+        """conversation_view of every context."""
+        with safe_lock(self._lock, timeout=5.0):
+            ids = list(self._contexts)
+        return [view for view in map(self.conversation_view, ids) if view is not None]
+
+    def delete_context(self, context_id: str) -> bool:
+        """Delete a context; a new one becomes active if it was. False if unknown."""
+        with safe_lock(self._lock, timeout=5.0):
+            if self._contexts.pop(context_id, None) is None:
+                return False
+            self._encoded.pop(context_id, None)
+            if self._current_context_id == context_id:
+                # Never leave the manager pointing at buffers that are gone.
+                self._activate_context(self._create_context())
+            self._save_to_file()
+            return True
+
+    def update_last_message_metadata(
+        self,
+        context_id: str,
+        updates: Dict[str, Any],
+        when: Callable[[ContextMessage], bool],
+    ) -> bool:
+        """Merge *updates* into the last message of a context if ``when`` accepts it."""
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            conversation = bucket["conversation"] if bucket else []
+            if not conversation or not when(conversation[-1]):
+                return False
+            last = conversation[-1]
+            last.metadata = {**(last.metadata or {}), **updates}
+            self._mark_changed(context_id)
+            self._save_to_file()
+            return True
 
     def append_metadata_event(
         self,
@@ -662,8 +728,7 @@ class ContextManager:
             bucket = self._contexts.get(self._current_context_id)
             if bucket is not None:
                 bucket["updated_at"] = datetime.now().isoformat()
-            if self.persist_path and not self.read_only:
-                self._save_to_file()
+            self._save_to_file()
             return list(items)
 
     def get_incomplete_run_summary(
@@ -1253,49 +1318,65 @@ class ContextManager:
         except Exception:
             return 0.0
     
+    def _mark_changed(self, context_id: Optional[str]) -> None:
+        """Re-encode *context_id* on the next save; unchanged contexts reuse their JSON."""
+        self._encoded.pop(context_id, None)
+
+    def _encode_context(self, bucket: Dict[str, Any]) -> str:
+        return json.dumps(
+            {
+                "conversation_history": [
+                    msg.model_dump() if hasattr(msg, "model_dump") else msg
+                    for msg in bucket.get("conversation", [])
+                ],
+                "execution_history": [
+                    ex.model_dump() if hasattr(ex, "model_dump") else ex
+                    for ex in bucket.get("executions", [])
+                ],
+                "metadata": bucket.get("metadata", {}),
+                "created_at": bucket.get("created_at"),
+                "updated_at": bucket.get("updated_at"),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
     def _save_to_file(self) -> None:
-        """Save context to persistence file."""
+        """Write every context to the persistence file, atomically.
+
+        The active context is re-encoded; the others reuse the JSON cached when
+        they last changed, so a save costs one encode, not one per context. The
+        file is replaced in one step: a crash leaves the previous version.
+        """
         if self.read_only or not self.persist_path:
             return
+        self._mark_changed(self._current_context_id)
         try:
-            data = {
-                "active_context_id": self._current_context_id,
-                "contexts": {}
-            }
-
+            parts = []
             for context_id, bucket in self._contexts.items():
-                conversation_dump = []
-                for msg in bucket.get("conversation", []):
-                    if hasattr(msg, "model_dump"):
-                        conversation_dump.append(msg.model_dump())
-                    else:
-                        conversation_dump.append(msg)
-
-                execution_dump = []
-                for ex in bucket.get("executions", []):
-                    if hasattr(ex, "model_dump"):
-                        execution_dump.append(ex.model_dump())
-                    else:
-                        execution_dump.append(ex)
-
-                data["contexts"][context_id] = {
-                    "conversation_history": conversation_dump,
-                    "execution_history": execution_dump,
-                    "metadata": bucket.get("metadata", {}),
-                    "created_at": bucket.get("created_at"),
-                    "updated_at": bucket.get("updated_at"),
-                }
-            
-            # Ensure directory exists
+                encoded = self._encoded.get(context_id)
+                if encoded is None:
+                    encoded = self._encoded[context_id] = self._encode_context(bucket)
+                parts.append(json.dumps(context_id) + ":" + encoded)
+            document = (
+                '{"active_context_id":'
+                + json.dumps(self._current_context_id)
+                + ',"contexts":{'
+                + ",".join(parts)
+                + "}}"
+            )
             self.persist_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            with open(self.persist_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-                
+            partial = self.persist_path.with_name(self.persist_path.name + ".tmp")
+            partial.write_text(document, encoding="utf-8")
+            os.replace(partial, self.persist_path)
         except Exception as e:
-            # Failed to save context
             logger.error(f"Failed to save context to {self.persist_path}: {e}")
-    
+
+    def save(self) -> None:
+        """Persist the current state now."""
+        with safe_lock(self._lock, timeout=5.0):
+            self._save_to_file()
+
     def _load_from_file(self, auto_activate: bool = True, normalize_and_save: bool = True) -> None:
         """
         Load context from persistence file.
@@ -1379,8 +1460,17 @@ class ContextManager:
                 logger.info("Context loaded and normalized, saved back to persistence")
 
         except Exception as e:
-            # Failed to load context
             logger.error(f"Failed to load context from {self.persist_path}: {e}")
+            if not self.read_only:
+                # Keep the unreadable file: the next save would overwrite it.
+                kept = self.persist_path.with_name(
+                    f"{self.persist_path.name}.unreadable-{datetime.now():%Y%m%d-%H%M%S}"
+                )
+                try:
+                    os.replace(self.persist_path, kept)
+                    logger.error(f"Unreadable context file kept as {kept}")
+                except OSError:
+                    logger.error("Could not move the unreadable context file aside")
             # Reset to empty state on failure
             self._conversation_history = []
             self._execution_history = []
