@@ -1620,28 +1620,16 @@ class AgentFactory:
         agent_key: str,
         context_path: Optional[str],
         include_transcript: bool,
-        context_id: str,
     ) -> str:
-        """Build the agent's instructions and record how they were assembled."""
-        instructions = self._build_agent_instructions(
-            agent_key, context_path, include_conversation_context=include_transcript
+        """Assemble the agent's instructions and record exactly what was sent."""
+        assembly = self.instructions_builder.assemble_model_context(
+            agent_key,
+            context_path,
+            include_conversation_context=include_transcript,
+            include_path_context=True,
         )
-        try:
-            assembly = self.instructions_builder.assemble_model_context(
-                agent_key,
-                context_path,
-                include_conversation_context=include_transcript,
-                include_path_context=True,
-            ).to_debug_payload()
-        except Exception:
-            logger.debug("Context assembly report failed for %s", agent_key, exc_info=True)
-            assembly = {
-                "context_id": context_id,
-                "history_strategy": "prompt" if include_transcript else "none",
-                "instruction_length": len(instructions),
-                "sections": [],
-            }
-        self.context_manager.set_metadata("last_context_assembly", assembly)
+        instructions = assembly.instructions
+        self.context_manager.set_metadata("last_context_assembly", assembly.to_debug_payload())
         if not self.context_manager.get_metadata("agent_instructions"):
             # Shown by the context inspector.
             self.context_manager.set_metadata("agent_instructions", instructions)
@@ -2028,7 +2016,7 @@ class AgentFactory:
                 continuing and session is not None and not await session.get_items(limit=1)
             )
             agent.instructions = self._prepare_instructions(
-                agent_key, context_path, include_transcript, active_context_id
+                agent_key, context_path, include_transcript
             )
             self._add_user_message(message, agent_input, agent_key, active_context_id)
             if manual_history:
@@ -2118,88 +2106,13 @@ class AgentFactory:
         context_path: Optional[str] = None,
         include_conversation_context: bool = True,
     ) -> str:
-        """Build complete agent instructions with context."""
-        base_instructions = self.config.build_agent_prompt(agent_key)
-
-        # Add path context
-        path_context = self._build_path_context(context_path)
-
-        # Combine all parts
-        parts = [base_instructions]
-
-        if path_context:
-            parts.append(path_context)
-        # Add current session context only if explicitly requested
-        if include_conversation_context:
-            conversation_context = self.context_manager.get_conversation_context()
-            if conversation_context:
-                parts.append(conversation_context)
-
-        return "\n\n".join(parts)
-
-    def _build_path_context(self, context_path: Optional[str] = None) -> str:
-        """Build path context information."""
-        # In container mode the agent sees "/" as its root.
-        working_dir = "/" if self.container_id else self.config.get_working_directory()
-        config_dir = self.config.get_config_directory()
-
-        context_parts = [
-            "Path information:",
-            f"Working directory: {working_dir}",
-        ]
-
-        # Only add config dir if not in container (or if we decide to map it later)
-        if not self.container_id:
-            context_parts.append(f"Configuration directory: {config_dir}")
-
-        if context_path:
-            # If in container, we try to make the path relative to the workspace
-            if self.container_id:
-                # If it's already relative, keep it. If absolute host path, try to convert.
-                if os.path.isabs(context_path):
-                    host_wd = self.config.get_working_directory()
-                    if context_path.startswith(host_wd):
-                        rel_path = os.path.relpath(context_path, host_wd)
-                        absolute_path = (Path("/") / rel_path).as_posix()
-                        context_path = rel_path
-                    else:
-                        # Outside host workspace — use relative form to avoid leaking container paths
-                        absolute_path = context_path.lstrip("/") or "/"
-                        context_path = absolute_path
-                else:
-                    absolute_path = (Path("/") / context_path).as_posix()
-            else:
-                absolute_path = self.config.get_absolute_path(context_path)
-
-            context_parts.extend(
-                [
-                    f"Context path: {context_path}",
-                    f"Absolute context path: {absolute_path}",
-                ]
-            )
-
-        context_parts.extend(
-            ["", "Use these paths for working with files and directories."]
-        )
-
-        return "\n".join(context_parts)
-
-    def _legacy_build_agent_instructions(
-        self,
-        agent_key: str,
-        context_path: Optional[str] = None,
-        include_conversation_context: bool = True,
-    ) -> str:
-        """Build complete agent instructions with context."""
-        return self.instructions_builder.build_agent_instructions(
+        """The agent's instructions, as the instructions builder assembles them."""
+        return self.instructions_builder.assemble_model_context(
             agent_key,
             context_path,
             include_conversation_context=include_conversation_context,
-        )
-
-    def _legacy_build_path_context(self, context_path: Optional[str] = None) -> str:
-        """Build path context information."""
-        return self.instructions_builder.build_path_context(context_path)
+            include_path_context=True,
+        ).instructions
 
     # ------------------------------------------------------------------
     # SDK exception helpers

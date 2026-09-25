@@ -96,13 +96,13 @@ async def test_history_reaches_the_model_through_one_channel(factory):
     context_id = factory.context_manager.get_current_context_id()
 
     built = []
-    original = factory._build_agent_instructions
+    original = factory.instructions_builder.assemble_model_context
 
-    def spy(agent_key, context_path=None, include_conversation_context=True):
-        built.append((agent_key, include_conversation_context))
-        return original(agent_key, context_path, include_conversation_context=include_conversation_context)
+    def spy(agent_key, context_path=None, **kwargs):
+        built.append((agent_key, kwargs["include_conversation_context"]))
+        return original(agent_key, context_path, **kwargs)
 
-    factory._build_agent_instructions = spy
+    factory.instructions_builder.assemble_model_context = spy
     with use(ScriptedRunner("Second.", "Review.")):
         # The worker's own session holds the conversation: no transcript.
         await factory.run_agent("worker", "Continue", context_id=context_id)

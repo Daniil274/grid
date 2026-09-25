@@ -8,6 +8,7 @@ from pathlib import Path
 
 from core.agent_factory import AgentFactory
 from core.config import Config
+from core.config.prompt_sections import PromptSection
 from core.fallback_model import AllModelsFailedError, FallbackModel
 from utils.exceptions import AgentError
 
@@ -399,49 +400,20 @@ class TestAgentFactory:
     
 
 
-    def test_build_agent_instructions_basic(self, config_file):
-        """Test building basic agent instructions."""
+    def test_build_agent_instructions_include_prompt_and_paths(self, config_file):
+        """Instructions come from the instructions builder: prompt, paths, context reference."""
         config = Config(str(config_file))
         factory = AgentFactory(config)
-        
-        with patch.object(config, 'build_agent_prompt', return_value="Base prompt"):
-            instructions = factory._build_agent_instructions("test_agent")
-            
-            assert "Base prompt" in instructions
-            assert "Path information:" in instructions
-            assert "Working directory:" in instructions
-    
-    def test_build_agent_instructions_with_context_path(self, config_file):
-        """Test building agent instructions with context path."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        with patch.object(config, 'build_agent_prompt', return_value="Base prompt"):
+        base = [PromptSection(key="base_prompt", content="Base prompt", scope="static")]
+
+        with patch.object(config, "build_agent_prompt_sections", return_value=base):
             instructions = factory._build_agent_instructions("test_agent", "/test/context")
-            
-            assert "Base prompt" in instructions
-            assert "Context path: /test/context" in instructions
-    
-    def test_build_path_context(self, config_file):
-        """Test building path context."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        context = factory._build_path_context()
-        
-        assert "Path information:" in context
-        assert "Working directory:" in context
-        assert "Configuration directory:" in context
-    
-    def test_build_path_context_with_context_path(self, config_file):
-        """Test building path context with context path."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        context = factory._build_path_context("/test/context")
-        
-        assert "Context path: /test/context" in context
-        assert "Absolute context path:" in context
+
+        assert instructions.startswith("Base prompt")
+        assert "Path information:" in instructions
+        assert "Context path: /test/context" in instructions
+        assert "Context ID: " in instructions
+
     
     @pytest.mark.asyncio
     async def test_get_agent_tools_caching(self, config_file):
