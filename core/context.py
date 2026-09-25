@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, Any, Union
 from datetime import datetime
 from threading import Lock
 from contextlib import contextmanager
+import copy
 import json
 from pathlib import Path
 import uuid
@@ -554,7 +555,7 @@ class ContextManager:
                             # Verify images are present in converted content
                             img_count = sum(1 for part in content if isinstance(part, dict) and part.get("type") == "input_image")
                             if has_imgs and img_count == 0:
-                                logger.warning(f"Image lost during conversion! Original had images but converted content doesn't")
+                                logger.warning("Image lost during conversion! Original had images but converted content doesn't")
                             elif img_count > 0:
                                 logger.debug(f"Converted message has {img_count} image(s) in SDK format")
                             
@@ -614,6 +615,18 @@ class ContextManager:
         """Get all context metadata."""
         with safe_lock(self._lock, timeout=5.0):
             return self._metadata.copy()
+
+    def get_context_metadata(self, context_id: str) -> Dict[str, Any]:
+        """A copy of one context's metadata; empty for an unknown context."""
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            return copy.deepcopy(bucket["metadata"]) if bucket else {}
+
+    def update_context_metadata(self, context_id: str, updates: Dict[str, Any]) -> None:
+        """Merge *updates* into one context's metadata, creating the context."""
+        with safe_lock(self._lock, timeout=5.0):
+            key = self._create_context(context_id)
+            self._contexts[key]["metadata"].update(updates)
 
     def append_metadata_event(
         self,
@@ -739,7 +752,7 @@ class ContextManager:
             return content
 
         # Import here to avoid circular dependency
-        from schemas import FileImageContent, ImageContent, ImageUrl, TextContent
+        from schemas import FileImageContent, ImageContent, ImageUrl
 
         normalized_parts = []
         for part in content:

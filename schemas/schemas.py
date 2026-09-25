@@ -241,29 +241,6 @@ class Settings(BaseModel):
     )
 
 
-class MemoryOptimizerConfig(BaseModel):
-    """Configuration for memory optimizer."""
-    consolidation_batch_size: int = Field(default=5, ge=1, le=100)
-    consolidation_trigger: str = Field(default="on_save", description="on_save, periodic, or manual")
-    consolidation_interval_seconds: int = Field(default=3600, ge=60)
-    min_short_term_age_hours: float = Field(default=1.0, ge=0.0)
-
-
-class EmbeddingsConfig(BaseModel):
-    """Configuration for semantic search / embeddings."""
-    model: str = Field(
-        description="Key from models: section that points to an embedding model on OpenRouter"
-    )
-    request_timeout: float = Field(
-        default=30.0, ge=1.0, le=300.0,
-        description="Timeout in seconds for each embedding API call"
-    )
-    persist: bool = Field(
-        default=True,
-        description="Persist ChromaDB vector index to disk (next to the SQLite memory DB)"
-    )
-
-
 class RoutedSystemConfig(BaseModel):
     """A Grid system the router can send a user message to."""
     config: str = Field(description="Path to the system's config.yaml, relative to this config file")
@@ -326,8 +303,6 @@ class GridConfig(BaseModel):
     scenarios: Optional[Dict[str, Any]] = None
     telegram: Optional[Dict[str, Any]] = None  # telegram bot config, incl. proxy for API requests
     voice: Dict[str, Any] = Field(default_factory=dict, description="Local web speech and voice routing settings")
-    memory_optimizer: Optional[MemoryOptimizerConfig] = Field(default=None, description="Memory optimizer configuration")
-    embeddings: Optional[EmbeddingsConfig] = Field(default=None, description="Semantic search / embeddings configuration")
     improvement: ImprovementConfig = Field(default_factory=ImprovementConfig, description="Controlled self-improvement loop configuration")
     routing: RoutingConfig = Field(default_factory=RoutingConfig, description="Automatic system and agent routing")
     

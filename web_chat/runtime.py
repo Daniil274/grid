@@ -12,7 +12,6 @@ system, so routing a follow-up elsewhere keeps the conversation intact.
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -21,8 +20,7 @@ import yaml
 
 from core.agent_factory import AgentFactory
 from core.config import Config
-from core.memory.store import MemoryStore
-from core.memory.unified import UnifiedMemory
+from core.context import ContextManager
 from core.managers.container_manager import ContainerManager
 from web_chat.systems import Resolution, SystemRegistry
 
@@ -82,8 +80,7 @@ class WebChatRuntime:
         self.container_id: Optional[str]
         self.workspace_path: Path
         self.persist_path: Path
-        self.memory_store: MemoryStore
-        self.unified_memory: UnifiedMemory
+        self.conversations: ContextManager
         self.registry: SystemRegistry
 
         self._build_runtime()
@@ -138,15 +135,10 @@ class WebChatRuntime:
         logs_dir.mkdir(parents=True, exist_ok=True)
         self.persist_path = logs_dir
 
-        self.unified_memory = UnifiedMemory(
-            workspace=self.workspace_path,
-            persist_path=logs_dir,
+        self.conversations = ContextManager(
             max_history=config.get_max_history(),
+            persist_path=str(logs_dir / "context.json"),
         )
-
-        data_dir = Path(config.get_absolute_path("data"))
-        data_dir.mkdir(parents=True, exist_ok=True)
-        self.memory_store = MemoryStore(str(data_dir / "memory.db"), config=config)
 
         self.registry = SystemRegistry(
             base_config=config,
@@ -187,12 +179,11 @@ class WebChatRuntime:
         return None
 
     def _build_factory(self, config: Config) -> AgentFactory:
-        """One factory per system; memory is shared so conversations survive routing."""
+        """One factory per system; history is shared so conversations survive routing."""
         return AgentFactory(
             config=config,
             working_directory=config.get_working_directory(),
-            unified_memory=self.unified_memory,
-            memory_store=self.memory_store,
+            context_manager=self.conversations,
             container_id=self.container_id,
             policy_config=self._policy_config,
         )
@@ -291,21 +282,15 @@ class WebChatRuntime:
         await self.registry.close()
 
     # -- conversation metadata --------------------------------------------
-    def context_manager(self):
-        return self.unified_memory.context_manager
+    def context_manager(self) -> ContextManager:
+        return self.conversations
 
     def conversation_metadata(self, context_id: str) -> Dict[str, Any]:
-        with self.context_manager()._lock:
-            bucket = self.context_manager()._contexts.get(context_id)
-            return copy.deepcopy(bucket.get("metadata") or {}) if bucket else {}
+        return self.conversations.get_context_metadata(context_id)
 
     def update_conversation_metadata(self, context_id: str, **updates: Any) -> None:
-        with self.context_manager()._lock:
-            bucket = self.context_manager()._contexts.setdefault(
-                context_id,
-                {"conversation": [], "executions": [], "metadata": {}, "created_at": "", "updated_at": ""},
-            )
-            metadata = bucket.setdefault("metadata", {})
-            if metadata.get("title_locked"):
-                updates.pop("title", None)  # the user renamed it; keep their title
-            metadata.update({k: v for k, v in updates.items() if v is not None})
+        if self.conversations.get_context_metadata(context_id).get("title_locked"):
+            updates.pop("title", None)  # the user renamed it; keep their title
+        self.conversations.update_context_metadata(
+            context_id, {k: v for k, v in updates.items() if v is not None}
+        )

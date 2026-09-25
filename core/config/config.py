@@ -643,14 +643,14 @@ class Config:
         Get arbitrary configuration value using dot notation.
         
         Args:
-            key: Dot-separated key path (e.g., 'memory_optimizer.consolidation_batch_size')
+            key: Dot-separated key path (e.g., 'settings.max_history')
             default: Default value if key not found
             
         Returns:
             Configuration value or default
             
         Example:
-            config.get('memory_optimizer.consolidation_batch_size', 5)
+            config.get('settings.max_history', 5)
         """
         try:
             keys = key.split('.')

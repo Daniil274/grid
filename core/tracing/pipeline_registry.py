@@ -95,7 +95,6 @@ class PipelineRegistry:
 
         self._pipelines: Dict[str, PipelineInfo] = {}
         self._context_to_pipeline: Dict[str, str] = {}  # context_id -> pipeline_id
-        self._memory_store = None  # Will be set by AgentFactory
         self._initialized = True
         logger.info("PipelineRegistry initialized")
 
@@ -467,13 +466,6 @@ class PipelineRegistry:
             pipeline.status = PipelineStatus.EMERGENCY_STOPPED
             pipeline.shutdown_completed_at = datetime.now()
 
-            # Save to memory store if available
-            if self._memory_store:
-                try:
-                    await self._save_emergency_event(pipeline)
-                except Exception as e:
-                    logger.error(f"Failed to save emergency event: {e}")
-
             result = {
                 "success": True,
                 "pipeline_id": pipeline_id,
@@ -580,35 +572,6 @@ class PipelineRegistry:
                     if pipeline.shutdown_requested_at else None
                 )
             }
-
-    async def _save_emergency_event(self, pipeline: PipelineInfo) -> None:
-        """Save emergency shutdown event to memory store."""
-        if not self._memory_store:
-            return
-
-        try:
-            event_data = {
-                "pipeline_id": pipeline.pipeline_id,
-                "orchestrator": pipeline.orchestrator_name,
-                "reason": pipeline.emergency_reason,
-                "severity": pipeline.emergency_severity,
-                "timestamp": pipeline.shutdown_requested_at.isoformat() if pipeline.shutdown_requested_at else None,
-                "completed_tasks": len(pipeline.completed_tasks),
-                "failed_tasks": len(pipeline.failed_tasks),
-                "total_tasks": len(pipeline.tasks)
-            }
-
-            await self._memory_store.save(
-                memory_type="task",
-                content=f"Emergency shutdown: {pipeline.emergency_reason}",
-                metadata=event_data,
-                task_id=pipeline.pipeline_id,
-                status="abandoned"
-            )
-
-            logger.debug(f"Saved emergency event for pipeline {pipeline.pipeline_id}")
-        except Exception as e:
-            logger.error(f"Error saving emergency event: {e}", exc_info=True)
 
     async def cleanup_completed_pipelines(self, max_age_minutes: int = 60) -> int:
         """

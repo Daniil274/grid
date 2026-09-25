@@ -24,9 +24,7 @@ from openai import (
 import agents
 from agents import (
     Agent,
-    OpenAIChatCompletionsModel,
     ModelSettings,
-    set_tracing_disabled,
     function_tool,
     RunContextWrapper,
     SQLiteSession,
@@ -42,7 +40,6 @@ from agents.exceptions import (
     UserError as AgentsUserError,
 )
 from core.vision_model import VisionChatCompletionsModel
-from agents.mcp import MCPServerStdio
 from core.managers.mcp_manager import ResilientMCPServerStdio
 
 from core.config.config import Config
@@ -61,7 +58,6 @@ from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
 from utils.path_utils import set_current_factory, reset_current_factory
 from core.tracing.config import get_tracing_config, ImmediateTraceProcessor
-from core.managers.skill_manager import SkillManager
 from core.application.agent_runtime_support import AgentRuntimeSupport
 from core.fallback_model import AllModelsFailedError, FallbackModel, ModelCandidate
 from core import sdk_patches
@@ -73,7 +69,6 @@ from core.compact import (
     auto_compact_if_needed,
     AutoCompactTrackingState,
     reactive_compact_on_prompt_too_long,
-    get_post_compact_state,
     run_post_compact_cleanup,
     CompactMessage,
     estimate_messages_tokens,
@@ -657,8 +652,7 @@ class AgentFactory:
         tracing_level: Optional[str] = "INFO",
         stream_observer: Optional[StreamObserver] = None,
         broadcaster: Optional[Any] = None,
-        unified_memory: Optional[Any] = None,
-        memory_store: Optional[Any] = None,
+        context_manager: Optional[ContextManager] = None,
         container_id: Optional[str] = None,
         policy_config: Optional[Config] = None,
     ):
@@ -671,8 +665,8 @@ class AgentFactory:
             tracing_level: Tracing level for debugging
             stream_observer: Observer for agent stream events
             broadcaster: LiveTransparencyBroadcaster for real-time progress updates
-            unified_memory: UnifiedMemory instance for hybrid memory management (deprecated)
-            memory_store: MemoryStore instance for SQLite-based memory (new)
+            context_manager: Conversation history to share with other factories
+                (the web runtime keeps one across systems); a new one otherwise
             container_id: Docker container ID for isolation
             policy_config: Config whose action policy and model registry win over
                 this factory's own config (the root routing config when the CLI
@@ -696,17 +690,10 @@ class AgentFactory:
         if hasattr(self.config.config, "settings"):
             ImageUtils.set_config(self.config.config.settings.image_processing)
 
-        # Initialize managers
-        # If unified_memory is provided, use its context_manager; otherwise create new
-        if unified_memory is not None:
-            self.context_manager = unified_memory.context_manager
-            self.unified_memory = unified_memory
-        else:
-            self.context_manager = ContextManager(
-                max_history=self.config.get_max_history(),
-                persist_path="logs/context.json",  # Saving context to file for persistence
-            )
-            self.unified_memory = None
+        self.context_manager = context_manager or ContextManager(
+            max_history=self.config.get_max_history(),
+            persist_path=str(Path(self.config.get_logs_directory()) / "context.json"),
+        )
 
         self._agent_session_db_path = self._build_agent_session_db_path()
 
@@ -717,35 +704,6 @@ class AgentFactory:
             session_factory=self._create_persistent_sqlite_session,
         )
         self.instructions_builder = self._runtime_support.instructions_builder
-
-        # Initialize SQLite-based memory store
-        if memory_store is not None:
-            self.memory_store = memory_store
-        else:
-            # Create default memory store
-            from core.memory.store import MemoryStore
-            from pathlib import Path
-
-            db_path = Path(self.config.get_working_directory()) / "data" / "memory.db"
-            self.memory_store = MemoryStore(db_path=str(db_path), config=self.config)
-            logger.info("MemoryStore initialized: %s", db_path)
-
-        # Initialize MemoryOptimizer
-        from core.memory.optimizer import MemoryOptimizer
-
-        self.memory_optimizer = MemoryOptimizer(
-            memory_store=self.memory_store, config=self.config, agent_factory=self
-        )
-        logger.info("MemoryOptimizer initialized")
-
-        # Initialize SkillManager
-        from pathlib import Path
-
-        self.skill_manager = SkillManager(
-            memory_store=self.memory_store,
-            workspace_root=Path(self.config.get_working_directory()),
-        )
-        logger.info("SkillManager initialized")
 
         # Initialize ContainerManager
         from core.managers.container_manager import ContainerManager, CONTAINER_WORKDIR
@@ -790,8 +748,6 @@ class AgentFactory:
         from core.tracing.pipeline_registry import PipelineRegistry
 
         self._pipeline_registry = PipelineRegistry()
-        # Link memory_store to registry for persistence
-        self._pipeline_registry._memory_store = self.memory_store
         logger.info("PipelineRegistry initialized")
 
     def _build_action_gate(

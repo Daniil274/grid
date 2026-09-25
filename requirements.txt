@@ -46,5 +46,3 @@ markdownify>=0.13.0
 trafilatura>=1.12.0
 nbformat>=5.10.0
 
-# ChromaDB for vector storage and similarity search
-chromadb>=0.4.0
