@@ -74,6 +74,8 @@ class WebChatRuntime:
 
         self._lock = asyncio.Lock()
         self._prepared: set[Tuple[str, str]] = set()
+        self._background: set[asyncio.Task] = set()
+        self._warmup: Optional[asyncio.Task] = None
 
         self.config: Config
         self.config_path: Path
@@ -226,6 +228,26 @@ class WebChatRuntime:
         system = self.registry.default_key()
         await self.warm_agent(self.registry.config(system).get_default_agent(), system)
 
+    def schedule_warmup(self) -> None:
+        """Warm the default agent in the background; a newer request replaces an older one."""
+        if self._warmup is not None:
+            self._warmup.cancel()
+        self._warmup = self._spawn(self.warm_default_agent(), "warm-default-agent")
+
+    def _spawn(self, coro: Any, name: str) -> asyncio.Task:
+        """Run *coro* in the background, owned by the runtime until it finishes."""
+        task = asyncio.get_running_loop().create_task(coro, name=name)
+        self._background.add(task)
+        task.add_done_callback(self._background_done)
+        return task
+
+    def _background_done(self, task: asyncio.Task) -> None:
+        self._background.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning(
+                "Background task %s failed", task.get_name(), exc_info=task.exception()
+            )
+
     def pending_action_reviews(self) -> list[dict[str, Any]]:
         """Collect pending reviews from factories that have handled a turn."""
         reviews: list[dict[str, Any]] = []
@@ -273,12 +295,16 @@ class WebChatRuntime:
         old_registry = getattr(self, "registry", None)
         if old_registry is not None:
             try:
-                asyncio.get_running_loop().create_task(old_registry.close())
+                self._spawn(old_registry.close(), "close-old-registry")
             except RuntimeError:
                 pass  # no loop (tests, CLI): the client is garbage-collected
         self._build_runtime()
 
     async def close(self) -> None:
+        pending = list(self._background)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         await self.registry.close()
 
     # -- conversation metadata --------------------------------------------

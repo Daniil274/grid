@@ -336,11 +336,14 @@ async def main():
         
         # Optional embedded timeline (normally: python -m timeline in another terminal)
         timeline_handle = None
+        timeline_task = None
         if args.timeline:
             try:
                 from timeline.integration import run_timeline_server, TimelineHandle
                 timeline_handle = TimelineHandle()
-                asyncio.create_task(run_timeline_server(handle=timeline_handle, port=8789))
+                timeline_task = asyncio.create_task(
+                    run_timeline_server(handle=timeline_handle, port=8789)
+                )
             except Exception as _tl_err:
                 print(f"Timeline server not started: {_tl_err}")
 
@@ -578,7 +581,7 @@ async def main():
 
         if args.message:
             # Single message mode
-            print(f"Processing message")
+            print("Processing message")
 
             try:
                 # Parse message for images
@@ -742,7 +745,7 @@ async def main():
                         except Exception:
                             pass
                         
-                        print(f"\n📋 Context info:")
+                        print("\n📋 Context info:")
                         print(f"   Messages: {context_info.get('conversation_messages', 0)}")
                         print(f"   Execution history: {context_info.get('execution_history', 0)}")
                         print(f"   Memory usage: {context_info.get('memory_usage_mb', 0):.2f} MB")
@@ -924,7 +927,6 @@ async def main():
                             pass
 
                     except Exception as e:
-                        print("Operation completed")
                         print(f"Error: {e}")
                     
                 except KeyboardInterrupt:
@@ -942,6 +944,9 @@ async def main():
             print("Cleanup")
             for routed_factory in factories.values():
                 await routed_factory.cleanup()
+            if timeline_task is not None:
+                timeline_task.cancel()
+                await asyncio.gather(timeline_task, return_exceptions=True)
             print("Cleanup - Resources freed")
         except (KeyboardInterrupt, asyncio.CancelledError):
             print("\nCleanup interrupted.")
@@ -951,14 +956,12 @@ async def main():
         
     except GridError as e:
         print(f"Grid Error: {e}")
-        print(f"Grid Error: {e}")
         sys.exit(1)
     except asyncio.CancelledError:
         print("\nInterrupted.")
         sys.exit(0)
     except Exception as e:
         print(f"Unexpected error: {e}")
-        print(f"Unexpected Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

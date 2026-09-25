@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hmac
 import logging
 from pathlib import Path
@@ -61,7 +60,7 @@ class WebChatServer:
     def _register_lifecycle(self) -> None:
         @self.app.on_event("startup")
         async def _startup() -> None:
-            asyncio.create_task(self.runtime.warm_default_agent())
+            self.runtime.schedule_warmup()
 
         @self.app.on_event("shutdown")
         async def _shutdown() -> None:
@@ -386,7 +385,7 @@ class WebChatServer:
         async def save_structured_settings(body: SettingsStructuredUpdateRequest) -> JSONResponse:
             try:
                 self.runtime.save_structured_config(body.config)
-                asyncio.create_task(self.runtime.warm_default_agent())
+                self.runtime.schedule_warmup()
                 return JSONResponse(self._structured_settings_payload())
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -395,7 +394,7 @@ class WebChatServer:
         async def save_yaml_settings(body: SettingsYamlUpdateRequest) -> JSONResponse:
             try:
                 self.runtime.save_yaml_config(body.yaml_content)
-                asyncio.create_task(self.runtime.warm_default_agent())
+                self.runtime.schedule_warmup()
                 return JSONResponse(self._structured_settings_payload())
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc

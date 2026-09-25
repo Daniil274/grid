@@ -82,6 +82,9 @@ class _DummyRuntime:
     async def warm_default_agent(self) -> None:
         return None
 
+    def schedule_warmup(self) -> None:
+        return None
+
     async def warm_agent(self, agent_key: str, system_key: str | None = None) -> None:
         return None
 
