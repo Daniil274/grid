@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Legacy chat interface for Grid Agent System.
-Simplified version of the main.py CLI for backward compatibility.
+Command-line chat with Grid agents (the `agent-chat` command).
+
+Without --agent/--config every message is routed across the systems of the
+routing catalog; with them, the chosen agent answers.
 """
 
 import signal
@@ -15,7 +17,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 def _configure_utf8_console() -> None:
@@ -33,22 +35,16 @@ _configure_utf8_console()
 # Add grid package to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Use Proactor event loop on Windows to support asyncio subprocess APIs (required for MCP)
-if sys.platform == "win32":
-    try:
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    except Exception:
-        pass
-
 from core.config import Config
 from core.agent_factory import AgentFactory, ConsoleStreamObserver
-from core.compact import compact_conversation, CompactMessage, estimate_messages_tokens
+from core.compact import (
+    compact_conversation,
+    estimate_messages_tokens,
+    to_compact_messages,
+    to_context_messages,
+)
 from core.routing import AutoRouter
 from core.tool_check import ToolIssue, agent_issues, diagnose, summarize
-from schemas import ContextMessage
 try:
     # Optional: only available when Docker SDK is installed and Docker is running
     from core.managers.container_manager import ContainerManager
@@ -139,7 +135,6 @@ def prepare_agent_message(text: str, image_paths: list[str]) -> str:
         return text
 
     # Create multimodal message
-    from datetime import datetime
     message = MultimodalConverter.create_multimodal_message(
         role="user",
         text=text,
@@ -166,52 +161,13 @@ def prepare_agent_message(text: str, image_paths: list[str]) -> str:
         return json.dumps(message_dict)
 
 
-def _context_to_compact_messages(messages) -> list[CompactMessage]:
-    compact_messages: list[CompactMessage] = []
-    for msg in messages:
-        metadata = msg.metadata or {}
-        timestamp = None
-        if getattr(msg, "timestamp", None):
-            try:
-                timestamp = datetime.fromisoformat(msg.timestamp)
-            except Exception:
-                timestamp = None
-        compact_messages.append(
-            CompactMessage(
-                role=msg.role,
-                content=msg.content,
-                message_id=metadata.get("message_id"),
-                uuid=metadata.get("uuid"),
-                timestamp=timestamp,
-                metadata=metadata.copy(),
-                is_compact_summary=bool(metadata.get("is_compact_summary")),
-                is_compact_boundary=bool(metadata.get("is_compact_boundary")),
-            )
-        )
-    return compact_messages
-
-
-def _compact_to_context_messages(messages: list[CompactMessage]) -> list[ContextMessage]:
-    context_messages: list[ContextMessage] = []
-    for msg in messages:
-        metadata = (msg.metadata or {}).copy()
-        if msg.message_id:
-            metadata.setdefault("message_id", msg.message_id)
-        if msg.uuid:
-            metadata.setdefault("uuid", msg.uuid)
-        if msg.is_compact_summary:
-            metadata["is_compact_summary"] = True
-        if msg.is_compact_boundary:
-            metadata["is_compact_boundary"] = True
-        context_messages.append(
-            ContextMessage(
-                role=msg.role,
-                content=msg.content,
-                timestamp=msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
-                metadata=metadata or None,
-            )
-        )
-    return context_messages
+def print_token_status(chat_ui: CliChatRenderer, factory: Any, config: Config, agent_key: str) -> None:
+    """The size of the conversation against the agent model's context window."""
+    messages = factory.context_manager.conversation_snapshot()
+    tokens = estimate_messages_tokens(to_compact_messages(messages)) if messages else 0
+    window = config.get_model(config.get_agent(agent_key).primary_model).context_window
+    percent = round(tokens / max(1, window) * 100, 1)
+    chat_ui.print_status(f"Tokens: ~{tokens:,} / {window:,} ({percent}%)", style="bright_black")
 
 
 def get_agent_skill_status(config: Config, agent_key: str) -> tuple[list[tuple[str, Path]], list[str]]:
@@ -635,26 +591,9 @@ async def main():
                     chat_ui.print_status(f"Context ID: {last_context_id}", style="bright_black")
                     selected_context_id = last_context_id
 
-                # Show token count in context
-                try:
-                    _msgs = factory.context_manager.conversation_snapshot()
-                    _tokens = estimate_messages_tokens(_context_to_compact_messages(_msgs)) if _msgs else 0
-                    try:
-                        _agent_cfg = config.get_agent(agent_key)
-                        _model_cfg = config.get_model(_agent_cfg.primary_model)
-                        _ctx_window = getattr(_model_cfg, "context_window", None)
-                    except Exception:
-                        _ctx_window = None
-                    if _ctx_window:
-                        _pct = round(_tokens / max(1, _ctx_window) * 100, 1)
-                        chat_ui.print_status(f"Tokens: ~{_tokens:,} / {_ctx_window:,} ({_pct}%)", style="bright_black")
-                    else:
-                        chat_ui.print_status(f"Tokens: ~{_tokens:,}", style="bright_black")
-                except Exception:
-                    pass
+                print_token_status(chat_ui, factory, config, agent_key)
 
             except Exception as e:
-                print("Operation completed")
                 print(f"Error: {e}")
             except asyncio.CancelledError:
                 print("\nInterrupted.")
@@ -731,7 +670,7 @@ async def main():
                         print("Get Context - Context information retrieved")
 
                         current_messages = factory.context_manager.conversation_snapshot()
-                        compact_messages = _context_to_compact_messages(current_messages)
+                        compact_messages = to_compact_messages(current_messages)
                         estimated_tokens = estimate_messages_tokens(compact_messages) if compact_messages else 0
 
                         context_window = None
@@ -798,7 +737,7 @@ async def main():
                                 continue
 
                             compact_cfg = factory.config.config.compact
-                            compact_messages = _context_to_compact_messages(messages)
+                            compact_messages = to_compact_messages(messages)
 
                             tokens_before = estimate_messages_tokens(compact_messages)
 
@@ -822,7 +761,7 @@ async def main():
                                 continue
 
                             factory.context_manager.replace_conversation_history(
-                                _compact_to_context_messages(result.compacted_messages)
+                                to_context_messages(result.compacted_messages)
                             )
                             factory._compact_tracking.consecutive_failures = 0
 
@@ -906,23 +845,7 @@ async def main():
                             chat_ui.print_status(f"Context ID: {last_context_id}", style="bright_black")
                             selected_context_id = last_context_id
 
-                        # Show token count in context
-                        try:
-                            _msgs = factory.context_manager.conversation_snapshot()
-                            _tokens = estimate_messages_tokens(_context_to_compact_messages(_msgs)) if _msgs else 0
-                            try:
-                                _agent_cfg = config.get_agent(agent_key)
-                                _model_cfg = config.get_model(_agent_cfg.primary_model)
-                                _ctx_window = getattr(_model_cfg, "context_window", None)
-                            except Exception:
-                                _ctx_window = None
-                            if _ctx_window:
-                                _pct = round(_tokens / max(1, _ctx_window) * 100, 1)
-                                chat_ui.print_status(f"Tokens: ~{_tokens:,} / {_ctx_window:,} ({_pct}%)", style="bright_black")
-                            else:
-                                chat_ui.print_status(f"Tokens: ~{_tokens:,}", style="bright_black")
-                        except Exception:
-                            pass
+                        print_token_status(chat_ui, factory, config, agent_key)
 
                     except Exception as e:
                         print(f"Error: {e}")

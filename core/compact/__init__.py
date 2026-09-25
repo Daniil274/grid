@@ -83,6 +83,9 @@ from .reactive_compact import (
     is_reactive_mode,
 )
 
+# Stored <-> compaction messages
+from .conversion import to_compact_messages, to_context_messages
+
 # LLM compact conversation
 from .compact_conversation import (
     compact_conversation,
@@ -122,6 +125,8 @@ __all__ = [
     "ReactiveCompactStatus", "ReactiveCompactResult",
     "is_prompt_too_long_error", "get_token_gap_from_error",
     "reactive_compact", "reactive_compact_on_prompt_too_long", "is_reactive_mode",
+    # Conversion
+    "to_compact_messages", "to_context_messages",
     # LLM compact
     "compact_conversation",
     "ERROR_MESSAGE_NOT_ENOUGH_MESSAGES", "ERROR_MESSAGE_PROMPT_TOO_LONG",

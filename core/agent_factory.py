@@ -50,7 +50,7 @@ from core.action_policy import (
     is_policy_block,
 )
 from .context import ContextManager
-from schemas import AgentConfig, AgentExecution, ContextMessage
+from schemas import AgentConfig, AgentExecution
 from tools import get_tools_by_names
 from utils.cli_chat import CliChatRenderer
 from utils.exceptions import AgentError, ConfigError, ContextError
@@ -72,6 +72,8 @@ from core.compact import (
     is_prompt_too_long_error,
     CompactMessage,
     estimate_messages_tokens,
+    to_compact_messages,
+    to_context_messages,
 )
 
 
@@ -1857,70 +1859,12 @@ class AgentFactory:
 
         return "\n\n".join(parts)
 
-    def _context_to_compact_messages(self, messages: List[Any]) -> List[CompactMessage]:
-        """Convert context messages into CompactMessage objects."""
-        compact_messages: List[CompactMessage] = []
-        for msg in messages:
-            metadata = msg.metadata or {}
-            timestamp = None
-            raw_timestamp = getattr(msg, "timestamp", None)
-            if raw_timestamp:
-                try:
-                    timestamp = datetime.fromisoformat(raw_timestamp)
-                except Exception:
-                    timestamp = None
-
-            compact_messages.append(
-                CompactMessage(
-                    role=msg.role,
-                    content=msg.content,
-                    message_id=metadata.get("message_id"),
-                    uuid=metadata.get("uuid"),
-                    timestamp=timestamp,
-                    metadata=metadata.copy(),
-                    is_compact_summary=bool(metadata.get("is_compact_summary")),
-                    is_compact_boundary=bool(metadata.get("is_compact_boundary")),
-                )
-            )
-        return compact_messages
-
-    def _compact_to_context_messages(
-        self, messages: List[CompactMessage]
-    ) -> List[ContextMessage]:
-        """Convert CompactMessage objects back into persisted context messages."""
-        context_messages: List[ContextMessage] = []
-        for msg in messages:
-            metadata = (msg.metadata or {}).copy()
-            if msg.message_id:
-                metadata.setdefault("message_id", msg.message_id)
-            if msg.uuid:
-                metadata.setdefault("uuid", msg.uuid)
-            if msg.is_compact_summary:
-                metadata["is_compact_summary"] = True
-            if msg.is_compact_boundary:
-                metadata["is_compact_boundary"] = True
-
-            timestamp = (
-                msg.timestamp.isoformat()
-                if msg.timestamp
-                else datetime.now().isoformat()
-            )
-            context_messages.append(
-                ContextMessage(
-                    role=msg.role,
-                    content=msg.content,
-                    timestamp=timestamp,
-                    metadata=metadata or None,
-                )
-            )
-        return context_messages
-
     def _replace_context_with_compact_messages(
         self, messages: List[CompactMessage]
     ) -> None:
         """Persist compacted/truncated history into the active context."""
         self.context_manager.replace_conversation_history(
-            self._compact_to_context_messages(messages)
+            to_context_messages(messages)
         )
 
     def _get_compact_client_and_model(
@@ -2198,7 +2142,7 @@ class AgentFactory:
         session too, so the model continues from the summary instead of the
         full transcript. A failed compaction is logged; the run goes on.
         """
-        messages = self._context_to_compact_messages(self.context_manager.conversation_snapshot())
+        messages = to_compact_messages(self.context_manager.conversation_snapshot())
         if not messages:
             return
         context_window = model_config.context_window
@@ -2401,7 +2345,7 @@ class AgentFactory:
         self, error: Exception, session: Optional[SQLiteSession]
     ) -> bool:
         """Drop the oldest history after a context overflow; True if anything was dropped."""
-        messages = self._context_to_compact_messages(self.context_manager.conversation_snapshot())
+        messages = to_compact_messages(self.context_manager.conversation_snapshot())
         try:
             trimmed = await reactive_compact_on_prompt_too_long(messages=messages, error=error)
         except Exception:
