@@ -181,3 +181,55 @@ async def test_plain_json_text_is_a_message_not_sdk_input(factory):
     with use(runner):
         await factory.run_agent("worker", '{"a": 1}')
     assert runner.calls[0].input == '{"a": 1}'
+
+
+async def test_compaction_replaces_history_and_the_agents_session(factory):
+    from core.compact import CompactMessage
+
+    with use(ScriptedRunner("First.")):
+        await factory.run_agent("worker", "Start")
+    context_id = factory.context_manager.get_current_context_id()
+    summary = CompactMessage(role="user", content="Summary: the user started a task.")
+    outcome = {
+        "was_compacted": True,
+        "consecutive_failures": 0,
+        "compaction_result": SimpleNamespace(
+            compacted_messages=[summary], tokens_before=90000, tokens_after=100
+        ),
+    }
+    over_threshold = SimpleNamespace(is_above_auto_compact_threshold=True)
+    runner = ScriptedRunner("Continued.")
+    with use(runner), patch(
+        "core.agent_factory.calculate_token_warning_state", return_value=over_threshold
+    ), patch("core.agent_factory.auto_compact_if_needed", new=AsyncMock(return_value=outcome)), patch.object(
+        factory, "_get_compact_client_and_model", return_value=(object(), "m")
+    ):
+        await factory.run_agent("worker", "Go on", context_id=context_id)
+
+    session_items = await runner.calls[0].session.get_items()
+    assert session_items[0]["content"] == "Summary: the user started a task."
+    history = factory.context_manager.conversation_snapshot()
+    assert history[0].content == "Summary: the user started a task."
+
+
+async def test_a_context_overflow_trims_history_and_retries_once(factory):
+    from core.compact.reactive_compact import ReactiveCompactResult, ReactiveCompactStatus
+
+    with use(ScriptedRunner("First.")):
+        await factory.run_agent("worker", "Start")
+    context_id = factory.context_manager.get_current_context_id()
+    trimmed = ReactiveCompactResult(status=ReactiveCompactStatus.TRIMMED, messages=[])
+    runner = ScriptedRunner(
+        RuntimeError("context_length_exceeded"),
+        RuntimeError("context_length_exceeded"),
+        "unused",
+    )
+    with use(runner), patch(
+        "core.agent_factory.reactive_compact_on_prompt_too_long",
+        new=AsyncMock(return_value=trimmed),
+    ) as trim:
+        with pytest.raises(Exception, match="context_length_exceeded"):
+            await factory.run_agent("worker", "Go on", context_id=context_id)
+
+    trim.assert_awaited_once()
+    assert len(runner.calls) == 2
