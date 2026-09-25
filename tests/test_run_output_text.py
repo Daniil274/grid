@@ -6,7 +6,7 @@ from agents import Agent
 from agents.items import MessageOutputItem
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
-from core.agent_factory import run_output_text
+from core.run_stream import run_output_text
 
 
 def message(text):

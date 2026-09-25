@@ -8,8 +8,8 @@ from agents.stream_events import RawResponsesStreamEvent
 
 from core.agent_factory import AgentFactory
 from core.config import Config
-from core import agent_factory as agent_factory_module
-from core.agent_factory import ConsoleStreamObserver
+from core import run_stream as run_stream_module
+from core.run_stream import ConsoleStreamObserver
 from core.tracing.config import ConsoleSpanExporter
 
 
@@ -182,7 +182,7 @@ def test_console_stream_observer_formats_tool_calls(monkeypatch):
             self.name = name
             self.item = item
 
-    monkeypatch.setattr(agent_factory_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
+    monkeypatch.setattr(run_stream_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
 
     raw_item = SimpleNamespace(
         name="search_code",
@@ -214,7 +214,7 @@ def test_console_stream_observer_passes_agent_and_duration_to_renderer(monkeypat
             self.name = name
             self.item = item
 
-    monkeypatch.setattr(agent_factory_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
+    monkeypatch.setattr(run_stream_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
 
     raw_item = SimpleNamespace(
         name="grep_tool",
@@ -249,7 +249,7 @@ def test_console_stream_observer_matches_tool_output_by_call_id(monkeypatch):
             self.name = name
             self.item = item
 
-    monkeypatch.setattr(agent_factory_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
+    monkeypatch.setattr(run_stream_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
 
     call_raw = SimpleNamespace(
         name="glob_tool",
@@ -341,7 +341,7 @@ agents:
             self.name = name
             self.item = item
 
-    monkeypatch.setattr(agent_factory_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
+    monkeypatch.setattr(run_stream_module, "RunItemStreamEvent", DummyRunItemStreamEvent)
 
     raw_item = SimpleNamespace(name="glob_tool", arguments={"pattern": "**/*"}, call_id="call_1")
     events = [DummyRunItemStreamEvent("tool_called", SimpleNamespace(raw_item=raw_item))]

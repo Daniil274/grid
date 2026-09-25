@@ -104,6 +104,7 @@ class TestGitCommandRunner:
             mock_run.return_value = mock_result
             
             result = _run_git_command(["git", "status"], cwd="/tmp")
+            assert result["success"]
             
             mock_run.assert_called_once()
             args, kwargs = mock_run.call_args

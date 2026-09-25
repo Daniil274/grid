@@ -23,7 +23,7 @@ OUTPUT_LIMIT = 4000
 def make_recorder(log_path: Path):
     from agents import RawResponsesStreamEvent, RunItemStreamEvent
 
-    from core.agent_factory import ConsoleStreamObserver, tool_event_info
+    from core.run_stream import ConsoleStreamObserver, tool_event_info
 
     log = log_path.open("a", encoding="utf-8")
 

@@ -14,7 +14,7 @@ import logging
 from collections import deque
 from typing import Any, Callable, Optional
 
-from core.agent_factory import (
+from core.run_stream import (
     REASONING_DELTA_EVENTS,
     field_of,
     is_output_delta,

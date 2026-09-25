@@ -36,7 +36,8 @@ _configure_utf8_console()
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.config import Config
-from core.agent_factory import AgentFactory, ConsoleStreamObserver
+from core.agent_factory import AgentFactory
+from core.run_stream import ConsoleStreamObserver
 from core.compact import (
     compact_conversation,
     estimate_messages_tokens,
