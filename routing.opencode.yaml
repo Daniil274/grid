@@ -45,20 +45,20 @@ providers:
 
 models:
   router:
-    name: typesafe/jev-1.13
-    provider: openrouter
+    name: deepseek-v4.1-flash
+    provider: opencode-go
     description: JEV decisions model used to pick the system and agent
 
   policy:
-    name: typesafe/jev-1.13
-    provider: openrouter
+    name: deepseek-v4.1-flash
+    provider: opencode-go
     description: JEV decisions model used by the action-policy gate
     # Most judgments take 1-2 s, a few stall past 10 s. A stalled request is
     # dropped after this long and retried within validator.timeout_seconds.
     request_timeout: 6
 
   policy_chat:
-    name: mimo-v2.6-flash
+    name: deepseek-v4.1-flash
     provider: opencode-go
     policy_api: chat
     description: Chat policy reserve used only after a technical Decisions failure
