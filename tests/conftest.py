@@ -3,49 +3,15 @@ Pytest configuration and shared fixtures for Grid Agent System tests.
 """
 
 import pytest
-import tempfile
-import shutil
-from pathlib import Path
 from unittest.mock import Mock
 import yaml
 import os
-import time
 
 
 @pytest.fixture
-def temp_dir():
-    """Create a temporary directory for tests."""
-    temp_path = tempfile.mkdtemp()
-    yield Path(temp_path)
-    
-    # Fix readonly permissions before cleanup on Windows
-    def handle_remove_readonly(func, path, exc):
-        import stat
-        if os.path.exists(path):
-            # First try to change permissions
-            try:
-                os.chmod(path, stat.S_IWRITE)
-                func(path)
-            except PermissionError:
-                # If still permission error, try waiting a bit for file handles to close
-                time.sleep(0.1)
-                try:
-                    os.chmod(path, stat.S_IWRITE)  
-                    func(path)
-                except:
-                    # Last resort - just ignore the file
-                    pass
-    
-    if os.name == 'nt':  # Windows
-        for _ in range(5):
-            try:
-                shutil.rmtree(temp_path, onerror=handle_remove_readonly)
-                return
-            except OSError:
-                time.sleep(0.2)
-        return
-    else:
-        shutil.rmtree(temp_path)
+def temp_dir(tmp_path):
+    """A temporary directory, removed by pytest."""
+    return tmp_path
 
 
 @pytest.fixture
