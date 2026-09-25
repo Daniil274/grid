@@ -8,7 +8,7 @@ import logging
 import threading
 import sys
 import json
-from typing import Callable, List, Dict, Any, Optional, Protocol, Tuple
+from typing import Callable, List, Dict, Any, Optional, Protocol, Tuple, Union
 from dotenv import load_dotenv
 import httpx
 from openai import AsyncOpenAI
@@ -50,7 +50,7 @@ from core.action_policy import (
     delegated_state,
     is_policy_block,
 )
-from .context import ContextManager, safe_lock
+from .context import ContextManager
 from schemas import AgentConfig, AgentExecution, ContextMessage
 from tools import get_tools_by_names
 from utils.cli_chat import CliChatRenderer
@@ -62,6 +62,7 @@ from core.application.agent_runtime_support import AgentRuntimeSupport
 from core.fallback_model import AllModelsFailedError, FallbackModel, ModelCandidate
 from core import sdk_patches
 from core.sdk_patches import tool_error_output
+from core.agent_input import AgentInput, context_content, parse_agent_input
 
 # Compact system integration
 from core.compact import (
@@ -69,6 +70,7 @@ from core.compact import (
     auto_compact_if_needed,
     AutoCompactTrackingState,
     reactive_compact_on_prompt_too_long,
+    is_prompt_too_long_error,
     CompactMessage,
     estimate_messages_tokens,
 )
@@ -86,6 +88,22 @@ load_dotenv()
 tracing_config = get_tracing_config()
 
 CONTEXT_ID_REGEX = re.compile(r"ctx-[0-9a-fA-F]{8,}")
+
+# Sent after an answer that wrote tool calls as text instead of calling tools.
+TOOL_CALL_CORRECTION = """Your last answer wrote tool calls as text, for example:
+<tool_call><function=function_name><parameter=parameter_name>value</parameter></function></tool_call>
+
+Text like that runs nothing. Call the tools themselves, then answer.
+Repeat the last step that way."""
+
+
+@dataclass
+class _RunProgress:
+    """Where a run stands, for the pending-run record kept in the context."""
+
+    input_preview: str
+    attempt: int = 0
+    recorded_failure: bool = False
 
 logger = logging.getLogger("grid.agent_factory")
 verbose_logger = logging.getLogger("grid.verbose")
@@ -409,10 +427,10 @@ class ConsoleStreamObserver:
         *,
         call_id: Optional[str] = None,
     ) -> None:
-        args_str = self._format_args(arguments)
         self._remember_tool_call(
             agent_key, tool_display_name, arguments, call_id=call_id
         )
+        args_str = self._format_args(arguments)
         if self._renderer:
             self._renderer.print_tool_call(
                 tool_display_name,
@@ -464,7 +482,6 @@ class ConsoleStreamObserver:
                     info = tool_event_info(item)
                     tool_name = info.get("tool_name") or "tool"
                     arguments = info.get("arguments")
-                    args_str = self._format_args(arguments)
                     server_label = info.get("server_label")
                     tool_display_name = (
                         f"{server_label}.{tool_name}" if server_label else tool_name
@@ -643,6 +660,8 @@ class AgentFactory:
     - Session-based memory for agents
     """
 
+    MALFORMED_TOOL_CALL_RETRIES = 2
+
     def __init__(
         self,
         config: Optional[Config] = None,
@@ -650,7 +669,6 @@ class AgentFactory:
         *,
         tracing_level: Optional[str] = "INFO",
         stream_observer: Optional[StreamObserver] = None,
-        broadcaster: Optional[Any] = None,
         context_manager: Optional[ContextManager] = None,
         container_id: Optional[str] = None,
         policy_config: Optional[Config] = None,
@@ -663,7 +681,6 @@ class AgentFactory:
             working_directory: Working directory override
             tracing_level: Tracing level for debugging
             stream_observer: Observer for agent stream events
-            broadcaster: LiveTransparencyBroadcaster for real-time progress updates
             context_manager: Conversation history to share with other factories
                 (the web runtime keeps one across systems); a new one otherwise
             container_id: Docker container ID for isolation
@@ -714,9 +731,6 @@ class AgentFactory:
                 "AgentFactory initialized with container isolation: %s",
                 self.container_id,
             )
-
-        # Telegram integration components
-        self.broadcaster = broadcaster
 
         # Caches
         self._agent_cache: Dict[str, Agent] = {}
@@ -1090,70 +1104,6 @@ class AgentFactory:
                     )
             tracing_config.apply()
             _TRACING_CONFIGURED = True
-
-    # ---------------------------------------------------------------------
-    # Telegram Integration - Progress Broadcasting
-    # ---------------------------------------------------------------------
-    async def emit_progress(
-        self,
-        event_type: str,
-        agent_name: str,
-        content: str,
-        parent_id: Optional[str] = None,
-        status: str = "running",
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """
-        Emit progress event to LiveTransparencyBroadcaster.
-
-        Args:
-            event_type: Type of event (agent_start, agent_end, tool_call, etc.)
-            agent_name: Name of the agent
-            content: Description of the event
-            parent_id: ID of parent agent (for building tree)
-            status: Current status (running, completed, failed)
-            details: Additional details for spoiler content
-        """
-        if not self.broadcaster:
-            return
-
-        try:
-            from core.tracing.events import ProgressEvent
-            from datetime import datetime
-
-            event = ProgressEvent(
-                event_type=event_type,
-                agent_name=agent_name,
-                content=content,
-                parent_id=parent_id,
-                status=status,
-                timestamp=datetime.now().isoformat(),
-                details=details or {},
-            )
-
-            await self.broadcaster.emit_event(event)
-
-        except Exception as e:
-            logger.warning(f"Failed to emit progress event: {e}")
-
-    async def emit_progress_event(
-        self,
-        event_type: str,
-        agent_name: str,
-        content: str,
-        parent_id: Optional[str] = None,
-        status: str = "running",
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """Backward-compatible wrapper for older call sites."""
-        await self.emit_progress(
-            event_type=event_type,
-            agent_name=agent_name,
-            content=content,
-            parent_id=parent_id,
-            status=status,
-            details=details,
-        )
 
     async def initialize(self) -> None:
         """Async init hook for compatibility with API lifespan."""
@@ -2040,127 +1990,82 @@ class AgentFactory:
             return self.get_openai_client_for_model(self.resolve_model_key(key))
         return None, None
 
+    # ------------------------------------------------------------------
+    # Running agents
+    # ------------------------------------------------------------------
+
+    async def _consume_stream(
+        self,
+        result: Any,
+        *,
+        observer: Any,
+        agent_key: str,
+        action_state: Any,
+        on_event: Optional[Callable[[Any], None]] = None,
+    ) -> List[str]:
+        """Feed a streamed run to its observer; return the text fragments it rendered.
+
+        Rendering and bookkeeping never stop a run: their failures are logged.
+        """
+        fragments: List[str] = []
+        async for event in result.stream_events():
+            append_action_reasoning(action_state, event)
+            try:
+                if on_event is not None:
+                    on_event(event)
+                fragment = observer.handle_event(event, agent_key=agent_key)
+            except Exception:
+                logger.exception("Stream observer failed for %s", agent_key)
+                continue
+            if fragment:
+                fragments.append(fragment)
+        return fragments
+
+    @staticmethod
+    def _final_text(result: Any, fragments: List[str]) -> str:
+        """The answer of a finished run: its final output, else what it streamed."""
+        final = getattr(result, "final_output", None)
+        if final is not None and str(final).strip():
+            return str(final)
+        streamed = "".join(fragments).strip()
+        return streamed or str(run_output_text(result))
+
     async def run_agent_object_simple(
         self,
         agent: Any,
         input_message: str,
         context_id: Optional[str] = None,
         pipeline_id: Optional[str] = None,
-        init_tools: Optional[List[Dict[str, Any]]] = None,
         stream_observer: Optional[Any] = None,
         action_state: Optional[Any] = None,
         action_depth: int = 0,
     ) -> str:
-        """Run agent and return simple text output (for subagents).
+        """Run an Agent instance in its own session and return its answer text.
+
+        Used for dynamic and background agents. The run has its own SDK session
+        (agent name + context id) and never reads or changes the factory's
+        conversation history.
 
         ``stream_observer`` is the view the run reports into - the caller's, so a
         dynamic agent shows up in the trace of the turn that launched it rather
         than on the server console. Defaults to the factory's own observer.
 
         ``action_state`` is the policy state of a run started by another agent
-        (see ``core.action_policy.delegated_state``). Without it the run is its own task: the
-        input message becomes the trusted instruction, which is right only for
-        callers that speak for the user (background workers, the CLI).
+        (see ``core.action_policy.delegated_state``). Without it the run is its own
+        task: the input message becomes the trusted instruction, which is right
+        only for callers that speak for the user (background workers, the CLI).
         """
         observer = stream_observer or self._stream_observer
-        # Compact integration: check token usage before running
-        try:
-            # Get current context messages for token check
-            messages = self.context_manager._conversation_history
-
-            # Estimate current token usage
-            compact_messages = self._context_to_compact_messages(messages)
-            current_tokens = (
-                estimate_messages_tokens(compact_messages) if compact_messages else 0
-            )
-
-            # Get model context window and compact config from config.yaml
-            agent_model_key = getattr(agent, "_grid_model_key", None)
-            if not agent_model_key:
-                agent_identifier = getattr(agent, "_grid_agent_key", None) or (
-                    agent.name if hasattr(agent, "name") else None
-                )
-                agent_model_key = self.resolve_model_key(agent_identifier)
-            model_config = (
-                self.config.get_model(agent_model_key) if agent_model_key else None
-            )
-            max_tokens = (
-                getattr(model_config, "context_window", 128000)
-                if model_config
-                else 128000
-            )
-            compact_cfg = self.config.config.compact
-
-            # Check if auto-compact is needed
-            warning_state = calculate_token_warning_state(
-                current_tokens, max_tokens, compact_cfg
-            )
-            if warning_state.is_above_auto_compact_threshold:
-                logger.info(
-                    f"Auto-compact triggered: {current_tokens}/{max_tokens} tokens "
-                    f"(threshold: {warning_state.percent_left}% remaining)"
-                )
-                # Get LLM client and model for full compact fallback
-                try:
-                    compact_client, compact_model = self._get_compact_client_and_model(
-                        agent_model_key
-                    )
-                except Exception:
-                    compact_client, compact_model = None, None
-
-                compact_outcome = await auto_compact_if_needed(
-                    messages=compact_messages,
-                    context_window=max_tokens,
-                    llm_client=compact_client,
-                    model=compact_model,
-                    tracking=self._compact_tracking,
-                    compact_cfg=compact_cfg,
-                )
-                # Update circuit-breaker counter from outcome
-                self._compact_tracking.consecutive_failures = compact_outcome.get(
-                    "consecutive_failures", self._compact_tracking.consecutive_failures
-                )
-                if compact_outcome.get("was_compacted"):
-                    compact_result = compact_outcome.get("compaction_result")
-                    if compact_result and compact_result.compacted_messages:
-                        self._replace_context_with_compact_messages(
-                            compact_result.compacted_messages
-                        )
-                    logger.info(
-                        "Auto-compact complete"
-                        + (
-                            f": tokens {compact_result.tokens_before} -> {compact_result.tokens_after} "
-                            f"(saved {compact_result.tokens_saved})"
-                            if compact_result
-                            else ""
-                        )
-                    )
-        except Exception as compact_error:
-            # Don't fail if compact fails - log and continue
-            logger.warning(f"Auto-compact check failed: {compact_error}")
-
-        # Create session for this agent/context pair
-        session = self._get_agent_session(
-            agent.name if hasattr(agent, "name") else "default",
-            context_id or self.context_manager.get_current_context_id(),
-        )
-
-        # Original implementation continues here...
-        agent._session = session
-
-        # Create GridRunContext
-        policy_context_id = context_id or self.context_manager.get_current_context_id()
+        agent_label = getattr(agent, "name", None) or "dynamic-agent"
+        context_id = context_id or self.context_manager.get_current_context_id()
+        session = self._get_agent_session(agent_label, context_id)
         if action_state is None:
-            action_state = self._action_state(
-                self._policy_task(input_message, policy_context_id)
-            )
+            action_state = self._action_state(self._policy_task(input_message, context_id))
             if action_state is not None and hasattr(observer, "handle_policy_event"):
                 action_state.policy_event = observer.handle_policy_event
-        # A delegated state keeps its caller's event sink: verdicts land on the
-        # rows of the view the whole turn reports into.
         run_ctx = GridRunContext(
             factory=self,
-            context_id=policy_context_id,
+            context_id=context_id,
             session=session,
             pipeline_id=pipeline_id,
             action_state=action_state,
@@ -2169,132 +2074,404 @@ class AgentFactory:
             stream_observer=stream_observer,
         )
 
-        # Execute init_tools if provided
-        if init_tools:
-            # ... existing init_tools code ...
-            pass
-
-        async def _run_streamed_simple() -> str:
-            streaming_text_parts: List[str] = []
-            run_result_streaming = _get_runner().run_streamed(
-                starting_agent=agent,
-                input=input_message,
-                context=run_ctx,
-                session=session,
-                max_turns=self.config.get_max_turns(),
-            )
-
-            agent_label = getattr(agent, "name", "dynamic-agent")
-            try:
-                async for event in run_result_streaming.stream_events():
-                    try:
-                        append_action_reasoning(run_ctx.action_state, event)
-                        if observer is not None:
-                            fragment = observer.handle_event(
-                                event, agent_key=agent_label
-                            )
-                            if fragment:
-                                streaming_text_parts.append(fragment)
-                    except Exception:
-                        logger.exception("Stream observer failed for %s", agent_label)
-            except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
-                # Not transient: retrying would repeat the work. The caller gets
-                # what the agent did so far.
-                logger.warning(
-                    "DYNAMIC_AGENT_STOPPED | agent=%s | %s: %s",
-                    agent_label,
-                    type(exc).__name__,
-                    exc,
-                )
-                return interrupted_run_report(
-                    run_result_streaming, f"Agent {agent_label}", exc
-                )
-
-            result_output = (
-                run_result_streaming.final_output
-                if getattr(run_result_streaming, "final_output", None) is not None
-                else ""
-            )
-            if (
-                not result_output or str(result_output).strip() == ""
-            ) and streaming_text_parts:
-                buffered_text = "".join(streaming_text_parts).strip()
-                if buffered_text:
-                    result_output = buffered_text
-            return str(result_output)
-
-        # Run the agent with infinite retry for transient provider errors
+        attempt = 0
         set_current_factory(self)
-        retry_count = 0
         try:
             while True:
+                result = _get_runner().run_streamed(
+                    starting_agent=agent,
+                    input=input_message,
+                    context=run_ctx,
+                    session=session,
+                    max_turns=self.config.get_max_turns(),
+                )
                 try:
-                    return await _run_streamed_simple()
-                except Exception as e:
-                    retriable = self._is_retriable_agent_exception(e)
-                    if not retriable:
-                        error_str = str(e).lower()
-                        if (
-                            "context_length_exceeded" in error_str
-                            or "prompt_too_long" in error_str
-                            or "max_tokens" in error_str
-                        ):
-                            logger.warning(
-                                f"Context overflow detected, attempting reactive compact: {e}"
-                            )
-                            try:
-                                # Get messages for reactive compact
-                                messages = self.context_manager._conversation_history
-                                compact_messages = self._context_to_compact_messages(
-                                    messages
-                                )
-
-                                # Try reactive compact (synchronous truncation, no LLM call)
-                                reactive_result = (
-                                    await reactive_compact_on_prompt_too_long(
-                                        messages=compact_messages,
-                                        error=e,
-                                    )
-                                )
-
-                                if reactive_result.status.value in (
-                                    "trimmed",
-                                    "success",
-                                ):
-                                    self._replace_context_with_compact_messages(
-                                        reactive_result.messages
-                                    )
-                                    logger.info(
-                                        f"Reactive compact: trimmed to {len(reactive_result.messages)} messages "
-                                        f"(tokens {reactive_result.tokens_before} -> {reactive_result.tokens_after}, "
-                                        f"saved ~{reactive_result.tokens_saved}), retrying"
-                                    )
-                                    # Retry the agent run with truncated messages injected
-                                    # via a fresh runner call — the truncated messages are
-                                    # returned in reactive_result.messages for the caller to use.
-                                    set_current_factory(self)
-                                    try:
-                                        return await _run_streamed_simple()
-                                    finally:
-                                        reset_current_factory()
-                            except Exception as reactive_error:
-                                logger.error(
-                                    f"Reactive compact failed: {reactive_error}"
-                                )
+                    fragments = await self._consume_stream(
+                        result,
+                        observer=observer,
+                        agent_key=agent_label,
+                        action_state=action_state,
+                    )
+                except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
+                    # Not transient: retrying would repeat the work. The caller
+                    # gets what the agent did so far.
+                    logger.warning("Agent %s stopped: %s: %s", agent_label, type(exc).__name__, exc)
+                    return interrupted_run_report(result, f"Agent {agent_label}", exc)
+                except Exception as exc:
+                    if not self._is_retriable_agent_exception(exc):
                         raise
-
-                    retry_count += 1
-                    delay = self._retry_backoff_seconds(retry_count)
+                    attempt += 1
+                    delay = self._retry_backoff_seconds(attempt)
                     logger.warning(
-                        "Retriable sub-agent failure for %s (attempt %d, retry in %.1fs): %s",
-                        getattr(agent, "name", "dynamic-agent"),
-                        retry_count,
+                        "Retriable failure of agent %s (attempt %d, retry in %.1fs): %s",
+                        agent_label,
+                        attempt,
                         delay,
-                        e,
+                        exc,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                return self._final_text(result, fragments)
+        finally:
+            reset_current_factory()
+
+    def _open_context(self, context_id: Optional[str], use_active_context: bool) -> str:
+        """The conversation this request belongs to: named, active, or new."""
+        try:
+            if context_id:
+                return self.context_manager.activate_context(context_id)
+            if use_active_context and self.context_manager.get_current_context_id():
+                return self.context_manager.get_current_context_id()
+            return self.context_manager.start_new_context()
+        except ContextError as exc:
+            raise AgentError("Failed to prepare conversation context") from exc
+
+    def _record_invocation(
+        self, agent_key: str, context_id: str, user_id: Optional[str], message: str
+    ) -> None:
+        self.context_manager.set_metadata("context_id", context_id)
+        self.context_manager.set_metadata(
+            "last_invocation", {"agent": agent_key, "timestamp": time.time()}
+        )
+        if user_id:
+            self.context_manager.set_metadata("user_id", user_id)
+        agent_logging = self.config.config.settings.agent_logging
+        if agent_logging is None or not agent_logging.enabled:
+            return
+        Logger.configure_agent_logging(
+            enabled=True,
+            level=agent_logging.level,
+            log_dir=str(self._logs_directory_path()),
+        )
+        Logger.activate_session_log(context_id)
+        if agent_logging.save_conversations and message:
+            Logger("agent_factory").log_verbose(f"USER INPUT: {agent_key}", message)
+
+    async def _auto_run_preamble(
+        self,
+        agent_key: str,
+        agent_config: AgentConfig,
+        agent: Agent,
+        run_ctx: "GridRunContext",
+        user_message: str,
+    ) -> str:
+        """Run the agent's auto_run_tools and return their output for its input.
+
+        One-time tools run once per user and agent; per-message tools on every
+        request. A failing tool is logged and left out; the request still runs.
+        """
+        if not agent_config.auto_run_tools:
+            return ""
+        working_dir = "/" if self.container_id else self.config.get_working_directory()
+        init_key = f"{agent_key}:{run_ctx.user_id or 'default'}"
+        parts: List[str] = []
+        phases = [(False, init_key not in self._initialized_agents), (True, True)]
+        for every_run, due in phases:
+            if not due:
+                continue
+            try:
+                info, complete = await self._execute_auto_run_tools(
+                    agent_key,
+                    agent_config,
+                    list(agent.tools or []),
+                    working_dir,
+                    run_ctx,
+                    every_run=every_run,
+                    user_message=user_message,
+                )
+            except Exception:
+                logger.warning(
+                    "auto_run_tools of %s failed (every_run=%s)", agent_key, every_run, exc_info=True
+                )
+                continue
+            if info:
+                parts.append(info)
+            if not every_run and complete:
+                self._initialized_agents.add(init_key)
+        # Per-message output first: it is the most recent state.
+        return "\n\n".join(reversed(parts))
+
+    def _prepare_instructions(
+        self,
+        agent_key: str,
+        context_path: Optional[str],
+        include_transcript: bool,
+        context_id: str,
+    ) -> str:
+        """Build the agent's instructions and record how they were assembled."""
+        instructions = self._build_agent_instructions(
+            agent_key, context_path, include_conversation_context=include_transcript
+        )
+        try:
+            assembly = self.instructions_builder.assemble_model_context(
+                agent_key,
+                context_path,
+                include_conversation_context=include_transcript,
+                include_path_context=True,
+            ).to_debug_payload()
+        except Exception:
+            logger.debug("Context assembly report failed for %s", agent_key, exc_info=True)
+            assembly = {
+                "context_id": context_id,
+                "history_strategy": "prompt" if include_transcript else "none",
+                "instruction_length": len(instructions),
+                "sections": [],
+            }
+        self.context_manager.set_metadata("last_context_assembly", assembly)
+        if not self.context_manager.get_metadata("agent_instructions"):
+            # Shown by the context inspector.
+            self.context_manager.set_metadata("agent_instructions", instructions)
+        if agent_key not in self._logged_agents:
+            Logger("agent_factory").log_verbose(f"FULL PROMPT STARTUP: {agent_key}", instructions)
+            self._logged_agents.add(agent_key)
+        return instructions
+
+    def _add_user_message(
+        self, message: str, agent_input: AgentInput, agent_key: str, context_id: str
+    ) -> None:
+        content = (
+            message if agent_input.is_text else context_content(agent_input.items[0])
+        )
+        self.context_manager.add_message(
+            "user",
+            content,
+            metadata={"context_id": context_id, "agent": agent_key, "type": "user_input"},
+        )
+
+    async def _compact_conversation_if_needed(
+        self, agent_key: str, model_config: Any, session: Optional[SQLiteSession]
+    ) -> None:
+        """Summarize the conversation before it outgrows the model's context window.
+
+        The summary replaces the stored history and, in session mode, the agent's
+        session too, so the model continues from the summary instead of the
+        full transcript. A failed compaction is logged; the run goes on.
+        """
+        messages = self._context_to_compact_messages(self.context_manager.conversation_snapshot())
+        if not messages:
+            return
+        context_window = model_config.context_window
+        compact_cfg = self.config.config.compact
+        tokens = estimate_messages_tokens(messages)
+        if not calculate_token_warning_state(
+            tokens, context_window, compact_cfg
+        ).is_above_auto_compact_threshold:
+            return
+        logger.info("Auto-compact of %s: %d/%d tokens", agent_key, tokens, context_window)
+        try:
+            client, model = self._get_compact_client_and_model(agent_key)
+            outcome = await auto_compact_if_needed(
+                messages=messages,
+                context_window=context_window,
+                llm_client=client,
+                model=model,
+                tracking=self._compact_tracking,
+                compact_cfg=compact_cfg,
+            )
+        except Exception:
+            logger.warning("Auto-compact of %s failed", agent_key, exc_info=True)
+            return
+        self._compact_tracking.consecutive_failures = outcome.get(
+            "consecutive_failures", self._compact_tracking.consecutive_failures
+        )
+        result = outcome.get("compaction_result")
+        if outcome.get("was_compacted") and result and result.compacted_messages:
+            await self._replace_history(result.compacted_messages, session)
+            logger.info(
+                "Auto-compact of %s: %d -> %d tokens",
+                agent_key,
+                result.tokens_before,
+                result.tokens_after,
+            )
+
+    async def _replace_history(
+        self, messages: List[CompactMessage], session: Optional[SQLiteSession]
+    ) -> None:
+        """Make *messages* the conversation the model continues from."""
+        self._replace_context_with_compact_messages(messages)
+        if session is not None:
+            await session.clear_session()
+            await session.add_items(self.context_manager.get_conversation_history_as_sdk_messages())
+
+    async def _run_attempt(
+        self,
+        agent: Agent,
+        agent_key: str,
+        run_input: Union[str, List[Any]],
+        run_ctx: "GridRunContext",
+        session: Optional[SQLiteSession],
+        *,
+        stream: bool,
+        observer: Any,
+        attempt: int,
+    ) -> Tuple[str, Any]:
+        """One run of the agent. Returns its answer text and the SDK result.
+
+        A run that exceeds settings.agent_timeout, max_turns, or stops on a model
+        or tool error ends with a report of what it did, not a retry: repeating
+        it would repeat the work done so far.
+        """
+        timeout = self.config.get_agent_timeout()
+        max_turns = self.config.get_max_turns()
+        fragments: List[str] = []
+        result: Any = None
+
+        def record_tool_event(event: Any) -> None:
+            if not isinstance(event, RunItemStreamEvent):
+                return
+            if event.name not in ("tool_called", "tool_output"):
+                return
+            info = tool_event_info(event.item)
+            self._record_runtime_event(
+                event_type=event.name,
+                tool_name=info.get("tool_name") or "tool",
+                arguments=info.get("arguments") if event.name == "tool_called" else None,
+                output=info.get("output") if event.name == "tool_output" else None,
+                extra={"retry_count": attempt},
+            )
+
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                if stream:
+                    if hasattr(observer, "reasoning_text"):
+                        observer.reasoning_text = ""
+                        observer._reasoning_buf = []
+                    result = _get_runner().run_streamed(
+                        agent, run_input, context=run_ctx, max_turns=max_turns, session=session
+                    )
+                    fragments = await self._consume_stream(
+                        result,
+                        observer=observer,
+                        agent_key=agent_key,
+                        action_state=run_ctx.action_state,
+                        on_event=record_tool_event,
+                    )
+                else:
+                    result = await _get_runner().run(
+                        agent, run_input, context=run_ctx, max_turns=max_turns, session=session
+                    )
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            logger.warning("Agent %s stopped after %s s", agent_key, timeout)
+            stopped = TimeoutError(f"no answer within settings.agent_timeout ({timeout} s)")
+            return interrupted_run_report(result, f"Agent {agent_key}", stopped), result
+        except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
+            logger.warning("Agent %s stopped: %s: %s", agent_key, type(exc).__name__, exc)
+            return interrupted_run_report(result, f"Agent {agent_key}", exc), result
+        return self._final_text(result, fragments), result
+
+    async def _run_with_retries(
+        self,
+        agent: Agent,
+        agent_key: str,
+        run_input: Union[str, List[Any]],
+        run_ctx: "GridRunContext",
+        session: Optional[SQLiteSession],
+        *,
+        stream: bool,
+        observer: Any,
+        progress: "_RunProgress",
+    ) -> Tuple[str, Any]:
+        """Run until an answer: transient provider errors are retried with backoff.
+
+        A context overflow is answered once by trimming the oldest history.
+        """
+        trimmed = False
+        set_current_factory(self)
+        try:
+            while True:
+                self._update_pending_agent_run(
+                    agent_key=agent_key,
+                    active_context_id=run_ctx.context_id,
+                    input_preview=progress.input_preview,
+                    status="running",
+                    retry_count=progress.attempt,
+                )
+                self._record_runtime_event(
+                    event_type="attempt_started", extra={"retry_count": progress.attempt}
+                )
+                try:
+                    return await self._run_attempt(
+                        agent,
+                        agent_key,
+                        run_input,
+                        run_ctx,
+                        session,
+                        stream=stream,
+                        observer=observer,
+                        attempt=progress.attempt,
+                    )
+                except Exception as exc:
+                    if not trimmed and is_prompt_too_long_error(exc):
+                        trimmed = True
+                        if await self._trim_history_after_overflow(exc, session):
+                            if session is None and isinstance(run_input, list):
+                                run_input = self._manual_run_input(run_input[-1:])
+                            continue
+                    retriable = self._is_retriable_agent_exception(exc)
+                    error_text = self._safe_preview(str(exc), max_length=700)
+                    self._update_pending_agent_run(
+                        agent_key=agent_key,
+                        active_context_id=run_ctx.context_id,
+                        input_preview=progress.input_preview,
+                        status="retrying" if retriable else "failed",
+                        retry_count=progress.attempt,
+                        last_error=error_text,
+                    )
+                    self._record_runtime_event(
+                        event_type="attempt_error",
+                        output=error_text,
+                        extra={
+                            "retry_count": progress.attempt,
+                            "retriable": retriable,
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+                    if not retriable:
+                        progress.recorded_failure = True
+                        raise AgentError(f"Agent execution failed: {exc}") from exc
+                    progress.attempt += 1
+                    delay = self._retry_backoff_seconds(progress.attempt)
+                    logger.warning(
+                        "Retriable failure of agent %s (attempt %d, retry in %.1fs): %s",
+                        agent_key,
+                        progress.attempt,
+                        delay,
+                        exc,
+                        exc_info=exc,
                     )
                     await asyncio.sleep(delay)
         finally:
             reset_current_factory()
+
+    async def _trim_history_after_overflow(
+        self, error: Exception, session: Optional[SQLiteSession]
+    ) -> bool:
+        """Drop the oldest history after a context overflow; True if anything was dropped."""
+        messages = self._context_to_compact_messages(self.context_manager.conversation_snapshot())
+        try:
+            trimmed = await reactive_compact_on_prompt_too_long(messages=messages, error=error)
+        except Exception:
+            logger.warning("Trimming history after a context overflow failed", exc_info=True)
+            return False
+        if trimmed.status.value not in ("trimmed", "success"):
+            return False
+        await self._replace_history(trimmed.messages, session)
+        logger.info(
+            "Context overflow: history trimmed to %d messages (%d -> %d tokens), retrying",
+            len(trimmed.messages),
+            trimmed.tokens_before,
+            trimmed.tokens_after,
+        )
+        return True
+
+    def _manual_run_input(self, current: List[Any]) -> List[Any]:
+        """Stored history followed by the current input: the manual-history run input."""
+        history = self.context_manager.get_conversation_history_as_sdk_messages()
+        # The current message is the last stored one; send it once.
+        return history[:-1] + current if history else current
 
     async def run_agent(
         self,
@@ -2304,1035 +2481,209 @@ class AgentFactory:
         context_id: Optional[str] = None,
         *,
         stream: bool = False,
-        streaming: Optional[bool] = None,
         use_active_context: bool = False,
-        skip_input_add: bool = False,
         user_id: Optional[str] = None,
         stream_observer: Optional[Any] = None,
-        _retry_count: int = 0,
     ) -> str:
-        """
-        Run agent with message and context management.
+        """Run an agent on a message within a conversation and return its answer.
 
         Args:
             agent_key: Agent to run
-            message: Input message
+            message: The user's message: text, or a JSON SDK message with images
             context_path: Optional context path
-            context_id: Optional identifier of a saved conversation context
-            stream: Whether to stream response (alias: streaming)
-            use_active_context: If True, use the currently active context instead of creating new one
-            user_id: Optional user identifier for workspace isolation
+            context_id: Conversation to continue; a new one when omitted
+            stream: Stream events to the observer while the agent runs
+            use_active_context: Continue the active conversation when no id is given
+            user_id: User the run acts for (workspace isolation)
+            stream_observer: View the run reports into; the factory's by default
 
-        Returns:
-            Agent response
+        The answer ends with the line ``Context ID: <id>``. An answer written as
+        text tool calls (``<tool_call><function=...>``) is retried with a
+        correction, up to MALFORMED_TOOL_CALL_RETRIES times.
         """
-        start_time = time.time()
-        execution = AgentExecution(
-            agent_name=agent_key, start_time=start_time, input_message=message
+        output, context_id = await self._run_turn(
+            agent_key,
+            message,
+            context_path,
+            context_id,
+            stream=stream,
+            use_active_context=use_active_context,
+            user_id=user_id,
+            stream_observer=stream_observer,
         )
+        for retry in range(1, self.MALFORMED_TOOL_CALL_RETRIES + 1):
+            if not self._detect_malformed_tool_calls(output):
+                break
+            logger.warning(
+                "Agent %s wrote tool calls as text; retrying with a correction (%d/%d)",
+                agent_key,
+                retry,
+                self.MALFORMED_TOOL_CALL_RETRIES,
+            )
+            output, context_id = await self._run_turn(
+                agent_key,
+                TOOL_CALL_CORRECTION,
+                context_path,
+                context_id,
+                stream=stream,
+                user_id=user_id,
+                stream_observer=stream_observer,
+            )
+        return output
+
+    async def _run_turn(
+        self,
+        agent_key: str,
+        message: str,
+        context_path: Optional[str],
+        context_id: Optional[str],
+        *,
+        stream: bool,
+        user_id: Optional[str],
+        stream_observer: Optional[Any],
+        use_active_context: bool = False,
+    ) -> Tuple[str, str]:
+        """One request and answer of the conversation. Returns (answer, context id)."""
+        observer = stream_observer or self._stream_observer
+        execution = AgentExecution(
+            agent_name=agent_key, start_time=time.time(), input_message=message
+        )
+        progress = _RunProgress(input_preview=self._safe_preview(message, max_length=700))
         active_context_id: Optional[str] = None
-        context_marker_line: Optional[str] = None
-        action_state: Optional[ActionRunState] = None
-        policy_observer = stream_observer or self._stream_observer
-
-        if streaming is not None:
-            stream = streaming
-
         try:
-
-            try:
-                if context_id:
-                    active_context_id = self.context_manager.activate_context(
-                        context_id
-                    )
-                elif use_active_context:
-                    # Use active context if available, otherwise create a new one
-                    current_id = self.context_manager.get_current_context_id()
-                    if current_id:
-                        active_context_id = current_id
-                    else:
-                        active_context_id = self.context_manager.start_new_context()
-                else:
-                    active_context_id = self.context_manager.start_new_context()
-            except ContextError as exc:
-                raise AgentError("Failed to prepare conversation context") from exc
-
+            active_context_id = self._open_context(context_id, use_active_context)
+            execution.context_id = active_context_id
+            continuing = context_id is not None or use_active_context
             # The trusted task includes the bounded user-authored conversation,
             # not only a context-free follow-up such as "commit" or "continue".
-            action_state = self._action_state(
-                self._policy_task(message, active_context_id)
-            )
-            if action_state is not None and hasattr(
-                policy_observer, "handle_policy_event"
-            ):
-                action_state.policy_event = policy_observer.handle_policy_event
+            action_state = self._action_state(self._policy_task(message, active_context_id))
+            if action_state is not None and hasattr(observer, "handle_policy_event"):
+                action_state.policy_event = observer.handle_policy_event
+            self._record_invocation(agent_key, active_context_id, user_id, message)
+            user_id = user_id or self.context_manager.get_metadata("user_id")
 
-            execution.context_id = active_context_id
-            if active_context_id:
-                self.context_manager.set_metadata("context_id", active_context_id)
-                self.context_manager.set_metadata(
-                    "last_invocation",
-                    {
-                        "agent": agent_key,
-                        "timestamp": time.time(),
-                    },
-                )
-                # Set user_id in metadata for workspace isolation
-                if user_id:
-                    self.context_manager.set_metadata("user_id", user_id)
-
-                agent_logging = getattr(
-                    self.config.config.settings, "agent_logging", None
-                )
-                if agent_logging and getattr(agent_logging, "enabled", True):
-                    Logger.configure_agent_logging(
-                        enabled=True,
-                        level=getattr(agent_logging, "level", "full"),
-                        log_dir=str(self._logs_directory_path()),
-                    )
-                    Logger.activate_session_log(active_context_id)
-                    if (
-                        getattr(agent_logging, "save_conversations", True)
-                        and message
-                        and not skip_input_add
-                    ):
-                        Logger("agent_factory").log_verbose(
-                            f"USER INPUT: {agent_key}",
-                            message,
-                        )
-
-            # Create agent (or get from cache)
             agent = await self.create_agent(agent_key, context_path)
-
-            # Parse message if it's a JSON string (for multimodal messages with images)
-            # According to Agents SDK, Runner.run accepts: str | list[TResponseInputItem]
-            # If message is JSON string, parse it to dict/list before passing to Runner
-            # IMPORTANT: When using session, we can only pass string, not list
-            # So for multimodal messages, we need to disable session or use session_input_callback
-            parsed_message = message
-            is_multimodal = False
-            try:
-                if isinstance(message, str) and message.strip().startswith("{"):
-                    # Try to parse as JSON - might be a multimodal message
-                    parsed_message = json.loads(message)
-                    # If it's a single message dict, wrap in list (as per SDK examples)
-                    if isinstance(parsed_message, dict) and "role" in parsed_message:
-                        # Check if it contains images
-                        content = parsed_message.get("content", [])
-                        if isinstance(content, list):
-                            for part in content:
-                                if isinstance(part, dict) and part.get("type") in (
-                                    "input_image",
-                                    "image_url",
-                                ):
-                                    is_multimodal = True
-                                    break
-                        parsed_message = [parsed_message]
-                    elif isinstance(parsed_message, list):
-                        # Check if list contains multimodal content
-                        for msg in parsed_message:
-                            if isinstance(msg, dict):
-                                content = msg.get("content", [])
-                                if isinstance(content, list):
-                                    for part in content:
-                                        if isinstance(part, dict) and part.get(
-                                            "type"
-                                        ) in ("input_image", "image_url"):
-                                            is_multimodal = True
-                                            break
-            except (json.JSONDecodeError, ValueError):
-                # Not JSON, keep as string
-                parsed_message = message
-
-            # Run auto_run_tools with current working_dir.
-            run_agent_config = self.config.get_agent(agent_key)
-            model_config = self.config.get_model(run_agent_config.primary_model)
-            init_key = f"{agent_key}:{user_id or 'default'}"
-            working_dir = (
-                "/" if self.container_id else self.config.get_working_directory()
-            )
-            ctx_user_id = user_id or (
-                self.context_manager.get_metadata("user_id")
-                if hasattr(self.context_manager, "get_metadata")
-                else None
-            )
-
-            if getattr(run_agent_config, "auto_run_tools", None):
-                agent_tools = getattr(agent, "tools", []) or []
-                temp_run_ctx = GridRunContext(
-                    factory=self,
-                    context_id=active_context_id or "run",
-                    user_id=ctx_user_id,
-                    agent_id=agent_key,
-                    container_id=self.container_id,
-                    action_state=action_state,
-                )
-                raw_message = message if isinstance(parsed_message, str) else ""
-
-                # One-time tools (every_run=False): run ONCE per user/agent session.
-                if init_key not in self._initialized_agents:
-                    try:
-                        auto_run_info, complete = await self._execute_auto_run_tools(
-                            agent_key,
-                            run_agent_config,
-                            agent_tools,
-                            working_dir,
-                            temp_run_ctx,
-                            every_run=False,
-                            user_message=raw_message,
-                        )
-                        if auto_run_info and isinstance(parsed_message, str):
-                            parsed_message = (
-                                auto_run_info
-                                + "\n\n[Current user request]\n\n"
-                                + parsed_message
-                            )
-                        if complete:
-                            self._initialized_agents.add(init_key)
-                            logger.info(
-                                f"✅ One-time auto-run tools executed for {init_key}"
-                            )
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to run one-time auto_run_tools: {e}")
-
-                # Per-message tools (every_run=True): run on EVERY request.
-                try:
-                    every_run_info, _ = await self._execute_auto_run_tools(
-                        agent_key,
-                        run_agent_config,
-                        agent_tools,
-                        working_dir,
-                        temp_run_ctx,
-                        every_run=True,
-                        user_message=raw_message,
-                    )
-                    if every_run_info and isinstance(parsed_message, str):
-                        parsed_message = (
-                            every_run_info
-                            + "\n\n[Current user request]\n\n"
-                            + parsed_message
-                        )
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to run per-message auto_run_tools: {e}")
-
-            # Determine whether to include dialogue context
-            # Context is included if:
-            # 1. Explicit context_id is provided (user wants to continue the dialogue)
-            # 2. Active context is used (interactive mode)
-            include_conversation_context = (
-                context_id is not None  # Explicit context_id provided
-                or use_active_context  # Use active context
-            )
-
-            # Check if conversation history contains images
-            # If yes, we need to use list format instead of session for ALL messages
-            # (because session doesn't preserve images from previous messages)
-            history_has_images = False
-            try:
-                # Get raw conversation history (ContextMessage objects)
-                with safe_lock(self.context_manager._lock, timeout=5.0):
-                    history = self.context_manager._conversation_history
-                    for msg in history:
-                        # Check if message has images using ContextMessage.has_images() method
-                        if hasattr(msg, "has_images"):
-                            if msg.has_images():
-                                history_has_images = True
-                                break
-                        # Fallback: check content directly
-                        elif hasattr(msg, "content"):
-                            if isinstance(msg.content, list):
-                                for part in msg.content:
-                                    if isinstance(part, dict):
-                                        if part.get("type") in (
-                                            "input_image",
-                                            "image_url",
-                                            "image_file",
-                                        ):
-                                            history_has_images = True
-                                            break
-                                    elif hasattr(part, "type") and part.type in (
-                                        "input_image",
-                                        "image_url",
-                                        "image_file",
-                                    ):
-                                        history_has_images = True
-                                        break
-                        if history_has_images:
-                            break
-            except Exception as e:
-                logger.debug(f"Failed to check history for images: {e}")
-
-            # If current message is multimodal, history has images, or the model
-            # requires provider-specific reasoning replay, use manual history.
-            model_requires_manual_history = self._model_requires_manual_history(
-                model_config
-            )
-            needs_list_format = (
-                is_multimodal or history_has_images or model_requires_manual_history
-            )
-
-            # Do not add agent instructions to dialogue; store in metadata for internal use
-            if not self.context_manager.get_conversation_context():
-                initial_instructions = self._build_agent_instructions(
-                    agent_key,
-                    context_path,
-                    include_conversation_context=False,
-                )
-                self.context_manager.set_metadata(
-                    "agent_instructions", initial_instructions
-                )
-                try:
-                    initial_context = self.instructions_builder.assemble_model_context(
-                        agent_key,
-                        context_path,
-                        include_conversation_context=False,
-                        include_path_context=True,
-                    )
-                    initial_payload = initial_context.to_debug_payload()
-                except Exception:
-                    initial_payload = {
-                        "context_id": active_context_id,
-                        "history_strategy": "none",
-                        "instruction_length": len(initial_instructions),
-                        "sections": [],
-                        "metadata": {
-                            "agent_key": agent_key,
-                            "context_path": context_path,
-                            "include_conversation_context": False,
-                            "include_path_context": True,
-                        },
-                    }
-                self.context_manager.set_metadata(
-                    "last_context_assembly",
-                    initial_payload,
-                )
-
-            # For messages that need list format, get history BEFORE adding current message
-            # (so we can prepend it to the input list)
-            history_messages = []
-            if needs_list_format:
-                history_messages = (
-                    self.context_manager.get_conversation_history_as_sdk_messages()
-                )
-
-            # Add message to context for current session
-            # For multimodal messages, we need to parse JSON and create proper ContextMessage
-            if not skip_input_add:
-                if (
-                    is_multimodal
-                    and isinstance(parsed_message, list)
-                    and len(parsed_message) > 0
-                ):
-                    # Extract content from parsed message
-                    msg_dict = (
-                        parsed_message[0] if isinstance(parsed_message[0], dict) else {}
-                    )
-                    msg_content = msg_dict.get("content", [])
-
-                    # Convert SDK format content parts to ContextMessage format
-                    # SDK uses: [{"type": "input_text", "text": "..."}, {"type": "input_image", "image_url": "..."}]
-                    # ContextMessage needs: [TextContent(...), ImageContent(...)]
-                    from schemas import (
-                        ContextMessage,
-                        TextContent,
-                        ImageContent,
-                        ImageUrl,
-                    )
-                    from datetime import datetime
-
-                    content_parts = []
-                    for part in msg_content:
-                        if isinstance(part, dict):
-                            part_type = part.get("type")
-                            if part_type == "input_text":
-                                content_parts.append(
-                                    TextContent(type="text", text=part.get("text", ""))
-                                )
-                            elif part_type == "input_image":
-                                image_url = part.get("image_url", "")
-                                detail = part.get("detail", "auto")
-                                # image_url should already be base64 data URL from prepare_agent_message
-                                # Store it as ImageContent so it can be converted back to SDK format
-                                content_parts.append(
-                                    ImageContent(
-                                        type="image_url",
-                                        image_url=ImageUrl(
-                                            url=image_url, detail=detail
-                                        ),
-                                    )
-                                )
-                                logger.debug(
-                                    f"Storing image in context: {len(image_url)} chars (base64 URL)"
-                                )
-                            # Pass through other types as dict
-                            else:
-                                content_parts.append(part)
-                        else:
-                            content_parts.append(part)
-
-                    # Create ContextMessage with multimodal content
-                    multimodal_msg = ContextMessage(
-                        role="user",
-                        content=content_parts,
-                        timestamp=datetime.now().isoformat(),
-                        metadata={
-                            "context_id": active_context_id,
-                            "agent": agent_key,
-                            "type": "user_input",
-                        },
-                    )
-                    # Add directly to context history using safe_lock
-                    try:
-                        with safe_lock(self.context_manager._lock, timeout=5.0):
-                            self.context_manager._conversation_history.append(
-                                multimodal_msg
-                            )
-                            # Trim history if needed
-                            if (
-                                len(self.context_manager._conversation_history)
-                                > self.context_manager.max_history
-                            ):
-                                self.context_manager._conversation_history.pop(0)
-                            # Update context bucket
-                            active_bucket = self.context_manager._contexts.get(
-                                self.context_manager._current_context_id
-                            )
-                            if active_bucket is not None:
-                                active_bucket["updated_at"] = datetime.now().isoformat()
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to add multimodal message to context: {e}, falling back to string"
-                        )
-                        self.context_manager.add_message(
-                            "user",
-                            message,
-                            metadata={
-                                "context_id": active_context_id,
-                                "agent": agent_key,
-                                "type": "user_input",
-                            },
-                        )
-                else:
-                    # Simple text message - use standard add_message
-                    self.context_manager.add_message(
-                        "user",
-                        message,  # Store original message string for context
-                        metadata={
-                            "context_id": active_context_id,
-                            "agent": agent_key,
-                            "type": "user_input",
-                        },
-                    )
-            elif skip_input_add and not message:
-                # If we are skipping input add (recursive call) and message is empty,
-                # we ensure parsed_message is empty list so we only send history
-                parsed_message = []
-
-            agent_instructions = self._build_agent_instructions(
-                agent_key,
-                context_path,
-                include_conversation_context=include_conversation_context,
-            )
-            try:
-                assembled_context = self.instructions_builder.assemble_model_context(
-                    agent_key,
-                    context_path,
-                    include_conversation_context=include_conversation_context,
-                    include_path_context=True,
-                )
-                context_payload = assembled_context.to_debug_payload()
-            except Exception:
-                context_payload = {
-                    "context_id": active_context_id,
-                    "history_strategy": (
-                        "prompt" if include_conversation_context else "none"
-                    ),
-                    "instruction_length": len(agent_instructions),
-                    "sections": [],
-                    "metadata": {
-                        "agent_key": agent_key,
-                        "context_path": context_path,
-                        "include_conversation_context": include_conversation_context,
-                        "include_path_context": True,
-                    },
-                }
-            self.context_manager.set_metadata(
-                "last_context_assembly",
-                context_payload,
-            )
-            agent.instructions = agent_instructions
-
-            # Log full prompt at startup (only once per agent per session)
-            if agent_key not in self._logged_agents:
-                Logger("agent_factory").log_verbose(
-                    f"FULL PROMPT STARTUP: {agent_key}", agent_instructions
-                )
-                self._logged_agents.add(agent_key)
-
-            # Run agent with max_turns configuration and timeout
-            max_turns = self.config.get_max_turns()
-            timeout_seconds = self.config.get_agent_timeout()
-
-            # Prepare session scoped to the active context
-            # IMPORTANT: Session cannot be used with list input (multimodal messages)
-            # For multimodal messages, we disable session and manage history manually via context
-            if not active_context_id:
-                raise AgentError("Failed to prepare conversation context")
-
-            # For multimodal messages OR if history has images, don't use session (SDK limitation)
-            # We'll manage history by prepending it to the input message list
-            if needs_list_format:
-                session = None
-                if is_multimodal:
-                    logger.debug(
-                        "Multimodal message detected - disabling session, prepending history to input"
-                    )
-                elif history_has_images:
-                    logger.debug(
-                        "History contains images - disabling session, prepending history to input"
-                    )
-                elif model_requires_manual_history:
-                    logger.debug(
-                        "Model '%s' requires manual history replay - disabling session",
-                        getattr(model_config, "name", run_agent_config.primary_model),
-                    )
-
-                # Convert current message to list format if it's a string
-                if isinstance(parsed_message, str):
-                    # Simple text message - convert to SDK format
-                    parsed_message = [{"role": "user", "content": parsed_message}]
-                elif isinstance(parsed_message, dict):
-                    parsed_message = [parsed_message]
-                # If already a list, keep it as is
-
-                # Prepend history to current message (history was fetched before adding current message)
-                parsed_message = history_messages + parsed_message
-            else:
-                session = self._get_agent_session(agent_key, active_context_id)
-                agent._session = session
-
-            # Get user_id and metadata from context
-            ctx_user_id = user_id or (
-                self.context_manager.get_metadata("user_id")
-                if hasattr(self.context_manager, "get_metadata")
-                else None
-            )
-            ctx_metadata = (
-                self.context_manager.get_all_metadata()
-                if hasattr(self.context_manager, "get_all_metadata")
-                else {}
-            )
+            agent_config = self.config.get_agent(agent_key)
+            model_config = self.config.get_model(agent_config.primary_model)
+            agent_input = parse_agent_input(message)
+            run_input: Union[str, List[Any]] = agent_input.items
 
             run_ctx = GridRunContext(
                 factory=self,
                 context_id=active_context_id,
-                session=session,
-                user_id=ctx_user_id,
+                user_id=user_id,
                 agent_id=agent_key,
-                metadata=ctx_metadata,
                 container_id=self.container_id,
                 action_state=action_state,
-                stream_observer=policy_observer,
+                stream_observer=observer,
             )
+            preamble = await self._auto_run_preamble(
+                agent_key,
+                agent_config,
+                agent,
+                run_ctx,
+                user_message=message if agent_input.is_text else "",
+            )
+            if preamble and agent_input.is_text:
+                run_input = f"{preamble}\n\n[Current user request]\n\n{run_input}"
 
-            input_preview = self._safe_preview(parsed_message, max_length=700)
+            # History reaches the model through one channel: the agent's SDK
+            # session, or - for images and models that need their reasoning
+            # replayed - the stored history sent with the input.
+            manual_history = (
+                not agent_input.is_text
+                or self.context_manager.history_has_images()
+                or self._model_requires_manual_history(model_config)
+            )
+            session = None if manual_history else self._get_agent_session(agent_key, active_context_id)
+            if continuing:
+                await self._compact_conversation_if_needed(agent_key, model_config, session)
+            # A transcript in the prompt only for an agent that joins a
+            # conversation its session has not seen (e.g. after routing).
+            include_transcript = (
+                continuing and session is not None and not await session.get_items(limit=1)
+            )
+            agent.instructions = self._prepare_instructions(
+                agent_key, context_path, include_transcript, active_context_id
+            )
+            self._add_user_message(message, agent_input, agent_key, active_context_id)
+            if manual_history:
+                current = [{"role": "user", "content": run_input}] if isinstance(run_input, str) else run_input
+                run_input = self._manual_run_input(current)
+
+            run_ctx.session = session
+            run_ctx.metadata = self.context_manager.get_all_metadata()
+            progress.input_preview = self._safe_preview(run_input, max_length=700)
             self._update_pending_agent_run(
                 agent_key=agent_key,
                 active_context_id=active_context_id,
-                input_preview=input_preview,
+                input_preview=progress.input_preview,
                 status="running",
-                retry_count=0,
                 clear_tool_events=True,
             )
+            output, result = await self._run_with_retries(
+                agent,
+                agent_key,
+                run_input,
+                run_ctx,
+                session,
+                stream=stream,
+                observer=observer,
+                progress=progress,
+            )
 
-            retry_count = 0
-            result = None
-            set_current_factory(self)
-            try:
-                while True:
-                    self._update_pending_agent_run(
-                        agent_key=agent_key,
-                        active_context_id=active_context_id,
-                        input_preview=input_preview,
-                        status="running",
-                        retry_count=retry_count,
-                    )
-                    self._record_runtime_event(
-                        event_type="attempt_started",
-                        extra={"retry_count": retry_count},
-                    )
-                    try:
-                        if stream:
-                            # Streaming mode: transparent highlighting of tool/MCP calls via observer
-                            result_output: Optional[str] = None
-                            streaming_text_parts: List[str] = []
-                            _init_obs = stream_observer or self._stream_observer
-                            if hasattr(_init_obs, "reasoning_text"):
-                                _init_obs.reasoning_text = ""
-                                _init_obs._reasoning_buf = []
-                            run_result_streaming = _get_runner().run_streamed(
-                                agent,
-                                parsed_message,
-                                context=run_ctx,
-                                max_turns=max_turns,
-                                session=session,
-                            )
-                            async for event in run_result_streaming.stream_events():
-                                try:
-                                    append_action_reasoning(action_state, event)
-                                    if isinstance(event, RunItemStreamEvent):
-                                        event_name = getattr(event, "name", "")
-                                        item = getattr(event, "item", None)
-                                        if item is not None and event_name in {
-                                            "tool_called",
-                                            "tool_output",
-                                        }:
-                                            raw_item = getattr(item, "raw_item", None)
-                                            tool_name = (
-                                                getattr(raw_item, "name", None)
-                                                or getattr(raw_item, "type", None)
-                                                or "tool"
-                                            )
-                                            if event_name == "tool_called":
-                                                arguments = getattr(
-                                                    raw_item, "arguments", None
-                                                )
-                                                self._record_runtime_event(
-                                                    event_type="tool_called",
-                                                    tool_name=tool_name,
-                                                    arguments=arguments,
-                                                    extra={"retry_count": retry_count},
-                                                )
-                                            else:
-                                                tool_output = getattr(
-                                                    item, "output", None
-                                                )
-                                                if tool_output is None:
-                                                    tool_output = getattr(
-                                                        raw_item, "output", None
-                                                    )
-                                                self._record_runtime_event(
-                                                    event_type="tool_output",
-                                                    tool_name=tool_name,
-                                                    output=tool_output,
-                                                    extra={"retry_count": retry_count},
-                                                )
-
-                                    obs = stream_observer or self._stream_observer
-                                    fragment = obs.handle_event(
-                                        event, agent_key=agent_key
-                                    )
-                                    if fragment:
-                                        streaming_text_parts.append(fragment)
-
-                                    if self.broadcaster and isinstance(
-                                        event, RunItemStreamEvent
-                                    ):
-                                        event_name = getattr(event, "name", "")
-                                        item = getattr(event, "item", None)
-
-                                        if (
-                                            event_name == "tool_called"
-                                            and item is not None
-                                        ):
-                                            raw_item = getattr(item, "raw_item", None)
-                                            tool_name = (
-                                                getattr(raw_item, "name", None)
-                                                or "tool"
-                                            )
-                                            arguments = getattr(
-                                                raw_item, "arguments", None
-                                            )
-
-                                            await self.emit_progress_event(
-                                                event_type="tool_call_start",
-                                                agent_name=agent_key,
-                                                content=f"Tool call: {tool_name}",
-                                                status="running",
-                                                details={
-                                                    "tool_name": tool_name,
-                                                    "arguments": (
-                                                        arguments
-                                                        if isinstance(arguments, dict)
-                                                        else str(arguments)
-                                                    ),
-                                                },
-                                            )
-                                        elif (
-                                            event_name == "tool_output"
-                                            and item is not None
-                                        ):
-                                            raw_item = getattr(item, "raw_item", None)
-                                            tool_name = (
-                                                getattr(raw_item, "name", None)
-                                                or "tool"
-                                            )
-                                            output = getattr(raw_item, "output", None)
-
-                                            await self.emit_progress_event(
-                                                event_type="tool_call_end",
-                                                agent_name=agent_key,
-                                                content=f"Result: {tool_name}",
-                                                status="completed",
-                                                details={
-                                                    "tool_name": tool_name,
-                                                    "output": (
-                                                        str(output)[:500]
-                                                        if output
-                                                        else ""
-                                                    ),
-                                                },
-                                            )
-                                except Exception:
-                                    logger.exception(
-                                        "Stream observer failed for %s",
-                                        type(event).__name__,
-                                    )
-
-                            result_output = (
-                                run_result_streaming.final_output
-                                if run_result_streaming.final_output is not None
-                                else ""
-                            )
-                            if (
-                                not result_output or str(result_output).strip() == ""
-                            ) and streaming_text_parts:
-                                try:
-                                    buffered_text = "".join(
-                                        streaming_text_parts
-                                    ).strip()
-                                    if buffered_text:
-                                        result_output = buffered_text
-                                except Exception:
-                                    logger.exception(
-                                        "Failed to merge streaming text fragments"
-                                    )
-                            result = result_output
-                        else:
-                            result = await asyncio.wait_for(
-                                _get_runner().run(
-                                    agent,
-                                    parsed_message,
-                                    context=run_ctx,
-                                    max_turns=max_turns,
-                                    session=session,
-                                ),
-                                timeout=timeout_seconds,
-                            )
-                        break
-                    except MaxTurnsExceeded as e:
-                        partial = self._extract_partial_output(e)
-                        if stream and not partial:
-                            partial = (
-                                "".join(streaming_text_parts).strip()
-                                if streaming_text_parts
-                                else None
-                            )
-                        if partial:
-                            logger.warning(
-                                "Agent reached max turns; returning partial output (%d chars)",
-                                len(partial),
-                            )
-                            result = partial
-                        else:
-                            result = f"⚠️ Agent reached max turns limit ({max_turns}). No final output produced."
-                            logger.warning(
-                                "Agent reached max turns with no partial output"
-                            )
-                        break
-                    except ModelBehaviorError as e:
-                        logger.error("Model behavior error during agent run: %s", e)
-                        result = (
-                            f"ERROR: Model produced an invalid response — {e}. "
-                            f"Please retry the request."
-                        )
-                        break
-                    except AgentsUserError as e:
-                        logger.error("SDK user error during agent run: %s", e)
-                        result = (
-                            f"ERROR: Tool execution failed — {e}. "
-                            f"Please check tool call arguments and retry."
-                        )
-                        break
-                    except Exception as e:
-                        retriable = self._is_retriable_agent_exception(e)
-                        error_text = self._safe_preview(str(e), max_length=700)
-                        self._update_pending_agent_run(
-                            agent_key=agent_key,
-                            active_context_id=active_context_id,
-                            input_preview=input_preview,
-                            status="retrying" if retriable else "failed",
-                            retry_count=retry_count,
-                            last_error=error_text,
-                        )
-                        self._record_runtime_event(
-                            event_type="attempt_error",
-                            output=error_text,
-                            extra={
-                                "retry_count": retry_count,
-                                "retriable": retriable,
-                                "exception_type": type(e).__name__,
-                            },
-                        )
-                        if not retriable:
-                            raise AgentError(f"Agent execution failed: {e}") from e
-
-                        retry_count += 1
-                        delay = self._retry_backoff_seconds(retry_count)
-                        logger.warning(
-                            "Retriable agent failure for %s (attempt %d, retry in %.1fs): %s",
-                            agent_key,
-                            retry_count,
-                            delay,
-                            e,
-                            exc_info=e,
-                        )
-                        await self.emit_progress_event(
-                            event_type="agent_retry",
-                            agent_name=agent_key,
-                            content=f"Provider temporary error, retrying in {delay:.1f}s",
-                            status="retrying",
-                            details={
-                                "retry_count": retry_count,
-                                "error": error_text,
-                            },
-                        )
-                        await asyncio.sleep(delay)
-            finally:
-                reset_current_factory()
-
-            # Process result - more robust extraction
-            try:
-                output = None
-                # Check if result is a string (already processed)
-                if isinstance(result, str):
-                    output = result
-                elif hasattr(result, "final_output") and result.final_output:
-                    output = result.final_output
-                elif hasattr(result, "output") and result.output:
-                    output = result.output
-                elif hasattr(result, "content") and result.content:
-                    output = result.content
-                # Fallback for RunResult if final_output is missing but we have raw responses
-                elif hasattr(result, "new_items") and result.new_items:
-                    # Try to find the last message content
-                    try:
-                        last_item = result.new_items[-1]
-                        if hasattr(last_item, "content") and last_item.content:
-                            output = str(last_item.content)
-                            logger.info(
-                                f"Recovered output from last new item: {output[:50]}..."
-                            )
-                    except Exception:
-                        pass
-
-                    # If still None, convert result to string
-                    if output is None:
-                        output = str(result)
-                else:
-                    output = str(result)
-
-                # Ensure we have a non-empty response
-                if not output or output.strip() == "":
-                    output = "Agent completed the task but did not provide a text response. Check logs for execution details."
-            except Exception as e:
-                logger.error(f"Error processing agent result: {e}", exc_info=True)
-                output = f"An error occurred while processing the agent result: {e}"
-
-            # Add agent response to context for current session
-            # Post-process potential manual tool call before storing response
-            try:
-                # Ensure output is defined before using it
-                if "output" not in locals():
-                    output = "Error: output variable is not defined."
-
-                manual_tool_result = await self._execute_first_tool_call_in_text(output)
-                if manual_tool_result is not None:
-                    output = manual_tool_result
-            except Exception as e:
-                logger.debug("Manual tool-call hook failed: %s", e, exc_info=e)
-
-            # Check for malformed tool calls and retry with correction
-            MAX_RETRY_COUNT = 2
-            if _retry_count < MAX_RETRY_COUNT and self._detect_malformed_tool_calls(
-                output
-            ):
-                logger.warning(
-                    f"Detected malformed tool call in agent output (attempt {_retry_count + 1}/{MAX_RETRY_COUNT}). "
-                    "Retrying with correction prompt..."
-                )
-                Logger("agent_factory").log_verbose(
-                    f"MALFORMED TOOL CALL DETECTED (retry {_retry_count + 1}/{MAX_RETRY_COUNT})",
-                    {
-                        "output_preview": output[:500],
-                        "context_id": active_context_id,
-                        "agent": agent_key,
-                    },
-                )
-
-                # Add the malformed response to context first
-                self.context_manager.add_message(
-                    "assistant",
-                    output,
-                    metadata={
-                        "context_id": active_context_id,
-                        "agent": agent_key,
-                        "type": "agent_response_malformed",
-                        "retry_count": _retry_count,
-                    },
-                )
-
-                # Add system correction message
-                correction_prompt = """CRITICAL ERROR: You used an incorrect tool call format!
-
-Your response contained an incorrect XML format like:
-<tool_call><function=function_name><parameter=parameter_name>value</parameter></function></tool_call>
-
-
-CORRECT way to call tools:
-- Simply use the available tools as usual through the SDK
-- The SDK automatically serializes calls in the correct format
-- Your job is just to select the right tool and parameters
-
-Please repeat the last action using ONLY standard tool calls through the SDK.
-DO NOT write XML tags manually!"""
-
-                self.context_manager.add_message(
-                    "user",
-                    correction_prompt,
-                    metadata={
-                        "context_id": active_context_id,
-                        "agent": agent_key,
-                        "type": "system_correction",
-                        "retry_count": _retry_count,
-                    },
-                )
-
-                # Retry with same context (use_active_context=True to preserve history)
-                # Skip adding new input since we already added correction prompt
-                logger.info(
-                    f"Retrying agent execution with correction (attempt {_retry_count + 2}/{MAX_RETRY_COUNT + 1})"
-                )
-                self._update_pending_agent_run(
-                    agent_key=agent_key,
-                    active_context_id=active_context_id,
-                    input_preview=input_preview,
-                    status="retrying",
-                    retry_count=retry_count,
-                    last_error="Malformed manual tool call detected; retrying with correction prompt.",
-                )
-                return await self.run_agent(
-                    agent_key=agent_key,
-                    message="",  # Empty message - we added correction prompt already
-                    context_path=context_path,
-                    context_id=active_context_id,  # Preserve context
-                    stream=stream,
-                    use_active_context=True,
-                    skip_input_add=True,  # Don't add empty message to context again
-                    user_id=user_id,
-                    _retry_count=_retry_count + 1,
-                )
-
-            if active_context_id:
-                context_marker_line = f"\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442 ID: {active_context_id}"
-                english_marker_line = f"Context ID: {active_context_id}"
-                normalized_output = output or ""
-                has_marker = (
-                    context_marker_line in normalized_output
-                    or english_marker_line in normalized_output
-                )
-                if not has_marker:
-                    trimmed_output = normalized_output.rstrip()
-                    if trimmed_output:
-                        output = f"{trimmed_output}\n\n{context_marker_line}"
-                    else:
-                        output = context_marker_line
-                else:
-                    output = normalized_output
-            else:
-                context_marker_line = None
-
+            marker = f"Context ID: {active_context_id}"
+            if marker not in output:
+                output = f"{output.rstrip()}\n\n{marker}"
             self.context_manager.add_message(
                 "assistant",
                 output,
-                metadata={
-                    "context_id": active_context_id,
-                    "agent": agent_key,
-                    "type": "agent_response",
-                },
+                metadata={"context_id": active_context_id, "agent": agent_key, "type": "agent_response"},
             )
-
-            # Update execution record
             execution.end_time = time.time()
             execution.output = output
-            # If we had a RunResult, try to extract the tool list
-            tools_used: List[str] = []
-            try:
-                if not isinstance(result, str):
-                    tools_used = self._extract_tools_used(result)
-                execution.tools_used = tools_used
-            except Exception as e:
-                execution.tools_used = []
-                logger.debug(
-                    "Failed to extract tools used from result: %s", e, exc_info=e
-                )
-
-            duration = execution.end_time - start_time
-
+            execution.tools_used = [
+                name
+                for item in getattr(result, "new_items", None) or []
+                if getattr(item, "type", "") == "tool_call_item"
+                and (name := tool_event_info(item).get("tool_name"))
+            ]
             self.context_manager.add_execution(execution)
             self._record_runtime_event(
                 event_type="attempt_completed",
                 output=output,
-                extra={"retry_count": retry_count},
+                extra={"retry_count": progress.attempt},
             )
             self._update_pending_agent_run(
                 agent_key=agent_key,
                 active_context_id=active_context_id,
-                input_preview=input_preview,
+                input_preview=progress.input_preview,
                 status="completed",
-                retry_count=retry_count,
+                retry_count=progress.attempt,
             )
-
-            # Ensure we log the final output for debugging
-            if not output:
-                logger.warning(
-                    f"⚠️ Agent '{agent_key}' returned empty output. Result type: {type(result)}"
-                )
-                if isinstance(result, str):
-                    logger.warning(f"Result (str): '{result}'")
-                elif hasattr(result, "__dict__"):
-                    logger.warning(f"Result attrs: {result.__dict__}")
-
             Logger("agent_factory").log_verbose(f"FULL RESPONSE: {agent_key}", output)
-
-            return output
-
-        except Exception as e:
+            return output, active_context_id
+        except Exception as exc:
             execution.end_time = time.time()
-            execution.error = str(e)
-            try:
-                self._update_pending_agent_run(
-                    agent_key=agent_key,
-                    active_context_id=locals().get("active_context_id"),
-                    input_preview=locals().get(
-                        "input_preview", self._safe_preview(message, max_length=700)
-                    ),
-                    status="failed",
-                    retry_count=locals().get("retry_count", 0),
-                    last_error=self._safe_preview(str(e), max_length=700),
-                )
-                self._record_runtime_event(
-                    event_type="execution_failed",
-                    output=str(e),
-                    extra={"exception_type": type(e).__name__},
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to persist pending run failure state", exc_info=True
-                )
-
+            execution.error = str(exc)
+            if not progress.recorded_failure:
+                try:
+                    self._update_pending_agent_run(
+                        agent_key=agent_key,
+                        active_context_id=active_context_id,
+                        input_preview=progress.input_preview,
+                        status="failed",
+                        retry_count=progress.attempt,
+                        last_error=self._safe_preview(str(exc), max_length=700),
+                    )
+                    self._record_runtime_event(
+                        event_type="execution_failed",
+                        output=str(exc),
+                        extra={"exception_type": type(exc).__name__},
+                    )
+                except Exception:
+                    logger.debug("Failed to persist pending run failure state", exc_info=True)
             self.context_manager.add_execution(execution)
-
             raise
         finally:
             Logger.deactivate_session_log()
@@ -3869,8 +3220,6 @@ DO NOT write XML tags manually!"""
                         result_text.rstrip() + "\n\nContext ID: " + sub_context_id
                     )
 
-                duration = execution.end_time - execution.start_time
-
                 self.context_manager.add_execution(execution)
 
                 # Log the full tool call result in verbose mode
@@ -4011,148 +3360,41 @@ DO NOT write XML tags manually!"""
                 )
             sub_run_ctx.stream_observer = sub_observer
 
-            # Execute auto_run_tools for sub-agent (mirrors logic in run_agent())
-            sub_agent_config = self.config.get_agent(agent_key)
-            if getattr(sub_agent_config, "auto_run_tools", None):
-                sub_agent_tools = getattr(local_sub_agent, "tools", []) or []
-                working_dir = (
-                    "/" if self.container_id else self.config.get_working_directory()
-                )
-                init_key = f"{agent_key}:{parent_user_id or 'default'}"
+            preamble = await self._auto_run_preamble(
+                agent_key,
+                self.config.get_agent(agent_key),
+                local_sub_agent,
+                sub_run_ctx,
+                user_message=enhanced_input,
+            )
+            if preamble:
+                enhanced_input = f"{preamble}\n\n[Current user request]\n\n{enhanced_input}"
 
-                # One-time tools: run once per user/agent session
-                if init_key not in self._initialized_agents:
-                    try:
-                        auto_run_info, complete = await self._execute_auto_run_tools(
-                            agent_key,
-                            sub_agent_config,
-                            sub_agent_tools,
-                            working_dir,
-                            sub_run_ctx,
-                            every_run=False,
-                            user_message=(
-                                enhanced_input
-                                if isinstance(enhanced_input, str)
-                                else ""
-                            ),
-                        )
-                        if auto_run_info:
-                            enhanced_input = (
-                                auto_run_info
-                                + "\n\n[Current user request]\n\n"
-                                + (
-                                    enhanced_input
-                                    if isinstance(enhanced_input, str)
-                                    else ""
-                                )
-                            )
-                        if complete:
-                            self._initialized_agents.add(init_key)
-                            logger.info(
-                                f"✅ One-time auto-run tools executed for sub-agent {init_key}"
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            f"⚠️ Failed to run one-time auto_run_tools for sub-agent {agent_key}: {e}"
-                        )
-
-                # Per-message tools: run on every call
-                try:
-                    every_run_info, _ = await self._execute_auto_run_tools(
-                        agent_key,
-                        sub_agent_config,
-                        sub_agent_tools,
-                        working_dir,
-                        sub_run_ctx,
-                        every_run=True,
-                        user_message=(
-                            enhanced_input if isinstance(enhanced_input, str) else ""
-                        ),
-                    )
-                    if every_run_info:
-                        enhanced_input = (
-                            every_run_info
-                            + "\n\n[Current user request]\n\n"
-                            + (
-                                enhanced_input
-                                if isinstance(enhanced_input, str)
-                                else ""
-                            )
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"⚠️ Failed to run per-message auto_run_tools for sub-agent {agent_key}: {e}"
-                    )
-
-            # Run the sub-agent with enhanced input and session
-            # Use streaming to capture tool calls for logging
             set_current_factory(self)
             run_error: Optional[str] = None
-            run_result_streaming = None
+            result = None
             try:
-                run_result_streaming = _get_runner().run_streamed(
+                result = _get_runner().run_streamed(
                     starting_agent=local_sub_agent,
                     input=enhanced_input,
-                    context=sub_run_ctx,  # Pass sub-agent context with session
+                    context=sub_run_ctx,
                     session=session,
                     max_turns=self.config.get_max_turns(),
                 )
-
-                # Process streaming events and log tool calls
-                output = None
-                async for event in run_result_streaming.stream_events():
-                    # Rendering the trace must never stop the sub-agent itself.
-                    try:
-                        append_action_reasoning(sub_run_ctx.action_state, event)
-                        sub_observer.handle_event(event, agent_key=agent_key)
-                    except Exception:
-                        logger.exception(
-                            "Stream observer failed for sub-agent %s", agent_key
-                        )
-
-                    # Also log specific events to file logs if needed (redundant if observer does it, but good for safety)
-                    if isinstance(event, RunItemStreamEvent):
-                        event_name = getattr(event, "name", "")
-                        item = getattr(event, "item", None)
-
-                        if event_name == "tool_called" and item is not None:
-                            raw_item = getattr(item, "raw_item", None)
-                            # Not `tool_name`: that names this agent tool and
-                            # labels the result recorded below.
-                            sub_tool_name = getattr(raw_item, "name", None) or "tool"
-                            arguments = getattr(raw_item, "arguments", None)
-
-                            # Format arguments for logging
-                            args_str = ""
-                            if isinstance(arguments, str):
-                                args_str = arguments[:200] + (
-                                    "..." if len(arguments) > 200 else ""
-                                )
-                            elif isinstance(arguments, dict):
-                                args_str = json.dumps(arguments, ensure_ascii=False)[
-                                    :200
-                                ]
-
-                            logger.info(
-                                f"SUB_AGENT_TOOL_CALL | agent={agent_key} | tool={sub_tool_name} | args={args_str}"
-                            )
-
-                # Extract final output
-                output = run_output_text(run_result_streaming, f"Agent {agent_key}")
+                await self._consume_stream(
+                    result,
+                    observer=sub_observer,
+                    agent_key=agent_key,
+                    action_state=sub_run_ctx.action_state,
+                )
+                output = run_output_text(result, f"Agent {agent_key}")
             except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
                 # The sub-agent stopped, but its caller goes on: it gets what the
                 # sub-agent did so far instead of a bare error, and can decide
                 # whether to retry without repeating work already done.
                 run_error = str(exc) or type(exc).__name__
-                logger.warning(
-                    "SUB_AGENT_STOPPED | agent=%s | %s: %s",
-                    agent_key,
-                    type(exc).__name__,
-                    run_error,
-                )
-                output = interrupted_run_report(
-                    run_result_streaming, f"Agent {agent_key}", exc
-                )
+                logger.warning("Sub-agent %s stopped: %s: %s", agent_key, type(exc).__name__, run_error)
+                output = interrupted_run_report(result, f"Agent {agent_key}", exc)
             except BaseException as exc:
                 run_error = str(exc) or type(exc).__name__
                 raise
@@ -4343,31 +3585,6 @@ DO NOT write XML tags manually!"""
         self._mcp_servers[cache_key] = server
         return server
 
-    def _extract_tools_used(self, result: Any) -> List[str]:
-        """
-        Extract the names of tools invoked during the run.
-
-        The SDK `Runner.run` returns an object that (as of v0.2.x) contains
-        a ``tool_calls`` attribute – a list of ``ToolCall`` objects with a
-        ``name`` field.  If the attribute is missing we fall back to an empty
-        list to keep the system robust.
-        """
-        try:
-            if hasattr(result, "tool_calls"):
-                tool_calls = getattr(result, "tool_calls")
-                names = []
-                for call in tool_calls:
-                    try:
-                        name = getattr(call, "name", None)
-                        if name:
-                            names.append(str(name))
-                    except Exception:
-                        continue
-                return names
-        except Exception as e:
-            logger.debug("Failed to extract tool call metadata: %s", e, exc_info=e)
-        return []
-
     def _extract_context_id_from_text(self, text: Optional[str]) -> Optional[str]:
         """Extract context identifier (ctx-XXXXXXXX) from arbitrary text."""
         if not text:
@@ -4463,10 +3680,6 @@ DO NOT write XML tags manually!"""
         self._agent_sessions.clear()
 
     # Fallback: stub for manual tool call parsing from response text
-    async def _execute_first_tool_call_in_text(self, output: str) -> Optional[str]:
-        """Safely ignore manual tool call parsing until fully implemented."""
-        return None
-
     def _detect_malformed_tool_calls(self, output: str) -> bool:
         """
         Detect malformed tool call formats in agent output.

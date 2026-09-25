@@ -637,7 +637,7 @@ async def main():
 
                 # Show token count in context
                 try:
-                    _msgs = factory.context_manager._conversation_history
+                    _msgs = factory.context_manager.conversation_snapshot()
                     _tokens = estimate_messages_tokens(_context_to_compact_messages(_msgs)) if _msgs else 0
                     try:
                         _agent_cfg = config.get_agent(agent_key)
@@ -730,7 +730,7 @@ async def main():
                         context_info = factory.get_context_info()
                         print("Get Context - Context information retrieved")
 
-                        current_messages = factory.context_manager._conversation_history
+                        current_messages = factory.context_manager.conversation_snapshot()
                         compact_messages = _context_to_compact_messages(current_messages)
                         estimated_tokens = estimate_messages_tokens(compact_messages) if compact_messages else 0
 
@@ -792,7 +792,7 @@ async def main():
                     elif user_input.lower() in {'/compact', 'compact'}:
                         print("Compacting context...")
                         try:
-                            messages = factory.context_manager._conversation_history
+                            messages = factory.context_manager.conversation_snapshot()
                             if not messages:
                                 print("Context is empty — compaction not needed.")
                                 continue
@@ -908,7 +908,7 @@ async def main():
 
                         # Show token count in context
                         try:
-                            _msgs = factory.context_manager._conversation_history
+                            _msgs = factory.context_manager.conversation_snapshot()
                             _tokens = estimate_messages_tokens(_context_to_compact_messages(_msgs)) if _msgs else 0
                             try:
                                 _agent_cfg = config.get_agent(agent_key)

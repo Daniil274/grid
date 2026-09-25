@@ -353,6 +353,16 @@ class ContextManager:
             logger.error("Lock timeout in add_message", exc_info=exc)
             raise
 
+    def conversation_snapshot(self) -> List[ContextMessage]:
+        """A copy of the active conversation, safe to read without the lock."""
+        with safe_lock(self._lock, timeout=5.0):
+            return list(self._conversation_history)
+
+    def history_has_images(self) -> bool:
+        """Whether any message of the active conversation carries an image."""
+        with safe_lock(self._lock, timeout=5.0):
+            return any(message.has_images() for message in self._conversation_history)
+
     def replace_conversation_history(self, messages: List[ContextMessage]) -> None:
         """Replace the active conversation history with a new message list."""
         try:

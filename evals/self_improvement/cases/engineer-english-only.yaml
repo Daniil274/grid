@@ -1,8 +1,8 @@
 name: engineer-english-only
 kind: fix
 notes: >-
-  Grid appends "Контекст ID: …" to every answer, so a check for any Cyrillic
-  word passes an English answer; four Cyrillic words in a row do not.
+  A check for any Cyrillic word would pass an English answer that quotes the
+  request; four Cyrillic words in a row do not.
   Prompt defect, checked by a full agent turn: a line in the engineer's long
   custom_prompt forces English. Routing is fine; the cause is found only by
   reading the prompt.

@@ -43,7 +43,7 @@ EXCLUDED = ("evals",)
 # runs it: its config, prompts and skills must match the tools being evaluated.
 UNDER_TEST = ("examples/system-admin",)
 # What Grid appends to every final answer; an answer check must not match it alone.
-ANSWER_FOOTER = "An answer in any language.\n\nКонтекст ID: ctx-0a1b2c3d"
+ANSWER_FOOTER = "An answer in any language.\n\nContext ID: ctx-0a1b2c3d"
 
 
 @dataclass(frozen=True)

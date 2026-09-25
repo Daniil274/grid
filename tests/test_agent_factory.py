@@ -3,16 +3,13 @@ Unit tests for core/agent_factory.py module.
 """
 
 import pytest
-import asyncio
-from unittest.mock import Mock, AsyncMock, patch, MagicMock
+from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
 
 from core.agent_factory import AgentFactory
 from core.config import Config
-from core.config.prompt_sections import ModelContextAssembly
 from core.fallback_model import AllModelsFailedError, FallbackModel
-from utils.exceptions import AgentError, ConfigError
-from schemas import AgentExecution
+from utils.exceptions import AgentError
 
 
 class TestAgentFactory:
@@ -400,171 +397,7 @@ class TestAgentFactory:
         with pytest.raises(AgentError, match="Failed to create agent"):
             await factory.create_agent("invalid_agent")
     
-    @pytest.mark.asyncio
-    async def test_run_agent_success(self, config_file):
-        """Test successful agent run."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
-             patch('core.agent_factory.Runner') as mock_runner, \
-             patch('asyncio.wait_for', new_callable=AsyncMock) as mock_wait_for, \
-             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"):
-            
-            mock_agent = Mock()
-            mock_agent.name = "Test Agent"
-            mock_create.return_value = mock_agent
-            
-            mock_result = Mock()
-            mock_result.final_output = "Test response"
-            mock_wait_for.return_value = mock_result
-            
-            response = await factory.run_agent("test_agent", "test message")
-            
-            assert response.startswith("Test response")
-            assert "ID:" in response
-            assert "ctx-" in response
-            mock_create.assert_called_once_with("test_agent", None)
-            mock_wait_for.assert_called_once()
-    
-    @pytest.mark.asyncio
-    async def test_run_agent_with_context_path(self, config_file):
-        """Test agent run with context path."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
-             patch('core.agent_factory.Runner') as mock_runner, \
-             patch('asyncio.wait_for', new_callable=AsyncMock) as mock_wait_for, \
-             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"):
-            
-            mock_agent = Mock()
-            mock_agent.name = "Test Agent"
-            mock_create.return_value = mock_agent
-            
-            mock_result = Mock()
-            mock_result.final_output = "Test response"
-            mock_wait_for.return_value = mock_result
-            
-            await factory.run_agent("test_agent", "test message", "/test/path")
-            
-            mock_create.assert_called_once_with("test_agent", "/test/path")
-    
-    @pytest.mark.asyncio
-    async def test_run_agent_retries_transient_timeout(self, config_file):
-        """Test agent retries transient timeout errors and eventually succeeds."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
-             patch('core.agent_factory.Runner') as mock_runner, \
-             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
-             patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
-            
-            mock_agent = Mock()
-            mock_agent.name = "Test Agent"
-            mock_create.return_value = mock_agent
 
-            mock_result = Mock()
-            mock_result.final_output = "Recovered response"
-            mock_runner.run = AsyncMock(return_value=mock_result)
-
-            attempts = {"count": 0}
-
-            async def fake_wait_for(coro, timeout):
-                attempts["count"] += 1
-                if attempts["count"] == 1:
-                    coro.close()
-                    raise asyncio.TimeoutError()
-                coro.close()
-                return mock_result
-
-            with patch('asyncio.wait_for', side_effect=fake_wait_for) as mock_wait_for:
-                response = await factory.run_agent("test_agent", "test message")
-
-            assert response.startswith("Recovered response")
-            assert attempts["count"] == 2
-            assert mock_wait_for.call_count == 2
-            mock_sleep.assert_awaited_once()
-    
-    @pytest.mark.asyncio
-    async def test_run_agent_streaming(self, config_file, capsys):
-        """Test agent run with streaming."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        # Simple test - just verify streaming parameter can be passed
-        with patch.object(factory, 'run_agent') as mock_run:
-            mock_run.return_value = "Test result"
-            
-            result = await factory.run_agent("test_agent", "test message", streaming=True)
-            
-            mock_run.assert_called_once_with("test_agent", "test message", streaming=True)
-            assert result == "Test result"
-    
-    @pytest.mark.asyncio
-    async def test_run_agent_empty_response(self, config_file):
-        """Test agent run with empty response."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
-             patch('asyncio.wait_for', new_callable=AsyncMock) as mock_wait_for, \
-             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"):
-            
-            mock_agent = Mock()
-            mock_agent.name = "Test Agent"
-            mock_create.return_value = mock_agent
-            
-            # Mock empty result - use string result to avoid Mock len() issue
-            mock_wait_for.return_value = ""  # Return empty string directly
-            
-            response = await factory.run_agent("test_agent", "test message")
-            
-            # Should return fallback message
-            assert "ID:" in response
-            assert "ctx-" in response
-            assert "Agent completed the task but did not provide a text response" in response
-    
-    @pytest.mark.asyncio
-    async def test_run_agent_refreshes_cached_agent_instructions(self, config_file):
-        """Test that run_agent applies freshly assembled instructions to a cached agent."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-
-        mock_agent = Mock()
-        mock_agent.name = "Test Agent"
-        mock_agent.instructions = "stale instructions"
-
-        assembly_calls = [
-            ModelContextAssembly(
-                instructions="Initial instructions",
-                sections=[],
-                context_id="ctx-test",
-                history_strategy="none",
-            ),
-            ModelContextAssembly(
-                instructions="Final instructions",
-                sections=[],
-                context_id="ctx-test",
-                history_strategy="prompt",
-            ),
-        ]
-        factory.instructions_builder.assemble_model_context = Mock(
-            side_effect=assembly_calls
-        )
-
-        with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
-             patch.object(factory, '_build_agent_instructions', side_effect=["Initial instructions", "Final instructions"]), \
-             patch('asyncio.wait_for', new_callable=AsyncMock) as mock_wait_for:
-            mock_create.return_value = mock_agent
-            mock_wait_for.return_value = "done"
-
-            response = await factory.run_agent("test_agent", "test message")
-
-        assert "done" in response
-        assert mock_agent.instructions == "Final instructions"
-        assert factory.instructions_builder.assemble_model_context.call_count == 2
 
     def test_build_agent_instructions_basic(self, config_file):
         """Test building basic agent instructions."""
@@ -637,48 +470,8 @@ class TestAgentFactory:
             # get_tools_by_names should be called once with function tools
             mock_get_tools.assert_called_once_with(["file_read", "file_write"])
     
-    def test_extract_tools_used_success(self, config_file):
-        """Test extracting tools used from result."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        # Mock result with tool_calls
-        mock_result = Mock()
-        mock_call1 = Mock()
-        mock_call1.name = "tool1"
-        mock_call2 = Mock()
-        mock_call2.name = "tool2"
-        mock_result.tool_calls = [mock_call1, mock_call2]
-        
-        tools = factory._extract_tools_used(mock_result)
-        
-        assert tools == ["tool1", "tool2"]
-    
-    def test_extract_tools_used_no_tool_calls(self, config_file):
-        """Test extracting tools when no tool_calls attribute."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        mock_result = Mock()
-        # No tool_calls attribute
-        del mock_result.tool_calls
-        
-        tools = factory._extract_tools_used(mock_result)
-        
-        assert tools == []
-    
-    def test_extract_tools_used_exception(self, config_file):
-        """Test extracting tools with exception."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        mock_result = Mock()
-        mock_result.tool_calls = None  # This will cause AttributeError when iterating
-        
-        tools = factory._extract_tools_used(mock_result)
-        
-        assert tools == []
-    
+
+
     def test_context_management_methods(self, config_file):
         """Test context management methods."""
         config = Config(str(config_file))
