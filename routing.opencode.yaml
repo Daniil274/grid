@@ -88,7 +88,6 @@ routing:
         Not for quick fixes or single-file changes.
     video:
       config: examples/video-editor/config.opencode.yaml
-      requires: [ffmpeg, ffprobe]
       description: >-
         Working with video files and footage (mp4, mov, clips): inspect footage,
         detect scenes, annotate, cut and join clips, add subtitles, build cutlists

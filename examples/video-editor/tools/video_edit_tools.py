@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from utils.tool_requirements import Requires
 from agents import function_tool
 from agents.tool import ToolOutputText
 
@@ -29,6 +30,15 @@ from _video_common import (
     which,
     write_json,
 )
+
+
+_FFMPEG_HINT = "Install FFmpeg and put ffmpeg and ffprobe on PATH"
+TOOL_REQUIREMENTS = {
+    "video_build_cutlist": Requires(programs=('ffprobe',), hint=_FFMPEG_HINT),
+    "video_make_preview": Requires(programs=('ffmpeg',), hint=_FFMPEG_HINT),
+    "video_render_cutlist": Requires(programs=('ffmpeg', 'ffprobe'), hint=_FFMPEG_HINT),
+    "video_concat": Requires(programs=('ffmpeg', 'ffprobe'), hint=_FFMPEG_HINT),
+}
 
 
 def _ok_json(payload: dict[str, Any]) -> str:

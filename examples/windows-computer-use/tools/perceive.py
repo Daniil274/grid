@@ -1,8 +1,18 @@
 """
 Unified perception: Windows UI Automation tree + annotated screenshot in one call.
-Screenshot is saved to the screenshots/ dir; the agent receives the file path
-and a visual copy. Use the path with crop_image() to zoom into specific regions.
+Screenshot is saved to screenshots/ in the working directory; the agent receives
+the workspace-relative path and a visual copy. Use the path with crop_image() to zoom into specific regions.
 """
+
+from utils.tool_requirements import Requires
+
+# Declared before the Windows-only imports: when they fail, the health check
+# still explains why instead of showing a bare import error.
+_HINT = "Run on Windows with: pip install -r examples/windows-computer-use/requirements.txt"
+TOOL_REQUIREMENTS = {
+    "perceive": Requires(platform="win32", programs=("powershell",), modules=("win32gui", "pyautogui", "PIL"), hint=_HINT),
+}
+
 
 import io, base64, os, time, uuid
 import win32gui
@@ -11,24 +21,23 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 from agents import function_tool
 from agents.tool import ToolOutputImage, ToolOutputText
+from utils.path_utils import display_agent_path_auto, resolve_agent_path_auto
 
 pyautogui.FAILSAFE = False
 
 _COLORS = ["#E63946", "#457B9D", "#2A9D8F", "#E9C46A", "#F4A261",
            "#8338EC", "#06D6A0", "#FB5607", "#3A86FF", "#FF006E"]
 
-# Per-process session dir: workspace/screenshots/<session_id>/
-_SESSION_DIR: Path | None = None
+# Per-process session dir: <working directory>/screenshots/<session_id>/
+_SESSION_ID = os.environ.get("GRID_SESSION_ID", uuid.uuid4().hex[:8])
 
 
 def _session_dir() -> Path:
-    global _SESSION_DIR
-    if _SESSION_DIR is None:
-        base = Path(os.environ.get("GRID_WORKSPACE", "workspace")) / "screenshots"
-        sid = os.environ.get("GRID_SESSION_ID", uuid.uuid4().hex[:8])
-        _SESSION_DIR = base / sid
-        _SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    return _SESSION_DIR
+    # Resolved per call: the working directory belongs to the running agent,
+    # and crop_image() looks for last_screenshot.png in the same place.
+    session_dir = Path(resolve_agent_path_auto("screenshots")) / _SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return session_dir
 
 
 def _save(img: Image.Image) -> Path:
@@ -113,7 +122,7 @@ def perceive(window: str = None):
     if elements:
         img = _annotate(img, elements, offset_x, offset_y)
 
-    path = _save(img)
+    path = display_agent_path_auto(str(_save(img)))
 
     if elements:
         lines = [

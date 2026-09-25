@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -20,7 +19,7 @@ import httpx
 from core.config.config import Config
 from core.managers.model_manager import ModelManager
 from core.managers.project_tools_loader import get_project_loader, set_project_loader
-from schemas import ToolType
+from core.tool_check import CONFIG, ToolIssue, diagnose
 
 logger = logging.getLogger("grid.routing")
 
@@ -46,48 +45,14 @@ DEFAULT_SYSTEM = "default"
 
 
 def check_system(config: Config, *, requires: Iterable[str] = ()) -> List[str]:
-    """Problems that would break one system at run time; empty when it is healthy.
+    """Config problems that would break one system at run time; empty when it is healthy.
 
-    Checks what config loading does not: routable agents are described, every
-    function tool has an implementation, agent tools target existing agents, MCP
-    servers and required programs are on PATH, and system skills exist.
+    Only what editing the config fixes: routable agents are described, every
+    function tool has an implementation, agent tools target existing agents,
+    skills exist. What this machine lacks (programs, packages, keys, services)
+    is in :func:`core.tool_check.diagnose`.
     """
-    from tools.function_tools import AVAILABLE_TOOLS, TOOL_ALIASES
-
-    issues: List[str] = []
-    declared = config.config.tools
-    loader = config.project_tools_loader
-    previous_loader = get_project_loader()
-    set_project_loader(loader)
-    try:
-        for agent_key, agent in config.config.agents.items():
-            if agent.routable and not agent.description:
-                issues.append(f"agent '{agent_key}' has no description, routing to it is blind")
-            for skill_name in agent.system_skills:
-                if config.skill_path(skill_name) is None:
-                    issues.append(f"agent '{agent_key}' uses missing skill '{skill_name}'")
-            for tool_name in agent.tools:
-                tool = declared.get(tool_name)
-                if tool is None:
-                    issues.append(f"agent '{agent_key}' uses undeclared tool '{tool_name}'")
-                elif tool.type == ToolType.AGENT:
-                    if tool.target_agent and tool.target_agent not in config.config.agents:
-                        issues.append(f"tool '{tool_name}' targets unknown agent '{tool.target_agent}'")
-                elif tool.type == ToolType.FUNCTION:
-                    resolved = TOOL_ALIASES.get(tool_name, tool_name)
-                    if not ((loader and loader.has_tool(tool_name)) or resolved in AVAILABLE_TOOLS):
-                        issues.append(f"tool '{tool_name}' of agent '{agent_key}' is not implemented")
-                elif tool.type == ToolType.MCP:
-                    command = (tool.server_command or [None])[0]
-                    if command and shutil.which(command) is None:
-                        issues.append(f"MCP tool '{tool_name}' requires '{command}' on PATH")
-    finally:
-        set_project_loader(previous_loader)
-
-    for program in requires:
-        if shutil.which(program) is None:
-            issues.append(f"required program '{program}' is not on PATH")
-    return issues
+    return [issue.text() for issue in diagnose(config, requires=requires) if issue.kind == CONFIG]
 
 
 class Router:
@@ -274,13 +239,19 @@ class AutoRouter:
         return self._configs[name]
 
     def check_systems(self) -> Dict[str, List[str]]:
-        """Report broken systems: unloadable configs, missing tools or required programs.
+        """Report broken systems: unloadable configs, tools that will fail and why.
 
         Loading every system here is deliberate: a system that only breaks when a
         message is routed to it would otherwise stay invisible until then.
         """
-        problems: Dict[str, List[str]] = {}
-        routing = self.root_config.config.routing
+        return {
+            name: [issue.text() for issue in issues] if not isinstance(issues, str) else [issues]
+            for name, issues in self.diagnose_systems().items()
+        }
+
+    def diagnose_systems(self) -> Dict[str, "List[ToolIssue] | str"]:
+        """Issues per system; a string instead of a list when its config does not load."""
+        problems: Dict[str, "List[ToolIssue] | str"] = {}
         # Loading a config replaces the process-wide project tools loader.
         previous_loader = get_project_loader()
         try:
@@ -288,15 +259,19 @@ class AutoRouter:
                 try:
                     config = self.system_config(name)
                 except Exception as exc:
-                    problems[name] = [f"config failed to load: {exc}"]
+                    problems[name] = f"config failed to load: {exc}"
                     continue
-                system = routing.systems.get(name)
-                issues = check_system(config, requires=system.requires if system else ())
+                issues = diagnose(config, requires=self.system_requires(name))
                 if issues:
                     problems[name] = issues
         finally:
             set_project_loader(previous_loader)
         return problems
+
+    def system_requires(self, name: str) -> List[str]:
+        """Programs routing.yaml says system *name* needs on PATH."""
+        system = self.root_config.config.routing.systems.get(name)
+        return list(system.requires) if system else []
 
     @staticmethod
     def agents(config: Config) -> Dict[str, str]:

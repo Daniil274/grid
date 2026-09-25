@@ -39,6 +39,10 @@ class ProjectToolsLoader:
         self.tools_dir = (self.config_dir / tools_directory).resolve()
         self._loaded_tools: Dict[str, Any] = {}
         self._module_cache: Dict[str, Any] = {}
+        #: Tool files that failed to import: file name -> "ErrorType: message".
+        self.load_errors: Dict[str, str] = {}
+        #: What each tool needs from the environment (module ``TOOL_REQUIREMENTS``).
+        self.requirements: Dict[str, Any] = {}
 
         logger.info(f"ProjectToolsLoader initialized: config_dir={self.config_dir}, tools_dir={self.tools_dir}")
 
@@ -99,6 +103,7 @@ class ProjectToolsLoader:
             module_name: Module name
             file_path: Path to module file
         """
+        module = None
         try:
             # Create the full module name for import.
             # Project tools may live outside config_dir, for example shared
@@ -154,6 +159,7 @@ class ProjectToolsLoader:
                 spec.loader.exec_module(module)
 
             self._module_cache[module_name] = module
+            self.requirements.update(getattr(module, "TOOL_REQUIREMENTS", None) or {})
 
             # Extract tool functions
             tools_found = 0
@@ -184,6 +190,10 @@ class ProjectToolsLoader:
             logger.info(f"Module {module_name}: loaded {tools_found} tools")
 
         except Exception as exc:
+            self.load_errors[file_path.name] = f"{type(exc).__name__}: {exc}"
+            # Requirements declared before the failing import still explain it,
+            # e.g. "works only on Windows" instead of "No module named 'win32gui'".
+            self.requirements.update(getattr(module, "TOOL_REQUIREMENTS", None) or {})
             logger.error(f"Error loading module {module_name}: {exc}", exc_info=True)
 
     def get_tool(self, tool_name: str) -> Optional[Any]:

@@ -2,7 +2,7 @@
 Web Tools — loading web pages and searching the internet.
 
 web_fetch  — loads a page and converts it to markdown
-web_search — web search via Firecrawl API (requires FIRECRAWL_API_KEY)
+web_search — web search via a SearXNG instance (SEARXNG_URL, default http://localhost:8080)
 """
 
 import asyncio
@@ -16,6 +16,16 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents import function_tool
+from utils.tool_requirements import Requires
+
+TOOL_REQUIREMENTS = {
+    "web_fetch": Requires(modules=("aiohttp", "trafilatura"), hint="pip install aiohttp trafilatura"),
+    "web_search": Requires(
+        modules=("aiohttp",),
+        service=("SEARXNG_URL", "http://localhost:8080"),
+        hint="Start SearXNG (docker compose up -d searxng) or point SEARXNG_URL at a running instance",
+    ),
+}
 
 
 # Optional dependencies

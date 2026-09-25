@@ -8,60 +8,10 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch, Mock, MagicMock
 
-from tools.git_tools import _run_git_command, git_status as _git_status
+from tools.git_tools import _run_git_command
 
 
-def git_status_impl(directory: str = ".") -> str:
-    """Test implementation of git_status logic."""
-    try:
-        from pathlib import Path
-        path = Path(directory)
-        if not path.exists():
-            return f"❌ Directory {directory} not found"
-        
-        cmd_result = _run_git_command(["git", "status", "--porcelain"], cwd=str(path))
-        
-        if not cmd_result["success"]:
-            if "not a git repository" in cmd_result["error"]:
-                return f"❌ Not a Git repository: {cmd_result['error']}"
-            return f"❌ Git error: {cmd_result['error']}"
-        
-        # Format output
-        if not cmd_result["output"].strip():
-            return "✅ Working directory is clean - no changes"
-        else:
-            lines = cmd_result["output"].split('\n')
-            status_map = {
-                'M': 'modified',
-                'A': 'added', 
-                'D': 'deleted',
-                'R': 'renamed',
-                'C': 'copied',
-                '??': 'untracked'
-            }
-            
-            formatted_lines = []
-            for line in lines:
-                if len(line) < 3:
-                    continue
-                status_code = line[:2].strip()
-                filename_start = 2
-                while filename_start < len(line) and line[filename_start] == ' ':
-                    filename_start += 1
-                filename = line[filename_start:].strip()
-                status_text = status_map.get(status_code, status_code)
-                formatted_lines.append(f"  📝 {status_text}: {filename}")
-            
-            changes_count = len(formatted_lines)
-            result = f"📊 Git repository status in {directory} ({changes_count} changes):\n\n" + "\n".join(formatted_lines)
-        
-        return result
-        
-    except Exception as e:
-        return f"❌ Error getting Git status: {str(e)}"
 
-def git_status(directory: str = ".") -> str:
-    return git_status_impl(directory)
 
 
 class TestGitCommandRunner:
@@ -177,83 +127,10 @@ class TestGitCommandRunner:
             assert mock_log_custom.call_count >= 2
 
 
-class TestGitTools:
-    """Test Git tool functions."""
-    
-    def test_git_status_success(self, temp_dir):
-        """Test git status operation with directory that's not a git repo."""
-        result = git_status(str(temp_dir))
-        
-        # Should handle non-git directory gracefully
-        assert isinstance(result, str)
-        assert len(result) > 0
-        assert "❌" in result  # Should show error for non-git directory
-    
-    def test_git_status_directory_not_found(self, temp_dir):
-        """Test git status with non-existent directory."""
-        non_existent_dir = temp_dir / "non_existent"
-        result = git_status(str(non_existent_dir))
-        
-        assert "❌ Directory" in result
-        assert "not found" in result
-    
-    @patch('tests.test_git_tools._run_git_command')
-    @patch('tools.git_tools.pretty_logger')
-    def test_git_status_not_git_repo(self, mock_logger, mock_run_cmd, temp_dir):
-        """Test git status on non-git directory."""
-        mock_operation = Mock()
-        mock_logger.tool_start.return_value = mock_operation
-        
-        mock_run_cmd.return_value = {
-            "success": False,
-            "output": "",
-            "error": "fatal: not a git repository"
-        }
-        
-        result = git_status(str(temp_dir))
-        
-        assert "❌ Not a Git repository" in result
-        assert "fatal: not a git repository" in result
-    
-    def test_git_status_with_changes(self, temp_dir):
-        """Test git status with non-git directory."""
-        result = git_status(str(temp_dir))
-        
-        # Should handle non-git directory gracefully
-        assert isinstance(result, str)
-        assert len(result) > 0
-        assert "❌" in result  # Should show error for non-git directory
-    
-    def test_git_status_exception_handling(self, temp_dir):
-        """Test git status with non-git directory (exception case)."""
-        result = git_status(str(temp_dir))
-        
-        # Should handle non-git directory gracefully
-        assert isinstance(result, str)
-        assert len(result) > 0
-        assert "❌" in result
-
-
 @pytest.mark.skip(reason="Git integration tests - temporarily disabled")
 class TestGitToolsIntegration:
     """Integration tests for Git tools with real Git operations."""
     
-    def test_git_status_real_repo(self, mock_git_repo):
-        """Test git status on a real git repository."""
-        # Initialize git repo
-        subprocess.run(["git", "init"], cwd=mock_git_repo, capture_output=True, timeout=10)
-        subprocess.run(["git", "config", "user.name", "Test User"], cwd=mock_git_repo, capture_output=True, timeout=10)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=mock_git_repo, capture_output=True, timeout=10)
-        
-        # Create a test file
-        test_file = mock_git_repo / "test.txt"
-        test_file.write_text("test content")
-        
-        result = git_status(str(mock_git_repo))
-        
-        assert "📊 Git repository status" in result
-        # Should show untracked file
-        assert "test.txt" in result
     
     def test_dangerous_command_protection(self):
         """Test that dangerous commands are properly blocked."""
@@ -349,24 +226,6 @@ class TestGitToolsEdgeCases:
                 result = _run_git_command(cmd)
                 assert result["success"] is True
     
-    def test_git_status_with_special_characters_in_path(self, temp_dir):
-        """Test git status with special characters in path."""
-        # Create directory with special characters
-        special_dir = temp_dir / "test dir with spaces & symbols"
-        special_dir.mkdir()
-        
-        with patch('tools.git_tools._run_git_command') as mock_run_cmd:
-            mock_run_cmd.return_value = {
-                "success": True,
-                "output": "On branch main",
-                "error": ""
-            }
-            
-            with patch('tools.git_tools.pretty_logger'):
-                result = git_status(str(special_dir))
-                
-                assert "📊 Git repository status" in result
-                mock_run_cmd.assert_called_once()
     
     def test_concurrent_git_operations(self, mock_git_repo):
         """Test concurrent git operations."""

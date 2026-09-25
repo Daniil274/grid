@@ -141,7 +141,8 @@
 .step[data-kind="tool"] > .step__head .step__icon { color: var(--text-2); }
 .step[data-kind="handoff"] > .step__head .step__icon { color: var(--warn); }
 .step[data-kind="agent"] > .step__head .step__icon { color: var(--accent); }
-.step[data-kind="error"] > .step__head .step__icon,
+.step[data-tone="warn"] > .step__head .step__icon { color: var(--warn); }
+.step[data-kind="error"]:not([data-tone="warn"]) > .step__head .step__icon,
 .step[data-status="error"] > .step__head .step__icon {
   border-color: var(--danger);
   color: var(--danger);

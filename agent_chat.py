@@ -15,7 +15,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 
 def _configure_utf8_console() -> None:
@@ -47,6 +47,7 @@ from core.config import Config
 from core.agent_factory import AgentFactory, ConsoleStreamObserver
 from core.compact import compact_conversation, CompactMessage, estimate_messages_tokens
 from core.routing import AutoRouter
+from core.tool_check import ToolIssue, agent_issues, diagnose, summarize
 from schemas import ContextMessage
 try:
     # Optional: only available when Docker SDK is installed and Docker is running
@@ -260,6 +261,22 @@ def print_agent_skill_status(config: Config, agent_key: str) -> None:
             print(f"    - {skill_name}")
 
 
+def print_tool_issues(chat_ui: CliChatRenderer, title: str, issues: List[ToolIssue]) -> None:
+    """Explain, before any agent runs, which tools will fail and how to fix them.
+
+    Nothing is disabled: the agent keeps these tools and may still call them.
+    """
+    if not issues:
+        return
+    lines = summarize(issues)
+    chat_ui.print_status(
+        f"{title}: {len(lines)} problem(s). The tools stay enabled, but calls to them will likely fail:",
+        style="red",
+    )
+    for line in lines:
+        chat_ui.print_status(f"  - {line}", style="yellow")
+
+
 async def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Legacy Grid agent chat interface")
@@ -440,15 +457,29 @@ async def main():
         agent_key = args.agent or config.get_default_agent()
         print_agent_skill_status(config, agent_key)
 
+        # Tool problems must be visible before the first message, not as a failed
+        # call mid-task. Kept per system to warn again when a message is routed.
+        system_issues: Dict[str, List[ToolIssue]] = {}
         if auto_router:
-            # Broken systems must be visible at startup, not when a message lands in one.
-            problems = auto_router.check_systems()
-            for system_name, issues in problems.items():
-                chat_ui.print_status(f"System '{system_name}' has problems:", style="red")
-                for issue in issues:
-                    chat_ui.print_status(f"  - {issue}", style="yellow")
-            if not problems:
+            for system_name, issues in auto_router.diagnose_systems().items():
+                if isinstance(issues, str):
+                    chat_ui.print_status(f"System '{system_name}' does not load: {issues}", style="red")
+                    continue
+                system_issues[system_name] = issues
+                print_tool_issues(chat_ui, f"System '{system_name}'", issues)
+            if not system_issues:
                 chat_ui.print_status(f"Systems checked: {', '.join(auto_router.systems())} - all healthy", style="green")
+        elif args.agent:
+            issues = agent_issues(config, diagnose(config), agent_key)
+            print_tool_issues(chat_ui, f"Agent '{agent_key}'", issues)
+            if not issues:
+                chat_ui.print_status(f"Agent '{agent_key}' checked: all tools available", style="green")
+        else:
+            issues = diagnose(config)
+            print_tool_issues(chat_ui, f"System '{config.config_path.parent.name}'", issues)
+            if not issues:
+                chat_ui.print_status("System checked: all tools available", style="green")
+        warned_routes: set = set()
 
         if auto_router is None and not args.agent:
             # A single system can still route between its own agents (routing.model in its config)
@@ -482,6 +513,16 @@ async def main():
             chat_ui.print_status(f"Route: {route.system} -> {agent_key}", style="cyan")
             if route.warning:
                 chat_ui.print_status(f"Routing warning: {route.warning}", style="yellow")
+            if (route.system, agent_key) not in warned_routes:
+                # Once per agent: the full report was printed at startup.
+                warned_routes.add((route.system, agent_key))
+                if route.system not in system_issues and not auto_router.root_config.config.routing.systems:
+                    system_issues[route.system] = diagnose(config)
+                print_tool_issues(
+                    chat_ui,
+                    f"Agent '{agent_key}'",
+                    agent_issues(config, system_issues.get(route.system, []), agent_key),
+                )
 
         activated_existing_context = False
         if is_context_id(args.context_path):

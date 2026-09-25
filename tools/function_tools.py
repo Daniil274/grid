@@ -1,5 +1,5 @@
 """
-Function tools for Grid agents - integration layer for file and git tools.
+Function tools for Grid agents - registry of the shared tools in tools/.
 
 Tool modules are discovered automatically from the tools/ directory.
 Each *_tools.py file that exports a dict named *_TOOLS is registered.
@@ -12,7 +12,9 @@ import sys
 from pathlib import Path
 from typing import List, Any, Dict
 from .file_tools import FILE_TOOLS, get_file_tools
-from .git_tools import GIT_TOOLS, get_git_tools
+from .git_tools import GIT_TOOLS, TOOL_REQUIREMENTS as _GIT_REQUIREMENTS, get_git_tools
+
+_eager_requirements: Dict[str, Any] = dict(_GIT_REQUIREMENTS)
 
 # ============================================================================
 # AUTO-DISCOVERY: find all *_tools.py in this package (tools/)
@@ -42,6 +44,8 @@ def _discover_tool_modules() -> Dict[str, str]:
 
 _MODULE_MAP: Dict[str, str] = _discover_tool_modules()  # {mod_path: dict_attr}
 _loaded_modules: Dict[str, Dict] = {}  # {mod_path: tool_dict}
+_load_errors: Dict[str, str] = {}  # {mod_path: "ErrorType: message"}
+_requirements: Dict[str, Any] = {}  # {tool_name: Requires}
 _all_loaded = False
 
 
@@ -51,9 +55,26 @@ def _load_module(mod_path: str) -> Dict:
         try:
             mod = importlib.import_module(mod_path)
             _loaded_modules[mod_path] = getattr(mod, dict_attr, {})
-        except Exception:
+            _requirements.update(getattr(mod, "TOOL_REQUIREMENTS", None) or {})
+        except Exception as exc:
             _loaded_modules[mod_path] = {}
+            _load_errors[mod_path] = f"{type(exc).__name__}: {exc}"
     return _loaded_modules[mod_path]
+
+
+def load_errors() -> Dict[str, str]:
+    """Shared tool modules that failed to import, with the reason."""
+    _load_all_modules()
+    return dict(_load_errors)
+
+
+def tool_requirements(name: str) -> Any:
+    """What shared tool *name* (or its alias) needs from the environment, or None."""
+    lookup = TOOL_ALIASES.get(name, name)
+    if lookup in FILE_TOOLS or lookup in GIT_TOOLS:
+        return _eager_requirements.get(lookup)
+    _load_all_modules()
+    return _requirements.get(lookup)
 
 
 def _load_all_modules() -> None:
@@ -117,120 +138,18 @@ class _LazyToolsDict:
 
 AVAILABLE_TOOLS = _LazyToolsDict()
 
-# Add extra tools for compatibility
+# Alternative names that configs and models use for the same tools.
 TOOL_ALIASES = {
-    # File operations
     "read_file": "file_read",
     "read": "file_read",
     "write_file": "file_write",
-    "write": "file_write", 
+    "write": "file_write",
     "list_files": "file_list",
-    "get_file_info": "file_info",
     "search_files": "file_search",
     "edit_file_patch": "file_edit_patch",
     "replace_in_file": "file_replace",
     "delete_file": "file_delete",
     "append_to_file": "file_append",
-    
-    # Git operations - main
-    "git_status": "git_status",
-    "git_log": "git_log",
-    "git_diff": "git_diff",
-    "git_branch_list": "git_branch_list",
-    "git_add_file": "git_add_file",
-    "git_add_all": "git_add_all",
-    "git_commit": "git_commit",
-    "git_checkout_branch": "git_checkout_branch",
-    
-    # Git operations - initialization and configuration
-    "git_init": "git_init",
-    "git_config": "git_config",
-    "git_clone": "git_clone",
-    
-    # Git operations - remote repositories
-    "git_remote_info": "git_remote_info",
-    "git_remote_add": "git_remote_add",
-    "git_remote_remove": "git_remote_remove",
-    "git_fetch": "git_fetch",
-    "git_pull": "git_pull",
-    "git_push": "git_push",
-    
-    # Git operations - branch management and merging
-    "git_merge": "git_merge",
-    "git_reset": "git_reset",
-    "git_stash": "git_stash",
-    
-    # Git operations - tags
-    "git_tag": "git_tag",
-    "git_tag_list": "git_tag_list",
-
-    # Orchestration
-    "orchestrate": "orchestrate",
-
-    # Memory operations V2 (new SQLite-based)
-    "memory_save": "memory_save",
-    "memory_search": "memory_search",
-    "memory_delete": "memory_delete",
-    "task_update": "task_update",
-
-    # Memory aliases (old names -> SQLite tools)
-    "save_memory": "memory_save",
-    "recall_memory": "memory_search",
-
-    # Document conversion and export operations
-    "markdown_to_html": "markdown_to_html",
-    "markdown_to_pdf": "markdown_to_pdf",
-    "save_report": "save_report",
-    "merge_reports": "merge_reports",
-
-    # OCR and document processing
-    "pdf": "pdf",
-    "pdf-ocr": "pdf-ocr",
-    "pdf_ocr": "pdf-ocr",
-    "pdf_to_markdown": "pdf_to_markdown",
-    "read_markdown": "read_markdown",
-
-    # Input and screen tools
-    "keyboard_type": "keyboard_type",
-    "keyboard_press": "keyboard_press",
-    "keyboard_hotkey": "keyboard_hotkey",
-    "take_screenshot": "take_screenshot",
-    "crop_image": "crop_image",
-
-    # System introspection tools
-    "list_agents": "system_list_agents",
-    "get_agent_info": "system_get_agent_info",
-    "list_tools": "system_list_tools",
-    "get_tool_info": "system_get_tool_info",
-    "get_skills": "system_get_skills",
-    "help": "system_help",
-    "get_context": "system_get_context",
-
-    # Evolution tools
-    "improvement_create_problem": "create_improvement_problem",
-    "improvement_list_problems": "list_improvement_problems",
-    "improvement_create_experiment": "create_improvement_experiment",
-    "improvement_propose_config": "propose_config_experiment",
-    "improvement_evaluate": "evaluate_improvement_experiment",
-    "improvement_review_requirements": "record_requirement_review",
-    "improvement_review_final": "record_final_review",
-    "improvement_promote": "promote_improvement_experiment",
-    "improvement_reject": "reject_improvement_experiment",
-    "improvement_canary": "run_improvement_canary",
-    "improvement_monitor": "monitor_promoted_improvement",
-
-    # System platform tools
-    "list_systems": "system_list_systems",
-    "get_system_info": "system_get_system_info",
-    "get_system_versions": "system_get_system_versions",
-    "invoke_system": "system_invoke_system",
-    "create_system_version": "system_create_version",
-    "clone_system_version": "system_clone_version",
-    "mutate_system_version": "system_apply_mutations",
-    "promote_system_version": "system_promote_version",
-    "reject_system_version": "system_reject_version",
-    "rollback_system_stable": "system_rollback_stable",
-    "build_system_bundle": "system_build_bundle",
 }
 
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:
@@ -322,34 +241,8 @@ def get_tool_info(tool_name: str) -> Dict[str, Any]:
         "alias": tool_name if tool_name != actual_name else None,
         "description": tool_func.__doc__ or "Description not available",
         "module": tool_func.__module__,
-        "type": "file" if actual_name.startswith("file_") else "git" if actual_name.startswith("git_") else "ape" if actual_name == "automatic_prompt_engineer" else "other"
+        "type": "file" if actual_name.startswith("file_") else "git" if actual_name.startswith("git_") else "other"
     }
-
-# ============================================================================
-# BACKWARDS COMPATIBILITY
-# ============================================================================
-
-# Export main functions for backwards compatibility
-from .file_tools import read_file, write_file, list_files, get_file_info, search_files, edit_file_patch
-
-# If git_tools.py exports functions directly, add them
-try:
-    from .git_tools import (
-        # Main operations
-        git_status, git_log, git_diff, git_branch_list, git_add_file, git_add_all,
-        git_commit, git_checkout_branch,
-        # Initialization and configuration
-        git_init, git_config, git_clone,
-        # Remote repositories
-        git_remote_info, git_remote_add, git_remote_remove, git_fetch, git_pull, git_push,
-        # Branch management and merging
-        git_merge, git_reset, git_stash,
-        # Tags
-        git_tag, git_tag_list
-    )
-except ImportError:
-    # Git tools may not be ready
-    pass
 
 # ============================================================================
 # TOOL STATISTICS AND MONITORING  

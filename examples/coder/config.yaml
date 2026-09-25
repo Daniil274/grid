@@ -224,10 +224,10 @@ tools:
 
   web_search:
     type: "function"
-    description: "Ищет в интернете через Firecrawl API."
+    description: "Ищет в интернете через SearXNG."
     prompt_addition: |
-      `web_search(query, limit=5, timeout=30)`
-      Требует `FIRECRAWL_API_KEY`. Используй, когда нужна актуальная внешняя информация.
+      `web_search(query, max_results=5)`
+      Требует запущенный SearXNG (`SEARXNG_URL`, по умолчанию http://localhost:8080). Используй, когда нужна актуальная внешняя информация.
 
   notebook_read:
     type: "function"
@@ -250,33 +250,6 @@ tools:
       `notebook_create(filepath, kernel="python3")`
       Используй, только если notebook действительно нужен для задачи.
 
-  todo_write:
-    type: "function"
-    description: "Создаёт или обновляет задачу в todo-списке."
-    prompt_addition: |
-      `todo_write(content, todo_id=None, status=None, priority=1)`
-      Используй проактивно для нетривиальных задач:
-      - когда работа требует 3+ различимых шагов;
-      - когда пользователь дал несколько подзадач;
-      - когда нужно явно показать прогресс.
-      Не используй для одной тривиальной операции.
-      Держи ровно одну задачу в `in_progress` и отмечай выполнение сразу после завершения шага.
-
-  todo_list:
-    type: "function"
-    description: "Показывает текущий todo-список."
-    prompt_addition: |
-      `todo_list(status_filter=None, sort_by="priority")`
-      Используй, чтобы свериться с прогрессом и состоянием задач.
-
-  todo_delete:
-    type: "function"
-    description: "Удаляет задачу по ID."
-
-  todo_clear:
-    type: "function"
-    description: "Очищает все задачи или задачи с указанным статусом."
-
   beads_init:
     type: "function"
     description: Initialize beads (bd) in the given directory. Idempotent; safe if already initialized.
@@ -298,19 +271,6 @@ tools:
   beads_close:
     type: "function"
     description: Close a bead
-  beads_sync:
-    type: "function"
-    description: Sync beads with the remote repository
-  beads_dep:
-    type: "function"
-    description: Manage dependencies between beads
-  beads_log_append:
-    type: "function"
-    description: Append a single entry to a shared, append-only JSONL log (inside .beads/shared_log/).
-  beads_log_read:
-    type: "function"
-    description: Read ONLY new log data for (channel, reader) since the last read (cursor-based).
-
   codegraph:
     type: "mcp"
     server_command: ["codegraph", "serve", "--mcp", "--path"]
@@ -322,30 +282,6 @@ tools:
       MCP-инструменты: `codegraph_search`, `codegraph_context`, `codegraph_callers`, `codegraph_callees`,
       `codegraph_impact`, `codegraph_node`, `codegraph_files`, `codegraph_status`.
       Следуй skill `codegraph`: лёгкие lookup-вызовы — в основной сессии; широкое исследование — через subagent `Agent`.
-
-  general_purpose_openai:
-    type: "agent"
-    name: "Agent"
-    description: "Launch a general-purpose subagent to research, search code, or execute a bounded multi-step task."
-    prompt_addition: |
-      `Agent(input)`
-      Используй `Agent` для сложных многошаговых задач, широкого поиска по кодовой базе и независимого исследования.
-      Не дублируй работу подагента в основном контексте. Передавай полноценный briefing: цель, что уже известно, ограничения и желаемый формат результата.
-    context_strategy: "minimal"
-    context_depth: 5
-    include_tool_history: false
-
-  general_purpose_kimi:
-    type: "agent"
-    name: "Agent"
-    description: "Launch a general-purpose subagent to research, search code, or execute a bounded multi-step task."
-    prompt_addition: |
-      `Agent(input)`
-      Используй `Agent` для сложных многошаговых задач, широкого поиска по кодовой базе и независимого исследования.
-      Не дублируй работу подагента в основном контексте. Передавай полноценный briefing: цель, что уже известно, ограничения и желаемый формат результата.
-    context_strategy: "minimal"
-    context_depth: 5
-    include_tool_history: false
 
   general_purpose:
     type: "agent"

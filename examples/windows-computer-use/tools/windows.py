@@ -2,6 +2,18 @@
 Window management: list, focus, inspect active window.
 """
 
+from utils.tool_requirements import Requires
+
+# Declared before the Windows-only imports: when they fail, the health check
+# still explains why instead of showing a bare import error.
+_HINT = "Run on Windows with: pip install -r examples/windows-computer-use/requirements.txt"
+TOOL_REQUIREMENTS = {
+    "list_windows": Requires(platform="win32", modules=("win32gui",), hint=_HINT),
+    "focus_window": Requires(platform="win32", modules=("win32gui",), hint=_HINT),
+    "active_window": Requires(platform="win32", modules=("win32gui",), hint=_HINT),
+}
+
+
 import win32gui
 import win32con
 from agents import function_tool

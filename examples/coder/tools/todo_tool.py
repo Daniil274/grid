@@ -38,13 +38,11 @@ def _get_todo_file() -> Path:
         except (ValueError, Exception):
             pass  # Escaped workspace or other error — ignore and use default
 
-    factory = get_current_factory()
-    if factory is not None:
+    if get_current_factory() is not None:
         try:
-            workspace = Path(factory.config.get_working_directory())
-            data_dir = workspace / "data"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            return data_dir / "todos.json"
+            todo_file = Path(resolve_agent_path_auto("data/todos.json"))
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            return todo_file
         except Exception:
             pass
 

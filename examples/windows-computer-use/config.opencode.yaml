@@ -94,9 +94,6 @@ tools:
   active_window:
     type: "function"
     description: "Get title, position and size of the active window."
-  shell:
-    type: "function"
-    description: "Execute PowerShell or CMD command and return output. Destructive commands are auto-blocked."
   scratchpad_write:
     type: "function"
     description: "Overwrite session scratchpad with a checkpoint summary."

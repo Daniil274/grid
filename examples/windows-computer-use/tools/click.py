@@ -4,6 +4,16 @@ Falls back to screen coordinates when name-based lookup fails.
 Implements the Unified GUI-API Action Layer concept from UFO2.
 """
 
+from utils.tool_requirements import Requires
+
+# Declared before the Windows-only imports: when they fail, the health check
+# still explains why instead of showing a bare import error.
+_HINT = "Run on Windows with: pip install -r examples/windows-computer-use/requirements.txt"
+TOOL_REQUIREMENTS = {
+    "click": Requires(platform="win32", modules=("pyautogui", "win32gui"), hint=_HINT),
+}
+
+
 import pyautogui
 from agents import function_tool
 

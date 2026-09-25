@@ -4,6 +4,16 @@ Types via layout-independent Unicode input (works under any keyboard layout);
 long text goes through the clipboard.
 """
 
+from utils.tool_requirements import Requires
+
+# Declared before the Windows-only imports: when they fail, the health check
+# still explains why instead of showing a bare import error.
+_HINT = "Run on Windows with: pip install -r examples/windows-computer-use/requirements.txt"
+TOOL_REQUIREMENTS = {
+    "type_into": Requires(platform="win32", programs=("powershell",), modules=("pyautogui", "win32clipboard"), hint=_HINT),
+}
+
+
 import time
 import pyautogui
 import win32clipboard

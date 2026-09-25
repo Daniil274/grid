@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.context import safe_lock
+from core.tool_check import summarize
 from web_chat.runtime import WebChatRuntime
 from web_chat.schemas import (
     ActionReviewRequest,
@@ -111,6 +112,7 @@ class WebChatServer:
         options: list[dict[str, Any]] = []
         for agent_key, agent in registry.agents(system).items():
             model = models.get(agent.primary_model)
+            issues = self._issue_payload(lambda: registry.agent_issues(system, agent_key))
             options.append(
                 {
                     "key": agent_key,
@@ -123,9 +125,24 @@ class WebChatServer:
                     "tool_count": len(agent.tools or []),
                     "mcp_enabled": bool(getattr(agent, "mcp_enabled", False)),
                     "routable": bool(getattr(agent, "routable", True)),
+                    # Tools that will fail and why; shown before the agent is used.
+                    "issues": issues,
                 }
             )
         return options
+
+    @staticmethod
+    def _issue_payload(compute: Any) -> dict[str, Any]:
+        """Issues as JSON: each one, plus one line per distinct problem for display.
+
+        A check that itself breaks is reported, never fatal.
+        """
+        try:
+            issues = compute()
+        except Exception as exc:
+            logger.warning("Tool check failed: %s", exc)
+            return {"items": [], "summary": [f"tool check failed: {exc}"]}
+        return {"items": [issue.to_dict() for issue in issues], "summary": summarize(issues)}
 
     def _system_options(self) -> list[dict[str, Any]]:
         """Every selectable system with its agents - the whole picker payload."""
@@ -135,9 +152,12 @@ class WebChatServer:
                 agents = self._agent_options(system.key)
                 default_agent = self.runtime.registry.config(system.key).get_default_agent()
                 error = ""
+                issues = self._issue_payload(
+                    lambda: [issue for issue in self.runtime.registry.issues(system.key) if issue.agent is None]
+                )
             except Exception as exc:  # a broken system stays visible and labelled
                 logger.warning("System '%s' could not be loaded: %s", system.key, exc)
-                agents, default_agent, error = [], None, str(exc)
+                agents, default_agent, error, issues = [], None, str(exc), {"items": [], "summary": []}
             options.append(
                 {
                     "key": system.key,
@@ -147,6 +167,7 @@ class WebChatServer:
                     "default_agent": default_agent,
                     "agents": agents,
                     "error": error,
+                    "issues": issues,
                 }
             )
         return options

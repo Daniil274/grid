@@ -18,18 +18,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.config.config import Config
 from core.managers.project_tools_loader import set_project_loader
 from core.routing import AutoRouter
+from core.tool_check import ToolIssue, agent_issues, diagnose
 
 logger = logging.getLogger("grid.web_chat.systems")
 
 #: A routing call must not hold up a turn; past this we use the default.
 ROUTING_TIMEOUT_SECONDS = 6.0
+#: A system's tool check is reused this long, so a fixed machine shows up without a restart.
+ISSUES_TTL_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,7 @@ class SystemRegistry:
         # still pick between the agents of the single loaded system.
         self._router = AutoRouter.from_config(catalog or base_config, working_directory=working_directory)
         self._factories: Dict[str, Any] = {}
+        self._issues: Dict[str, Tuple[float, List[ToolIssue]]] = {}
         self._base_key = _key_for(base_config.config_path)
 
     # -- catalog -----------------------------------------------------------
@@ -151,6 +156,21 @@ class SystemRegistry:
 
     def has_agent(self, system_key: str, agent_key: str) -> bool:
         return agent_key in self.agents(system_key)
+
+    # -- health ------------------------------------------------------------
+    def issues(self, system_key: str) -> List[ToolIssue]:
+        """Why tools of a system will fail on this machine; cached briefly."""
+        cached = self._issues.get(system_key)
+        if cached and time.monotonic() - cached[0] < ISSUES_TTL_SECONDS:
+            return cached[1]
+        requires = self._router.system_requires(system_key) if self.has_catalog else []
+        issues = diagnose(self.config(system_key), requires=requires)
+        self._issues[system_key] = (time.monotonic(), issues)
+        return issues
+
+    def agent_issues(self, system_key: str, agent_key: str) -> List[ToolIssue]:
+        """Issues a run of one agent meets: the system's, its own and its subagents'."""
+        return agent_issues(self.config(system_key), self.issues(system_key), agent_key)
 
     # -- resolution --------------------------------------------------------
     async def resolve(

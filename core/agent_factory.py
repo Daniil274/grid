@@ -890,15 +890,6 @@ class AgentFactory:
         if working_directory:
             self.config.set_working_directory(working_directory)
 
-        # Propagate the fully-configured Config instance to semantic tools
-        # so they use the correct working directory and model settings
-        try:
-            from tools.semantic_tools import set_semantic_config
-
-            set_semantic_config(self.config)
-        except ImportError:
-            pass
-
         # Initialize image processing config
         from utils.image_utils import ImageUtils
 
@@ -2029,27 +2020,6 @@ class AgentFactory:
         tools: List[Any] = []
         mcp_servers_list: List[Any] = []
         effective_tool_names = tool_names or []
-
-        # Auto-add emergency_shutdown for agents in active pipeline
-        try:
-            context_id = self.get_active_context_id()
-            if context_id:
-                pipeline = await self._pipeline_registry.get_pipeline_by_context(
-                    context_id
-                )
-                from core.tracing.pipeline_registry import PipelineStatus
-
-                if pipeline and pipeline.status == PipelineStatus.RUNNING:
-                    if "emergency_shutdown" not in effective_tool_names:
-                        effective_tool_names.append("emergency_shutdown")
-                        logger.debug(
-                            f"Auto-added emergency_shutdown to agent {name} in pipeline {pipeline.pipeline_id}"
-                        )
-        except Exception as e:
-            # Don't fail agent creation if pipeline check fails
-            logger.warning(
-                f"Failed to check pipeline for emergency_shutdown auto-add: {e}"
-            )
 
         # Gather all tool names (including MCP)
         all_tool_names = list(effective_tool_names)

@@ -214,10 +214,10 @@ tools:
 
   web_search:
     type: "function"
-    description: "Ищет в интернете через Firecrawl API."
+    description: "Ищет в интернете через SearXNG."
     prompt_addition: |
-      `web_search(query, limit=5, timeout=30)`
-      Требует `FIRECRAWL_API_KEY`. Используй, когда нужна актуальная внешняя информация.
+      `web_search(query, max_results=5)`
+      Требует запущенный SearXNG (`SEARXNG_URL`, по умолчанию http://localhost:8080). Используй, когда нужна актуальная внешняя информация.
 
   notebook_read:
     type: "function"
@@ -279,18 +279,6 @@ tools:
       Требует CLI `codegraph` в PATH (`npm i -g @colbymchenry/codegraph`).
 
   # ── Agent tools (subagents) ─────────────────────────────────────
-  general_purpose:
-    type: "agent"
-    name: "Agent"
-    description: "Launch a general-purpose subagent to research, search code, or execute a bounded multi-step task."
-    prompt_addition: |
-      `Agent(input)`
-      Используй `Agent` для сложных многошаговых задач, широкого поиска по кодовой базе и независимого исследования.
-      Не дублируй работу подагента в основном контексте. Передавай полноценный briefing: цель, что уже известно, ограничения и желаемый формат результата.
-    context_strategy: "minimal"
-    context_depth: 5
-    include_tool_history: false
-
   call_coordinator:
     type: "agent"
     name: "call_coordinator"

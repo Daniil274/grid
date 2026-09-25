@@ -9,6 +9,7 @@
 
 import { api } from "./net/api.js";
 import { ChatConnection } from "./net/chat-socket.js";
+import { toast } from "./ui/toast.js";
 
 export class ChatController {
   /**
@@ -27,6 +28,8 @@ export class ChatController {
     this._voice = voice;
     this._connection = null;
     this._activeTurn = null;
+    // Agents whose tool problems were already announced on this page.
+    this._warnedAgents = new Set();
   }
 
   get isStreaming() {
@@ -199,6 +202,13 @@ export class ChatController {
         this._transcript.follow();
       })
       .on("routed", ({ agent_name: agentName }) => message.setAuthor(agentName))
+      // The full list is a step in the trace; the toast makes sure it is seen once.
+      .on("tool_issues", ({ system, agent, agent_name: agentName, summary }) => {
+        const key = `${system}/${agent}`;
+        if (this._warnedAgents.has(key)) return;
+        this._warnedAgents.add(key);
+        toast(`${agentName}: ${summary.length} tool problem(s), calls may fail. ${summary[0]}`, { tone: "error", timeout: 12000 });
+      })
       .on("step", ({ step }) => {
         message.reasoning.upsert(step);
         this._transcript.follow();

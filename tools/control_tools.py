@@ -20,6 +20,7 @@ from agents import function_tool
 from pydantic import BaseModel
 
 from core.workshop import ControlClient, Workshop, WorkshopError
+from utils.tool_requirements import Requires
 from utils.path_utils import resolve_agent_path_auto
 
 PENDING = {"queued", "running"}
@@ -163,6 +164,15 @@ async def control_status(experiment_id: str, wait_seconds: int = 0) -> dict:
             return report
         await asyncio.sleep(POLL_SECONDS)
 
+
+_WORKSHOP = Requires(
+    env=("GRID_CONTROL_URL", "GRID_CONTROL_TOKEN"),
+    hint="Runs only in the workshop container, which grid_control starts with these variables",
+)
+TOOL_REQUIREMENTS = {name: _WORKSHOP for name in (
+    "control_begin", "control_submit", "control_trial", "control_diff",
+    "control_revert", "control_scenarios", "control_status",
+)}
 
 CONTROL_TOOLS = {
     "control_begin": control_begin,

@@ -2,6 +2,17 @@
 Mouse scroll and drag tools — low-level actions for when click/type_into aren't enough.
 """
 
+from utils.tool_requirements import Requires
+
+# Declared before the Windows-only imports: when they fail, the health check
+# still explains why instead of showing a bare import error.
+_HINT = "Run on Windows with: pip install -r examples/windows-computer-use/requirements.txt"
+TOOL_REQUIREMENTS = {
+    "scroll": Requires(platform="win32", modules=("pyautogui",), hint=_HINT),
+    "drag": Requires(platform="win32", modules=("pyautogui",), hint=_HINT),
+}
+
+
 import pyautogui
 from agents import function_tool
 

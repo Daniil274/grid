@@ -14,7 +14,8 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from agents import function_tool, RunContextWrapper
-from utils.path_utils import sanitize_text_for_agent_from_ctx
+from utils.path_utils import resolve_agent_path_from_ctx, sanitize_text_for_agent_from_ctx
+from utils.tool_requirements import Requires
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,7 @@ def _run_bd_command(args: List[str], cwd: Optional[str] = None, container_id: Op
     except FileNotFoundError as e:
         # If we're not already in a managed container, fall back to running bd in Docker.
         # This avoids requiring bd on the Windows host.
-        if not container_id and os.environ.get("BEADS_DISABLE_DOCKER_FALLBACK", "0") not in ("1", "true", "yes"):
+        if not container_id and _docker_fallback_enabled():
             try:
                 effective_cwd = cwd or os.path.abspath(".")
                 return _run_bd_via_docker_run(args, cwd=effective_cwd, context=context)
@@ -248,62 +249,14 @@ def _run_bd_command(args: List[str], cwd: Optional[str] = None, container_id: Op
     except Exception as e:
         return {"success": False, "output": "", "error": str(e), "data": None, "exit_code": -1}
 
-def _extract_factory(context: RunContextWrapper) -> Optional[Any]:
-    """Best-effort factory extraction from RunContextWrapper."""
-    # Preferred path for Agents SDK function tools:
-    # context -> RunContextWrapper, context.context -> GridRunContext
-    raw = getattr(context, "context", None)
-    if raw is not None:
-        factory = getattr(raw, "factory", None)
-        if factory is not None:
-            return factory
-
-    # Backward-compat fallback for legacy wrappers.
-    legacy_factory = getattr(context, "factory", None)
-    if legacy_factory is not None:
-        return legacy_factory
-    return None
-
-
 def _resolve_directory(context: RunContextWrapper, directory: str) -> str:
-    """Resolve directory for bd commands. In container never returns host paths (agent must not see them)."""
-    container_id = _get_container_id(context)
-    if container_id:
-        # Agent must never see or use full host paths. In container only "." or relative paths.
-        if not directory or directory in (".", "/"):
-            return "."
-        if os.path.isabs(directory):
-            # Treat any absolute path as workspace root (e.g. leaked host path) — never pass through
-            return "."
-        return directory
+    """Host path of the project directory, relative to the agent working directory.
 
-    if directory != ".":
-        return os.path.abspath(directory)
-
-    try:
-        factory = _extract_factory(context)
-        if factory is None or not hasattr(factory, "config"):
-            return os.path.abspath(".")
-
-        base_wd = os.path.abspath(factory.config.get_working_directory())
-        base_path = Path(base_wd)
-
-        # If .beads already exists in the configured cwd, use it.
-        if (base_path / ".beads").exists():
-            return base_wd
-
-        # User-scoped fallback: workspace/user_{id}
-        raw = getattr(context, "context", None)
-        user_id = getattr(raw, "user_id", None) if raw is not None else None
-        if user_id:
-            user_workspace = base_path / f"user_{user_id}"
-            if (user_workspace / ".beads").exists() or user_workspace.exists():
-                return str(user_workspace)
-
-        return base_wd
-    except Exception as e:
-        logger.warning(f"Failed to resolve beads working directory: {e}")
-        return os.path.abspath(".")
+    Same rule as the file and git tools: the agent's paths are relative to its
+    working directory and never escape it (ValueError). In a container the host
+    path is mapped to the container path when the command runs.
+    """
+    return resolve_agent_path_from_ctx(directory or ".", context)
 
 
 # ============================================================================
@@ -397,7 +350,10 @@ async def beads_log_append(
         text: Message body (one entry)
         directory: Working directory (defaults to auto-resolved ".")
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
     path = _log_path(directory, channel)
 
     entry = {
@@ -444,7 +400,10 @@ async def beads_log_read(
         reset_to_end: If True, set cursor to end of file and return empty (useful to "mark as read")
         directory: Working directory (defaults to auto-resolved ".")
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
     log_path = _log_path(directory, channel)
     cur_path = _cursor_path(directory)
 
@@ -557,7 +516,10 @@ async def beads_init(context: RunContextWrapper, directory: str = ".") -> str:
     Args:
         directory: Path to the project directory (default: ".")
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
     res = _run_bd_command(["init"], cwd=directory, container_id=container_id, context=context)
@@ -577,7 +539,10 @@ async def beads_ready(context: RunContextWrapper, directory: str = ".") -> str:
     Args:
         directory: Path to the project directory (default: ".")
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
     res = _run_bd_command(["ready"], cwd=directory, container_id=container_id, context=context)
@@ -604,7 +569,10 @@ async def beads_create(
         description: Detailed description
         directory: Path to the project directory
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
     args = ["create", title, "-p", str(priority), "-t", type]
@@ -625,7 +593,10 @@ async def beads_show(context: RunContextWrapper, bead_id: str, directory: str = 
         bead_id: The ID of the bead (e.g., "bd-a1b2")
         directory: Path to the project directory
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
     res = _run_bd_command(["show", bead_id], cwd=directory, container_id=container_id, context=context)
@@ -656,7 +627,10 @@ async def beads_update(
         claim: If True, atomically sets assignee to current user and status to in_progress
         directory: Path to the project directory
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
     args = ["update", bead_id]
@@ -691,7 +665,10 @@ async def beads_close(
         reason: Reason for closing
         directory: Path to the project directory
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
     res = _run_bd_command(["close", bead_id, "--reason", reason], cwd=directory, container_id=container_id, context=context)
@@ -708,7 +685,10 @@ async def beads_sync(context: RunContextWrapper, directory: str = ".") -> str:
     Args:
         directory: Path to the project directory
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
     res = _run_bd_command(["sync"], cwd=directory, container_id=container_id, context=context)
@@ -733,7 +713,10 @@ async def beads_dep(
         parent_id: The ID of the parent/blocker bead
         directory: Path to the project directory
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
     if action not in ["add", "remove"]:
@@ -767,7 +750,10 @@ async def beads_list(
         page_size: Items per page (clamped to 1..15).
         directory: Path to the project directory (default: ".")
     """
-    directory = _resolve_directory(context, directory)
+    try:
+        directory = _resolve_directory(context, directory)
+    except ValueError as exc:
+        return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
 
     # Safety clamps to avoid huge tool outputs.
@@ -831,6 +817,30 @@ async def beads_list(
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 # Registry for easy integration
+def _docker_fallback_enabled() -> bool:
+    return os.environ.get("BEADS_DISABLE_DOCKER_FALLBACK", "0") not in ("1", "true", "yes")
+
+
+def _bd_problem() -> Optional[str]:
+    """Why bd cannot run on this host, following the same lookup as _find_bd."""
+    bd = _find_bd()
+    if os.path.isfile(bd) or shutil.which(bd):
+        return None
+    if _docker_fallback_enabled() and shutil.which("docker"):
+        return None  # bd runs inside the isolation image instead
+    if _docker_fallback_enabled():
+        return "bd is not installed (BEADS_BD_PATH, ~/.local/bin/bd, PATH) and docker for the fallback is missing"
+    return "bd is not installed (BEADS_BD_PATH, ~/.local/bin/bd, PATH); docker fallback is disabled"
+
+
+_BD = Requires(check=_bd_problem, hint="Install beads (bd) or set BEADS_BD_PATH to its executable")
+# beads_log_append/beads_log_read only touch files under .beads/ and need nothing.
+TOOL_REQUIREMENTS = {name: _BD for name in (
+    "beads_init", "beads_ready", "beads_list", "beads_create", "beads_show",
+    "beads_update", "beads_close", "beads_sync", "beads_dep",
+)}
+
+
 BEADS_TOOLS = {
     "beads_init": beads_init,
     "beads_ready": beads_ready,

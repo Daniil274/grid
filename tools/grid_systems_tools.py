@@ -20,7 +20,7 @@ from agents import function_tool
 
 from core.config.config import Config
 from core.managers.project_tools_loader import get_project_loader, set_project_loader
-from core.routing import check_system
+from core.tool_check import CONFIG, diagnose
 from utils.path_utils import display_agent_path_auto, resolve_agent_path_auto
 
 CATALOG_FILE = "routing.yaml"
@@ -108,13 +108,17 @@ def grid_check_system(config_path: str) -> str:
     description, and whether the system is registered in routing.yaml. Run it on
     every system you create or change; healthy means ready to commit.
 
+    ``environment`` lists what this machine lacks for the tools to work
+    (programs, packages, keys, services). It does not make a system unhealthy:
+    the config is right, the machine that runs it has to provide these.
+
     Args:
         config_path: Path to the system's config.yaml, relative to the repository root.
     """
     path = Path(resolve_agent_path_auto(config_path)).resolve()
     visible = display_agent_path_auto(str(path))
     if not path.is_file():
-        return json.dumps({"config": visible, "healthy": False, "issues": ["config file not found"]})
+        return json.dumps({"config": visible, "healthy": False, "issues": ["config file not found"], "environment": []})
 
     with _isolated_loader():
         registered_as = None
@@ -126,9 +130,12 @@ def grid_check_system(config_path: str) -> str:
                     registered_as, requires = name, list(entry.requires)
                     break
         try:
-            issues = check_system(Config(str(path)), requires=requires)
+            found = diagnose(Config(str(path)), requires=requires)
         except Exception as exc:
-            issues = [f"config failed to load: {exc}"]
+            issues, environment = [f"config failed to load: {exc}"], []
+        else:
+            issues = [issue.text() for issue in found if issue.kind == CONFIG]
+            environment = [issue.text() for issue in found if issue.kind != CONFIG]
 
     return json.dumps(
         {
@@ -136,6 +143,7 @@ def grid_check_system(config_path: str) -> str:
             "registered_as": registered_as,
             "healthy": not issues,
             "issues": issues,
+            "environment": environment,
         },
         ensure_ascii=False,
         indent=2,

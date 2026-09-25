@@ -245,52 +245,6 @@ def read_file(filepath: str) -> str:
 
 
 @function_tool
-def get_file_info(filepath: str) -> str:
-    """
-    Gets file information.
-
-    Args:
-        filepath: Path to the file
-
-    Returns:
-        str: File information
-    """
-    visible_path = display_agent_path_auto(filepath)
-    log_tool_call("get_file_info", {"filepath": visible_path})
-    try:
-        visible_path, filepath = _resolve_tool_path(filepath)
-        path = Path(filepath)
-        if not path.exists():
-            log_tool_error("get_file_info", f"File {visible_path} not found")
-            return f"❌ File {visible_path} not found"
-
-        if not path.is_file():
-            log_tool_error("get_file_info", f"{visible_path} is not a file")
-            return f"❌ {visible_path} is not a file"
-
-        stat = path.stat()
-        content = path.read_text(encoding='utf-8')
-        lines_count = len(content.splitlines())
-        extension = path.suffix.lower()
-
-        log_tool_result("get_file_info", f"File {stat.st_size} bytes, {lines_count} lines")
-
-        result = f"""📄 File info {visible_path}:
-• Name: {path.name}
-• Size: {stat.st_size} bytes
-• Lines: {lines_count}
-• Extension: {extension or 'no extension'}
-• Modified: {time.ctime(stat.st_mtime)}
-• Absolute path: {path.absolute()}"""
-
-        return result
-
-    except Exception as e:
-        log_tool_error("get_file_info", str(e))
-        return f"❌ Error getting info for {visible_path}: {str(e)}"
-
-
-@function_tool
 def write_file(filepath: str, content: str) -> str:
     """Create a file or replace its whole content.
 
@@ -460,7 +414,6 @@ FILE_TOOLS = {
     "file_write": write_file,
     "file_append": append_file,
     "file_list": list_files,
-    "file_info": get_file_info,
     "file_search": search_files,
     "file_content_search": search_content,
     "file_edit_patch": edit_file_patch,

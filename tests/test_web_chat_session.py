@@ -325,3 +325,38 @@ async def test_streamed_tokens_include_steps_that_the_final_answer_replaces():
 
     await socket.incoming.put(None)
     await session
+
+
+@pytest.mark.asyncio
+async def test_tool_problems_are_announced_before_the_agent_runs_and_do_not_stop_it():
+    from core.tool_check import ENVIRONMENT, ToolIssue
+
+    started = []
+
+    async def run(**kwargs):
+        started.append(True)
+        return 'done anyway'
+
+    server, socket = server_for(run), Socket()
+    issue = ToolIssue(ENVIRONMENT, 'program not on PATH: ffmpeg', agent='a', tool='video_probe', hint='Install FFmpeg')
+    server.runtime.registry = SimpleNamespace(agent_issues=lambda system, agent: [issue])
+    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    await socket.incoming.put('{"message":"hello"}')
+
+    frames = []
+    async with asyncio.timeout(2):
+        while True:
+            frames.append(await socket.outgoing.get())
+            if frames[-1]['type'] == 'done':
+                break
+
+    kinds = [frame['type'] for frame in frames]
+    notice = next(frame for frame in frames if frame['type'] == 'tool_issues')
+    assert notice['summary'] == ["tool 'video_probe' (agent 'a'): program not on PATH: ffmpeg (fix: Install FFmpeg)"]
+    assert kinds.index('tool_issues') < kinds.index('final_output')
+    warning = next(frame['step'] for frame in frames
+                   if frame['type'] == 'step' and frame['step']['tone'] == 'warn')
+    assert 'ffmpeg' in warning['body']
+    assert started == [True]
+    await socket.incoming.put(None)
+    await session

@@ -75,6 +75,7 @@ async def test_check_reports_healthy_registered_system(repo):
         "registered_as": "notes",
         "healthy": True,
         "issues": [],
+        "environment": [],
     }
 
 

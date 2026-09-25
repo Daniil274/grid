@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 from agents import RunContextWrapper, function_tool
 
 from core.pipeline_runtime import PipelineRuntime, TOOL_PROFILES
+from utils.path_utils import resolve_agent_path
 
 EXAMPLE = ROOT / "examples" / "coordinator-pipeline"
 DEFAULT_TOOLS_DIRECTORY = "examples/coder/tools"
@@ -159,7 +160,7 @@ async def pipeline_start(
             "A run is already open; call pipeline_finish or pipeline_block before starting another",
             run_id=session.runtime.state["run_id"],
         )
-    workdir = Path(factory.config.get_working_directory()).resolve()
+    workdir = Path(resolve_agent_path(".", factory))
     state_path = (
         Path(factory.config.get_logs_directory()).resolve()
         / "pipeline-runs"

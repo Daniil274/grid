@@ -248,7 +248,7 @@ def test_check_system_reports_missing_skills_of_any_agent(tmp_path):
     (tmp_path / "skills").mkdir()
     config = Config(str(_write(tmp_path / "video.yaml", video)))
 
-    assert check_system(config) == ["agent 'annotator' uses missing skill 'scenes'"]
+    assert check_system(config) == ["agent 'annotator': uses missing skill 'scenes'"]
 
     (tmp_path / "skills" / "scenes.md").write_text("# Scenes", encoding="utf-8")
     assert check_system(config) == []

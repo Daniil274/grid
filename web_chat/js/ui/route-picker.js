@@ -21,7 +21,19 @@ const agentMeta = (agent) =>
     .filter(Boolean)
     .join(" · ");
 
-function option({ title, description, meta, active, disabled, onPick }) {
+/** Tools that will fail and why, as the server's health check reported them. */
+function issuesNote(issues) {
+  const lines = issues?.summary ?? [];
+  if (!lines.length) return null;
+  return h(
+    "span.routeOption__issues",
+    { title: lines.join("\n") },
+    icon(ICONS.error, { size: 12 }),
+    h("span", { text: `${lines.length} tool problem(s): ${lines[0]}${lines.length > 1 ? " …" : ""}` }),
+  );
+}
+
+function option({ title, description, meta, issues, active, disabled, onPick }) {
   return h(
     "button.routeOption",
     {
@@ -38,6 +50,7 @@ function option({ title, description, meta, active, disabled, onPick }) {
     ),
     description ? h("span.routeOption__desc", { text: description }) : null,
     meta ? h("span.routeOption__meta", { text: meta }) : null,
+    issuesNote(issues),
   );
 }
 
@@ -80,6 +93,7 @@ export function createRoutePicker({ button, nameNode, metaNode, popover, systemL
           title: system.name,
           description: system.error || system.description,
           meta: system.error ? "unavailable" : system.config_path,
+          issues: system.issues,
           active: state.systemKey === system.key,
           disabled: Boolean(system.error),
           onPick: () => pick({ systemKey: system.key, agentKey: AUTO }),
@@ -118,6 +132,7 @@ export function createRoutePicker({ button, nameNode, metaNode, popover, systemL
           title: agent.name,
           description: agent.description || agent.key,
           meta: agentMeta(agent),
+          issues: agent.issues,
           active: state.agentKey === agent.key,
           onPick: () => pick({ systemKey: system.key, agentKey: agent.key }),
         }),

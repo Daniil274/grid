@@ -28,6 +28,7 @@ from typing import Any, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 
 from core.context import safe_lock
+from core.tool_check import summarize
 from web_chat.observer import WebStreamObserver
 from web_chat.systems import Resolution
 from web_chat.trace import StepKind, TraceRecorder, is_tool_result
@@ -129,6 +130,7 @@ class AgentTurn:
             resolution = await self._resolve()
             label = self._session.agent_label(resolution.system, resolution.agent)
             self._observer.agent_label = label
+            self._warn_about_tools(resolution, label)
 
             step = self._recorder.open(
                 StepKind.PREPARE,
@@ -167,6 +169,32 @@ class AgentTurn:
             self._queue.put_nowait({"type": "error", "content": str(exc)})
         finally:
             self._queue.put_nowait({"type": _FINISHED})
+
+    def _warn_about_tools(self, resolution: Resolution, label: str) -> None:
+        """Say which tools will fail before the agent starts; nothing is disabled."""
+        try:
+            issues = self._session.runtime.registry.agent_issues(resolution.system, resolution.agent)
+        except Exception as exc:  # the check must never cost the turn
+            logger.warning("Tool check failed for %s/%s: %s", resolution.system, resolution.agent, exc)
+            return
+        if not issues:
+            return
+        lines = summarize(issues)
+        self._recorder.note(
+            StepKind.ERROR,
+            f"{len(lines)} tool problem(s) · {label}",
+            subtitle="The tools stay enabled, but calls to them will likely fail",
+            body="\n".join(f"- {line}" for line in lines),
+            tone="warn",
+        )
+        self._queue.put_nowait({
+            "type": "tool_issues",
+            "system": resolution.system,
+            "agent": resolution.agent,
+            "agent_name": label,
+            "summary": lines,
+            "issues": [issue.to_dict() for issue in issues],
+        })
 
     async def _resolve(self) -> Resolution:
         """Decide the system and agent, showing the routing as its own step."""

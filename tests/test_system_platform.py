@@ -39,7 +39,6 @@ from schemas import (
     TaskType,
     ValueRef,
 )
-from tools.function_tools import AVAILABLE_TOOLS, TOOL_ALIASES
 
 
 def _permission_policy():
@@ -329,23 +328,6 @@ def test_domain_mutation_layer_updates_draft_system():
     assert len(updated.edges) == 1
 
 
-def test_platform_tools_are_registered_in_global_tool_registry():
-    assert "system_list_systems" in AVAILABLE_TOOLS
-    assert "system_get_system_info" in AVAILABLE_TOOLS
-    assert "system_get_system_versions" in AVAILABLE_TOOLS
-    assert "system_invoke_system" in AVAILABLE_TOOLS
-    assert "system_create_version" in AVAILABLE_TOOLS
-    assert "system_clone_version" in AVAILABLE_TOOLS
-    assert "system_apply_mutations" in AVAILABLE_TOOLS
-    assert "system_promote_version" in AVAILABLE_TOOLS
-    assert "system_reject_version" in AVAILABLE_TOOLS
-    assert "system_rollback_stable" in AVAILABLE_TOOLS
-    assert "system_build_bundle" in AVAILABLE_TOOLS
-
-    assert TOOL_ALIASES["list_systems"] == "system_list_systems"
-    assert TOOL_ALIASES["invoke_system"] == "system_invoke_system"
-    assert TOOL_ALIASES["clone_system_version"] == "system_clone_version"
-    assert TOOL_ALIASES["build_system_bundle"] == "system_build_bundle"
 
 
 def test_system_workbench_supports_clone_mutate_and_promotion(temp_dir):

@@ -3,6 +3,16 @@ Hotkey and single-key press tool. Pure keyboard shortcuts, no text typing.
 For text input use type_into().
 """
 
+from utils.tool_requirements import Requires
+
+# Declared before the Windows-only imports: when they fail, the health check
+# still explains why instead of showing a bare import error.
+_HINT = "Run on Windows with: pip install -r examples/windows-computer-use/requirements.txt"
+TOOL_REQUIREMENTS = {
+    "hotkey": Requires(platform="win32", hint=_HINT),
+}
+
+
 from agents import function_tool
 from _win_input import press_combo
 
