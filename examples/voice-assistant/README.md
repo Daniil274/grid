@@ -19,8 +19,7 @@ also work: pass their path with `--config` and add a `voice:` section if needed.
 For a new environment, install the project dependencies and the speech packages:
 
 ```powershell
-python -m pip install -r requirements.txt
-python -m pip install faster-whisper torch numpy soundfile
+python -m pip install -e ".[voice]"
 ```
 
 For CUDA, use a CUDA-enabled PyTorch installation and the CUDA/cuDNN runtime

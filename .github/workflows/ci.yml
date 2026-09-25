@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.11", "3.12"]
 
     steps:
       - name: Checkout
@@ -36,7 +36,7 @@ jobs:
 
       - name: Compile project
         run: |
-          python -m compileall core tests tools web_chat timeline agent_chat.py grid.py
+          python -m compileall core tests tools web_chat timeline grid_control schemas utils agent_chat.py grid.py grid_mcp.py
 
       - name: Run tests
         run: |
