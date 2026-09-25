@@ -6,16 +6,16 @@ the tools from `examples/coder/tools`.
 
 ## Codex-side setup
 
-Add this server to Codex's `config.toml` (adjust paths if the repository moves):
+Add this server to Codex's `config.toml` (replace C:\path\to\grid with your checkout):
 
 ```toml
 [mcp_servers.grid]
-command = 'C:\Users\danii\grid\.venv\Scripts\python.exe'
+command = 'C:\path\to\grid\.venv\Scripts\python.exe'
 args = [
-  'C:\Users\danii\grid\grid.py',
+  'C:\path\to\grid\grid.py',
   'serve-mcp',
-  '--config', 'C:\Users\danii\grid\config.yaml',
-  '--workdir', 'C:\Users\danii\grid',
+  '--config', 'C:\path\to\grid\config.yaml',
+  '--workdir', 'C:\path\to\grid',
   '--provider', 'opencode',
   '--max-concurrency', '4',
   '--default-timeout', '300',
