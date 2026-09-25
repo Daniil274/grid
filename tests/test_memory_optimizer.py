@@ -81,7 +81,7 @@ class TestTriggerConsolidation:
     @pytest.mark.asyncio
     async def test_manual_trigger(self, memory_store, config_file, mock_agent_factory):
         optimizer = MemoryOptimizer(memory_store, config_file, mock_agent_factory)
-        with patch('core.memory_optimizer._TRACING_AVAILABLE', False):
+        with patch('core.memory.optimizer._TRACING_AVAILABLE', False):
             with patch.object(optimizer, 'consolidate_recent') as mock_cons:
                 await optimizer.trigger_consolidation()
                 mock_cons.assert_called_once_with(user_id=None, session_id=None, agent_id=None, batch_size=5)
@@ -124,7 +124,7 @@ class TestProcessNewEntry:
         with open(config_path, 'w') as f:
             yaml.dump(config_data_periodic, f)
         config = Config(str(config_path))
-        with patch('core.memory_optimizer._TRACING_AVAILABLE', False):
+        with patch('core.memory.optimizer._TRACING_AVAILABLE', False):
             optimizer = MemoryOptimizer(memory_store, config, mock_agent_factory)
             assert optimizer.consolidation_trigger == 'periodic'
 
@@ -143,7 +143,7 @@ class TestAgeFilter:
         now = datetime.now()
         mock_entry.created_at = now.isoformat()  # Just created, should be filtered out
 
-        with patch('core.memory_optimizer._TRACING_AVAILABLE', False):
+        with patch('core.memory.optimizer._TRACING_AVAILABLE', False):
             with patch.object(optimizer.store, 'search', return_value=[mock_entry] * 10):
                 with patch.object(optimizer, '_get_client_and_model', return_value=(None, None)):
                     # Should filter out all entries as they are too young
@@ -154,7 +154,7 @@ class TestAgeFilter:
 @pytest.mark.asyncio
 async def test_stop_periodic_loop(memory_store, config_periodic, mock_agent_factory):
     """Test that stop_periodic_loop properly cancels the task."""
-    with patch('core.memory_optimizer._TRACING_AVAILABLE', False):
+    with patch('core.memory.optimizer._TRACING_AVAILABLE', False):
         optimizer = MemoryOptimizer(memory_store, config_periodic, mock_agent_factory)
         await optimizer.stop_periodic_loop()
         assert optimizer._periodic_running is False
