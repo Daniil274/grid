@@ -186,8 +186,8 @@ class ConsoleSpanExporter(TracingExporter):
                     return f"{total_seconds * 1000:.0f}ms"
                 else:
                     return f"{total_seconds:.2f}s"
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError):
+            pass  # a span without parseable timestamps has no duration to show
         return ""
     
     # ===== Helpers =====
@@ -313,33 +313,39 @@ class HttpSpanExporter(TracingExporter):
 
 
 class ImmediateTraceProcessor(TracingProcessor):
-    """Synchronous processor that immediately exports traces/spans without a background queue."""
+    """Synchronous processor that immediately exports traces/spans without a background queue.
+
+    A failing exporter never breaks a run; its first failure is a warning, the
+    rest are debug records.
+    """
     def __init__(self, exporter: TracingExporter, export_span_start: bool = False):
         self._exporter = exporter
         self._export_span_start = export_span_start
+        self._export_failed = False
+
+    def _export(self, item: Any) -> None:
+        try:
+            self._exporter.export([item])
+        except Exception:
+            level = logging.DEBUG if self._export_failed else logging.WARNING
+            self._export_failed = True
+            logging.getLogger("grid.tracing").log(
+                level, "Trace export to %s failed", type(self._exporter).__name__, exc_info=True
+            )
 
     def on_trace_start(self, trace: Trace) -> None:
-        try:
-            self._exporter.export([trace])
-        except Exception:
-            pass
+        self._export(trace)
 
     def on_trace_end(self, trace: Trace) -> None:
-        # Do nothing — already exported on start
+        # Already exported on start.
         pass
 
     def on_span_start(self, span: Span[Any]) -> None:
         if self._export_span_start:
-            try:
-                self._exporter.export([span])
-            except Exception:
-                pass
+            self._export(span)
 
     def on_span_end(self, span: Span[Any]) -> None:
-        try:
-            self._exporter.export([span])
-        except Exception:
-            pass
+        self._export(span)
 
     def shutdown(self, timeout: float | None = None):
         pass

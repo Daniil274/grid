@@ -13,6 +13,7 @@ Cold start optimization:
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -113,10 +114,8 @@ class SpeechProcessor:
             from pydub import AudioSegment
             seg = AudioSegment.from_wav(wav_path)
             seg.export(ogg_path, format="ogg", codec="libopus")
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(wav_path)
-            except Exception:
-                pass
             return ogg_path
         except Exception as e:
             logger.debug("pydub WAV→OGG failed: %s", e)
@@ -129,10 +128,8 @@ class SpeechProcessor:
                 timeout=30,
             )
             if r.returncode == 0 and Path(ogg_path).exists():
-                try:
+                with contextlib.suppress(OSError):
                     os.remove(wav_path)
-                except Exception:
-                    pass
                 return ogg_path
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             logger.debug("ffmpeg WAV→OGG: %s", e)
@@ -379,10 +376,8 @@ class SpeechProcessor:
                 )
                 combined.export(merged_wav, format="wav")
                 for p in wav_paths:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.remove(p)
-                    except Exception:
-                        pass
             except Exception as e:
                 logger.warning(f"Failed to merge SSML segments ({e}), using first")
                 merged_wav = wav_paths[0]

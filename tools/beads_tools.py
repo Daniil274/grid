@@ -243,8 +243,14 @@ def _run_bd_command(args: List[str], cwd: Optional[str] = None, container_id: Op
             try:
                 effective_cwd = cwd or os.path.abspath(".")
                 return _run_bd_via_docker_run(args, cwd=effective_cwd, context=context)
-            except Exception:
-                pass
+            except Exception as fallback_error:
+                return {
+                    "success": False,
+                    "output": "",
+                    "error": f"bd is not installed ({e}) and running it in Docker failed: {fallback_error}",
+                    "data": None,
+                    "exit_code": -1,
+                }
         return {"success": False, "output": "", "error": f"Executable not found: {e}. cmd={cmd if not container_id else docker_cmd}", "data": None, "exit_code": -1}
     except Exception as e:
         return {"success": False, "output": "", "error": str(e), "data": None, "exit_code": -1}
@@ -320,11 +326,11 @@ def _load_cursors(path: Path) -> Dict[str, Dict[str, int]]:
                 for r, off in readers.items():
                     try:
                         out[str(ch)][str(r)] = int(off)
-                    except Exception:
+                    except (TypeError, ValueError):
                         continue
             return out
-    except Exception:
-        pass
+    except (OSError, ValueError):
+        logger.warning("Log cursors in %s are unreadable; reading from the start", path, exc_info=True)
     return {}
 
 
@@ -449,8 +455,9 @@ async def beads_log_read(
         cursors.setdefault(ch_key, {})[rd_key] = int(end_pos)
         try:
             _save_cursors(cur_path, cursors)
-        except Exception:
-            pass
+        except OSError:
+            # The next read repeats what this one returned.
+            logger.warning("Could not save log cursor %s", cur_path, exc_info=True)
         return json.dumps(
             {
                 "success": True,
@@ -477,17 +484,15 @@ async def beads_log_read(
                 data = data[:max_bytes]
             cursor_after = cursor_before + len(data)
 
-        try:
-            new_text = data.decode("utf-8", errors="replace")
-        except Exception:
-            new_text = ""
+        new_text = data.decode("utf-8", errors="replace")
 
         # Persist cursor.
         cursors.setdefault(ch_key, {})[rd_key] = int(cursor_after)
         try:
             _save_cursors(cur_path, cursors)
-        except Exception:
-            pass
+        except OSError:
+            # The next read repeats what this one returned.
+            logger.warning("Could not save log cursor %s", cur_path, exc_info=True)
 
         return json.dumps(
             {

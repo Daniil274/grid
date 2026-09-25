@@ -36,7 +36,6 @@ from agents.items import ItemHelpers, MessageOutputItem
 from agents.exceptions import (
     ModelBehaviorError,
     MaxTurnsExceeded,
-    AgentsException,
     UserError as AgentsUserError,
 )
 from core.vision_model import VisionChatCompletionsModel
@@ -1114,50 +1113,9 @@ class AgentFactory:
     # Lightweight model resolution helpers for API (e.g., Cline endpoint)
     # ---------------------------------------------------------------------
     def _is_model_allowed(self, model_key: str) -> bool:
-        """
-        Check if a model key is in the allowed models whitelist.
-
-        Args:
-            model_key: Model key to check
-
-        Returns:
-            True if model is allowed (or if no whitelist is configured), False otherwise
-        """
-        try:
-            # Get allowed_models from settings
-            if hasattr(self.config, "config") and hasattr(
-                self.config.config, "settings"
-            ):
-                allowed_models = getattr(
-                    self.config.config.settings, "allowed_models", None
-                )
-
-                # If no whitelist configured or empty list, allow all models
-                if allowed_models is None or len(allowed_models) == 0:
-                    logger.debug(
-                        f"Model whitelist not configured (None or empty), allowing all models. "
-                        f"Checking model: {model_key}"
-                    )
-                    return True
-
-                # Check if model_key is in whitelist
-                is_allowed = model_key in allowed_models
-                logger.debug(
-                    f"Model whitelist check: model_key='{model_key}', "
-                    f"allowed={is_allowed}, whitelist={allowed_models}"
-                )
-                return is_allowed
-
-            # If config structure is not as expected, allow all models (backward compatibility)
-            logger.debug(
-                f"Config structure unexpected, allowing all models by default. Checking model: {model_key}"
-            )
-            return True
-        except Exception as e:
-            logger.warning(
-                f"Failed to check model whitelist: {e}, allowing model by default"
-            )
-            return True
+        """Whether settings.allowed_models permits *model_key*; no list allows every model."""
+        allowed = self.config.config.settings.allowed_models
+        return not allowed or model_key in allowed
 
     def resolve_model_key(self, key: Optional[str]) -> str:
         """Resolve an input key into a model key using runtime support services."""
@@ -1644,17 +1602,7 @@ class AgentFactory:
         """
         resolved_model_key = self.resolve_model_key(model_key)
 
-        # Get allowed models list for logging
-        allowed_models = []
-        try:
-            if hasattr(self.config, "config") and hasattr(
-                self.config.config, "settings"
-            ):
-                allowed_models = getattr(
-                    self.config.config.settings, "allowed_models", []
-                )
-        except Exception:
-            pass
+        allowed_models = self.config.config.settings.allowed_models or []
 
         # Log every dynamic agent creation attempt
         logger.info(
@@ -1836,8 +1784,10 @@ class AgentFactory:
                     agent_tools.append(tool_key)
                 elif tool_cfg.type == "mcp":
                     mcp_tools.append(tool_key)
-            except Exception:
-                # Unknown tool key – ignore (keep robust for LLM-produced tool lists)
+            except ConfigError:
+                # Tool lists of dynamic agents are written by models: an unknown
+                # name is dropped, not fatal, but it must be visible.
+                logger.warning("Unknown tool '%s' requested for a dynamic agent; skipped", tool_key)
                 continue
 
         resolved: List[Any] = []
@@ -2781,33 +2731,6 @@ class AgentFactory:
     # ------------------------------------------------------------------
     # SDK exception helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _extract_partial_output(exc: AgentsException) -> Optional[str]:
-        """Extract the last assistant text from an AgentsException's run_data.new_items."""
-        run_data = getattr(exc, "run_data", None)
-        if not run_data:
-            return None
-        new_items = getattr(run_data, "new_items", []) or []
-        for item in reversed(new_items):
-            if isinstance(item, MessageOutputItem):
-                try:
-                    raw = item.raw_item
-                    content = getattr(raw, "content", None) or []
-                    texts = []
-                    for part in content:
-                        if hasattr(part, "text"):
-                            texts.append(part.text)
-                        elif isinstance(part, dict) and part.get("type") in (
-                            "output_text",
-                            "text",
-                        ):
-                            texts.append(part.get("text", ""))
-                    if texts:
-                        return " ".join(texts)
-                except Exception:
-                    pass
-        return None
 
     # ------------------------------------------------------------------
     # Tool output truncation

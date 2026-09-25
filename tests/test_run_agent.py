@@ -233,3 +233,10 @@ async def test_a_context_overflow_trims_history_and_retries_once(factory):
 
     trim.assert_awaited_once()
     assert len(runner.calls) == 2
+
+
+def test_the_model_whitelist_allows_only_listed_models(factory):
+    assert factory._is_model_allowed("anything")  # no list: every model
+    factory.config.config.settings.allowed_models = ["m"]
+    assert factory._is_model_allowed("m")
+    assert not factory._is_model_allowed("other")
