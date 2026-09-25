@@ -26,7 +26,7 @@ from utils.logger import Logger
 
 from .base import CompactMessage
 from .grouping import truncate_head_for_ptl_retry
-from .utils import estimate_message_tokens, create_compact_boundary_message
+from .utils import estimate_message_tokens
 
 logger = Logger.get_logger("compact.reactive")
 

@@ -15,7 +15,6 @@ Key differences from the previous implementation:
 - Uses tool_use IDs from assistant messages to identify which tool_results
   to clear in user messages (matches CC's architecture exactly).
 - Clearing replaces the content with TIME_BASED_MC_CLEARED_MESSAGE string.
-- reset_microcompact_state() is a no-op (no persistent state to reset).
 """
 
 from datetime import datetime
@@ -258,17 +257,6 @@ def microcompact_messages(
     return {"messages": result}
 
 
-def reset_microcompact_state() -> None:
-    """
-    Reset microcompact state after compaction.
-
-    The time-based microcompact has no persistent module-level state to reset
-    (unlike the previous implementation). This function exists for API
-    compatibility with post_compact.py which calls it after every compaction.
-    """
-    pass  # No-op: time-based MC is stateless
-
-
 __all__ = [
     "TIME_BASED_MC_CLEARED_MESSAGE",
     "GAP_THRESHOLD_MINUTES",
@@ -277,5 +265,4 @@ __all__ = [
     "collect_compactable_tool_ids",
     "evaluate_time_based_trigger",
     "microcompact_messages",
-    "reset_microcompact_state",
 ]

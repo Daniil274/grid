@@ -11,7 +11,6 @@ from core.compact import (
     collect_compactable_tool_ids,
     evaluate_time_based_trigger,
     microcompact_messages,
-    reset_microcompact_state,
     CompactMessage,
 )
 from schemas import CompactConfig, CompactMicroConfig
@@ -274,10 +273,3 @@ class TestMicrocompactMessages:
 
         assert result["messages"][1].content[0]["content"] == "original"
 
-
-class TestResetMicrocompactState:
-    """Tests for reset_microcompact_state."""
-
-    def test_reset_is_no_op(self):
-        """reset_microcompact_state succeeds without error (stateless)."""
-        reset_microcompact_state()  # Should not raise

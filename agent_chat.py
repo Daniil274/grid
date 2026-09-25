@@ -821,11 +821,9 @@ async def main():
                                 )
                                 continue
 
-                            from core.compact import run_post_compact_cleanup
                             factory.context_manager.replace_conversation_history(
                                 _compact_to_context_messages(result.compacted_messages)
                             )
-                            run_post_compact_cleanup()
                             factory._compact_tracking.consecutive_failures = 0
 
                             tokens_after = getattr(result, 'tokens_after', 0)

@@ -8,7 +8,7 @@ Mirrors Claude Code's autoCompact.ts:
 - calculateTokenWarningState: warning/error/blocking thresholds
 - isAutoCompactEnabled: env-var override check
 - shouldAutoCompact: token count check + recursion guard
-- autoCompactIfNeeded: circuit breaker → try SM compact → try full compact
+- autoCompactIfNeeded: circuit breaker → full LLM compact
 
 Key difference from previous implementation:
 - No module-level global _state singleton (was not thread-safe).
@@ -18,24 +18,15 @@ Key difference from previous implementation:
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Any, TYPE_CHECKING
 from utils.logger import Logger
 
 from .base import (
     CompactMessage,
-    CompactionResult,
-    CompactionStatus,
-    CompactionStrategy,
     TokenWarningState,
 )
 from .utils import estimate_message_tokens
-from .session_memory_compact import (
-    try_session_memory_compact,
-    set_last_summarized_message_uuid,
-)
-from .micro_compact import reset_microcompact_state
-from .post_compact import run_post_compact_cleanup
 
 if TYPE_CHECKING:
     from schemas import CompactConfig
@@ -237,8 +228,7 @@ async def auto_compact_if_needed(
     Mirrors CC's autoCompactIfNeeded():
     1. Circuit breaker: skip if consecutive_failures >= MAX.
     2. shouldAutoCompact check.
-    3. Try session memory compact (cheap, no LLM).
-    4. Fall back to full LLM compact.
+    3. Full LLM compact.
 
     Args:
         messages: Current conversation messages.
@@ -277,22 +267,6 @@ async def auto_compact_if_needed(
     if not should_auto_compact(messages, context_window, is_subagent, compact_cfg):
         return {"was_compacted": False, "consecutive_failures": consecutive}
 
-    threshold = get_auto_compact_threshold(context_window, compact_cfg)
-
-    # --- Strategy 1: Session memory compact (no LLM call) ---
-    sm_result = try_session_memory_compact(messages, auto_compact_threshold=threshold)
-    if sm_result:
-        # On SM compact success, reset lastSummarizedMessageUuid —
-        # SM compact prunes messages and the old UUID won't exist anymore
-        set_last_summarized_message_uuid(None)
-        run_post_compact_cleanup()
-        return {
-            "was_compacted": True,
-            "compaction_result": sm_result,
-            "consecutive_failures": 0,
-        }
-
-    # --- Strategy 2: Full LLM compact ---
     if llm_client is None or model is None:
         logger.warning(
             "Auto-compact: no LLM client/model provided, cannot run full compact"
@@ -327,10 +301,6 @@ async def auto_compact_if_needed(
                 "compaction_result": result,
                 "consecutive_failures": 0,
             }
-
-        # Full compact replaces all messages — reset UUID tracking
-        set_last_summarized_message_uuid(None)
-        run_post_compact_cleanup()
 
         return {
             "was_compacted": True,

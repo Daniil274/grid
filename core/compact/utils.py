@@ -210,7 +210,6 @@ def create_compact_boundary_message(
     Create a system message marking a compact boundary.
     trigger: "auto" or "manual"
     """
-    from datetime import datetime
     import uuid as _uuid
     return CompactMessage(
         role="system",

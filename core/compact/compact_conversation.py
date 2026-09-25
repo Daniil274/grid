@@ -26,7 +26,7 @@ from .utils import (
     get_user_summary_message,
 )
 from .grouping import truncate_head_for_ptl_retry
-from .prompts import get_compact_prompt, get_partial_compact_prompt
+from .prompts import get_compact_prompt
 from .micro_compact import microcompact_messages
 
 logger = Logger.get_logger("compact.conversation")

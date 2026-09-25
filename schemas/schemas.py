@@ -388,14 +388,6 @@ class AgentExecution(BaseModel):
 # COMPACT SYSTEM CONFIGURATION
 # =============================================================================
 
-class CompactSessionMemoryConfig(BaseModel):
-    """Configuration for session memory compaction."""
-    enabled: bool = True
-    min_tokens: int = Field(default=10000, ge=1000, description="Minimum tokens to preserve")
-    max_tokens: int = Field(default=40000, ge=5000, description="Maximum tokens after compact")
-    trigger_threshold: float = Field(default=0.75, ge=0.5, le=1.0, description="Trigger at % of context")
-
-
 class CompactMicroConfig(BaseModel):
     """Configuration for microcompact (tool result clearing)."""
     enabled: bool = True
@@ -428,41 +420,17 @@ class CompactAutoConfig(BaseModel):
     max_consecutive_failures: int = Field(default=3, ge=1, description="Circuit breaker: max consecutive errors")
 
 
-class CompactRestoreFilesConfig(BaseModel):
-    """Configuration for file restoration after compact."""
-    enabled: bool = True
-    max_files: int = Field(default=5, ge=1)
-    max_tokens_per_file: int = Field(default=5000, ge=500)
-    token_budget: int = Field(default=50000, ge=10000)
-
-
-class CompactRestoreSkillsConfig(BaseModel):
-    """Configuration for skill restoration after compact."""
-    enabled: bool = True
-    token_budget: int = Field(default=25000, ge=5000)
-    max_tokens_per_skill: int = Field(default=5000, ge=1000)
-
-
-class CompactRestoreConfig(BaseModel):
-    """Configuration for post-compact restoration."""
-    files: CompactRestoreFilesConfig = Field(default_factory=CompactRestoreFilesConfig)
-    skills: CompactRestoreSkillsConfig = Field(default_factory=CompactRestoreSkillsConfig)
-
-
 class CompactConfig(BaseModel):
     """Complete configuration for the compact system.
     
     Compact manages context window limits through intelligent compaction:
-    - Session Memory Compact: LLM-based conversation summarization
     - Microcompact: Tool result clearing for token efficiency
     - Auto Compact: Automatic triggering on threshold
     - Reactive Compact: Handle context_length_exceeded errors
     """
     enabled: bool = True
-    session_memory: CompactSessionMemoryConfig = Field(default_factory=CompactSessionMemoryConfig)
     micro: CompactMicroConfig = Field(default_factory=CompactMicroConfig)
     auto: CompactAutoConfig = Field(default_factory=CompactAutoConfig)
-    restore: CompactRestoreConfig = Field(default_factory=CompactRestoreConfig)
     
     # Model for summarization (optional, uses default if None)
     summary_model: Optional[str] = None

@@ -15,7 +15,6 @@ import uuid as uuid_module
 class CompactionStrategy(str, Enum):
     """Strategy for compacting conversation context."""
     MICRO = "micro"              # Time-based tool result clearing
-    SESSION_MEMORY = "session_memory"  # Session memory-based (no LLM call)
     FULL = "full"               # Full LLM summarization
     REACTIVE = "reactive"       # Triggered by prompt_too_long error
 

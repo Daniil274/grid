@@ -7,10 +7,8 @@ Aligned with Claude Code's compact architecture:
 - grouping: API-round grouping (boundary on assistant message_id)
 - micro_compact: Time-based tool result clearing (gap > 60min)
 - compact_conversation: LLM-based full compaction with PTL retry
-- session_memory_compact: Session-memory-based compact (no LLM call)
 - auto_compact: Threshold detection + circuit breaker + strategy selection
 - reactive_compact: Head-truncation on context-overflow errors
-- post_compact: Cache clearing + file/skill restoration
 - prompts: LLM prompts for full compaction
 """
 
@@ -56,22 +54,6 @@ from .micro_compact import (
     collect_compactable_tool_ids,
     evaluate_time_based_trigger,
     microcompact_messages,
-    reset_microcompact_state,
-)
-
-# Session memory compact
-from .session_memory_compact import (
-    SessionMemoryCompactConfig,
-    set_session_memory_compact_config,
-    get_session_memory_compact_config,
-    set_session_memory_content,
-    get_session_memory_content,
-    get_last_summarized_message_uuid,
-    set_last_summarized_message_uuid,
-    reset_session_memory_state,
-    adjust_index_to_preserve_api_invariants,
-    calculate_messages_to_keep_index,
-    try_session_memory_compact,
 )
 
 # Auto compact
@@ -101,21 +83,6 @@ from .reactive_compact import (
     is_reactive_mode,
 )
 
-# Post compact
-from .post_compact import (
-    PostCompactState,
-    FileRestoreInfo,
-    SkillRestoreInfo,
-    get_post_compact_state,
-    reset_post_compact_state,
-    record_file_read,
-    record_skill_invocation,
-    run_post_compact_cleanup,
-    create_post_compact_file_attachments,
-    create_skill_attachments,
-    mark_post_compaction,
-)
-
 # LLM compact conversation
 from .compact_conversation import (
     compact_conversation,
@@ -123,10 +90,6 @@ from .compact_conversation import (
     ERROR_MESSAGE_PROMPT_TOO_LONG,
 )
 
-# Context for use by agent_factory (kept for backward compatibility)
-# CompactContext is now just AutoCompactTrackingState — agent_factory should
-# be updated to use AutoCompactTrackingState directly.
-from .session_memory_compact import SessionMemoryCompactConfig as CompactContext
 
 __all__ = [
     # Base
@@ -146,15 +109,7 @@ __all__ = [
     "CLEARED_RESULT_MARKER", "COMPACTABLE_TOOLS",
     "GAP_THRESHOLD_MINUTES", "KEEP_RECENT",
     "collect_compactable_tool_ids", "evaluate_time_based_trigger",
-    "microcompact_messages", "reset_microcompact_state",
-    # Session memory
-    "SessionMemoryCompactConfig",
-    "set_session_memory_compact_config", "get_session_memory_compact_config",
-    "set_session_memory_content", "get_session_memory_content",
-    "get_last_summarized_message_uuid", "set_last_summarized_message_uuid",
-    "reset_session_memory_state",
-    "adjust_index_to_preserve_api_invariants", "calculate_messages_to_keep_index",
-    "try_session_memory_compact",
+    "microcompact_messages",
     # Auto compact
     "AutoCompactTrackingState",
     "AUTOCOMPACT_BUFFER_TOKENS", "WARNING_THRESHOLD_BUFFER_TOKENS",
@@ -167,15 +122,7 @@ __all__ = [
     "ReactiveCompactStatus", "ReactiveCompactResult",
     "is_prompt_too_long_error", "get_token_gap_from_error",
     "reactive_compact", "reactive_compact_on_prompt_too_long", "is_reactive_mode",
-    # Post compact
-    "PostCompactState", "FileRestoreInfo", "SkillRestoreInfo",
-    "get_post_compact_state", "reset_post_compact_state",
-    "record_file_read", "record_skill_invocation",
-    "run_post_compact_cleanup", "create_post_compact_file_attachments",
-    "create_skill_attachments", "mark_post_compaction",
     # LLM compact
     "compact_conversation",
     "ERROR_MESSAGE_NOT_ENOUGH_MESSAGES", "ERROR_MESSAGE_PROMPT_TOO_LONG",
-    # Compat
-    "CompactContext",
 ]

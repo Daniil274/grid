@@ -69,7 +69,6 @@ from core.compact import (
     auto_compact_if_needed,
     AutoCompactTrackingState,
     reactive_compact_on_prompt_too_long,
-    run_post_compact_cleanup,
     CompactMessage,
     estimate_messages_tokens,
 )
@@ -2067,9 +2066,6 @@ class AgentFactory:
         # Compact integration: check token usage before running
         try:
             # Get current context messages for token check
-            current_context_id = (
-                context_id or self.context_manager.get_current_context_id()
-            )
             messages = self.context_manager._conversation_history
 
             # Estimate current token usage
@@ -2139,7 +2135,6 @@ class AgentFactory:
                             else ""
                         )
                     )
-                    run_post_compact_cleanup(context_id=current_context_id)
         except Exception as compact_error:
             # Don't fail if compact fails - log and continue
             logger.warning(f"Auto-compact check failed: {compact_error}")
@@ -2268,9 +2263,6 @@ class AgentFactory:
                                 ):
                                     self._replace_context_with_compact_messages(
                                         reactive_result.messages
-                                    )
-                                    run_post_compact_cleanup(
-                                        context_id=current_context_id
                                     )
                                     logger.info(
                                         f"Reactive compact: trimmed to {len(reactive_result.messages)} messages "
