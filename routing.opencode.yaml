@@ -19,7 +19,6 @@ settings:
       # The whole judgment, retry included; one request is bounded by the
       # model's request_timeout below.
       timeout_seconds: 15
-      fallback_models: [policy_chat]
       max_attempts: 2
       retry_backoff_seconds: 0.25
       max_concurrency: 4
@@ -47,28 +46,20 @@ models:
   router:
     name: deepseek-v4.1-flash
     provider: opencode-go
-    description: JEV decisions model used to pick the system and agent
+    description: Chat model that picks the system and the agent
 
   policy:
     name: deepseek-v4.1-flash
     provider: opencode-go
-    description: JEV decisions model used by the action-policy gate
-    # Most judgments take 1-2 s, a few stall past 10 s. A stalled request is
-    # dropped after this long and retried within validator.timeout_seconds.
-    request_timeout: 6
-
-  policy_chat:
-    name: deepseek-v4.1-flash
-    provider: opencode-go
-    policy_api: chat
-    description: Chat policy reserve used only after a technical Decisions failure
+    policy_api: chat  # opencode serves no Decisions API
+    description: Chat model that judges agent actions for the policy gate
     request_timeout: 9
     max_tokens: 512
     reasoning: {enabled: false}
 
 routing:
   model: router
-  api: decisions
+  api: chat
   default_system: engineering
   systems:
     engineering:

@@ -163,7 +163,7 @@ class TestContextManager:
         
         context = cm.get_conversation_context()
         
-        assert "Previous conversation" in context
+        assert context.startswith("Previous dialogue")
         assert "User: Hello" in context
         assert "Assistant: Hi there!" in context
     

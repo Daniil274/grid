@@ -45,7 +45,7 @@ python examples/coordinator-pipeline/run.py --config examples/coordinator-pipeli
 | Компонент | Ответственность |
 |---|---|
 | `run.py` | CLI: открывает прогон и запускает автономного LLM-координатора |
-| `tools/pipeline_tools.py` | Те же инструменты как обычные тулы Grid (для чата и роутера) |
+| `tools/pipeline_tools.py` | Инструменты координатора `run.py` поверх runtime |
 | `core/pipeline_runtime.py` | Контракты, попытки, доступ к общей папке, приёмка, сохранение состояния |
 | `core/background_agents.py` | Фоновые workers, очередь, ожидание события, отмена и таймаут |
 | `skills/coordinator.md` | Короткий цикл принятия решений |
@@ -59,22 +59,17 @@ runtime: `pipeline_task`, `pipeline_wait`, `pipeline_inspect`, `pipeline_review`
 
 ## Запуск из чата и через роутер
 
-Инструменты те же самые, поэтому пайплайн доступен не только из CLI. В
-`config.yaml` объявлен агент `pipeline_coordinator` — единственный routable агент
-этой системы, поэтому `agent_chat.py` без `--agent/--config` направляет к нему
-крупные многошаговые задачи по каталогу `routing.yaml` (система `pipeline`).
+В чате система `pipeline` работает через beads-координатора (`coordinator`):
+он раскладывает цель на задачи трекера и запускает исполнителей через
+`orchestrate`. Роутер `agent_chat.py` направляет к нему крупные многошаговые
+задачи по каталогу `routing.yaml`. Прогон пайплайна с контрактами, приёмкой и
+журналом в `<logs_directory>/pipeline-runs/<id>.json` открывается только из CLI
+через `run.py`.
 
 ```powershell
 python agent_chat.py            # роутер выбирает систему по сообщению
-python agent_chat.py --config examples/coordinator-pipeline/config.yaml --agent pipeline_coordinator
+python agent_chat.py --config examples/coordinator-pipeline/config.yaml --agent coordinator
 ```
-
-Разница только в том, кто открывает прогон: в CLI это делает `run.py`, в чате —
-сам координатор вызовом `pipeline_start` с целью пользователя. Прогон один на
-фабрику: следующий начинается после `pipeline_finish` или `pipeline_block`.
-Журнал пишется в `<logs_directory>/pipeline-runs/<id>.json`. Beads-координатор
-(`coordinator`) остаётся в конфиге, но в маршрутизации не участвует — вызывайте
-его явно через `--agent coordinator`.
 
 Задание содержит цель, область, входы, критерии готовности и ограничения. Отдельно
 задаются модель, инструменты, тип работы и таймаут. Runtime добавляет общий

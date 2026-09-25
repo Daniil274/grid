@@ -48,7 +48,7 @@ def packet():
 def root(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-primary")
     monkeypatch.setenv("OPENCODE_API_KEY", "test-reserve")
-    config = Config("routing.opencode.yaml")
+    config = Config("routing.yaml")  # Decisions primary with a chat reserve
     config.config.models["policy_chat"] = config.get_model("policy_chat").model_copy(
         update={"name": "chat-test-model"}
     )
@@ -248,18 +248,26 @@ async def test_chat_reserve_cannot_override_valid_jev_decision(root, verdict):
     assert hosts == ["openrouter.ai"]
 
 
-def test_both_profiles_revert_zen_and_configure_chat_reserve():
-    for filename in ("routing.yaml", "routing.opencode.yaml"):
-        root = Config(filename)
-        primary = ActionValidator.from_config(root)
-        assert primary.model.model_name == "typesafe/jev-1.13"
-        assert primary.model.url == "https://openrouter.ai/api/alpha/decisions"
-        assert (
-            primary.fallbacks[0].model.url
-            == "https://opencode.ai/zen/go/v1/chat/completions"
-        )
-        assert isinstance(primary.fallbacks[0], ChatActionValidator)
-        assert "opencode-zen" not in root.config.providers
+def test_openrouter_profile_uses_decisions_with_a_chat_reserve():
+    root = Config("routing.yaml")
+    primary = ActionValidator.from_config(root)
+    assert primary.model.model_name == "typesafe/jev-1.13"
+    assert primary.model.url == "https://openrouter.ai/api/alpha/decisions"
+    assert (
+        primary.fallbacks[0].model.url
+        == "https://opencode.ai/zen/go/v1/chat/completions"
+    )
+    assert isinstance(primary.fallbacks[0], ChatActionValidator)
+    assert "opencode-zen" not in root.config.providers
+
+
+def test_opencode_profile_judges_and_routes_over_chat():
+    # opencode serves no Decisions API: a decisions model there fails every call.
+    root = Config("routing.opencode.yaml")
+    primary = ActionValidator.from_config(root)
+    assert isinstance(primary, ChatActionValidator)
+    assert primary.model.url == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert root.config.routing.api == "chat"
 
 
 def test_chat_can_be_selected_as_primary(root):

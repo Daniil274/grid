@@ -67,5 +67,5 @@ def test_claude_tools_example_uses_expected_compact_thresholds():
     )
     assert config.get_model("mercury-2.5").name == "inception/mercury-2.5"
     assert config.get_agent("engineer").model == "glm-latest"
-    assert config.get_agent("general_purpose_glm").model == "deepseek-flash-latest"
+    assert config.get_agent("general_purpose").model == "deepseek-flash-latest"
     assert config.get_agent("web_spider").model == "mercury-2.5"

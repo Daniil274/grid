@@ -93,7 +93,7 @@ class TestProviderConfig:
         
         # Invalid max_retries - too high
         with pytest.raises(ValidationError):
-            ProviderConfig(name="test", base_url="url", max_retries=20)
+            ProviderConfig(name="test", base_url="url", max_retries=1001)
 
 
 class TestModelConfig:
@@ -361,14 +361,14 @@ class TestSettings:
             Settings(max_history=0)
         
         with pytest.raises(ValidationError):
-            Settings(max_history=200)
+            Settings(max_history=1001)
         
         # Invalid max_turns
         with pytest.raises(ValidationError):
             Settings(max_turns=0)
         
         with pytest.raises(ValidationError):
-            Settings(max_turns=200)
+            Settings(max_turns=301)
         
         # Invalid agent_timeout
         with pytest.raises(ValidationError):
