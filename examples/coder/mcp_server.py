@@ -6,8 +6,6 @@ Wraps all @function_tool objects from the tools/ package and serves them
 as MCP tools, maintaining full compatibility with the AgentsSDK FunctionTool API.
 """
 
-import asyncio
-import importlib
 import json
 import logging
 import sys

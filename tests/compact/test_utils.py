@@ -1,7 +1,5 @@
 """Tests for compact utilities."""
 
-import pytest
-from datetime import datetime
 
 from core.compact import (
     rough_token_count as estimate_tokens,

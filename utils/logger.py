@@ -11,7 +11,6 @@ from typing import Any, Dict, Optional
 from utils.grid_paths import get_default_logs_dir
 from pathlib import Path
 from functools import lru_cache
-import re
 
 
 def format_verbose_block(title: str, content: Any) -> str:

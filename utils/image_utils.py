@@ -5,7 +5,6 @@ Handles image conversion, validation, and format detection.
 
 import base64
 import mimetypes
-import os
 import re
 from pathlib import Path
 from typing import Optional, Tuple, Union, TYPE_CHECKING

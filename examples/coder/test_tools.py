@@ -17,7 +17,6 @@ from tools import (
     bash_tool,
     file_read, file_write, file_edit, file_append,
     glob_tool, grep_tool,
-    web_fetch,
     notebook_create, notebook_read, notebook_edit,
     todo_write, todo_list, todo_clear
 )

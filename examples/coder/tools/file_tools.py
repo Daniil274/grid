@@ -3,7 +3,6 @@ File Tools — reading, writing, editing, and appending files.
 All paths are isolated in the agent's working directory via resolve_agent_path_auto().
 """
 
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path

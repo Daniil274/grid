@@ -6,7 +6,7 @@ import pytest
 import os
 import yaml
 from pathlib import Path
-from unittest.mock import patch, Mock
+from unittest.mock import patch
 
 from core.config import Config
 from utils.exceptions import ConfigError

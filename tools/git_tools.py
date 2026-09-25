@@ -2,9 +2,7 @@
 Git tools for agents: read-only commit history (git_log).
 """
 
-import re
 import subprocess
-import time
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -181,7 +179,6 @@ def git_log(context: RunContextWrapper, directory: str = ".", max_commits: int =
     Returns:
         str: Commit history
     """
-    start_time = time.time()
     visible_directory = display_agent_path_from_ctx(directory, context)
     args = {"directory": visible_directory, "max_commits": max_commits}
     operation = log_tool_start("git_log", **args)
@@ -226,7 +223,6 @@ def git_log(context: RunContextWrapper, directory: str = ".", max_commits: int =
             
             result = "\n".join(formatted_lines)
         
-        duration = time.time() - start_time
         log_tool_result(operation, result=result)
         return result
         

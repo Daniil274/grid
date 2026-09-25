@@ -2,7 +2,7 @@
 Exception classes for Grid system.
 """
 
-from typing import Optional, Any
+from typing import Optional
 
 
 class GridError(Exception):

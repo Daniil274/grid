@@ -8,7 +8,6 @@ Modules are imported lazily — only when a specific tool is first requested.
 
 import importlib
 import pkgutil
-import sys
 from pathlib import Path
 from typing import List, Any, Dict
 from .file_tools import FILE_TOOLS, get_file_tools
@@ -30,7 +29,7 @@ def _discover_tool_modules() -> Dict[str, str]:
     skip = {"tools.file_tools", "tools.git_tools", "tools.function_tools"}
     result = {}
     tools_path = Path(__file__).parent
-    for finder, mod_name, _ in pkgutil.iter_modules([str(tools_path)]):
+    for _, mod_name, _ in pkgutil.iter_modules([str(tools_path)]):
         if not mod_name.endswith("_tools"):
             continue
         full_name = f"tools.{mod_name}"

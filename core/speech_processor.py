@@ -476,7 +476,6 @@ class SpeechProcessor:
 
         if results["torch"]:
             from pathlib import Path as _Path
-            import os as _os
             # Check model.pt
             default_path = _Path(__file__).parent.parent / "speech-text" / "model.pt"
             if default_path.exists():

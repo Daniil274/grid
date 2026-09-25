@@ -7,7 +7,7 @@ to enable proper separation of concerns and dependency injection.
 
 from typing import Protocol, Any, Optional, List, Dict, Tuple, runtime_checkable, Callable
 from openai import AsyncOpenAI
-from agents import Agent, SQLiteSession
+from agents import SQLiteSession
 
 
 @runtime_checkable

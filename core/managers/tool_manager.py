@@ -4,7 +4,6 @@ Tool Manager for handling agent tools.
 
 import logging
 from typing import List, Any, TYPE_CHECKING
-from core.config.protocols import IToolManager
 
 if TYPE_CHECKING:
     from core.config.config import Config

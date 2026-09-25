@@ -1,12 +1,9 @@
 """Tests for microcompact - time-based tool result clearing."""
 
-import pytest
 from datetime import datetime, timedelta
 
 from core.compact import (
     CLEARED_RESULT_MARKER,
-    COMPACTABLE_TOOLS,
-    GAP_THRESHOLD_MINUTES,
     KEEP_RECENT,
     collect_compactable_tool_ids,
     evaluate_time_based_trigger,

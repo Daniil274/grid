@@ -88,7 +88,7 @@ def _validate_url(url: str) -> Optional[str]:
     if scheme not in ("http", "https"):
         if scheme in BLOCKED_SCHEMES:
             return f"❌ Protocol '{scheme}://' is blocked"
-        return f"❌ Only http:// and https:// are supported"
+        return "❌ Only http:// and https:// are supported"
 
     host = (parsed.hostname or "").lower()
     if host in BLOCKED_HOSTNAMES:

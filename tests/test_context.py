@@ -4,15 +4,11 @@ Unit tests for core/context.py module.
 
 import pytest
 import json
-import tempfile
-from pathlib import Path
-from datetime import datetime
-from unittest.mock import patch, Mock
-import os
+from unittest.mock import patch
 import time
 
 from core.context import ContextManager
-from schemas import ContextMessage, AgentExecution
+from schemas import AgentExecution
 from utils.exceptions import ContextError
 
 

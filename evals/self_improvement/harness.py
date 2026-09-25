@@ -27,7 +27,6 @@ import sqlite3
 import subprocess
 import sys
 import time
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -415,7 +414,7 @@ def main() -> None:
     cases = load_cases(args.cases or None)
     for case in cases:
         for index in range(1 if args.command == "validate" else args.runs):
-            work = stamp / case.name / (f"validate" if args.command == "validate" else f"run{index + 1}")
+            work = stamp / case.name / ("validate" if args.command == "validate" else f"run{index + 1}")
             try:
                 if args.command == "validate":
                     outcome = validate(case, work, repetitions=args.repetitions)

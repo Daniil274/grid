@@ -5,7 +5,6 @@ Handles conversion between OpenAI Vision API format and Agents SDK format.
 
 from typing import List, Dict, Any, Union, Optional
 import logging
-from pathlib import Path
 
 from schemas.schemas import (
     ContextMessage, TextContent, ImageContent, FileImageContent,

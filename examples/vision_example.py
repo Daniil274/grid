@@ -8,7 +8,6 @@ converting to OpenAI format and Agents SDK format.
 
 import logging
 from datetime import datetime
-from pathlib import Path
 
 # Assuming the project structure
 from utils.multimodal_converter import MultimodalConverter

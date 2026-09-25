@@ -794,7 +794,7 @@ async def beads_list(
             issues = []
 
     if not isinstance(issues, list):
-        return f"❌ Error listing beads: unexpected output format"
+        return "❌ Error listing beads: unexpected output format"
 
     total = len(issues)
     total_pages = (total + page_size - 1) // page_size if total > 0 else 0

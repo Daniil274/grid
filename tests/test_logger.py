@@ -2,13 +2,9 @@
 Unit tests for utils/logger.py module.
 """
 
-import pytest
-import tempfile
 import json
 import logging
-from pathlib import Path
-from unittest.mock import patch, Mock, mock_open
-from io import StringIO
+from unittest.mock import patch
 
 from utils.logger import Logger, JSONFormatter, LegacyFormatter, SessionLogManager, format_verbose_block
 

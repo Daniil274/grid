@@ -5,7 +5,6 @@ Allows projects (e.g., ISKOR-autotest) to have their own tools
 without modifying the system root directory.
 """
 
-import os
 import sys
 import importlib
 import importlib.machinery
@@ -13,7 +12,7 @@ import importlib.util
 import inspect
 import logging
 import hashlib
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 from pathlib import Path
 
 logger = logging.getLogger("grid.project_tools_loader")

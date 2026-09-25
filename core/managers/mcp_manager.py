@@ -18,7 +18,6 @@ except ImportError:
 
 from core.config.protocols import IConfig, IContextManager
 from core.managers.container_manager import CONTAINER_WORKDIR
-from utils.exceptions import ConfigError
 
 logger = logging.getLogger("grid.mcp_manager")
 

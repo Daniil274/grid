@@ -2,7 +2,6 @@
 BashTool — executes shell commands with isolation by working directory.
 """
 
-import os
 import re
 import subprocess
 import sys
