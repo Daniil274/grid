@@ -181,3 +181,6 @@ voice-*.log
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Local binaries
+*.exe
