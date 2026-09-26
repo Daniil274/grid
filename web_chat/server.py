@@ -43,8 +43,8 @@ from web_chat.schemas import (
     SettingsStructuredUpdateRequest,
     SettingsYamlUpdateRequest,
 )
-from web_chat.security import OriginGuard
-from web_chat.space import UserSpace
+from web_chat.security import OriginGuard, refusal
+from web_chat.space import IsolationUnavailable, UserSpace
 from web_chat.spaces import SpacePool
 from web_chat.trace import is_tool_result
 from web_chat.views import UNTITLED, agent_options, conversation_title, serialize_message, system_options
@@ -148,9 +148,17 @@ class WebChatServer:
             guard.check(connection)
             return await identify(connection)
 
-        async def current_space(user: User = Depends(current_user)) -> AsyncIterator[UserSpace]:
-            async with spaces.use(user.id) as space:
-                yield space
+        async def current_space(
+            connection: HTTPConnection, user: User = Depends(current_user)
+        ) -> AsyncIterator[UserSpace]:
+            # Only building a space raises IsolationUnavailable. It is refused,
+            # never degraded: the agents do not run on the host instead.
+            try:
+                async with spaces.use(user.id) as space:
+                    yield space
+            except IsolationUnavailable as exc:
+                logger.error("Space of %s not built: %s", user.id, exc)
+                raise refusal(connection, status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from None
 
         return current_user, current_space
 

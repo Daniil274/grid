@@ -279,3 +279,22 @@ def test_every_response_carries_the_security_headers(client):
     for response in (client.get("/login"), client.get("/api/chat/bootstrap"), client.get("/static/styles/auth.css")):
         for name, value in SECURITY_HEADERS.items():
             assert response.headers[name] == value
+
+
+def test_a_space_whose_container_cannot_start_is_refused(accounts):
+    from web_chat.space import IsolationUnavailable
+
+    def build(user_id):
+        raise IsolationUnavailable("The workspace container could not be started.")
+
+    accounts.create_user("alice", PASSWORD)
+    server = WebChatServer(Deployment(), SpacePool(build), auth=SessionAuth(accounts), warm_user=None)
+    alice = signed_in(server, "alice")
+
+    refused = alice.get("/api/chat/conversations")
+
+    assert refused.status_code == 503 and "container" in refused.json()["detail"]
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with alice.websocket_connect("/api/chat/ws/ctx"):
+            pass
+    assert closed.value.code == 1008

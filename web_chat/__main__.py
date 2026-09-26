@@ -165,11 +165,19 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
 
     if args.path:
         raise SystemExit("--path sets the single user's workspace; with --accounts every user has their own.")
-    if not deployment.isolated and not args.trusted_users:
-        raise SystemExit(
-            f"Isolation is off in {deployment.config_path}: agents would run commands on this machine "
-            "for every user. Enable isolation (Docker), or pass --trusted-users if every user may do that."
-        )
+    if not args.trusted_users:
+        if not deployment.isolated:
+            raise SystemExit(
+                f"Isolation is off in {deployment.config_path}: agents would run commands on this machine "
+                "for every user. Enable isolation (Docker), or pass --trusted-users if every user may do that."
+            )
+        from core.managers.container_manager import ContainerManager
+
+        if not ContainerManager(deployment.config).enabled:
+            raise SystemExit(
+                "Isolation is on, but Docker is not usable here (the docker SDK is missing or the daemon "
+                "does not answer): no user's agents could run. Start Docker, or pass --trusted-users."
+            )
     data_dir = args.data_dir.expanduser().resolve()
     accounts = open_accounts(data_dir)
     users_dir = data_dir / "users"
