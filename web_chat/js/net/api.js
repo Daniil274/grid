@@ -50,6 +50,9 @@ export const api = {
   signOut: () => request("/api/auth/logout", { method: "POST" }),
   changePassword: (current, next) => request("/api/auth/password", json("POST", { current, new: next })),
   adminUsers: () => request("/api/admin/users"),
+  reviews: () => request("/api/action-policy/reviews"),
+  resolveReview: (id, decision) =>
+    request(`/api/action-policy/reviews/${encodeURIComponent(id)}`, json("POST", { decision })),
   updateUser: (id, patch) => request(`/api/admin/users/${encodeURIComponent(id)}`, json("PATCH", patch)),
   adminInvites: () => request("/api/admin/invites"),
   createInvite: (invite) => request("/api/admin/invites", json("POST", invite)),

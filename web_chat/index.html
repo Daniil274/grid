@@ -146,6 +146,14 @@
       <div class="drawer__body">
         <div class="pane">
           <section class="card">
+            <div class="card__head">
+              <h3>Pending actions</h3>
+              <button class="btn btn--ghost btn--xs" id="admin-refresh" type="button">Refresh</button>
+            </div>
+            <p class="field__hint">Actions the policy sent to review. An approval lets the agent retry that exact action once.</p>
+            <div id="admin-reviews"></div>
+          </section>
+          <section class="card">
             <h3>Users</h3>
             <div id="admin-users"></div>
           </section>

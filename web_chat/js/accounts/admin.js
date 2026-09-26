@@ -1,6 +1,8 @@
 /**
  * "Accounts": the admin's view of who may use the server (web_chat/accounts/http.py).
  *
+ * Pending actions - what the operator's policy sent to review, from every
+ * user's agents; an approval lets that exact action through once.
  * Users - role, state, turns today - with the two changes an admin makes:
  * role and disabled. Invites - a new one is shown once as a link, since only
  * its hash is stored; open ones can be revoked. The server enforces every rule
@@ -15,7 +17,7 @@ const when = (seconds) => new Date(seconds * 1000).toLocaleString();
 
 export class AccountsDrawer {
   /**
-   * @param {object} nodes drawer, backdrop, closeButton, users, invites, inviteForm, created, status
+   * @param {object} nodes drawer, backdrop, closeButton, refreshButton, reviews, users, invites, inviteForm, created, status
    * @param {{currentUser: () => ?object}} options the signed-in admin
    */
   constructor(nodes, { currentUser }) {
@@ -36,7 +38,8 @@ export class AccountsDrawer {
   }
 
   _bind() {
-    const { drawer, backdrop, closeButton, inviteForm } = this.nodes;
+    const { drawer, backdrop, closeButton, refreshButton, inviteForm } = this.nodes;
+    refreshButton.addEventListener("click", () => this._load());
     backdrop.addEventListener("click", () => this.close());
     closeButton.addEventListener("click", () => this.close());
     inviteForm.addEventListener("submit", (event) => {
@@ -65,10 +68,46 @@ export class AccountsDrawer {
   }
 
   async _load() {
-    const [users, invites] = await Promise.all([api.adminUsers(), api.adminInvites()]);
+    const [reviews, users, invites] = await Promise.all([api.reviews(), api.adminUsers(), api.adminInvites()]);
     const names = new Map(users.map((user) => [user.id, user.username]));
+    this._renderReviews(reviews);
     this._renderUsers(users);
     this._renderInvites(invites, names);
+  }
+
+  _renderReviews(reviews) {
+    const decide = (review, decision) =>
+      this._act(() => api.resolveReview(review.approval_id, decision), decision === "approve" ? "Approved" : "Denied");
+    replace(
+      this.nodes.reviews,
+      reviews.length
+        ? h(
+            "table.adminTable",
+            {},
+            h("thead", {}, h("tr", {}, ["User", "Tool", "Asked", "Expires", ""].map((title) => h("th", { text: title })))),
+            h(
+              "tbody",
+              {},
+              reviews.map((review) =>
+                h(
+                  "tr",
+                  {},
+                  h("td", { text: review.username }),
+                  h("td", {}, h("code", { text: review.tool })),
+                  h("td", { text: when(review.created_at) }),
+                  h("td", { text: when(review.expires_at) }),
+                  h(
+                    "td.adminTable__actions",
+                    {},
+                    h("button.btn.btn--primary.btn--xs", { type: "button", text: "Approve", on: { click: () => decide(review, "approve") } }),
+                    h("button.btn.btn--danger.btn--xs", { type: "button", text: "Deny", on: { click: () => decide(review, "deny") } }),
+                  ),
+                ),
+              ),
+            ),
+          )
+        : h("p.pane__empty", { text: "Nothing waits for review." }),
+    );
   }
 
   _renderUsers(users) {

@@ -173,6 +173,42 @@ class WebChatServer:
         if not supplied or not hmac.compare_digest(supplied, expected):
             raise HTTPException(status_code=403, detail="Invalid action review token")
 
+    def _reviewer(self):
+        """Who resolves the actions the operator's policy sends to review.
+
+        With accounts: admins. The policy is the operator's, so the user whose
+        agent asked must not be the one to wave the action through. Without
+        accounts: whoever holds the operator token the launcher printed - never
+        given to agents.
+        """
+        current_user = self.current_user
+
+        async def reviewer(
+            user: User = Depends(current_user),
+            review_token: Optional[str] = Header(default=None, alias="X-Grid-Action-Review-Token"),
+        ) -> User:
+            if self.auth is not None:
+                if not user.is_admin:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admins only")
+            else:
+                self._require_action_review_token(review_token)
+            return user
+
+        return reviewer
+
+    def _reviewed_spaces(self, own: UserSpace) -> list[UserSpace]:
+        """The spaces whose pending reviews a reviewer sees: every loaded one.
+
+        A review lives in its space's policy gate, in memory; a space is only
+        unloaded when idle, and a review expires on its own anyway.
+        """
+        return [own, *(space for space in self.spaces.live() if space is not own)]
+
+    def _usernames(self) -> dict[str, str]:
+        if self.auth is None:
+            return {}
+        return {account.user.id: account.user.username for account in self.auth.accounts.accounts()}
+
     def _settings_payload(self, space: UserSpace) -> dict[str, Any]:
         raw = self.deployment.config_dict()
         cfg = space.config.config
@@ -264,23 +300,24 @@ class WebChatServer:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return JSONResponse({"ok": True, "agent_key": body.agent_key, "system_key": body.system_key})
 
-        @api.get("/api/action-policy/reviews")
-        async def pending_action_reviews(
-            space: UserSpace = Depends(current_space),
-            review_token: Optional[str] = Header(default=None, alias="X-Grid-Action-Review-Token"),
-        ) -> JSONResponse:
-            self._require_action_review_token(review_token)
-            return JSONResponse(space.pending_action_reviews())
+        reviewer = self._reviewer()
 
-        @api.post("/api/action-policy/reviews/{approval_id}")
+        @api.get("/api/action-policy/reviews", dependencies=[Depends(reviewer)])
+        async def pending_action_reviews(space: UserSpace = Depends(current_space)) -> JSONResponse:
+            names = self._usernames()
+            reviews = [
+                {**review, "user_id": owner.user_id, "username": names.get(owner.user_id, owner.user_id)}
+                for owner in self._reviewed_spaces(space)
+                for review in owner.pending_action_reviews()
+            ]
+            return JSONResponse(sorted(reviews, key=lambda review: review["created_at"]))
+
+        @api.post("/api/action-policy/reviews/{approval_id}", dependencies=[Depends(reviewer)])
         async def resolve_action_review(
-            approval_id: str,
-            body: ActionReviewRequest,
-            space: UserSpace = Depends(current_space),
-            review_token: Optional[str] = Header(default=None, alias="X-Grid-Action-Review-Token"),
+            approval_id: str, body: ActionReviewRequest, space: UserSpace = Depends(current_space)
         ) -> JSONResponse:
-            self._require_action_review_token(review_token)
-            if not space.resolve_action_review(approval_id, approve=body.decision == "approve"):
+            approve = body.decision == "approve"
+            if not any(owner.resolve_action_review(approval_id, approve=approve) for owner in self._reviewed_spaces(space)):
                 raise HTTPException(status_code=404, detail="Review not found or expired")
             return JSONResponse({"ok": True, "approval_id": approval_id, "decision": body.decision})
 

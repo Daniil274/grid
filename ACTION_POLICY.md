@@ -179,9 +179,12 @@ exact tool, kind and original arguments, expires after `review_ttl_seconds`, and
 is consumed by the retry. It cannot override `deny`.
 
 The web runtime exposes the host endpoints `GET /api/action-policy/reviews` and
-`POST /api/action-policy/reviews/{approval_id}`. Both require the random
-`X-Grid-Action-Review-Token` printed by the web-chat launcher; the token is not
-given to the agent. Embedders can call `pending_action_reviews()` and
+`POST /api/action-policy/reviews/{approval_id}`. On a one-user server both
+require the random `X-Grid-Action-Review-Token` printed by the web-chat
+launcher; the token is not given to the agent. On a server with accounts
+(`--accounts`) admins resolve reviews - in the Accounts panel - for every
+user's agents; the user whose agent asked cannot, since the policy is the
+operator's. Embedders can call `pending_action_reviews()` and
 `resolve_action_review()` directly instead.
 
 A validator timeout, a transport error, a malformed answer or a nonfinite

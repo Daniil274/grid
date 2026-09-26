@@ -229,3 +229,45 @@ def test_the_origin_guard(connection, allowed):
     guard = OriginGuard(["https://chat.example.com/"])
 
     assert guard.allows(connection) is allowed
+
+
+# -- action reviews --------------------------------------------------------------
+
+
+class ReviewingSpace(FakeSpace):
+    """A fake space whose policy gate holds one pending review."""
+
+    def __init__(self, user_id):
+        super().__init__(user_id)
+        self.reviews = {f"review-{user_id}": {"approval_id": f"review-{user_id}", "tool": "bash_tool", "created_at": 1}}
+        self.resolved = []
+
+    def pending_action_reviews(self):
+        return list(self.reviews.values())
+
+    def resolve_action_review(self, approval_id, *, approve):
+        if self.reviews.pop(approval_id, None) is None:
+            return False
+        self.resolved.append((approval_id, approve))
+        return True
+
+
+def test_admins_review_the_actions_of_every_users_agents(accounts):
+    accounts.create_user("root", PASSWORD, role="admin")
+    alice = accounts.create_user("alice", PASSWORD)
+    spaces = {}
+    pool = SpacePool(lambda user_id: spaces.setdefault(user_id, ReviewingSpace(user_id)))
+    server = WebChatServer(Deployment(), pool, auth=SessionAuth(accounts), warm_user=None)
+    alice_client = signed_in(server, "alice")
+    alice_client.get("/api/chat/conversations")  # alice's space is loaded
+    root = signed_in(server, "root")
+
+    assert alice_client.get("/api/action-policy/reviews").status_code == 403
+    pending = root.get("/api/action-policy/reviews").json()
+    assert {(review["username"], review["tool"]) for review in pending} == {("root", "bash_tool"), ("alice", "bash_tool")}
+
+    decided = root.post(f"/api/action-policy/reviews/review-{alice.id}", json={"decision": "deny"})
+
+    assert decided.status_code == 200
+    assert spaces[alice.id].resolved == [(f"review-{alice.id}", False)]
+    assert root.post("/api/action-policy/reviews/missing", json={"decision": "approve"}).status_code == 404

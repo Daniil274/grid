@@ -249,6 +249,8 @@ async function boot() {
       drawer: $("#admin"),
       backdrop: $("#admin-backdrop"),
       closeButton: $("#admin-close"),
+      refreshButton: $("#admin-refresh"),
+      reviews: $("#admin-reviews"),
       users: $("#admin-users"),
       invites: $("#admin-invites"),
       inviteForm: $("#admin-invite-form"),
