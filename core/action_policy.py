@@ -13,6 +13,7 @@ import math
 import threading
 import time
 from collections import deque
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterator, Optional
 from uuid import uuid4
@@ -28,6 +29,10 @@ from utils.exceptions import ConfigError
 logger = logging.getLogger("grid.action_policy")
 
 VERDICTS = ("allow", "deny", "review")
+
+# Run states whose call is executing in the current task: a call it makes in
+# turn runs inside it rather than queueing behind it.
+_EXECUTING: ContextVar[tuple] = ContextVar("grid_action_policy_executing", default=())
 
 
 @dataclass
@@ -61,6 +66,34 @@ class ActionRunState:
     delegation: Optional[dict] = None
     # Calls made in the whole turn, delegated runs included; kept on the root.
     turn_attempts: int = 0
+    # Completes when the latest call issued in this run, and every call before
+    # it, is finished. See take_turn.
+    order_tail: Optional[asyncio.Future] = None
+
+    def take_turn(self) -> tuple[Optional[asyncio.Future], asyncio.Future]:
+        """Queue a call behind the calls this run issued before it.
+
+        The SDK starts every call of one model response at once, and their
+        verdicts arrive in any order. An action followed by a look at its result
+        (click, then perceive) must still run in the order the model wrote.
+        """
+        previous = self.order_tail
+        own = asyncio.get_running_loop().create_future()
+        self.order_tail = own
+        return previous, own
+
+    @staticmethod
+    def pass_turn(previous: Optional[asyncio.Future], own: asyncio.Future) -> None:
+        """Let later calls go once this one and all earlier ones are finished."""
+
+        def release(_=None):
+            if not own.done():
+                own.set_result(None)
+
+        if previous is None or previous.done():
+            release()
+        else:
+            previous.add_done_callback(release)
 
     def lineage(self) -> Iterator["ActionRunState"]:
         """This run, then the runs that delegated to it, outermost last."""
@@ -623,6 +656,23 @@ class ActionGate:
                 "unparsed",
                 "missing_trusted_task",
             )
+        if any(active is run for active in _EXECUTING.get()):
+            return await self._mediated_call(
+                run, tool_name, kind, ctx, raw_args, invoke, descriptor, None
+            )
+        previous, own = run.take_turn()
+        try:
+            return await self._mediated_call(
+                run, tool_name, kind, ctx, raw_args, invoke, descriptor, previous
+            )
+        finally:
+            run.pass_turn(previous, own)
+
+    async def _mediated_call(
+        self, run, tool_name, kind, ctx, raw_args, invoke, descriptor, previous
+    ):
+        """Judge one call alongside its siblings, then run it in its turn."""
+        raw_ctx = getattr(ctx, "context", None)
         digest = "unparsed"
         # Parallel calls to one tool are judged concurrently; the call id lets an
         # event sink attach each verdict to the exact call it belongs to.
@@ -771,9 +821,17 @@ class ActionGate:
             async with run.lock:
                 return self._deny(run, tool_name, kind, digest, "invalid_call")
 
+        if previous is not None:
+            # Judged concurrently, executed in the order the model issued them.
+            await asyncio.shield(previous)
+            if run.halted:
+                async with run.lock:
+                    return self._deny(run, tool_name, kind, digest, "run_stopped")
+
         # Executed outside the judgment: a tool's own error is neither a policy
         # denial nor a reason to stop the run - the agent sees it and goes on.
         # Only an interruption (cancellation, shutdown) stops the run.
+        executing = _EXECUTING.set((*_EXECUTING.get(), run))
         try:
             result = await invoke(ctx, raw_args)
         except Exception:
@@ -798,6 +856,8 @@ class ActionGate:
                     run, tool_name, kind, digest, "stopped", "execution_interrupted"
                 )
             raise
+        finally:
+            _EXECUTING.reset(executing)
         async with run.lock:
             if stop_after_shadow_call:
                 run.stopped = True

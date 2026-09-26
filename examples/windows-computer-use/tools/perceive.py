@@ -14,7 +14,7 @@ TOOL_REQUIREMENTS = {
 }
 
 
-import io, base64, os, time, uuid
+import asyncio, io, base64, os, time, uuid
 import win32gui
 import pyautogui
 from pathlib import Path
@@ -55,9 +55,13 @@ def _save(img: Image.Image) -> Path:
 
 
 def _encode(img: Image.Image) -> str:
+    # JPEG at full size: every screenshot stays in the history and is resent on
+    # each turn - eleven PNGs (8.7 MB) took 27-39 s per turn, as JPEG 9-11 s.
+    # Full size keeps screenshot pixels equal to click coordinates; the file on
+    # disk stays PNG for crop_image().
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    img.convert("RGB").save(buf, format="JPEG", quality=85, optimize=True)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 def _find_hwnd(title: str):
@@ -90,20 +94,25 @@ def _annotate(img: Image.Image, elements: list, offset_x=0, offset_y=0):
 
 
 @function_tool
-def perceive(window: str = None):
+async def perceive(window: str = None, wait: float = 0):
     """
     Capture the current screen state as a unified view:
     - Windows UI Automation element list (type, name, exact center coordinates)
     - Screenshot annotated with numbered markers [N] matching each element
     - Screenshot saved to a file — pass the path to crop_image() to zoom in
 
-    Call this at the start of every task step to understand what is on screen.
-    Use element names from the list to call click() or type_into().
+    The only tool that shows the screen. Put it last in the same response as
+    the actions whose result you need to see; calls run in the order written.
 
     Args:
         window: Optional window title substring. Omit to capture full desktop.
+        wait: Seconds to let the UI settle before capturing (0-10), e.g. 2
+            after opening a page or launching an app in the same response.
     """
     from _ps_uia import get_uia_elements
+
+    if wait:
+        await asyncio.sleep(min(max(float(wait), 0.0), 10.0))
 
     offset_x, offset_y = 0, 0
     hwnd = None

@@ -518,6 +518,62 @@ async def test_a_mediated_call_may_make_mediated_calls():
     assert state.attempts == 2
 
 
+async def test_calls_of_one_response_run_in_the_order_they_were_issued():
+    """The first call's verdict arriving last must not let the second run first."""
+    gate, validator, state, ctx = setup_gate()
+    delays = {"click": 0.05, "perceive": 0.0}
+
+    async def evaluate(packet, **_):
+        await asyncio.sleep(delays[packet["untrusted_action"]["tool"]])
+        return {"action": "allow", "chain": "allow"}
+
+    validator.evaluate = evaluate
+    ran = []
+
+    async def record(inner_ctx, args):
+        ran.append(json.loads(args)["tool"])
+        return "ok"
+
+    results = await asyncio.gather(
+        *(
+            gate.invoke(tool, "function", ctx, json.dumps({"tool": tool}), record)
+            for tool in ("click", "perceive")
+        )
+    )
+    assert results == ["ok", "ok"]
+    assert ran == ["click", "perceive"]
+
+
+async def test_a_blocked_call_does_not_hold_up_the_calls_after_it():
+    gate, validator, state, ctx = setup_gate()
+
+    async def evaluate(packet, **_):
+        if packet["untrusted_action"]["tool"] == "click":
+            await asyncio.sleep(0.05)
+            return {"action": "deny", "chain": "allow"}
+        return {"action": "allow", "chain": "allow"}
+
+    validator.evaluate = evaluate
+    ran = []
+
+    async def record(inner_ctx, args):
+        ran.append(json.loads(args)["tool"])
+        return "ok"
+
+    click, perceive = await asyncio.wait_for(
+        asyncio.gather(
+            *(
+                gate.invoke(tool, "function", ctx, json.dumps({"tool": tool}), record)
+                for tool in ("click", "perceive")
+            )
+        ),
+        timeout=5,
+    )
+    assert json.loads(click)["rule"] == "policy_deny"
+    assert perceive == "ok"
+    assert ran == ["perceive"]
+
+
 async def test_interrupted_execution_stops_the_run():
     gate, _, state, ctx = setup_gate()
 
