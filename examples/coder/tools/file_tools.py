@@ -401,3 +401,14 @@ def file_edit(
         return str(exc)
     except Exception as exc:
         return f"❌ Edit error: {exc}"
+
+
+# Where these tools act (utils.tool_isolation): in the server, inside the run's workspace
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
+
+TOOL_ISOLATION = {
+    "file_read": _WORKSPACE,
+    "file_write": _WORKSPACE,
+    "file_append": _WORKSPACE,
+    "file_edit": _WORKSPACE,
+}

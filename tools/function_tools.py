@@ -10,10 +10,11 @@ import importlib
 import pkgutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from .file_tools import FILE_TOOLS, get_file_tools
-from .git_tools import GIT_TOOLS, TOOL_REQUIREMENTS as _GIT_REQUIREMENTS, get_git_tools
+from .file_tools import FILE_TOOLS, TOOL_ISOLATION as _FILE_ISOLATION, get_file_tools
+from .git_tools import GIT_TOOLS, TOOL_ISOLATION as _GIT_ISOLATION, TOOL_REQUIREMENTS as _GIT_REQUIREMENTS, get_git_tools
 
 _eager_requirements: Dict[str, Any] = dict(_GIT_REQUIREMENTS)
+_eager_isolation: Dict[str, str] = {**_FILE_ISOLATION, **_GIT_ISOLATION}
 
 # ============================================================================
 # AUTO-DISCOVERY: find all *_tools.py in this package (tools/)
@@ -45,6 +46,7 @@ _MODULE_MAP: Dict[str, str] = _discover_tool_modules()  # {mod_path: dict_attr}
 _loaded_modules: Dict[str, Dict] = {}  # {mod_path: tool_dict}
 _load_errors: Dict[str, str] = {}  # {mod_path: "ErrorType: message"}
 _requirements: Dict[str, Any] = {}  # {tool_name: Requires}
+_isolation: Dict[str, str] = {}  # {tool_name: where it acts (utils.tool_isolation)}
 _all_loaded = False
 
 
@@ -55,6 +57,7 @@ def _load_module(mod_path: str) -> Dict:
             mod = importlib.import_module(mod_path)
             _loaded_modules[mod_path] = getattr(mod, dict_attr, {})
             _requirements.update(getattr(mod, "TOOL_REQUIREMENTS", None) or {})
+            _isolation.update(getattr(mod, "TOOL_ISOLATION", None) or {})
         except Exception as exc:
             _loaded_modules[mod_path] = {}
             _load_errors[mod_path] = f"{type(exc).__name__}: {exc}"
@@ -74,6 +77,19 @@ def tool_requirements(name: str) -> Any:
         return _eager_requirements.get(lookup)
     _load_all_modules()
     return _requirements.get(lookup)
+
+
+def tool_isolation(name: str, project_loader: Optional[Any] = None) -> Optional[str]:
+    """Where tool *name* acts (utils.tool_isolation), as the tool itself
+    resolves: a project tool of *project_loader* first, then a shared tool.
+    None when the tool declares nothing."""
+    if project_loader is not None and project_loader.has_tool(name):
+        return project_loader.isolation.get(name)
+    lookup = TOOL_ALIASES.get(name, name)
+    if lookup in _eager_isolation:
+        return _eager_isolation[lookup]
+    _load_all_modules()
+    return _isolation.get(lookup)
 
 
 def _load_all_modules() -> None:

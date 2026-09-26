@@ -51,3 +51,13 @@ def scratchpad_append(line: str) -> str:
     with _ensure().open("a", encoding="utf-8") as f:
         f.write("\n" + line)
     return "Appended."
+
+
+# Where these tools act (utils.tool_isolation): a file inside the run's workspace
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
+
+TOOL_ISOLATION = {
+    "scratchpad_write": _WORKSPACE,
+    "scratchpad_read": _WORKSPACE,
+    "scratchpad_append": _WORKSPACE,
+}

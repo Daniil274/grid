@@ -386,3 +386,19 @@ FILE_TOOLS = {
 def get_file_tools() -> List[Any]:
     """Returns all file tool functions."""
     return list(FILE_TOOLS.values())
+
+
+# Where these tools act (utils.tool_isolation): in the server, inside the run's workspace (utils.path_utils)
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
+
+TOOL_ISOLATION = {
+    "file_append": _WORKSPACE,
+    "file_content_search": _WORKSPACE,
+    "file_delete": _WORKSPACE,
+    "file_edit_patch": _WORKSPACE,
+    "file_list": _WORKSPACE,
+    "file_read": _WORKSPACE,
+    "file_replace": _WORKSPACE,
+    "file_search": _WORKSPACE,
+    "file_write": _WORKSPACE,
+}

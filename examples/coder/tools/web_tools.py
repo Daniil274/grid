@@ -330,3 +330,12 @@ def web_search(
         return _run_async(_do(), timeout=40)
     except Exception as exc:
         return f"❌ Search error: {exc}"
+
+
+# Where these tools act (utils.tool_isolation): the public internet only (PublicResolver) and the operator's search service
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
+
+TOOL_ISOLATION = {
+    "web_fetch": _WORKSPACE,
+    "web_search": _WORKSPACE,
+}

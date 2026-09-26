@@ -228,6 +228,7 @@ class UserSpace:
             policy_config=self.deployment.policy_config,
             session_db_path=str(self.layout.agent_sessions) if self.layout else None,
             logs_directory=str(self.layout.logs) if self.layout else None,
+            confine_tools=self.require_isolation,
         )
 
     @property

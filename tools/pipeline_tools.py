@@ -339,3 +339,19 @@ PIPELINE_TOOLS = {
     "pipeline_finish": pipeline_finish,
     "pipeline_block": pipeline_block,
 }
+
+
+# Where these tools act (utils.tool_isolation): they start agents, whose own tools are confined in turn
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
+
+TOOL_ISOLATION = {
+    "pipeline_block": _WORKSPACE,
+    "pipeline_finish": _WORKSPACE,
+    "pipeline_inspect": _WORKSPACE,
+    "pipeline_interrupt": _WORKSPACE,
+    "pipeline_retry": _WORKSPACE,
+    "pipeline_review": _WORKSPACE,
+    "pipeline_start": _WORKSPACE,
+    "pipeline_task": _WORKSPACE,
+    "pipeline_wait": _WORKSPACE,
+}

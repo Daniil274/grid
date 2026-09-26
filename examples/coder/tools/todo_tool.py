@@ -291,3 +291,14 @@ def todo_clear(status: Optional[str] = None) -> str:
 
     except Exception as exc:
         return f"❌ Error: {exc}"
+
+
+# Where these tools act (utils.tool_isolation): in the server, inside the run's workspace
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
+
+TOOL_ISOLATION = {
+    "todo_write": _WORKSPACE,
+    "todo_list": _WORKSPACE,
+    "todo_delete": _WORKSPACE,
+    "todo_clear": _WORKSPACE,
+}

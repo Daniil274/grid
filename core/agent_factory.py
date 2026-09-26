@@ -52,7 +52,8 @@ from core.action_policy import (
 from .context import ContextManager
 from schemas import AgentConfig, AgentExecution, CompactConfig
 from schemas.schemas import ImageContent, ImageUrl, TextContent
-from tools import resolve_tool
+from tools import resolve_tool, tool_isolation
+from utils.tool_isolation import is_confined
 from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
 from utils.path_utils import set_current_factory, reset_current_factory
@@ -282,6 +283,7 @@ class AgentFactory:
         policy_config: Optional[Config] = None,
         session_db_path: Optional[str] = None,
         logs_directory: Optional[str] = None,
+        confine_tools: bool = False,
     ):
         """
         Initialize Agent Factory.
@@ -304,6 +306,10 @@ class AgentFactory:
             logs_directory: Where the factory's runs write their session logs;
                 the config's logs directory by default. The web chat gives each
                 user's space its own.
+            confine_tools: Give agents only the function tools that keep to the
+                user's side - their container or their workspace
+                (utils.tool_isolation). A space that must isolate its agents
+                sets it; an undeclared tool is withheld.
         """
         if tracing_level is not None:
             self._configure_tracing_once(tracing_level)
@@ -315,6 +321,7 @@ class AgentFactory:
         self.config = config or Config()
         self.container_id = container_id
         self._logs_directory = Path(logs_directory) if logs_directory else None
+        self.confine_tools = confine_tools
         if working_directory:
             self.config.set_working_directory(working_directory)
 
@@ -2851,6 +2858,13 @@ class AgentFactory:
         loader = self.config.project_tools_loader
         tools: List[Any] = []
         for tool_key in tool_keys:
+            if self.confine_tools and not is_confined(tool_isolation(tool_key, loader)):
+                logger.warning(
+                    "Tool '%s' acts on the host, not in the user's container or workspace; "
+                    "withheld from agents of an isolated space",
+                    tool_key,
+                )
+                continue
             tool = resolve_tool(tool_key, loader)
             if tool is None:
                 logger.warning("Tool '%s' not found in project or system tools; skipped", tool_key)

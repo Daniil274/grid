@@ -860,3 +860,21 @@ BEADS_TOOLS = {
     "beads_log_append": beads_log_append,
     "beads_log_read": beads_log_read,
 }
+
+
+# Where these tools act (utils.tool_isolation): bd runs in the run's container when there is one
+from utils.tool_isolation import CONTAINER as _CONTAINER  # noqa: E402
+
+TOOL_ISOLATION = {
+    "beads_close": _CONTAINER,
+    "beads_create": _CONTAINER,
+    "beads_dep": _CONTAINER,
+    "beads_init": _CONTAINER,
+    "beads_list": _CONTAINER,
+    "beads_log_append": _CONTAINER,
+    "beads_log_read": _CONTAINER,
+    "beads_ready": _CONTAINER,
+    "beads_show": _CONTAINER,
+    "beads_sync": _CONTAINER,
+    "beads_update": _CONTAINER,
+}

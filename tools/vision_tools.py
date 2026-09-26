@@ -120,3 +120,11 @@ TOOL_REQUIREMENTS = {
 VISION_TOOLS = {
     "crop_image": crop_image,
 }
+
+
+# Where these tools act (utils.tool_isolation): reads an image inside the run's workspace
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
+
+TOOL_ISOLATION = {
+    "crop_image": _WORKSPACE,
+}

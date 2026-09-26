@@ -231,7 +231,8 @@ def _grep_with_ripgrep(
     max_results: int,
 ) -> str:
     """Use ripgrep with --json output (handles Windows paths correctly)."""
-    cmd = ["rg", "--json", "--line-number"]
+    # --no-config: no ripgrep config file of this machine applies.
+    cmd = ["rg", "--no-config", "--json", "--line-number"]
 
     if not case_sensitive:
         cmd.append("--ignore-case")
@@ -246,7 +247,9 @@ def _grep_with_ripgrep(
                 glob_pat = f"*{ext}" if ext.startswith(".") else f"*.{ext}"
                 cmd.extend(["--glob", glob_pat])
 
-    cmd.extend([pattern, str(base_path)])
+    # The pattern and the path are never options: a pattern such as
+    # "--pre=sh" would make ripgrep run a program on every file it searches.
+    cmd.extend(["--regexp", pattern, "--", str(base_path)])
 
     result = subprocess.run(
         cmd,
@@ -404,3 +407,12 @@ def grep_tool(
     return _grep_with_python(
         pattern, base_path, file_extensions, case_sensitive, use_regex, max_results
     )
+
+
+# Where these tools act (utils.tool_isolation): in the server, inside the run's workspace
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
+
+TOOL_ISOLATION = {
+    "glob_tool": _WORKSPACE,
+    "grep_tool": _WORKSPACE,
+}

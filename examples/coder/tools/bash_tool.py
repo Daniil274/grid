@@ -11,7 +11,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents import function_tool
-from utils.path_utils import resolve_agent_path_auto, display_agent_path_auto
+from utils.path_utils import display_agent_path_auto, get_current_factory, resolve_agent_path_auto
 
 
 # ---------------------------------------------------------------------------
@@ -96,12 +96,43 @@ def _detect_encoding() -> str:
     return "utf-8"
 
 
+#: Where the host workspace is mounted in a run's container.
+CONTAINER_ROOT = "/workspace"
+
+
+def _container_command(command: str, container_id: str, relative_dir: str, timeout: int) -> list:
+    """``docker exec`` of *command* in the container, in the workspace
+    directory *relative_dir*; ``timeout`` ends it inside the container too."""
+    workdir = CONTAINER_ROOT if relative_dir in ("", ".") else f"{CONTAINER_ROOT}/{relative_dir}"
+    return [
+        "docker", "exec", "-i", "-w", workdir, container_id,
+        "timeout", "-k", "5", str(timeout), "sh", "-c", command,
+    ]
+
+
+def _run_in_container(command: str, container_id: str, relative_dir: str, timeout: int) -> tuple:
+    """Run *command* in the run's container; (returncode, stdout, stderr)."""
+    try:
+        result = subprocess.run(
+            _container_command(command, container_id, relative_dir, timeout),
+            capture_output=True,
+            timeout=timeout + 15,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(f"Command exceeded timeout of {timeout} seconds")
+    if result.returncode == 124:
+        raise TimeoutError(f"Command exceeded timeout of {timeout} seconds")
+    return result.returncode, result.stdout, result.stderr
+
+
 def _run_command(
     command: str, work_path: Path, timeout: int
 ) -> tuple:
     """
-    Run *command* inside *work_path* and return (returncode, stdout, stderr).
-    Uses subprocess.run so the approach is simple and encoding-correct.
+    Run *command* inside *work_path* on this machine and return (returncode, stdout, stderr).
+    Only for runs without a container (see bash_tool).
     """
     encoding = _detect_encoding()
 
@@ -171,9 +202,14 @@ def bash_tool(
     if not work_path.is_dir():
         return f"❌ Path is not a directory: {visible_dir}"
 
-    # --- Execute -----------------------------------------------------------
+    # --- Execute: in the run's container when it has one, else here -------
+    container_id = getattr(get_current_factory(), "container_id", None)
     try:
-        returncode, stdout, stderr = _run_command(command, work_path, timeout)
+        if container_id:
+            relative_dir = display_agent_path_auto(working_dir)
+            returncode, stdout, stderr = _run_in_container(command, container_id, relative_dir, timeout)
+        else:
+            returncode, stdout, stderr = _run_command(command, work_path, timeout)
     except TimeoutError as exc:
         return f"⏱️ {exc}"
     except Exception as exc:
@@ -192,3 +228,11 @@ def bash_tool(
         parts.append(f"⚠️ Exit code: {returncode}")
 
     return caution_prefix + "\n\n".join(parts)
+
+
+# Where these tools act (utils.tool_isolation): commands run in the run's container when there is one
+from utils.tool_isolation import CONTAINER as _CONTAINER  # noqa: E402
+
+TOOL_ISOLATION = {
+    "bash_tool": _CONTAINER,
+}

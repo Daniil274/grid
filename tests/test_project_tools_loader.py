@@ -70,6 +70,7 @@ def test_each_factory_resolves_the_project_tools_of_its_own_config(tmp_path):
     factory = object.__new__(AgentFactory)
     factory.config = SimpleNamespace(project_tools_loader=first)
     factory._wrap_tool_with_output_limit = lambda tool, key: tool
+    factory.confine_tools = False
     previous = get_project_loader()
     set_project_loader(second)
     try:

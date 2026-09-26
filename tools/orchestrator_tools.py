@@ -458,5 +458,9 @@ ORCHESTRATOR_TOOLS = {
 }
 
 
+# Where these tools act (utils.tool_isolation): it starts agents, whose own tools are confined in turn
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
 
-
+TOOL_ISOLATION = {
+    "orchestrate": _WORKSPACE,
+}

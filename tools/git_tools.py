@@ -253,4 +253,12 @@ def get_git_tools_by_names(tool_names: List[str]) -> List[Any]:
         else:
             from utils.logger import Logger
             Logger(__name__).warning(f"Git инструмент '{name}' не найден")
-    return tools 
+    return tools
+
+
+# Where these tools act (utils.tool_isolation): git runs in the run's container when there is one
+from utils.tool_isolation import CONTAINER as _CONTAINER  # noqa: E402
+
+TOOL_ISOLATION = {
+    "git_log": _CONTAINER,
+}

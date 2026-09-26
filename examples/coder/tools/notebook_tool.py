@@ -321,3 +321,13 @@ def notebook_create(
 
     except Exception as exc:
         return f"❌ Creation error: {exc}"
+
+
+# Where these tools act (utils.tool_isolation): in the server, inside the run's workspace
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
+
+TOOL_ISOLATION = {
+    "notebook_read": _WORKSPACE,
+    "notebook_edit": _WORKSPACE,
+    "notebook_create": _WORKSPACE,
+}
