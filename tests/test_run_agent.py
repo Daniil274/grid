@@ -57,8 +57,10 @@ class ScriptedRunner:
         self.replies = list(replies)
         self.calls = []
 
-    async def run(self, agent, run_input, *, context, max_turns, session):
-        self.calls.append(SimpleNamespace(agent=agent, input=run_input, session=session))
+    async def run(self, agent, run_input, *, context, max_turns, session, run_config=None):
+        self.calls.append(
+            SimpleNamespace(agent=agent, input=run_input, session=session, run_config=run_config)
+        )
         reply = self.replies.pop(0)
         if isinstance(reply, BaseException):
             raise reply
@@ -156,7 +158,8 @@ async def test_text_tool_calls_are_retried_with_a_correction(factory):
     assert runner.calls[1].session is runner.calls[0].session
 
 
-async def test_images_switch_the_turn_to_explicit_history(factory):
+async def test_images_reach_the_model_through_the_agents_session(factory):
+    """The session keeps tool calls between turns; images no longer bypass it."""
     with use(ScriptedRunner("First.")):
         await factory.run_agent("worker", "Hello")
     context_id = factory.context_manager.get_current_context_id()
@@ -165,15 +168,33 @@ async def test_images_switch_the_turn_to_explicit_history(factory):
         ' {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]}'
     )
 
-    runner = ScriptedRunner("A cat.")
+    runner = ScriptedRunner("A cat.", "Still a cat.")
     with use(runner):
         await factory.run_agent("worker", image_message, context_id=context_id)
+        await factory.run_agent("worker", "And now?", context_id=context_id)
 
-    call = runner.calls[0]
-    assert call.session is None
-    assert [m["role"] for m in call.input] == ["user", "assistant", "user"]
-    assert call.input[-1]["content"][1]["type"] == "input_image"
-    assert factory.context_manager.history_has_images()
+    first, second = runner.calls
+    assert first.session is factory.sessions[("worker", context_id)]
+    # Only the new message: the session supplies the history.
+    assert [m["role"] for m in first.input] == ["user"]
+    assert first.input[0]["content"][1]["type"] == "input_image"
+    assert second.session is first.session
+    assert second.input == "And now?"
+
+
+async def test_reasoning_replay_models_keep_their_session(factory):
+    """preserve_reasoning_content no longer drops the tool history between turns."""
+    factory.config.get_model("m").preserve_reasoning_content = True
+    with use(ScriptedRunner("First.")):
+        await factory.run_agent("worker", "Start")
+    context_id = factory.context_manager.get_current_context_id()
+
+    runner = ScriptedRunner("Second.")
+    with use(runner):
+        await factory.run_agent("worker", "Go on", context_id=context_id)
+
+    assert runner.calls[0].session is factory.sessions[("worker", context_id)]
+    assert runner.calls[0].input == "Go on"
 
 
 async def test_plain_json_text_is_a_message_not_sdk_input(factory):
@@ -183,56 +204,116 @@ async def test_plain_json_text_is_a_message_not_sdk_input(factory):
     assert runner.calls[0].input == '{"a": 1}'
 
 
-async def test_compaction_replaces_history_and_the_agents_session(factory):
+def summarized(text="Summary: the user started a task."):
+    """What compact_conversation returns when the summary succeeds."""
     from core.compact import CompactMessage
 
+    return SimpleNamespace(
+        success=lambda: True,
+        summary_messages=[CompactMessage(role="user", content=text)],
+        user_display_message=None, error_message=None, status=SimpleNamespace(value="success"),
+    )
+
+
+async def test_a_session_past_the_threshold_is_summarized_and_the_chat_is_kept(factory):
     with use(ScriptedRunner("First.")):
         await factory.run_agent("worker", "Start")
     context_id = factory.context_manager.get_current_context_id()
-    summary = CompactMessage(role="user", content="Summary: the user started a task.")
-    outcome = {
-        "was_compacted": True,
-        "consecutive_failures": 0,
-        "compaction_result": SimpleNamespace(
-            compacted_messages=[summary], tokens_before=90000, tokens_after=100
-        ),
-    }
-    over_threshold = SimpleNamespace(is_above_auto_compact_threshold=True)
+    session = factory.sessions[("worker", context_id)]
+    # A long tool result makes the session large.
+    await session.add_items([
+        {"type": "function_call", "call_id": "c1", "name": "file_read", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": "x" * 400_000},
+    ])
+    chat_before = [m.content for m in factory.context_manager.conversation_snapshot()]
+
+    compact = AsyncMock(return_value=summarized())
     runner = ScriptedRunner("Continued.")
-    with use(runner), patch(
-        "core.agent_factory.calculate_token_warning_state", return_value=over_threshold
-    ), patch("core.agent_factory.auto_compact_if_needed", new=AsyncMock(return_value=outcome)), patch.object(
+    with use(runner), patch("core.agent_factory.compact_conversation", new=compact), patch.object(
         factory, "_get_compact_client_and_model", return_value=(object(), "m")
     ):
         await factory.run_agent("worker", "Go on", context_id=context_id)
 
+    transcript = compact.await_args.kwargs["messages"]
+    assert any("[Result of file_read:" in m.get_text() for m in transcript)
     session_items = await runner.calls[0].session.get_items()
     assert session_items[0]["content"] == "Summary: the user started a task."
-    history = factory.context_manager.conversation_snapshot()
-    assert history[0].content == "Summary: the user started a task."
+    # The visible chat is not compacted: it only grows.
+    chat_after = [m.content for m in factory.context_manager.conversation_snapshot()]
+    assert chat_after[: len(chat_before)] == chat_before
 
 
-async def test_a_context_overflow_trims_history_and_retries_once(factory):
-    from core.compact.reactive_compact import ReactiveCompactResult, ReactiveCompactStatus
-
+async def test_a_session_within_the_threshold_is_left_alone(factory):
     with use(ScriptedRunner("First.")):
         await factory.run_agent("worker", "Start")
     context_id = factory.context_manager.get_current_context_id()
-    trimmed = ReactiveCompactResult(status=ReactiveCompactStatus.TRIMMED, messages=[])
+    compact = AsyncMock(return_value=summarized())
+    with use(ScriptedRunner("Second.")), patch("core.agent_factory.compact_conversation", new=compact):
+        await factory.run_agent("worker", "Go on", context_id=context_id)
+    compact.assert_not_awaited()
+
+
+async def test_compaction_stops_after_repeated_failures(factory):
+    context_id = factory.context_manager.start_new_context()
+    session = factory._get_agent_session("worker", context_id)
+    await session.add_items([{"role": "user", "content": "x" * 400_000}])
+    compact = AsyncMock(side_effect=RuntimeError("summary model down"))
+    limit = factory.compact_config.auto.max_consecutive_failures
+    with patch("core.agent_factory.compact_conversation", new=compact), patch.object(
+        factory, "_get_compact_client_and_model", return_value=(object(), "m")
+    ):
+        for _ in range(limit + 2):
+            assert await factory.compact_session("worker", context_id) is None
+    assert compact.await_count == limit
+    # An explicit /compact still tries.
+    with patch("core.agent_factory.compact_conversation", new=AsyncMock(return_value=summarized())), patch.object(
+        factory, "_get_compact_client_and_model", return_value=(object(), "m")
+    ):
+        assert await factory.compact_session("worker", context_id, force=True)
+
+
+async def test_a_context_overflow_summarizes_the_session_and_retries_once(factory):
+    with use(ScriptedRunner("First.")):
+        await factory.run_agent("worker", "Start")
+    context_id = factory.context_manager.get_current_context_id()
     runner = ScriptedRunner(
         RuntimeError("context_length_exceeded"),
         RuntimeError("context_length_exceeded"),
         "unused",
     )
-    with use(runner), patch(
-        "core.agent_factory.reactive_compact_on_prompt_too_long",
-        new=AsyncMock(return_value=trimmed),
-    ) as trim:
+    compact = AsyncMock(return_value=summarized())
+    with use(runner), patch("core.agent_factory.compact_conversation", new=compact), patch.object(
+        factory, "_get_compact_client_and_model", return_value=(object(), "m")
+    ):
         with pytest.raises(Exception, match="context_length_exceeded"):
             await factory.run_agent("worker", "Go on", context_id=context_id)
 
-    trim.assert_awaited_once()
+    compact.assert_awaited_once()
     assert len(runner.calls) == 2
+    # Nothing of the failed attempt was stored, so the request is sent again.
+    assert runner.calls[1].input == "Go on"
+
+
+async def test_every_model_call_clears_old_tool_outputs_past_the_budget(factory):
+    factory.compact_config.micro.compactable_tools = ["file_read"]
+    factory.compact_config.micro.preserve_last_n = 1
+    runner = ScriptedRunner("Done.")
+    with use(runner):
+        await factory.run_agent("worker", "Go")
+    from agents.run import CallModelData, ModelInputData
+
+    items = []
+    for n in range(4):
+        items += [
+            {"type": "function_call", "call_id": f"c{n}", "name": "file_read", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": f"c{n}", "output": "y" * 200_000},
+        ]
+    apply = runner.calls[0].run_config.call_model_input_filter
+    sent = apply(CallModelData(model_data=ModelInputData(input=items, instructions="Be brief."), agent=None, context=None)).input
+    outputs = [item["output"] for item in sent if item["type"] == "function_call_output"]
+    assert outputs[-1] == "y" * 200_000  # the newest is kept
+    assert all(output.startswith("[Output of file_read cleared") for output in outputs[:-1])
+    assert items[1]["output"] == "y" * 200_000  # the session's items are untouched
 
 
 def test_the_model_whitelist_allows_only_listed_models(factory):

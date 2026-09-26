@@ -9,6 +9,8 @@ This subclass:
 2. Post-processes messages: extracts image_url parts from tool messages
    and re-inserts them as separate user messages that vision models
    understand universally.
+3. Reports the images an image-generation model returns in the
+   non-standard ``images`` field (core.generated_images).
 
 NOTE: _fetch_response body is a copy of openai_chatcompletions.py:246-376
 (SDK 0.7.0). If the SDK is upgraded, compare and update accordingly.
@@ -40,6 +42,8 @@ from agents.tool import Tool
 from agents.tracing.span_data import GenerationSpanData
 from agents.tracing.spans import Span
 from agents.util._json import _to_dump_compatible
+
+from core.generated_images import ReportingStream, report
 
 
 class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
@@ -376,6 +380,9 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
         )
 
         if isinstance(ret, ChatCompletion):
+            # Images an image model generated; the SDK drops this field.
+            for choice in ret.choices:
+                report(choice.message)
             return ret
 
         responses_tool_choice = OpenAIResponsesConverter.convert_tool_choice(
@@ -397,4 +404,4 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
             parallel_tool_calls=parallel_tool_calls or False,
             reasoning=model_settings.reasoning,
         )
-        return response, ret
+        return response, ReportingStream(ret)

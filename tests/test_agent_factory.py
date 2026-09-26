@@ -20,7 +20,7 @@ class TestAgentFactory:
     def test_parallel_tool_calls_follow_the_agent_setting(self, reasoning):
         """Off unless the agent opts in, with or without reasoning overrides."""
         factory = object.__new__(AgentFactory)
-        model_config = Mock(max_tokens=100, reasoning=reasoning)
+        model_config = Mock(max_tokens=100, reasoning=reasoning, modalities=None)
 
         assert factory._build_model_settings(model_config).parallel_tool_calls is False
         assert (
@@ -224,18 +224,7 @@ class TestAgentFactory:
         assert not factory._is_reasoning_model_name("")
         assert not factory._is_reasoning_model_name(None)
 
-    def test_model_requires_manual_history(self, config_file):
-        """Thinking models that preserve reasoning should bypass SDK session history."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-
-        base_model = config.get_model("gpt-4")
-        assert factory._model_requires_manual_history(base_model) is False
-
-        base_model.preserve_reasoning_content = True
-        assert factory._model_requires_manual_history(base_model) is True
-    
-    @pytest.mark.asyncio 
+    @pytest.mark.asyncio
     async def test_create_agent_success(self, config_file):
         """Test successful agent creation."""
         config = Config(str(config_file))

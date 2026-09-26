@@ -48,10 +48,21 @@ def packet():
 def root(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-primary")
     monkeypatch.setenv("OPENCODE_API_KEY", "test-reserve")
-    config = Config("routing.yaml")  # Decisions primary with a chat reserve
-    config.config.models["policy_chat"] = config.get_model("policy_chat").model_copy(
-        update={"name": "chat-test-model"}
+    config = Config("routing.yaml")
+    config.config.providers["opencode-go"] = config.get_provider("openrouter").model_copy(
+        update={"name": "opencode-go", "base_url": "https://opencode.ai/zen/go/v1",
+                "api_key_env": "OPENCODE_API_KEY",
+                "default_headers": {"x-opencode-session": "grid-policy"}}
     )
+    config.config.models["policy_chat"] = config.get_model("policy").model_copy(
+        update={"name": "chat-test-model", "provider": "opencode-go",
+                "policy_api": "chat", "request_timeout": 9, "max_tokens": 512,
+                "reasoning": {"enabled": False}}
+    )
+    policy = config.config.settings.action_policy
+    config.config.settings.action_policy = policy.model_copy(update={
+        "validator": policy.validator.model_copy(update={"fallback_models": ["policy_chat"]})
+    })
     return config
 
 
@@ -248,26 +259,16 @@ async def test_chat_reserve_cannot_override_valid_jev_decision(root, verdict):
     assert hosts == ["openrouter.ai"]
 
 
-def test_openrouter_profile_uses_decisions_with_a_chat_reserve():
+def test_default_profile_uses_jev_for_routing_and_policy():
     root = Config("routing.yaml")
     primary = ActionValidator.from_config(root)
     assert primary.model.model_name == "typesafe/jev-1.13"
     assert primary.model.url == "https://openrouter.ai/api/alpha/decisions"
-    assert (
-        primary.fallbacks[0].model.url
-        == "https://opencode.ai/zen/go/v1/chat/completions"
-    )
-    assert isinstance(primary.fallbacks[0], ChatActionValidator)
-    assert "opencode-zen" not in root.config.providers
-
-
-def test_opencode_profile_judges_and_routes_over_chat():
-    # opencode serves no Decisions API: a decisions model there fails every call.
-    root = Config("routing.opencode.yaml")
-    primary = ActionValidator.from_config(root)
-    assert isinstance(primary, ChatActionValidator)
-    assert primary.model.url == "https://opencode.ai/zen/go/v1/chat/completions"
-    assert root.config.routing.api == "chat"
+    assert not primary.fallbacks
+    assert root.config.routing.api == "decisions"
+    router = root.config.models[root.config.routing.model]
+    assert router.name == "typesafe/jev-1.13"
+    assert router.provider == "openrouter"
 
 
 def test_chat_can_be_selected_as_primary(root):

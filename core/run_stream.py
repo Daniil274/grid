@@ -108,18 +108,32 @@ def run_output_text(result: Any, agent_label: str = "The agent") -> Any:
     )
 
 
+def last_message_text(items: Any) -> str:
+    """The newest non-empty assistant message among SDK run items, or ""."""
+    for item in reversed(list(items or [])):
+        if isinstance(item, MessageOutputItem):
+            text = ItemHelpers.text_message_output(item)
+            if text.strip():
+                return text.strip()
+    return ""
+
+
 def interrupted_run_report(result: Any, agent_label: str, exc: BaseException) -> str:
     """What a run that stopped on an SDK error still hands back to its caller.
 
     The reason, the tools it called and its last text, so the caller can go on
     or retry without repeating work that was already done.
     """
+    from core.interruption import StopRequested
+
     items = list(getattr(result, "new_items", None) or [])
     if not items:
         run_data = getattr(exc, "run_data", None)
         items = list(getattr(run_data, "new_items", None) or [])
     if isinstance(exc, MaxTurnsExceeded):
         reason = "reached its turn limit"
+    elif isinstance(exc, StopRequested):
+        reason = "was stopped by the user before it finished"
     else:
         reason = f"stopped on an error: {exc}"
     lines = [f"[{agent_label} {reason}]"]
@@ -134,12 +148,9 @@ def interrupted_run_report(result: Any, agent_label: str, exc: BaseException) ->
             f"It made {len(tools)} tool call(s) before stopping: {called}. "
             "Their effects may already be in place - check before retrying."
         )
-    for item in reversed(items):
-        if isinstance(item, MessageOutputItem):
-            text = ItemHelpers.text_message_output(item)
-            if text.strip():
-                lines.append(f"Its last message:\n{text.strip()}")
-                break
+    text = last_message_text(items)
+    if text:
+        lines.append(f"Its last message:\n{text}")
     return "\n".join(lines)
 
 

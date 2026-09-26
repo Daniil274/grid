@@ -3,7 +3,7 @@ Advanced context management for Grid agents with memory and persistence.
 """
 
 import os
-from typing import Callable, List, Dict, Optional, Any, Union
+from typing import Callable, List, Dict, Optional, Any, Tuple, Union
 from datetime import datetime
 from threading import Lock
 from contextlib import contextmanager
@@ -13,12 +13,58 @@ from pathlib import Path
 import uuid
 from utils.logger import Logger
 
+from core.interruption import (
+    CallLedger,
+    Interruption,
+    StopReason,
+    interruption_of,
+    is_resumable,
+)
 from schemas import ContextMessage, AgentExecution
 from utils.exceptions import ContextError
 from utils.image_utils import ImageUtils
 # Tracing is handled automatically by Agents SDK
 
 logger = Logger.get_logger("context")
+
+#: Statuses of ``pending_agent_run`` while its turn has not ended.
+ACTIVE_RUN_STATUSES = ("running", "retrying")
+#: A turn that failed; before interruption records existed, nothing else was kept.
+FAILED_RUN_STATUS = "failed"
+
+
+def is_tool_result(message: Any) -> bool:
+    """A sub-agent report kept for the model's context, not a chat answer."""
+    metadata = getattr(message, "metadata", None) or {}
+    if metadata.get("kind") == "tool_result":
+        return True
+    # Stored before results were tagged.
+    content = getattr(message, "content", None)
+    return (
+        getattr(message, "role", None) == "assistant"
+        and isinstance(content, str)
+        and content.startswith("Tool result of ")
+    )
+
+
+def with_message_id(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """*metadata* with a ``message_id``: a message keeps it for life, copies included.
+
+    Branches (fork_context) copy messages with their ids, so one id names the
+    same message in every branch that shares it.
+    """
+    metadata = dict(metadata or {})
+    if not metadata.get("message_id"):
+        metadata["message_id"] = uuid.uuid4().hex
+    return metadata
+
+
+def _last_turn_message(conversation: List[ContextMessage]) -> Optional[ContextMessage]:
+    """The newest message that is part of the dialogue, not a sub-agent report."""
+    for message in reversed(conversation):
+        if not is_tool_result(message):
+            return message
+    return None
 
 
 @contextmanager
@@ -329,7 +375,7 @@ class ContextManager:
                         role=role,
                         content=normalized_content,
                         timestamp=datetime.now().isoformat(),
-                        metadata=metadata
+                        metadata=with_message_id(metadata)
                     )
 
                     self._conversation_history.append(message)
@@ -356,11 +402,6 @@ class ContextManager:
         """A copy of the active conversation, safe to read without the lock."""
         with safe_lock(self._lock, timeout=5.0):
             return list(self._conversation_history)
-
-    def history_has_images(self) -> bool:
-        """Whether any message of the active conversation carries an image."""
-        with safe_lock(self._lock, timeout=5.0):
-            return any(message.has_images() for message in self._conversation_history)
 
     def replace_conversation_history(self, messages: List[ContextMessage]) -> None:
         """Replace the active conversation history with a new message list."""
@@ -537,6 +578,11 @@ class ContextManager:
                 sdk_messages = []
                 
                 for msg in messages:
+                    if msg.role == "assistant" and not isinstance(msg.content, str):
+                        # An answer reaches the model as text; the images an
+                        # image model generated with it stay in the chat.
+                        sdk_messages.append({"role": "assistant", "content": msg.get_text_content()})
+                        continue
                     # Convert to SDK format
                     if isinstance(msg.content, str):
                         # Simple text message
@@ -704,6 +750,272 @@ class ContextManager:
             self._save_to_file()
             return True
 
+    def append_message_to(
+        self,
+        context_id: str,
+        role: str,
+        content: Union[str, List[Any]],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Add a message to *context_id*, active or not. False if it is unknown."""
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return False
+            conversation = bucket["conversation"]
+            conversation.append(
+                ContextMessage(
+                    role=role,
+                    content=self._normalize_message_content(content),
+                    timestamp=datetime.now().isoformat(),
+                    metadata=with_message_id(metadata),
+                )
+            )
+            if len(conversation) > self.max_history:
+                del conversation[: len(conversation) - self.max_history]
+            bucket["updated_at"] = datetime.now().isoformat()
+            self._mark_changed(context_id)
+            self._save_to_file()
+            return True
+
+    # -- branches --------------------------------------------------------------
+    # Editing a user message never rewrites history: it forks the conversation.
+    # A branch is a context of its own - its own messages, agent sessions and
+    # interruptions - holding a copy of every message before the edited one,
+    # ids included. Its metadata names its family and place:
+    #   branch_root    the conversation the family grew from (the rail's row)
+    #   branch_parent  the context it was forked from
+    #   branch_slot    the edited message's slot: the id every version of that
+    #                  message shares (the original's id; see message_versions)
+    # The root's metadata keeps ``active_branch``, the context the rail opens.
+
+    #: Conversation settings a branch keeps from the context it is forked from.
+    BRANCH_INHERITED = (
+        "title", "title_locked", "created_by_web", "system_key", "agent_key",
+        "routed_system", "routed_agent", "session_epochs",
+    )
+
+    def branch_root(self, context_id: str) -> str:
+        """The conversation *context_id* belongs to: itself unless it is a branch."""
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            root = (bucket or {}).get("metadata", {}).get("branch_root")
+            return root if root in self._contexts else context_id
+
+    def family(self, context_id: str) -> List[str]:
+        """Every context of *context_id*'s conversation: the root, then its branches."""
+        root = self.branch_root(context_id)
+        with safe_lock(self._lock, timeout=5.0):
+            branches = [
+                key for key, bucket in self._contexts.items()
+                if bucket["metadata"].get("branch_root") == root and key != root
+            ]
+        return [root, *branches]
+
+    def fork_context(self, context_id: str, message_id: str) -> Tuple[str, str]:
+        """A new branch of *context_id* with every message before *message_id*.
+
+        *message_id* is the user message being edited; the branch ends just
+        before it, so the edited text becomes the branch's next message.
+        Returns (branch id, slot). Raises KeyError for an unknown context or
+        message, ValueError for a message that is not the user's.
+        """
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                raise KeyError(f"Unknown conversation {context_id}")
+            conversation = bucket["conversation"]
+            index = next(
+                (i for i, message in enumerate(conversation)
+                 if (message.metadata or {}).get("message_id") == message_id),
+                None,
+            )
+            if index is None:
+                raise KeyError(f"No message {message_id} in {context_id}")
+            target = conversation[index]
+            # A message the user typed as a turn; not a Continue, not one added
+            # mid-turn - those have no turn start to cut the agent's session at.
+            if target.role != "user" or (target.metadata or {}).get("type", "user_input") != "user_input":
+                raise ValueError("Only a message the user sent as a turn can be edited")
+            slot = (target.metadata or {}).get("edit_of") or message_id
+            root = bucket["metadata"].get("branch_root") or context_id
+
+            branch_id = self._create_context()
+            branch = self._contexts[branch_id]
+            branch["conversation"] = [message.model_copy(deep=True) for message in conversation[:index]]
+            branch["metadata"] = {
+                **{
+                    key: copy.deepcopy(bucket["metadata"][key])
+                    for key in self.BRANCH_INHERITED
+                    if key in bucket["metadata"]
+                },
+                "branch_root": root,
+                "branch_parent": context_id,
+                "branch_slot": slot,
+            }
+            if root in self._contexts:
+                self._contexts[root]["metadata"]["active_branch"] = branch_id
+                self._mark_changed(root)
+            self._mark_changed(branch_id)
+            self._save_to_file()
+            return branch_id, slot
+
+    def set_active_branch(self, context_id: str) -> None:
+        """Make *context_id* the branch its conversation opens with."""
+        root = self.branch_root(context_id)
+        self.update_context_metadata(root, {"active_branch": context_id}, create=False)
+
+    def open_branch(self, context_id: str) -> str:
+        """The context to show for conversation *context_id*: its active branch."""
+        root = self.branch_root(context_id)
+        with safe_lock(self._lock, timeout=5.0):
+            active = self._contexts.get(root, {}).get("metadata", {}).get("active_branch")
+            return active if active in self._contexts else root
+
+    def message_versions(self, context_id: str) -> Dict[str, Dict[str, Any]]:
+        """For each user message of *context_id* that was edited: its versions.
+
+        Every version of a message shares its slot (``edit_of``, or the id of the
+        original). A version lives in the branches that contain it, and every
+        branch that contains a message shares all messages before it, so the
+        versions of one slot are real alternatives at the same point. Returns
+        {message_id: {"index", "total", "targets"}}, ``targets`` naming for each
+        version the most recently updated branch that shows it; messages with a
+        single version are left out.
+        """
+        family = self.family(context_id)
+        with safe_lock(self._lock, timeout=5.0):
+            buckets = {key: self._contexts[key] for key in family if key in self._contexts}
+            # slot -> version id -> (first seen, latest (updated_at, context))
+            slots: Dict[str, Dict[str, Tuple[str, Tuple[str, str]]]] = {}
+            for key, bucket in buckets.items():
+                updated = bucket.get("updated_at") or ""
+                for message in bucket["conversation"]:
+                    metadata = message.metadata or {}
+                    if message.role != "user" or metadata.get("type") != "user_input":
+                        continue
+                    version = metadata.get("message_id")
+                    if not version:
+                        continue
+                    slot = metadata.get("edit_of") or version
+                    seen = slots.setdefault(slot, {}).get(version)
+                    best = max(seen[1], (updated, key)) if seen else (updated, key)
+                    first = min(seen[0], message.timestamp) if seen else message.timestamp
+                    slots[slot][version] = (first, best)
+            result: Dict[str, Dict[str, Any]] = {}
+            for message in buckets.get(context_id, {}).get("conversation", []):
+                metadata = message.metadata or {}
+                version = metadata.get("message_id")
+                if message.role != "user" or not version or metadata.get("type") != "user_input":
+                    continue
+                versions = slots.get(metadata.get("edit_of") or version, {})
+                if len(versions) < 2:
+                    continue
+                ordered = sorted(versions.items(), key=lambda item: item[1][0])
+                result[version] = {
+                    "index": [v for v, _ in ordered].index(version),
+                    "total": len(ordered),
+                    "targets": [info[1][1] for _, info in ordered],
+                }
+            return result
+
+    def delete_family(self, context_id: str) -> List[str]:
+        """Delete *context_id*'s conversation with all its branches; their ids."""
+        removed = []
+        for key in self.family(context_id):
+            if self.delete_context(key):
+                removed.append(key)
+        return removed
+
+    def pending_interruption(self, context_id: str) -> Optional[Interruption]:
+        """The unresumed interruption *context_id* ends with, or None."""
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            last = _last_turn_message(bucket["conversation"]) if bucket else None
+            return interruption_of(last) if last is not None and is_resumable(last) else None
+
+    def take_interruption(self, context_id: str) -> Optional[Interruption]:
+        """Claim the interruption *context_id* ends with, for the turn that resumes it.
+
+        Returns it and marks it resumed in one step under the lock, so two turns
+        can never both continue the same interruption. None when there is none.
+        """
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            last = _last_turn_message(bucket["conversation"]) if bucket else None
+            if last is None or not is_resumable(last):
+                return None
+            last.metadata = {
+                **(last.metadata or {}),
+                "resumed": True,
+                "resumed_at": datetime.now().isoformat(),
+            }
+            self._mark_changed(context_id)
+            self._save_to_file()
+            return interruption_of(last)
+
+    def recover_abandoned_turn(self, context_id: str) -> Optional[Interruption]:
+        """Record the interruption of a turn that ended without leaving one.
+
+        Call it only where no turn of *context_id* can be running in this
+        process - before starting one, or for a conversation with no live turn.
+        A turn counts as abandoned when the conversation ends with its request
+        and its run record says either "running" - its process ended mid-run -
+        or "failed" - it failed before failures were recorded as interruptions.
+        A turn that stored an answer or an interruption is over, whatever the
+        record says. Returns the recorded interruption, or None when there was
+        nothing to recover.
+        """
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return None
+            pending = bucket["metadata"].get("pending_agent_run")
+            status = pending.get("status") if isinstance(pending, dict) else None
+            if status not in (*ACTIVE_RUN_STATUSES, FAILED_RUN_STATUS):
+                return None
+            conversation = bucket["conversation"]
+            last = _last_turn_message(conversation)
+            pending["status"] = "interrupted"
+            self._mark_changed(context_id)
+            if last is None or last.role != "user":
+                self._save_to_file()
+                return None
+
+            ledger = CallLedger()
+            for event in pending.get("tool_events") or []:
+                if not isinstance(event, dict):
+                    continue
+                if event.get("event_type") == "tool_called":
+                    ledger.called(event.get("call_id"), event.get("tool_name"), event.get("arguments"))
+                elif event.get("event_type") == "tool_output":
+                    ledger.returned(event.get("call_id"), event.get("tool_name"))
+            task = pending.get("task")
+            if not isinstance(task, str) or not task.strip():
+                task = last.get_text_content() if hasattr(last, "get_text_content") else str(last.content)
+            failed = status == FAILED_RUN_STATUS
+            interruption = Interruption(
+                reason=StopReason.ERROR if failed else StopReason.CRASH,
+                task=task,
+                agent=str(pending.get("agent") or ""),
+                detail=str(pending.get("last_error") or "") if failed else "",
+                in_flight=ledger.in_flight,
+                completed=ledger.completed,
+            )
+            conversation.append(
+                ContextMessage(
+                    role="assistant",
+                    content=interruption.summary(),
+                    timestamp=datetime.now().isoformat(),
+                    metadata=with_message_id(interruption.message_metadata(
+                        context_id=context_id, turn_id=pending.get("turn_id")
+                    )),
+                )
+            )
+            bucket["updated_at"] = datetime.now().isoformat()
+            self._save_to_file()
+            return interruption
+
     def append_metadata_event(
         self,
         key: str,
@@ -730,85 +1042,6 @@ class ContextManager:
                 bucket["updated_at"] = datetime.now().isoformat()
             self._save_to_file()
             return list(items)
-
-    def get_incomplete_run_summary(
-        self,
-        *,
-        max_events: int = 8,
-        max_field_length: int = 300,
-    ) -> str:
-        """Build a compact prompt-safe summary for an unfinished previous run."""
-        with safe_lock(self._lock, timeout=5.0):
-            payload = self._metadata.get("pending_agent_run")
-            if not isinstance(payload, dict):
-                return ""
-
-            status = str(payload.get("status") or "").strip() or "unknown"
-            if status == "completed":
-                return ""
-
-            lines = [
-                "Unfinished previous execution attempt:",
-            ]
-
-            agent = payload.get("agent")
-            if agent:
-                lines.append(f"Agent: {agent}")
-
-            last_error = payload.get("last_error")
-            if isinstance(last_error, str) and last_error.strip():
-                err = last_error.strip()
-                if len(err) > max_field_length:
-                    err = err[:max_field_length] + "…"
-                lines.append(f"Last error: {err}")
-
-            retries = payload.get("retry_count")
-            if retries is not None:
-                lines.append(f"Retry count: {retries}")
-
-            input_preview = payload.get("input_preview")
-            if isinstance(input_preview, str) and input_preview.strip():
-                preview = input_preview.strip()
-                if len(preview) > max_field_length:
-                    preview = preview[:max_field_length] + "…"
-                lines.append(f"Original request: {preview}")
-
-            tool_events = payload.get("tool_events")
-            if isinstance(tool_events, list):
-                compact_events = [item for item in tool_events if isinstance(item, dict)][-max_events:]
-            else:
-                compact_events = []
-
-            if compact_events:
-                lines.append("Recent execution events:")
-                for item in compact_events:
-                    event_type = str(item.get("event_type") or "event")
-                    tool_name = str(item.get("tool_name") or "").strip()
-                    details = []
-                    if tool_name:
-                        details.append(tool_name)
-                    arguments = item.get("arguments")
-                    if arguments is not None and event_type == "tool_called":
-                        arg_text = str(arguments).strip()
-                        if len(arg_text) > max_field_length:
-                            arg_text = arg_text[:max_field_length] + "…"
-                        details.append(f"args={arg_text}")
-                    output = item.get("output")
-                    if output is not None and event_type == "tool_output":
-                        output_text = str(output).strip()
-                        if len(output_text) > max_field_length:
-                            output_text = output_text[:max_field_length] + "…"
-                        details.append(f"output={output_text}")
-                    suffix = " | ".join(part for part in details if part)
-                    if suffix:
-                        lines.append(f"- {event_type}: {suffix}")
-                    else:
-                        lines.append(f"- {event_type}")
-
-            lines.append(
-                "If appropriate, continue taking into account already completed steps and do not repeat completed operations unnecessarily."
-            )
-            return "\n".join(lines)
 
     def _normalize_message_content(self, content: Union[str, List[Any]]) -> Union[str, List[Any]]:
         """
@@ -884,14 +1117,14 @@ class ContextManager:
             Normalized ContextMessage
         """
         normalized_content = self._normalize_message_content(msg.content)
-
-        # Only create new message if content changed
-        if normalized_content is not msg.content:
+        metadata = msg.metadata or {}
+        if normalized_content is not msg.content or not metadata.get("message_id"):
+            # Messages stored before ids existed get one now, kept from here on.
             return ContextMessage(
                 role=msg.role,
                 content=normalized_content,
                 timestamp=msg.timestamp,
-                metadata=msg.metadata
+                metadata=with_message_id(metadata),
             )
         return msg
 

@@ -25,12 +25,14 @@ import agents
 from agents import (
     Agent,
     ModelSettings,
+    RunConfig,
     function_tool,
     RunContextWrapper,
     SQLiteSession,
     RunItemStreamEvent,
 )
 from agents.model_settings import Reasoning
+from agents.run import CallModelData, ModelInputData
 from agents.exceptions import (
     ModelBehaviorError,
     MaxTurnsExceeded,
@@ -48,7 +50,8 @@ from core.action_policy import (
     is_policy_block,
 )
 from .context import ContextManager
-from schemas import AgentConfig, AgentExecution
+from schemas import AgentConfig, AgentExecution, CompactConfig
+from schemas.schemas import ImageContent, ImageUrl, TextContent
 from tools import get_tools_by_names
 from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
@@ -63,29 +66,39 @@ from core.run_stream import (
     append_action_reasoning,
     run_output_text,
     interrupted_run_report,
+    last_message_text,
     tool_event_info,
     ConsoleStreamObserver,
 )
 from core.agent_input import AgentInput, context_content, parse_agent_input
+from core.generated_images import ImageCollector, collecting, generated_so_far
+from core.image_window import limit_images
+from core.steering import SteerMessage, Steering
+from core.interruption import (
+    CONTINUATION_TYPE,
+    CONTINUE_TEXT,
+    CallLedger,
+    Interruption,
+    RunControl,
+    StopReason,
+    StopRequested,
+    completed_names,
+)
 
 # Compact system integration
 from core.compact import (
-    calculate_token_warning_state,
-    auto_compact_if_needed,
     AutoCompactTrackingState,
-    reactive_compact_on_prompt_too_long,
+    compact_conversation,
+    get_auto_compact_threshold,
     is_prompt_too_long_error,
-    CompactMessage,
-    estimate_messages_tokens,
-    to_compact_messages,
-    to_context_messages,
 )
+from core.context_budget import context_budget_filter, request_tokens, session_transcript
 
 
 import os
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -105,11 +118,73 @@ Repeat the last step that way."""
 
 @dataclass
 class _RunProgress:
-    """Where a run stands, for the pending-run record kept in the context."""
+    """Where a turn stands: its pending-run record and what its runs did so far."""
 
     input_preview: str
     attempt: int = 0
     recorded_failure: bool = False
+    #: Tool calls of the turn, fed from the stream (see CallLedger).
+    ledger: CallLedger = field(default_factory=CallLedger)
+    #: The SDK result of the latest attempt, as soon as it exists.
+    result: Any = None
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def layered_compact(catalog: Optional[Config], own: Config) -> CompactConfig:
+    """The ``compact`` settings a system runs with.
+
+    Routed from a catalog (routing.yaml) that has a ``compact`` section, that
+    section is the base for every system and the system's own section overrides
+    it field by field - thresholds in one place, compactable tools per system.
+    Otherwise the system's own section, or the defaults.
+    """
+    own_config = own.config
+    if catalog is None or "compact" not in catalog.config.model_fields_set:
+        return own_config.compact
+    base = catalog.config.compact.model_dump(exclude_unset=True)
+    override = own_config.compact.model_dump(exclude_unset=True) if "compact" in own_config.model_fields_set else {}
+    return CompactConfig(**_deep_merge(base, override))
+
+
+def with_images(text: str, images: List[str]) -> Union[str, List[Any]]:
+    """Message content: *text*, plus the images generated with it, if any."""
+    if not images:
+        return text
+    return [
+        TextContent(type="text", text=text),
+        *(ImageContent(type="image_url", image_url=ImageUrl(url=url)) for url in images),
+    ]
+
+
+class _TurnStopped(Exception):
+    """A run that ended before its answer without failing: timeout, turn limit,
+    a model-side error that retrying would repeat, or the user's graceful Stop.
+    The turn records it as an interruption and answers with its summary."""
+
+    def __init__(self, reason: StopReason, detail: str = "") -> None:
+        super().__init__(detail or reason.value)
+        self.reason = reason
+        self.detail = detail
+
+
+# Input of an attempt rerun after an overflowing session was summarized: the
+# summary already holds the request and what was done for it.
+OVERFLOW_RETRY_NOTE = (
+    "[The conversation was compacted into the summary above to fit the context "
+    "window.] Continue the current request from where you stopped; do not redo "
+    "steps that already succeeded."
+)
+# Context window assumed for an agent that is not in the config (dynamic agents).
+DEFAULT_CONTEXT_WINDOW = 128_000
 
 logger = logging.getLogger("grid.agent_factory")
 verbose_logger = logging.getLogger("grid.verbose")
@@ -177,6 +252,9 @@ class GridRunContext:
     stream_observer: Optional[Any] = (
         None  # The run's own observer, so sub-agents report into the same view
     )
+    run_control: Optional[RunControl] = (
+        None  # Graceful Stop of the user's turn, shared with its sub-agents
+    )
 
 
 class AgentFactory:
@@ -216,7 +294,8 @@ class AgentFactory:
             container_id: Docker container ID for isolation
             policy_config: Config whose action policy and model registry win over
                 this factory's own config (the root routing config when the CLI
-                routes a message between systems)
+                routes a message between systems); its ``compact`` section is
+                the base this config's own section refines (layered_compact)
         """
         if tracing_level is not None:
             self._configure_tracing_once(tracing_level)
@@ -283,9 +362,12 @@ class AgentFactory:
 
         # Track initialized agents (auto_run_tools executed) per user
         self._initialized_agents: set[str] = set()
+        # Stop switches of the top-level turns running now, by conversation.
+        self._run_controls: Dict[str, RunControl] = {}
 
         # Per-session compact tracking state (circuit breaker lives here)
         self._compact_tracking = AutoCompactTrackingState()
+        self.compact_config = layered_compact(policy_config, self.config)
 
         # Initialize pipeline registry for emergency shutdown
         from core.tracing.pipeline_registry import PipelineRegistry
@@ -474,12 +556,26 @@ class AgentFactory:
         retry_count: int = 0,
         last_error: Optional[str] = None,
         clear_tool_events: bool = False,
+        task: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Persist durable state for the currently running agent attempt."""
+        """Persist durable state for the currently running agent attempt.
+
+        ``clear_tool_events`` starts the record of a new turn; ``task`` and
+        ``turn_id`` are what recovering the turn after a crash needs
+        (ContextManager.recover_abandoned_turn).
+        """
         existing = self.context_manager.get_metadata("pending_agent_run")
         payload: Dict[str, Any] = existing.copy() if isinstance(existing, dict) else {}
         if clear_tool_events or not isinstance(payload.get("tool_events"), list):
             payload["tool_events"] = []
+        if clear_tool_events:
+            payload.pop("task", None)
+            payload.pop("turn_id", None)
+        if task is not None:
+            payload["task"] = task
+        if turn_id is not None:
+            payload["turn_id"] = turn_id
 
         payload.update(
             {
@@ -508,8 +604,15 @@ class AgentFactory:
         arguments: Any = None,
         output: Any = None,
         extra: Optional[Dict[str, Any]] = None,
+        persist: bool = False,
     ) -> None:
-        """Append a compact runtime event to durable context metadata."""
+        """Append a compact runtime event to durable context metadata.
+
+        Events are written with the next status change, not one file write per
+        event - except with ``persist``: a tool call about to run is saved at
+        once, so a process that dies during it still leaves the call on record
+        (ContextManager.recover_abandoned_turn).
+        """
         event: Dict[str, Any] = {
             "event_type": event_type,
             "timestamp": datetime.now().isoformat(),
@@ -537,8 +640,7 @@ class AgentFactory:
         tool_events.append(event)
         pending["tool_events"] = tool_events[-100:]
         pending["updated_at"] = datetime.now().isoformat()
-        # Saved with the next status change, not once per tool call.
-        self.context_manager.set_metadata("pending_agent_run", pending, persist=False)
+        self.context_manager.set_metadata("pending_agent_run", pending, persist=persist)
 
     @staticmethod
     def _message_looks_transient_provider_error(message: str) -> bool:
@@ -699,19 +801,6 @@ class AgentFactory:
         """Heuristic check for reasoning-style models requiring Responses API."""
         return self._runtime_support.is_reasoning_model_name(model_name)
 
-    @staticmethod
-    def _model_requires_manual_history(model_config: Any) -> bool:
-        """Return True when SDK session history is unsafe for the model.
-
-        Some thinking-enabled providers require `reasoning_content` from prior
-        assistant tool-call turns to be replayed verbatim on subsequent requests.
-        Our manual ContextManager history stores user/assistant-visible messages
-        only, which is sufficient for continuity, while SDK SQLiteSession may
-        replay internal tool-call turns without the provider-specific reasoning
-        payload and trigger 400 errors.
-        """
-        return bool(getattr(model_config, "preserve_reasoning_content", False))
-
     def _build_model_settings(
         self, model_config: Any, parallel_tool_calls: bool = False
     ) -> ModelSettings:
@@ -723,34 +812,30 @@ class AgentFactory:
         Config examples:
           reasoning: {effort: "none"}    → SDK-native reasoning_effort (OpenAI)
           reasoning: {enabled: false}    → extra_body {"reasoning": {"enabled": false}} (OpenRouter etc.)
+          modalities: [image, text]      → extra_body {"modalities": [...]} (image generation)
         """
         max_tokens = getattr(model_config, "max_tokens", None)
         reasoning_cfg: Optional[Dict[str, Any]] = getattr(
             model_config, "reasoning", None
-        )
-        if not reasoning_cfg:
-            return ModelSettings(
-                max_tokens=max_tokens,
-                parallel_tool_calls=parallel_tool_calls,
-            )
-
+        ) or {}
         sdk_reasoning: Optional[Reasoning] = None
-        extra_body: Optional[Dict[str, Any]] = None
+        extra_body: Dict[str, Any] = {}
 
         effort = reasoning_cfg.get("effort")
-        enabled = reasoning_cfg.get("enabled")
-
         if effort is not None:
             # SDK-native: sent as reasoning_effort=<effort> in the API call
             sdk_reasoning = Reasoning(effort=effort)
-        elif enabled is False:
+        elif reasoning_cfg.get("enabled") is False:
             # Provider-specific: sent via extra_body as {"reasoning": {"enabled": false}}
-            extra_body = {"reasoning": {"enabled": False}}
+            extra_body["reasoning"] = {"enabled": False}
+        modalities = getattr(model_config, "modalities", None)
+        if modalities:
+            extra_body["modalities"] = list(modalities)
 
         return ModelSettings(
             max_tokens=max_tokens,
             reasoning=sdk_reasoning,
-            extra_body=extra_body,
+            extra_body=extra_body or None,
             parallel_tool_calls=parallel_tool_calls,
         )
 
@@ -1388,19 +1473,11 @@ class AgentFactory:
 
         return "\n\n".join(parts)
 
-    def _replace_context_with_compact_messages(
-        self, messages: List[CompactMessage]
-    ) -> None:
-        """Persist compacted/truncated history into the active context."""
-        self.context_manager.replace_conversation_history(
-            to_context_messages(messages)
-        )
-
     def _get_compact_client_and_model(
         self, key: Optional[str]
     ) -> tuple[Optional[AsyncOpenAI], Optional[str]]:
         """Resolve the client/model to use for full compact."""
-        compact_cfg = self.config.config.compact
+        compact_cfg = self.compact_config
         summary_model_key = getattr(compact_cfg, "summary_model", None)
         if summary_model_key:
             try:
@@ -1445,14 +1522,63 @@ class AgentFactory:
                 fragments.append(fragment)
         return fragments
 
+    def _context_window(self, agent_key: Optional[str]) -> int:
+        """The context window of *agent_key*'s model; a default for unknown agents."""
+        try:
+            return self.config.get_model(self.config.get_agent(agent_key).primary_model).context_window
+        except Exception:
+            return DEFAULT_CONTEXT_WINDOW
+
+    def _run_config(
+        self,
+        agent_key: Optional[str] = None,
+        *,
+        steering: Optional[Steering] = None,
+        session: Optional[SQLiteSession] = None,
+    ) -> RunConfig:
+        """What every model call of a run of *agent_key* passes through.
+
+        First the messages the user sent while the turn runs (core.steering;
+        only for the top-level run of a turn, which passes its ``steering`` and
+        ``session``), then the image budget (core.image_window), then the
+        context budget (core.context_budget): old compactable tool outputs are
+        cleared from the request once it would pass the auto-compact threshold.
+        """
+        max_images = self.config.config.settings.image_processing.max_images_per_request
+        clear_outputs = context_budget_filter(
+            self._context_window(agent_key), self.compact_config
+        )
+
+        def budget(items: List[Any], instructions: Optional[str]) -> ModelInputData:
+            items = limit_images(items, max_images)
+            if clear_outputs is not None:
+                items = clear_outputs(items, instructions)
+            return ModelInputData(input=items, instructions=instructions)
+
+        if steering is None:
+            def apply(data: CallModelData) -> ModelInputData:
+                return budget(data.model_data.input, data.model_data.instructions)
+        else:
+            async def apply(data: CallModelData) -> ModelInputData:
+                items = await steering.apply(data.model_data.input, session)
+                return budget(items, data.model_data.instructions)
+
+        return RunConfig(call_model_input_filter=apply)
+
     @staticmethod
     def _final_text(result: Any, fragments: List[str]) -> str:
-        """The answer of a finished run: its final output, else what it streamed."""
+        """The answer of a finished run: its final output, else what it streamed.
+
+        An answer that is only generated images has no text, and says nothing
+        about a missing report.
+        """
         final = getattr(result, "final_output", None)
         if final is not None and str(final).strip():
             return str(final)
         streamed = "".join(fragments).strip()
-        return streamed or str(run_output_text(result))
+        if streamed or generated_so_far():
+            return streamed
+        return str(run_output_text(result))
 
     async def run_agent_object_simple(
         self,
@@ -1508,6 +1634,7 @@ class AgentFactory:
                     context=run_ctx,
                     session=session,
                     max_turns=self.config.get_max_turns(),
+                    run_config=self._run_config(None),
                 )
                 try:
                     fragments = await self._consume_stream(
@@ -1639,71 +1766,169 @@ class AgentFactory:
         return instructions
 
     def _add_user_message(
-        self, message: str, agent_input: AgentInput, agent_key: str, context_id: str
+        self,
+        message: str,
+        agent_input: AgentInput,
+        agent_key: str,
+        context_id: str,
+        turn_id: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         content = (
             message if agent_input.is_text else context_content(agent_input.items[0])
         )
-        self.context_manager.add_message(
+        self.context_manager.append_message_to(
+            context_id,
             "user",
             content,
-            metadata={"context_id": context_id, "agent": agent_key, "type": "user_input"},
+            metadata={
+                **(extra or {}),
+                "context_id": context_id,
+                "agent": agent_key,
+                "type": "user_input",
+                "turn_id": turn_id,
+            },
         )
 
-    async def _compact_conversation_if_needed(
-        self, agent_key: str, model_config: Any, session: Optional[SQLiteSession]
-    ) -> None:
-        """Summarize the conversation before it outgrows the model's context window.
+    def _session_epoch(self, context_id: str, agent_key: str) -> int:
+        """How many times *agent_key*'s session in *context_id* was replaced by a summary."""
+        epochs = self.context_manager.get_context_metadata(context_id).get("session_epochs") or {}
+        return int(epochs.get(agent_key, 0))
 
-        The summary replaces the stored history and, in session mode, the agent's
-        session too, so the model continues from the summary instead of the
-        full transcript. A failed compaction is logged; the run goes on.
+    def _bump_session_epoch(self, context_id: str, agent_key: str) -> None:
+        epochs = dict(self.context_manager.get_context_metadata(context_id).get("session_epochs") or {})
+        epochs[agent_key] = int(epochs.get(agent_key, 0)) + 1
+        self.context_manager.update_context_metadata(context_id, {"session_epochs": epochs})
+
+    async def fork_conversation(self, context_id: str, message_id: str) -> str:
+        """Branch *context_id* at user message *message_id*, for an edited version of it.
+
+        The branch holds the messages before it (ContextManager.fork_context)
+        and, for each agent that worked in the conversation, its session up to
+        the point where the turn of that message started - so the agent in the
+        branch remembers every step before the edit, tool calls included, and
+        nothing after. The cut is the turn's ``session_mark``. When the session
+        was summarized since that mark, no exact cut exists: that agent's
+        session in the branch starts empty and it reads the copied messages as a
+        transcript instead. Returns the branch id.
         """
-        messages = to_compact_messages(self.context_manager.conversation_snapshot())
-        if not messages:
-            return
-        context_window = model_config.context_window
-        compact_cfg = self.config.config.compact
-        tokens = estimate_messages_tokens(messages)
-        if not calculate_token_warning_state(
-            tokens, context_window, compact_cfg
-        ).is_above_auto_compact_threshold:
-            return
-        logger.info("Auto-compact of %s: %d/%d tokens", agent_key, tokens, context_window)
+        branch_id, _ = self.context_manager.fork_context(context_id, message_id)
+        messages = self.context_manager.conversation_view(context_id)["messages"]
+        index = next(i for i, m in enumerate(messages) if (m.metadata or {}).get("message_id") == message_id)
+        epochs = self.context_manager.get_context_metadata(context_id).get("session_epochs") or {}
+        branch_epochs = dict(epochs)
+        agents = {(m.metadata or {}).get("agent") for m in messages} - {None}
+        for agent in sorted(agents):
+            items = await self._get_agent_session(agent, context_id).get_items()
+            if not items:
+                continue
+            # The first turn of this agent at or after the edit point.
+            mark = next(
+                (
+                    (m.metadata or {})["session_mark"]
+                    for m in messages[index:]
+                    if ((m.metadata or {}).get("session_mark") or {}).get("agent") == agent
+                ),
+                None,
+            )
+            if mark is None:
+                cut = len(items)  # the agent did nothing after the edit point
+            elif int(mark.get("epoch", 0)) == int(epochs.get(agent, 0)) and mark["items"] <= len(items):
+                cut = mark["items"]
+            else:
+                # Summarized since: the copied marks of this agent no longer apply.
+                branch_epochs[agent] = int(epochs.get(agent, 0)) + 1
+                logger.info("Branch %s: %s starts from the transcript (session was compacted)", branch_id, agent)
+                continue
+            if cut:
+                await self._get_agent_session(agent, branch_id).add_items(items[:cut])
+        self.context_manager.update_context_metadata(branch_id, {"session_epochs": branch_epochs})
+        return branch_id
+
+    async def context_usage(self, agent_key: str, context_id: Optional[str] = None) -> Dict[str, int]:
+        """How full *agent_key*'s context is in a conversation: tokens, window, threshold.
+
+        Measured on the agent's SDK session - what the model reads - not on the
+        stored chat, which holds only the visible text.
+        """
+        context_id = context_id or self.get_active_context_id()
+        items = await self._get_agent_session(agent_key, context_id).get_items()
+        window = self._context_window(agent_key)
+        return {
+            "tokens": request_tokens(items),
+            "window": window,
+            "threshold": get_auto_compact_threshold(window, self.compact_config),
+        }
+
+    async def compact_session(
+        self, agent_key: str, context_id: str, *, force: bool = False
+    ) -> Optional[Dict[str, int]]:
+        """Summarize *agent_key*'s session in a conversation into one message.
+
+        Without ``force`` only when the session is past the auto-compact
+        threshold (core.context_budget) and compaction has not failed
+        ``compact.auto.max_consecutive_failures`` times in a row. The compaction
+        model reads the session - messages, tool calls and their results - and
+        the session is replaced by its summary. The stored chat users see is not
+        touched. Returns ``{"tokens_before", "tokens_after"}``, or None when
+        nothing was compacted; a failure is logged, never raised.
+        """
+        compact_cfg = self.compact_config
+        if not compact_cfg.enabled or not (force or compact_cfg.auto.enabled):
+            return None
+        session = self._get_agent_session(agent_key, context_id)
+        items = await session.get_items()
+        if not items:
+            return None
+        tokens_before = request_tokens(items)
+        window = self._context_window(agent_key)
+        if not force:
+            if tokens_before <= get_auto_compact_threshold(window, compact_cfg):
+                return None
+            if self._compact_tracking.consecutive_failures >= compact_cfg.auto.max_consecutive_failures:
+                logger.warning(
+                    "Auto-compact of %s skipped after %d failures in a row",
+                    agent_key,
+                    self._compact_tracking.consecutive_failures,
+                )
+                return None
+        logger.info("Compacting the session of %s: ~%d/%d tokens", agent_key, tokens_before, window)
         try:
             client, model = self._get_compact_client_and_model(agent_key)
-            outcome = await auto_compact_if_needed(
-                messages=messages,
-                context_window=context_window,
+            result = await compact_conversation(
+                messages=session_transcript(items),
                 llm_client=client,
                 model=model,
-                tracking=self._compact_tracking,
+                suppress_followup_questions=True,
+                is_auto_compact=not force,
+                max_output_tokens=compact_cfg.summary_max_output_tokens,
                 compact_cfg=compact_cfg,
             )
         except Exception:
-            logger.warning("Auto-compact of %s failed", agent_key, exc_info=True)
-            return
-        self._compact_tracking.consecutive_failures = outcome.get(
-            "consecutive_failures", self._compact_tracking.consecutive_failures
-        )
-        result = outcome.get("compaction_result")
-        if outcome.get("was_compacted") and result and result.compacted_messages:
-            await self._replace_history(result.compacted_messages, session)
-            logger.info(
-                "Auto-compact of %s: %d -> %d tokens",
+            self._compact_tracking.consecutive_failures += 1
+            logger.warning("Compacting the session of %s failed", agent_key, exc_info=True)
+            return None
+        summary = [
+            {"role": message.role, "content": message.get_text()}
+            for message in result.summary_messages
+            if message.get_text().strip()
+        ]
+        if not result.success() or not summary:
+            self._compact_tracking.consecutive_failures += 1
+            logger.warning(
+                "Compacting the session of %s produced no summary: %s",
                 agent_key,
-                result.tokens_before,
-                result.tokens_after,
+                result.user_display_message or result.error_message or result.status.value,
             )
-
-    async def _replace_history(
-        self, messages: List[CompactMessage], session: Optional[SQLiteSession]
-    ) -> None:
-        """Make *messages* the conversation the model continues from."""
-        self._replace_context_with_compact_messages(messages)
-        if session is not None:
-            await session.clear_session()
-            await session.add_items(self.context_manager.get_conversation_history_as_sdk_messages())
+            return None
+        self._compact_tracking.consecutive_failures = 0
+        await session.clear_session()
+        await session.add_items(summary)
+        # Turn marks taken before this point no longer count items of this session.
+        self._bump_session_epoch(context_id, agent_key)
+        tokens_after = request_tokens(summary)
+        logger.info("Compacted the session of %s: ~%d -> ~%d tokens", agent_key, tokens_before, tokens_after)
+        return {"tokens_before": tokens_before, "tokens_after": tokens_after}
 
     async def _run_attempt(
         self,
@@ -1715,16 +1940,18 @@ class AgentFactory:
         *,
         stream: bool,
         observer: Any,
-        attempt: int,
+        progress: "_RunProgress",
     ) -> Tuple[str, Any]:
         """One run of the agent. Returns its answer text and the SDK result.
 
-        A run that exceeds settings.agent_timeout, max_turns, or stops on a model
-        or tool error ends with a report of what it did, not a retry: repeating
-        it would repeat the work done so far.
+        A run that ends without an answer and without failing raises
+        _TurnStopped - settings.agent_timeout, max_turns, a model-side error
+        that a retry would repeat, the user's graceful Stop. Other errors
+        propagate for _run_with_retries to judge.
         """
         timeout = self.config.get_agent_timeout()
         max_turns = self.config.get_max_turns()
+        control = run_ctx.run_control
         fragments: List[str] = []
         result: Any = None
 
@@ -1734,12 +1961,18 @@ class AgentFactory:
             if event.name not in ("tool_called", "tool_output"):
                 return
             info = tool_event_info(event.item)
+            tool_name = info.get("tool_name") or "tool"
+            if event.name == "tool_called":
+                progress.ledger.called(info.get("call_id"), tool_name, info.get("arguments"))
+            else:
+                progress.ledger.returned(info.get("call_id"), tool_name)
             self._record_runtime_event(
                 event_type=event.name,
-                tool_name=info.get("tool_name") or "tool",
+                tool_name=tool_name,
                 arguments=info.get("arguments") if event.name == "tool_called" else None,
                 output=info.get("output") if event.name == "tool_output" else None,
-                extra={"retry_count": attempt},
+                extra={"retry_count": progress.attempt, "call_id": info.get("call_id")},
+                persist=event.name == "tool_called",
             )
 
         deadline = asyncio.timeout(timeout)
@@ -1749,29 +1982,58 @@ class AgentFactory:
                     if hasattr(observer, "reasoning_text"):
                         observer.reasoning_text = ""
                         observer._reasoning_buf = []
-                    result = _get_runner().run_streamed(
-                        agent, run_input, context=run_ctx, max_turns=max_turns, session=session
+                    steering = control.steering if control is not None else None
+                    if steering is not None:
+                        steering.new_run()
+                    result = progress.result = _get_runner().run_streamed(
+                        agent,
+                        run_input,
+                        context=run_ctx,
+                        max_turns=max_turns,
+                        session=session,
+                        run_config=self._run_config(agent_key, steering=steering, session=session),
                     )
-                    fragments = await self._consume_stream(
-                        result,
-                        observer=observer,
-                        agent_key=agent_key,
-                        action_state=run_ctx.action_state,
-                        on_event=record_tool_event,
-                    )
+                    if control is not None:
+                        control.attach(result)
+                    try:
+                        fragments = await self._consume_stream(
+                            result,
+                            observer=observer,
+                            agent_key=agent_key,
+                            action_state=run_ctx.action_state,
+                            on_event=record_tool_event,
+                        )
+                    finally:
+                        if control is not None:
+                            control.detach(result)
                 else:
-                    result = await _get_runner().run(
-                        agent, run_input, context=run_ctx, max_turns=max_turns, session=session
+                    result = progress.result = await _get_runner().run(
+                        agent,
+                        run_input,
+                        context=run_ctx,
+                        max_turns=max_turns,
+                        session=session,
+                        run_config=self._run_config(agent_key),
                     )
         except TimeoutError:
             if not deadline.expired():
                 raise
             logger.warning("Agent %s stopped after %s s", agent_key, timeout)
-            stopped = TimeoutError(f"no answer within settings.agent_timeout ({timeout} s)")
-            return interrupted_run_report(result, f"Agent {agent_key}", stopped), result
-        except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
+            raise _TurnStopped(
+                StopReason.TIMEOUT, f"no answer within settings.agent_timeout ({timeout} s)"
+            ) from None
+        except MaxTurnsExceeded:
+            logger.warning("Agent %s reached max_turns (%s)", agent_key, max_turns)
+            raise _TurnStopped(
+                StopReason.MAX_TURNS, f"settings.max_turns is {max_turns}"
+            ) from None
+        except (ModelBehaviorError, AgentsUserError) as exc:
             logger.warning("Agent %s stopped: %s: %s", agent_key, type(exc).__name__, exc)
-            return interrupted_run_report(result, f"Agent {agent_key}", exc), result
+            raise _TurnStopped(StopReason.ERROR, f"{type(exc).__name__}: {exc}") from None
+        # A graceful Stop ends the stream after a step. If that step was the
+        # final answer, the turn is simply done.
+        if control is not None and control.stop_requested and result.final_output is None:
+            raise _TurnStopped(StopReason.USER_STOP)
         return self._final_text(result, fragments), result
 
     async def _run_with_retries(
@@ -1789,11 +2051,20 @@ class AgentFactory:
         """Run until an answer: transient provider errors are retried with backoff.
 
         A context overflow is answered once by trimming the oldest history.
+
+        A rerun never sends the request twice. The SDK stores the input in the
+        session when a run starts, and each finished step after it; so once the
+        session has moved, the rerun's input is a note to continue from there
+        (Interruption.resume_input) naming the calls the failed attempt left in
+        flight. When the session did not move, the request is sent again.
         """
+        control = run_ctx.run_control
         trimmed = False
         set_current_factory(self)
         try:
             while True:
+                if control is not None and control.stop_requested:
+                    raise _TurnStopped(StopReason.USER_STOP)
                 self._update_pending_agent_run(
                     agent_key=agent_key,
                     active_context_id=run_ctx.context_id,
@@ -1804,6 +2075,7 @@ class AgentFactory:
                 self._record_runtime_event(
                     event_type="attempt_started", extra={"retry_count": progress.attempt}
                 )
+                session_mark = await self._session_mark(session)
                 try:
                     return await self._run_attempt(
                         agent,
@@ -1813,14 +2085,20 @@ class AgentFactory:
                         session,
                         stream=stream,
                         observer=observer,
-                        attempt=progress.attempt,
+                        progress=progress,
                     )
+                except _TurnStopped:
+                    raise
                 except Exception as exc:
-                    if not trimmed and is_prompt_too_long_error(exc):
+                    if not trimmed and is_prompt_too_long_error(exc) and session is not None:
                         trimmed = True
-                        if await self._trim_history_after_overflow(exc, session):
-                            if session is None and isinstance(run_input, list):
-                                run_input = self._manual_run_input(run_input[-1:])
+                        # Whether the failed attempt stored the request: then
+                        # the summary holds it, else it is sent again.
+                        stored_request = await self._session_mark(session) != session_mark
+                        if await self.compact_session(agent_key, run_ctx.context_id, force=True):
+                            progress.ledger.forget_open()
+                            if stored_request:
+                                run_input = OVERFLOW_RETRY_NOTE
                             continue
                     retriable = self._is_retriable_agent_exception(exc)
                     error_text = self._safe_preview(str(exc), max_length=700)
@@ -1844,6 +2122,15 @@ class AgentFactory:
                     if not retriable:
                         progress.recorded_failure = True
                         raise AgentError(f"Agent execution failed: {exc}") from exc
+                    if await self._session_mark(session) != session_mark:
+                        run_input = Interruption(
+                            reason=StopReason.ERROR,
+                            task="",
+                            agent=agent_key,
+                            detail=f"{type(exc).__name__}: {error_text}",
+                            in_flight=progress.ledger.in_flight,
+                        ).resume_input()
+                    progress.ledger.forget_open()
                     progress.attempt += 1
                     delay = self._retry_backoff_seconds(progress.attempt)
                     logger.warning(
@@ -1854,36 +2141,22 @@ class AgentFactory:
                         exc,
                         exc_info=exc,
                     )
-                    await asyncio.sleep(delay)
+                    # Stop ends the wait for the provider, too.
+                    if control is not None:
+                        if await control.wait(delay):
+                            raise _TurnStopped(StopReason.USER_STOP)
+                    else:
+                        await asyncio.sleep(delay)
         finally:
             reset_current_factory()
 
-    async def _trim_history_after_overflow(
-        self, error: Exception, session: Optional[SQLiteSession]
-    ) -> bool:
-        """Drop the oldest history after a context overflow; True if anything was dropped."""
-        messages = to_compact_messages(self.context_manager.conversation_snapshot())
-        try:
-            trimmed = await reactive_compact_on_prompt_too_long(messages=messages, error=error)
-        except Exception:
-            logger.warning("Trimming history after a context overflow failed", exc_info=True)
-            return False
-        if trimmed.status.value not in ("trimmed", "success"):
-            return False
-        await self._replace_history(trimmed.messages, session)
-        logger.info(
-            "Context overflow: history trimmed to %d messages (%d -> %d tokens), retrying",
-            len(trimmed.messages),
-            trimmed.tokens_before,
-            trimmed.tokens_after,
-        )
-        return True
-
-    def _manual_run_input(self, current: List[Any]) -> List[Any]:
-        """Stored history followed by the current input: the manual-history run input."""
-        history = self.context_manager.get_conversation_history_as_sdk_messages()
-        # The current message is the last stored one; send it once.
-        return history[:-1] + current if history else current
+    @staticmethod
+    async def _session_mark(session: Optional[SQLiteSession]) -> Any:
+        """The newest item of *session*: it changes whenever the SDK stores one."""
+        if session is None:
+            return None
+        items = await session.get_items(limit=1)
+        return items[-1] if items else None
 
     async def run_agent(
         self,
@@ -1896,6 +2169,8 @@ class AgentFactory:
         use_active_context: bool = False,
         user_id: Optional[str] = None,
         stream_observer: Optional[Any] = None,
+        turn_id: Optional[str] = None,
+        edit_of: Optional[str] = None,
     ) -> str:
         """Run an agent on a message within a conversation and return its answer.
 
@@ -1908,12 +2183,20 @@ class AgentFactory:
             use_active_context: Continue the active conversation when no id is given
             user_id: User the run acts for (workspace isolation)
             stream_observer: View the run reports into; the factory's by default
+            turn_id: Caller's id for this turn, stored on its messages
+            edit_of: The slot of the message this one is a new version of, in a
+                branch made by fork_conversation (ContextManager.message_versions)
 
         The answer ends with the line ``Context ID: <id>``. An answer written as
         text tool calls (``<tool_call><function=...>``) is retried with a
         correction, up to MALFORMED_TOOL_CALL_RETRIES times.
+
+        When the conversation ends with an interrupted turn, this message resumes
+        it (see core.interruption). A turn that stops early answers with the
+        summary of its interruption - or, for an error or a cancelled task,
+        raises after recording it.
         """
-        output, context_id = await self._run_turn(
+        return await self._run_turn_with_corrections(
             agent_key,
             message,
             context_path,
@@ -1922,9 +2205,99 @@ class AgentFactory:
             use_active_context=use_active_context,
             user_id=user_id,
             stream_observer=stream_observer,
+            turn_id=turn_id,
+            edit_of=edit_of,
         )
+
+    async def continue_agent(
+        self,
+        agent_key: str,
+        context_id: str,
+        *,
+        context_path: Optional[str] = None,
+        stream: bool = False,
+        user_id: Optional[str] = None,
+        stream_observer: Optional[Any] = None,
+        turn_id: Optional[str] = None,
+    ) -> str:
+        """Continue the interrupted turn *context_id* ends with - the Continue button.
+
+        The agent resumes the same request from its session, told why it
+        stopped and which tool calls were in flight. Raises AgentError when the
+        conversation has no interruption left to continue.
+        """
+        return await self._run_turn_with_corrections(
+            agent_key,
+            None,
+            context_path,
+            context_id,
+            stream=stream,
+            user_id=user_id,
+            stream_observer=stream_observer,
+            turn_id=turn_id,
+        )
+
+    def steer(self, context_id: str, message: SteerMessage) -> bool:
+        """Give *message* to the turn running in *context_id*, for its next step.
+
+        The agent reads it before its next model call without stopping
+        (core.steering), and it is stored in the conversation as the user's.
+        Returns False when no streamed turn of this conversation runs here.
+        If the turn ends before a next call, ``message.on_undelivered`` gets it
+        back.
+        """
+        control = self._run_controls.get(context_id)
+        if control is None:
+            return False
+        reported = message.on_delivered
+
+        def delivered(steer: SteerMessage) -> None:
+            # The user's words widen the task the policy gate judges against.
+            state = control.action_state
+            if isinstance(state, ActionRunState):
+                state.task = f"{state.task}\n\nUser instruction added during the task:\n{steer.text}"
+            self.context_manager.append_message_to(
+                context_id,
+                "user",
+                steer.text,
+                metadata={"context_id": context_id, "type": "steer", "steer_id": steer.message_id},
+            )
+            if reported is not None:
+                reported(steer)
+
+        message.on_delivered = delivered
+        control.steering.add(message)
+        return True
+
+    def request_stop(self, context_id: str) -> bool:
+        """Ask the turn running in *context_id* to stop after its current step.
+
+        The step finishes - the model's response and the tool calls it made -
+        and is saved; then the turn ends with a Stop interruption that Continue
+        picks up. Returns False when no streamed turn of this conversation is
+        running here; the caller can only cancel it then.
+        """
+        control = self._run_controls.get(context_id)
+        if control is None:
+            return False
+        control.request_stop()
+        return True
+
+    async def _run_turn_with_corrections(
+        self,
+        agent_key: str,
+        message: Optional[str],
+        context_path: Optional[str],
+        context_id: Optional[str],
+        **options: Any,
+    ) -> str:
+        output, context_id, answered = await self._run_turn(
+            agent_key, message, context_path, context_id, **options
+        )
+        options.pop("use_active_context", None)
+        options.pop("edit_of", None)  # a correction is not another version
         for retry in range(1, self.MALFORMED_TOOL_CALL_RETRIES + 1):
-            if not self._detect_malformed_tool_calls(output):
+            if not answered or not self._detect_malformed_tool_calls(output):
                 break
             logger.warning(
                 "Agent %s wrote tool calls as text; retrying with a correction (%d/%d)",
@@ -1932,21 +2305,90 @@ class AgentFactory:
                 retry,
                 self.MALFORMED_TOOL_CALL_RETRIES,
             )
-            output, context_id = await self._run_turn(
-                agent_key,
-                TOOL_CALL_CORRECTION,
-                context_path,
-                context_id,
-                stream=stream,
-                user_id=user_id,
-                stream_observer=stream_observer,
+            output, context_id, answered = await self._run_turn(
+                agent_key, TOOL_CALL_CORRECTION, context_path, context_id, **options
             )
         return output
+
+    def _turn_task(self, message: Optional[str], interrupted: Optional[Interruption]) -> str:
+        """The user's request this turn works on, as the interruption record keeps it."""
+        if message is None:
+            return interrupted.task
+        text = self._policy_message_text(message).strip()
+        if interrupted is None:
+            return text
+        return f"{interrupted.task}\n\nThen the user wrote:\n{text}"
+
+    @staticmethod
+    def _resumed_input(
+        agent_input: AgentInput, resumed: Interruption, message: Optional[str]
+    ) -> Union[str, List[Any]]:
+        """The model's input for a turn that resumes *resumed*."""
+        if message is None:
+            return resumed.resume_input()
+        if agent_input.is_text:
+            return resumed.resume_input(agent_input.items)
+        # A message with images: the note goes in front of its own parts.
+        first = dict(agent_input.items[0])
+        note = {"type": "input_text", "text": resumed.resume_input("")}
+        first["content"] = [note, *(first.get("content") or [])]
+        return [first, *agent_input.items[1:]]
+
+    def _record_interruption(
+        self,
+        *,
+        context_id: str,
+        agent_key: str,
+        task: str,
+        reason: StopReason,
+        detail: str,
+        progress: "_RunProgress",
+        turn_id: Optional[str],
+        images: Optional[List[str]] = None,
+    ) -> Interruption:
+        """Store why the turn stopped and what was in progress; return the record.
+
+        Runs on every early end, including a cancelled task, so it never awaits
+        and never raises: a failure to store is logged, and the caller's own
+        outcome - an answer, an error, a cancellation - goes on.
+        """
+        items = list(getattr(progress.result, "new_items", None) or [])
+        interruption = Interruption(
+            reason=reason,
+            task=task,
+            agent=agent_key,
+            detail=detail,
+            in_flight=progress.ledger.in_flight,
+            completed=progress.ledger.completed or completed_names(items),
+            last_text=last_message_text(items),
+        )
+        try:
+            self.context_manager.append_message_to(
+                context_id,
+                "assistant",
+                with_images(interruption.summary(), images or []),
+                interruption.message_metadata(context_id=context_id, turn_id=turn_id),
+            )
+            self._update_pending_agent_run(
+                agent_key=agent_key,
+                active_context_id=context_id,
+                input_preview=progress.input_preview,
+                status="interrupted",
+                retry_count=progress.attempt,
+                last_error=detail or None,
+            )
+            progress.recorded_failure = True
+        except Exception:
+            logger.exception("Could not record the interruption of %s in %s", agent_key, context_id)
+        logger.warning(
+            "Turn of %s in %s interrupted: %s %s", agent_key, context_id, reason.value, detail
+        )
+        return interruption
 
     async def _run_turn(
         self,
         agent_key: str,
-        message: str,
+        message: Optional[str],
         context_path: Optional[str],
         context_id: Optional[str],
         *,
@@ -1954,31 +2396,66 @@ class AgentFactory:
         user_id: Optional[str],
         stream_observer: Optional[Any],
         use_active_context: bool = False,
-    ) -> Tuple[str, str]:
-        """One request and answer of the conversation. Returns (answer, context id)."""
+        turn_id: Optional[str] = None,
+        edit_of: Optional[str] = None,
+    ) -> Tuple[str, str, bool]:
+        """One request and answer of the conversation.
+
+        Returns (answer, context id, answered): ``answered`` is False when the
+        text is the summary of an interruption rather than the agent's answer.
+
+        ``message`` None is Continue. Either way, when the conversation ends
+        with an interruption this turn resumes it (core.interruption).
+
+        Once the turn's request is stored, the conversation always says how the
+        turn ended: its answer, or an interruption record - timeout, turn limit,
+        model error, provider failure, Stop (graceful or a cancelled task).
+        """
         observer = stream_observer or self._stream_observer
+        shown_message = message if message is not None else CONTINUE_TEXT
         execution = AgentExecution(
-            agent_name=agent_key, start_time=time.time(), input_message=message
+            agent_name=agent_key, start_time=time.time(), input_message=shown_message
         )
-        progress = _RunProgress(input_preview=self._safe_preview(message, max_length=700))
+        progress = _RunProgress(input_preview=self._safe_preview(shown_message, max_length=700))
+        control = RunControl()
+        # Images an image model generates during the turn: shown as they come,
+        # stored with the answer (core.generated_images).
+        generated = ImageCollector(on_image=getattr(observer, "handle_generated_image", None))
         active_context_id: Optional[str] = None
+        task = ""
+        stored = False  # the turn's request is in the conversation
         try:
             active_context_id = self._open_context(context_id, use_active_context)
             execution.context_id = active_context_id
             continuing = context_id is not None or use_active_context
+            # Turns of a conversation start only here, one at a time, so a run
+            # record that still says "running" was left by a process that ended.
+            self.context_manager.recover_abandoned_turn(active_context_id)
+            interrupted = self.context_manager.pending_interruption(active_context_id)
+            if interrupted is not None and interrupted.agent and interrupted.agent != agent_key:
+                # Only its own agent can resume it: the finished steps are in
+                # that agent's session. Another agent's turn leaves it behind.
+                interrupted = None
+            if message is None and interrupted is None:
+                raise AgentError("This conversation has no interrupted turn of this agent to continue.")
+            task = self._turn_task(message, interrupted)
             # The trusted task includes the bounded user-authored conversation,
             # not only a context-free follow-up such as "commit" or "continue".
-            action_state = self._action_state(self._policy_task(message, active_context_id))
+            # Continue is judged against the request it continues.
+            action_state = self._action_state(
+                self._policy_task(message if message is not None else interrupted.task, active_context_id)
+            )
             if action_state is not None and hasattr(observer, "handle_policy_event"):
                 action_state.policy_event = observer.handle_policy_event
-            self._record_invocation(agent_key, active_context_id, user_id, message)
+            self._record_invocation(agent_key, active_context_id, user_id, shown_message)
             user_id = user_id or self.context_manager.get_metadata("user_id")
 
             agent = await self.create_agent(agent_key, context_path)
             agent_config = self.config.get_agent(agent_key)
-            model_config = self.config.get_model(agent_config.primary_model)
-            agent_input = parse_agent_input(message)
-            run_input: Union[str, List[Any]] = agent_input.items
+            agent_input = (
+                parse_agent_input(message) if message is not None
+                else AgentInput(CONTINUE_TEXT, multimodal=False)
+            )
 
             run_ctx = GridRunContext(
                 factory=self,
@@ -1988,40 +2465,71 @@ class AgentFactory:
                 container_id=self.container_id,
                 action_state=action_state,
                 stream_observer=observer,
+                run_control=control,
             )
+            control.action_state = action_state
             preamble = await self._auto_run_preamble(
                 agent_key,
                 agent_config,
                 agent,
                 run_ctx,
-                user_message=message if agent_input.is_text else "",
+                user_message=message if message is not None and agent_input.is_text else "",
             )
-            if preamble and agent_input.is_text:
-                run_input = f"{preamble}\n\n[Current user request]\n\n{run_input}"
 
-            # History reaches the model through one channel: the agent's SDK
-            # session, or - for images and models that need their reasoning
-            # replayed - the stored history sent with the input.
-            manual_history = (
-                not agent_input.is_text
-                or self.context_manager.history_has_images()
-                or self._model_requires_manual_history(model_config)
-            )
-            session = None if manual_history else self._get_agent_session(agent_key, active_context_id)
-            if continuing:
-                await self._compact_conversation_if_needed(agent_key, model_config, session)
+            # History reaches the model through the agent's SDK session: every
+            # message, tool call and tool result, images included.
+            session = self._get_agent_session(agent_key, active_context_id)
+            # Past the threshold, the session is summarized before the turn adds to it.
+            await self.compact_session(agent_key, active_context_id)
+            # Where this turn starts in the agent's session: a branch forked at
+            # this turn's message copies the session up to here (fork_conversation).
+            session_mark = {
+                "agent": agent_key,
+                "items": len(await session.get_items()),
+                "epoch": self._session_epoch(active_context_id, agent_key),
+            }
             # A transcript in the prompt only for an agent that joins a
             # conversation its session has not seen (e.g. after routing).
-            include_transcript = (
-                continuing and session is not None and not await session.get_items(limit=1)
-            )
+            include_transcript = continuing and not await session.get_items(limit=1)
             agent.instructions = self._prepare_instructions(
                 agent_key, context_path, include_transcript
             )
-            self._add_user_message(message, agent_input, agent_key, active_context_id)
-            if manual_history:
-                current = [{"role": "user", "content": run_input}] if isinstance(run_input, str) else run_input
-                run_input = self._manual_run_input(current)
+
+            # Claimed right before the request is stored, after the last await,
+            # so an interruption is continued by exactly one turn.
+            resumed = (
+                self.context_manager.take_interruption(active_context_id)
+                if interrupted is not None
+                else None
+            )
+            if message is None and resumed is None:
+                raise AgentError("The interrupted turn was already continued.")
+            run_input: Union[str, List[Any]] = (
+                self._resumed_input(agent_input, resumed, message)
+                if resumed is not None
+                else agent_input.items
+            )
+            if preamble and isinstance(run_input, str):
+                run_input = f"{preamble}\n\n[Current user request]\n\n{run_input}"
+            if message is None:
+                self.context_manager.append_message_to(
+                    active_context_id,
+                    "user",
+                    CONTINUE_TEXT,
+                    metadata={
+                        "context_id": active_context_id,
+                        "agent": agent_key,
+                        "type": CONTINUATION_TYPE,
+                        "turn_id": turn_id,
+                        "session_mark": session_mark,
+                    },
+                )
+            else:
+                extra = {"session_mark": session_mark}
+                if edit_of:
+                    extra["edit_of"] = edit_of
+                self._add_user_message(message, agent_input, agent_key, active_context_id, turn_id, extra)
+            stored = True
 
             run_ctx.session = session
             run_ctx.metadata = self.context_manager.get_all_metadata()
@@ -2032,26 +2540,53 @@ class AgentFactory:
                 input_preview=progress.input_preview,
                 status="running",
                 clear_tool_events=True,
+                task=task,
+                turn_id=turn_id,
             )
-            output, result = await self._run_with_retries(
-                agent,
-                agent_key,
-                run_input,
-                run_ctx,
-                session,
-                stream=stream,
-                observer=observer,
-                progress=progress,
-            )
+            # Graceful Stop needs a streamed run: it ends the stream after a step.
+            if stream:
+                self._run_controls[active_context_id] = control
+            answered = True
+            try:
+                with collecting(generated):
+                    output, result = await self._run_with_retries(
+                        agent,
+                        agent_key,
+                        run_input,
+                        run_ctx,
+                        session,
+                        stream=stream,
+                        observer=observer,
+                        progress=progress,
+                    )
+            except _TurnStopped as stop:
+                interruption = self._record_interruption(
+                    context_id=active_context_id,
+                    agent_key=agent_key,
+                    task=task,
+                    reason=stop.reason,
+                    detail=stop.detail,
+                    progress=progress,
+                    turn_id=turn_id,
+                    images=generated.images,
+                )
+                output, result, answered = interruption.summary(), progress.result, False
 
             marker = f"Context ID: {active_context_id}"
             if marker not in output:
                 output = f"{output.rstrip()}\n\n{marker}"
-            self.context_manager.add_message(
-                "assistant",
-                output,
-                metadata={"context_id": active_context_id, "agent": agent_key, "type": "agent_response"},
-            )
+            if answered:
+                self.context_manager.append_message_to(
+                    active_context_id,
+                    "assistant",
+                    with_images(output, generated.images),
+                    metadata={
+                        "context_id": active_context_id,
+                        "agent": agent_key,
+                        "type": "agent_response",
+                        "turn_id": turn_id,
+                    },
+                )
             execution.end_time = time.time()
             execution.output = output
             execution.tools_used = [
@@ -2066,18 +2601,45 @@ class AgentFactory:
                 output=output,
                 extra={"retry_count": progress.attempt},
             )
-            self._update_pending_agent_run(
-                agent_key=agent_key,
-                active_context_id=active_context_id,
-                input_preview=progress.input_preview,
-                status="completed",
-                retry_count=progress.attempt,
-            )
+            if answered:
+                self._update_pending_agent_run(
+                    agent_key=agent_key,
+                    active_context_id=active_context_id,
+                    input_preview=progress.input_preview,
+                    status="completed",
+                    retry_count=progress.attempt,
+                )
             Logger("agent_factory").log_verbose(f"FULL RESPONSE: {agent_key}", output)
-            return output, active_context_id
+            return output, active_context_id, answered
+        except asyncio.CancelledError:
+            # The hard Stop, or the process shutting down: the task is cancelled
+            # wherever it was. Record it and let the cancellation go on.
+            if stored:
+                self._record_interruption(
+                    context_id=active_context_id,
+                    agent_key=agent_key,
+                    task=task,
+                    reason=StopReason.USER_STOP,
+                    detail="",
+                    progress=progress,
+                    turn_id=turn_id,
+                    images=generated.images,
+                )
+            raise
         except Exception as exc:
             execution.end_time = time.time()
             execution.error = str(exc)
+            if stored:
+                self._record_interruption(
+                    context_id=active_context_id,
+                    agent_key=agent_key,
+                    task=task,
+                    reason=StopReason.ERROR,
+                    detail=str(exc),
+                    progress=progress,
+                    turn_id=turn_id,
+                    images=generated.images,
+                )
             if not progress.recorded_failure:
                 try:
                     self._update_pending_agent_run(
@@ -2098,6 +2660,10 @@ class AgentFactory:
             self.context_manager.add_execution(execution)
             raise
         finally:
+            if active_context_id is not None and self._run_controls.get(active_context_id) is control:
+                del self._run_controls[active_context_id]
+            # Messages sent during the turn that no model call read go back.
+            control.steering.hand_back()
             Logger.deactivate_session_log()
 
     def _build_agent_instructions(
@@ -2655,6 +3221,8 @@ class AgentFactory:
                 pipeline_id=parent_pipeline_id,
                 parent_step_id=parent_step_id,
                 execution_mode="serial_subtree" if parent_pipeline_id else None,
+                # The user's Stop reaches the sub-agent too: it ends after its step.
+                run_control=getattr(getattr(context, "context", None), "run_control", None),
             )
             # A sub-agent reports into its caller's view (the web trace, not the
             # console), through a child that keeps its prose out of the answer
@@ -2690,14 +3258,27 @@ class AgentFactory:
                     context=sub_run_ctx,
                     session=session,
                     max_turns=self.config.get_max_turns(),
+                    run_config=self._run_config(agent_key),
                 )
-                await self._consume_stream(
-                    result,
-                    observer=sub_observer,
-                    agent_key=agent_key,
-                    action_state=sub_run_ctx.action_state,
-                )
-                output = run_output_text(result, f"Agent {agent_key}")
+                control = sub_run_ctx.run_control
+                if control is not None:
+                    control.attach(result)
+                try:
+                    await self._consume_stream(
+                        result,
+                        observer=sub_observer,
+                        agent_key=agent_key,
+                        action_state=sub_run_ctx.action_state,
+                    )
+                finally:
+                    if control is not None:
+                        control.detach(result)
+                if control is not None and control.stop_requested and result.final_output is None:
+                    # Its finished steps are in its session; the caller is told
+                    # it stopped, then stops after this step itself.
+                    output = interrupted_run_report(result, f"Agent {agent_key}", StopRequested())
+                else:
+                    output = run_output_text(result, f"Agent {agent_key}")
             except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
                 # The sub-agent stopped, but its caller goes on: it gets what the
                 # sub-agent did so far instead of a bare error, and can decide

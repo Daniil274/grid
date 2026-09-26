@@ -57,6 +57,12 @@ class ModelConfig(BaseModel):
     fresh attempt instead of waiting out a stalled one. Defaults to the
     provider's timeout.
     """
+    modalities: Optional[List[Literal["text", "image"]]] = None
+    """Output modalities to request, sent as ``modalities`` in the request body.
+    ``[image, text]`` asks an image-generation model (OpenRouter
+    google/gemini-*-image and alike) to answer with pictures; they are shown in
+    the chat and stored with the answer (core.generated_images).
+    """
     preserve_reasoning_content: bool = False
     """When True, reasoning_content from thinking-enabled models is preserved in
     assistant messages that contain tool_calls. Required for providers like
@@ -106,7 +112,8 @@ class AgentConfig(BaseModel):
         default=False,
         description=(
             "Let the model emit several tool calls in one response. The calls "
-            "still run one after another; the gain is one model turn per batch."
+            "still run one after another, in the order the model wrote them; "
+            "the gain is one model turn per batch."
         ),
     )
 
@@ -152,6 +159,16 @@ class ImageProcessingConfig(BaseModel):
     max_height: int = Field(default=512, ge=64, le=4096)
     max_file_size_mb: int = Field(default=10, ge=1, le=100)
     jpeg_quality: int = Field(default=70, ge=1, le=100)
+    max_images_per_request: int = Field(
+        default=6,
+        ge=1,
+        le=100,
+        description=(
+            "Images sent with one model request, newest first; older ones are "
+            "replaced by a note in that request and stay in the session. "
+            "Providers cap this (often at 30), and every image slows the call."
+        ),
+    )
 
 
 class IsolationConfig(BaseModel):

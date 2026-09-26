@@ -96,7 +96,7 @@ agents:
 
         class DummyRunner:
             @staticmethod
-            def run_streamed(agent, message, context, max_turns, session):
+            def run_streamed(agent, message, context, max_turns, session, run_config=None):
                 return dummy_stream
 
         with patch.object(agents, "Runner", DummyRunner):
@@ -153,7 +153,7 @@ agents:
 
         class DummyRunner:
             @staticmethod
-            def run_streamed(agent, message, context, max_turns, session):
+            def run_streamed(agent, message, context, max_turns, session, run_config=None):
                 return dummy_stream
 
         with patch.object(agents, "Runner", DummyRunner):

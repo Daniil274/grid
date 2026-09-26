@@ -38,12 +38,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.config import Config
 from core.agent_factory import AgentFactory
 from core.run_stream import ConsoleStreamObserver
-from core.compact import (
-    compact_conversation,
-    estimate_messages_tokens,
-    to_compact_messages,
-    to_context_messages,
-)
 from core.routing import AutoRouter
 from core.tool_check import ToolIssue, agent_issues, diagnose, summarize
 try:
@@ -162,13 +156,15 @@ def prepare_agent_message(text: str, image_paths: list[str]) -> str:
         return json.dumps(message_dict)
 
 
-def print_token_status(chat_ui: CliChatRenderer, factory: Any, config: Config, agent_key: str) -> None:
-    """The size of the conversation against the agent model's context window."""
-    messages = factory.context_manager.conversation_snapshot()
-    tokens = estimate_messages_tokens(to_compact_messages(messages)) if messages else 0
-    window = config.get_model(config.get_agent(agent_key).primary_model).context_window
-    percent = round(tokens / max(1, window) * 100, 1)
-    chat_ui.print_status(f"Tokens: ~{tokens:,} / {window:,} ({percent}%)", style="bright_black")
+async def print_token_status(chat_ui: CliChatRenderer, factory: Any, config: Config, agent_key: str) -> None:
+    """How full the agent's context is: its session against the model's window."""
+    usage = await factory.context_usage(agent_key)
+    percent = round(usage["tokens"] / max(1, usage["window"]) * 100, 1)
+    chat_ui.print_status(
+        f"Tokens: ~{usage['tokens']:,} / {usage['window']:,} ({percent}%), "
+        f"compacts past ~{usage['threshold']:,}",
+        style="bright_black",
+    )
 
 
 def get_agent_skill_status(config: Config, agent_key: str) -> tuple[list[tuple[str, Path]], list[str]]:
@@ -592,7 +588,7 @@ async def main():
                     chat_ui.print_status(f"Context ID: {last_context_id}", style="bright_black")
                     selected_context_id = last_context_id
 
-                print_token_status(chat_ui, factory, config, agent_key)
+                await print_token_status(chat_ui, factory, config, agent_key)
 
             except Exception as e:
                 print(f"Error: {e}")
@@ -670,20 +666,11 @@ async def main():
                         context_info = factory.get_context_info()
                         print("Get Context - Context information retrieved")
 
-                        current_messages = factory.context_manager.conversation_snapshot()
-                        compact_messages = to_compact_messages(current_messages)
-                        estimated_tokens = estimate_messages_tokens(compact_messages) if compact_messages else 0
-
-                        context_window = None
-                        context_pct = None
-                        try:
-                            agent_config = config.get_agent(agent_key)
-                            model_cfg = config.get_model(agent_config.primary_model)
-                            context_window = getattr(model_cfg, "context_window", None)
-                            if context_window:
-                                context_pct = round((estimated_tokens / max(1, context_window)) * 100, 1)
-                        except Exception:
-                            pass
+                        # What the model reads: the agent's session, not the visible chat.
+                        usage = await factory.context_usage(agent_key)
+                        estimated_tokens = usage["tokens"]
+                        context_window = usage["window"]
+                        context_pct = round(estimated_tokens / max(1, context_window) * 100, 1)
                         
                         print("\n📋 Context info:")
                         print(f"   Messages: {context_info.get('conversation_messages', 0)}")
@@ -732,46 +719,17 @@ async def main():
                     elif user_input.lower() in {'/compact', 'compact'}:
                         print("Compacting context...")
                         try:
-                            messages = factory.context_manager.conversation_snapshot()
-                            if not messages:
-                                print("Context is empty — compaction not needed.")
-                                continue
-
-                            compact_cfg = factory.config.config.compact
-                            compact_messages = to_compact_messages(messages)
-
-                            tokens_before = estimate_messages_tokens(compact_messages)
-
-                            # Get client and model for the current agent
-                            compact_client, compact_model = factory._get_compact_client_and_model(agent_key)
-
-                            result = await compact_conversation(
-                                messages=compact_messages,
-                                llm_client=compact_client,
-                                model=compact_model,
-                                suppress_followup_questions=False,
-                                is_auto_compact=False,
-                                compact_cfg=compact_cfg,
+                            # The agent's session is summarized; the chat stays as it is.
+                            outcome = await factory.compact_session(
+                                agent_key, factory.get_active_context_id(), force=True
                             )
-
-                            if not result.success():
+                            if outcome is None:
+                                print("Nothing was compacted (empty context, or the summary failed - see the log).")
+                            else:
                                 print(
-                                    result.user_display_message
-                                    or "Compaction skipped: result does not reduce context size."
+                                    f"Compact complete: ~{outcome['tokens_before']:,} -> "
+                                    f"~{outcome['tokens_after']:,} tokens."
                                 )
-                                continue
-
-                            factory.context_manager.replace_conversation_history(
-                                to_context_messages(result.compacted_messages)
-                            )
-                            factory._compact_tracking.consecutive_failures = 0
-
-                            tokens_after = getattr(result, 'tokens_after', 0)
-                            tokens_saved = getattr(result, 'tokens_saved', tokens_before - tokens_after)
-                            print(
-                                f"Compact complete: ~{tokens_before} -> ~{tokens_after} tokens, "
-                                f"saved ~{tokens_saved}."
-                            )
                         except Exception as ce:
                             print(f"Compact error: {ce}")
                         continue
@@ -846,7 +804,7 @@ async def main():
                             chat_ui.print_status(f"Context ID: {last_context_id}", style="bright_black")
                             selected_context_id = last_context_id
 
-                        print_token_status(chat_ui, factory, config, agent_key)
+                        await print_token_status(chat_ui, factory, config, agent_key)
 
                     except Exception as e:
                         print(f"Error: {e}")
