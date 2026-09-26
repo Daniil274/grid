@@ -21,6 +21,7 @@ from typing import Any, Dict, Optional, Tuple
 import yaml
 
 from core.config import Config
+from schemas.schemas import PersonalAgentsPolicy
 
 logger = logging.getLogger("grid.web_chat.deployment")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +115,12 @@ class Deployment:
         system's factory in the space works in it, so the base config decides.
         """
         return isolation_enabled(self.config)
+
+    @property
+    def personal_agents_policy(self) -> PersonalAgentsPolicy:
+        """What users may build their own agents from: the catalog's
+        ``personal_agents``, or the single system's."""
+        return (self.catalog or self.config).config.personal_agents
 
     @property
     def policy_config(self) -> Optional[Config]:

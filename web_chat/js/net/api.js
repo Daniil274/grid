@@ -48,4 +48,9 @@ export const api = {
   saveSettings: (config) => request("/api/settings/structured", json("PUT", { config })),
   saveYaml: (yamlContent) => request("/api/settings/yaml", json("PUT", { yaml_content: yamlContent })),
   signOut: () => request("/api/auth/logout", { method: "POST" }),
+  /** The user's own agents and the templates they may start from. */
+  agents: () => request("/api/agents"),
+  createAgent: (spec) => request("/api/agents", json("POST", spec)),
+  updateAgent: (key, spec) => request(`/api/agents/${encodeURIComponent(key)}`, json("PUT", spec)),
+  deleteAgent: (key) => request(`/api/agents/${encodeURIComponent(key)}`, { method: "DELETE" }),
 };

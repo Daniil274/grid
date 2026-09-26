@@ -91,9 +91,16 @@ class SystemRegistry:
         build_factory: Callable[[Config], Any],
         catalog: Optional[Config] = None,
         working_directory: Optional[str] = None,
+        customize: Optional[Callable[[str, Config], set[str]]] = None,
     ) -> None:
+        """``customize(system_key, config)`` adjusts a system's config once, when
+        it is first loaded - the space's personal agents (web_chat.personal_agents) -
+        and returns the agent keys it changed."""
         self._base_config = base_config
         self._build_factory = build_factory
+        self._customize = customize
+        # The configs customized so far, by system key.
+        self._customized: Dict[str, Config] = {}
         self._catalog = catalog
         # With a catalog the router picks between systems; without one it can
         # still pick between the agents of the single loaded system.
@@ -119,7 +126,7 @@ class SystemRegistry:
                 SystemInfo(
                     key=self._base_key,
                     name=_title(self._base_key),
-                    description=str(self._base_config.config_path),
+                    description="",
                     config_path=self._base_config.config_path,
                 )
             ]
@@ -140,9 +147,23 @@ class SystemRegistry:
         return self._router.default_system() if self.has_catalog else self._base_key
 
     def config(self, system_key: str) -> Config:
-        if not self.has_catalog or system_key not in self._router.systems():
-            return self._base_config
-        return self._router.system_config(system_key)
+        routed = self.has_catalog and system_key in self._router.systems()
+        config = self._router.system_config(system_key) if routed else self._base_config
+        key = system_key if routed else self._base_key
+        if self._customize is not None and key not in self._customized:
+            self._customize(key, config)
+            self._customized[key] = config
+        return config
+
+    def recustomize(self) -> Dict[str, set[str]]:
+        """Customize the loaded configs again; the changed agent keys by system.
+
+        Factories built earlier keep built agents; the caller has them forget
+        the changed ones.
+        """
+        if self._customize is None:
+            return {}
+        return {key: self._customize(key, config) for key, config in self._customized.items()}
 
     def factory(self, system_key: str) -> Any:
         """The factory for a system, built on first use and cached after."""

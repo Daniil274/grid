@@ -232,7 +232,7 @@ class AgentTurn:
                 StepKind.PREPARE,
                 "Preparing the runtime",
                 subtitle=f"{resolution.system} · {resolution.agent}",
-                body=f"Workspace: {space.workspace_path}",
+                body=f"Workspace: {space.workspace_label}",
             )
             await space.warm_agent(resolution.agent, resolution.system)
             self._recorder.close(step, title=f"Runtime ready · {label}")

@@ -8,7 +8,8 @@ space is what one user owns on top of them:
 - the workspace the agents work in, and the container when isolation is on,
 - a factory per system, all sharing the space's conversations, so routing a
   follow-up to another system keeps the conversation intact,
-- the turns running in the space (web_chat.turns).
+- the turns running in the space (web_chat.turns),
+- with a layout of its own, the user's personal agents (web_chat.personal_agents).
 
 Where the state lives is the space's :class:`SpaceLayout`. A server for one
 person keeps the layout it always had: conversations and sessions in the base
@@ -24,17 +25,20 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TypeVar
 
 from core.agent_factory import AgentFactory
 from core.config import Config
 from core.context import ContextManager
 from core.managers.container_manager import ContainerManager
 from web_chat.deployment import Deployment, isolation_enabled
+from web_chat.personal_agents import PersonalAgentError, PersonalAgents, PersonalAgentStore
 from web_chat.systems import Resolution, SystemRegistry
 from web_chat.turns import TurnBoard
 
 logger = logging.getLogger("grid.web_chat.space")
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,8 @@ class SpaceLayout:
     agent_sessions: Path
     #: The directory the agents work in.
     workspace: Path
+    #: The user's personal agents.
+    personal_agents: Path
 
     @classmethod
     def under(cls, root: Path) -> "SpaceLayout":
@@ -55,6 +61,7 @@ class SpaceLayout:
             conversations=root / "conversations.json",
             agent_sessions=root / "agent_sessions.db",
             workspace=root / "workspace",
+            personal_agents=root / "agents.json",
         )
 
 
@@ -95,6 +102,7 @@ class UserSpace:
         self.workspace_path: Path
         self.conversations_path: Path
         self.conversations: ContextManager
+        self.personal_agents: Optional[PersonalAgents]
         self.registry: SystemRegistry
 
         self._build()
@@ -126,11 +134,20 @@ class UserSpace:
             persist_path=str(self.conversations_path),
         )
 
+        self.personal_agents = (
+            PersonalAgents(
+                PersonalAgentStore(self.layout.personal_agents),
+                lambda: self.deployment.personal_agents_policy,
+            )
+            if self.layout is not None
+            else None
+        )
         self.registry = SystemRegistry(
             base_config=config,
             catalog=self.deployment.catalog,
             build_factory=self._build_factory,
             working_directory=str(self.workspace_path) if self.layout else self.deployment.working_directory,
+            customize=self.personal_agents.apply if self.personal_agents is not None else None,
         )
         self._prepared.clear()
 
@@ -193,6 +210,12 @@ class UserSpace:
             session_db_path=str(self.layout.agent_sessions) if self.layout else None,
         )
 
+    @property
+    def workspace_label(self) -> str:
+        """The workspace as shown to the user: its path on a one-user server;
+        on a shared one, where it lives on the server is not the user's business."""
+        return str(self.workspace_path) if self.layout is None else "your workspace"
+
     # -- systems -----------------------------------------------------------
     @property
     def factory(self) -> AgentFactory:
@@ -250,6 +273,21 @@ class UserSpace:
             logger.warning(
                 "Background task %s failed", task.get_name(), exc_info=task.exception()
             )
+
+    # -- personal agents -----------------------------------------------------
+    def change_personal_agents(self, edit: Callable[[PersonalAgents], T]) -> T:
+        """Apply *edit* to the personal agents, then bring configs and factories
+        up to date: the next turn uses the agents as they are now."""
+        if self.personal_agents is None:
+            raise PersonalAgentError("Personal agents need a server with accounts.")
+        result = edit(self.personal_agents)
+        factories = self.registry.built_factories()
+        for system, keys in self.registry.recustomize().items():
+            for key in keys:
+                if system in factories:
+                    factories[system].forget_agent(key)
+                self._prepared.discard((system, key))
+        return result
 
     # -- action reviews ----------------------------------------------------
     def pending_action_reviews(self) -> list[dict[str, Any]]:

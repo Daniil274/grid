@@ -70,6 +70,7 @@ class _DummySpace:
         self.container_id = None
         self.registry = _DummyRegistry()
         self.turns = TurnBoard()
+        self.personal_agents = None
         self._context_manager = _DummyContextManager()
         self._reviews = [
             {

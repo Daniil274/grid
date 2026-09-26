@@ -3526,6 +3526,12 @@ class AgentFactory:
         self._agent_cache.clear()
         self._tool_cache.clear()
 
+    def forget_agent(self, agent_key: str) -> None:
+        """Drop the built agent *agent_key*: its next use builds it from the
+        config as it is now. A run already using it is not affected."""
+        self._agent_cache.pop(agent_key, None)
+        self._logged_agents.discard(agent_key)
+
     async def cleanup(self) -> None:
         """Cleanup resources."""
         gate = getattr(self, "action_gate", None)

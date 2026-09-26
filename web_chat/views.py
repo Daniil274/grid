@@ -87,8 +87,10 @@ def issue_payload(compute: Callable[[], Any]) -> dict[str, Any]:
     return {"items": [issue.to_dict() for issue in issues], "summary": summarize(issues)}
 
 
-def agent_options(registry: SystemRegistry, system_key: Optional[str] = None) -> list[dict[str, Any]]:
-    """Agents of one system, as the picker shows them."""
+def agent_options(
+    registry: SystemRegistry, system_key: Optional[str] = None, personal: frozenset[str] = frozenset()
+) -> list[dict[str, Any]]:
+    """Agents of one system, as the picker shows them; *personal* are the user's own."""
     system = system_key or registry.default_key()
     models = registry.config(system).config.models or {}
     options: list[dict[str, Any]] = []
@@ -106,6 +108,7 @@ def agent_options(registry: SystemRegistry, system_key: Optional[str] = None) ->
                 "tool_count": len(agent.tools or []),
                 "mcp_enabled": bool(getattr(agent, "mcp_enabled", False)),
                 "routable": bool(getattr(agent, "routable", True)),
+                "personal": agent_key in personal,
                 # Tools that will fail and why; shown before the agent is used.
                 "issues": issue_payload(lambda key=agent_key: registry.agent_issues(system, key)),
             }
@@ -113,12 +116,18 @@ def agent_options(registry: SystemRegistry, system_key: Optional[str] = None) ->
     return options
 
 
-def system_options(registry: SystemRegistry) -> list[dict[str, Any]]:
-    """Every selectable system with its agents - the whole picker payload."""
+def system_options(
+    registry: SystemRegistry, personal: frozenset[str] = frozenset(), *, reveal_paths: bool = True
+) -> list[dict[str, Any]]:
+    """Every selectable system with its agents - the whole picker payload.
+
+    ``reveal_paths`` False leaves out where the configs live on the server:
+    users who are not admins have no business with its file system.
+    """
     options: list[dict[str, Any]] = []
     for system in registry.systems():
         try:
-            agents = agent_options(registry, system.key)
+            agents = agent_options(registry, system.key, personal)
             default_agent = registry.config(system.key).get_default_agent()
             error = ""
             issues = issue_payload(
@@ -132,7 +141,7 @@ def system_options(registry: SystemRegistry) -> list[dict[str, Any]]:
                 "key": system.key,
                 "name": system.name,
                 "description": system.description,
-                "config_path": str(system.config_path),
+                "config_path": str(system.config_path) if reveal_paths else "",
                 "default_agent": default_agent,
                 "agents": agents,
                 "error": error,

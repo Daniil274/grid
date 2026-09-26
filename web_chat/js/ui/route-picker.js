@@ -17,7 +17,12 @@ import { ICONS } from "./icons.js";
 const AUTO = null;
 
 const agentMeta = (agent) =>
-  [agent.model_description || agent.model_name || agent.model_key, `${agent.tool_count} tools`, agent.mcp_enabled && "MCP"]
+  [
+    agent.personal && "yours",
+    agent.model_description || agent.model_name || agent.model_key,
+    `${agent.tool_count} tools`,
+    agent.mcp_enabled && "MCP",
+  ]
     .filter(Boolean)
     .join(" · ");
 

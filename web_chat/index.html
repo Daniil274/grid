@@ -39,6 +39,7 @@
       </div>
 
       <div class="rail__foot">
+        <button class="btn btn--ghost" id="open-agents" type="button" data-icon="agent" hidden>My agents</button>
         <button class="btn btn--ghost" id="open-settings" type="button" data-icon="sliders">Configuration</button>
         <a class="btn btn--ghost" href="/timeline" target="_blank" rel="noreferrer" data-icon="timeline">Timeline</a>
         <button class="iconBtn" id="theme-toggle" type="button" data-icon="theme"></button>
@@ -128,6 +129,38 @@
         </div>
       </footer>
     </main>
+  </div>
+
+  <div class="drawer drawer--simple" id="agents" role="dialog" aria-label="My agents">
+    <div class="drawer__backdrop" id="agents-backdrop"></div>
+    <div class="drawer__panel">
+      <header class="drawer__head">
+        <div>
+          <h2>My agents</h2>
+          <p>Agents of your own, built on the templates this server offers. Only you see them.</p>
+        </div>
+        <button class="iconBtn" id="agents-close" type="button" aria-label="Close my agents" data-icon="close"></button>
+      </header>
+      <div class="drawer__body">
+        <div class="master">
+          <div>
+            <div class="master__head">
+              <h3>Agents</h3>
+              <button class="btn btn--ghost btn--xs" id="agents-new" type="button" data-icon="plus">New</button>
+            </div>
+            <div class="recordList" id="agents-list"></div>
+          </div>
+          <div class="master__detail" id="agents-editor"></div>
+        </div>
+      </div>
+      <footer class="drawer__foot">
+        <span class="drawer__status" id="agents-status"></span>
+        <div class="drawer__actions">
+          <button class="btn btn--danger" id="agents-delete" type="button" hidden>Delete</button>
+          <button class="btn btn--primary" id="agents-save" type="button">Save</button>
+        </div>
+      </footer>
+    </div>
   </div>
 
   <div class="drawer" id="settings" role="dialog" aria-label="System configuration">

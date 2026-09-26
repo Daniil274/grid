@@ -4,7 +4,7 @@ These are copies of the main schemas to avoid circular imports.
 """
 
 from typing import List, Dict, Any, Optional, Union, Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from enum import Enum
 from .action_policy import ActionPolicyConfig
 
@@ -252,6 +252,30 @@ class RoutingConfig(BaseModel):
     )
 
 
+class PersonalAgentsPolicy(BaseModel):
+    """What users of a multi-user web chat may build their own agents from.
+
+    A personal agent is derived from a template - an agent of a system listed
+    here - and can only narrow it: the template's tools or fewer, one of the
+    ``models`` (or the template's own), and the owner's instructions added to
+    the template's prompt (web_chat.personal_agents).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    templates: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="System key -> keys of its agents users may start from",
+    )
+    models: List[str] = Field(
+        default_factory=list,
+        description="Model keys a user may choose besides the template's own",
+    )
+    max_agents: int = Field(default=20, ge=1, le=200)
+    max_instructions_chars: int = Field(default=8000, ge=100, le=100_000)
+
+
 class GridConfig(BaseModel):
     """Complete Grid system configuration."""
     settings: Settings = Field(default_factory=Settings)
@@ -265,6 +289,10 @@ class GridConfig(BaseModel):
     scenarios: Optional[Dict[str, Any]] = None
     voice: Dict[str, Any] = Field(default_factory=dict, description="Local web speech and voice routing settings")
     routing: RoutingConfig = Field(default_factory=RoutingConfig, description="Automatic system and agent routing")
+    personal_agents: PersonalAgentsPolicy = Field(
+        default_factory=PersonalAgentsPolicy,
+        description="Agents users of a multi-user web chat may build for themselves",
+    )
     
     @field_validator('agents')
     @classmethod

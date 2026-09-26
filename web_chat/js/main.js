@@ -11,6 +11,7 @@ import { $, $$, h, icon } from "./lib/dom.js";
 import { createStore } from "./lib/store.js";
 import { api } from "./net/api.js";
 import { ChatController } from "./chat.js";
+import { PersonalAgentsDrawer } from "./agents/drawer.js";
 import { SettingsDrawer } from "./settings/drawer.js";
 import { createRoutePicker } from "./ui/route-picker.js";
 import { createComposer } from "./ui/composer.js";
@@ -46,6 +47,8 @@ const store = createStore({
   // The signed-in user ({id, username, role}); `accounts` is false on a one-user server.
   user: null,
   accounts: false,
+  // The server lets this user build agents of their own.
+  personalAgents: false,
 });
 
 /** Icon-only buttons declare their glyph in markup; fill them in one pass. */
@@ -224,12 +227,31 @@ async function boot() {
     { onSaved: reloadRuntime },
   );
 
+  const personalAgents = new PersonalAgentsDrawer(
+    {
+      drawer: $("#agents"),
+      backdrop: $("#agents-backdrop"),
+      closeButton: $("#agents-close"),
+      newButton: $("#agents-new"),
+      list: $("#agents-list"),
+      editor: $("#agents-editor"),
+      status: $("#agents-status"),
+      saveButton: $("#agents-save"),
+      deleteButton: $("#agents-delete"),
+    },
+    { onChanged: reloadRuntime },
+  );
+
   // -- chrome ------------------------------------------------------------
   const openRail = () => document.body.classList.add("rail-open");
   const closeRail = () => document.body.classList.remove("rail-open");
   $("#toggle-rail").addEventListener("click", openRail);
   $("#sidebar-scrim").addEventListener("click", closeRail);
   $("#open-settings").addEventListener("click", () => settings.open());
+  $("#open-agents").addEventListener("click", () => {
+    closeRail();
+    personalAgents.open();
+  });
   $("#sign-out").addEventListener("click", async () => {
     await api.signOut();
     location.replace("/login");
@@ -268,16 +290,18 @@ async function boot() {
       contextId: store.get().contextId ?? bootstrap.current_context_id ?? null,
       user: bootstrap.user ?? null,
       accounts: Boolean(bootstrap.accounts),
+      personalAgents: Boolean(bootstrap.personal_agents),
     });
     await refreshConversations();
   }
 
   // Who is signed in, on a server with accounts; the system configs are
   // shared by all users, so only admins get to open them.
-  store.subscribe(({ user, accounts }) => {
+  store.subscribe(({ user, accounts, personalAgents: ownAgents }) => {
     $("#account").hidden = !accounts;
     $("#account-name").textContent = user?.username ?? "";
     $("#open-settings").hidden = user?.role !== "admin";
+    $("#open-agents").hidden = !ownAgents;
   });
 
   store.subscribe(({ workspacePath, isolated, streaming }) => {

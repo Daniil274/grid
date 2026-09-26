@@ -229,6 +229,8 @@ def _registry(*, agents: dict[str, str], hang: bool = False) -> SystemRegistry:
     registry = object.__new__(SystemRegistry)
     registry._base_config = config
     registry._build_factory = lambda cfg: SimpleNamespace(config=cfg)
+    registry._customize = None
+    registry._customized = {}
     registry._catalog = None
     registry._router = SimpleNamespace(router=SimpleNamespace(choose=choose))
     registry._factories = {}

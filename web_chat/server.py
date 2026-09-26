@@ -108,6 +108,9 @@ class WebChatServer:
         api = APIRouter(dependencies=identified)
         self._register_pages()
         self._register_routes(api)
+        from web_chat.agents_api import register_personal_agent_routes
+
+        register_personal_agent_routes(api, self.current_space)
         if auth is not None:
             auth.register_routes(self.app, guard=self._guard, current_user=self.current_user)
         from web_chat.voice import register_voice_routes
@@ -232,16 +235,23 @@ class WebChatServer:
             space: UserSpace = Depends(current_space), user: User = Depends(current_user)
         ) -> JSONResponse:
             registry = space.registry
+            personal = space.personal_agents
             return JSONResponse(
                 {
                     "user": {"id": user.id, "username": user.username, "role": user.role},
                     "accounts": self.auth is not None,
-                    "systems": system_options(registry),
+                    "personal_agents": personal is not None and personal.enabled,
+                    "systems": system_options(
+                        registry,
+                        frozenset(personal.keys()) if personal else frozenset(),
+                        reveal_paths=user.is_admin,
+                    ),
                     "default_system": registry.default_key(),
                     "routing_enabled": registry.can_route,
                     "multi_system": registry.has_catalog,
                     "current_context_id": space.context_manager().get_current_context_id(),
-                    "workspace_path": str(space.workspace_path),
+                    # Where the workspace lives on the server: for admins only.
+                    "workspace_path": str(space.workspace_path) if user.is_admin else "",
                     "isolation_enabled": bool(space.container_id),
                 }
             )

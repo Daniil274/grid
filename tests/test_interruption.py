@@ -443,7 +443,7 @@ async def test_web_stop_then_continue_over_the_real_factory(factory):
         )
 
     space = SimpleNamespace(
-        context_manager=lambda: manager, workspace_path=".", user_id="test", factory=factory,
+        context_manager=lambda: manager, workspace_path=".", workspace_label=".", user_id="test", factory=factory,
         warm_agent=AsyncMock(), resolve_turn=resolve_turn,
         update_conversation_metadata=lambda ctx, **updates: manager.update_context_metadata(
             ctx, {key: value for key, value in updates.items() if value is not None}

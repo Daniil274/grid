@@ -64,7 +64,7 @@ def space_for(run, *, request_stop=lambda context_id: False, continue_agent=None
         agent_issues=lambda system, agent: [],
     )
     return SimpleNamespace(
-        context_manager=lambda: manager, workspace_path='.', user_id='test',
+        context_manager=lambda: manager, workspace_path='.', workspace_label='.', user_id='test',
         factory=factory, warm_agent=AsyncMock(), resolve_turn=resolve_turn,
         update_conversation_metadata=lambda *a, **kw: None,
         registry=registry, turns=TurnBoard(), deployment=SimpleNamespace(),
