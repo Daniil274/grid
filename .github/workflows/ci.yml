@@ -11,6 +11,10 @@ on:
       - "refactor/**"
   workflow_dispatch:
 
+# Read-only token: nothing here pushes, comments or releases.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

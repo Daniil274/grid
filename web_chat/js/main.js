@@ -336,6 +336,8 @@ async function boot() {
     $("#open-settings").hidden = user?.role !== "admin";
     $("#open-admin").hidden = !accounts || user?.role !== "admin";
     $("#open-agents").hidden = !ownAgents;
+    // The timeline is the operator's local tool (grid-timeline), not the site's.
+    $("#open-timeline").hidden = accounts;
   });
 
   store.subscribe(({ workspacePath, isolated, streaming }) => {

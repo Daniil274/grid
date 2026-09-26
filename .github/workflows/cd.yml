@@ -9,6 +9,10 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Read-only token: nothing here pushes, comments or releases.
+permissions:
+  contents: read
+
 jobs:
   package:
     runs-on: ubuntu-latest
