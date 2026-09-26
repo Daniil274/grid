@@ -89,7 +89,7 @@ settings editor preserves the `voice:` section.
 ## Verification
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests/test_web_voice.py tests/test_web_chat_session.py tests/test_web_chat_runtime.py tests/test_web_ui_routes.py tests/test_windows_speech.py tests/test_voice_turns.py -q
+.venv\Scripts\python.exe -m pytest tests/test_web_voice.py tests/test_web_chat_session.py tests/test_web_space.py tests/test_web_ui_routes.py tests/test_windows_speech.py tests/test_voice_turns.py -q
 node --test tests/voice_client.test.cjs tests/voice_conversation.test.cjs
 ```
 

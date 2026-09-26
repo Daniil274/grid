@@ -5,7 +5,9 @@ from fastapi.testclient import TestClient
 
 from timeline.server import create_app as create_timeline_app
 from web_chat.server import WebChatServer
+from web_chat.spaces import SpacePool
 from web_chat.systems import SystemInfo
+from web_chat.turns import TurnBoard
 
 
 class _DummyContextManager:
@@ -52,19 +54,19 @@ class _DummyRegistry:
         return agent_key in self.AGENTS
 
 
-class _DummyRuntime:
+class _DummySpace:
     def __init__(self) -> None:
         self.config = SimpleNamespace(
             config=SimpleNamespace(
                 settings=SimpleNamespace(default_agent="test_agent")
             )
         )
+        self.user_id = "default_user"
         self.workspace_path = "workspace/test"
-        self.config_path = Path("config.yaml")
-        self.persist_path = "data/test"
+        self.conversations_path = "data/test/context.json"
         self.container_id = None
-        self.action_review_token = "operator-token"
         self.registry = _DummyRegistry()
+        self.turns = TurnBoard()
         self._context_manager = _DummyContextManager()
         self._reviews = [
             {
@@ -79,7 +81,11 @@ class _DummyRuntime:
             }
         ]
 
-    async def warm_default_agent(self) -> None:
+    @property
+    def idle(self) -> bool:
+        return self.turns.idle
+
+    async def close(self) -> None:
         return None
 
     def schedule_warmup(self) -> None:
@@ -104,6 +110,16 @@ class _DummyRuntime:
         self.review_resolution = (approval_id, approve)
         return True
 
+
+class _DummyDeployment:
+    config_path = Path("config.yaml")
+
+    def voice_source(self):
+        return self.config_path, None
+
+    def voice_config_dict(self):
+        return {}
+
     def config_dict(self):
         return {
             "agents": {
@@ -126,6 +142,16 @@ class _DummyRuntime:
         }
 
 
+def _server(space=None) -> WebChatServer:
+    """A single-user server lending *space* to every request."""
+    space = space or _DummySpace()
+    return WebChatServer(
+        _DummyDeployment(),
+        SpacePool(lambda user_id: space),
+        action_review_token="operator-token",
+    )
+
+
 def test_timeline_index_serves_dashboard_html():
     client = TestClient(create_timeline_app())
 
@@ -136,7 +162,7 @@ def test_timeline_index_serves_dashboard_html():
 
 
 def test_web_chat_index_and_bootstrap_are_available():
-    client = TestClient(WebChatServer(_DummyRuntime()).app)
+    client = TestClient(_server().app)
 
     index_response = client.get("/")
     bootstrap_response = client.get("/api/chat/bootstrap")
@@ -148,8 +174,8 @@ def test_web_chat_index_and_bootstrap_are_available():
 
 
 def test_action_review_routes_list_and_resolve_pending_review():
-    runtime = _DummyRuntime()
-    client = TestClient(WebChatServer(runtime).app)
+    space = _DummySpace()
+    client = TestClient(_server(space).app)
 
     headers = {"X-Grid-Action-Review-Token": "operator-token"}
     pending = client.get("/api/action-policy/reviews", headers=headers)
@@ -163,11 +189,11 @@ def test_action_review_routes_list_and_resolve_pending_review():
     assert pending.json()[0]["approval_id"] == "review-1"
     assert "arguments" not in pending.json()[0]
     assert approved.status_code == 200
-    assert runtime.review_resolution == ("review-1", True)
+    assert space.review_resolution == ("review-1", True)
 
 
 def test_action_review_route_rejects_unknown_or_expired_review():
-    client = TestClient(WebChatServer(_DummyRuntime()).app)
+    client = TestClient(_server().app)
 
     response = client.post(
         "/api/action-policy/reviews/missing",
@@ -179,27 +205,28 @@ def test_action_review_route_rejects_unknown_or_expired_review():
 
 
 def test_action_review_routes_require_the_operator_token():
-    client = TestClient(WebChatServer(_DummyRuntime()).app)
+    client = TestClient(_server().app)
 
     assert client.get("/api/action-policy/reviews").status_code == 403
 
 
 def _chat_server_with_contexts():
+    """(space, its conversations, a client of a server lending the space)."""
     from core.context import ContextManager
 
-    runtime = _DummyRuntime()
+    space = _DummySpace()
     manager = ContextManager()
-    runtime._context_manager = manager
+    space._context_manager = manager
     for context_id, text in (("ctx-a", "first chat"), ("ctx-b", "second chat")):
         manager.start_new_context(context_id)
         manager.add_message("user", text)
     manager.add_tool_result_as_message("Agent", "sub-agent report")
-    server = WebChatServer(runtime)
-    return server, manager, TestClient(server.app)
+    server = _server(space)
+    return space, manager, TestClient(server.app)
 
 
 def test_web_chat_renames_a_conversation_and_keeps_the_title():
-    server, manager, client = _chat_server_with_contexts()
+    space, manager, client = _chat_server_with_contexts()
 
     response = client.patch("/api/chat/conversations/ctx-a", json={"title": "  My   chat "})
 
@@ -211,13 +238,13 @@ def test_web_chat_renames_a_conversation_and_keeps_the_title():
 
 
 def test_web_chat_deletes_a_conversation_but_not_a_running_one():
-    server, manager, client = _chat_server_with_contexts()
+    space, manager, client = _chat_server_with_contexts()
 
     class Running:
         def done(self):
             return False
 
-    server._chat_turns["ctx-a"] = (SimpleNamespace(message="m", elapsed_ms=5), Running())
+    space.turns.register("ctx-a", SimpleNamespace(message="m", elapsed_ms=5), Running())
     assert client.delete("/api/chat/conversations/ctx-a").status_code == 409
     listed = {item["id"]: item for item in client.get("/api/chat/conversations").json()}
     assert listed["ctx-a"]["active"] is True and listed["ctx-b"]["active"] is False

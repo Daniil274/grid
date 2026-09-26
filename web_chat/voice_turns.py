@@ -24,9 +24,9 @@ A failed decision authorizes nothing: HTTP 503, the phrase is kept.
 """
 
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from core.decisions import DecisionsModel
@@ -94,9 +94,9 @@ def endings(text: str) -> Dict[str, str]:
     return {f"e{index}": " ".join(words[index:]) for index in range(min(len(words), _MAX_ENDINGS))}
 
 
-def _chats(runtime: Any) -> List[Dict[str, str]]:
+def _chats(space: Any) -> List[Dict[str, str]]:
     """Recent conversations a phrase may name: one row per conversation."""
-    manager = runtime.context_manager()
+    manager = space.context_manager()
     rows = []
     for view in manager.conversation_views():
         metadata = view["metadata"]
@@ -110,12 +110,12 @@ def _chats(runtime: Any) -> List[Dict[str, str]]:
     return rows[:_MAX_CHATS]
 
 
-def _agents(runtime: Any) -> List[Dict[str, Optional[str]]]:
+def _agents(space: Any) -> List[Dict[str, Optional[str]]]:
     """Every agent a phrase may pick, and "automatic"."""
     options: List[Dict[str, Optional[str]]] = [
         {"system": None, "agent": None, "label": "Automatic: let the router choose the system and agent"}
     ]
-    registry = runtime.registry
+    registry = space.registry
     for system in registry.systems():
         try:
             for key, agent in registry.agents(system.key).items():
@@ -129,15 +129,15 @@ def _agents(runtime: Any) -> List[Dict[str, Optional[str]]]:
     return options
 
 
-def _decision_model(runtime: Any):
-    config = runtime.voice_config_dict()
+def _decision_model(deployment: Any):
+    config = deployment.voice_config_dict()
     voice = config.get("voice") or {}
     if not voice.get("enabled", True):
         raise HTTPException(403, "Voice is disabled")
     key = voice.get("decision_model") or (config.get("routing") or {}).get("model")
     if not key:
         raise HTTPException(503, "Configure voice.decision_model for semantic turn control")
-    _, source = runtime.voice_source()
+    _, source = deployment.voice_source()
     return DecisionsModel.from_config(source, key), key
 
 
@@ -157,7 +157,7 @@ def _choice(answers: dict, key: str, allowed) -> str:
 NO_TEXT = "none"
 
 
-async def _argument(runtime: Any, model: DecisionsModel, command: str, payload: TurnRequest) -> Optional[dict]:
+async def _argument(space: Any, model: DecisionsModel, command: str, payload: TurnRequest) -> Optional[dict]:
     """The command's argument, chosen from what exists; None when it takes none.
 
     For a text argument, ``{"text": None}`` means the phrase has none yet.
@@ -184,7 +184,7 @@ async def _argument(runtime: Any, model: DecisionsModel, command: str, payload: 
         choice = _choice(answers, "span", criteria)
         return {"text": None if choice == NO_TEXT else candidates[choice]}
     if command == "open_chat":
-        chats = _chats(runtime)
+        chats = _chats(space)
         if not chats:
             return None
         criteria = {f"c{index}": row["title"] for index, row in enumerate(chats)}
@@ -196,7 +196,7 @@ async def _argument(runtime: Any, model: DecisionsModel, command: str, payload: 
         row = chats[int(_choice(answers, "chat", criteria)[1:])]
         return {"context_id": row["id"], "title": row["title"]}
     if command == "choose_agent":
-        options = _agents(runtime)
+        options = _agents(space)
         criteria = {f"a{index}": option["label"] for index, option in enumerate(options)}
         answers = await _ask(model, {"speech": payload.text}, {"agent": {
             "type": "choice",
@@ -208,11 +208,14 @@ async def _argument(runtime: Any, model: DecisionsModel, command: str, payload: 
     return None
 
 
-def register_turn_routes(app, runtime):
-    @app.post("/api/voice/decide")
-    async def decide(payload: TurnRequest):
+def register_turn_routes(router: Any, current_space: Callable[..., Any]) -> None:
+    """Register ``/api/voice/decide`` on *router*; *current_space* is the
+    dependency that lends the asking user's space (web_chat.server)."""
+
+    @router.post("/api/voice/decide")
+    async def decide(payload: TurnRequest, space: Any = Depends(current_space)):
         try:
-            model, model_key = _decision_model(runtime)
+            model, model_key = _decision_model(space.deployment)
         except HTTPException:
             raise
         except Exception as exc:
@@ -238,7 +241,7 @@ def register_turn_routes(app, runtime):
                 "criteria": COMMANDS,
             }})
             command = _choice(answers, "command", COMMANDS)
-            argument = await _argument(runtime, model, command, payload)
+            argument = await _argument(space, model, command, payload)
         except Exception as exc:
             raise HTTPException(503, "Модель управления разговором недоступна; реплика сохранена, действие не запущено.") from exc
         awaiting_text = command in TEXT_ARGUMENTS and argument is not None and argument["text"] is None

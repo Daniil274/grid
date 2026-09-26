@@ -14,13 +14,13 @@ Thin, per-app service around :class:`core.speech_processor.SpeechProcessor`:
 - No models are loaded or downloaded at import/startup/status time; status
   uses :func:`importlib.util.find_spec` only (never imports torch or
   faster-whisper).
-- Configuration is re-read from ``runtime.voice_config_dict()`` - the routing
+- Configuration is re-read from ``deployment.voice_config_dict()`` - the routing
   catalog when the chat routes across systems, else the system's config - on
   each request and
   deep-merged over defaults without mutating the defaults. Model/device
   changes of an already loaded model require a service restart.
 
-Routes (registered via ``register_voice_routes(app, runtime)``):
+Routes (registered via ``register_voice_routes(app, deployment)``):
 
 - ``GET  /api/voice/status``
 - ``POST /api/voice/transcribe``  — raw ``audio/wav`` body (not multipart),
@@ -45,7 +45,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -269,8 +269,9 @@ def _silence_wav(duration_sec: float = 0.05, sample_rate: int = 16000) -> bytes:
 class VoiceService:
     """Per-application voice backend owning one core SpeechProcessor."""
 
-    def __init__(self, runtime: Any) -> None:
-        self._runtime = runtime
+    def __init__(self, deployment: Any) -> None:
+        """*deployment* supplies the voice settings (web_chat.deployment)."""
+        self._deployment = deployment
         self._processor = SpeechProcessor(self.voice_config())
         self._stt_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="grid-voice-stt"
@@ -293,7 +294,7 @@ class VoiceService:
 
     def _config_parent(self) -> Path:
         try:
-            config_path = Path(str(self._runtime.voice_source()[0] or ""))
+            config_path = Path(str(self._deployment.voice_source()[0] or ""))
         except Exception:
             config_path = Path()
         parent = config_path.parent if str(config_path) else Path()
@@ -302,7 +303,7 @@ class VoiceService:
     def voice_config(self) -> Dict[str, Any]:
         """Freshly read + merged voice config (defaults are never mutated)."""
         try:
-            raw = self._runtime.voice_config_dict().get("voice") or {}
+            raw = self._deployment.voice_config_dict().get("voice") or {}
         except Exception:
             raw = {}
         if not isinstance(raw, dict):
@@ -613,20 +614,22 @@ class VoiceService:
                 logger.exception("Failed to shut down voice executor")
 
 
-def register_voice_routes(app: FastAPI, runtime: Any) -> VoiceService:
-    """Register voice routes on ``app`` using ``runtime`` configuration.
+def register_voice_routes(
+    app: FastAPI, deployment: Any, *, dependencies: Sequence[Any] = ()
+) -> VoiceService:
+    """Register the speech routes on ``app``, configured by ``deployment``.
 
     One service per app (stored on ``app.state.grid_voice_service``); calling
     this twice on the same app reuses the existing service. There is no
-    global service cache.
+    global service cache. ``dependencies`` run before every route - the web
+    chat's identification of the user.
     """
     service = getattr(app.state, "grid_voice_service", None)
     if service is not None:
         return service
-    service = VoiceService(runtime)
+    service = VoiceService(deployment)
     app.state.grid_voice_service = service
-    from web_chat.voice_turns import register_turn_routes
-    register_turn_routes(app, runtime)
+    dependencies = list(dependencies)
 
     def _error_response(exc: Exception, fallback_detail: str) -> HTTPException:
         if isinstance(exc, VoiceInputError):
@@ -640,11 +643,11 @@ def register_voice_routes(app: FastAPI, runtime: Any) -> VoiceService:
         logger.exception("Voice operation failed")
         return HTTPException(status_code=503, detail=f"{fallback_detail}: {exc}")
 
-    @app.get("/api/voice/status")
+    @app.get("/api/voice/status", dependencies=dependencies)
     async def voice_status() -> JSONResponse:
         return JSONResponse(service.get_status())
 
-    @app.post("/api/voice/transcribe")
+    @app.post("/api/voice/transcribe", dependencies=dependencies)
     async def voice_transcribe(request: Request) -> JSONResponse:
         content_type = (request.headers.get("content-type") or "").split(";")[0]
         content_type = content_type.strip().lower()
@@ -681,7 +684,7 @@ def register_voice_routes(app: FastAPI, runtime: Any) -> VoiceService:
             raise _error_response(exc, "Speech recognition failed") from exc
         return JSONResponse(result)
 
-    @app.post("/api/voice/synthesize")
+    @app.post("/api/voice/synthesize", dependencies=dependencies)
     async def voice_synthesize(payload: SynthesizeRequest) -> Response:
         try:
             wav_bytes = await service.synthesize(payload.text)
@@ -695,7 +698,7 @@ def register_voice_routes(app: FastAPI, runtime: Any) -> VoiceService:
             headers={"Content-Disposition": 'inline; filename="speech.wav"'},
         )
 
-    @app.post("/api/voice/warmup")
+    @app.post("/api/voice/warmup", dependencies=dependencies)
     async def voice_warmup(payload: Optional[WarmupRequest] = None) -> JSONResponse:
         warm_tts = bool(payload is not None and payload.tts)
         try:

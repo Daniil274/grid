@@ -280,6 +280,7 @@ class AgentFactory:
         context_manager: Optional[ContextManager] = None,
         container_id: Optional[str] = None,
         policy_config: Optional[Config] = None,
+        session_db_path: Optional[str] = None,
     ):
         """
         Initialize Agent Factory.
@@ -296,6 +297,9 @@ class AgentFactory:
                 this factory's own config (the root routing config when the CLI
                 routes a message between systems); its ``compact`` section is
                 the base this config's own section refines (layered_compact)
+            session_db_path: SQLite file of the agents' SDK sessions; the logs
+                directory's ``agent_sessions.db`` by default. The web chat keeps
+                each user's sessions in that user's space.
         """
         if tracing_level is not None:
             self._configure_tracing_once(tracing_level)
@@ -320,7 +324,7 @@ class AgentFactory:
             persist_path=str(Path(self.config.get_logs_directory()) / "context.json"),
         )
 
-        self._agent_session_db_path = self._build_agent_session_db_path()
+        self._agent_session_db_path = session_db_path or self._build_agent_session_db_path()
 
         self._runtime_support = AgentRuntimeSupport(
             config=self.config,

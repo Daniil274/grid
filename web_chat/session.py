@@ -1,6 +1,6 @@
 """Chat websocket transport: one turn at a time per conversation, always responsive.
 
-A turn belongs to the server, not to the socket that started it. Closing or
+A turn belongs to the user's space, not to the socket that started it. Closing or
 reloading the page only detaches that socket; the agent keeps working, and a
 socket that attaches later receives the turn's events so far and then follows
 it live. Only an explicit ``stop`` ends a turn early.
@@ -221,7 +221,7 @@ class AgentTurn:
 
     # -- producer ----------------------------------------------------------
     async def _produce(self) -> None:
-        runtime = self._session.runtime
+        space = self._session.space
         try:
             resolution = await self._resolve()
             label = self._session.agent_label(resolution.system, resolution.agent)
@@ -232,12 +232,12 @@ class AgentTurn:
                 StepKind.PREPARE,
                 "Preparing the runtime",
                 subtitle=f"{resolution.system} · {resolution.agent}",
-                body=f"Workspace: {runtime.workspace_path}",
+                body=f"Workspace: {space.workspace_path}",
             )
-            await runtime.warm_agent(resolution.agent, resolution.system)
+            await space.warm_agent(resolution.agent, resolution.system)
             self._recorder.close(step, title=f"Runtime ready · {label}")
 
-            runtime.update_conversation_metadata(
+            space.update_conversation_metadata(
                 self._session.context_id,
                 created_by_web=True,
                 system_key=self._requested[0],
@@ -253,7 +253,7 @@ class AgentTurn:
                     resolution.agent,
                     self._session.context_id,
                     stream=True,
-                    user_id=runtime.user_id,
+                    user_id=space.user_id,
                     stream_observer=self._observer,
                     turn_id=self.run_id,
                 )
@@ -264,7 +264,7 @@ class AgentTurn:
                     edit_of=self._edit_of,
                     context_id=self._session.context_id,
                     stream=True,
-                    user_id=runtime.user_id,
+                    user_id=space.user_id,
                     stream_observer=self._observer,
                     turn_id=self.run_id,
                 )
@@ -285,7 +285,7 @@ class AgentTurn:
     def _warn_about_tools(self, resolution: Resolution, label: str) -> None:
         """Say which tools will fail before the agent starts; nothing is disabled."""
         try:
-            issues = self._session.runtime.registry.agent_issues(resolution.system, resolution.agent)
+            issues = self._session.space.registry.agent_issues(resolution.system, resolution.agent)
         except Exception as exc:  # the check must never cost the turn
             logger.warning("Tool check failed for %s/%s: %s", resolution.system, resolution.agent, exc)
             return
@@ -329,7 +329,7 @@ class AgentTurn:
                 subtitle="No system pinned" if system_key is None else f"System: {system_key}",
             )
 
-        resolution = await self._session.runtime.resolve_turn(
+        resolution = await self._session.space.resolve_turn(
             self._routing_text(),
             system_key=system_key,
             agent_key=agent_key,
@@ -425,19 +425,19 @@ class AgentTurn:
 
 
 class ChatSession:
-    """Command loop for one chat websocket."""
+    """Command loop for one chat websocket, in the space of the user it serves."""
 
-    def __init__(self, server: Any, websocket: WebSocket, context_id: str) -> None:
-        self._server = server
+    def __init__(self, space: Any, websocket: WebSocket, context_id: str) -> None:
+        self.space = space
         self._socket = websocket
         self.context_id = context_id
-        self.runtime = server.runtime
-        self.manager = self.runtime.context_manager()
+        self.manager = space.context_manager()
         self.send_lock = asyncio.Lock()
 
     @property
-    def _turns(self) -> dict[str, tuple[AgentTurn, asyncio.Task]]:
-        return self._server._chat_turns
+    def _turns(self) -> Any:
+        """The space's TurnBoard (web_chat.turns)."""
+        return self.space.turns
 
     async def serve(self) -> None:
         await self._socket.accept()
@@ -462,10 +462,10 @@ class ChatSession:
         await self._socket.send_json(event)
 
     def agent_label(self, system_key: str, agent_key: str) -> str:
-        return self._server.agent_label(system_key, agent_key)
+        return self.space.registry.agent_label(system_key, agent_key)
 
     def release(self) -> None:
-        self._server._active_chat_contexts.discard(self.context_id)
+        self._turns.release(self.context_id)
 
     # -- commands ----------------------------------------------------------
     async def _dispatch(self, raw: str) -> None:
@@ -503,7 +503,7 @@ class ChatSession:
             await self.send({"type": "error", "content": str(exc)})
             await self.send({"type": "done"})
             return
-        if self.context_id in self._server._active_chat_contexts:
+        if self._turns.is_claimed(self.context_id):
             # The agent is working: the message is delivered, not refused. A
             # decision can take seconds, so it runs beside the command loop.
             self._background(self._deliver_during_turn(text, images, payload.get("delivery")))
@@ -516,22 +516,13 @@ class ChatSession:
         )
 
     def _background(self, coroutine: Any) -> None:
-        """Run *coroutine* beside the command loop; a failure is logged."""
-        task = asyncio.create_task(coroutine)
-        tasks = self._server.__dict__.setdefault("_chat_background", set())
-        tasks.add(task)
-
-        def finished(done: asyncio.Task) -> None:
-            tasks.discard(done)
-            if not done.cancelled() and done.exception() is not None:
-                logger.error("Chat background work failed", exc_info=done.exception())
-
-        task.add_done_callback(finished)
+        """Run *coroutine* beside the command loop, owned by the space."""
+        self._turns.spawn(coroutine)
 
     async def _deliver_during_turn(self, text: str, images: list[str], requested: Any) -> None:
         """Deliver a message sent while a turn runs: now, next step or after the turn."""
-        active = self._turns.get(self.context_id)
-        if active is None or active[1].done():
+        active = self._turns.running(self.context_id)
+        if active is None:
             # The turn ended meanwhile: it is an ordinary message now.
             await self._start(text, None, None, images=images)
             return
@@ -541,7 +532,7 @@ class ChatSession:
             delivery, decided_by = requested, "user"
         else:
             delivery, decided_by = await decide_delivery(
-                self.runtime,
+                self.space.deployment,
                 message=text,
                 task=turn.message,
                 steps=turn.recent_steps(),
@@ -575,8 +566,8 @@ class ChatSession:
         if item is None:
             await self.send({"type": "queue", "items": queue.public()})
             return
-        active = self._turns.get(self.context_id)
-        running = active is not None and not active[1].done()
+        active = self._turns.running(self.context_id)
+        running = active is not None
         if action == "unqueue" or not running:
             queue.remove(item["id"])
         else:
@@ -600,7 +591,7 @@ class ChatSession:
         The queue moves on when the turn answered, or when it was stopped for a
         ``now`` message. After a Stop, a timeout or a failure the messages wait.
         """
-        if self.context_id in self._server._active_chat_contexts:
+        if self._turns.is_claimed(self.context_id):
             return
         queue = MessageQueue(self.manager, self.context_id)
         item = queue.next_queued()
@@ -612,8 +603,8 @@ class ChatSession:
         await self._start(item["text"], None, None, images=item.get("images") or [])
 
     def _image_config(self) -> Any:
-        """settings.image_processing of the runtime, or None for the defaults."""
-        config = getattr(self.runtime, "config", None)
+        """settings.image_processing of the space's config, or None for the defaults."""
+        config = getattr(self.space, "config", None)
         settings = getattr(getattr(config, "config", None), "settings", None)
         return getattr(settings, "image_processing", None)
 
@@ -627,8 +618,8 @@ class ChatSession:
         await active[0].attach(self)
 
     async def _stop(self, *, now: bool = False) -> None:
-        active = self._turns.get(self.context_id)
-        if active is None or active[1].done():
+        active = self._turns.running(self.context_id)
+        if active is None:
             await self.send({"type": "done", "stopped": True})
             return
         turn, task = active
@@ -650,10 +641,10 @@ class ChatSession:
 
         ``edit_of`` marks the message as a new version of an edited one, sent
         into the branch made for it (POST .../branches)."""
-        if self.context_id in self._server._active_chat_contexts:
+        if self._turns.is_claimed(self.context_id):
             await self.send({"type": "busy", "content": "This conversation already has an active turn."})
             return
-        if not self._server.selection_is_valid(system_key, agent_key):
+        if not self.space.registry.selection_is_valid(system_key or None, agent_key or None):
             await self.send({"type": "error", "content": "Unknown system or agent"})
             await self.send({"type": "done"})
             return
@@ -664,7 +655,7 @@ class ChatSession:
             await self.send({"type": "error", "content": "There is nothing to continue in this conversation."})
             await self.send({"type": "done"})
             return
-        self._server._active_chat_contexts.add(self.context_id)
+        self._turns.claim(self.context_id)
         turn = AgentTurn(
             self,
             message,
@@ -674,18 +665,13 @@ class ChatSession:
             edit_of=edit_of,
         )
         task = asyncio.create_task(turn.run())
-        self._turns[self.context_id] = (turn, task)
+        self._turns.register(self.context_id, turn, task)
 
         def ended(_task: asyncio.Task) -> None:
-            self._forget(turn)
+            self._turns.forget(self.context_id, turn)
             self._background(self._advance_queue(turn))
 
         task.add_done_callback(ended)
-
-    def _forget(self, turn: AgentTurn) -> None:
-        active = self._turns.get(self.context_id)
-        if active is not None and active[0] is turn:
-            del self._turns[self.context_id]
 
     @staticmethod
     async def _cancel(task: asyncio.Task) -> None:
@@ -696,5 +682,5 @@ class ChatSession:
             await task
 
 
-async def chat_session(server: Any, websocket: WebSocket, context_id: str) -> None:
-    await ChatSession(server, websocket, context_id).serve()
+async def chat_session(space: Any, websocket: WebSocket, context_id: str) -> None:
+    await ChatSession(space, websocket, context_id).serve()

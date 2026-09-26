@@ -1,0 +1,149 @@
+"""What every user of one web chat server shares: the systems and their configs.
+
+A server runs one system (``--config``) or routes across the catalog of systems
+(``routing.yaml``). Which config files that means, the catalog itself, the
+voice settings and the operator's edits to those files belong to the server
+and are the same for every user. What each user owns - conversations, agent
+sessions, a workspace - is a space (web_chat.space).
+
+Started without an explicit config, the server loads the catalog and every
+message is routed across the systems in it, just like a CLI session started
+without ``--agent``/``--config``. Given a config, it runs that one system, which
+can still route between its own agents.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+import yaml
+
+from core.config import Config
+
+logger = logging.getLogger("grid.web_chat.deployment")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+DEFAULT_CONFIG = "config.yaml"
+DEFAULT_ROUTING = "routing.yaml"
+
+
+def resolve_path(path_value: str) -> Path:
+    """Resolve against the project root first, then the working directory."""
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path.resolve(strict=False)
+
+    project_path = PROJECT_ROOT / path
+    if project_path.exists():
+        return project_path.resolve(strict=False)
+
+    cwd_path = path.resolve(strict=False)
+    return cwd_path if cwd_path.exists() else project_path.resolve(strict=False)
+
+
+class Deployment:
+    """The system configs a server runs, read once and re-read after an edit."""
+
+    def __init__(
+        self,
+        *,
+        config_path: Optional[str] = None,
+        routing_path: Optional[str] = DEFAULT_ROUTING,
+        working_directory: Optional[str] = None,
+    ) -> None:
+        """``working_directory`` is the ``--path`` override of a single-user
+        server; spaces with a workspace of their own ignore it."""
+        self.requested_config_path = config_path
+        self.routing_path = resolve_path(routing_path) if routing_path else None
+        self.working_directory = working_directory
+
+        #: The catalog of systems; None when one system was requested explicitly.
+        self.catalog: Optional[Config]
+        #: The system whose settings (workspace, logs, isolation) spaces start from.
+        self.config_path: Path
+        #: That system's config, for model keys and settings.
+        self.config: Config
+        self.load()
+
+    def load(self) -> None:
+        """(Re)read the catalog and the base system config from disk."""
+        self.catalog = self._catalog_config()
+        self.config_path = self._base_config_path(self.catalog)
+        self.config = Config(str(self.config_path), self.working_directory)
+
+    def _catalog_config(self) -> Optional[Config]:
+        if self.requested_config_path:
+            return None
+        if self.routing_path is None:
+            raise ValueError("A routing catalog is required when --config is not specified")
+        if not self.routing_path.is_file():
+            raise FileNotFoundError(
+                f"Routing catalog not found: {self.routing_path}. "
+                "Pass --routing or use --config for one system."
+            )
+        return Config(str(self.routing_path))
+
+    def _base_config_path(self, catalog: Optional[Config]) -> Path:
+        if self.requested_config_path:
+            return resolve_path(self.requested_config_path)
+        if catalog is not None:
+            from core.routing import AutoRouter
+
+            router = AutoRouter.from_config(catalog)
+            if router is not None:
+                return router.system_config_path(router.default_system())
+        return resolve_path(DEFAULT_CONFIG)
+
+    @property
+    def policy_config(self) -> Optional[Config]:
+        """The operator-owned action policy for every routed system.
+
+        The catalog wins, matching the CLI runtime; a system's own policy is the
+        fallback when no catalog policy is enabled.
+        """
+        return self.catalog
+
+    # -- voice ---------------------------------------------------------------
+    def voice_source(self) -> Tuple[Path, Config]:
+        """The file that holds the voice settings, and its Config for model keys.
+
+        Routing across systems, voice belongs to the whole chat rather than to
+        the default system, so its settings - ``voice`` and the Decisions model
+        that controls the conversation - come from the routing catalog. A single
+        system (``--config``) keeps them in its own config.
+        """
+        if self.catalog is not None and self.routing_path is not None:
+            return self.routing_path, self.catalog
+        return self.config_path, self.config
+
+    def voice_config_dict(self) -> Dict[str, Any]:
+        """The whole file of :meth:`voice_source`, read fresh."""
+        path, _ = self.voice_source()
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+    # -- the base system's config file ---------------------------------------
+    def config_dict(self) -> Dict[str, Any]:
+        return yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
+
+    def config_yaml(self) -> str:
+        return self.config_path.read_text(encoding="utf-8")
+
+    def save_structured_config(self, payload: Dict[str, Any]) -> None:
+        """Validate and write the base config; the caller rebuilds the spaces."""
+        from schemas import GridConfig
+
+        GridConfig(**payload)
+        self.config_path.write_text(
+            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False, width=120), encoding="utf-8"
+        )
+        self.load()
+
+    def save_yaml_config(self, yaml_content: str) -> None:
+        """Validate and write the base config as given; the caller rebuilds the spaces."""
+        from schemas import GridConfig
+
+        GridConfig(**(yaml.safe_load(yaml_content) or {}))
+        self.config_path.write_text(yaml_content, encoding="utf-8")
+        self.load()

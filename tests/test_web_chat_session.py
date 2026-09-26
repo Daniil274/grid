@@ -11,6 +11,7 @@ from core.context import ContextManager
 from fastapi import WebSocketDisconnect
 
 from web_chat.session import chat_session
+from web_chat.turns import TurnBoard
 
 
 class Socket:
@@ -38,8 +39,8 @@ class Socket:
                     return value
 
 
-def server_for(run, *, request_stop=lambda context_id: False, continue_agent=None):
-    """A server whose single system 's' holds one agent 'a' running *run*.
+def space_for(run, *, request_stop=lambda context_id: False, continue_agent=None):
+    """A space whose single system 's' holds one agent 'a' running *run*.
 
     ``request_stop`` is the factory's graceful Stop; by default the agent
     cannot stop gracefully, so Stop cancels the turn.
@@ -57,15 +58,16 @@ def server_for(run, *, request_stop=lambda context_id: False, continue_agent=Non
             routed_agent=kwargs.get('agent_key') is None, routed=True, warning='',
         )
 
-    runtime = SimpleNamespace(
+    registry = SimpleNamespace(
+        agent_label=lambda system, agent: 'Agent',
+        selection_is_valid=lambda system, agent: True,
+        agent_issues=lambda system, agent: [],
+    )
+    return SimpleNamespace(
         context_manager=lambda: manager, workspace_path='.', user_id='test',
         factory=factory, warm_agent=AsyncMock(), resolve_turn=resolve_turn,
         update_conversation_metadata=lambda *a, **kw: None,
-    )
-    return SimpleNamespace(
-        runtime=runtime, _active_chat_contexts=set(), _chat_turns={},
-        agent_label=lambda system, agent: 'Agent',
-        selection_is_valid=lambda system, agent: True,
+        registry=registry, turns=TurnBoard(), deployment=SimpleNamespace(),
     )
 
 
@@ -80,14 +82,14 @@ async def test_stop_cancels_running_agent_without_waiting_for_output():
         finally:
             cancelled.set()
 
-    server, socket = server_for(run), Socket()
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"message":"hello"}')
     await asyncio.wait_for(started.wait(), 2)
     await socket.incoming.put('{"action":"stop"}')
     assert (await socket.event('done'))['stopped'] is True
     assert cancelled.is_set()
-    assert not server._active_chat_contexts
+    assert not space.turns.is_claimed('ctx')
     await socket.incoming.put(None)
     await session
 
@@ -95,22 +97,22 @@ async def test_stop_cancels_running_agent_without_waiting_for_output():
 @pytest.mark.asyncio
 async def test_stop_during_agent_warmup_and_next_turn():
     run = AsyncMock(return_value='Ready')
-    server, socket = server_for(run), Socket()
+    space, socket = space_for(run), Socket()
     started = asyncio.Event()
 
     async def warm(agent_key, system_key=None):
         started.set()
         await asyncio.Event().wait()
 
-    server.runtime.warm_agent = warm
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    space.warm_agent = warm
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"message":"first"}')
     await asyncio.wait_for(started.wait(), 2)
     await socket.incoming.put('{"action":"stop"}')
     first = await socket.event('done')
     assert first['stopped'] is True
     run.assert_not_awaited()
-    server.runtime.warm_agent = AsyncMock()
+    space.warm_agent = AsyncMock()
     await socket.incoming.put('{"message":"second"}')
     assert (await socket.event('final_output'))['content'] == 'Ready'
     second = await socket.event('done')
@@ -121,12 +123,12 @@ async def test_stop_during_agent_warmup_and_next_turn():
 
 @pytest.mark.asyncio
 async def test_error_is_terminal_and_disconnect_cleans_up():
-    server, socket = server_for(AsyncMock(side_effect=ValueError('failed'))), Socket()
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    space, socket = space_for(AsyncMock(side_effect=ValueError('failed'))), Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"message":"hello"}')
     assert (await socket.event('error'))['content'] == 'failed'
     await socket.event('done')
-    assert not server._active_chat_contexts
+    assert not space.turns.is_claimed('ctx')
     await socket.incoming.put(None)
     await session
 
@@ -144,9 +146,9 @@ async def test_a_message_from_another_tab_waits_for_the_running_turn():
             await release.wait()
         return "done"
 
-    server = server_for(run)
+    space = space_for(run)
     first, second = Socket(), Socket()
-    tasks = [asyncio.create_task(chat_session(server, s, 'ctx')) for s in (first, second)]
+    tasks = [asyncio.create_task(chat_session(space, s, 'ctx')) for s in (first, second)]
     await first.incoming.put('{"message":"first"}')
     await asyncio.wait_for(started.wait(), 2)
     await second.incoming.put('{"message":"second"}')
@@ -187,19 +189,19 @@ async def test_reload_keeps_the_turn_running_and_replays_it():
             raise
         return 'Finished.'
 
-    server = server_for(run)
+    space = space_for(run)
     first = Socket()
-    first_task = asyncio.create_task(chat_session(server, first, 'ctx'))
+    first_task = asyncio.create_task(chat_session(space, first, 'ctx'))
     await first.incoming.put('{"message":"work"}')
     await asyncio.wait_for(started.wait(), 2)
     await first.incoming.put(None)  # the page reloads
     await first_task
     await asyncio.sleep(0)
     assert not cancelled.is_set()
-    assert 'ctx' in server._chat_turns
+    assert space.turns.get('ctx') is not None
 
     second = Socket()
-    second_task = asyncio.create_task(chat_session(server, second, 'ctx'))
+    second_task = asyncio.create_task(chat_session(space, second, 'ctx'))
     await second.incoming.put('{"action":"attach"}')
     attached = await second.event('attached')
     assert attached['message'] == 'work'
@@ -210,15 +212,15 @@ async def test_reload_keeps_the_turn_running_and_replays_it():
     assert (await second.event('final_output'))['content'] == 'Finished.'
     await second.event('done')
     await asyncio.sleep(0)
-    assert 'ctx' not in server._chat_turns
+    assert space.turns.get('ctx') is None
     await second.incoming.put(None)
     await second_task
 
 
 @pytest.mark.asyncio
 async def test_attach_without_a_running_turn_reports_it_is_over():
-    server, socket = server_for(AsyncMock(return_value='x')), Socket()
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    space, socket = space_for(AsyncMock(return_value='x')), Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"action":"attach"}')
     assert (await socket.event('done'))['detached'] is True
     await socket.incoming.put(None)
@@ -236,15 +238,15 @@ async def test_stop_from_a_reattached_page_cancels_the_turn():
         finally:
             cancelled.set()
 
-    server = server_for(run)
+    space = space_for(run)
     first, second = Socket(), Socket()
-    first_task = asyncio.create_task(chat_session(server, first, 'ctx'))
+    first_task = asyncio.create_task(chat_session(space, first, 'ctx'))
     await first.incoming.put('{"message":"work"}')
     await asyncio.wait_for(started.wait(), 2)
     await first.incoming.put(None)
     await first_task
 
-    second_task = asyncio.create_task(chat_session(server, second, 'ctx'))
+    second_task = asyncio.create_task(chat_session(space, second, 'ctx'))
     await second.incoming.put('{"action":"attach"}')
     await second.event('attached')
     await second.incoming.put('{"action":"stop"}')
@@ -273,8 +275,8 @@ async def test_turn_streams_trace_steps_and_answer_separately():
             data=NS(type='response.output_text.delta', delta='All set.')))
         return 'All set.'
 
-    server, socket = server_for(run), Socket()
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"message":"hello"}')
 
     frames = []
@@ -325,8 +327,8 @@ async def test_streamed_tokens_include_steps_that_the_final_answer_replaces():
             data=NS(type='response.output_text.delta', delta='Port 8080 is set.')))
         return 'Port 8080 is set.'
 
-    server, socket = server_for(run), Socket()
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"message":"which port?"}')
 
     frames = []
@@ -357,10 +359,10 @@ async def test_tool_problems_are_announced_before_the_agent_runs_and_do_not_stop
         started.append(True)
         return 'done anyway'
 
-    server, socket = server_for(run), Socket()
+    space, socket = space_for(run), Socket()
     issue = ToolIssue(ENVIRONMENT, 'program not on PATH: ffmpeg', agent='a', tool='video_probe', hint='Install FFmpeg')
-    server.runtime.registry = SimpleNamespace(agent_issues=lambda system, agent: [issue])
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    space.registry.agent_issues = lambda system, agent: [issue]
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"message":"hello"}')
 
     frames = []
@@ -412,9 +414,9 @@ async def test_first_stop_lets_the_step_finish_and_the_turn_says_how_it_ended():
         released.set()
         return True
 
-    server, socket = server_for(run, request_stop=request_stop), Socket()
-    holder['manager'] = server.runtime.context_manager()
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    space, socket = space_for(run, request_stop=request_stop), Socket()
+    holder['manager'] = space.context_manager()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"message":"Open Notepad"}')
     await asyncio.wait_for(started.wait(), 2)
     await socket.incoming.put('{"action":"stop"}')
@@ -440,8 +442,8 @@ async def test_second_stop_cancels_a_turn_that_is_still_finishing_its_step():
         finally:
             cancelled.set()
 
-    server, socket = server_for(run, request_stop=lambda context_id: True), Socket()
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    space, socket = space_for(run, request_stop=lambda context_id: True), Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"message":"hello"}')
     await asyncio.wait_for(started.wait(), 2)
     await socket.incoming.put('{"action":"stop"}')
@@ -462,29 +464,29 @@ async def test_continue_resumes_with_the_agent_that_was_interrupted():
         continued.append((agent_key, context_id, kwargs['turn_id']))
         return 'Notepad is open.'
 
-    server, socket = server_for(AsyncMock(), continue_agent=continue_agent), Socket()
-    manager = server.runtime.context_manager()
+    space, socket = space_for(AsyncMock(), continue_agent=continue_agent), Socket()
+    manager = space.context_manager()
     record_interruption(manager, 'earlier-turn', reason='timeout')
     manager.update_context_metadata('ctx', {'routed_system': 's', 'routed_agent': 'a'})
 
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"action":"continue"}')
     assert (await socket.event('final_output'))['content'] == 'Notepad is open.'
     done = await socket.event('done')
     assert continued == [('a', 'ctx', done['run_id'])]
-    server.runtime.factory.run_agent.assert_not_awaited()
+    space.factory.run_agent.assert_not_awaited()
     await socket.incoming.put(None)
     await session
 
 
 @pytest.mark.asyncio
 async def test_continue_with_nothing_to_resume_is_refused():
-    server, socket = server_for(AsyncMock()), Socket()
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    space, socket = space_for(AsyncMock()), Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"action":"continue"}')
     assert 'nothing to continue' in (await socket.event('error'))['content']
     await socket.event('done')
-    assert not server._active_chat_contexts
+    assert not space.turns.is_claimed('ctx')
     await socket.incoming.put(None)
     await session
 
@@ -501,9 +503,9 @@ async def test_stop_now_cancels_at_once_even_when_the_agent_could_finish_its_ste
         finally:
             cancelled.set()
 
-    server = server_for(run, request_stop=lambda context_id: stops.append(context_id) or True)
+    space = space_for(run, request_stop=lambda context_id: stops.append(context_id) or True)
     socket = Socket()
-    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
     await socket.incoming.put('{"message":"hello"}')
     await asyncio.wait_for(started.wait(), 2)
     await socket.incoming.put('{"action":"stop","now":true}')
@@ -530,8 +532,8 @@ async def test_attached_images_reach_the_agent_as_an_sdk_message():
     import json
 
     run = AsyncMock(return_value="A green square.")
-    server, socket = server_for(run), Socket()
-    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put(json.dumps({"message": "what is this?", "images": [png_data_url()]}))
     assert (await socket.event("final_output"))["content"] == "A green square."
     await socket.event("done")
@@ -549,8 +551,8 @@ async def test_an_image_alone_is_a_message():
     import json
 
     run = AsyncMock(return_value="ok")
-    server, socket = server_for(run), Socket()
-    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put(json.dumps({"images": [png_data_url()]}))
     await socket.event("done")
     sent = json.loads(run.await_args.kwargs["message"])
@@ -564,13 +566,13 @@ async def test_a_refused_image_starts_no_turn():
     import json
 
     run = AsyncMock(return_value="unused")
-    server, socket = server_for(run), Socket()
-    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put(json.dumps({"message": "look", "images": ["data:image/svg+xml;base64,PHN2Zz4="]}))
     assert "not supported" in (await socket.event("error"))["content"]
     await socket.event("done")
     run.assert_not_awaited()
-    assert not server._active_chat_contexts
+    assert not space.turns.is_claimed('ctx')
     await socket.incoming.put(None)
     await session
 
@@ -580,8 +582,8 @@ async def test_an_edited_message_reaches_the_agent_as_a_new_version():
     import json
 
     run = AsyncMock(return_value="ok")
-    server, socket = server_for(run), Socket()
-    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put(json.dumps({"message": "better", "edit_of": "slot-1"}))
     await socket.event("done")
     assert run.await_args.kwargs["edit_of"] == "slot-1"
@@ -624,9 +626,9 @@ async def test_a_next_step_message_reaches_the_running_agent_and_leaves_the_queu
         message.on_delivered(message)  # the agent's next call reads it at once here
         return True
 
-    server, socket = server_for(run), Socket()
-    server.runtime.factory.steer = steer
-    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    space, socket = space_for(run), Socket()
+    space.factory.steer = steer
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put('{"message":"refactor"}')
     await asyncio.wait_for(started.wait(), 2)
     await socket.incoming.put('{"message":"keep the API","delivery":"next_step"}')
@@ -644,8 +646,8 @@ async def test_a_next_step_message_reaches_the_running_agent_and_leaves_the_queu
 @pytest.mark.asyncio
 async def test_a_now_message_stops_the_turn_and_is_sent_next():
     run, started, release, seen = running_agent()
-    server, socket = server_for(run), Socket()
-    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put('{"message":"deploy to staging"}')
     await asyncio.wait_for(started.wait(), 2)
     await socket.incoming.put('{"message":"no, to production","delivery":"now"}')
@@ -658,8 +660,8 @@ async def test_a_now_message_stops_the_turn_and_is_sent_next():
 @pytest.mark.asyncio
 async def test_after_a_stop_the_queue_waits_for_the_user():
     run, started, release, seen = running_agent()
-    server, socket = server_for(run), Socket()
-    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put('{"message":"first"}')
     await asyncio.wait_for(started.wait(), 2)
     await socket.incoming.put('{"message":"later","delivery":"after_turn"}')
@@ -679,8 +681,8 @@ async def test_after_a_stop_the_queue_waits_for_the_user():
 @pytest.mark.asyncio
 async def test_a_waiting_message_can_be_dropped():
     run, started, release, seen = running_agent()
-    server, socket = server_for(run), Socket()
-    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put('{"message":"first"}')
     await asyncio.wait_for(started.wait(), 2)
     await socket.incoming.put('{"message":"never mind","delivery":"after_turn"}')
@@ -698,9 +700,9 @@ async def test_a_waiting_message_can_be_dropped():
 @pytest.mark.asyncio
 async def test_the_decision_model_chooses_when_the_user_did_not():
     run, started, release, seen = running_agent()
-    server, socket = server_for(run), Socket()
+    space, socket = space_for(run), Socket()
     decide = AsyncMock(return_value=("now", "model"))
-    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
     with patch("web_chat.session.decide_delivery", new=decide):
         await socket.incoming.put('{"message":"build it"}')
         await asyncio.wait_for(started.wait(), 2)

@@ -58,31 +58,39 @@ def main() -> None:
     except ImportError as exc:
         raise SystemExit("uvicorn is required. Run: pip install 'uvicorn[standard]'") from exc
 
-    from web_chat.runtime import WebChatRuntime
-    from web_chat.server import create_app
     from dotenv import load_dotenv
+
+    from web_chat.deployment import Deployment
+    from web_chat.identity import single_user
+    from web_chat.server import create_app
+    from web_chat.space import UserSpace
+    from web_chat.spaces import SpacePool
 
     # Match CLI credentials without requiring a separate shell export.
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-    action_review_token = secrets.token_urlsafe(32)
-    runtime = WebChatRuntime(
+    deployment = Deployment(
         config_path=args.config,
         routing_path=args.routing,
         working_directory=args.path,
-        user_id=args.user_id,
-        action_review_token=action_review_token,
     )
+    spaces = SpacePool(lambda user_id: UserSpace(deployment, user_id=user_id))
+    action_review_token = secrets.token_urlsafe(32)
 
-    print(f"Systems: {', '.join(runtime.registry.keys())}")
-    print(f"Config: {runtime.config_path}")
-    print(f"Working directory: {runtime.workspace_path}")
-    print(f"Sessions: {runtime.persist_path / 'context.json'}")
+    print(f"Catalog: {deployment.routing_path if deployment.catalog else 'none'}")
+    print(f"Config: {deployment.config_path}")
+    print(f"Working directory: {deployment.config.get_working_directory()}")
     print(f"Action review token: {action_review_token}")
     print(f"Open http://{args.host}:{args.port}/")
 
-    uvicorn.run(create_app(runtime), host=args.host, port=args.port)
-
+    app = create_app(
+        deployment,
+        spaces,
+        identify=single_user(args.user_id),
+        action_review_token=action_review_token,
+        warm_user=args.user_id,
+    )
+    uvicorn.run(app, host=args.host, port=args.port)
 
 if __name__ == "__main__":
     main()

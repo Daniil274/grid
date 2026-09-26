@@ -5,7 +5,8 @@ import asyncio
 
 import pytest
 
-from web_chat.runtime import WebChatRuntime
+from web_chat.deployment import Deployment
+from web_chat.space import SpaceLayout, UserSpace
 from web_chat.systems import SystemRegistry
 
 MINIMAL_CONFIG = """
@@ -43,7 +44,7 @@ def minimal_config(tmp_path: Path) -> Path:
     return config_file
 
 
-def test_runtime_uses_working_directory_for_sessions(
+def test_single_user_space_keeps_conversations_in_the_workspace_logs(
     minimal_config: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -57,40 +58,57 @@ def test_runtime_uses_working_directory_for_sessions(
         encoding="utf-8",
     )
 
-    runtime = WebChatRuntime(
-        config_path=str(minimal_config),
-        working_directory=str(workdir),
+    space = UserSpace(
+        Deployment(config_path=str(minimal_config), working_directory=str(workdir)),
         user_id="test",
     )
 
-    assert runtime.workspace_path.resolve() == workdir.resolve()
-    assert runtime.persist_path.resolve() == logs_dir.resolve()
-    assert runtime.context_manager().persist_path == logs_dir / "context.json"
+    assert space.workspace_path.resolve() == workdir.resolve()
+    assert space.conversations_path.resolve() == (logs_dir / "context.json").resolve()
+    assert space.context_manager().persist_path == logs_dir / "context.json"
 
 
-def test_runtime_defaults_to_config_working_directory(
+def test_single_user_space_defaults_to_config_working_directory(
     minimal_config: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
 
-    runtime = WebChatRuntime(config_path=str(minimal_config))
+    space = UserSpace(Deployment(config_path=str(minimal_config)))
 
     expected = (minimal_config.parent / ".").resolve()
-    assert runtime.workspace_path.resolve() == expected
-    assert runtime.persist_path.resolve() == (expected / "logs").resolve()
+    assert space.workspace_path.resolve() == expected
+    assert space.conversations_path.resolve() == (expected / "logs" / "context.json").resolve()
+
+
+def test_a_laid_out_space_keeps_its_records_beside_its_workspace(
+    minimal_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user's conversations and agent sessions are outside the agents' workspace."""
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+    root = minimal_config.parent / "users" / "u1"
+
+    space = UserSpace(Deployment(config_path=str(minimal_config)), user_id="u1", layout=SpaceLayout.under(root))
+    factory = space.registry.factory(space.registry.default_key())
+
+    assert space.workspace_path == (root / "workspace").resolve()
+    assert space.conversations_path == root / "conversations.json"
+    assert factory._agent_session_db_path == str(root / "agent_sessions.db")
+    assert Path(factory.config.get_working_directory()).resolve() == (root / "workspace").resolve()
+    assert not (root / "workspace" / "logs").exists()
 
 
 def test_missing_routing_catalog_does_not_fall_back_to_root_config(
     tmp_path: Path,
 ) -> None:
     with pytest.raises(FileNotFoundError, match="Routing catalog not found"):
-        WebChatRuntime(routing_path=str(tmp_path / "missing.yaml"))
+        Deployment(routing_path=str(tmp_path / "missing.yaml"))
 
 
 def test_single_system_requires_explicit_config(minimal_config: Path) -> None:
-    runtime = WebChatRuntime(config_path=str(minimal_config), routing_path=None)
-    assert runtime.config_path == minimal_config.resolve()
+    deployment = Deployment(config_path=str(minimal_config), routing_path=None)
+    assert deployment.config_path == minimal_config.resolve()
 
 
 def test_catalog_action_policy_applies_to_web_factories(
@@ -139,8 +157,8 @@ routing:
         encoding="utf-8",
     )
 
-    runtime = WebChatRuntime(routing_path=str(routing))
-    factory = runtime.registry.factory("app")
+    space = UserSpace(Deployment(routing_path=str(routing)))
+    factory = space.registry.factory("app")
 
     assert factory.action_gate is not None
     assert factory.action_gate.config.mode == "enforce"
@@ -151,11 +169,11 @@ routing:
 async def test_routing_keeps_follow_ups_with_the_previous_agent():
     """An open selection routes every message, continuing where the last one went."""
     registry = _registry(agents={"assistant": "Talk", "engineer": "Code"})
-    runtime = _runtime(
+    space = _space(
         registry, metadata={"routed_system": "solo", "routed_agent": "engineer"}
     )
 
-    resolution = await runtime.resolve_turn("fix the build", context_id="coding")
+    resolution = await space.resolve_turn("fix the build", context_id="coding")
 
     assert resolution.agent == "engineer"
     assert resolution.routed_agent is True
@@ -165,9 +183,9 @@ async def test_routing_keeps_follow_ups_with_the_previous_agent():
 @pytest.mark.asyncio
 async def test_pinned_agent_is_never_routed():
     registry = _registry(agents={"assistant": "Talk", "engineer": "Code"})
-    runtime = _runtime(registry, metadata={})
+    space = _space(registry, metadata={})
 
-    resolution = await runtime.resolve_turn(
+    resolution = await space.resolve_turn(
         "fix", agent_key="assistant", context_id="ctx"
     )
 
@@ -179,9 +197,9 @@ async def test_pinned_agent_is_never_routed():
 async def test_routing_timeout_falls_back_to_the_default_agent(monkeypatch):
     registry = _registry(agents={"assistant": "Talk", "engineer": "Code"}, hang=True)
     monkeypatch.setattr("web_chat.systems.ROUTING_TIMEOUT_SECONDS", 0.01)
-    runtime = _runtime(registry, metadata={})
+    space = _space(registry, metadata={})
 
-    resolution = await runtime.resolve_turn("hello", context_id="ctx")
+    resolution = await space.resolve_turn("hello", context_id="ctx")
 
     assert resolution.agent == "assistant"
 
@@ -219,11 +237,11 @@ def _registry(*, agents: dict[str, str], hang: bool = False) -> SystemRegistry:
     return registry
 
 
-def _runtime(registry: SystemRegistry, *, metadata: dict) -> WebChatRuntime:
-    runtime = object.__new__(WebChatRuntime)
-    runtime.registry = registry
-    runtime.conversation_metadata = lambda context_id: metadata
-    return runtime
+def _space(registry: SystemRegistry, *, metadata: dict) -> UserSpace:
+    space = object.__new__(UserSpace)
+    space.registry = registry
+    space.conversation_metadata = lambda context_id: metadata
+    return space
 
 
 ROUTING_WITH_VOICE = """
@@ -254,17 +272,17 @@ def test_voice_settings_come_from_the_catalog_when_routing(minimal_config, monke
     routing = minimal_config.parent / "routing.yaml"
     routing.write_text(ROUTING_WITH_VOICE.format(config=minimal_config.name), encoding="utf-8")
 
-    runtime = WebChatRuntime(routing_path=str(routing))
+    deployment = Deployment(routing_path=str(routing))
 
-    path, source = runtime.voice_source()
+    path, source = deployment.voice_source()
     assert path == routing.resolve() or path == routing
-    assert runtime.voice_config_dict()["voice"]["decision_model"] == "router"
+    assert deployment.voice_config_dict()["voice"]["decision_model"] == "router"
     assert source.get_model("router").name == "decisions-model"
 
 
 def test_a_single_system_keeps_its_own_voice_settings(minimal_config, monkeypatch):
     monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
-    runtime = WebChatRuntime(config_path=str(minimal_config), routing_path=None)
-    path, source = runtime.voice_source()
-    assert path == runtime.config_path
-    assert source is runtime.config
+    deployment = Deployment(config_path=str(minimal_config), routing_path=None)
+    path, source = deployment.voice_source()
+    assert path == deployment.config_path
+    assert source is deployment.config

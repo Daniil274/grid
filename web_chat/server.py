@@ -1,18 +1,33 @@
+"""HTTP and websocket routes of the web chat.
+
+Every API route and the chat socket act for one user, found by the server's
+``Identify`` (web_chat.identity), and work in that user's space, lent by the
+server's pool for the duration of the request (web_chat.spaces). A route never
+reaches a space but through that lease, so what it reads and changes belongs
+to the user who asked.
+
+The system configs are the deployment's (web_chat.deployment), shared by all
+spaces; saving them marks every space stale, and each is rebuilt on the new
+configs once nothing uses it.
+"""
+
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
-from fastapi import FastAPI, Header, HTTPException, WebSocket
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import HTTPConnection
 
-from core.interruption import CONTINUATION_TYPE, interruption_of
-from core.tool_check import summarize
-from schemas.schemas import ImageContent
-from web_chat.runtime import WebChatRuntime
+from web_chat.delivery import MessageQueue
+from web_chat.deployment import Deployment
+from web_chat.identity import DEFAULT_USER, Identify, single_user
 from web_chat.schemas import (
     ActionReviewRequest,
     BranchRequest,
@@ -22,12 +37,17 @@ from web_chat.schemas import (
     SettingsStructuredUpdateRequest,
     SettingsYamlUpdateRequest,
 )
-from web_chat.delivery import MessageQueue
-from web_chat.trace import is_tool_result, normalize_steps
+from web_chat.space import UserSpace
+from web_chat.spaces import SpacePool
+from web_chat.trace import is_tool_result
+from web_chat.views import UNTITLED, agent_options, conversation_title, serialize_message, system_options
 
 logger = logging.getLogger("grid.web_chat.server")
 ROOT = Path(__file__).resolve().parent
 INDEX_HTML = ROOT / "index.html"
+
+#: How often idle and stale spaces are looked for and retired.
+SWEEP_INTERVAL_SECONDS = 60.0
 
 
 class RevalidatedStaticFiles(StaticFiles):
@@ -43,19 +63,54 @@ class RevalidatedStaticFiles(StaticFiles):
         response.headers["Cache-Control"] = "no-cache"
         return response
 
+
 class WebChatServer:
-    def __init__(self, runtime: WebChatRuntime) -> None:
-        self.runtime = runtime
-        self._active_chat_contexts: set[str] = set()
-        # Running turns by conversation; they outlive the sockets watching them.
-        self._chat_turns: dict[str, Any] = {}
+    def __init__(
+        self,
+        deployment: Deployment,
+        spaces: SpacePool,
+        *,
+        identify: Optional[Identify] = None,
+        action_review_token: Optional[str] = None,
+        warm_user: Optional[str] = DEFAULT_USER,
+    ) -> None:
+        """``identify`` defaults to the single local user. ``warm_user``'s space
+        is built and its default agent warmed at startup; None warms nobody."""
+        self.deployment = deployment
+        self.spaces = spaces
+        self.action_review_token = action_review_token
+        self._identify = identify or single_user()
+        self._warm_user = warm_user
+        self._sweeper: Optional[asyncio.Task] = None
+
         self.app = FastAPI(title="Grid Web Chat", docs_url=None, redoc_url=None)
         self._mount_static()
-        self._register_routes()
+        self.current_user, self.current_space = self._dependencies()
+        # Everything under /api acts for an identified user.
+        identified = [Depends(self.current_user)]
+        api = APIRouter(dependencies=identified)
+        self._register_routes(api)
         from web_chat.voice import register_voice_routes
+        from web_chat.voice_turns import register_turn_routes
 
-        register_voice_routes(self.app, runtime)
+        register_turn_routes(api, self.current_space)
+        self.app.include_router(api)
+        # Speech is shared by all users and owns its lifecycle on the app.
+        self.voice = register_voice_routes(self.app, deployment, dependencies=identified)
         self._register_lifecycle()
+
+    def _dependencies(self):
+        """The route dependencies: the identified user, and that user's space."""
+        identify, spaces = self._identify, self.spaces
+
+        async def current_user(connection: HTTPConnection) -> str:
+            return await identify(connection)
+
+        async def current_space(user_id: str = Depends(current_user)) -> AsyncIterator[UserSpace]:
+            async with spaces.use(user_id) as space:
+                yield space
+
+        return current_user, current_space
 
     def _mount_static(self) -> None:
         self.app.mount("/static", RevalidatedStaticFiles(directory=str(ROOT)), name="static")
@@ -63,185 +118,66 @@ class WebChatServer:
     def _register_lifecycle(self) -> None:
         @self.app.on_event("startup")
         async def _startup() -> None:
-            self.runtime.schedule_warmup()
+            if self._warm_user is not None:
+                async with self.spaces.use(self._warm_user) as space:
+                    space.schedule_warmup()
+            self._sweeper = asyncio.get_running_loop().create_task(self._sweep_forever(), name="space-sweeper")
 
         @self.app.on_event("shutdown")
         async def _shutdown() -> None:
-            if hasattr(self.runtime, "close"):
-                await self.runtime.close()
+            if self._sweeper is not None:
+                self._sweeper.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._sweeper
+            await self.spaces.close()
 
-    def turn_is_running(self, context_id: str) -> bool:
-        active = self._chat_turns.get(context_id)
-        return active is not None and not active[1].done()
-
-    def _conversation_title(self, view: dict[str, Any]) -> str:
-        metadata = view["metadata"]
-        if metadata.get("title") and metadata.get("title") != "New chat":
-            return metadata["title"]
-        for msg in view["messages"]:
-            if getattr(msg, "role", None) == "user":
-                text = msg.get_text_content() if hasattr(msg, "get_text_content") else str(getattr(msg, "content", ""))
-                text = " ".join(text.split())
-                return text[:42] + ("..." if len(text) > 42 else "")
-        return "New chat"
-
-    def _serialize_message(
-        self, msg: Any, *, resumable: bool = False, versions: Optional[dict] = None
-    ) -> dict[str, Any]:
-        """A stored message as the chat renders it.
-
-        ``interruption`` marks a turn that stopped early; ``resumable`` is set
-        only on the one Continue can still resume. ``kind`` "continuation" is
-        the user entry of a Continue, shown as a marker, not a bubble.
-        ``images`` are the data URLs of the images the message carries.
-        ``id`` is the message's stable id; ``versions`` lists the branches with
-        other versions of an edited user message (ContextManager.message_versions).
-        """
-        if hasattr(msg, "get_text_content"):
-            content = msg.get_text_content()
-        else:
-            content = str(getattr(msg, "content", ""))
-        images = [
-            part.image_url.url
-            for part in (msg.get_images() if hasattr(msg, "get_images") else [])
-            if isinstance(part, ImageContent)
-        ]
-        if images and content == "[multimodal content]":
-            content = ""  # an image without words
-        metadata = getattr(msg, "metadata", None) or {}
-        # Older builds stored a flat "trace_events" list; normalize_steps keeps
-        # those conversations renderable by the current timeline component.
-        trace = metadata.get("trace") or normalize_steps(metadata.get("trace_events"))
-        record = interruption_of(msg)
-        return {
-            "id": metadata.get("message_id"),
-            "versions": versions,
-            "role": getattr(msg, "role", "assistant"),
-            "content": content,
-            "timestamp": getattr(msg, "timestamp", None),
-            "trace": trace,
-            "kind": "continuation" if metadata.get("type") == CONTINUATION_TYPE else None,
-            "images": images,
-            "interruption": (
-                {**record.to_dict(), "resumable": resumable} if record is not None else None
-            ),
-        }
-
-    def _agent_options(self, system_key: Optional[str] = None) -> list[dict[str, Any]]:
-        """Agents of one system, as the picker shows them."""
-        registry = self.runtime.registry
-        system = system_key or registry.default_key()
-        models = registry.config(system).config.models or {}
-        options: list[dict[str, Any]] = []
-        for agent_key, agent in registry.agents(system).items():
-            model = models.get(agent.primary_model)
-            issues = self._issue_payload(lambda: registry.agent_issues(system, agent_key))
-            options.append(
-                {
-                    "key": agent_key,
-                    "name": agent.name or agent_key,
-                    "description": agent.description or "",
-                    "model_key": agent.primary_model,
-                    "model_keys": agent.model_keys(),
-                    "model_name": getattr(model, "name", None) or agent.primary_model,
-                    "model_description": getattr(model, "description", "") or "",
-                    "tool_count": len(agent.tools or []),
-                    "mcp_enabled": bool(getattr(agent, "mcp_enabled", False)),
-                    "routable": bool(getattr(agent, "routable", True)),
-                    # Tools that will fail and why; shown before the agent is used.
-                    "issues": issues,
-                }
-            )
-        return options
-
-    @staticmethod
-    def _issue_payload(compute: Any) -> dict[str, Any]:
-        """Issues as JSON: each one, plus one line per distinct problem for display.
-
-        A check that itself breaks is reported, never fatal.
-        """
-        try:
-            issues = compute()
-        except Exception as exc:
-            logger.warning("Tool check failed: %s", exc)
-            return {"items": [], "summary": [f"tool check failed: {exc}"]}
-        return {"items": [issue.to_dict() for issue in issues], "summary": summarize(issues)}
-
-    def _system_options(self) -> list[dict[str, Any]]:
-        """Every selectable system with its agents - the whole picker payload."""
-        options: list[dict[str, Any]] = []
-        for system in self.runtime.registry.systems():
+    async def _sweep_forever(self) -> None:
+        while True:
+            await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
             try:
-                agents = self._agent_options(system.key)
-                default_agent = self.runtime.registry.config(system.key).get_default_agent()
-                error = ""
-                issues = self._issue_payload(
-                    lambda: [issue for issue in self.runtime.registry.issues(system.key) if issue.agent is None]
-                )
-            except Exception as exc:  # a broken system stays visible and labelled
-                logger.warning("System '%s' could not be loaded: %s", system.key, exc)
-                agents, default_agent, error, issues = [], None, str(exc), {"items": [], "summary": []}
-            options.append(
-                {
-                    "key": system.key,
-                    "name": system.name,
-                    "description": system.description,
-                    "config_path": str(system.config_path),
-                    "default_agent": default_agent,
-                    "agents": agents,
-                    "error": error,
-                    "issues": issues,
-                }
-            )
-        return options
-
-    def agent_label(self, system_key: str, agent_key: str) -> str:
-        """Display name of an agent, falling back to its key."""
-        try:
-            agent = self.runtime.registry.agents(system_key).get(agent_key)
-        except Exception:
-            return agent_key
-        return getattr(agent, "name", None) or agent_key
-
-    def selection_is_valid(self, system_key: Any, agent_key: Any) -> bool:
-        """`None` means `auto` on that level and is always valid."""
-        registry = self.runtime.registry
-        if system_key is not None and system_key not in registry.keys():
-            return False
-        if agent_key is None:
-            return True
-        return registry.has_agent(system_key or registry.default_key(), agent_key)
+                await self.spaces.sweep()
+            except Exception:
+                logger.exception("Retiring idle spaces failed")
 
     def _require_action_review_token(self, supplied: Optional[str]) -> None:
-        expected = getattr(self.runtime, "action_review_token", None)
+        expected = self.action_review_token
         if not expected:
             raise HTTPException(status_code=503, detail="Action review API is disabled")
         if not supplied or not hmac.compare_digest(supplied, expected):
             raise HTTPException(status_code=403, detail="Invalid action review token")
 
-    def _structured_settings_payload(self) -> dict[str, Any]:
-        raw = self.runtime.config_dict()
-        cfg = self.runtime.config.config
+    def _settings_payload(self, space: UserSpace) -> dict[str, Any]:
+        raw = self.deployment.config_dict()
+        cfg = space.config.config
         return {
             "config": raw,
-            "raw_yaml": self.runtime.config_path.read_text(encoding="utf-8"),
+            "raw_yaml": self.deployment.config_yaml(),
             "meta": {
                 "default_agent": cfg.settings.default_agent,
-                "config_path": str(self.runtime.config_path),
-                "workspace_path": str(self.runtime.workspace_path),
-                "persist_path": str(self.runtime.persist_path),
+                "config_path": str(self.deployment.config_path),
+                "workspace_path": str(space.workspace_path),
+                "persist_path": str(space.conversations_path),
                 "isolation_enabled": bool(getattr(cfg.isolation, "enabled", False)),
-                "container_id": self.runtime.container_id,
-                "agent_options": self._agent_options(),
-                "systems": self._system_options(),
+                "container_id": space.container_id,
+                "agent_options": agent_options(space.registry),
+                "systems": system_options(space.registry),
                 "model_keys": sorted((raw.get("models") or {}).keys()),
                 "tool_keys": sorted((raw.get("tools") or {}).keys()),
                 "prompt_keys": sorted((raw.get("prompt_templates") or {}).keys()),
             },
         }
 
-    def _register_routes(self) -> None:
+    async def _configs_changed(self, user_id: str) -> dict[str, Any]:
+        """After a config edit: retire what is free, answer from a fresh space."""
+        self.spaces.invalidate()
+        await self.spaces.sweep()
+        async with self.spaces.use(user_id) as space:
+            space.schedule_warmup()
+            return self._settings_payload(space)
+
+    def _register_routes(self, api: APIRouter) -> None:
         app = self.app
+        current_user, current_space = self.current_user, self.current_space
 
         @app.get("/", response_class=HTMLResponse)
         async def index() -> HTMLResponse:
@@ -252,61 +188,52 @@ class WebChatServer:
                 headers={"Cache-Control": "no-store"},
             )
 
-        @app.get("/api/chat/bootstrap")
-        async def bootstrap() -> JSONResponse:
-            registry = self.runtime.registry
+        @api.get("/api/chat/bootstrap")
+        async def bootstrap(space: UserSpace = Depends(current_space)) -> JSONResponse:
+            registry = space.registry
             return JSONResponse(
                 {
-                    "systems": self._system_options(),
+                    "systems": system_options(registry),
                     "default_system": registry.default_key(),
                     "routing_enabled": registry.can_route,
                     "multi_system": registry.has_catalog,
-                    "current_context_id": self.runtime.context_manager().get_current_context_id(),
-                    "workspace_path": str(self.runtime.workspace_path),
-                    "isolation_enabled": bool(self.runtime.container_id),
+                    "current_context_id": space.context_manager().get_current_context_id(),
+                    "workspace_path": str(space.workspace_path),
+                    "isolation_enabled": bool(space.container_id),
                 }
             )
 
-        @app.post("/api/chat/prepare-agent")
-        async def prepare_agent(body: PrepareAgentRequest) -> JSONResponse:
+        @api.post("/api/chat/prepare-agent")
+        async def prepare_agent(body: PrepareAgentRequest, space: UserSpace = Depends(current_space)) -> JSONResponse:
             try:
-                await self.runtime.warm_agent(body.agent_key, body.system_key)
+                await space.warm_agent(body.agent_key, body.system_key)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return JSONResponse({"ok": True, "agent_key": body.agent_key, "system_key": body.system_key})
 
-        @app.get("/api/action-policy/reviews")
+        @api.get("/api/action-policy/reviews")
         async def pending_action_reviews(
-            review_token: Optional[str] = Header(
-                default=None, alias="X-Grid-Action-Review-Token"
-            ),
+            space: UserSpace = Depends(current_space),
+            review_token: Optional[str] = Header(default=None, alias="X-Grid-Action-Review-Token"),
         ) -> JSONResponse:
             self._require_action_review_token(review_token)
-            return JSONResponse(self.runtime.pending_action_reviews())
+            return JSONResponse(space.pending_action_reviews())
 
-        @app.post("/api/action-policy/reviews/{approval_id}")
+        @api.post("/api/action-policy/reviews/{approval_id}")
         async def resolve_action_review(
             approval_id: str,
             body: ActionReviewRequest,
-            review_token: Optional[str] = Header(
-                default=None, alias="X-Grid-Action-Review-Token"
-            ),
+            space: UserSpace = Depends(current_space),
+            review_token: Optional[str] = Header(default=None, alias="X-Grid-Action-Review-Token"),
         ) -> JSONResponse:
             self._require_action_review_token(review_token)
-            resolved = self.runtime.resolve_action_review(
-                approval_id, approve=body.decision == "approve"
-            )
-            if not resolved:
-                raise HTTPException(
-                    status_code=404, detail="Review not found or expired"
-                )
-            return JSONResponse(
-                {"ok": True, "approval_id": approval_id, "decision": body.decision}
-            )
+            if not space.resolve_action_review(approval_id, approve=body.decision == "approve"):
+                raise HTTPException(status_code=404, detail="Review not found or expired")
+            return JSONResponse({"ok": True, "approval_id": approval_id, "decision": body.decision})
 
-        @app.get("/api/chat/conversations")
-        async def list_conversations() -> JSONResponse:
-            manager = self.runtime.context_manager()
+        @api.get("/api/chat/conversations")
+        async def list_conversations(space: UserSpace = Depends(current_space)) -> JSONResponse:
+            manager = space.context_manager()
             views = {view["id"]: view for view in manager.conversation_views()}
             items: list[dict[str, Any]] = []
             for view in views.values():
@@ -325,7 +252,7 @@ class WebChatServer:
                         "id": view["id"],
                         "open_id": shown["id"],
                         "branches": len(family),
-                        "title": self._conversation_title(view),
+                        "title": conversation_title(view),
                         "updated_at": max((member["updated_at"] or "") for member in family),
                         "system_key": metadata.get("system_key"),
                         "agent_key": metadata.get("agent_key"),
@@ -334,42 +261,43 @@ class WebChatServer:
                         "message_count": sum(
                             1 for msg in shown["messages"] if not is_tool_result(msg)
                         ),
-                        "active": any(self.turn_is_running(member["id"]) for member in family),
+                        "active": any(space.turns.is_running(member["id"]) for member in family),
                     }
                 )
             items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
             return JSONResponse(items)
 
-        @app.post("/api/chat/conversations")
-        async def create_conversation(body: ConversationCreateRequest | None = None) -> JSONResponse:
-            context_manager = self.runtime.context_manager()
-            context_id = context_manager.start_new_context()
+        @api.post("/api/chat/conversations")
+        async def create_conversation(
+            body: ConversationCreateRequest | None = None, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            context_id = space.context_manager().start_new_context()
             selection = {
                 "system_key": body.system_key if body else None,
                 "agent_key": body.agent_key if body else None,
             }
-            self.runtime.update_conversation_metadata(
-                context_id, created_by_web=True, title="New chat", **selection
-            )
+            space.update_conversation_metadata(context_id, created_by_web=True, title=UNTITLED, **selection)
             return JSONResponse({"id": context_id, **selection})
 
-        @app.patch("/api/chat/conversations/{context_id}")
-        async def rename_conversation(context_id: str, body: ConversationRenameRequest) -> JSONResponse:
+        @api.patch("/api/chat/conversations/{context_id}")
+        async def rename_conversation(
+            context_id: str, body: ConversationRenameRequest, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
             title = " ".join(body.title.split())
             if not title:
                 raise HTTPException(status_code=400, detail="Title must not be empty")
             # A title the user chose outranks the one derived from messages.
-            if not self.runtime.context_manager().update_context_metadata(
+            if not space.context_manager().update_context_metadata(
                 context_id, {"title": title, "title_locked": True}, create=False
             ):
                 raise HTTPException(status_code=404, detail="Conversation not found")
             return JSONResponse({"id": context_id, "title": title})
 
-        @app.delete("/api/chat/conversations/{context_id}")
-        async def delete_conversation(context_id: str) -> JSONResponse:
-            manager = self.runtime.context_manager()
+        @api.delete("/api/chat/conversations/{context_id}")
+        async def delete_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
+            manager = space.context_manager()
             family = manager.family(context_id)
-            if any(self.turn_is_running(member) for member in family):
+            if any(space.turns.is_running(member) for member in family):
                 raise HTTPException(status_code=409, detail="Stop the running turn before deleting this chat")
             # A conversation goes with all its branches.
             deleted = manager.delete_family(context_id)
@@ -377,21 +305,23 @@ class WebChatServer:
                 raise HTTPException(status_code=404, detail="Conversation not found")
             return JSONResponse({"id": context_id, "deleted": True, "contexts": deleted})
 
-        @app.post("/api/chat/conversations/{context_id}/branches")
-        async def create_branch(context_id: str, body: BranchRequest) -> JSONResponse:
+        @api.post("/api/chat/conversations/{context_id}/branches")
+        async def create_branch(
+            context_id: str, body: BranchRequest, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
             """Fork the conversation before a user message, for an edited version of it.
 
             The client then sends the new text into the branch with ``edit_of``.
             A turn running in the conversation must be stopped first.
             """
-            manager = self.runtime.context_manager()
+            manager = space.context_manager()
             if manager.conversation_view(context_id) is None:
                 raise HTTPException(status_code=404, detail="Conversation not found")
-            if self.turn_is_running(context_id):
+            if space.turns.is_running(context_id):
                 raise HTTPException(status_code=409, detail="Stop the running turn before editing a message")
             metadata = manager.get_context_metadata(context_id)
-            system = metadata.get("routed_system") or self.runtime.registry.default_key()
-            factory = self.runtime.registry.factory(system)
+            system = metadata.get("routed_system") or space.registry.default_key()
+            factory = space.registry.factory(system)
             try:
                 branch_id = await factory.fork_conversation(context_id, body.message_id)
             except KeyError:
@@ -401,37 +331,38 @@ class WebChatServer:
             slot = manager.get_context_metadata(branch_id).get("branch_slot")
             return JSONResponse({"id": branch_id, "edit_of": slot, "root": manager.branch_root(branch_id)})
 
-        @app.post("/api/chat/conversations/{context_id}/compact")
-        async def compact_conversation(context_id: str) -> JSONResponse:
+        @api.post("/api/chat/conversations/{context_id}/compact")
+        async def compact_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
             """Summarize the agent's session in this conversation now (core.context_budget)."""
-            manager = self.runtime.context_manager()
+            manager = space.context_manager()
             if manager.conversation_view(context_id) is None:
                 raise HTTPException(status_code=404, detail="Conversation not found")
-            if self.turn_is_running(context_id):
+            if space.turns.is_running(context_id):
                 raise HTTPException(status_code=409, detail="Stop the running turn before compacting")
             metadata = manager.get_context_metadata(context_id)
             agent = metadata.get("routed_agent")
             if not agent:
                 raise HTTPException(status_code=400, detail="No agent has worked in this chat yet")
-            system = metadata.get("routed_system") or self.runtime.registry.default_key()
-            outcome = await self.runtime.registry.factory(system).compact_session(agent, context_id, force=True)
+            system = metadata.get("routed_system") or space.registry.default_key()
+            outcome = await space.registry.factory(system).compact_session(agent, context_id, force=True)
             if outcome is None:
                 raise HTTPException(status_code=422, detail="Nothing was compacted: the context is empty or the summary failed")
             return JSONResponse({"id": context_id, **outcome})
 
-        @app.post("/api/chat/conversations/{context_id}/activate")
-        async def activate_branch(context_id: str) -> JSONResponse:
+        @api.post("/api/chat/conversations/{context_id}/activate")
+        async def activate_branch(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
             """Make this branch the one its conversation opens with."""
-            manager = self.runtime.context_manager()
+            manager = space.context_manager()
             if manager.conversation_view(context_id) is None:
                 raise HTTPException(status_code=404, detail="Conversation not found")
             manager.set_active_branch(context_id)
             return JSONResponse({"id": context_id, "root": manager.branch_root(context_id)})
 
-        @app.get("/api/chat/conversations/{context_id}")
-        async def get_conversation(context_id: str) -> JSONResponse:
-            manager = self.runtime.context_manager()
-            if not self.turn_is_running(context_id):
+        @api.get("/api/chat/conversations/{context_id}")
+        async def get_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
+            manager = space.context_manager()
+            active = space.turns.running(context_id)
+            if active is None:
                 # A turn the record says is running died with an earlier
                 # process: show it as interrupted, with Continue.
                 manager.recover_abandoned_turn(context_id)
@@ -442,22 +373,20 @@ class WebChatServer:
             pending = manager.pending_interruption(context_id) is not None
             versions = manager.message_versions(context_id)
             messages = [
-                self._serialize_message(
+                serialize_message(
                     msg,
                     resumable=pending and index == len(shown) - 1,
                     versions=versions.get((msg.metadata or {}).get("message_id")),
                 )
                 for index, msg in enumerate(shown)
             ]
-            metadata = view["metadata"]
-            active = self._chat_turns.get(context_id)
             active_turn = (
                 {
                     "message": active[0].message,
                     "resumes": active[0].resumes,
                     "elapsed_ms": active[0].elapsed_ms,
                 }
-                if active is not None and not active[1].done()
+                if active is not None
                 else None
             )
             return JSONResponse({
@@ -466,40 +395,46 @@ class WebChatServer:
                 "messages": messages,
                 # Messages waiting for their turn (web_chat.delivery).
                 "pending": MessageQueue(manager, context_id).public(),
-                "metadata": metadata,
+                "metadata": view["metadata"],
                 "active_turn": active_turn,
             })
 
-        @app.get("/api/settings")
-        async def get_settings() -> JSONResponse:
-            return JSONResponse(self._structured_settings_payload())
+        @api.get("/api/settings")
+        async def get_settings(space: UserSpace = Depends(current_space)) -> JSONResponse:
+            return JSONResponse(self._settings_payload(space))
 
-        @app.put("/api/settings/structured")
-        async def save_structured_settings(body: SettingsStructuredUpdateRequest) -> JSONResponse:
+        # Saving takes no lease on the user's space: the edit retires spaces,
+        # and one held by the request itself could not be rebuilt.
+        @api.put("/api/settings/structured")
+        async def save_structured_settings(
+            body: SettingsStructuredUpdateRequest, user_id: str = Depends(current_user)
+        ) -> JSONResponse:
             try:
-                self.runtime.save_structured_config(body.config)
-                self.runtime.schedule_warmup()
-                return JSONResponse(self._structured_settings_payload())
+                self.deployment.save_structured_config(body.config)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(await self._configs_changed(user_id))
 
-        @app.put("/api/settings/yaml")
-        async def save_yaml_settings(body: SettingsYamlUpdateRequest) -> JSONResponse:
+        @api.put("/api/settings/yaml")
+        async def save_yaml_settings(
+            body: SettingsYamlUpdateRequest, user_id: str = Depends(current_user)
+        ) -> JSONResponse:
             try:
-                self.runtime.save_yaml_config(body.yaml_content)
-                self.runtime.schedule_warmup()
-                return JSONResponse(self._structured_settings_payload())
+                self.deployment.save_yaml_config(body.yaml_content)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(await self._configs_changed(user_id))
 
-        @app.websocket("/api/chat/ws/{context_id}")
-        async def chat_ws(websocket: WebSocket, context_id: str) -> None:
+        @api.websocket("/api/chat/ws/{context_id}")
+        async def chat_ws(websocket: WebSocket, context_id: str, space: UserSpace = Depends(current_space)) -> None:
             from web_chat.session import chat_session
 
-            await chat_session(self, websocket, context_id)
+            await chat_session(space, websocket, context_id)
 
 
-
-def create_app(runtime: Optional[WebChatRuntime] = None) -> FastAPI:
-    server = WebChatServer(runtime or WebChatRuntime())
-    return server.app
+def create_app(
+    deployment: Deployment,
+    spaces: SpacePool,
+    **options: Any,
+) -> FastAPI:
+    return WebChatServer(deployment, spaces, **options).app

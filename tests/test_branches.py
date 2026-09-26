@@ -159,16 +159,15 @@ def web_client(factory):
 
     from fastapi.testclient import TestClient
 
-    from tests.test_web_ui_routes import _DummyRuntime
-    from web_chat.server import create_app
+    from tests.test_web_ui_routes import _DummySpace, _server
 
-    runtime = _DummyRuntime()
-    runtime._context_manager = factory.context_manager
-    runtime.registry = SimpleNamespace(
+    space = _DummySpace()
+    space._context_manager = factory.context_manager
+    space.registry = SimpleNamespace(
         default_key=lambda: "s", factory=lambda system: factory, keys=lambda: ["s"],
         systems=lambda: [], can_route=False, has_catalog=False,
     )
-    return TestClient(create_app(runtime))
+    return TestClient(_server(space).app)
 
 
 async def test_the_web_api_forks_lists_one_row_and_deletes_the_family(factory):

@@ -431,6 +431,7 @@ async def test_web_stop_then_continue_over_the_real_factory(factory):
     """Stop mid-step in the chat, then Continue: the same session, nothing lost."""
     from tests.test_web_chat_session import Socket
     from web_chat.session import chat_session
+    from web_chat.turns import TurnBoard
 
     manager = factory.context_manager
     context_id = manager.start_new_context()
@@ -441,16 +442,18 @@ async def test_web_stop_then_continue_over_the_real_factory(factory):
             factory=factory, routed=True, warning="",
         )
 
-    runtime = SimpleNamespace(
+    space = SimpleNamespace(
         context_manager=lambda: manager, workspace_path=".", user_id="test", factory=factory,
         warm_agent=AsyncMock(), resolve_turn=resolve_turn,
         update_conversation_metadata=lambda ctx, **updates: manager.update_context_metadata(
             ctx, {key: value for key, value in updates.items() if value is not None}
         ),
-    )
-    server = SimpleNamespace(
-        runtime=runtime, _active_chat_contexts=set(), _chat_turns={},
-        agent_label=lambda system, agent: "Worker", selection_is_valid=lambda system, agent: True,
+        registry=SimpleNamespace(
+            agent_label=lambda system, agent: "Worker",
+            selection_is_valid=lambda system, agent: True,
+            agent_issues=lambda system, agent: [],
+        ),
+        turns=TurnBoard(),
     )
 
     at_tool, release = asyncio.Event(), asyncio.Event()
@@ -465,7 +468,7 @@ async def test_web_stop_then_continue_over_the_real_factory(factory):
     )
     socket = Socket()
     with patch("agents.Runner", runner):
-        session = asyncio.create_task(chat_session(server, socket, context_id))
+        session = asyncio.create_task(chat_session(space, socket, context_id))
         await socket.incoming.put('{"message":"Click OK"}')
         await asyncio.wait_for(at_tool.wait(), 2)
         await socket.incoming.put('{"action":"stop"}')

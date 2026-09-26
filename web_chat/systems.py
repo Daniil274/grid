@@ -157,6 +157,26 @@ class SystemRegistry:
     def has_agent(self, system_key: str, agent_key: str) -> bool:
         return agent_key in self.agents(system_key)
 
+    def built_factories(self) -> Dict[str, Any]:
+        """The factories built so far, by system; none is built by asking."""
+        return dict(self._factories)
+
+    def agent_label(self, system_key: str, agent_key: str) -> str:
+        """Display name of an agent, falling back to its key."""
+        try:
+            agent = self.agents(system_key).get(agent_key)
+        except Exception:  # a broken system still gets its agent named
+            return agent_key
+        return getattr(agent, "name", None) or agent_key
+
+    def selection_is_valid(self, system_key: Optional[str], agent_key: Optional[str]) -> bool:
+        """Whether a pinned selection names what exists; ``None`` is `auto`, always valid."""
+        if system_key is not None and system_key not in self.keys():
+            return False
+        if agent_key is None:
+            return True
+        return self.has_agent(system_key or self.default_key(), agent_key)
+
     # -- health ------------------------------------------------------------
     def issues(self, system_key: str) -> List[ToolIssue]:
         """Why tools of a system will fail on this machine; cached briefly."""

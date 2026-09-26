@@ -87,7 +87,7 @@ def make_riff_wav(data_bytes: int = 64) -> bytes:
 
 @pytest.fixture
 def runtime(tmp_path):
-    """Mocked WebChatRuntime with a valid voice config and model file."""
+    """A mocked deployment with a valid voice config and model file."""
     model_path = tmp_path / "models" / "model.pt"
     model_path.parent.mkdir(parents=True, exist_ok=True)
     model_path.write_bytes(b"fake-silero-model")

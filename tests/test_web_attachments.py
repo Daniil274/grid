@@ -3,7 +3,6 @@
 import base64
 import io
 import json
-from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -17,7 +16,7 @@ from web_chat.attachments import (
     normalize_image,
     normalize_images,
 )
-from web_chat.server import WebChatServer
+from web_chat.views import serialize_message
 
 CONFIG = ImageProcessingConfig(max_width=400, max_height=300, jpeg_quality=80)
 
@@ -102,8 +101,7 @@ def test_stored_images_are_served_with_the_message():
         content=[ImageContent(type="image_url", image_url=ImageUrl(url="data:image/jpeg;base64,BBBB"))],
         timestamp="2026-09-26T12:00:01",
     )
-    serialize = WebChatServer._serialize_message
-    served = serialize(SimpleNamespace(), message)
+    served = serialize_message(message)
     assert served["content"] == "look"
     assert served["images"] == ["data:image/jpeg;base64,AAAA"]
-    assert serialize(SimpleNamespace(), image_only)["content"] == ""
+    assert serialize_message(image_only)["content"] == ""

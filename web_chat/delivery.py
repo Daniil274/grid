@@ -54,15 +54,18 @@ _MAX_QUEUE = 20
 
 
 async def decide_delivery(
-    runtime: Any, *, message: str, task: str, steps: List[str], agent_text: str
+    deployment: Any, *, message: str, task: str, steps: List[str], agent_text: str
 ) -> tuple[str, str]:
-    """(delivery, who decided): "model", or why the safe default was used."""
+    """(delivery, who decided): "model", or why the safe default was used.
+
+    The decision model is the deployment's voice decision model (web_chat.deployment).
+    """
     try:
-        config = runtime.voice_config_dict()
+        config = deployment.voice_config_dict()
         key = (config.get("voice") or {}).get("decision_model") or (config.get("routing") or {}).get("model")
         if not key:
             return SAFE_DELIVERY, "no decision model configured"
-        _, source = runtime.voice_source()
+        _, source = deployment.voice_source()
         model = DecisionsModel.from_config(source, key)
         state = {
             "new_user_message": message[:4000],
