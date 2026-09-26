@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from context_inspector.service import (
@@ -27,6 +27,7 @@ from context_inspector.service import (
     reload_context_manager,
     resolve_context_path,
 )
+from web_chat.security import same_site_only
 
 logger = logging.getLogger("grid.context_inspector.server")
 
@@ -65,7 +66,11 @@ def create_app(
         else open_context_manager(resolved),
     }
 
-    app = FastAPI(title="Context Inspector", docs_url=None, redoc_url=None)
+    # Local tools, reachable by every page the operator's browser opens: a
+    # change (rerun, edit, reload) must come from their own page.
+    app = FastAPI(
+        title="Context Inspector", docs_url=None, redoc_url=None, dependencies=[Depends(same_site_only())]
+    )
 
     def _manager():
         return state["manager"]

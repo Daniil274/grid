@@ -259,3 +259,20 @@ def test_web_chat_deletes_a_conversation_but_not_a_running_one():
     assert "ctx-b" not in manager._contexts
     assert manager._current_context_id != "ctx-b"
     assert client.delete("/api/chat/conversations/ctx-b").status_code == 404
+
+
+def test_the_timeline_takes_changes_only_from_its_own_page():
+    from starlette.websockets import WebSocketDisconnect
+
+    client = TestClient(create_timeline_app())
+    rerun = "/api/traces/t/nodes/n/rerun"
+
+    assert client.post(rerun, json={"messages": []}, headers={"Origin": "https://evil.example"}).status_code == 403
+    assert client.post(rerun, json={"messages": []}).status_code == 403  # no origin at all
+    assert client.post(rerun, json={"messages": []}, headers=SAME_SITE).status_code != 403
+    assert client.get("/").status_code == 200
+    try:
+        with client.websocket_connect("/ws", headers={"Origin": "https://evil.example"}):
+            raise AssertionError("a cross-site socket was accepted")
+    except WebSocketDisconnect as closed:
+        assert closed.code == 1008

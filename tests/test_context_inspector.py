@@ -116,6 +116,7 @@ def test_api_endpoints(temp_dir):
     missing = client.get("/api/contexts/ctx-nope")
     assert missing.status_code == 404
 
-    reloaded = client.post("/api/reload")
+    assert client.post("/api/reload", headers={"Origin": "https://evil.example"}).status_code == 403
+    reloaded = client.post("/api/reload", headers={"Origin": "http://testserver"})
     assert reloaded.status_code == 200
     assert reloaded.json()["ok"] is True

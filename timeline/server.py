@@ -19,9 +19,11 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
+
+from web_chat.security import same_site_only
 
 logger = logging.getLogger("grid.timeline.server")
 
@@ -105,7 +107,11 @@ def create_app(
 
     tracer.register_ws_callback(_on_tracer_event)
 
-    app = FastAPI(title="Agent Timeline", docs_url=None, redoc_url=None)
+    # Local tools, reachable by every page the operator's browser opens: a
+    # change (rerun, edit, reload) must come from their own page.
+    app = FastAPI(
+        title="Agent Timeline", docs_url=None, redoc_url=None, dependencies=[Depends(same_site_only())]
+    )
 
     @app.on_event("startup")
     async def _startup() -> None:

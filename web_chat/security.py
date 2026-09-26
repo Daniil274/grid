@@ -69,3 +69,14 @@ def refusal(connection: HTTPConnection, http_status: int, detail: str) -> Except
     if connection.scope["type"] == "websocket":
         return WebSocketException(code=status.WS_1008_POLICY_VIOLATION, reason=detail)
     return HTTPException(status_code=http_status, detail=detail)
+
+
+def same_site_only(allowed_origins: Iterable[str] = ()):
+    """An app-wide dependency applying :class:`OriginGuard` - for the local
+    tools (timeline, context inspector) that have no sign-in of their own."""
+    guard = OriginGuard(allowed_origins)
+
+    async def same_site(connection: HTTPConnection) -> None:
+        guard.check(connection)
+
+    return same_site
