@@ -52,7 +52,7 @@ from core.action_policy import (
 from .context import ContextManager
 from schemas import AgentConfig, AgentExecution, CompactConfig
 from schemas.schemas import ImageContent, ImageUrl, TextContent
-from tools import get_tools_by_names
+from tools import resolve_tool
 from utils.exceptions import AgentError, ConfigError, ContextError
 from utils.logger import Logger
 from utils.path_utils import set_current_factory, reset_current_factory
@@ -1410,17 +1410,7 @@ class AgentFactory:
                 logger.warning("Unknown tool '%s' requested for a dynamic agent; skipped", tool_key)
                 continue
 
-        resolved: List[Any] = []
-        if function_tools:
-            try:
-                resolved_ft = get_tools_by_names(function_tools)
-                resolved_ft = [
-                    self._wrap_tool_with_output_limit(tool, tool_key)
-                    for tool, tool_key in zip(resolved_ft, function_tools)
-                ]
-                resolved.extend(resolved_ft)
-            except Exception as exc:
-                logger.debug("Failed to resolve function tools: %s", exc, exc_info=exc)
+        resolved: List[Any] = self._resolve_function_tools(function_tools)
 
         if agent_tools:
             try:
@@ -2843,6 +2833,20 @@ class AgentFactory:
         tool.on_invoke_tool = limited_invoke
         return self._wrap_tool_with_policy(tool, tool_name, "function")
 
+    def _resolve_function_tools(self, tool_keys: List[str]) -> List[Any]:
+        """Each function tool by key, from this factory's own config: its project
+        tools first, then the system's. An unknown key is logged and left out;
+        each tool keeps its own key for its output limit."""
+        loader = self.config.project_tools_loader
+        tools: List[Any] = []
+        for tool_key in tool_keys:
+            tool = resolve_tool(tool_key, loader)
+            if tool is None:
+                logger.warning("Tool '%s' not found in project or system tools; skipped", tool_key)
+                continue
+            tools.append(self._wrap_tool_with_output_limit(tool, tool_key))
+        return tools
+
     async def _get_agent_tools(
         self, agent_config: AgentConfig, agent_key: Optional[str] = None
     ) -> List[Any]:
@@ -2877,23 +2881,7 @@ class AgentFactory:
                     exc_info=exc,
                 )
 
-        # Add function tools
-        if function_tools:
-            try:
-                func_tools = get_tools_by_names(function_tools)
-                func_tools = [
-                    self._wrap_tool_with_output_limit(tool, tool_key)
-                    for tool, tool_key in zip(func_tools, function_tools)
-                ]
-                tools.extend(func_tools)
-
-            except Exception as e:
-                logger.error(
-                    "Failed to load function tools %s: %s",
-                    function_tools,
-                    e,
-                    exc_info=e,
-                )
+        tools.extend(self._resolve_function_tools(function_tools))
 
         # Add agent tools
         if agent_tools:

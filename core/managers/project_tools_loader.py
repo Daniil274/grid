@@ -207,6 +207,12 @@ class ProjectToolsLoader:
         """
         return self._loaded_tools.get(tool_name)
 
+    def add_tools(self, tools: Dict[str, Any]) -> None:
+        """Make *tools* resolvable through this loader too; a tool it already
+        has under a name keeps it."""
+        for name, tool in tools.items():
+            self._loaded_tools.setdefault(name, tool)
+
     def get_all_tools(self) -> Dict[str, Any]:
         """
         Returns all loaded tools.

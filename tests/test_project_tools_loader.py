@@ -46,3 +46,44 @@ def test_project_tools_do_not_shadow_grid_tools_package(tmp_path):
     finally:
         if grid_file_tools is not None:
             sys.modules["tools.file_tools"] = grid_file_tools
+
+
+def _system_with_tool(root, module: str, answer: str) -> ProjectToolsLoader:
+    tools_dir = root / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / f"{module}.py").write_text(f"def greet():\n    return {answer!r}\n", encoding="utf-8")
+    loader = ProjectToolsLoader(str(root), "./tools")
+    loader.load_project_tools()
+    return loader
+
+
+def test_each_factory_resolves_the_project_tools_of_its_own_config(tmp_path):
+    """Two systems with a tool of the same name: the process-wide loader, left
+    on the other system, must not decide which one a factory gets."""
+    from types import SimpleNamespace
+
+    from core.agent_factory import AgentFactory
+    from core.managers.project_tools_loader import get_project_loader, set_project_loader
+
+    first = _system_with_tool(tmp_path / "first", "first_greetings", "first")
+    second = _system_with_tool(tmp_path / "second", "second_greetings", "second")
+    factory = object.__new__(AgentFactory)
+    factory.config = SimpleNamespace(project_tools_loader=first)
+    factory._wrap_tool_with_output_limit = lambda tool, key: tool
+    previous = get_project_loader()
+    set_project_loader(second)
+    try:
+        [tool] = factory._resolve_function_tools(["greet", "no_such_tool"])
+    finally:
+        set_project_loader(previous)
+
+    assert tool() == "first"
+
+
+def test_added_tools_never_replace_the_loaders_own(tmp_path):
+    loader = _system_with_tool(tmp_path / "system", "own_greetings", "own")
+
+    loader.add_tools({"greet": lambda: "added", "wave": lambda: "wave"})
+
+    assert loader.get_tool("greet")() == "own"
+    assert loader.get_tool("wave")() == "wave"

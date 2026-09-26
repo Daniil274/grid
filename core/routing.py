@@ -304,8 +304,6 @@ class AutoRouter:
             warning = f"system '{system}' failed to load ({exc}); using '{fallback_system}'"
             system = fallback_system
             config = self.system_config(system)
-        # Project tools are resolved through one process-wide loader; point it at this system.
-        set_project_loader(config.project_tools_loader)
         agents = self.agents(config) or {config.get_default_agent(): ""}
         agent = await self.router.choose(
             message,

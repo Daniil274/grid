@@ -414,7 +414,7 @@ class TestAgentFactory:
         
         # Mock the tool configs to be found properly
         with patch.object(config, 'get_tool') as mock_get_tool, \
-             patch('core.agent_factory.get_tools_by_names', return_value=[Mock(), Mock()]) as mock_get_tools:
+             patch('core.agent_factory.resolve_tool', side_effect=lambda name, loader: Mock()) as mock_resolve:
             
             # Mock tool configs as function type
             mock_tool_config = Mock()
@@ -428,8 +428,11 @@ class TestAgentFactory:
             tools2 = await factory._get_agent_tools(agent_config)
             assert tools1 is tools2
             
-            # get_tools_by_names should be called once with function tools
-            mock_get_tools.assert_called_once_with(["file_read", "file_write"])
+            # Each function tool was resolved once, with this config's loader
+            assert [call.args for call in mock_resolve.call_args_list] == [
+                ("file_read", config.project_tools_loader),
+                ("file_write", config.project_tools_loader),
+            ]
     
 
 

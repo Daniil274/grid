@@ -45,6 +45,13 @@ class AgentCatalog:
             tool.name: tool for tool in loaded.values() if _is_function_tool(tool)
         }
 
+        # The factory resolves tools through its config's own loader
+        # (tools.resolve_tool): make the catalog's tools reachable there.
+        if self.config.project_tools_loader is None:
+            self.config.project_tools_loader = loader
+        else:
+            self.config.project_tools_loader.add_tools(self._tools)
+
         # AgentFactory resolves only tools declared in config. Register the strict
         # FunctionTool catalog dynamically so the worker config stays lightweight.
         for name, tool in self._tools.items():

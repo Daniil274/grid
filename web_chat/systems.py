@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.config.config import Config
-from core.managers.project_tools_loader import set_project_loader
 from core.routing import AutoRouter
 from core.tool_check import ToolIssue, agent_issues, diagnose
 
@@ -244,9 +243,6 @@ class SystemRegistry:
             logger.error("System '%s' failed to load, using '%s': %s", chosen_system, fallback, exc)
             warning = f"system '{chosen_system}' failed to load ({exc}); using '{fallback}'"
             chosen_system, config = fallback, self.config(fallback)
-
-        # Project tools resolve through one process-wide loader; aim it here.
-        set_project_loader(config.project_tools_loader)
 
         pinned_agent = agent_key if self.has_agent(chosen_system, agent_key or "") else None
         candidates = AutoRouter.agents(config) or {config.get_default_agent(): ""}

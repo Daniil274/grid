@@ -9,7 +9,7 @@ Modules are imported lazily — only when a specific tool is first requested.
 import importlib
 import pkgutil
 from pathlib import Path
-from typing import List, Any, Dict
+from typing import Any, Dict, List, Optional
 from .file_tools import FILE_TOOLS, get_file_tools
 from .git_tools import GIT_TOOLS, TOOL_REQUIREMENTS as _GIT_REQUIREMENTS, get_git_tools
 
@@ -151,44 +151,40 @@ TOOL_ALIASES = {
     "append_to_file": "file_append",
 }
 
-def get_tools_by_names(tool_names: List[str]) -> List[Any]:
+def resolve_tool(name: str, project_loader: Optional[Any]) -> Optional[Any]:
+    """The tool called *name*: a project tool of *project_loader* first, then a
+    system tool (by name or alias); None when neither has it.
+
+    The loader is the one of the config the tool is for (Config.project_tools_loader),
+    passed explicitly: two systems - or two users' turns - resolving tools at the
+    same time must each get their own system's project tools.
     """
-    Returns a list of tools by their names.
-    Supports loading from:
-    1. Project tools (if project_tools_loader is initialized)
-    2. Base system tools
-    3. Aliases
+    if project_loader is not None and project_loader.has_tool(name):
+        tool = project_loader.get_tool(name)
+        if tool:
+            return tool
+    # The alias first, so lazy modules of unrelated tools are not loaded.
+    return AVAILABLE_TOOLS.get(TOOL_ALIASES.get(name, name))
 
-    Args:
-        tool_names: List of tool names
 
-    Returns:
-        List[Any]: List of tool functions
+def get_tools_by_names(tool_names: List[str]) -> List[Any]:
+    """The tools called *tool_names*, through the process-wide project loader.
+
+    For callers without a config at hand; an unknown name is logged and left
+    out. Code that knows its config uses :func:`resolve_tool` with that
+    config's loader instead.
     """
     from core.managers.project_tools_loader import get_project_loader
 
-    tools = []
     project_loader = get_project_loader()
-
+    tools = []
     for name in tool_names:
-        # 1. Check project tools (priority!)
-        if project_loader and project_loader.has_tool(name):
-            tool = project_loader.get_tool(name)
-            if tool:
-                tools.append(tool)
-                continue
-
-        # 2. Resolve alias (before iterating lazy modules, to avoid loading unnecessary ones)
-        lookup_name = TOOL_ALIASES.get(name, name)
-
-        # 3. Search in system tools
-        tool = AVAILABLE_TOOLS.get(lookup_name)
-        if tool is not None:
-            tools.append(tool)
-        else:
+        tool = resolve_tool(name, project_loader)
+        if tool is None:
             from utils.logger import Logger
             Logger(__name__).warning(f"Tool '{name}' not found in project or system tools")
-
+            continue
+        tools.append(tool)
     return tools
 
 def get_all_tools() -> List[Any]:
