@@ -85,6 +85,7 @@
 
 .rail__foot {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
   padding: 10px 12px;
@@ -92,7 +93,7 @@
 }
 
 .rail__foot .btn {
-  flex: 1;
+  flex: 1 1 auto;
   justify-content: flex-start;
   min-height: 34px;
   padding: 0 10px;

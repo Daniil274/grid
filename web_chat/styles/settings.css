@@ -46,6 +46,91 @@
   width: min(860px, 100vw);
 }
 
+.drawer--small .drawer__panel {
+  width: min(440px, 100vw);
+}
+
+/* -- accounts ------------------------------------------------------------- */
+.adminTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.adminTable th {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: 0.05em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.adminTable td {
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.adminTable tr.is-muted td {
+  color: var(--text-3);
+}
+
+.adminTable__you {
+  color: var(--text-3);
+}
+
+.adminTable__actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.adminTable__actions .btn + .btn {
+  margin-left: 6px;
+}
+
+.inviteForm {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 110px 130px minmax(0, 1fr) auto;
+  align-items: end;
+  margin-bottom: 14px;
+}
+
+.inviteCreated {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+}
+
+.inviteLink {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.inviteLink__url {
+  flex: 1;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+@media (max-width: 720px) {
+  .inviteForm {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .inviteForm__note {
+    grid-column: 1 / -1;
+  }
+}
+
 .drawer__head {
   display: flex;
   gap: 16px;

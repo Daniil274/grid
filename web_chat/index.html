@@ -35,6 +35,8 @@
       <div class="rail__account" id="account" hidden>
         <span class="rail__accountIcon" data-icon="agent" data-icon-size="15"></span>
         <span class="rail__accountName" id="account-name"></span>
+        <button class="iconBtn" id="open-admin" type="button" title="Accounts" aria-label="Accounts" data-icon="users" hidden></button>
+        <button class="iconBtn" id="open-password" type="button" title="Change password" aria-label="Change password" data-icon="key"></button>
         <button class="iconBtn" id="sign-out" type="button" title="Sign out" aria-label="Sign out" data-icon="logout"></button>
       </div>
 
@@ -129,6 +131,87 @@
         </div>
       </footer>
     </main>
+  </div>
+
+  <div class="drawer drawer--simple" id="admin" role="dialog" aria-label="Accounts">
+    <div class="drawer__backdrop" id="admin-backdrop"></div>
+    <div class="drawer__panel">
+      <header class="drawer__head">
+        <div>
+          <h2>Accounts</h2>
+          <p>Who may use this server. People join only with an invite.</p>
+        </div>
+        <button class="iconBtn" id="admin-close" type="button" aria-label="Close accounts" data-icon="close"></button>
+      </header>
+      <div class="drawer__body">
+        <div class="pane">
+          <section class="card">
+            <h3>Users</h3>
+            <div id="admin-users"></div>
+          </section>
+          <section class="card">
+            <h3>Invites</h3>
+            <form class="inviteForm" id="admin-invite-form">
+              <label class="field">
+                <span class="field__label">Role</span>
+                <select class="control" name="role">
+                  <option value="user" selected>user</option>
+                  <option value="admin">admin</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field__label">Valid for, days</span>
+                <input class="control" name="days" type="number" min="1" max="90" value="7" required>
+              </label>
+              <label class="field inviteForm__note">
+                <span class="field__label">Note</span>
+                <input class="control" name="note" maxlength="200" placeholder="Who it is for">
+              </label>
+              <button class="btn btn--primary" type="submit" data-icon="plus">Create invite</button>
+            </form>
+            <div class="inviteCreated" id="admin-invite-created" hidden></div>
+            <div id="admin-invites"></div>
+          </section>
+        </div>
+      </div>
+      <footer class="drawer__foot">
+        <span class="drawer__status" id="admin-status"></span>
+      </footer>
+    </div>
+  </div>
+
+  <div class="drawer drawer--simple drawer--small" id="password" role="dialog" aria-label="Change password">
+    <div class="drawer__backdrop" id="password-backdrop"></div>
+    <div class="drawer__panel">
+      <header class="drawer__head">
+        <div>
+          <h2>Change password</h2>
+          <p>Your other sessions are signed out; this one stays.</p>
+        </div>
+        <button class="iconBtn" id="password-close" type="button" aria-label="Close" data-icon="close"></button>
+      </header>
+      <div class="drawer__body">
+        <form class="pane" id="password-form">
+          <label class="field">
+            <span class="field__label">Current password</span>
+            <input class="control" name="current" type="password" autocomplete="current-password" required maxlength="256">
+          </label>
+          <label class="field">
+            <span class="field__label">New password</span>
+            <input class="control" name="new" type="password" autocomplete="new-password" required minlength="10" maxlength="256">
+            <span class="field__hint">At least 10 characters.</span>
+          </label>
+          <label class="field">
+            <span class="field__label">Repeat the new password</span>
+            <input class="control" name="repeat" type="password" autocomplete="new-password" required maxlength="256">
+          </label>
+          <button class="btn btn--primary" type="submit">Change password</button>
+        </form>
+      </div>
+      <footer class="drawer__foot">
+        <span class="drawer__status" id="password-status"></span>
+      </footer>
+    </div>
   </div>
 
   <div class="drawer drawer--simple" id="agents" role="dialog" aria-label="My agents">

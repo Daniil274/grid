@@ -48,6 +48,12 @@ export const api = {
   saveSettings: (config) => request("/api/settings/structured", json("PUT", { config })),
   saveYaml: (yamlContent) => request("/api/settings/yaml", json("PUT", { yaml_content: yamlContent })),
   signOut: () => request("/api/auth/logout", { method: "POST" }),
+  changePassword: (current, next) => request("/api/auth/password", json("POST", { current, new: next })),
+  adminUsers: () => request("/api/admin/users"),
+  updateUser: (id, patch) => request(`/api/admin/users/${encodeURIComponent(id)}`, json("PATCH", patch)),
+  adminInvites: () => request("/api/admin/invites"),
+  createInvite: (invite) => request("/api/admin/invites", json("POST", invite)),
+  revokeInvite: (id) => request(`/api/admin/invites/${encodeURIComponent(id)}`, { method: "DELETE" }),
   /** The user's own agents and the templates they may start from. */
   agents: () => request("/api/agents"),
   createAgent: (spec) => request("/api/agents", json("POST", spec)),

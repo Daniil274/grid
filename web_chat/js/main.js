@@ -11,6 +11,8 @@ import { $, $$, h, icon } from "./lib/dom.js";
 import { createStore } from "./lib/store.js";
 import { api } from "./net/api.js";
 import { ChatController } from "./chat.js";
+import { AccountsDrawer } from "./accounts/admin.js";
+import { PasswordDrawer } from "./accounts/password.js";
 import { PersonalAgentsDrawer } from "./agents/drawer.js";
 import { SettingsDrawer } from "./settings/drawer.js";
 import { createRoutePicker } from "./ui/route-picker.js";
@@ -242,6 +244,27 @@ async function boot() {
     { onChanged: reloadRuntime },
   );
 
+  const accountsAdmin = new AccountsDrawer(
+    {
+      drawer: $("#admin"),
+      backdrop: $("#admin-backdrop"),
+      closeButton: $("#admin-close"),
+      users: $("#admin-users"),
+      invites: $("#admin-invites"),
+      inviteForm: $("#admin-invite-form"),
+      created: $("#admin-invite-created"),
+      status: $("#admin-status"),
+    },
+    { currentUser: () => store.get().user },
+  );
+  const password = new PasswordDrawer({
+    drawer: $("#password"),
+    backdrop: $("#password-backdrop"),
+    closeButton: $("#password-close"),
+    form: $("#password-form"),
+    status: $("#password-status"),
+  });
+
   // -- chrome ------------------------------------------------------------
   const openRail = () => document.body.classList.add("rail-open");
   const closeRail = () => document.body.classList.remove("rail-open");
@@ -251,6 +274,14 @@ async function boot() {
   $("#open-agents").addEventListener("click", () => {
     closeRail();
     personalAgents.open();
+  });
+  $("#open-admin").addEventListener("click", () => {
+    closeRail();
+    accountsAdmin.open();
+  });
+  $("#open-password").addEventListener("click", () => {
+    closeRail();
+    password.open();
   });
   $("#sign-out").addEventListener("click", async () => {
     await api.signOut();
@@ -301,6 +332,7 @@ async function boot() {
     $("#account").hidden = !accounts;
     $("#account-name").textContent = user?.username ?? "";
     $("#open-settings").hidden = user?.role !== "admin";
+    $("#open-admin").hidden = !accounts || user?.role !== "admin";
     $("#open-agents").hidden = !ownAgents;
   });
 
