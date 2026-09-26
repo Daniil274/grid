@@ -94,22 +94,65 @@ def _validate_url(url: str) -> Optional[str]:
     if host in BLOCKED_HOSTNAMES:
         return f"❌ Access to '{host}' is blocked"
 
-    # Block private / loopback / link-local / reserved IP addresses (SSRF prevention)
+    # An address written as such must be public. A host name is checked when
+    # it is resolved, at connect time (PublicResolver).
     try:
         addr = ipaddress.ip_address(host)
-        if (
-            addr.is_loopback
-            or addr.is_private
-            or addr.is_link_local
-            or addr.is_reserved
-            or addr.is_multicast
-            or addr.is_unspecified
-        ):
-            return f"❌ Access to internal address is blocked: {host}"
     except ValueError:
-        pass  # Not an IP address — hostname, proceed
-
+        return None
+    if not _is_public(addr):
+        return f"❌ Access to internal address is blocked: {host}"
     return None
+
+
+def _is_public(addr: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
+    """Reachable on the public internet: not loopback, private, link-local
+    (cloud metadata), shared, reserved or mapped onto one of those."""
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return addr.is_global and (mapped is None or mapped.is_global)
+
+
+# ---------------------------------------------------------------------------
+# SSRF protection at the network layer
+# ---------------------------------------------------------------------------
+#
+# web_fetch runs in the server process, on the host - also when the agent's own
+# commands run in a container. It must reach only the public internet: not the
+# server itself, the host's network, or a cloud metadata service. So:
+#
+# - every host name is resolved by PublicResolver, which refuses when any of
+#   its addresses is not public - the address connected to is the one checked,
+#   so names that point inward, numeric forms like 2130706433 and DNS
+#   rebinding all fail;
+# - redirects are followed here, not by aiohttp, and every Location is checked
+#   again, since addresses written as such do not pass through the resolver.
+
+MAX_REDIRECTS = 5
+CONNECT_ERROR: type = OSError  # replaced below when aiohttp is there
+
+if HAS_AIOHTTP:
+    from aiohttp.abc import AbstractResolver
+    from aiohttp.resolver import DefaultResolver
+    from yarl import URL
+
+    #: How a refused connection - the resolver's refusal included - arrives.
+    CONNECT_ERROR: type = aiohttp.ClientConnectorError
+
+    class PublicResolver(AbstractResolver):
+        """Resolves only names whose every address is public."""
+
+        def __init__(self) -> None:
+            self._resolver = DefaultResolver()
+
+        async def resolve(self, host, port=0, family=0):
+            hosts = await self._resolver.resolve(host, port, family)
+            for entry in hosts:
+                if not _is_public(ipaddress.ip_address(entry["host"])):
+                    raise OSError(f"Access to internal address is blocked: {host} resolves to {entry['host']}")
+            return hosts
+
+        async def close(self) -> None:
+            await self._resolver.close()
 
 
 # ---------------------------------------------------------------------------
@@ -129,19 +172,26 @@ def _run_async(coro, timeout: float = DEFAULT_TIMEOUT + 10):
 
 
 async def _fetch_url(url: str, timeout: int) -> tuple:
-    """Returns (status_code, content, error_message)."""
+    """Returns (status_code, content, error_message); only public addresses are reached."""
     if not HAS_AIOHTTP:
         return 0, "", "aiohttp is not installed. Install: pip install aiohttp"
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            url, timeout=aiohttp.ClientTimeout(total=timeout)
-        ) as response:
-            ct = response.headers.get("Content-Type", "")
-            if "text/html" in ct or "text/plain" in ct:
-                text = await response.text()
-                return response.status, text, ""
-            return response.status, "", f"Unsupported Content-Type: {ct}"
+    connector = aiohttp.TCPConnector(resolver=PublicResolver())
+    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+        for _ in range(MAX_REDIRECTS + 1):
+            async with session.get(url, allow_redirects=False) as response:
+                if response.status in (301, 302, 303, 307, 308) and "Location" in response.headers:
+                    url = str(response.url.join(URL(response.headers["Location"])))
+                    blocked = _validate_url(url)
+                    if blocked:
+                        return 0, "", f"Redirect refused: {blocked.lstrip('❌ ')}"
+                    continue
+                ct = response.headers.get("Content-Type", "")
+                if "text/html" in ct or "text/plain" in ct:
+                    text = await response.text()
+                    return response.status, text, ""
+                return response.status, "", f"Unsupported Content-Type: {ct}"
+        return 0, "", f"More than {MAX_REDIRECTS} redirects"
 
 
 def _truncate(content: str, max_len: int = MAX_CONTENT_LENGTH) -> str:
@@ -202,6 +252,9 @@ def web_fetch(
 
     try:
         status, content, error = _run_async(_fetch_url(url, timeout), timeout=timeout + 10)
+    except CONNECT_ERROR as exc:
+        # The resolver's refusal of an internal address arrives as a connect error.
+        return f"❌ Load error: {exc.os_error}"
     except Exception as exc:
         return f"❌ Load error: {exc}"
 
