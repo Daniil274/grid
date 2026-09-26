@@ -135,6 +135,11 @@ class Accounts:
             raise AccountError("That username is taken.") from None
         return user
 
+    def find_user(self, username: str) -> Optional[User]:
+        """The user called *username* (any case), or None."""
+        record = self._store.user_by_name(username) if USERNAME.fullmatch(username) else None
+        return record.user if record else None
+
     def has_users(self) -> bool:
         return self._store.count_users() > 0
 

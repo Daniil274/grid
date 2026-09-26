@@ -69,6 +69,16 @@ class SpaceLayout:
         )
 
 
+def single_user_records(config: Config) -> tuple[Path, Path]:
+    """Where a one-user server keeps its conversations and agent sessions:
+    the config's ``logs/context.json`` and the logs directory's
+    ``agent_sessions.db`` (AgentFactory's default)."""
+    return (
+        Path(config.get_absolute_path("logs")) / "context.json",
+        Path(config.get_logs_directory()) / "agent_sessions.db",
+    )
+
+
 class IsolationUnavailable(RuntimeError):
     """A space that must isolate its agents cannot start its container."""
 
@@ -136,9 +146,7 @@ class UserSpace:
         if self.layout is not None:
             self.conversations_path = self.layout.conversations
         else:
-            logs_dir = Path(config.get_absolute_path("logs"))
-            logs_dir.mkdir(parents=True, exist_ok=True)
-            self.conversations_path = logs_dir / "context.json"
+            self.conversations_path, _ = single_user_records(config)
         self.conversations_path.parent.mkdir(parents=True, exist_ok=True)
         self.conversations = ContextManager(
             max_history=config.get_max_history(),
