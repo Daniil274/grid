@@ -4,7 +4,13 @@ Every API route and the chat socket act for one user, found by the server's
 ``Identify`` (web_chat.identity), and work in that user's space, lent by the
 server's pool for the duration of the request (web_chat.spaces). A route never
 reaches a space but through that lease, so what it reads and changes belongs
-to the user who asked.
+to the user who asked. Before identifying anyone, a request that changes
+something and every socket must come from the chat's own pages
+(web_chat.security).
+
+Without accounts the server has one local user, who owns it. With accounts
+(web_chat.accounts) a user signs in on ``/login``, and the pages and the API
+refuse anyone who has not.
 
 The system configs are the deployment's (web_chat.deployment), shared by all
 spaces; saving them marks every space stale, and each is rebuilt on the new
@@ -20,14 +26,14 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, WebSocket
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, WebSocket, status
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import HTTPConnection
 
 from web_chat.delivery import MessageQueue
 from web_chat.deployment import Deployment
-from web_chat.identity import DEFAULT_USER, Identify, single_user
+from web_chat.identity import DEFAULT_USER, Identify, User, admins_only, single_user
 from web_chat.schemas import (
     ActionReviewRequest,
     BranchRequest,
@@ -37,6 +43,7 @@ from web_chat.schemas import (
     SettingsStructuredUpdateRequest,
     SettingsYamlUpdateRequest,
 )
+from web_chat.security import OriginGuard
 from web_chat.space import UserSpace
 from web_chat.spaces import SpacePool
 from web_chat.trace import is_tool_result
@@ -45,6 +52,7 @@ from web_chat.views import UNTITLED, agent_options, conversation_title, serializ
 logger = logging.getLogger("grid.web_chat.server")
 ROOT = Path(__file__).resolve().parent
 INDEX_HTML = ROOT / "index.html"
+LOGIN_HTML = ROOT / "login.html"
 
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
@@ -70,16 +78,25 @@ class WebChatServer:
         deployment: Deployment,
         spaces: SpacePool,
         *,
+        auth: Optional[Any] = None,
         identify: Optional[Identify] = None,
+        allowed_origins: tuple[str, ...] = (),
         action_review_token: Optional[str] = None,
         warm_user: Optional[str] = DEFAULT_USER,
     ) -> None:
-        """``identify`` defaults to the single local user. ``warm_user``'s space
-        is built and its default agent warmed at startup; None warms nobody."""
+        """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
+        accounts; without it ``identify`` decides, by default the single local
+        user. ``allowed_origins`` are other sites' origins trusted like the
+        server's own (a reverse proxy's public address). ``warm_user``'s space is
+        built and its default agent warmed at startup; None warms nobody."""
+        if auth is not None and identify is not None:
+            raise ValueError("Pass auth or identify, not both")
         self.deployment = deployment
         self.spaces = spaces
+        self.auth = auth
         self.action_review_token = action_review_token
-        self._identify = identify or single_user()
+        self._identify = auth.identify if auth is not None else identify or single_user()
+        self._guard = OriginGuard(allowed_origins)
         self._warm_user = warm_user
         self._sweeper: Optional[asyncio.Task] = None
 
@@ -89,7 +106,10 @@ class WebChatServer:
         # Everything under /api acts for an identified user.
         identified = [Depends(self.current_user)]
         api = APIRouter(dependencies=identified)
+        self._register_pages()
         self._register_routes(api)
+        if auth is not None:
+            auth.register_routes(self.app, guard=self._guard, current_user=self.current_user)
         from web_chat.voice import register_voice_routes
         from web_chat.voice_turns import register_turn_routes
 
@@ -101,13 +121,14 @@ class WebChatServer:
 
     def _dependencies(self):
         """The route dependencies: the identified user, and that user's space."""
-        identify, spaces = self._identify, self.spaces
+        identify, spaces, guard = self._identify, self.spaces, self._guard
 
-        async def current_user(connection: HTTPConnection) -> str:
+        async def current_user(connection: HTTPConnection) -> User:
+            guard.check(connection)
             return await identify(connection)
 
-        async def current_space(user_id: str = Depends(current_user)) -> AsyncIterator[UserSpace]:
-            async with spaces.use(user_id) as space:
+        async def current_space(user: User = Depends(current_user)) -> AsyncIterator[UserSpace]:
+            async with spaces.use(user.id) as space:
                 yield space
 
         return current_user, current_space
@@ -132,12 +153,15 @@ class WebChatServer:
             await self.spaces.close()
 
     async def _sweep_forever(self) -> None:
+        """Periodic upkeep: idle spaces go, and with accounts, dead sessions."""
         while True:
             await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
             try:
                 await self.spaces.sweep()
+                if self.auth is not None:
+                    self.auth.maintain()
             except Exception:
-                logger.exception("Retiring idle spaces failed")
+                logger.exception("Server upkeep failed")
 
     def _require_action_review_token(self, supplied: Optional[str]) -> None:
         expected = self.action_review_token
@@ -167,32 +191,51 @@ class WebChatServer:
             },
         }
 
-    async def _configs_changed(self, user_id: str) -> dict[str, Any]:
+    async def _configs_changed(self, user: User) -> dict[str, Any]:
         """After a config edit: retire what is free, answer from a fresh space."""
         self.spaces.invalidate()
         await self.spaces.sweep()
-        async with self.spaces.use(user_id) as space:
+        async with self.spaces.use(user.id) as space:
             space.schedule_warmup()
             return self._settings_payload(space)
 
-    def _register_routes(self, api: APIRouter) -> None:
-        app = self.app
-        current_user, current_space = self.current_user, self.current_space
+    def _register_pages(self) -> None:
+        """The chat page, and with accounts the sign-in page in front of it."""
+        app, auth = self.app, self.auth
+
+        def page(path: Path) -> HTMLResponse:
+            if not path.exists():
+                return HTMLResponse(f"<h1>web_chat/{path.name} not found</h1>", status_code=503)
+            return HTMLResponse(path.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
 
         @app.get("/", response_class=HTMLResponse)
-        async def index() -> HTMLResponse:
-            if not INDEX_HTML.exists():
-                return HTMLResponse("<h1>web_chat/index.html not found</h1>", status_code=503)
-            return HTMLResponse(
-                INDEX_HTML.read_text(encoding="utf-8"),
-                headers={"Cache-Control": "no-store"},
-            )
+        async def index(request: Request) -> Any:
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(INDEX_HTML)
+
+        if auth is None:
+            return
+
+        @app.get("/login", response_class=HTMLResponse)
+        async def login(request: Request) -> Any:
+            if auth.user_of(request) is not None:
+                return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+            return page(LOGIN_HTML)
+
+    def _register_routes(self, api: APIRouter) -> None:
+        current_user, current_space = self.current_user, self.current_space
+        admin = admins_only(current_user)
 
         @api.get("/api/chat/bootstrap")
-        async def bootstrap(space: UserSpace = Depends(current_space)) -> JSONResponse:
+        async def bootstrap(
+            space: UserSpace = Depends(current_space), user: User = Depends(current_user)
+        ) -> JSONResponse:
             registry = space.registry
             return JSONResponse(
                 {
+                    "user": {"id": user.id, "username": user.username, "role": user.role},
+                    "accounts": self.auth is not None,
                     "systems": system_options(registry),
                     "default_system": registry.default_key(),
                     "routing_enabled": registry.can_route,
@@ -399,7 +442,8 @@ class WebChatServer:
                 "active_turn": active_turn,
             })
 
-        @api.get("/api/settings")
+        # The system configs are shared by every user: only admins see or edit them.
+        @api.get("/api/settings", dependencies=[Depends(admin)])
         async def get_settings(space: UserSpace = Depends(current_space)) -> JSONResponse:
             return JSONResponse(self._settings_payload(space))
 
@@ -407,23 +451,23 @@ class WebChatServer:
         # and one held by the request itself could not be rebuilt.
         @api.put("/api/settings/structured")
         async def save_structured_settings(
-            body: SettingsStructuredUpdateRequest, user_id: str = Depends(current_user)
+            body: SettingsStructuredUpdateRequest, user: User = Depends(admin)
         ) -> JSONResponse:
             try:
                 self.deployment.save_structured_config(body.config)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return JSONResponse(await self._configs_changed(user_id))
+            return JSONResponse(await self._configs_changed(user))
 
         @api.put("/api/settings/yaml")
         async def save_yaml_settings(
-            body: SettingsYamlUpdateRequest, user_id: str = Depends(current_user)
+            body: SettingsYamlUpdateRequest, user: User = Depends(admin)
         ) -> JSONResponse:
             try:
                 self.deployment.save_yaml_config(body.yaml_content)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return JSONResponse(await self._configs_changed(user_id))
+            return JSONResponse(await self._configs_changed(user))
 
         @api.websocket("/api/chat/ws/{context_id}")
         async def chat_ws(websocket: WebSocket, context_id: str, space: UserSpace = Depends(current_space)) -> None:

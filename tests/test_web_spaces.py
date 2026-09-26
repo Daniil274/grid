@@ -7,9 +7,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core.context import ContextManager
+from web_chat.identity import User
 from web_chat.server import WebChatServer
 from web_chat.spaces import SpacePool
 from web_chat.turns import TurnBoard
+
+#: What the chat's own pages send with a request that changes something.
+SAME_SITE = {"Origin": "http://testserver"}
 
 
 class FakeSpace:
@@ -169,7 +173,8 @@ def two_user_server():
     """A server that takes the user from a test header, over a pool of fake spaces."""
 
     async def identify(connection):
-        return connection.headers["X-Test-User"]
+        name = connection.headers["X-Test-User"]
+        return User(id=name, username=name, role="user")
 
     pool = SpacePool(FakeSpace)
     deployment = SimpleNamespace(voice_source=lambda: ("voice.yaml", None), voice_config_dict=lambda: {})
@@ -177,7 +182,7 @@ def two_user_server():
 
 
 def test_conversations_of_one_user_are_invisible_to_another():
-    client = TestClient(two_user_server().app)
+    client = TestClient(two_user_server().app, headers=SAME_SITE)
     alice, bob = {"X-Test-User": "alice"}, {"X-Test-User": "bob"}
 
     created = client.post("/api/chat/conversations", headers=alice).json()
@@ -217,4 +222,4 @@ def test_a_request_without_a_user_is_refused(path):
         warm_user=None,
     )
 
-    assert TestClient(server.app).get(path).status_code == 401
+    assert TestClient(server.app, headers=SAME_SITE).get(path).status_code == 401

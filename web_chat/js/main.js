@@ -43,6 +43,9 @@ const store = createStore({
   queue: [],
   workspacePath: "",
   isolated: false,
+  // The signed-in user ({id, username, role}); `accounts` is false on a one-user server.
+  user: null,
+  accounts: false,
 });
 
 /** Icon-only buttons declare their glyph in markup; fill them in one pass. */
@@ -227,6 +230,10 @@ async function boot() {
   $("#toggle-rail").addEventListener("click", openRail);
   $("#sidebar-scrim").addEventListener("click", closeRail);
   $("#open-settings").addEventListener("click", () => settings.open());
+  $("#sign-out").addEventListener("click", async () => {
+    await api.signOut();
+    location.replace("/login");
+  });
 
   for (const button of [$("#new-chat"), $("#new-chat-top")]) {
     button.addEventListener("click", async () => {
@@ -259,9 +266,19 @@ async function boot() {
       workspacePath: bootstrap.workspace_path ?? "",
       isolated: Boolean(bootstrap.isolation_enabled),
       contextId: store.get().contextId ?? bootstrap.current_context_id ?? null,
+      user: bootstrap.user ?? null,
+      accounts: Boolean(bootstrap.accounts),
     });
     await refreshConversations();
   }
+
+  // Who is signed in, on a server with accounts; the system configs are
+  // shared by all users, so only admins get to open them.
+  store.subscribe(({ user, accounts }) => {
+    $("#account").hidden = !accounts;
+    $("#account-name").textContent = user?.username ?? "";
+    $("#open-settings").hidden = user?.role !== "admin";
+  });
 
   store.subscribe(({ workspacePath, isolated, streaming }) => {
     const label = streaming ? "Working" : isolated ? "Container isolated" : "Local runtime";

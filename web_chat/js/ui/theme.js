@@ -20,6 +20,11 @@ function apply(theme) {
   else document.documentElement.dataset.theme = theme;
 }
 
+/** Apply the stored choice on a page that shows no toggle (the sign-in page). */
+export function applyStoredTheme() {
+  apply(read());
+}
+
 export function createThemeToggle(button) {
   let theme = read();
   apply(theme);

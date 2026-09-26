@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
+  <meta name="referrer" content="no-referrer">
+  <title>Sign in · Grid Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles/tokens.css">
+  <link rel="stylesheet" href="/static/styles/base.css">
+  <link rel="stylesheet" href="/static/styles/auth.css">
+</head>
+<body class="authPage">
+  <main class="authCard">
+    <header class="authCard__head">
+      <h1>Grid Chat</h1>
+      <p id="auth-lead">Sign in to your space.</p>
+    </header>
+
+    <form class="authForm" id="sign-in" novalidate>
+      <label class="authField">
+        <span>Username</span>
+        <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="32">
+      </label>
+      <label class="authField">
+        <span>Password</span>
+        <input name="password" type="password" autocomplete="current-password" required maxlength="256">
+      </label>
+      <p class="authError" role="alert" hidden></p>
+      <button class="btn btn--primary authForm__submit" type="submit">Sign in</button>
+    </form>
+
+    <form class="authForm" id="sign-up" novalidate hidden>
+      <label class="authField">
+        <span>Username</span>
+        <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required
+               minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{2,31}">
+        <small>3-32 letters, digits, "_", "." or "-".</small>
+      </label>
+      <label class="authField">
+        <span>Password</span>
+        <input name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="256">
+        <small>At least 10 characters.</small>
+      </label>
+      <label class="authField">
+        <span>Repeat the password</span>
+        <input name="repeat" type="password" autocomplete="new-password" required maxlength="256">
+      </label>
+      <p class="authError" role="alert" hidden></p>
+      <button class="btn btn--primary authForm__submit" type="submit">Create account</button>
+    </form>
+
+    <footer class="authCard__foot">
+      <span id="foot-sign-in">No account? Ask an admin of this server for an invite link.</span>
+      <span id="foot-sign-up" hidden>Already have an account? <a href="/login">Sign in</a></span>
+    </footer>
+  </main>
+
+  <script type="module" src="/static/js/auth.js"></script>
+</body>
+</html>

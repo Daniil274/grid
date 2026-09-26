@@ -30,7 +30,7 @@ from core.agent_factory import AgentFactory
 from core.config import Config
 from core.context import ContextManager
 from core.managers.container_manager import ContainerManager
-from web_chat.deployment import Deployment
+from web_chat.deployment import Deployment, isolation_enabled
 from web_chat.systems import Resolution, SystemRegistry
 from web_chat.turns import TurnBoard
 
@@ -58,13 +58,8 @@ class SpaceLayout:
         )
 
 
-def _isolation_enabled(config: Config) -> bool:
-    isolation_cfg = getattr(config.config, "isolation", None)
-    if not isolation_cfg:
-        return False
-    if isinstance(isolation_cfg, dict):
-        return bool(isolation_cfg.get("enabled", False))
-    return bool(getattr(isolation_cfg, "enabled", False))
+class IsolationUnavailable(RuntimeError):
+    """A space that must isolate its agents cannot start its container."""
 
 
 class UserSpace:
@@ -76,11 +71,18 @@ class UserSpace:
         *,
         user_id: str = "default_user",
         layout: Optional[SpaceLayout] = None,
+        require_isolation: bool = False,
     ) -> None:
-        """``layout`` None keeps the single-user layout (see the module docs)."""
+        """``layout`` None keeps the single-user layout (see the module docs).
+
+        ``require_isolation``: the agents' tools must run in the space's
+        container. A space whose container cannot start is then not built at
+        all, rather than letting its agents work on the host.
+        """
         self.deployment = deployment
         self.user_id = user_id
         self.layout = layout
+        self.require_isolation = require_isolation
         self.turns = TurnBoard()
 
         self._lock = asyncio.Lock()
@@ -100,7 +102,12 @@ class UserSpace:
     # -- construction ------------------------------------------------------
     def _build(self) -> None:
         config, workspace = self._workspace_config()
-        container_id = self._start_container(config, workspace) if _isolation_enabled(config) else None
+        container_id = self._start_container(config, workspace) if isolation_enabled(config) else None
+        if self.require_isolation and container_id is None:
+            raise IsolationUnavailable(
+                f"The workspace container for user {self.user_id} could not be started, and this "
+                "server runs agents only in containers. Check isolation settings and Docker."
+            )
 
         self.config = config
         self.container_id = container_id
@@ -148,7 +155,7 @@ class UserSpace:
             workspace.mkdir(parents=True, exist_ok=True)
             return Config(config_path, str(workspace)), workspace
         config = Config(config_path, self.deployment.working_directory)
-        if not _isolation_enabled(config):
+        if not isolation_enabled(config):
             return config, None
         workspace = self._single_user_isolated_workspace()
         return Config(config_path, str(workspace)), workspace

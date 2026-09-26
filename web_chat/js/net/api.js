@@ -1,8 +1,19 @@
-/** REST client. One place that knows the server's URL shape and error format. */
+/**
+ * REST client. One place that knows the server's URL shape and error format.
+ *
+ * On a server with accounts, a 401 means the session is gone (signed out
+ * elsewhere, expired, disabled): the page goes to sign-in.
+ */
+
+const SIGN_IN = "/login";
 
 async function request(url, options = {}) {
   const response = await fetch(url, options);
   const payload = await response.json().catch(() => null);
+  if (response.status === 401) {
+    location.assign(SIGN_IN);
+    throw new Error("Signed out");
+  }
   if (!response.ok) {
     throw new Error(payload?.detail || `${options.method || "GET"} ${url} failed (${response.status})`);
   }
@@ -36,4 +47,5 @@ export const api = {
   getSettings: () => request("/api/settings"),
   saveSettings: (config) => request("/api/settings/structured", json("PUT", { config })),
   saveYaml: (yamlContent) => request("/api/settings/yaml", json("PUT", { yaml_content: yamlContent })),
+  signOut: () => request("/api/auth/logout", { method: "POST" }),
 };

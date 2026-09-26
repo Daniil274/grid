@@ -65,6 +65,24 @@
   overflow-y: auto;
 }
 
+.rail__account {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 12px 8px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.rail__accountName {
+  flex: 1;
+  overflow: hidden;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rail__foot {
   display: flex;
   gap: 6px;

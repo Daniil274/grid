@@ -4,6 +4,7 @@ export const ICONS = {
   plus: "M12 5v14M5 12h14",
   menu: "M4 7h16M4 12h16M4 17h16",
   close: "M6 6l12 12M18 6L6 18",
+  logout: "M14 4h5v16h-5M10 8l-4 4 4 4M6 12h11",
   send: "M4 12l16-8-6 8 6 8z",
   stop: "M7 7h10v10H7z",
   resume: "M8 5v14l11-7z",

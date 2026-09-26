@@ -43,6 +43,16 @@ def resolve_path(path_value: str) -> Path:
     return cwd_path if cwd_path.exists() else project_path.resolve(strict=False)
 
 
+def isolation_enabled(config: Config) -> bool:
+    """Whether *config* asks for its agents' tools to run in a container."""
+    isolation_cfg = getattr(config.config, "isolation", None)
+    if not isolation_cfg:
+        return False
+    if isinstance(isolation_cfg, dict):
+        return bool(isolation_cfg.get("enabled", False))
+    return bool(getattr(isolation_cfg, "enabled", False))
+
+
 class Deployment:
     """The system configs a server runs, read once and re-read after an edit."""
 
@@ -95,6 +105,15 @@ class Deployment:
             if router is not None:
                 return router.system_config_path(router.default_system())
         return resolve_path(DEFAULT_CONFIG)
+
+    @property
+    def isolated(self) -> bool:
+        """Whether spaces run their agents' tools in a container.
+
+        A space starts one container from the base system's settings and every
+        system's factory in the space works in it, so the base config decides.
+        """
+        return isolation_enabled(self.config)
 
     @property
     def policy_config(self) -> Optional[Config]:

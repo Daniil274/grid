@@ -9,6 +9,9 @@ from web_chat.spaces import SpacePool
 from web_chat.systems import SystemInfo
 from web_chat.turns import TurnBoard
 
+#: What the chat's own pages send with a request that changes something.
+SAME_SITE = {"Origin": "http://testserver"}
+
 
 class _DummyContextManager:
     def __init__(self) -> None:
@@ -162,7 +165,7 @@ def test_timeline_index_serves_dashboard_html():
 
 
 def test_web_chat_index_and_bootstrap_are_available():
-    client = TestClient(_server().app)
+    client = TestClient(_server().app, headers=SAME_SITE)
 
     index_response = client.get("/")
     bootstrap_response = client.get("/api/chat/bootstrap")
@@ -175,7 +178,7 @@ def test_web_chat_index_and_bootstrap_are_available():
 
 def test_action_review_routes_list_and_resolve_pending_review():
     space = _DummySpace()
-    client = TestClient(_server(space).app)
+    client = TestClient(_server(space).app, headers=SAME_SITE)
 
     headers = {"X-Grid-Action-Review-Token": "operator-token"}
     pending = client.get("/api/action-policy/reviews", headers=headers)
@@ -193,7 +196,7 @@ def test_action_review_routes_list_and_resolve_pending_review():
 
 
 def test_action_review_route_rejects_unknown_or_expired_review():
-    client = TestClient(_server().app)
+    client = TestClient(_server().app, headers=SAME_SITE)
 
     response = client.post(
         "/api/action-policy/reviews/missing",
@@ -205,7 +208,7 @@ def test_action_review_route_rejects_unknown_or_expired_review():
 
 
 def test_action_review_routes_require_the_operator_token():
-    client = TestClient(_server().app)
+    client = TestClient(_server().app, headers=SAME_SITE)
 
     assert client.get("/api/action-policy/reviews").status_code == 403
 
@@ -222,7 +225,7 @@ def _chat_server_with_contexts():
         manager.add_message("user", text)
     manager.add_tool_result_as_message("Agent", "sub-agent report")
     server = _server(space)
-    return space, manager, TestClient(server.app)
+    return space, manager, TestClient(server.app, headers=SAME_SITE)
 
 
 def test_web_chat_renames_a_conversation_and_keeps_the_title():

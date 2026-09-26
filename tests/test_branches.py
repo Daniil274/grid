@@ -7,6 +7,9 @@ import pytest
 from core.context import ContextManager
 from tests.test_run_agent import ScriptedRunner, factory, summarized, use  # noqa: F401 - fixture
 
+#: What the chat's own pages send with a request that changes something.
+SAME_SITE = {"Origin": "http://testserver"}
+
 
 def texts(manager, context_id):
     return [m.content for m in manager.conversation_view(context_id)["messages"]]
@@ -167,7 +170,7 @@ def web_client(factory):
         default_key=lambda: "s", factory=lambda system: factory, keys=lambda: ["s"],
         systems=lambda: [], can_route=False, has_catalog=False,
     )
-    return TestClient(_server(space).app)
+    return TestClient(_server(space).app, headers=SAME_SITE)
 
 
 async def test_the_web_api_forks_lists_one_row_and_deletes_the_family(factory):
