@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents import function_tool
+from utils import confined_fs
 from utils.path_utils import resolve_agent_path_auto, display_agent_path_auto
 
 
@@ -243,7 +244,7 @@ def file_read(
         if file_size > MAX_FILE_SIZE:
             return f"⚠️ File too large ({file_size} bytes). Use limit_lines and offset."
 
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = confined_fs.read_text(path, errors="replace")
         lines = content.split("\n")
         total = len(lines)
 
@@ -292,8 +293,8 @@ def file_write(
         if existed_before and not overwrite:
             return f"❌ File already exists: {visible}. Use overwrite=true to overwrite."
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        confined_fs.make_dirs(path.parent)
+        confined_fs.write_text(path, content)
 
         lines = len(content.split("\n"))
         size = path.stat().st_size
@@ -328,14 +329,14 @@ def file_append(
 
     try:
         path = Path(resolved)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        confined_fs.make_dirs(path.parent)
 
         old_size = path.stat().st_size if path.exists() else 0
 
-        with path.open("a", encoding="utf-8") as f:
+        with confined_fs.open_file(path, "a", encoding="utf-8") as f:
             # Ensure new content starts on a fresh line
             if old_size > 0:
-                with path.open("rb") as rb:
+                with confined_fs.open_file(path, "rb") as rb:
                     rb.seek(-1, 2)
                     last_byte = rb.read(1)
                 if last_byte not in (b"\n", b"\r"):
@@ -387,9 +388,9 @@ def file_edit(
         if not path.is_file():
             return f"❌ Not a file: {visible}"
 
-        original = path.read_text(encoding="utf-8", errors="replace")
+        original = confined_fs.read_text(path, errors="replace")
         updated = _apply_unified_patch(original, patch_content)
-        path.write_text(updated, encoding="utf-8")
+        confined_fs.write_text(path, updated)
 
         original_lines, _ = _split_file_content(original)
         result_lines, _ = _split_file_content(updated)

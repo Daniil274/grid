@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents import function_tool
+from utils import confined_fs
 from utils.path_utils import resolve_agent_path_auto, display_agent_path_auto
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ def notebook_read(
                 logger.warning(f"nbformat.read failed for {visible}: {exc}. Falling back to JSON.")
 
         # JSON fallback
-        with open(path, "r", encoding="utf-8") as f:
+        with confined_fs.open_file(path, "r", encoding="utf-8") as f:
             nb = json.load(f)
         return _format_nb_json(nb, visible, include_output)
 
@@ -225,7 +226,7 @@ def notebook_edit(
 
     # JSON fallback
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with confined_fs.open_file(path, "r", encoding="utf-8") as f:
             nb = json.load(f)
 
         cells = nb.get("cells", [])
@@ -238,7 +239,7 @@ def notebook_edit(
         if cell_type:
             cell["cell_type"] = cell_type
 
-        with open(path, "w", encoding="utf-8") as f:
+        with confined_fs.open_file(path, "w", encoding="utf-8") as f:
             json.dump(nb, f, indent=2, ensure_ascii=False)
 
         actual_type = cell.get("cell_type", "unknown")
@@ -281,7 +282,7 @@ def notebook_create(
         if path.exists():
             return f"❌ File already exists: {visible}"
 
-        path.parent.mkdir(parents=True, exist_ok=True)
+        confined_fs.make_dirs(path.parent)
 
         if HAS_NBFORMAT:
             nb = nbformat.v4.new_notebook()
@@ -314,7 +315,7 @@ def notebook_create(
                 "nbformat": 4,
                 "nbformat_minor": 5,
             }
-            with open(path, "w", encoding="utf-8") as f:
+            with confined_fs.open_file(path, "w", encoding="utf-8") as f:
                 json.dump(nb, f, indent=2, ensure_ascii=False)
 
         return f"✅ Notebook created: {visible}"

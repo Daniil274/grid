@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents import function_tool
+from utils import confined_fs
 from utils.path_utils import get_current_factory, resolve_agent_path_auto
 
 
@@ -33,7 +34,7 @@ def _get_todo_file() -> Path:
     if env_path:
         try:
             resolved = Path(resolve_agent_path_auto(env_path))
-            resolved.parent.mkdir(parents=True, exist_ok=True)
+            confined_fs.make_dirs(resolved.parent)
             return resolved
         except (ValueError, Exception):
             pass  # Escaped workspace or other error — ignore and use default
@@ -41,7 +42,7 @@ def _get_todo_file() -> Path:
     if get_current_factory() is not None:
         try:
             todo_file = Path(resolve_agent_path_auto("data/todos.json"))
-            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            confined_fs.make_dirs(todo_file.parent)
             return todo_file
         except Exception:
             pass
@@ -54,7 +55,7 @@ def _load() -> dict:
     todo_file = _get_todo_file()
     if todo_file.exists():
         try:
-            with open(todo_file, "r", encoding="utf-8") as f:
+            with confined_fs.open_file(todo_file, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             pass
@@ -63,8 +64,8 @@ def _load() -> dict:
 
 def _save(data: dict) -> None:
     todo_file = _get_todo_file()
-    todo_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(todo_file, "w", encoding="utf-8") as f:
+    confined_fs.make_dirs(todo_file.parent)
+    with confined_fs.open_file(todo_file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 

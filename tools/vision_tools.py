@@ -9,6 +9,7 @@ import base64
 
 from agents import function_tool, RunContextWrapper
 from agents.tool import ToolOutputImage, ToolOutputText
+from utils import confined_fs
 from utils.path_utils import display_agent_path_from_ctx, resolve_agent_path_from_ctx
 from utils.tool_requirements import Requires
 
@@ -39,7 +40,7 @@ def _image_path_to_data_url(image_path: str) -> str:
     }
     mime_type = mime_types.get(ext, 'image/jpeg')
 
-    with open(img_file, 'rb') as f:
+    with confined_fs.open_file(img_file, "rb") as f:
         img_data = f.read()
 
     b64_data = base64.b64encode(img_data).decode('utf-8')
@@ -82,7 +83,7 @@ async def crop_image(
         return [ToolOutputText(text=f"❌ File not found: {visible_path}. Take a screenshot first.")]
 
     try:
-        with Image.open(img_file) as img:
+        with Image.open(confined_fs.image_file(img_file)) as img:
             w, h = img.size
 
             if left >= right or top >= bottom:

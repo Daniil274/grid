@@ -16,6 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents import function_tool
+from utils import confined_fs
 from utils.path_utils import resolve_agent_path_auto, display_agent_path_auto
 
 
@@ -172,7 +173,7 @@ def _search_file(filepath: Path, regex, max_per_file: int = 5, per_file_timeout:
 
     def _do():
         try:
-            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            with confined_fs.open_file(filepath, "r", encoding="utf-8", errors="replace") as f:
                 for lineno, line in enumerate(f, 1):
                     if regex.search(line):
                         content = line.rstrip()

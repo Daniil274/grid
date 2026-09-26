@@ -11,6 +11,7 @@ from typing import List, Any
 
 from agents import function_tool
 from utils.logger import Logger
+from utils import confined_fs
 from utils.path_utils import display_agent_path_auto, resolve_agent_path_auto
 from utils.text_patch import PatchError, apply_patch, keep_newlines, replace_once
 
@@ -53,14 +54,13 @@ def _read_existing(path: Path) -> str | None:
     """Current text with its own line endings, or None for a missing file."""
     if not path.is_file():
         return None
-    with open(path, encoding="utf-8", newline="") as file:
+    with confined_fs.open_file(path, encoding="utf-8", newline="") as file:
         return file.read()
 
 
 def _write(path: Path, text: str) -> None:
     """Write text exactly as given: no newline translation on Windows."""
-    with open(path, "w", encoding="utf-8", newline="") as file:
-        file.write(text)
+    confined_fs.write_text(path, text, newline="")
 
 
 @function_tool
@@ -162,7 +162,7 @@ def delete_file(filepath: str) -> str:
             return f"❌ File {visible_path} not found"
         if not path.is_file():
             return f"❌ {visible_path} is a directory: only files can be deleted"
-        path.unlink()
+        confined_fs.unlink(path)
         log_tool_result("delete_file", "Deleted")
         return f"✅ Deleted {visible_path}"
     except Exception as e:
@@ -194,7 +194,7 @@ def read_file(filepath: str) -> str:
             log_tool_error("read_file", f"{visible_path} is not a file")
             return f"❌ {visible_path} is not a file"
 
-        content = path.read_text(encoding='utf-8')
+        content = confined_fs.read_text(path)
         lines_count = len(content.splitlines())
 
         log_tool_result("read_file", f"Read {lines_count} lines")
@@ -221,7 +221,7 @@ def write_file(filepath: str, content: str) -> str:
             return refused
         path = Path(filepath)
         existing = _read_existing(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        confined_fs.make_dirs(path.parent)
         _write(path, keep_newlines(existing, content))
         log_tool_result("write_file", f"Wrote {len(content)} chars")
         verb = "Replaced" if existing is not None else "Created"
@@ -242,8 +242,8 @@ def append_file(filepath: str, content: str) -> str:
         if refused:
             return refused
         path = Path(filepath)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, 'a', encoding='utf-8') as f:
+        confined_fs.make_dirs(path.parent)
+        with confined_fs.open_file(path, "a", encoding="utf-8") as f:
             f.write(content)
         log_tool_result("append_file", f"Appended {len(content)} chars")
         return f"✅ Appended to file {visible_path}"
@@ -335,7 +335,7 @@ def search_content(filepath: str, query: str) -> str:
 
         def lines_of(file: Path) -> list[tuple[int, str]]:
             try:
-                text = file.read_text(encoding="utf-8")
+                text = confined_fs.read_text(file)
             except (UnicodeDecodeError, OSError):
                 return []
             return [(n, line) for n, line in enumerate(text.splitlines(), start=1)
@@ -343,7 +343,7 @@ def search_content(filepath: str, query: str) -> str:
 
         if path.is_file():
             try:
-                path.read_text(encoding="utf-8")
+                confined_fs.read_text(path)
             except UnicodeDecodeError:
                 return f"❌ {visible_path} is not a text file"
             matches = [f"{n}: {line}" for n, line in lines_of(path)]
