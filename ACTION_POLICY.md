@@ -49,13 +49,10 @@ registry. Each model selects its policy adapter with `policy_api: decisions`
 (the default) or `policy_api: chat`. Unknown keys fail at factory construction.
 Every route uses the same operator policy, questions and projected evidence.
 
-The shipped routing configs use OpenRouter `typesafe/jev-1.13` as the primary
-validator (`OPENROUTER_API_KEY`) and OpenCode Go through Chat Completions as the
-reserve (`OPENCODE_API_KEY`). `routing.yaml` selects `glm-5.3-flash`;
-`routing.opencode.yaml` selects `mimo-v2.6-flash`. The paid Zen/System One switch
-was reverted: Go access does not imply access to the Zen Jev endpoint.
-HTTP 402 opens the failing route's circuit and immediately tries the reserve;
-a valid deny/review is final and never triggers fallback.
+The shipped `routing.yaml` uses OpenRouter `typesafe/jev-1.13` for both
+routing and policy validation (`OPENROUTER_API_KEY`), with no chat fallback.
+A valid deny/review is final. Custom configurations can explicitly enable a
+Chat Completions reserve, for example:
 
 ```yaml
 settings:

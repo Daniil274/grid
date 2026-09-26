@@ -2,7 +2,7 @@ settings:
   default_agent: "windows_operator"
   max_history: 100
   max_turns: 200
-  agent_timeout: 900
+  agent_timeout: 1800
   debug: true
   mcp_enabled: false
   working_directory: "./workspace"
@@ -25,12 +25,32 @@ settings:
     max_width: 1920
     max_height: 1080
     jpeg_quality: 88
-  compact:
+    # Screenshots sent with each model request, newest first; older ones stay in
+    # the session. Providers cap images per request (some at 30).
+    max_images_per_request: 6
+# Context compaction (core/context_budget.py). The window is 40k tokens and an
+# answer takes up to 8k, so a request is kept under 26k: 40k - 4k reserved for
+# the summary - 10k buffer for instructions, tool schemas and estimate error.
+# Past it, the oldest outputs of the tools below are cleared before each model
+# call (the newest preserve_last_n stay), and before a turn the session is
+# summarized. The chat users see is never compacted.
+compact:
+  enabled: true
+  summary_max_output_tokens: 4000
+  auto:
     enabled: true
-    auto:
-      enabled: true
-      buffer_tokens: 15000
-      warning_buffer_tokens: 22000
+    max_output_tokens_for_summary: 4000
+    buffer_tokens: 10000
+    max_consecutive_failures: 3
+  micro:
+    enabled: true
+    preserve_last_n: 3
+    compactable_tools:
+      - perceive
+      - crop_image
+      - list_windows
+      - active_window
+      - scratchpad_read
 
 providers:
   openrouter:
@@ -45,72 +65,43 @@ providers:
     name: "opencode"
     base_url: "https://opencode.ai/zen/go/v1"
     api_key_env: "OPENCODE_API_KEY"
+    default_headers:
+      User-Agent: "grid-agent-system/1.0"
+      x-opencode-session: "grid-coder"
     timeout: 300
     max_retries: 3
 
 models:
 
-  muse-spark-1.3-openrouter:
-    name: deepseek/deepseek-v4.1-flash
-    provider: "openrouter"
+  glm-5.3-flash:
+    name: deepseek-v4.1-flash
+    provider: "opencode"
     temperature: 0.2
     max_tokens: 8192
-    context_window: 1048576
-    description: "Meta Muse Spark 1.3 via OpenRouter"
+    context_window: 40000
+    description: "DeepSeek V4 Flash Vision via OpenCode Go"
     streaming_enabled: true
     use_responses_api: false
-
-  kimi-k2.6-opencode:
-    name: "kimi-k2.6"
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "Kimi K2.5 via OpenCode"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
-  glm-5.1-opencode:
-    name: "glm-5.1"
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: "GLM-5.1 via OpenCode"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
-  qwen-3.7-max-opencode:
-    name: qwen3.7-max
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
-    description: Qwen 3.7 Pro via OpenCode
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
 
 tools:
   perceive:
     type: "function"
-    description: "Unified screen perception: UIA accessibility tree + annotated screenshot. Returns path and image. Use at task start and after external UI changes. Action tools auto-return state."
+    description: "The only tool that shows the screen: UIA element list + annotated screenshot + file path. Put it last in the same response as the actions whose result you need; wait= lets a page or app settle first."
   click:
     type: "function"
-    description: "Smart click by UIA element name (preferred) or x,y fallback. Returns action result + fresh screenshot + UIA tree — no separate perceive() needed."
+    description: "Smart click by UIA element name (preferred) or x,y fallback. Returns a one-line status only, no screenshot."
   type_into:
     type: "function"
-    description: "Type text into a field. Optionally focuses by name. Handles Cyrillic/Unicode. Returns result + fresh screenshot + UIA tree."
+    description: "Type text into a field; target= focuses it by name first. Handles Cyrillic/Unicode. Returns a one-line status only, no screenshot."
   hotkey:
     type: "function"
-    description: "Press keyboard shortcuts (win+r, ctrl+c, alt+tab, enter, f5, etc.). Returns result + fresh screenshot + UIA tree."
+    description: "Press keyboard shortcuts (win+r, ctrl+c, alt+tab, enter, f5, etc.). Returns a one-line status only, no screenshot."
   scroll:
     type: "function"
-    description: "Scroll at screen coordinates. Returns result + fresh screenshot + UIA tree."
+    description: "Scroll at screen coordinates. Returns a one-line status only, no screenshot."
   drag:
     type: "function"
-    description: "Drag from one screen position to another. Returns result + fresh screenshot + UIA tree."
+    description: "Drag from one screen position to another. Returns a one-line status only, no screenshot."
   list_windows:
     type: "function"
     description: "List all visible windows on the desktop."
@@ -133,7 +124,9 @@ tools:
 agents:
   windows_operator:
     name: "Windows Operator"
-    model: muse-spark-1.3-openrouter
+    model: glm-5.3-flash
+    # Several calls per response: actions + perceive() cost one model turn.
+    parallel_tool_calls: true
     tools:
       - perceive
       - crop_image
@@ -160,57 +153,79 @@ agents:
       </context_and_scope>
 
       <tool_usage_rules>
-      ## Tool selection
+      ## What the tools return
 
-      1. perceive()          — call at task START and after external UI changes.
-                               Returns UIA element list + annotated screenshot.
-                               Action tools auto-return fresh state — you do
-                               NOT need perceive() after click/type_into/hotkey.
+      Action tools — click, type_into, hotkey, scroll, drag — return ONLY a
+      one-line status such as "OK: clicked at (412,63)". They return NO
+      screenshot and NO UIA list. perceive() is the only way to see the screen.
 
-      2. crop_image(path, x, y, w, h) — zoom into a region of the screenshot.
-                               Use when a UI area needs closer inspection.
+      1. perceive(wait=0)    — UIA element list + annotated screenshot + file path.
+                               wait= seconds (0-10) to let the UI settle first:
+                               1-3 after opening a page, launching an app or
+                               submitting a form.
+
+      2. crop_image(path, x, y, w, h) — zoom into a region of a screenshot.
                                path comes from perceive() output.
 
       3. click(name="...")   — click by element name from the UIA list (preferred).
                                click(x=, y=) only as fallback for canvas/games/RDP.
-                               Returns result + fresh screenshot + UIA tree.
 
-      4. type_into(text, target="...") — type text; target= focuses the field first.
+      4. type_into(text, target="...") — type text; target= focuses the field
+                               first, so no separate click is needed.
                                Use for all text input including Cyrillic.
-                               Returns result + fresh screenshot + UIA tree.
 
       5. hotkey("combo")     — keyboard shortcuts only. Not for typing text.
                                win+r, ctrl+c, alt+tab, enter, f5, etc.
-                               Returns result + fresh screenshot + UIA tree.
 
       6. scroll / drag       — only when click and hotkey cannot accomplish.
-                               Returns result + fresh screenshot + UIA tree.
 
-      ## Batching rules
-      Framework runs tool calls sequentially within one response.
-      Batch independent calls to save round-trips:
-        perceive() + scratchpad_read()       — initial state + restore context
-        active_window() + list_windows()     — both read-only queries
-        scratchpad_append(done) + click(...) — log step and act (click auto-observes)
-      Sequential batching is safe: B runs after A, so action+perceive works.
+      ## Batching — MANDATORY
+
+      Every model response costs 5-40 seconds. Do as much as possible per
+      response. Calls in one response run strictly in the order you write
+      them, so a perceive() written after an action sees that action's result.
+
+      RULE 1. Never end a response with an action and look at the screen in
+      the next one. A response that acts ENDS with perceive():
+          [action, action, ..., perceive(wait=N)]
+
+      RULE 2. Chain every step whose outcome you can predict without looking.
+      Break the chain only at the first step whose target depends on what the
+      screen shows after the previous one: end with perceive() there.
+
+      Good (one response each):
+          type_into("chess.com/play/computer", target="Address bar", clear=true)
+            + hotkey("enter") + perceive(wait=3)
+          type_into("report.txt", target="File name") + hotkey("enter") + perceive(wait=1)
+          click(name="New to Chess") + perceive(wait=1)
+          scroll(700, 400, -5) + perceive()
+          scratchpad_append("step 3 done") + click(name="Play") + perceive(wait=2)
+          perceive() + scratchpad_read()                         (task start)
+
+      Bad (two responses for one step — never do this):
+          response 1: click(name="Play")
+          response 2: perceive()
+
+      A failed or blocked call does not stop the calls after it. Read every
+      status line in the batch before trusting the screenshot, and do not
+      chain a type_into or hotkey after a click that must land first — use
+      type_into(target=...) instead, which fails without typing elsewhere.
       </tool_usage_rules>
 
       <react_cycle>
-      ## Optimized ReAct cycle — Perceive → Think → Act(+Observe)
+      ## ReAct cycle — Look → Think → Act+Look
 
-      1. Perceive: call perceive() to get element list and screenshot.
-         At task start batch with scratchpad_read() to restore prior progress.
+      1. Look: perceive() at task start (batched with scratchpad_read()).
 
-      2. Think: use <thinking> tags to identify target element by name from UIA list,
-         plan the action, and check scratchpad for prior steps.
+      2. Think: pick targets by name from the UIA list, plan the longest chain
+         of steps you can predict, check the scratchpad for prior steps.
 
-      3. Act+Observe: execute one atomic action — click, type_into, hotkey.
-         The tool returns action result AND fresh screenshot + UIA tree.
-         Read the returned UIA list to verify the action succeeded.
-         If UI did not change as expected: explain in <thinking> and retry.
+      3. Act+Look: send that chain in ONE response, ending with perceive(wait=N).
+         Compare the new screenshot and UIA list with what you expected.
+         If the UI did not change as expected, say why and re-plan.
 
-      4. Batch scratchpad_append(completed_step) with the next action call
-         to log progress without extra round-trips.
+      4. Put scratchpad_append(completed_step) into the same response as the
+         next actions.
       </react_cycle>
 
       <context_management>

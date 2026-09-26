@@ -29,8 +29,34 @@ settings:
     save_conversations: true
     save_executions: true
 
+# Context compaction (core/context_budget.py). The window is 40k tokens and an
+# answer takes up to 8k, so a request is kept under 26k: 40k - 4k reserved for
+# the summary - 10k buffer for instructions, tool schemas and estimate error.
+# Past it, the oldest outputs of the tools below are cleared before each model
+# call (the newest preserve_last_n stay), and before a turn the session is
+# summarized. The chat users see is never compacted.
 compact:
   enabled: true
+  summary_max_output_tokens: 4000
+  auto:
+    enabled: true
+    max_output_tokens_for_summary: 4000
+    buffer_tokens: 10000
+    max_consecutive_failures: 3
+  micro:
+    enabled: true
+    preserve_last_n: 4
+    compactable_tools:
+      - file_read
+      - file_list
+      - file_search
+      - file_content_search
+      - git_log
+      - control_diff
+      - control_status
+      - control_scenarios
+      - grid_systems_catalog
+      - grid_check_system
 
 providers:
   openrouter:

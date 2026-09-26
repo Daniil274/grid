@@ -52,39 +52,51 @@ settings:
     - Если нужно сделать несколько независимых вызовов инструментов, делай их параллельно в одном ответе.
     - Если задача состоит из нескольких заметных шагов, веди её через `todo_write` и держи ровно одну задачу в `in_progress`.
 
+# Context compaction (core/context_budget.py). The window is 40k tokens and an
+# answer takes up to 8k, so a request is kept under 26k: 40k - 4k reserved for
+# the summary - 10k buffer for instructions, tool schemas and estimate error.
+# Past it, the oldest outputs of the tools below are cleared before each model
+# call (the newest preserve_last_n stay), and before a turn the session is
+# summarized. The chat users see is never compacted.
 compact:
   enabled: true
   summary_max_output_tokens: 4000
-
   auto:
     enabled: true
     max_output_tokens_for_summary: 4000
-    buffer_tokens: 3000
-    warning_buffer_tokens: 2000
-    error_buffer_tokens: 1000
-    manual_buffer_tokens: 500
+    buffer_tokens: 10000
     max_consecutive_failures: 3
-
   micro:
     enabled: true
-    gap_threshold_minutes: 60
-    preserve_last_n: 5
+    preserve_last_n: 4
     compactable_tools:
       - bash_tool
       - file_read
       - glob_tool
       - grep_tool
+      - codegraph
+      - notebook_read
       - web_fetch
       - web_search
-      - notebook_read
-      - file_edit
-      - file_write
+      - beads_list
+      - beads_show
+      - general_purpose
+      - web_spider
 
 providers:
+  opencode:
+    name: "opencode"
+    base_url: "https://opencode.ai/zen/go/v1"
+    api_key_env: "OPENCODE_API_KEY"
+    default_headers:
+      User-Agent: "grid-agent-system/1.0"
+      x-opencode-session: "grid-coder"
+    timeout: 300
+    max_retries: 3
   openrouter:
-    name: "openrouter"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
     timeout: 300
     max_retries: 3
 
@@ -112,24 +124,24 @@ models:
       effort: "high"
 
   deepseek-flash-latest:
-    name: "~deepseek/deepseek-flash-latest"
-    provider: "openrouter"
+    name: "deepseek-v4.1-flash"
+    provider: "opencode"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: "Latest DeepSeek Flash via OpenRouter (currently DeepSeek V4.1 Flash)"
+    description: "DeepSeek V4.1 Flash via OpenCode Go"
     streaming_enabled: true
     preserve_reasoning_content: true
     reasoning:
       effort: "low"
 
-  mercury-2.5:
-    name: "inception/mercury-2.5"
-    provider: "openrouter"
+  glm-flash:
+    name: "glm-5.3-flash"
+    provider: "opencode"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: "Mercury 2.5 via OpenRouter"
+    description: "GLM 5.3 Flash via OpenCode Go"
     streaming_enabled: true
     preserve_reasoning_content: true
     reasoning:
@@ -420,7 +432,7 @@ agents:
 
   web_spider:
     name: "WebSpider"
-    model: mercury-2.5
+    model: glm-flash
     system_skills:
       - beads
       - web_spider_research_skill

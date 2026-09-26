@@ -36,59 +36,51 @@ settings:
     enabled: true
     tools_directory: "../../examples/coder/tools"
 
+# Context compaction (core/context_budget.py). The window is 40k tokens and an
+# answer takes up to 8k, so a request is kept under 26k: 40k - 4k reserved for
+# the summary - 10k buffer for instructions, tool schemas and estimate error.
+# Past it, the oldest outputs of the tools below are cleared before each model
+# call (the newest preserve_last_n stay), and before a turn the session is
+# summarized. The chat users see is never compacted.
 compact:
   enabled: true
-  summary_max_output_tokens: 12000
+  summary_max_output_tokens: 4000
   auto:
     enabled: true
-    max_output_tokens_for_summary: 12000
-    buffer_tokens: 8000
-    warning_buffer_tokens: 2000
-    error_buffer_tokens: 1000
-    manual_buffer_tokens: 500
+    max_output_tokens_for_summary: 4000
+    buffer_tokens: 10000
     max_consecutive_failures: 3
-
   micro:
     enabled: true
-    gap_threshold_minutes: 60
-    preserve_last_n: 5
+    preserve_last_n: 4
     compactable_tools:
       - bash_tool
       - file_read
       - glob_tool
       - grep_tool
+      - codegraph
+      - notebook_read
       - web_fetch
       - web_search
-      - notebook_read
-      - file_edit
-      - file_write
+      - beads_list
+      - beads_show
+      - beads_log_read
+      - todo_list
 
 providers:
   opencode:
     name: "opencode"
     base_url: "https://opencode.ai/zen/go/v1"
     api_key_env: "OPENCODE_API_KEY"
+    default_headers:
+      User-Agent: "grid-agent-system/1.0"
+      x-opencode-session: "grid-coder"
     timeout: 300
     max_retries: 3
-
   openrouter:
-    name: "openrouter"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
-    timeout: 300
-    max_retries: 3
-
-  multiai:
-    name: "multiai"
-    base_url: "https://multiai.store/v1"
-    api_key_env: "MULTIAI_API_KEY"
-    timeout: 300
-    max_retries: 20
-providers:
-  openrouter:
-    name: "openrouter"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
     timeout: 300
     max_retries: 3
 
@@ -106,24 +98,24 @@ models:
       effort: "high"
 
   deepseek-flash-latest:
-    name: "~deepseek/deepseek-flash-latest"
-    provider: "openrouter"
+    name: "deepseek-v4.1-flash"
+    provider: "opencode"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: "Latest DeepSeek Flash via OpenRouter (currently DeepSeek V4.1 Flash)"
+    description: "DeepSeek V4.1 Flash via OpenCode Go"
     streaming_enabled: true
     preserve_reasoning_content: true
     reasoning:
       effort: "low"
 
-  mercury-2.5:
-    name: "inception/mercury-2.5"
-    provider: "openrouter"
+  glm-flash:
+    name: "glm-5.3-flash"
+    provider: "opencode"
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
-    description: "Mercury 2.5 via OpenRouter"
+    description: "GLM 5.3 Flash via OpenCode Go"
     streaming_enabled: true
     preserve_reasoning_content: true
     reasoning:
@@ -181,7 +173,7 @@ tools:
     name: "orchestrate"
     description: "Meta-tool: запускает динамического агента для решения подзадачи."
     env_vars:
-      DEFAULT_MODEL: mercury-2.5
+      DEFAULT_MODEL: glm-flash
 
   # ── coder (function) ─────────────────────────────────────
   bash_tool:

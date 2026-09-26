@@ -18,24 +18,33 @@ settings:
       model: policy
       # The whole judgment, retry included; one request is bounded by the
       # model's request_timeout below.
-      timeout_seconds: 15
-      fallback_models: [policy_chat]
+      timeout_seconds: 22
       max_attempts: 2
       retry_backoff_seconds: 0.25
       max_concurrency: 4
       circuit_failure_threshold: 3
       circuit_cooldown_seconds: 15
 
+      
+
+# Context compaction for every routed system (core/context_budget.py): the base
+# each system's own `compact` section refines field by field. A system names
+# its compactable tools there; one without a section runs on this base. With a
+# 40k window and 8k answers, requests stay under 26k (40k - 4k summary reserve -
+# 10k buffer).
+compact:
+  enabled: true
+  summary_max_output_tokens: 4000
+  auto:
+    enabled: true
+    max_output_tokens_for_summary: 4000
+    buffer_tokens: 10000
+    max_consecutive_failures: 3
+  micro:
+    enabled: true
+    preserve_last_n: 4
+
 providers:
-  opencode-go:
-    name: opencode-go
-    base_url: https://opencode.ai/zen/go/v1
-    api_key_env: OPENCODE_API_KEY
-    default_headers:
-      User-Agent: grid-agent-system/1.0
-      x-opencode-session: grid-policy
-    timeout: 60
-    max_retries: 2
   openrouter:
     name: openrouter
     base_url: https://openrouter.ai/api/v1
@@ -53,18 +62,10 @@ models:
     name: typesafe/jev-1.13
     provider: openrouter
     description: Decisions model that judges agent actions for the policy gate
-    # Most judgments take 1-2 s, a few stall past 10 s. A stalled request is
+    # Most judgments take under 2 s; a slow one can pass 6 s (2026-09-26: an
+    # answer arrived 1 ms after a 6 s cut-off, twice). A stalled request is
     # dropped after this long and retried within validator.timeout_seconds.
-    request_timeout: 6
-
-  policy_chat:
-    name: glm-5.3-flash
-    provider: opencode-go
-    policy_api: chat
-    description: Chat policy reserve used only after a technical Decisions failure
-    request_timeout: 9
-    max_tokens: 512
-    reasoning: {enabled: false}
+    request_timeout: 10
 
 routing:
   model: router
@@ -99,3 +100,11 @@ routing:
         Controlling this Windows computer through its GUI like a person: open
         and use applications, click, type, press hotkeys, switch windows, fill
         forms in programs. Pick when the task must be done on screen.
+
+# Voice in the web chat. Routing across systems, the chat reads this section
+# from the catalog, not from a system's config. decision_model tells a finished
+# spoken turn from a pause, an interruption or noise; it must be a Decisions
+# model from `models` above.
+voice:
+  enabled: true
+  decision_model: router

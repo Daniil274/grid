@@ -40,33 +40,41 @@ settings:
     Never claim that a video was rendered unless a render tool returned an output path.
     For non-trivial edits, create or read an annotation file before rendering.
 
+# Context compaction (core/context_budget.py). The window is 40k tokens and an
+# answer takes up to 8k, so a request is kept under 26k: 40k - 4k reserved for
+# the summary - 10k buffer for instructions, tool schemas and estimate error.
+# Past it, the oldest outputs of the tools below are cleared before each model
+# call (the newest preserve_last_n stay), and before a turn the session is
+# summarized. The chat users see is never compacted.
 compact:
   enabled: true
-  summary_max_output_tokens: 6000
+  summary_max_output_tokens: 4000
   auto:
     enabled: true
-    max_output_tokens_for_summary: 6000
-    buffer_tokens: 5000
-    warning_buffer_tokens: 2000
-    error_buffer_tokens: 1000
-    manual_buffer_tokens: 500
+    max_output_tokens_for_summary: 4000
+    buffer_tokens: 10000
     max_consecutive_failures: 3
   micro:
     enabled: true
-    gap_threshold_minutes: 60
-    preserve_last_n: 5
+    preserve_last_n: 4
     compactable_tools:
+      - read_file
+      - list_files
       - video_probe
       - video_sample_frames
       - video_detect_scenes
       - video_create_annotation_template
       - video_build_cutlist
       - video_export_review_report
+
 providers:
   opencode:
     name: "opencode"
     base_url: "https://opencode.ai/zen/go/v1"
     api_key_env: "OPENCODE_API_KEY"
+    default_headers:
+      User-Agent: "grid-agent-system/1.0"
+      x-opencode-session: "grid-coder"
     timeout: 300
     max_retries: 3
   openrouter:
@@ -88,8 +96,8 @@ models:
     preserve_reasoning_content: true
 
   video-fast:
-    name: z-ai/glm-5.3-flashx
-    provider: openrouter
+    name: glm-5.3-flash
+    provider: opencode
     temperature: 0.2
     max_tokens: 8192
     context_window: 40000
