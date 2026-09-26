@@ -2,6 +2,8 @@
 Container Manager for agent isolation using Docker.
 """
 
+import hashlib
+import json
 import logging
 import os
 import sys
@@ -29,6 +31,9 @@ logger = logging.getLogger("grid.container_manager")
 # Agent-facing paths are shown as "/"; this is the actual mount point for docker.
 CONTAINER_WORKDIR = "/workspace"
 
+#: The label naming the settings a container was made with (ContainerManager.profile).
+PROFILE_LABEL = "grid.isolation.profile"
+
 class ContainerManager:
     """
     Manages Docker containers for agent isolation.
@@ -42,29 +47,43 @@ class ContainerManager:
         Args:
             config: GridConfig object
         """
+        from schemas.schemas import IsolationConfig
+
         self.config = config
         self.client = None
         self.enabled = False
-        self.image = "grid-agent:latest"
-        
-        # Check if isolation is enabled in config
+
         isolation_config = getattr(config.config, "isolation", None)
-        if isolation_config:
-            # Handle both dict and Pydantic model
-            enabled = getattr(isolation_config, "enabled", False) if not isinstance(isolation_config, dict) else isolation_config.get("enabled", False)
-            if enabled:
-                if docker is None:
-                    logger.warning("Docker isolation requested but docker SDK is not installed; disabling isolation")
-                    self.enabled = False
-                    return
-                self.enabled = True
-                self.image = getattr(isolation_config, "image", "grid-agent:latest") if not isinstance(isolation_config, dict) else isolation_config.get("image", "grid-agent:latest")
-                try:
-                    self.client = docker.from_env()
-                    logger.info("🐳 Docker client initialized successfully")
-                except DockerException as e:
-                    logger.error(f"❌ Failed to initialize Docker client: {e}")
-                    self.enabled = False
+        if isinstance(isolation_config, dict):
+            isolation_config = IsolationConfig(**isolation_config)
+        self.settings: IsolationConfig = isolation_config or IsolationConfig()
+        self.image = self.settings.image
+        if not self.settings.enabled:
+            return
+        if docker is None:
+            logger.warning("Docker isolation requested but docker SDK is not installed; disabling isolation")
+            return
+        self.enabled = True
+        try:
+            self.client = docker.from_env()
+            logger.info("Docker client initialized")
+        except DockerException as e:
+            logger.error("Failed to initialize Docker client: %s", e)
+            self.enabled = False
+
+    @property
+    def profile(self) -> str:
+        """A digest of the settings a container is made with. A container made
+        with other settings - an older Grid, an edited config - is recreated,
+        so the limits in force are always the configured ones."""
+        settings = {
+            "image": self.image,
+            "memory": self.settings.memory,
+            "cpus": self.settings.cpus,
+            "pids_limit": self.settings.pids_limit,
+            "hardening": ["cap_drop:ALL", "no-new-privileges", "no-restart"],
+        }
+        return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
 
     def get_or_create_container(self, user_id: str, workspace: Optional[Path] = None) -> Optional[Container]:
         """
@@ -100,13 +119,13 @@ class ContainerManager:
                     current_host_path = mount.get("Source")
                     break
 
-            if current_host_path != expected_host_path:
+            made_with = (container.attrs.get("Config", {}).get("Labels") or {}).get(PROFILE_LABEL)
+            if current_host_path != expected_host_path or made_with != self.profile:
                 logger.warning(
-                    "Container %s mounts '%s' but expected '%s'. Recreating.",
-                    container_name, current_host_path, expected_host_path,
+                    "Container %s mounts '%s' with settings %s; expected '%s' with %s. Recreating.",
+                    container_name, current_host_path, made_with, expected_host_path, self.profile,
                 )
-                container.stop()
-                container.remove()
+                container.remove(force=True)
                 return self._create_container(user_id, container_name, workspace=workspace)
 
             if container.status != "running":
@@ -167,6 +186,8 @@ class ContainerManager:
                 if proxy_val:
                     container_env[proxy_var] = proxy_val
 
+            # No restart policy: a user's container runs when Grid starts it for
+            # that user's space, not whenever the Docker daemon comes up.
             container = self.client.containers.run(
                 self.image,
                 name=container_name,
@@ -177,7 +198,13 @@ class ContainerManager:
                 working_dir=CONTAINER_WORKDIR,
                 user="agent",
                 environment=container_env, # Disable beads daemon and forward proxy env vars
-                restart_policy={"Name": "unless-stopped"},
+                labels={PROFILE_LABEL: self.profile},
+                # One user's agents cannot take the machine, nor any privilege.
+                mem_limit=self.settings.memory,
+                nano_cpus=int(self.settings.cpus * 1e9),
+                pids_limit=self.settings.pids_limit,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
                 **run_kwargs,
             )
             return container

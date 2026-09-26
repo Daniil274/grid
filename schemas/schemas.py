@@ -172,10 +172,18 @@ class ImageProcessingConfig(BaseModel):
 
 
 class IsolationConfig(BaseModel):
-    """Configuration for agent isolation."""
+    """Configuration for agent isolation: one container per user.
+
+    Every container also drops all Linux capabilities and cannot gain
+    privileges (core.managers.container_manager); the limits below keep one
+    user's agents from taking the whole machine.
+    """
     enabled: bool = False
     type: str = "docker"
     image: str = "grid-agent:latest"
+    memory: str = Field(default="2g", pattern=r"^[1-9][0-9]*[kmg]$", description="Memory a container may use, e.g. 2g")
+    cpus: float = Field(default=2.0, gt=0, le=64, description="CPU cores a container may use")
+    pids_limit: int = Field(default=512, ge=32, le=65536, description="Processes a container may run at once")
 
 
 class ProjectToolsConfig(BaseModel):
