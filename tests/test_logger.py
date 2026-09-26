@@ -6,6 +6,8 @@ import json
 import logging
 from unittest.mock import patch
 
+import pytest
+
 from utils.logger import Logger, JSONFormatter, LegacyFormatter, SessionLogManager, format_verbose_block
 
 
@@ -279,3 +281,42 @@ class TestHelpers:
         formatted = format_verbose_block("TITLE", {"a": 1})
         assert "TITLE" in formatted
         assert '"a": 1' in formatted
+
+
+class TestSessionLogRouting:
+    """Concurrent turns - of different users on a web server - keep their logs apart."""
+
+    @pytest.mark.asyncio
+    async def test_each_turn_writes_only_its_own_session_log(self, tmp_path):
+        import asyncio
+
+        verbose = logging.getLogger("grid.verbose")
+        level = verbose.level
+        verbose.setLevel(logging.DEBUG)
+        both_active = asyncio.Barrier(2)
+
+        async def turn(user: str, context_id: str) -> None:
+            token = Logger.activate_session_log(context_id, log_dir=str(tmp_path / user), level="full", enabled=True)
+            try:
+                await both_active.wait()  # both sessions are on before either writes
+                for step in range(3):
+                    Logger("test").log_verbose(f"{user} step {step}", "")
+                    await asyncio.sleep(0)
+            finally:
+                Logger.deactivate_session_log(token)
+
+        try:
+            await asyncio.gather(turn("alice", "ctx-a"), turn("bob", "ctx-b"))
+            Logger("test").log_verbose("outside any turn", "")
+        finally:
+            verbose.setLevel(level)
+
+        alice = (tmp_path / "alice" / "sessions" / "ctx-a.log").read_text(encoding="utf-8")
+        bob = (tmp_path / "bob" / "sessions" / "ctx-b.log").read_text(encoding="utf-8")
+        assert alice.count("alice step") == 3 and "bob" not in alice
+        assert bob.count("bob step") == 3 and "alice" not in bob
+        assert "outside" not in alice + bob
+
+    def test_nothing_is_mirrored_below_the_detailed_level(self, tmp_path):
+        assert Logger.activate_session_log("ctx", log_dir=str(tmp_path), level="basic", enabled=True) is None
+        assert not (tmp_path / "sessions").exists()

@@ -54,6 +54,8 @@ class SpaceLayout:
     workspace: Path
     #: The user's personal agents.
     personal_agents: Path
+    #: The session logs of the user's turns.
+    logs: Path
 
     @classmethod
     def under(cls, root: Path) -> "SpaceLayout":
@@ -63,6 +65,7 @@ class SpaceLayout:
             agent_sessions=root / "agent_sessions.db",
             workspace=root / "workspace",
             personal_agents=root / "agents.json",
+            logs=root / "logs",
         )
 
 
@@ -216,6 +219,7 @@ class UserSpace:
             container_id=self.container_id,
             policy_config=self.deployment.policy_config,
             session_db_path=str(self.layout.agent_sessions) if self.layout else None,
+            logs_directory=str(self.layout.logs) if self.layout else None,
         )
 
     @property

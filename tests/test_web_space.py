@@ -95,6 +95,7 @@ def test_a_laid_out_space_keeps_its_records_beside_its_workspace(
     assert space.workspace_path == (root / "workspace").resolve()
     assert space.conversations_path == root / "conversations.json"
     assert factory._agent_session_db_path == str(root / "agent_sessions.db")
+    assert factory._logs_directory_path() == root / "logs"
     assert Path(factory.config.get_working_directory()).resolve() == (root / "workspace").resolve()
     assert not (root / "workspace" / "logs").exists()
 

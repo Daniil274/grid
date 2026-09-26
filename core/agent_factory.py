@@ -281,6 +281,7 @@ class AgentFactory:
         container_id: Optional[str] = None,
         policy_config: Optional[Config] = None,
         session_db_path: Optional[str] = None,
+        logs_directory: Optional[str] = None,
     ):
         """
         Initialize Agent Factory.
@@ -300,6 +301,9 @@ class AgentFactory:
             session_db_path: SQLite file of the agents' SDK sessions; the logs
                 directory's ``agent_sessions.db`` by default. The web chat keeps
                 each user's sessions in that user's space.
+            logs_directory: Where the factory's runs write their session logs;
+                the config's logs directory by default. The web chat gives each
+                user's space its own.
         """
         if tracing_level is not None:
             self._configure_tracing_once(tracing_level)
@@ -310,6 +314,7 @@ class AgentFactory:
 
         self.config = config or Config()
         self.container_id = container_id
+        self._logs_directory = Path(logs_directory) if logs_directory else None
         if working_directory:
             self.config.set_working_directory(working_directory)
 
@@ -512,7 +517,7 @@ class AgentFactory:
 
     def _build_agent_session_db_path(self) -> str:
         """Return durable SQLite path for agent sessions."""
-        base_dir = Path(self.config.get_logs_directory())
+        base_dir = self._logs_directory_path()
         base_dir.mkdir(parents=True, exist_ok=True)
         return str(base_dir / "agent_sessions.db")
 
@@ -548,7 +553,7 @@ class AgentFactory:
         return 700
 
     def _logs_directory_path(self) -> Path:
-        return Path(self.config.get_logs_directory())
+        return self._logs_directory or Path(self.config.get_logs_directory())
 
     def _update_pending_agent_run(
         self,
@@ -1673,7 +1678,9 @@ class AgentFactory:
 
     def _record_invocation(
         self, agent_key: str, context_id: str, user_id: Optional[str], message: str
-    ) -> None:
+    ) -> Optional[Any]:
+        """Note the invocation; with agent logging on, start this turn's session
+        log and return its token for Logger.deactivate_session_log."""
         self.context_manager.set_metadata("context_id", context_id)
         self.context_manager.set_metadata(
             "last_invocation", {"agent": agent_key, "timestamp": time.time()}
@@ -1682,15 +1689,18 @@ class AgentFactory:
             self.context_manager.set_metadata("user_id", user_id)
         agent_logging = self.config.config.settings.agent_logging
         if agent_logging is None or not agent_logging.enabled:
-            return
-        Logger.configure_agent_logging(
-            enabled=True,
-            level=agent_logging.level,
+            return None
+        # This factory's own settings travel with the turn: another turn -
+        # another user's, on a web server - logs to its own directory at once.
+        token = Logger.activate_session_log(
+            context_id,
             log_dir=str(self._logs_directory_path()),
+            level=agent_logging.level,
+            enabled=True,
         )
-        Logger.activate_session_log(context_id)
         if agent_logging.save_conversations and message:
             Logger("agent_factory").log_verbose(f"USER INPUT: {agent_key}", message)
+        return token
 
     async def _auto_run_preamble(
         self,
@@ -2418,6 +2428,7 @@ class AgentFactory:
         active_context_id: Optional[str] = None
         task = ""
         stored = False  # the turn's request is in the conversation
+        session_log = None
         try:
             active_context_id = self._open_context(context_id, use_active_context)
             execution.context_id = active_context_id
@@ -2441,7 +2452,7 @@ class AgentFactory:
             )
             if action_state is not None and hasattr(observer, "handle_policy_event"):
                 action_state.policy_event = observer.handle_policy_event
-            self._record_invocation(agent_key, active_context_id, user_id, shown_message)
+            session_log = self._record_invocation(agent_key, active_context_id, user_id, shown_message)
             user_id = user_id or self.context_manager.get_metadata("user_id")
 
             agent = await self.create_agent(agent_key, context_path)
@@ -2658,7 +2669,7 @@ class AgentFactory:
                 del self._run_controls[active_context_id]
             # Messages sent during the turn that no model call read go back.
             control.steering.hand_back()
-            Logger.deactivate_session_log()
+            Logger.deactivate_session_log(session_log)
 
     def _build_agent_instructions(
         self,

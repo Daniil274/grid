@@ -6,6 +6,7 @@ import logging
 import sys
 import json
 import threading
+from contextvars import ContextVar, Token
 from datetime import datetime
 from typing import Any, Dict, Optional
 from utils.grid_paths import get_default_logs_dir
@@ -27,15 +28,22 @@ def format_verbose_block(title: str, content: Any) -> str:
 
 
 class SessionLogManager:
-    """Mirrors grid.verbose output into per-context session log files."""
+    """Mirrors grid.verbose output into per-context session log files.
+
+    Turns of several conversations - on a web server, of several users - run at
+    once in one process. A record belongs to the session active in the task
+    that logged it: :meth:`activate` sets a context variable, which the tasks a
+    run starts inherit, and one handler on grid.verbose appends every record to
+    that session's file. A record logged outside any session goes to none, and
+    one run's settings (its log directory) never change another's.
+    """
 
     _lock = threading.Lock()
     _enabled = False
     _verbose_level = "full"
     _log_dir: Optional[Path] = None
-    _active_context_id: Optional[str] = None
-    _mirror_handler: Optional[logging.Handler] = None
-    _activation_depth: int = 0
+    _current: ContextVar[Optional[Path]] = ContextVar("grid_session_log", default=None)
+    _handler: Optional[logging.Handler] = None
 
     @classmethod
     def configure(
@@ -45,61 +53,56 @@ class SessionLogManager:
         level: str = "full",
         log_dir: Optional[Path] = None,
     ) -> None:
+        """Defaults for :meth:`activate` calls that bring no settings of their own."""
         with cls._lock:
             cls._enabled = enabled
             cls._verbose_level = (level or "full").lower()
             if log_dir is not None:
                 cls._log_dir = log_dir
 
+    @staticmethod
+    def _mirrors(enabled: bool, level: Optional[str]) -> bool:
+        return enabled and (level or "full").lower() in ("full", "detailed")
+
     @classmethod
     def uses_verbose_mirror(cls) -> bool:
-        return cls._enabled and cls._verbose_level in ("full", "detailed")
+        return cls._mirrors(cls._enabled, cls._verbose_level)
 
     @classmethod
-    def activate(cls, context_id: str) -> None:
-        if not cls.uses_verbose_mirror() or not context_id:
-            return
+    def activate(
+        cls,
+        context_id: str,
+        *,
+        log_dir: Optional[Path] = None,
+        enabled: Optional[bool] = None,
+        level: Optional[str] = None,
+    ) -> Optional[Token]:
+        """Mirror this task's verbose output to ``<log_dir>/sessions/<context_id>.log``
+        until :meth:`deactivate` gets the returned token; None when not mirroring.
+        Settings not given come from :meth:`configure`."""
+        enabled = cls._enabled if enabled is None else enabled
+        level = cls._verbose_level if level is None else level
+        if not context_id or not cls._mirrors(enabled, level):
+            return None
+        session_dir = (log_dir or cls._log_dir or get_default_logs_dir()) / "sessions"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        cls._install_handler()
+        return cls._current.set(session_dir / f"{context_id}.log")
+
+    @classmethod
+    def deactivate(cls, token: Optional[Token]) -> None:
+        """End the mirroring :meth:`activate` started in this task."""
+        if token is not None:
+            cls._current.reset(token)
+
+    @classmethod
+    def _install_handler(cls) -> None:
         with cls._lock:
-            if cls._active_context_id == context_id and cls._mirror_handler is not None:
-                cls._activation_depth += 1
-                return
-            cls.deactivate_unlocked()
-            log_dir = cls._log_dir or get_default_logs_dir()
-            session_dir = log_dir / "sessions"
-            session_dir.mkdir(parents=True, exist_ok=True)
-            session_path = session_dir / f"{context_id}.log"
-            handler = NonLockingFileHandler(session_path, level=logging.DEBUG)
-            handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
-            verbose_logger = logging.getLogger("grid.verbose")
-            verbose_logger.addHandler(handler)
-            cls._mirror_handler = handler
-            cls._active_context_id = context_id
-            cls._activation_depth = 1
-
-    @classmethod
-    def deactivate(cls) -> None:
-        with cls._lock:
-            if cls._mirror_handler is None:
-                return
-            if cls._activation_depth > 1:
-                cls._activation_depth -= 1
-                return
-            cls.deactivate_unlocked()
-
-    @classmethod
-    def deactivate_unlocked(cls) -> None:
-        if cls._mirror_handler is None:
-            cls._active_context_id = None
-            cls._activation_depth = 0
-            return
-        verbose_logger = logging.getLogger("grid.verbose")
-        try:
-            verbose_logger.removeHandler(cls._mirror_handler)
-        except Exception:
-            pass
-        cls._mirror_handler = None
-        cls._active_context_id = None
-        cls._activation_depth = 0
+            if cls._handler is None:
+                handler = _SessionRoutingHandler(cls._current)
+                handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+                logging.getLogger("grid.verbose").addHandler(handler)
+                cls._handler = handler
 
     @classmethod
     def write_verbose(cls, title: str, content: Any) -> None:
@@ -201,6 +204,24 @@ class NonLockingFileHandler(logging.Handler):
         except Exception:
             # Avoid raising during logging in tests
             pass
+
+
+class _SessionRoutingHandler(logging.Handler):
+    """Appends each record to the session log of the task that logged it."""
+
+    def __init__(self, current: "ContextVar[Optional[Path]]") -> None:
+        super().__init__(logging.DEBUG)
+        self._current = current
+
+    def emit(self, record: logging.LogRecord) -> None:
+        path = self._current.get()
+        if path is None:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as file:
+                file.write(self.format(record) + "\n")
+        except OSError:
+            self.handleError(record)
 
 
 class Logger:
@@ -536,25 +557,36 @@ class Logger:
         level: str = "full",
         log_dir: Optional[str] = None,
     ) -> None:
-        """Apply settings.agent_logging to session log mirroring."""
-        path: Optional[Path] = None
-        if log_dir:
-            path_obj = Path(log_dir).expanduser()
-            if path_obj.is_absolute():
-                path = path_obj
-            else:
-                path = get_default_logs_dir() / path_obj
-        SessionLogManager.configure(enabled=enabled, level=level, log_dir=path)
+        """Process-wide defaults for session log mirroring (settings.agent_logging)."""
+        SessionLogManager.configure(enabled=enabled, level=level, log_dir=cls._logs_path(log_dir))
 
     @classmethod
-    def activate_session_log(cls, context_id: str) -> None:
-        """Start mirroring verbose output to logs/sessions/<context_id>.log."""
-        SessionLogManager.activate(context_id)
+    def activate_session_log(
+        cls,
+        context_id: str,
+        *,
+        log_dir: Optional[str] = None,
+        level: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> Optional[Token]:
+        """Mirror this task's verbose output to <log_dir>/sessions/<context_id>.log;
+        pass the returned token to :meth:`deactivate_session_log`."""
+        return SessionLogManager.activate(
+            context_id, log_dir=cls._logs_path(log_dir), level=level, enabled=enabled
+        )
 
     @classmethod
-    def deactivate_session_log(cls) -> None:
-        """Stop mirroring verbose output for the current context."""
-        SessionLogManager.deactivate()
+    def deactivate_session_log(cls, token: Optional[Token]) -> None:
+        """Stop the mirroring the token's activation started."""
+        SessionLogManager.deactivate(token)
+
+    @staticmethod
+    def _logs_path(log_dir: Optional[str]) -> Optional[Path]:
+        """*log_dir* as a path: absolute as given, relative under the default logs directory."""
+        if not log_dir:
+            return None
+        path = Path(log_dir).expanduser()
+        return path if path.is_absolute() else get_default_logs_dir() / path
 
 
 # Legacy compatibility functions
