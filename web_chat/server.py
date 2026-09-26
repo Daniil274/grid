@@ -72,6 +72,16 @@ class RevalidatedStaticFiles(StaticFiles):
         return response
 
 
+#: Sent with every response, whatever proxy stands in front: no framing by
+#: other sites (clickjacking the sign-in page), no content-type guessing, no
+#: full URLs in Referer headers to other sites.
+SECURITY_HEADERS = {
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+}
+
+
 class WebChatServer:
     def __init__(
         self,
@@ -101,6 +111,14 @@ class WebChatServer:
         self._sweeper: Optional[asyncio.Task] = None
 
         self.app = FastAPI(title="Grid Web Chat", docs_url=None, redoc_url=None)
+
+        @self.app.middleware("http")
+        async def security_headers(request: Request, call_next):
+            response = await call_next(request)
+            for name, value in SECURITY_HEADERS.items():
+                response.headers.setdefault(name, value)
+            return response
+
         self._mount_static()
         self.current_user, self.current_space = self._dependencies()
         # Everything under /api acts for an identified user.

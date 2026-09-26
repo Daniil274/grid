@@ -1,0 +1,12 @@
+# Grid web chat with accounts behind Caddy: HTTPS with an automatic
+# certificate, websockets and the Host header passed through as they are.
+#
+# grid-web-chat listens on 127.0.0.1 only; Caddy on the same machine is a
+# proxy uvicorn trusts by default, so the real client address reaches the
+# sign-in rate limit and the session cookie is marked Secure.
+
+chat.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8000
+	header Strict-Transport-Security "max-age=31536000"
+}

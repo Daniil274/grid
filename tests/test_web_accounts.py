@@ -271,3 +271,11 @@ def test_admins_review_the_actions_of_every_users_agents(accounts):
     assert decided.status_code == 200
     assert spaces[alice.id].resolved == [(f"review-{alice.id}", False)]
     assert root.post("/api/action-policy/reviews/missing", json={"decision": "approve"}).status_code == 404
+
+
+def test_every_response_carries_the_security_headers(client):
+    from web_chat.server import SECURITY_HEADERS
+
+    for response in (client.get("/login"), client.get("/api/chat/bootstrap"), client.get("/static/styles/auth.css")):
+        for name, value in SECURITY_HEADERS.items():
+            assert response.headers[name] == value

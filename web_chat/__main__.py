@@ -86,6 +86,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Another origin whose pages may use the API, e.g. a proxy's https://chat.example.com",
     )
     multi.add_argument(
+        "--forwarded-allow-ips",
+        default=None,
+        metavar="IPS",
+        help="Proxies whose X-Forwarded-For/-Proto are trusted, comma-separated "
+        "(default: 127.0.0.1). Sign-in limits count the real client address only through them",
+    )
+    multi.add_argument(
         "--trusted-users",
         action="store_true",
         help="Allow agents to run tools on this machine without containers (every user is trusted)",
@@ -130,7 +137,8 @@ def main() -> None:
 
     options = multi_user_options(deployment, args) if args.accounts else single_user_options(deployment, args)
     print(f"Open http://{args.host}:{args.port}/")
-    uvicorn.run(create_app(deployment, **options), host=args.host, port=args.port)
+    proxy = {"forwarded_allow_ips": args.forwarded_allow_ips} if args.forwarded_allow_ips else {}
+    uvicorn.run(create_app(deployment, **options), host=args.host, port=args.port, **proxy)
 
 
 def single_user_options(deployment, args: argparse.Namespace) -> dict:
