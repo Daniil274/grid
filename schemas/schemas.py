@@ -276,6 +276,19 @@ class PersonalAgentsPolicy(BaseModel):
     max_instructions_chars: int = Field(default=8000, ge=100, le=100_000)
 
 
+class UserLimitsPolicy(BaseModel):
+    """How much one user of a multi-user web chat may run (web_chat.limits)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    running_turns: int = Field(
+        default=2, ge=1, le=50, description="Turns one user may have running at once, across their chats"
+    )
+    turns_per_day: Optional[int] = Field(
+        default=None, ge=1, description="Turns one user may start per UTC day; None for no daily limit"
+    )
+
+
 class GridConfig(BaseModel):
     """Complete Grid system configuration."""
     settings: Settings = Field(default_factory=Settings)
@@ -292,6 +305,10 @@ class GridConfig(BaseModel):
     personal_agents: PersonalAgentsPolicy = Field(
         default_factory=PersonalAgentsPolicy,
         description="Agents users of a multi-user web chat may build for themselves",
+    )
+    user_limits: UserLimitsPolicy = Field(
+        default_factory=UserLimitsPolicy,
+        description="How much one user of a multi-user web chat may run",
     )
     
     @field_validator('agents')

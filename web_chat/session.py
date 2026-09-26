@@ -567,23 +567,20 @@ class ChatSession:
             await self.send({"type": "queue", "items": queue.public()})
             return
         active = self._turns.running(self.context_id)
-        running = active is not None
-        if action == "unqueue" or not running:
-            queue.remove(item["id"])
-        else:
+        if action == "send_queued" and active is None:
+            await self._start_queued(queue, item)
+            return
+        queue.remove(item["id"])
+        if action == "send_queued":
             # Sent now while the agent works: first in line, and the turn stops.
-            queue.remove(item["id"])
             queue.add(item["text"], item.get("images") or [], "now", front=True)
         snapshot = {"type": "queue", "items": queue.public()}
-        if running:
-            await active[0].announce(snapshot)
-        else:
+        if active is None:
             await self.send(snapshot)
+            return
+        await active[0].announce(snapshot)
         if action == "send_queued":
-            if running:
-                await self._cancel(active[1])
-            else:
-                await self._start(item["text"], None, None, images=item.get("images") or [])
+            await self._cancel(active[1])
 
     async def _advance_queue(self, finished: AgentTurn) -> None:
         """After a turn, send the next waiting message - unless the user should decide.
@@ -599,8 +596,16 @@ class ChatSession:
             return
         if finished.outcome != "answered" and item.get("delivery") != "now":
             return
+        await self._start_queued(queue, item)
+
+    async def _start_queued(self, queue: MessageQueue, item: dict[str, Any]) -> None:
+        """Send a waiting message as the next turn. Refused - a limit, say - it
+        goes back to the front of the queue instead of being lost."""
         queue.remove(item["id"])
-        await self._start(item["text"], None, None, images=item.get("images") or [])
+        images = item.get("images") or []
+        if not await self._start(item["text"], None, None, images=images):
+            queue.add(item["text"], images, item.get("delivery") or "after_turn", front=True)
+        await self.send({"type": "queue", "items": queue.public()})
 
     def _image_config(self) -> Any:
         """settings.image_processing of the space's config, or None for the defaults."""
@@ -636,25 +641,32 @@ class ChatSession:
         *,
         images: list[str] | tuple[str, ...] = (),
         edit_of: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """Start a turn; ``message`` None continues the interrupted one.
+        Whether it started; a refusal was sent to the socket.
 
         ``edit_of`` marks the message as a new version of an edited one, sent
         into the branch made for it (POST .../branches)."""
         if self._turns.is_claimed(self.context_id):
             await self.send({"type": "busy", "content": "This conversation already has an active turn."})
-            return
+            return False
         if not self.space.registry.selection_is_valid(system_key or None, agent_key or None):
             await self.send({"type": "error", "content": "Unknown system or agent"})
             await self.send({"type": "done"})
-            return
+            return False
         # No turn of this conversation runs here, so one that the record says
         # is running died with an earlier process: record it before routing.
         self.manager.recover_abandoned_turn(self.context_id)
         if message is None and self.manager.pending_interruption(self.context_id) is None:
             await self.send({"type": "error", "content": "There is nothing to continue in this conversation."})
             await self.send({"type": "done"})
-            return
+            return False
+        # Admitting counts the turn for the day: only a request that will run.
+        refusal = self.space.admit_turn()
+        if refusal is not None:
+            await self.send({"type": "error", "content": refusal})
+            await self.send({"type": "done"})
+            return False
         self._turns.claim(self.context_id)
         turn = AgentTurn(
             self,
@@ -672,6 +684,7 @@ class ChatSession:
             self._background(self._advance_queue(turn))
 
         task.add_done_callback(ended)
+        return True
 
     @staticmethod
     async def _cancel(task: asyncio.Task) -> None:

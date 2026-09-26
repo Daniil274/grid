@@ -46,6 +46,11 @@ class TurnBoard:
     def is_claimed(self, context_id: str) -> bool:
         return context_id in self._claimed
 
+    @property
+    def claimed_count(self) -> int:
+        """Conversations with a turn on: the user's turns running now."""
+        return len(self._claimed)
+
     # -- running turns ---------------------------------------------------------
     def register(self, context_id: str, turn: Any, task: asyncio.Task) -> None:
         self._turns[context_id] = (turn, task)

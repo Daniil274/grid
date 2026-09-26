@@ -26,6 +26,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from web_chat.accounts import passwords, tokens
@@ -81,6 +82,7 @@ class Account:
     user: User
     disabled: bool
     created_at: float
+    turns_today: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -89,6 +91,7 @@ class Account:
             "role": self.user.role,
             "disabled": self.disabled,
             "created_at": self.created_at,
+            "turns_today": self.turns_today,
         }
 
 
@@ -136,7 +139,20 @@ class Accounts:
         return self._store.count_users() > 0
 
     def accounts(self) -> list[Account]:
-        return [Account(r.user, r.disabled, r.created_at) for r in self._store.users()]
+        turns = self._store.turns_by_user(self._today())
+        return [Account(r.user, r.disabled, r.created_at, turns.get(r.user.id, 0)) for r in self._store.users()]
+
+    # -- usage ---------------------------------------------------------------------
+    def count_turn(self, user_id: str, limit: Optional[int]) -> bool:
+        """Count a turn the user starts now, unless the day's *limit* is reached;
+        whether it was counted (and may start). Days are UTC."""
+        return self._store.count_turn(user_id, self._today(), limit)
+
+    def turns_today(self, user_id: str) -> int:
+        return self._store.turns_on(user_id, self._today())
+
+    def _today(self) -> str:
+        return datetime.fromtimestamp(self._clock(), timezone.utc).date().isoformat()
 
     def set_disabled(self, actor: User, user_id: str, disabled: bool) -> None:
         """Disable or re-enable a user; disabling ends the user's sessions."""

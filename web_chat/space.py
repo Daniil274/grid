@@ -32,6 +32,7 @@ from core.config import Config
 from core.context import ContextManager
 from core.managers.container_manager import ContainerManager
 from web_chat.deployment import Deployment, isolation_enabled
+from web_chat.limits import TurnCounter, TurnLimits
 from web_chat.personal_agents import PersonalAgentError, PersonalAgents, PersonalAgentStore
 from web_chat.systems import Resolution, SystemRegistry
 from web_chat.turns import TurnBoard
@@ -79,18 +80,25 @@ class UserSpace:
         user_id: str = "default_user",
         layout: Optional[SpaceLayout] = None,
         require_isolation: bool = False,
+        turn_counter: Optional[TurnCounter] = None,
     ) -> None:
         """``layout`` None keeps the single-user layout (see the module docs).
 
         ``require_isolation``: the agents' tools must run in the space's
         container. A space whose container cannot start is then not built at
         all, rather than letting its agents work on the host.
+
+        ``turn_counter`` counts the user's turns per day; given one, the
+        deployment's ``user_limits`` apply to the space (web_chat.limits).
         """
         self.deployment = deployment
         self.user_id = user_id
         self.layout = layout
         self.require_isolation = require_isolation
         self.turns = TurnBoard()
+        self.limits = (
+            TurnLimits(user_id, lambda: deployment.user_limits, turn_counter) if turn_counter is not None else None
+        )
 
         self._lock = asyncio.Lock()
         self._prepared: set[tuple[str, str]] = set()
@@ -273,6 +281,12 @@ class UserSpace:
             logger.warning(
                 "Background task %s failed", task.get_name(), exc_info=task.exception()
             )
+
+    def admit_turn(self) -> Optional[str]:
+        """None when the user may start a turn now (it is counted), or why not."""
+        if self.limits is None:
+            return None
+        return self.limits.admit(self.turns.claimed_count)
 
     # -- personal agents -----------------------------------------------------
     def change_personal_agents(self, edit: Callable[[PersonalAgents], T]) -> T:

@@ -174,6 +174,7 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
             user_id=user_id,
             layout=SpaceLayout.under(users_dir / user_id),
             require_isolation=not args.trusted_users,
+            turn_counter=accounts,
         )
 
     print(f"Data: {data_dir}")

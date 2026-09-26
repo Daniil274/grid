@@ -55,6 +55,15 @@ MIGRATIONS: tuple[str, ...] = (
         used_at    REAL
     );
     """,
+    # 2: turns started per user and UTC day, for the daily limit.
+    """
+    CREATE TABLE usage (
+        user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        day     TEXT NOT NULL,
+        turns   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, day)
+    );
+    """,
 )
 
 
@@ -206,6 +215,27 @@ class AccountStore:
 
     def delete_expired_sessions(self, now: float) -> int:
         return self._write("DELETE FROM sessions WHERE expires_at <= ?", now)
+
+    # -- usage -------------------------------------------------------------------
+    def turns_on(self, user_id: str, day: str) -> int:
+        row = self._one("SELECT turns FROM usage WHERE user_id = ? AND day = ?", user_id, day)
+        return row[0] if row else 0
+
+    def turns_by_user(self, day: str) -> dict[str, int]:
+        return {row["user_id"]: row["turns"] for row in self._all("SELECT user_id, turns FROM usage WHERE day = ?", day)}
+
+    def count_turn(self, user_id: str, day: str, limit: Optional[int]) -> bool:
+        """Count one more turn of the user on *day*, unless that would pass
+        *limit*; whether it was counted. Checking and counting are one step."""
+        with self.transaction():
+            if limit is not None and self.turns_on(user_id, day) >= limit:
+                return False
+            self._write(
+                "INSERT INTO usage (user_id, day, turns) VALUES (?, ?, 1) "
+                "ON CONFLICT (user_id, day) DO UPDATE SET turns = turns + 1",
+                user_id, day,
+            )
+            return True
 
     # -- invites -----------------------------------------------------------------
     def add_invite(self, invite: InviteRecord, code_hash: str) -> None:
