@@ -45,7 +45,7 @@ export function createScrollFollower(container) {
   };
 }
 
-export function createTranscript({ container, emptyState, jumpButton, onEditMessage, onSpeakMessage }) {
+export function createTranscript({ container, emptyState, jumpButton, onEditMessage, onSpeakMessage, onContinue, onSwitchVersion }) {
   /** Live message handles by id - the speech player reports state by id. */
   const messages = new Map();
   const scrollFollower = createScrollFollower(container);
@@ -113,7 +113,7 @@ export function createTranscript({ container, emptyState, jumpButton, onEditMess
     /** @returns the message handle, so the caller can stream into it. */
     add(options) {
       setEmpty(false);
-      const message = createMessage({ ...options, onEdit: onEditMessage, onSpeak: onSpeakMessage });
+      const message = createMessage({ ...options, onEdit: onEditMessage, onSpeak: onSpeakMessage, onContinue, onSwitchVersion });
       messages.set(message.id, message);
       container.append(message.el);
       scrollToBottom(true);
@@ -137,8 +137,15 @@ export function createTranscript({ container, emptyState, jumpButton, onEditMess
           role: message.role,
           content: message.content,
           timestamp: message.timestamp,
+          kind: message.kind,
+          images: message.images,
+          messageId: message.id,
+          versions: message.versions,
         });
         handle.reasoning?.hydrate(message.trace);
+        if (message.interruption) {
+          handle.setInterrupted(message.interruption, { resumable: message.interruption.resumable });
+        }
       }
       setEmpty(stored.length === 0);
       scrollToBottom(true);
@@ -148,6 +155,50 @@ export function createTranscript({ container, emptyState, jumpButton, onEditMess
       container.replaceChildren();
       messages.clear();
       setEmpty(true);
+    },
+
+    /**
+     * Bring a transcript that shows the same messages as *stored* up to date -
+     * ids and versions - without re-rendering it. False when they differ.
+     */
+    adopt(stored) {
+      const handles = [...messages.values()];
+      if (handles.length !== stored.length) return false;
+      handles.forEach((handle, index) => handle.adopt({ id: stored[index].id, versions: stored[index].versions }));
+      return true;
+    },
+
+    /** The newest message the user sent as a turn (it has an id), or null. */
+    lastUserMessage() {
+      return [...messages.values()].reverse().find((handle) => handle.role === "user" && handle.messageId) ?? null;
+    },
+
+    /** The newest assistant message with text, or null. */
+    lastAnswer() {
+      return [...messages.values()].reverse().find((handle) => handle.role === "assistant" && handle.text) ?? null;
+    },
+
+    /** Versions of the newest edited message on screen, or null. */
+    lastVersions() {
+      return [...messages.values()].reverse().find((handle) => handle.versions)?.versions ?? null;
+    },
+
+    /** Whether the newest message is an interruption Continue can resume. */
+    resumable() {
+      return this.last()?.resumable === true;
+    },
+
+    /** Insert a message just before *anchor* - a message the user sent mid-turn. */
+    addBefore(anchor, options) {
+      const message = createMessage({ ...options, onEdit: onEditMessage, onSpeak: onSpeakMessage, onContinue, onSwitchVersion });
+      messages.set(message.id, message);
+      container.insertBefore(message.el, anchor.el);
+      return message;
+    },
+
+    /** A new turn is starting: no earlier interruption can be continued now. */
+    retireContinue() {
+      for (const message of messages.values()) message.retireContinue();
     },
 
     /** The newest message handle, or null. */

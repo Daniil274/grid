@@ -66,7 +66,7 @@ export function createConversationList({ container, searchInput, store, onSelect
     const title = h("span.chatRow__title", { text: conversation.title || "New chat" });
     const main = h(
       "button.chatRow__main",
-      { type: "button", on: { click: () => onSelect(conversation.id) } },
+      { type: "button", on: { click: () => onSelect(conversation.open_id ?? conversation.id) } },
       h(
         "span.chatRow__head",
         {},
@@ -94,7 +94,7 @@ export function createConversationList({ container, searchInput, store, onSelect
     return h("div.chatRow", { class: classes.join(" ") }, main, actions);
   };
 
-  const render = ({ conversations, contextId }) => {
+  const render = ({ conversations, contextId, rootId }) => {
     if (renaming) return;
     const visible = conversations.filter((conversation) => matches(conversation, query));
     if (!visible.length) {
@@ -104,7 +104,7 @@ export function createConversationList({ container, searchInput, store, onSelect
     replace(
       container,
       groupByDay(visible).map(([label, items]) =>
-        h("div.chatGroup", {}, h("div.chatGroup__label", { text: label }), ...items.map((item) => row(item, contextId))),
+        h("div.chatGroup", {}, h("div.chatGroup__label", { text: label }), ...items.map((item) => row(item, rootId ?? contextId))),
       ),
     );
   };

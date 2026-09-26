@@ -24,6 +24,13 @@ export const api = {
     request(`/api/chat/conversations/${encodeURIComponent(id)}`, json("PATCH", { title })),
   deleteConversation: (id) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** Fork before a user message; the edited text then goes into the branch. */
+  createBranch: (id, messageId) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/branches`, json("POST", { message_id: messageId })),
+  compactConversation: (id) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/compact`, { method: "POST" }),
+  activateBranch: (id) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/activate`, { method: "POST" }),
   prepareAgent: (systemKey, agentKey) =>
     request("/api/chat/prepare-agent", json("POST", { system_key: systemKey, agent_key: agentKey })),
   getSettings: () => request("/api/settings"),

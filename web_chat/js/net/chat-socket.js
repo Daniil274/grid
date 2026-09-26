@@ -7,7 +7,7 @@
  * caller registers, so no component has to parse raw frames.
  */
 
-/** @typedef {"token"|"step"|"step_removed"|"reasoning"|"routed"|"tool_issues"|"final_output"|"answer_reset"|"attached"|"error"|"busy"|"done"} ChatEventType */
+/** @typedef {"token"|"step"|"step_removed"|"reasoning"|"routed"|"tool_issues"|"final_output"|"answer_reset"|"attached"|"stopping"|"interrupted"|"image"|"delivery"|"queue"|"steered"|"error"|"busy"|"done"} ChatEventType */
 
 export class ChatConnection {
   /**
@@ -46,13 +46,40 @@ export class ChatConnection {
     return this;
   }
 
-  /** @param {{system_key: ?string, agent_key: ?string}} selection nulls mean `auto` */
-  send(message, selection) {
-    this._post({ message, ...selection });
+  /**
+   * @param {string} message
+   * @param {{system_key: ?string, agent_key: ?string}} selection nulls mean `auto`
+   * @param {string[]} [images] data URLs attached to the message
+   * @param {?string} [editOf] the slot of the message this one is a new version of
+   * @param {?string} [delivery] while the agent works: "now", "next_step",
+   *   "after_turn", or null for the decision model to choose
+   */
+  send(message, selection, images = [], editOf = null, delivery = null) {
+    this._post({
+      message,
+      ...selection,
+      ...(images.length ? { images } : {}),
+      ...(editOf ? { edit_of: editOf } : {}),
+      ...(delivery ? { delivery } : {}),
+    });
   }
 
-  stop() {
-    this._post({ action: "stop" });
+  /** Act on a waiting message: "send_queued" or "unqueue". */
+  queued(action, id) {
+    this._post({ action, id });
+  }
+
+  /**
+   * First call: stop after the current step. Second call, or `now`: stop at
+   * once, wherever the agent is.
+   */
+  stop({ now = false } = {}) {
+    this._post(now ? { action: "stop", now: true } : { action: "stop" });
+  }
+
+  /** Resume the interrupted turn the conversation ends with. */
+  resume() {
+    this._post({ action: "continue" });
   }
 
   /** Follow the conversation's running turn: the server replays it, then streams live. */

@@ -71,11 +71,13 @@ class WebStreamObserver:
         *,
         emit_token: Callable[[str], None],
         reset_answer: Optional[Callable[[], None]] = None,
+        emit_image: Optional[Callable[[str], None]] = None,
         agent_label: str = "",
     ) -> None:
         self._recorder = recorder
         self._emit_token = emit_token
         self._reset_answer = reset_answer
+        self._emit_image = emit_image
         # Text streamed since the last action. If another action follows, it was
         # narration ("let me check the diff"), not the answer, and moves to the trace.
         self._narration = ""
@@ -137,6 +139,11 @@ class WebStreamObserver:
         child._parent_id = block.id
         child._block = block
         return child
+
+    def handle_generated_image(self, url: str) -> None:
+        """An image the model generated (core.generated_images): show it now."""
+        if self._emit_image is not None:
+            self._emit_image(url)
 
     def finish(self, error: Optional[str] = None) -> None:
         """The sub-agent run ended: settle its thinking and its block.

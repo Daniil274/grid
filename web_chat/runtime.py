@@ -119,6 +119,7 @@ class WebChatRuntime:
         # system, matching the CLI runtime. Individual system policy remains
         # the fallback when no catalog policy is enabled.
         self._policy_config = catalog
+        self.catalog = catalog
         self.config_path = self._base_config_path(catalog)
         config = Config(str(self.config_path), self.working_directory_override)
         container_id: Optional[str] = None
@@ -274,6 +275,23 @@ class WebChatRuntime:
     # -- configuration -----------------------------------------------------
     def config_dict(self) -> Dict[str, Any]:
         return yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
+
+    def voice_source(self) -> Tuple[Path, Config]:
+        """The file that holds the voice settings, and its Config for model keys.
+
+        Routing across systems, voice belongs to the whole chat rather than to
+        the default system, so its settings - ``voice`` and the Decisions model
+        that controls the conversation - come from the routing catalog. A single
+        system (``--config``) keeps them in its own config.
+        """
+        if self.catalog is not None and self.routing_path is not None:
+            return self.routing_path, self.catalog
+        return self.config_path, self.config
+
+    def voice_config_dict(self) -> Dict[str, Any]:
+        """The whole file of :meth:`voice_source`, read fresh."""
+        path, _ = self.voice_source()
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
     def save_structured_config(self, payload: Dict[str, Any]) -> None:
         from schemas import GridConfig

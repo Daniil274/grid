@@ -35,6 +35,8 @@ from enum import Enum
 from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlparse
 
+from core.context import is_tool_result  # noqa: F401 - part of this module's API
+
 #: Longest tool payload kept in a step; the UI shows the head and says so.
 DETAIL_LIMIT = 4000
 #: Longest single context-chip label.
@@ -303,18 +305,6 @@ class TraceRecorder:
         self._emit({"type": "step_removed", "id": step.id})
 
 
-def is_tool_result(message: Any) -> bool:
-    """A sub-agent report kept for the model's context, not a chat answer."""
-    metadata = getattr(message, "metadata", None) or {}
-    if metadata.get("kind") == "tool_result":
-        return True
-    # Stored before results were tagged.
-    content = getattr(message, "content", None)
-    return (
-        getattr(message, "role", None) == "assistant"
-        and isinstance(content, str)
-        and content.startswith("Tool result of ")
-    )
 
 
 _LEGACY_KINDS = {

@@ -99,11 +99,22 @@
 
       <footer class="composerWrap">
         <div class="composer">
+          <div class="queueTray" id="queue-tray" hidden></div>
+          <div class="composer__tray" id="composer-tray" hidden></div>
           <label class="visuallyHidden" for="composer-input">Message</label>
           <textarea id="composer-input" class="composer__input" rows="1" placeholder="Message Grid…"></textarea>
           <div class="composer__bar">
             <span class="composer__hint"><kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line</span>
             <div class="composer__buttons">
+              <input id="composer-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+              <button class="iconBtn" id="attach" type="button" title="Attach images (or paste / drop them)" aria-label="Attach images" data-icon="attach"></button>
+              <button class="btn btn--ghost" id="continue" type="button" data-icon="resume" title="Continue from where the agent stopped" hidden>Continue</button>
+              <select class="composer__delivery" id="delivery" title="How a message reaches the working agent" hidden>
+                <option value="auto">Auto</option>
+                <option value="now">Now (stop the agent)</option>
+                <option value="next_step">At the next step</option>
+                <option value="after_turn">After this turn</option>
+              </select>
               <button class="btn btn--ghost" id="stop" type="button" data-icon="stop" hidden>Stop</button>
               <button class="btn btn--primary" id="send" type="button" data-icon="send" disabled>Send</button>
             </div>

@@ -108,6 +108,11 @@
     let voiceStatus = null, timer = null, enabled = false;
     let audioQueue = [], textQueue = [], processing = false;
     let pendingSpeech = "", decisionRevision = 0, decisionAbort = null, starting = false, lastAssistantText = "", floorHeld = false;
+    // A command that waits for a spoken yes or no (deleting a chat), and until when.
+    let confirmation = null;
+    const CONFIRMATION_MS = 20000;
+    // A command that waits for its text as the next phrase ("change my message" said alone).
+    let awaitingText = null;
     function status(value, message) {
       phase = value;
       if (!els) return;
@@ -151,7 +156,7 @@
       audioUrl = null;
     }
     function cleanup() {
-      enabled = false; audioQueue = []; textQueue = []; pendingSpeech = "";
+      enabled = false; audioQueue = []; textQueue = []; pendingSpeech = ""; confirmation = null; awaitingText = null;
       floorHeld = false; lastAssistantText = "";
       decisionRevision++; decisionAbort?.abort();
       captureGeneration.next(); transcribeAbort?.abort(); transcribeAbort = null;
@@ -242,10 +247,61 @@
       }
     }
     async function sendPending() {
-      if (!enabled || processing || hooks.isStreaming() || recording?.detector.active || !textQueue.length) return;
+      // While the agent works the chat delivers a message now, at its next
+      // step or after its turn (web_chat/delivery.py): no need to wait here.
+      if (!enabled || recording?.detector.active || !textQueue.length) return;
       const item = textQueue.shift();
       if (hooks.getContextId() !== item.contextId) return;
       await hooks.sendVoiceMessage(item.text);
+    }
+    function pendingConfirmation() {
+      if (confirmation && confirmation.expires < Date.now()) confirmation = null;
+      return confirmation;
+    }
+    function pendingText() {
+      if (awaitingText && awaitingText.expires < Date.now()) awaitingText = null;
+      return awaitingText;
+    }
+    /** Say a short prompt aloud, when speech output is available. */
+    function prompt(text) {
+      if (voiceStatus?.tts_available && speaker.shared) void speaker.shared.speak("voice-prompt", text);
+    }
+    /**
+     * Run a chat command the decision model named (web_chat/voice_turns.py).
+     * A command that needs a yes first is held until the next phrase answers.
+     * Returns the status line to show.
+     */
+    async function runCommand(decision) {
+      const {action, argument} = decision;
+      if (decision.awaiting_text) {
+        // The command came without its text: ask for it; the next phrase is the text.
+        confirmation = null;
+        awaitingText = {action, expires: Date.now() + CONFIRMATION_MS};
+        const question = action === "rename_chat" ? "Скажите новое название чата." : "Скажите новый текст сообщения.";
+        prompt(question);
+        return question;
+      }
+      awaitingText = null;
+      if (action === "confirm" || action === "decline") {
+        const pending = pendingConfirmation();
+        confirmation = null;
+        if (!pending) return "Подтверждать нечего. Слушаю…";
+        if (action === "decline") return "Отменено. Слушаю…";
+        return await hooks.command(pending.action, pending.argument);
+      }
+      confirmation = null;
+      if (decision.needs_confirmation) {
+        confirmation = {action, argument, expires: Date.now() + CONFIRMATION_MS};
+        const question = hooks.confirmationQuestion?.(action) ?? "Подтвердите: да или нет?";
+        prompt(question);
+        return question;
+      }
+      if (!hooks.command) return "Голосовые команды недоступны.";
+      try {
+        return await hooks.command(action, argument);
+      } catch (error) {
+        return error.message;
+      }
     }
     async function processAudio() {
       if (processing) return;
@@ -288,31 +344,37 @@
             const decisionResponse = await fetch("/api/voice/decide", {method: "POST",
               headers: {"Content-Type": "application/json"}, signal: decisionAbort.signal,
               body: JSON.stringify({text: pendingSpeech, context_id: item.contextId,
-                agent_busy: hooks.isStreaming(), assistant_text: (hooks.getAssistantText() || lastAssistantText).slice(-6000)})});
+                agent_busy: hooks.isStreaming(), assistant_text: (hooks.getAssistantText() || lastAssistantText).slice(-6000),
+                state: {...(hooks.getVoiceState?.() ?? {}), confirmation: pendingConfirmation()?.action ?? null,
+                  awaiting_text: pendingText()?.action ?? null}})});
             if (!decisionResponse.ok) throw await responseError(decisionResponse);
             const decision = await decisionResponse.json();
             if (!enabled || revision !== decisionRevision || !captureGeneration.is(item.generation)) continue;
             if (decision.action === "wait") {
               status("listening", "Слушаю продолжение…"); continue;
             }
-            if (decision.action === "respond") stopSpeaking();
-            if (decision.action === "interrupt") {
-              stopSpeaking(); textQueue = [];
-              if (hooks.isStreaming()) hooks.interruptAgent();
+            const spoken = pendingSpeech;
+            pendingSpeech = "";
+            floorHeld = false;
+            if (decision.action === "ignore") {
+              if (speaker.present) speaker.resume();
+              status("listening", "Слушаю…");
+              continue;
             }
-            if (decision.action === "respond" || (decision.action === "interrupt" && decision.replacement)) {
+            if (decision.action === "message") {
+              stopSpeaking();
+              confirmation = null;
+              awaitingText = null;
               if (textQueue.length >= 8) {
                 status("error", "Много ожидающих реплик; текущая мысль сохранена."); continue;
               }
-              textQueue.push({text: pendingSpeech, contextId: item.contextId});
+              textQueue.push({text: spoken, contextId: item.contextId});
+              status("listening", "Понял. Можете продолжать говорить.");
+              await sendPending();
+              continue;
             }
-            pendingSpeech = "";
-            floorHeld = false;
-            if (decision.action === "ignore" && speaker.present) {
-              speaker.resume();
-            }
-            status("listening", decision.action === "ignore" ? "Слушаю…" : "Понял. Можете продолжать говорить.");
-            await sendPending();
+            if (decision.action !== "read_aloud") stopSpeaking();
+            status("listening", await runCommand(decision));
           } catch (error) {
             if (captureGeneration.is(item.generation) && error.name !== "AbortError") status("error", error.message);
           } finally { if (transcribeAbort === controller) transcribeAbort = null; }

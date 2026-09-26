@@ -111,6 +111,9 @@ def runtime(tmp_path):
             },
         }
     }
+    # Voice settings come from the same file in these tests.
+    rt.voice_config_dict = rt.config_dict
+    rt.voice_source.return_value = (rt.config_path, rt.config)
     return rt
 
 
@@ -742,6 +745,7 @@ class TestServiceAndConfig:
             other_rt = MagicMock()
             other_rt.config_path = runtime.config_path
             other_rt.config_dict.return_value = runtime.config_dict.return_value
+            other_rt.voice_config_dict = other_rt.config_dict
             other_app = FastAPI()
             other_service = register_voice_routes(other_app, other_rt)
             assert other_service is not service

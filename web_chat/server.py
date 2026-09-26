@@ -9,16 +9,20 @@ from fastapi import FastAPI, Header, HTTPException, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from core.interruption import CONTINUATION_TYPE, interruption_of
 from core.tool_check import summarize
+from schemas.schemas import ImageContent
 from web_chat.runtime import WebChatRuntime
 from web_chat.schemas import (
     ActionReviewRequest,
+    BranchRequest,
     ConversationCreateRequest,
     ConversationRenameRequest,
     PrepareAgentRequest,
     SettingsStructuredUpdateRequest,
     SettingsYamlUpdateRequest,
 )
+from web_chat.delivery import MessageQueue
 from web_chat.trace import is_tool_result, normalize_steps
 
 logger = logging.getLogger("grid.web_chat.server")
@@ -81,20 +85,46 @@ class WebChatServer:
                 return text[:42] + ("..." if len(text) > 42 else "")
         return "New chat"
 
-    def _serialize_message(self, msg: Any) -> dict[str, Any]:
+    def _serialize_message(
+        self, msg: Any, *, resumable: bool = False, versions: Optional[dict] = None
+    ) -> dict[str, Any]:
+        """A stored message as the chat renders it.
+
+        ``interruption`` marks a turn that stopped early; ``resumable`` is set
+        only on the one Continue can still resume. ``kind`` "continuation" is
+        the user entry of a Continue, shown as a marker, not a bubble.
+        ``images`` are the data URLs of the images the message carries.
+        ``id`` is the message's stable id; ``versions`` lists the branches with
+        other versions of an edited user message (ContextManager.message_versions).
+        """
         if hasattr(msg, "get_text_content"):
             content = msg.get_text_content()
         else:
             content = str(getattr(msg, "content", ""))
+        images = [
+            part.image_url.url
+            for part in (msg.get_images() if hasattr(msg, "get_images") else [])
+            if isinstance(part, ImageContent)
+        ]
+        if images and content == "[multimodal content]":
+            content = ""  # an image without words
         metadata = getattr(msg, "metadata", None) or {}
         # Older builds stored a flat "trace_events" list; normalize_steps keeps
         # those conversations renderable by the current timeline component.
         trace = metadata.get("trace") or normalize_steps(metadata.get("trace_events"))
+        record = interruption_of(msg)
         return {
+            "id": metadata.get("message_id"),
+            "versions": versions,
             "role": getattr(msg, "role", "assistant"),
             "content": content,
             "timestamp": getattr(msg, "timestamp", None),
             "trace": trace,
+            "kind": "continuation" if metadata.get("type") == CONTINUATION_TYPE else None,
+            "images": images,
+            "interruption": (
+                {**record.to_dict(), "resumable": resumable} if record is not None else None
+            ),
         }
 
     def _agent_options(self, system_key: Optional[str] = None) -> list[dict[str, Any]]:
@@ -276,26 +306,35 @@ class WebChatServer:
 
         @app.get("/api/chat/conversations")
         async def list_conversations() -> JSONResponse:
+            manager = self.runtime.context_manager()
+            views = {view["id"]: view for view in manager.conversation_views()}
             items: list[dict[str, Any]] = []
-            for view in self.runtime.context_manager().conversation_views():
+            for view in views.values():
                 metadata = view["metadata"]
+                if metadata.get("branch_root") in views:
+                    continue  # a branch shows under its conversation's row
                 if not view["messages"] and not metadata.get("created_by_web"):
                     continue
+                # One row per conversation; it opens the branch last worked on.
+                family = [views[key] for key in manager.family(view["id"]) if key in views]
+                shown = views.get(manager.open_branch(view["id"]), view)
                 # The pinned selection is what the user chose; the routed pair
                 # is who actually answered last - the rail shows the latter.
                 items.append(
                     {
                         "id": view["id"],
+                        "open_id": shown["id"],
+                        "branches": len(family),
                         "title": self._conversation_title(view),
-                        "updated_at": view["updated_at"],
+                        "updated_at": max((member["updated_at"] or "") for member in family),
                         "system_key": metadata.get("system_key"),
                         "agent_key": metadata.get("agent_key"),
                         "routed_system": metadata.get("routed_system"),
                         "routed_agent": metadata.get("routed_agent"),
                         "message_count": sum(
-                            1 for msg in view["messages"] if not is_tool_result(msg)
+                            1 for msg in shown["messages"] if not is_tool_result(msg)
                         ),
-                        "active": self.turn_is_running(view["id"]),
+                        "active": any(self.turn_is_running(member["id"]) for member in family),
                     }
                 )
             items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
@@ -328,32 +367,105 @@ class WebChatServer:
 
         @app.delete("/api/chat/conversations/{context_id}")
         async def delete_conversation(context_id: str) -> JSONResponse:
-            if self.turn_is_running(context_id):
+            manager = self.runtime.context_manager()
+            family = manager.family(context_id)
+            if any(self.turn_is_running(member) for member in family):
                 raise HTTPException(status_code=409, detail="Stop the running turn before deleting this chat")
-            if not self.runtime.context_manager().delete_context(context_id):
+            # A conversation goes with all its branches.
+            deleted = manager.delete_family(context_id)
+            if not deleted:
                 raise HTTPException(status_code=404, detail="Conversation not found")
-            return JSONResponse({"id": context_id, "deleted": True})
+            return JSONResponse({"id": context_id, "deleted": True, "contexts": deleted})
+
+        @app.post("/api/chat/conversations/{context_id}/branches")
+        async def create_branch(context_id: str, body: BranchRequest) -> JSONResponse:
+            """Fork the conversation before a user message, for an edited version of it.
+
+            The client then sends the new text into the branch with ``edit_of``.
+            A turn running in the conversation must be stopped first.
+            """
+            manager = self.runtime.context_manager()
+            if manager.conversation_view(context_id) is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            if self.turn_is_running(context_id):
+                raise HTTPException(status_code=409, detail="Stop the running turn before editing a message")
+            metadata = manager.get_context_metadata(context_id)
+            system = metadata.get("routed_system") or self.runtime.registry.default_key()
+            factory = self.runtime.registry.factory(system)
+            try:
+                branch_id = await factory.fork_conversation(context_id, body.message_id)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="Message not found") from None
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            slot = manager.get_context_metadata(branch_id).get("branch_slot")
+            return JSONResponse({"id": branch_id, "edit_of": slot, "root": manager.branch_root(branch_id)})
+
+        @app.post("/api/chat/conversations/{context_id}/compact")
+        async def compact_conversation(context_id: str) -> JSONResponse:
+            """Summarize the agent's session in this conversation now (core.context_budget)."""
+            manager = self.runtime.context_manager()
+            if manager.conversation_view(context_id) is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            if self.turn_is_running(context_id):
+                raise HTTPException(status_code=409, detail="Stop the running turn before compacting")
+            metadata = manager.get_context_metadata(context_id)
+            agent = metadata.get("routed_agent")
+            if not agent:
+                raise HTTPException(status_code=400, detail="No agent has worked in this chat yet")
+            system = metadata.get("routed_system") or self.runtime.registry.default_key()
+            outcome = await self.runtime.registry.factory(system).compact_session(agent, context_id, force=True)
+            if outcome is None:
+                raise HTTPException(status_code=422, detail="Nothing was compacted: the context is empty or the summary failed")
+            return JSONResponse({"id": context_id, **outcome})
+
+        @app.post("/api/chat/conversations/{context_id}/activate")
+        async def activate_branch(context_id: str) -> JSONResponse:
+            """Make this branch the one its conversation opens with."""
+            manager = self.runtime.context_manager()
+            if manager.conversation_view(context_id) is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            manager.set_active_branch(context_id)
+            return JSONResponse({"id": context_id, "root": manager.branch_root(context_id)})
 
         @app.get("/api/chat/conversations/{context_id}")
         async def get_conversation(context_id: str) -> JSONResponse:
-            view = self.runtime.context_manager().conversation_view(context_id)
+            manager = self.runtime.context_manager()
+            if not self.turn_is_running(context_id):
+                # A turn the record says is running died with an earlier
+                # process: show it as interrupted, with Continue.
+                manager.recover_abandoned_turn(context_id)
+            view = manager.conversation_view(context_id)
             if view is None:
                 raise HTTPException(status_code=404, detail="Conversation not found")
+            shown = [msg for msg in view["messages"] if not is_tool_result(msg)]
+            pending = manager.pending_interruption(context_id) is not None
+            versions = manager.message_versions(context_id)
             messages = [
-                self._serialize_message(msg)
-                for msg in view["messages"]
-                if not is_tool_result(msg)
+                self._serialize_message(
+                    msg,
+                    resumable=pending and index == len(shown) - 1,
+                    versions=versions.get((msg.metadata or {}).get("message_id")),
+                )
+                for index, msg in enumerate(shown)
             ]
             metadata = view["metadata"]
             active = self._chat_turns.get(context_id)
             active_turn = (
-                {"message": active[0].message, "elapsed_ms": active[0].elapsed_ms}
+                {
+                    "message": active[0].message,
+                    "resumes": active[0].resumes,
+                    "elapsed_ms": active[0].elapsed_ms,
+                }
                 if active is not None and not active[1].done()
                 else None
             )
             return JSONResponse({
                 "id": context_id,
+                "root": manager.branch_root(context_id),
                 "messages": messages,
+                # Messages waiting for their turn (web_chat.delivery).
+                "pending": MessageQueue(manager, context_id).public(),
                 "metadata": metadata,
                 "active_turn": active_turn,
             })

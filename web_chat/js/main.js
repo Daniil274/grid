@@ -14,6 +14,7 @@ import { ChatController } from "./chat.js";
 import { SettingsDrawer } from "./settings/drawer.js";
 import { createRoutePicker } from "./ui/route-picker.js";
 import { createComposer } from "./ui/composer.js";
+import { createQueueTray } from "./ui/queue.js";
 import { createConversationList } from "./ui/sidebar.js";
 import { SpeechPlayer, synthesizeSentence } from "./ui/speech.js";
 import { ICONS } from "./ui/icons.js";
@@ -31,7 +32,15 @@ const store = createStore({
   routingEnabled: false,
   conversations: [],
   contextId: null,
+  // The conversation the open branch belongs to: the rail's row.
+  rootId: null,
   streaming: false,
+  // The first Stop was sent; the agent is finishing its step.
+  stopping: false,
+  // The conversation ends with a turn that stopped early and can be continued.
+  resumable: false,
+  // Messages waiting for the agent (web_chat/delivery.py).
+  queue: [],
   workspacePath: "",
   isolated: false,
 });
@@ -100,8 +109,10 @@ async function boot() {
     container: $("#chat-scroll"),
     emptyState: $("#welcome"),
     jumpButton: $("#jump-latest"),
-    onEditMessage: (text) => composer.setValue(text),
+    onEditMessage: (edited) => void chat.editMessage(edited),
+    onSwitchVersion: (contextId) => void chat.switchVersion(contextId),
     onSpeakMessage: (id) => chat.toggleSpeech(id),
+    onContinue: () => chat.continueTurn(),
   });
 
   const chat = new ChatController({
@@ -116,9 +127,22 @@ async function boot() {
     input: $("#composer-input"),
     sendButton: $("#send"),
     stopButton: $("#stop"),
+    deliverySelect: $("#delivery"),
+    continueButton: $("#continue"),
+    attachButton: $("#attach"),
+    fileInput: $("#composer-files"),
+    tray: $("#composer-tray"),
     store,
-    onSend: (text) => chat.send(text),
+    onSend: (text, images, delivery) => chat.send(text, { images, delivery }),
     onStop: () => chat.stop(),
+    onContinue: () => chat.continueTurn(),
+  });
+
+  createQueueTray({
+    container: $("#queue-tray"),
+    store,
+    onSendNow: (item) => void chat.sendQueued(item),
+    onDrop: (item) => void chat.dropQueued(item),
   });
 
   createConversationList({
@@ -259,7 +283,15 @@ async function boot() {
     ensureConversation: () => chat.startConversation(),
     // Dictated turns - and only these - read their answer back automatically.
     sendVoiceMessage: (text) => chat.send(text, { spoken: true }),
-    interruptAgent: () => chat.stop(),
+    // A spoken "stop" means now, not after the current step.
+    interruptAgent: () => chat.stop({ now: true }),
+    // Voice control of the whole chat (web_chat/voice_turns.py).
+    getVoiceState: () => chat.voiceState(),
+    command: (action, argument) => chat.voiceCommand(action, argument, { chooseAgent: selectRoute }),
+    confirmationQuestion: (action) =>
+      action === "delete_chat"
+        ? `Удалить чат «${chat.voiceState().chat_title || "без названия"}»? Скажите «да» или «нет».`
+        : "Подтвердите: да или нет?",
     getAssistantText: () => chat.currentAnswer,
     sendMessage: (text) => chat.send(text),
   });

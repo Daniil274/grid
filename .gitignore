@@ -13,6 +13,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+# The web chat's own JS modules, not a Python build directory.
+!web_chat/js/lib/
 lib64/
 parts/
 sdist/

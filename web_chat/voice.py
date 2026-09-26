@@ -14,7 +14,9 @@ Thin, per-app service around :class:`core.speech_processor.SpeechProcessor`:
 - No models are loaded or downloaded at import/startup/status time; status
   uses :func:`importlib.util.find_spec` only (never imports torch or
   faster-whisper).
-- Configuration is re-read from ``runtime.config_dict()`` on each request and
+- Configuration is re-read from ``runtime.voice_config_dict()`` - the routing
+  catalog when the chat routes across systems, else the system's config - on
+  each request and
   deep-merged over defaults without mutating the defaults. Model/device
   changes of an already loaded model require a service restart.
 
@@ -291,7 +293,7 @@ class VoiceService:
 
     def _config_parent(self) -> Path:
         try:
-            config_path = Path(str(getattr(self._runtime, "config_path", "") or ""))
+            config_path = Path(str(self._runtime.voice_source()[0] or ""))
         except Exception:
             config_path = Path()
         parent = config_path.parent if str(config_path) else Path()
@@ -300,7 +302,7 @@ class VoiceService:
     def voice_config(self) -> Dict[str, Any]:
         """Freshly read + merged voice config (defaults are never mutated)."""
         try:
-            raw = self._runtime.config_dict().get("voice") or {}
+            raw = self._runtime.voice_config_dict().get("voice") or {}
         except Exception:
             raw = {}
         if not isinstance(raw, dict):

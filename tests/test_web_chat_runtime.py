@@ -224,3 +224,47 @@ def _runtime(registry: SystemRegistry, *, metadata: dict) -> WebChatRuntime:
     runtime.registry = registry
     runtime.conversation_metadata = lambda context_id: metadata
     return runtime
+
+
+ROUTING_WITH_VOICE = """
+providers:
+  openrouter:
+    name: openrouter
+    base_url: https://example.com/v1
+    api_key_env: TEST_OPENROUTER_KEY
+models:
+  router:
+    name: decisions-model
+    provider: openrouter
+routing:
+  model: router
+  api: decisions
+  default_system: app
+  systems:
+    app:
+      config: {config}
+voice:
+  decision_model: router
+"""
+
+
+def test_voice_settings_come_from_the_catalog_when_routing(minimal_config, monkeypatch):
+    """The default system's config has no voice section; the catalog's is used."""
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+    routing = minimal_config.parent / "routing.yaml"
+    routing.write_text(ROUTING_WITH_VOICE.format(config=minimal_config.name), encoding="utf-8")
+
+    runtime = WebChatRuntime(routing_path=str(routing))
+
+    path, source = runtime.voice_source()
+    assert path == routing.resolve() or path == routing
+    assert runtime.voice_config_dict()["voice"]["decision_model"] == "router"
+    assert source.get_model("router").name == "decisions-model"
+
+
+def test_a_single_system_keeps_its_own_voice_settings(minimal_config, monkeypatch):
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+    runtime = WebChatRuntime(config_path=str(minimal_config), routing_path=None)
+    path, source = runtime.voice_source()
+    assert path == runtime.config_path
+    assert source is runtime.config

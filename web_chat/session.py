@@ -3,7 +3,14 @@
 A turn belongs to the server, not to the socket that started it. Closing or
 reloading the page only detaches that socket; the agent keeps working, and a
 socket that attaches later receives the turn's events so far and then follows
-it live. Only an explicit ``stop`` cancels a turn.
+it live. Only an explicit ``stop`` ends a turn early.
+
+Stop works in two steps. The first asks the agent to stop after the step it is
+on: that step finishes and is saved, and the turn ends. A second Stop - a
+first one before the agent has started, or one sent with ``now`` - cancels the
+turn where it is. Either way the conversation records the interruption, and
+``continue`` resumes it with everything the agent had done (see
+core.interruption).
 
 Commands (``stop``, the next message) are read on a loop that never awaits
 inference, so a running turn can always be cancelled. Inference itself runs in a
@@ -13,6 +20,12 @@ the stored assistant message so a reloaded conversation shows the same timeline.
 
 A turn begins by resolving where it runs: the client may pin a system, an agent,
 both, or neither, and anything left open is routed per message.
+
+A message sent while a turn runs is not refused: it is delivered now, at the
+agent's next step, or after the turn (web_chat.delivery), as the user or the
+decision model chooses. Waiting messages form the conversation's queue, which
+moves on by itself when a turn answers - or when it was stopped for a ``now``
+message; after a Stop or a failure the user decides.
 """
 
 from __future__ import annotations
@@ -27,7 +40,11 @@ from typing import Any, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from core.interruption import INTERRUPTED_TYPE, is_resumable
+from core.steering import SteerMessage
 from core.tool_check import summarize
+from web_chat.attachments import AttachmentError, agent_message, normalize_images
+from web_chat.delivery import DELIVERIES, MessageQueue, decide_delivery
 from web_chat.observer import WebStreamObserver
 from web_chat.systems import Resolution
 from web_chat.trace import StepKind, TraceRecorder, is_tool_result
@@ -50,14 +67,26 @@ class AgentTurn:
     def __init__(
         self,
         session: "ChatSession",
-        message: str,
+        message: Optional[str],
         *,
         system_key: Optional[str],
         agent_key: Optional[str],
+        images: tuple[str, ...] = (),
+        edit_of: Optional[str] = None,
     ) -> None:
+        """``message`` None is Continue: the turn resumes the conversation's
+        interrupted turn with the agent that ran it. ``images`` are normalized
+        ``data:`` URLs (web_chat.attachments) sent with the message."""
         self._session = session
         self._message = message
+        self._images = tuple(images)
+        self._edit_of = edit_of
         self._requested = (system_key, agent_key)
+        self._factory: Any = None  # set once the turn knows where it runs
+        self._stop_requested = False
+        #: How the turn ended: "answered", "interrupted", "error" or "stopped".
+        self.outcome: Optional[str] = None
+        self._answer_tail = ""  # the agent's latest words, for delivery decisions
         self.run_id = uuid.uuid4().hex
         self._started = time.monotonic()
         self._log: list[dict[str, Any]] = []
@@ -66,13 +95,53 @@ class AgentTurn:
         self._recorder = TraceRecorder(self._queue.put_nowait)
         self._observer = WebStreamObserver(
             self._recorder,
-            emit_token=lambda text: self._queue.put_nowait({"type": "token", "content": text}),
+            emit_token=self._token,
             reset_answer=lambda: self._queue.put_nowait({"type": "answer_reset"}),
+            emit_image=lambda url: self._queue.put_nowait({"type": "image", "url": url}),
         )
 
     @property
     def message(self) -> str:
-        return self._message
+        return self._message if self._message is not None else ""
+
+    @property
+    def resumes(self) -> bool:
+        return self._message is None
+
+    @property
+    def answer_tail(self) -> str:
+        return self._answer_tail
+
+    def _token(self, text: str) -> None:
+        self._answer_tail = (self._answer_tail + text)[-2000:]
+        self._queue.put_nowait({"type": "token", "content": text})
+
+    def recent_steps(self) -> list[str]:
+        """Titles of the turn's latest timeline steps."""
+        return [step.get("title", "") for step in self._recorder.snapshot()][-8:]
+
+    def steer(self, item: dict[str, Any], queue: "MessageQueue") -> bool:
+        """Hand a queued message to the running agent for its next step.
+
+        Delivered, it leaves the queue and shows in the chat; if the turn ends
+        first it waits in the queue for the next turn. False when the agent
+        has not started or cannot take messages mid-run.
+        """
+        if self._factory is None or not hasattr(self._factory, "steer"):
+            return False
+
+        def delivered(message: SteerMessage) -> None:
+            queue.remove(message.message_id)
+            self._queue.put_nowait({"type": "steered", "id": message.message_id, "text": message.text, "images": message.images})
+            self._queue.put_nowait({"type": "queue", "items": queue.public()})
+
+        def undelivered(message: SteerMessage) -> None:
+            queue.requeue(message.message_id)
+
+        return self._factory.steer(
+            self._session.context_id,
+            SteerMessage(item["id"], item["text"], list(item.get("images") or []), delivered, undelivered),
+        )
 
     @property
     def elapsed_ms(self) -> int:
@@ -90,7 +159,8 @@ class AgentTurn:
             self._subscribers.add(session)
             header = {
                 "type": "attached",
-                "message": self._message,
+                "message": self.message,
+                "resumes": self.resumes,
                 "elapsed_ms": self.elapsed_ms,
                 "run_id": self.run_id,
             }
@@ -100,6 +170,28 @@ class AgentTurn:
     def detach(self, session: "ChatSession") -> None:
         self._subscribers.discard(session)
 
+    def request_stop(self) -> bool:
+        """The graceful Stop; True when the agent will stop after its step.
+
+        False when that is not possible - the agent has not started yet, or
+        this is the second Stop - and the caller cancels the turn instead.
+        """
+        if self._stop_requested or self._factory is None:
+            return False
+        self._stop_requested = True
+        return self._factory.request_stop(self._session.context_id)
+
+    async def announce(self, event: dict[str, Any], *, also_to: Optional["ChatSession"] = None) -> None:
+        """Send an event from outside the producer, to every viewer.
+
+        ``also_to`` reaches a socket that is not following the turn - the tab
+        that sent a message while another one watches the agent work.
+        """
+        await self._emit(event)
+        if also_to is not None and also_to not in self._subscribers:
+            with suppress(WebSocketDisconnect, RuntimeError, OSError):
+                await also_to.send({**event, "run_id": self.run_id})
+
     async def run(self) -> None:
         producer = asyncio.create_task(self._produce())
         stopped = False
@@ -107,12 +199,17 @@ class AgentTurn:
             await self._consume()
         except asyncio.CancelledError:
             stopped = True
+            self.outcome = "stopped"
         finally:
             if not producer.done():
                 producer.cancel()
             with suppress(asyncio.CancelledError):
                 await producer
             self._persist_trace()
+            # Stopped, timed out or failed: say so with what Continue needs.
+            with suppress(WebSocketDisconnect, RuntimeError, OSError):
+                if await self._announce_interruption() and self.outcome != "stopped":
+                    self.outcome = "interrupted"
             # Release before "done": the client may submit its next turn at once.
             self._session.release()
             with suppress(WebSocketDisconnect, RuntimeError, OSError):
@@ -147,22 +244,38 @@ class AgentTurn:
                 agent_key=self._requested[1],
                 routed_system=resolution.system,
                 routed_agent=resolution.agent,
-                title=" ".join(self._message.split())[:42],
+                # Continue has no text of its own to name the chat by.
+                title=self._title(),
             )
-            result = await resolution.factory.run_agent(
-                agent_key=resolution.agent,
-                message=self._message,
-                context_id=self._session.context_id,
-                stream=True,
-                user_id=runtime.user_id,
-                stream_observer=self._observer,
-            )
+            self._factory = resolution.factory
+            if self._message is None:
+                result = await resolution.factory.continue_agent(
+                    resolution.agent,
+                    self._session.context_id,
+                    stream=True,
+                    user_id=runtime.user_id,
+                    stream_observer=self._observer,
+                    turn_id=self.run_id,
+                )
+            else:
+                result = await resolution.factory.run_agent(
+                    agent_key=resolution.agent,
+                    message=agent_message(self._message, list(self._images)),
+                    edit_of=self._edit_of,
+                    context_id=self._session.context_id,
+                    stream=True,
+                    user_id=runtime.user_id,
+                    stream_observer=self._observer,
+                    turn_id=self.run_id,
+                )
             self._recorder.end_all_reasoning()
+            self.outcome = "answered"
             if result:
                 self._queue.put_nowait({"type": "final_output", "content": str(result)})
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            self.outcome = "error"
             logger.exception("Web chat run failed")
             self._recorder.fail(str(exc))
             self._queue.put_nowait({"type": "error", "content": str(exc)})
@@ -196,8 +309,18 @@ class AgentTurn:
         })
 
     async def _resolve(self) -> Resolution:
-        """Decide the system and agent, showing the routing as its own step."""
+        """Decide the system and agent, showing the routing as its own step.
+
+        While the conversation ends with an interrupted turn, the turn goes to
+        the agent that ran it unless the user picked one: only that agent's
+        session holds the work to resume.
+        """
         system_key, agent_key = self._requested
+        interrupted_by = self._interrupted_agent()
+        if interrupted_by is not None and (self.resumes or (system_key is None and agent_key is None)):
+            system_key, agent_key = interrupted_by
+        elif self.resumes:
+            raise RuntimeError("There is no interrupted turn to continue in this conversation.")
         routing_step = None
         if system_key is None or agent_key is None:
             routing_step = self._recorder.open(
@@ -207,7 +330,7 @@ class AgentTurn:
             )
 
         resolution = await self._session.runtime.resolve_turn(
-            self._message,
+            self._routing_text(),
             system_key=system_key,
             agent_key=agent_key,
             context_id=self._session.context_id,
@@ -228,6 +351,49 @@ class AgentTurn:
             "routed": resolution.routed,
         })
         return resolution
+
+    def _title(self) -> Optional[str]:
+        """What names the chat after this message; None leaves the name alone."""
+        if self._message is None:
+            return None
+        text = " ".join(self._message.split())[:42]
+        return text or ("Image" if self._images else None)
+
+    def _routing_text(self) -> str:
+        """What the router reads: the text, or a word that there are images."""
+        if self.message or not self._images:
+            return self.message
+        return f"[{len(self._images)} image(s) attached]"
+
+    def _interrupted_agent(self) -> Optional[tuple[str, str]]:
+        """(system, agent) of the interrupted turn the conversation ends with."""
+        manager = self._session.manager
+        context_id = self._session.context_id
+        if manager.pending_interruption(context_id) is None:
+            return None
+        metadata = manager.get_context_metadata(context_id)
+        system, agent = metadata.get("routed_system"), metadata.get("routed_agent")
+        return (system, agent) if system and agent else None
+
+    async def _announce_interruption(self) -> bool:
+        """Send the interruption this turn recorded, if it recorded one; True if so."""
+        view = self._session.manager.conversation_view(self._session.context_id)
+        for message in reversed((view or {}).get("messages", [])):
+            metadata = getattr(message, "metadata", None) or {}
+            if metadata.get("turn_id") != self.run_id:
+                continue
+            if metadata.get("type") == INTERRUPTED_TYPE:
+                await self._emit({
+                    "type": "interrupted",
+                    "content": message.content,
+                    "interruption": {
+                        **metadata.get("interruption", {}),
+                        "resumable": is_resumable(message),
+                    },
+                })
+                return True
+            return False
+        return False
 
     # -- consumer ----------------------------------------------------------
     async def _consume(self) -> None:
@@ -312,16 +478,144 @@ class ChatSession:
             return
 
         if payload.get("action") == "stop":
-            await self._stop()
+            await self._stop(now=payload.get("now") is True)
             return
         if payload.get("action") == "attach":
             await self._attach()
             return
+        if payload.get("action") == "continue":
+            await self._start(None, payload.get("system_key"), payload.get("agent_key"))
+            return
+        if payload.get("action") in ("unqueue", "send_queued"):
+            await self._queued_action(payload.get("action"), payload.get("id"))
+            return
 
         message = payload.get("message")
-        if not isinstance(message, str) or not message.strip():
+        text = message.strip() if isinstance(message, str) else ""
+        attached = payload.get("images")
+        if not text and not attached:
             return
-        await self._start(message.strip(), payload.get("system_key"), payload.get("agent_key"))
+        try:
+            # Decoding and re-encoding is CPU work: off the loop, so Stop and
+            # the other commands stay responsive.
+            images = await asyncio.to_thread(normalize_images, attached, self._image_config())
+        except AttachmentError as exc:
+            await self.send({"type": "error", "content": str(exc)})
+            await self.send({"type": "done"})
+            return
+        if self.context_id in self._server._active_chat_contexts:
+            # The agent is working: the message is delivered, not refused. A
+            # decision can take seconds, so it runs beside the command loop.
+            self._background(self._deliver_during_turn(text, images, payload.get("delivery")))
+            return
+        edit_of = payload.get("edit_of")
+        if not (isinstance(edit_of, str) and 0 < len(edit_of) <= 64):
+            edit_of = None
+        await self._start(
+            text, payload.get("system_key"), payload.get("agent_key"), images=images, edit_of=edit_of
+        )
+
+    def _background(self, coroutine: Any) -> None:
+        """Run *coroutine* beside the command loop; a failure is logged."""
+        task = asyncio.create_task(coroutine)
+        tasks = self._server.__dict__.setdefault("_chat_background", set())
+        tasks.add(task)
+
+        def finished(done: asyncio.Task) -> None:
+            tasks.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                logger.error("Chat background work failed", exc_info=done.exception())
+
+        task.add_done_callback(finished)
+
+    async def _deliver_during_turn(self, text: str, images: list[str], requested: Any) -> None:
+        """Deliver a message sent while a turn runs: now, next step or after the turn."""
+        active = self._turns.get(self.context_id)
+        if active is None or active[1].done():
+            # The turn ended meanwhile: it is an ordinary message now.
+            await self._start(text, None, None, images=images)
+            return
+        turn, task = active
+        queue = MessageQueue(self.manager, self.context_id)
+        if requested in DELIVERIES:
+            delivery, decided_by = requested, "user"
+        else:
+            delivery, decided_by = await decide_delivery(
+                self.runtime,
+                message=text,
+                task=turn.message,
+                steps=turn.recent_steps(),
+                agent_text=turn.answer_tail,
+            )
+        try:
+            item = queue.add(
+                text,
+                images,
+                delivery,
+                state="steering" if delivery == "next_step" else "queued",
+                front=delivery == "now",
+            )
+        except ValueError as exc:
+            await self.send({"type": "error", "content": str(exc)})
+            return
+        await turn.announce(
+            {"type": "delivery", "id": item["id"], "delivery": delivery, "decided_by": decided_by}, also_to=self
+        )
+        if delivery == "next_step" and not turn.steer(item, queue):
+            queue.requeue(item["id"])
+        await turn.announce({"type": "queue", "items": queue.public()}, also_to=self)
+        if delivery == "now":
+            # The queue starts the message once the turn has stopped.
+            await self._cancel(task)
+
+    async def _queued_action(self, action: Any, item_id: Any) -> None:
+        """``unqueue`` drops a waiting message; ``send_queued`` sends it now."""
+        queue = MessageQueue(self.manager, self.context_id)
+        item = queue.get(item_id) if isinstance(item_id, str) else None
+        if item is None:
+            await self.send({"type": "queue", "items": queue.public()})
+            return
+        active = self._turns.get(self.context_id)
+        running = active is not None and not active[1].done()
+        if action == "unqueue" or not running:
+            queue.remove(item["id"])
+        else:
+            # Sent now while the agent works: first in line, and the turn stops.
+            queue.remove(item["id"])
+            queue.add(item["text"], item.get("images") or [], "now", front=True)
+        snapshot = {"type": "queue", "items": queue.public()}
+        if running:
+            await active[0].announce(snapshot)
+        else:
+            await self.send(snapshot)
+        if action == "send_queued":
+            if running:
+                await self._cancel(active[1])
+            else:
+                await self._start(item["text"], None, None, images=item.get("images") or [])
+
+    async def _advance_queue(self, finished: AgentTurn) -> None:
+        """After a turn, send the next waiting message - unless the user should decide.
+
+        The queue moves on when the turn answered, or when it was stopped for a
+        ``now`` message. After a Stop, a timeout or a failure the messages wait.
+        """
+        if self.context_id in self._server._active_chat_contexts:
+            return
+        queue = MessageQueue(self.manager, self.context_id)
+        item = queue.next_queued()
+        if item is None:
+            return
+        if finished.outcome != "answered" and item.get("delivery") != "now":
+            return
+        queue.remove(item["id"])
+        await self._start(item["text"], None, None, images=item.get("images") or [])
+
+    def _image_config(self) -> Any:
+        """settings.image_processing of the runtime, or None for the defaults."""
+        config = getattr(self.runtime, "config", None)
+        settings = getattr(getattr(config, "config", None), "settings", None)
+        return getattr(settings, "image_processing", None)
 
     async def _attach(self) -> None:
         active = self._turns.get(self.context_id)
@@ -332,14 +626,30 @@ class ChatSession:
             return
         await active[0].attach(self)
 
-    async def _stop(self) -> None:
+    async def _stop(self, *, now: bool = False) -> None:
         active = self._turns.get(self.context_id)
-        if active is not None and not active[1].done():
-            await self._cancel(active[1])
-        else:
+        if active is None or active[1].done():
             await self.send({"type": "done", "stopped": True})
+            return
+        turn, task = active
+        if not now and turn.request_stop():
+            await turn.announce({"type": "stopping"})
+            return
+        await self._cancel(task)
 
-    async def _start(self, message: str, system_key: Any, agent_key: Any) -> None:
+    async def _start(
+        self,
+        message: Optional[str],
+        system_key: Any,
+        agent_key: Any,
+        *,
+        images: list[str] | tuple[str, ...] = (),
+        edit_of: Optional[str] = None,
+    ) -> None:
+        """Start a turn; ``message`` None continues the interrupted one.
+
+        ``edit_of`` marks the message as a new version of an edited one, sent
+        into the branch made for it (POST .../branches)."""
         if self.context_id in self._server._active_chat_contexts:
             await self.send({"type": "busy", "content": "This conversation already has an active turn."})
             return
@@ -347,11 +657,30 @@ class ChatSession:
             await self.send({"type": "error", "content": "Unknown system or agent"})
             await self.send({"type": "done"})
             return
+        # No turn of this conversation runs here, so one that the record says
+        # is running died with an earlier process: record it before routing.
+        self.manager.recover_abandoned_turn(self.context_id)
+        if message is None and self.manager.pending_interruption(self.context_id) is None:
+            await self.send({"type": "error", "content": "There is nothing to continue in this conversation."})
+            await self.send({"type": "done"})
+            return
         self._server._active_chat_contexts.add(self.context_id)
-        turn = AgentTurn(self, message, system_key=system_key or None, agent_key=agent_key or None)
+        turn = AgentTurn(
+            self,
+            message,
+            system_key=system_key or None,
+            agent_key=agent_key or None,
+            images=tuple(images),
+            edit_of=edit_of,
+        )
         task = asyncio.create_task(turn.run())
         self._turns[self.context_id] = (turn, task)
-        task.add_done_callback(lambda _task: self._forget(turn))
+
+        def ended(_task: asyncio.Task) -> None:
+            self._forget(turn)
+            self._background(self._advance_queue(turn))
+
+        task.add_done_callback(ended)
 
     def _forget(self, turn: AgentTurn) -> None:
         active = self._turns.get(self.context_id)

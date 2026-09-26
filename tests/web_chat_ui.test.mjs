@@ -7,6 +7,7 @@ import { createStore } from "../web_chat/js/lib/store.js";
 import { SpeechPlayer, takeSentences } from "../web_chat/js/ui/speech.js";
 import { humanizePath, speakableText } from "../web_chat/js/lib/speakable.js";
 import { createScrollFollower } from "../web_chat/js/ui/transcript.js";
+import { fitWithin, rejectReason, MAX_IMAGES } from "../web_chat/js/lib/images.js";
 
 test("live trace follows growth until the reader scrolls away", () => {
   let top = 0;
@@ -293,4 +294,17 @@ test("a long answer is spoken past its first sentence", async () => {
     "There are 27 changed files.",
     "Also 3 deleted.",
   ]);
+});
+
+test("attached images are scaled to fit, keeping their shape", () => {
+  assert.deepEqual(fitWithin(4000, 3000), { width: 2048, height: 1536 });
+  assert.deepEqual(fitWithin(800, 600), { width: 800, height: 600 });
+  assert.deepEqual(fitWithin(10, 100000), { width: 1, height: 2048 });
+});
+
+test("only supported image files within the size limit are attached", () => {
+  assert.equal(rejectReason({ name: "a.png", type: "image/png", size: 1000 }), null);
+  assert.match(rejectReason({ name: "a.svg", type: "image/svg+xml", size: 1000 }), /not a PNG/);
+  assert.match(rejectReason({ name: "big.jpg", type: "image/jpeg", size: 20 * 1024 * 1024 }), /15 MB/);
+  assert.equal(MAX_IMAGES, 8);
 });

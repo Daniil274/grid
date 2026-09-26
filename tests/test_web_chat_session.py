@@ -1,8 +1,9 @@
 """Commands must remain responsive while agent inference is suspended."""
 
 import asyncio
+import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -37,11 +38,17 @@ class Socket:
                     return value
 
 
-def server_for(run):
-    """A server whose single system 's' holds one agent 'a' running *run*."""
+def server_for(run, *, request_stop=lambda context_id: False, continue_agent=None):
+    """A server whose single system 's' holds one agent 'a' running *run*.
+
+    ``request_stop`` is the factory's graceful Stop; by default the agent
+    cannot stop gracefully, so Stop cancels the turn.
+    """
     manager = ContextManager()
     manager.ensure_context('ctx')
-    factory = SimpleNamespace(run_agent=run)
+    factory = SimpleNamespace(
+        run_agent=run, request_stop=request_stop, continue_agent=continue_agent
+    )
 
     async def resolve_turn(message, **kwargs):
         return SimpleNamespace(
@@ -125,13 +132,17 @@ async def test_error_is_terminal_and_disconnect_cleans_up():
 
 
 @pytest.mark.asyncio
-async def test_second_socket_cannot_overlap_a_running_turn():
+async def test_a_message_from_another_tab_waits_for_the_running_turn():
+    """Turns never overlap: a second message is queued and sent when the first answers."""
     started, release = asyncio.Event(), asyncio.Event()
+    seen = []
 
     async def run(**kwargs):
-        started.set()
-        await release.wait()
-        return 'done'
+        seen.append(kwargs["message"])
+        if len(seen) == 1:
+            started.set()
+            await release.wait()
+        return "done"
 
     server = server_for(run)
     first, second = Socket(), Socket()
@@ -139,9 +150,16 @@ async def test_second_socket_cannot_overlap_a_running_turn():
     await first.incoming.put('{"message":"first"}')
     await asyncio.wait_for(started.wait(), 2)
     await second.incoming.put('{"message":"second"}')
-    await second.event('busy')
+    queued = await second.event('queue')
+    assert [item["text"] for item in queued["items"]] == ["second"]
+    assert queued["items"][0]["delivery"] == "after_turn"  # no decision model: the safe default
     release.set()
     await first.event('done')
+    for _ in range(50):
+        if seen == ["first", "second"]:
+            break
+        await asyncio.sleep(0.02)
+    assert seen == ["first", "second"]
     for socket, task in zip((first, second), tasks):
         await socket.incoming.put(None)
         await task
@@ -360,5 +378,337 @@ async def test_tool_problems_are_announced_before_the_agent_runs_and_do_not_stop
                    if frame['type'] == 'step' and frame['step']['tone'] == 'warn')
     assert 'ffmpeg' in warning['body']
     assert started == [True]
+    await socket.incoming.put(None)
+    await session
+
+
+def record_interruption(manager, turn_id, reason='user_stop'):
+    """What the factory stores when a turn ends early."""
+    from core.interruption import Interruption
+
+    record = Interruption(reason=reason, task='Open Notepad', agent='a')
+    manager.append_message_to('ctx', 'user', 'Open Notepad')
+    manager.append_message_to(
+        'ctx', 'assistant', record.summary(),
+        record.message_metadata(context_id='ctx', turn_id=turn_id),
+    )
+    return record
+
+
+@pytest.mark.asyncio
+async def test_first_stop_lets_the_step_finish_and_the_turn_says_how_it_ended():
+    started, released = asyncio.Event(), asyncio.Event()
+    stops = []
+    holder = {}
+
+    async def run(**kwargs):
+        started.set()
+        await released.wait()
+        record = record_interruption(holder['manager'], kwargs['turn_id'])
+        return record.summary()
+
+    def request_stop(context_id):
+        stops.append(context_id)
+        released.set()
+        return True
+
+    server, socket = server_for(run, request_stop=request_stop), Socket()
+    holder['manager'] = server.runtime.context_manager()
+    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    await socket.incoming.put('{"message":"Open Notepad"}')
+    await asyncio.wait_for(started.wait(), 2)
+    await socket.incoming.put('{"action":"stop"}')
+
+    await socket.event('stopping')
+    interrupted = await socket.event('interrupted')
+    assert interrupted['interruption']['reason'] == 'user_stop'
+    assert interrupted['interruption']['resumable'] is True
+    assert (await socket.event('done'))['stopped'] is False  # it ended by itself
+    assert stops == ['ctx']
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_second_stop_cancels_a_turn_that_is_still_finishing_its_step():
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def run(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    server, socket = server_for(run, request_stop=lambda context_id: True), Socket()
+    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    await socket.incoming.put('{"message":"hello"}')
+    await asyncio.wait_for(started.wait(), 2)
+    await socket.incoming.put('{"action":"stop"}')
+    await socket.event('stopping')
+    assert not cancelled.is_set()
+    await socket.incoming.put('{"action":"stop"}')
+    assert (await socket.event('done'))['stopped'] is True
+    assert cancelled.is_set()
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_continue_resumes_with_the_agent_that_was_interrupted():
+    continued = []
+
+    async def continue_agent(agent_key, context_id, **kwargs):
+        continued.append((agent_key, context_id, kwargs['turn_id']))
+        return 'Notepad is open.'
+
+    server, socket = server_for(AsyncMock(), continue_agent=continue_agent), Socket()
+    manager = server.runtime.context_manager()
+    record_interruption(manager, 'earlier-turn', reason='timeout')
+    manager.update_context_metadata('ctx', {'routed_system': 's', 'routed_agent': 'a'})
+
+    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    await socket.incoming.put('{"action":"continue"}')
+    assert (await socket.event('final_output'))['content'] == 'Notepad is open.'
+    done = await socket.event('done')
+    assert continued == [('a', 'ctx', done['run_id'])]
+    server.runtime.factory.run_agent.assert_not_awaited()
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_continue_with_nothing_to_resume_is_refused():
+    server, socket = server_for(AsyncMock()), Socket()
+    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    await socket.incoming.put('{"action":"continue"}')
+    assert 'nothing to continue' in (await socket.event('error'))['content']
+    await socket.event('done')
+    assert not server._active_chat_contexts
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_stop_now_cancels_at_once_even_when_the_agent_could_finish_its_step():
+    started, cancelled = asyncio.Event(), asyncio.Event()
+    stops = []
+
+    async def run(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    server = server_for(run, request_stop=lambda context_id: stops.append(context_id) or True)
+    socket = Socket()
+    session = asyncio.create_task(chat_session(server, socket, 'ctx'))
+    await socket.incoming.put('{"message":"hello"}')
+    await asyncio.wait_for(started.wait(), 2)
+    await socket.incoming.put('{"action":"stop","now":true}')
+    assert (await socket.event('done'))['stopped'] is True
+    assert cancelled.is_set()
+    assert stops == []
+    await socket.incoming.put(None)
+    await session
+
+
+def png_data_url(size=(32, 24)):
+    import base64
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, "green").save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+@pytest.mark.asyncio
+async def test_attached_images_reach_the_agent_as_an_sdk_message():
+    import json
+
+    run = AsyncMock(return_value="A green square.")
+    server, socket = server_for(run), Socket()
+    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    await socket.incoming.put(json.dumps({"message": "what is this?", "images": [png_data_url()]}))
+    assert (await socket.event("final_output"))["content"] == "A green square."
+    await socket.event("done")
+
+    sent = json.loads(run.await_args.kwargs["message"])
+    assert sent["content"][0] == {"type": "input_text", "text": "what is this?"}
+    assert sent["content"][1]["type"] == "input_image"
+    assert sent["content"][1]["image_url"].startswith("data:image/jpeg;base64,")
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_an_image_alone_is_a_message():
+    import json
+
+    run = AsyncMock(return_value="ok")
+    server, socket = server_for(run), Socket()
+    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    await socket.incoming.put(json.dumps({"images": [png_data_url()]}))
+    await socket.event("done")
+    sent = json.loads(run.await_args.kwargs["message"])
+    assert [part["type"] for part in sent["content"]] == ["input_image"]
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_a_refused_image_starts_no_turn():
+    import json
+
+    run = AsyncMock(return_value="unused")
+    server, socket = server_for(run), Socket()
+    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    await socket.incoming.put(json.dumps({"message": "look", "images": ["data:image/svg+xml;base64,PHN2Zz4="]}))
+    assert "not supported" in (await socket.event("error"))["content"]
+    await socket.event("done")
+    run.assert_not_awaited()
+    assert not server._active_chat_contexts
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_an_edited_message_reaches_the_agent_as_a_new_version():
+    import json
+
+    run = AsyncMock(return_value="ok")
+    server, socket = server_for(run), Socket()
+    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    await socket.incoming.put(json.dumps({"message": "better", "edit_of": "slot-1"}))
+    await socket.event("done")
+    assert run.await_args.kwargs["edit_of"] == "slot-1"
+    await socket.incoming.put(json.dumps({"message": "plain", "edit_of": ["not", "a", "slot"]}))
+    await socket.event("done")
+    assert run.await_args.kwargs["edit_of"] is None
+    await socket.incoming.put(None)
+    await session
+
+
+def running_agent():
+    """A run that waits for release; records every message it was given."""
+    started, release, seen = asyncio.Event(), asyncio.Event(), []
+
+    async def run(**kwargs):
+        seen.append(kwargs["message"])
+        if len(seen) == 1:
+            started.set()
+            await release.wait()
+        return "done"
+
+    return run, started, release, seen
+
+
+async def wait_for(predicate):
+    for _ in range(100):
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("condition not reached")
+
+
+@pytest.mark.asyncio
+async def test_a_next_step_message_reaches_the_running_agent_and_leaves_the_queue():
+    run, started, release, seen = running_agent()
+    given = []
+
+    def steer(context_id, message):
+        given.append(message.text)
+        message.on_delivered(message)  # the agent's next call reads it at once here
+        return True
+
+    server, socket = server_for(run), Socket()
+    server.runtime.factory.steer = steer
+    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    await socket.incoming.put('{"message":"refactor"}')
+    await asyncio.wait_for(started.wait(), 2)
+    await socket.incoming.put('{"message":"keep the API","delivery":"next_step"}')
+    steered = await socket.event("steered")
+    assert steered["text"] == "keep the API" and given == ["keep the API"]
+    assert (await socket.event("queue"))["items"] == []
+    release.set()
+    await socket.event("done")
+    await asyncio.sleep(0.05)
+    assert seen == ["refactor"]  # nothing left to send after the turn
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_a_now_message_stops_the_turn_and_is_sent_next():
+    run, started, release, seen = running_agent()
+    server, socket = server_for(run), Socket()
+    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    await socket.incoming.put('{"message":"deploy to staging"}')
+    await asyncio.wait_for(started.wait(), 2)
+    await socket.incoming.put('{"message":"no, to production","delivery":"now"}')
+    assert (await socket.event("done"))["stopped"] is True
+    await wait_for(lambda: seen == ["deploy to staging", "no, to production"])
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_after_a_stop_the_queue_waits_for_the_user():
+    run, started, release, seen = running_agent()
+    server, socket = server_for(run), Socket()
+    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    await socket.incoming.put('{"message":"first"}')
+    await asyncio.wait_for(started.wait(), 2)
+    await socket.incoming.put('{"message":"later","delivery":"after_turn"}')
+    queued = (await socket.event("queue"))["items"]
+    await socket.incoming.put('{"action":"stop","now":true}')
+    await socket.event("done")
+    await asyncio.sleep(0.1)
+    assert seen == ["first"]
+
+    # The user sends the waiting message after all.
+    await socket.incoming.put(json.dumps({"action": "send_queued", "id": queued[0]["id"]}))
+    await wait_for(lambda: seen == ["first", "later"])
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_message_can_be_dropped():
+    run, started, release, seen = running_agent()
+    server, socket = server_for(run), Socket()
+    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    await socket.incoming.put('{"message":"first"}')
+    await asyncio.wait_for(started.wait(), 2)
+    await socket.incoming.put('{"message":"never mind","delivery":"after_turn"}')
+    item = (await socket.event("queue"))["items"][0]
+    await socket.incoming.put(json.dumps({"action": "unqueue", "id": item["id"]}))
+    assert (await socket.event("queue"))["items"] == []
+    release.set()
+    await socket.event("done")
+    await asyncio.sleep(0.1)
+    assert seen == ["first"]
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_the_decision_model_chooses_when_the_user_did_not():
+    run, started, release, seen = running_agent()
+    server, socket = server_for(run), Socket()
+    decide = AsyncMock(return_value=("now", "model"))
+    session = asyncio.create_task(chat_session(server, socket, "ctx"))
+    with patch("web_chat.session.decide_delivery", new=decide):
+        await socket.incoming.put('{"message":"build it"}')
+        await asyncio.wait_for(started.wait(), 2)
+        await socket.incoming.put('{"message":"stop, wrong branch"}')
+        delivery = await socket.event("delivery")
+    assert (delivery["delivery"], delivery["decided_by"]) == ("now", "model")
+    kwargs = decide.await_args.kwargs
+    assert kwargs["message"] == "stop, wrong branch" and kwargs["task"] == "build it"
+    await wait_for(lambda: seen == ["build it", "stop, wrong branch"])
     await socket.incoming.put(None)
     await session

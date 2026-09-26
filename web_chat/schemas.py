@@ -24,6 +24,12 @@ class ConversationRenameRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
 
 
+class BranchRequest(BaseModel):
+    """The user message a new branch replaces (its ``message_id``)."""
+
+    message_id: str = Field(min_length=1, max_length=64)
+
+
 class ConversationCreateRequest(BaseModel):
     """``None`` on either key means the router decides per message."""
 

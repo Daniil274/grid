@@ -6,6 +6,8 @@ export const ICONS = {
   close: "M6 6l12 12M18 6L6 18",
   send: "M4 12l16-8-6 8 6 8z",
   stop: "M7 7h10v10H7z",
+  resume: "M8 5v14l11-7z",
+  attach: "M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8",
   copy: "M9 9h10v11H9zM5 15V4h10",
   check: "M5 13l4 4L19 7",
   edit: "M4 20h4L20 8l-4-4L4 16z",
