@@ -2,7 +2,7 @@
 
 from .config import Config
 from .prompt_sections import PromptSection, ModelContextAssembly
-from .protocols import IConfig, IContextManager, IToolManager
+from .protocols import IConfig, IContextManager
 
 __all__ = [
     "Config",
@@ -10,5 +10,4 @@ __all__ = [
     "ModelContextAssembly",
     "IConfig",
     "IContextManager",
-    "IToolManager",
 ]

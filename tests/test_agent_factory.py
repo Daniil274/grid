@@ -60,7 +60,7 @@ class TestAgentFactory:
         assert factory.context_manager is not None
         assert len(factory._agent_cache) == 0
         assert len(factory._tool_cache) == 0
-        assert len(factory._mcp_servers) == 0
+        assert len(factory.mcp) == 0
         assert len(factory._agent_sessions) == 0
     
     def test_agent_factory_init_with_working_directory(self, config_file, temp_dir):
@@ -230,7 +230,7 @@ class TestAgentFactory:
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
              patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
-             patch.object(factory, '_create_mcp_servers', return_value=[], new_callable=AsyncMock):
+             patch.object(factory.mcp, 'for_tools', return_value=[], new_callable=AsyncMock):
             
             mock_client = Mock()
             mock_openai.return_value = mock_client
@@ -270,7 +270,7 @@ class TestAgentFactory:
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
              patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
-             patch.object(factory, '_create_mcp_servers', return_value=[], new_callable=AsyncMock):
+             patch.object(factory.mcp, 'for_tools', return_value=[], new_callable=AsyncMock):
             mock_agent_class.return_value = Mock()
             await factory.create_agent("test_agent")
 
@@ -326,7 +326,7 @@ class TestAgentFactory:
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
              patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
-             patch.object(factory, '_create_mcp_servers', return_value=[], new_callable=AsyncMock):
+             patch.object(factory.mcp, 'for_tools', return_value=[], new_callable=AsyncMock):
             
             mock_agent1 = Mock()
             mock_agent2 = Mock()
@@ -355,7 +355,7 @@ class TestAgentFactory:
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
              patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
-             patch.object(factory, '_create_mcp_servers', return_value=[], new_callable=AsyncMock):
+             patch.object(factory.mcp, 'for_tools', return_value=[], new_callable=AsyncMock):
             
             mock_agent = Mock()
             mock_agent_class.return_value = mock_agent
@@ -479,7 +479,7 @@ class TestAgentFactory:
         
         mock_server = Mock()
         mock_server.cleanup = AsyncMock()
-        factory._mcp_servers["test"] = mock_server
+        factory.mcp._servers["test"] = mock_server
         
         await factory.cleanup()
         
@@ -489,7 +489,7 @@ class TestAgentFactory:
         
         # Should clear caches
         assert len(factory._agent_sessions) == 0
-        assert len(factory._mcp_servers) == 0
+        assert len(factory.mcp) == 0
         assert len(factory._agent_cache) == 0
     
     @pytest.mark.asyncio

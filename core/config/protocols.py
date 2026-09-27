@@ -55,35 +55,6 @@ class IModelManager(Protocol):
 
 
 @runtime_checkable
-class IToolManager(Protocol):
-    """Protocol for managing agent tools."""
-
-    async def get_agent_tools(self, agent_config: Any) -> List[Any]:
-        """
-        Get all tools for agent with caching.
-
-        Args:
-            agent_config: Agent configuration
-
-        Returns:
-            List of tool instances
-        """
-        ...
-
-    async def create_agent_tools(self, agent_keys: List[str]) -> List[Any]:
-        """
-        Create agent tools with proper logging and context sharing.
-
-        Args:
-            agent_keys: List of agent keys to create tools for
-
-        Returns:
-            List of agent tool instances
-        """
-        ...
-
-
-@runtime_checkable
 class ISessionManager(Protocol):
     """Protocol for managing agent sessions."""
 
@@ -115,53 +86,6 @@ class ISessionManager(Protocol):
 
         This does not cleanup resources, just clears the cache.
         Use cleanup_sessions() for proper resource cleanup.
-        """
-        ...
-
-
-@runtime_checkable
-class IMCPManager(Protocol):
-    """Protocol for managing MCP servers."""
-
-    async def create_mcp_servers(self, mcp_tool_names: List[str]) -> List[Any]:
-        """
-        Create and connect MCP servers using the Agents SDK.
-
-        Args:
-            mcp_tool_names: List of MCP tool names from configuration
-
-        Returns:
-            List of connected MCP server instances
-        """
-        ...
-
-    async def get_mcp_server(self, tool_name: str) -> Optional[Any]:
-        """
-        Get or create an SDK-based MCP server (MCPServerStdio).
-
-        Args:
-            tool_name: MCP tool name from configuration
-
-        Returns:
-            MCP server instance or None if tool is not MCP type
-        """
-        ...
-
-    async def cleanup_servers(self) -> None:
-        """
-        Cleanup all MCP servers and release resources.
-
-        This method should be called during shutdown to properly
-        disconnect from all MCP servers.
-        """
-        ...
-
-    def clear_servers(self) -> None:
-        """
-        Clear all MCP servers from cache.
-
-        This does not cleanup resources, just clears the cache.
-        Use cleanup_servers() for proper resource cleanup.
         """
         ...
 

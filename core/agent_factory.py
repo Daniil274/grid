@@ -8,7 +8,6 @@ the run journal and the policy wiring. This module keeps what ties them
 together: construction, the agent builders, caches and the context API.
 """
 
-import asyncio
 import logging
 import os
 import threading
@@ -33,7 +32,7 @@ from core.compact import AutoCompactTrackingState
 from core.config.config import Config
 from core.factory.auto_run import AutoRunTools
 from core.factory.journal import RunJournal
-from core.factory.mcp import McpSetup
+from core.factory.mcp import McpServers
 from core.factory.models import ModelProvider
 from core.factory.policy import PolicyWiring
 from core.factory.run_context import (
@@ -80,7 +79,7 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, PolicyWiring):
+class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, PolicyWiring):
     """
     Enterprise Agent Factory with advanced features:
     - Configuration validation
@@ -173,6 +172,8 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, PolicyWirin
 
         self.container_manager = ContainerManager(self.config)
         self._container_workdir = CONTAINER_WORKDIR
+        # MCP servers, started once and shared by this factory's agents.
+        self.mcp = McpServers(self.config, self.context_manager, self.container_id, CONTAINER_WORKDIR)
         if self.container_id:
             logger.info(
                 "AgentFactory initialized with container isolation: %s",
@@ -182,7 +183,6 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, PolicyWirin
         # Caches
         self._agent_cache: Dict[str, Agent] = {}
         self._tool_cache: Dict[str, List[Any]] = {}
-        self._mcp_servers: Dict[str, Any] = {}
 
         # Session management for agent memory (per agent/context pair)
         self._agent_sessions = self._runtime_support.agent_sessions
@@ -351,7 +351,7 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, PolicyWirin
             if mcp_server_names and (
                 agent_config.mcp_enabled or self.config.is_mcp_enabled()
             ):
-                mcp_servers_list = await self._create_mcp_servers(mcp_server_names)
+                mcp_servers_list = await self.mcp.for_tools(mcp_server_names)
 
             # Create agent
             agent = Agent(
@@ -472,7 +472,7 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, PolicyWirin
         if mcp_tool_names:
             # Only if enabled (globally or per caller)
             if self.config.is_mcp_enabled():
-                mcp_servers_list = await self._create_mcp_servers(mcp_tool_names)
+                mcp_servers_list = await self.mcp.for_tools(mcp_tool_names)
 
         # Add prompt_addition from tool configuration to instructions
         enhanced_instructions = self._build_dynamic_agent_instructions(
@@ -662,25 +662,7 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, PolicyWirin
         gate = getattr(self, "action_gate", None)
         if gate is not None:
             await gate.aclose()
-        # Disconnect MCP clients
-        for mcp_client in self._mcp_servers.values():
-            try:
-                # SDK MCP servers expose cleanup()
-                cleanup_method = getattr(mcp_client, "cleanup", None)
-                if cleanup_method is not None:
-                    await cleanup_method()
-                else:
-                    # Back-compat for any legacy clients
-                    await mcp_client.disconnect()
-            except asyncio.CancelledError:
-                logger.debug("MCP cleanup cancelled", exc_info=True)
-            except Exception as e:
-                logger.warning(
-                    "Failed to cleanup MCP server %s: %s",
-                    getattr(mcp_client, "name", "unknown"),
-                    e,
-                    exc_info=e,
-                )
+        await self.mcp.close()
 
         # Clear agent sessions
         await self._runtime_support.cleanup_sessions()
@@ -702,6 +684,5 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, PolicyWirin
 
         # Clear caches
         self.clear_cache()
-        self._mcp_servers.clear()
         self._agent_sessions.clear()
 

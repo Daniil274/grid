@@ -1,30 +1,38 @@
-"""The MCP servers an agent uses, started once and shared.
+"""The MCP servers agents use, started once and shared.
 
-Each configured MCP server is started on first use and kept; with a
-container the server runs inside it. Relies on ``self.config``,
-``self.container_id``, ``self._container_workdir`` and ``self._mcp_servers``.
+McpServers starts each configured MCP server on first use and keeps it. A
+server is keyed by its tool, and by the working directory and container it
+was started for: one started for another workspace or container is never
+handed out. With a container the server runs inside it (``docker exec``),
+confined like the agent's own commands.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from core.managers.mcp_manager import ResilientMCPServerStdio
 
 logger = logging.getLogger("grid.agent_factory")
 
 
-class McpSetup:
-    """The MCP servers an agent uses, started once and shared.
+class McpServers:
+    """The MCP servers of one factory: its config, workspace and container."""
 
-    Each configured MCP server is started on first use and kept; with a
-    container the server runs inside it. Relies on ``self.config``,
-    ``self.container_id``, ``self._container_workdir`` and ``self._mcp_servers``.
-    """
+    def __init__(self, config: Any, context_manager: Any, container_id: Optional[str], container_workdir: str) -> None:
+        self.config = config
+        self.context_manager = context_manager
+        self.container_id = container_id
+        self._container_workdir = container_workdir
+        self._servers: Dict[str, Any] = {}
 
-    async def _create_mcp_servers(self, mcp_tool_names: List[str]) -> List[Any]:
+    def __len__(self) -> int:
+        return len(self._servers)
+
+    async def for_tools(self, mcp_tool_names: List[str]) -> List[Any]:
         """Create and connect MCP servers using the Agents SDK."""
         logger.info(f"Creating MCP servers for tools: {mcp_tool_names}")
         servers: list[Any] = []
@@ -32,7 +40,7 @@ class McpSetup:
         for name in mcp_tool_names:
             try:
                 logger.debug(f"Attempting to create MCP server: {name}")
-                server = await self._get_mcp_server(name)
+                server = await self.get(name)
                 if server is not None:
                     servers.append(server)
                     logger.info(f"✅ MCP server created successfully: {name}")
@@ -59,7 +67,7 @@ class McpSetup:
         )
         return servers
 
-    async def _get_mcp_server(self, tool_name: str) -> Optional[Any]:
+    async def get(self, tool_name: str) -> Optional[Any]:
         """Get or create an SDK-based MCP server (MCPServerStdio)."""
         tool_config = self.config.get_tool(tool_name)
         if tool_config.type != "mcp":
@@ -83,9 +91,9 @@ class McpSetup:
         if self.container_id:
             cache_key += f"::{self.container_id}"
 
-        if cache_key in self._mcp_servers:
+        if cache_key in self._servers:
             logger.debug("Reusing cached MCP server: %s", cache_key)
-            return self._mcp_servers[cache_key]
+            return self._servers[cache_key]
 
         server_command = tool_config.server_command or []
         if not server_command:
@@ -185,5 +193,18 @@ class McpSetup:
 
         await server.connect()
         logger.info(f"MCP server connected successfully: {tool_name}")
-        self._mcp_servers[cache_key] = server
+        self._servers[cache_key] = server
         return server
+
+    async def close(self) -> None:
+        """Disconnect every server; a failure is logged, the rest still close."""
+        for server in self._servers.values():
+            try:
+                await server.cleanup()
+            except asyncio.CancelledError:
+                logger.debug("MCP cleanup cancelled", exc_info=True)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to clean up MCP server %s: %s", getattr(server, "name", "unknown"), exc, exc_info=exc
+                )
+        self._servers.clear()
