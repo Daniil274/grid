@@ -98,8 +98,9 @@ class UserSpace:
         """``layout`` None keeps the single-user layout (see the module docs).
 
         ``require_isolation``: the agents' tools must run in the space's
-        container. A space whose container cannot start is then not built at
-        all, rather than letting its agents work on the host.
+        container, whatever the config's ``isolation.enabled`` says (a server
+        with accounts). A space whose container cannot start is then not built
+        at all, rather than letting its agents work on the host.
 
         ``turn_counter`` counts the user's turns per day; given one, the
         deployment's ``user_limits`` apply to the space (web_chat.limits).
@@ -131,7 +132,8 @@ class UserSpace:
     # -- construction ------------------------------------------------------
     def _build(self) -> None:
         config, workspace = self._workspace_config()
-        container_id = self._start_container(config, workspace) if isolation_enabled(config) else None
+        isolated = self.require_isolation or isolation_enabled(config)
+        container_id = self._start_container(config, workspace) if isolated else None
         if self.require_isolation and container_id is None:
             raise IsolationUnavailable(
                 f"The workspace container for user {self.user_id} could not be started, and this "
@@ -205,7 +207,7 @@ class UserSpace:
         return workspace
 
     def _start_container(self, config: Config, workspace: Optional[Path]) -> Optional[str]:
-        manager = ContainerManager(config)
+        manager = ContainerManager(config, enabled=True if self.require_isolation else None)
         if not manager.enabled:
             return None
         try:

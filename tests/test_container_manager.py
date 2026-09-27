@@ -98,3 +98,13 @@ def test_changing_a_limit_changes_the_profile(monkeypatch):
 def test_malformed_memory_limits_are_refused(memory):
     with pytest.raises(ValueError):
         IsolationConfig(memory=memory)
+
+
+def test_an_explicit_choice_overrides_the_configs_flag(monkeypatch):
+    monkeypatch.setattr(module, "docker", SimpleNamespace(from_env=FakeClient))
+    off = SimpleNamespace(config=SimpleNamespace(isolation=IsolationConfig(enabled=False)))
+    on = SimpleNamespace(config=SimpleNamespace(isolation=IsolationConfig(enabled=True)))
+
+    assert ContainerManager(off).enabled is False
+    assert ContainerManager(off, enabled=True).enabled is True
+    assert ContainerManager(on, enabled=False).enabled is False

@@ -298,3 +298,31 @@ def test_voice_is_off_unless_the_config_turns_it_on(minimal_config, monkeypatch)
     minimal_config.write_text(minimal_config.read_text(encoding="utf-8") + "voice:\n  enabled: true\n", encoding="utf-8")
 
     assert Deployment(config_path=str(minimal_config), routing_path=None).voice_enabled() is True
+
+
+class _Containers:
+    """ContainerManager stand-in: records whether a container was asked for."""
+
+    started = []
+
+    def __init__(self, config, *, enabled=None):
+        self.enabled = enabled if enabled is not None else config.config.isolation.enabled
+
+    def get_or_create_container(self, user_id, workspace=None):
+        _Containers.started.append(user_id)
+        return SimpleNamespace(id=f"c-{user_id}", name=f"grid-agent-{user_id}")
+
+
+def test_a_space_that_requires_isolation_gets_a_container_whatever_the_config_says(minimal_config, monkeypatch):
+    """Isolation belongs to the server with accounts, not to the config's flag."""
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+    monkeypatch.setattr("web_chat.space.ContainerManager", _Containers)
+    _Containers.started = []
+    deployment = Deployment(config_path=str(minimal_config), routing_path=None)  # isolation.enabled: false
+
+    isolated = UserSpace(deployment, user_id="u1", layout=SpaceLayout.under(minimal_config.parent / "u1"), require_isolation=True)
+    single = UserSpace(deployment)
+
+    assert isolated.container_id == "c-u1"
+    assert single.container_id is None
+    assert _Containers.started == ["u1"]

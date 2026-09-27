@@ -6,9 +6,10 @@
 
 With ``--accounts`` everything the server keeps lives in ``--data-dir``: the
 accounts database and, per user, ``users/<id>/`` with the user's conversations,
-agent sessions and workspace. Agents then run their tools only in containers:
-the server refuses to start when the base system's isolation is off, unless
-``--trusted-users`` says every user may run commands on this machine.
+agent sessions and workspace. Every user's agents then run in a container of
+their own, whatever the config's ``isolation.enabled`` says (a one-user server
+follows that flag); the server refuses to start without a usable Docker,
+unless ``--trusted-users`` says every user may run commands on this machine.
 """
 
 from __future__ import annotations
@@ -95,7 +96,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     multi.add_argument(
         "--trusted-users",
         action="store_true",
-        help="Allow agents to run tools on this machine without containers (every user is trusted)",
+        help="Run users' agents without containers, on this machine (every user is trusted)",
     )
     return parser.parse_args(argv)
 
@@ -166,17 +167,15 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
     if args.path:
         raise SystemExit("--path sets the single user's workspace; with --accounts every user has their own.")
     if not args.trusted_users:
-        if not deployment.isolated:
-            raise SystemExit(
-                f"Isolation is off in {deployment.config_path}: agents would run commands on this machine "
-                "for every user. Enable isolation (Docker), or pass --trusted-users if every user may do that."
-            )
+        # With accounts every user's agents run in a container, whatever the
+        # config's isolation.enabled says; the config gives image and limits.
         from core.managers.container_manager import ContainerManager
 
-        if not ContainerManager(deployment.config).enabled:
+        if not ContainerManager(deployment.config, enabled=True).enabled:
             raise SystemExit(
-                "Isolation is on, but Docker is not usable here (the docker SDK is missing or the daemon "
-                "does not answer): no user's agents could run. Start Docker, or pass --trusted-users."
+                "With accounts, every user's agents run in a container, but Docker is not usable here "
+                "(the docker SDK is missing or the daemon does not answer). Start Docker, or pass "
+                "--trusted-users if every user may run commands on this machine."
             )
     data_dir = args.data_dir.expanduser().resolve()
     accounts = open_accounts(data_dir)

@@ -1,5 +1,5 @@
 isolation:
-  enabled: true
+  enabled: false
 
 settings:
   default_agent: "video_director"

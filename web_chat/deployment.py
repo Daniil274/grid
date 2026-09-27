@@ -108,15 +108,6 @@ class Deployment:
         return resolve_path(DEFAULT_CONFIG)
 
     @property
-    def isolated(self) -> bool:
-        """Whether spaces run their agents' tools in a container.
-
-        A space starts one container from the base system's settings and every
-        system's factory in the space works in it, so the base config decides.
-        """
-        return isolation_enabled(self.config)
-
-    @property
     def personal_agents_policy(self) -> PersonalAgentsPolicy:
         """What users may build their own agents from: the catalog's
         ``personal_agents``, or the single system's."""

@@ -1,6 +1,3 @@
-isolation:
-  enabled: true
-  
 settings:
   default_agent: "windows_operator"
   max_history: 100

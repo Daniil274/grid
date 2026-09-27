@@ -40,13 +40,10 @@ class ContainerManager:
     Implements 'One Container per User' strategy.
     """
 
-    def __init__(self, config: Any):
-        """
-        Initialize ContainerManager.
-        
-        Args:
-            config: GridConfig object
-        """
+    def __init__(self, config: Any, *, enabled: Optional[bool] = None):
+        """``enabled`` None follows the config's ``isolation.enabled``; True or
+        False decides regardless - a server with accounts isolates every user,
+        whatever the config says. The config still gives image and limits."""
         from schemas.schemas import IsolationConfig
 
         self.config = config
@@ -58,7 +55,7 @@ class ContainerManager:
             isolation_config = IsolationConfig(**isolation_config)
         self.settings: IsolationConfig = isolation_config or IsolationConfig()
         self.image = self.settings.image
-        if not self.settings.enabled:
+        if not (self.settings.enabled if enabled is None else enabled):
             return
         if docker is None:
             logger.warning("Docker isolation requested but docker SDK is not installed; disabling isolation")
