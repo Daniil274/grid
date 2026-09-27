@@ -1,8 +1,12 @@
 """Which failures of a model call are worth another attempt.
 
-Provider errors that pass (timeouts, rate limits, 5xx, transient
-messages) are retried with backoff; everything else is final. Also spots an
-answer that wrote tool calls as text instead of calling tools.
+A provider failure that passes - a timeout, a dropped connection, a rate
+limit, a 5xx, or a message saying as much - is retried with a bounded
+backoff; any other failure is final. When every model of an agent's fallback
+chain has failed, the chain already did its retrying: that is final too.
+
+Also: spotting an answer that wrote tool calls as text instead of calling
+the tools, which the turn then corrects (core.factory.turns).
 """
 
 from __future__ import annotations
@@ -21,105 +25,85 @@ from openai import (
 )
 
 from core.fallback_model import AllModelsFailedError
-from utils.exceptions import AgentError
 
 logger = logging.getLogger("grid.agent_factory")
 
+_TRANSIENT_MARKERS = (
+    "connection error",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "remote protocol error",
+    "server disconnected",
+    "connection reset",
+    "network",
+    "rate limit",
+    "overloaded",
+    "stream closed",
+    "incomplete chunked read",
+    "all providers exhausted",
+    "upstream_unavailable",
+    "upstream unavailable",
+    "server_error",
+    "server error",
+    "provider",
+    "retry",
+    "unavailable",
+)
 
-class FailureRules:
-    """Which failures of a model call are worth another attempt.
+_TRANSIENT_ERRORS = (
+    asyncio.TimeoutError,
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
 
-    Provider errors that pass (timeouts, rate limits, 5xx, transient
-    messages) are retried with backoff; everything else is final. Also spots an
-    answer that wrote tool calls as text instead of calling tools.
-    """
+_TRANSIENT_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
-    @staticmethod
-    def _message_looks_transient_provider_error(message: str) -> bool:
-        text = (message or "").lower()
-        transient_markers = (
-            "connection error",
-            "timed out",
-            "timeout",
-            "temporarily unavailable",
-            "service unavailable",
-            "bad gateway",
-            "gateway timeout",
-            "remote protocol error",
-            "server disconnected",
-            "connection reset",
-            "network",
-            "rate limit",
-            "overloaded",
-            "stream closed",
-            "incomplete chunked read",
-            "all providers exhausted",
-            "upstream_unavailable",
-            "upstream unavailable",
-            "server_error",
-            "server error",
-            "provider",
-            "retry",
-            "unavailable",
-        )
-        return any(marker in text for marker in transient_markers)
+_BACKOFF_SECONDS = (1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 30.0, 45.0, 60.0)
 
-    def _is_retriable_agent_exception(self, exc: Exception) -> bool:
-        """Decide whether agent execution should be retried indefinitely."""
-        if isinstance(exc, AllModelsFailedError):
-            return False
-        if isinstance(
-            exc,
-            (
-                asyncio.TimeoutError,
-                httpx.TimeoutException,
-                httpx.ConnectError,
-                httpx.ReadError,
-                httpx.RemoteProtocolError,
-                APIConnectionError,
-                APITimeoutError,
-                InternalServerError,
-                RateLimitError,
-            ),
-        ):
+_TOOL_CALLS_AS_TEXT = (
+    re.compile(r"<tool_call>\s*<function="),  # <tool_call><function=...>
+    re.compile(r"<function=[^>]+>\s*<parameter="),  # <function=name><parameter=...>
+)
+
+
+def is_transient_message(message: str) -> bool:
+    """Whether an error's text says the failure will pass."""
+    text = (message or "").lower()
+    return any(marker in text for marker in _TRANSIENT_MARKERS)
+
+
+def is_retriable(exc: BaseException) -> bool:
+    """Whether a failed model call is worth another attempt."""
+    if isinstance(exc, AllModelsFailedError):
+        return False
+    if isinstance(exc, _TRANSIENT_ERRORS):
+        return True
+    if isinstance(exc, APIStatusError):
+        return getattr(exc, "status_code", None) in _TRANSIENT_STATUS_CODES
+    return is_transient_message(str(exc))
+
+
+def retry_backoff_seconds(retry_count: int) -> float:
+    """The wait before retry *retry_count*: rises quickly, never past a minute."""
+    return _BACKOFF_SECONDS[min(max(retry_count, 0), len(_BACKOFF_SECONDS) - 1)]
+
+
+def writes_tool_calls_as_text(output: str) -> bool:
+    """Whether an answer wrote tool calls as text, e.g.
+    ``<tool_call><function=name><parameter=p>...</parameter></function></tool_call>``,
+    which runs nothing."""
+    for pattern in _TOOL_CALLS_AS_TEXT:
+        if pattern.search(output):
+            logger.warning("Detected tool calls written as text: %s", pattern.pattern)
             return True
-        if isinstance(exc, APIStatusError):
-            status_code = getattr(exc, "status_code", None)
-            return status_code in {408, 409, 425, 429, 500, 502, 503, 504}
-        if isinstance(exc, AgentError):
-            return self._message_looks_transient_provider_error(str(exc))
-        if isinstance(exc, Exception):
-            return self._message_looks_transient_provider_error(str(exc))
-        return False
-
-    @staticmethod
-    def _retry_backoff_seconds(retry_count: int) -> float:
-        """Backoff that rises quickly but stays bounded for endless retries."""
-        schedule = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 30.0, 45.0, 60.0]
-        if retry_count <= 0:
-            return schedule[0]
-        return schedule[min(retry_count, len(schedule) - 1)]
-
-    # Fallback: stub for manual tool call parsing from response text
-    def _detect_malformed_tool_calls(self, output: str) -> bool:
-        """
-        Detect malformed tool call formats in agent output.
-
-        Returns True if malformed tool calls are detected.
-        Examples of malformed formats:
-        - <tool_call><function=get_screen><parameter=save_path>...</parameter></function></tool_call>
-        """
-        # Pattern for malformed tool_call format
-        malformed_patterns = [
-            r"<tool_call>\s*<function=",  # <tool_call><function=...>
-            r"<function=[^>]+>\s*<parameter=",  # <function=name><parameter=...>
-        ]
-
-        for pattern in malformed_patterns:
-            if re.search(pattern, output):
-                logger.warning(
-                    f"Detected malformed tool call format in output: {pattern}"
-                )
-                return True
-
-        return False
+    return False

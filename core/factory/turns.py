@@ -41,6 +41,12 @@ from core.context_budget import (
     request_tokens,
     session_transcript,
 )
+from core.factory.failures import (
+    is_retriable,
+    retry_backoff_seconds,
+    writes_tool_calls_as_text,
+)
+from core.factory.journal import safe_preview
 from core.factory.run_context import (
     GridRunContext,
     _get_runner,
@@ -249,10 +255,10 @@ class TurnRunner:
                     logger.warning("Agent %s stopped: %s: %s", agent_label, type(exc).__name__, exc)
                     return interrupted_run_report(result, f"Agent {agent_label}", exc)
                 except Exception as exc:
-                    if not self._is_retriable_agent_exception(exc):
+                    if not is_retriable(exc):
                         raise
                     attempt += 1
-                    delay = self._retry_backoff_seconds(attempt)
+                    delay = retry_backoff_seconds(attempt)
                     logger.warning(
                         "Retriable failure of agent %s (attempt %d, retry in %.1fs): %s",
                         agent_label,
@@ -527,7 +533,7 @@ class TurnRunner:
                 progress.ledger.called(info.get("call_id"), tool_name, info.get("arguments"))
             else:
                 progress.ledger.returned(info.get("call_id"), tool_name)
-            self._record_runtime_event(
+            self.journal.record_event(
                 event_type=event.name,
                 tool_name=tool_name,
                 arguments=info.get("arguments") if event.name == "tool_called" else None,
@@ -626,14 +632,14 @@ class TurnRunner:
             while True:
                 if control is not None and control.stop_requested:
                     raise _TurnStopped(StopReason.USER_STOP)
-                self._update_pending_agent_run(
+                self.journal.update_pending_run(
                     agent_key=agent_key,
                     active_context_id=run_ctx.context_id,
                     input_preview=progress.input_preview,
                     status="running",
                     retry_count=progress.attempt,
                 )
-                self._record_runtime_event(
+                self.journal.record_event(
                     event_type="attempt_started", extra={"retry_count": progress.attempt}
                 )
                 session_mark = await self._session_mark(session)
@@ -661,9 +667,9 @@ class TurnRunner:
                             if stored_request:
                                 run_input = OVERFLOW_RETRY_NOTE
                             continue
-                    retriable = self._is_retriable_agent_exception(exc)
-                    error_text = self._safe_preview(str(exc), max_length=700)
-                    self._update_pending_agent_run(
+                    retriable = is_retriable(exc)
+                    error_text = safe_preview(str(exc), max_length=700)
+                    self.journal.update_pending_run(
                         agent_key=agent_key,
                         active_context_id=run_ctx.context_id,
                         input_preview=progress.input_preview,
@@ -671,7 +677,7 @@ class TurnRunner:
                         retry_count=progress.attempt,
                         last_error=error_text,
                     )
-                    self._record_runtime_event(
+                    self.journal.record_event(
                         event_type="attempt_error",
                         output=error_text,
                         extra={
@@ -693,7 +699,7 @@ class TurnRunner:
                         ).resume_input()
                     progress.ledger.forget_open()
                     progress.attempt += 1
-                    delay = self._retry_backoff_seconds(progress.attempt)
+                    delay = retry_backoff_seconds(progress.attempt)
                     logger.warning(
                         "Retriable failure of agent %s (attempt %d, retry in %.1fs): %s",
                         agent_key,
@@ -858,7 +864,7 @@ class TurnRunner:
         options.pop("use_active_context", None)
         options.pop("edit_of", None)  # a correction is not another version
         for retry in range(1, self.MALFORMED_TOOL_CALL_RETRIES + 1):
-            if not answered or not self._detect_malformed_tool_calls(output):
+            if not answered or not writes_tool_calls_as_text(output):
                 break
             logger.warning(
                 "Agent %s wrote tool calls as text; retrying with a correction (%d/%d)",
@@ -930,7 +936,7 @@ class TurnRunner:
                 with_images(interruption.summary(), images or []),
                 interruption.message_metadata(context_id=context_id, turn_id=turn_id),
             )
-            self._update_pending_agent_run(
+            self.journal.update_pending_run(
                 agent_key=agent_key,
                 active_context_id=context_id,
                 input_preview=progress.input_preview,
@@ -977,7 +983,7 @@ class TurnRunner:
         execution = AgentExecution(
             agent_name=agent_key, start_time=time.time(), input_message=shown_message
         )
-        progress = _RunProgress(input_preview=self._safe_preview(shown_message, max_length=700))
+        progress = _RunProgress(input_preview=safe_preview(shown_message, max_length=700))
         control = RunControl()
         # Images an image model generates during the turn: shown as they come,
         # stored with the answer (core.generated_images).
@@ -1095,8 +1101,8 @@ class TurnRunner:
 
             run_ctx.session = session
             run_ctx.metadata = self.context_manager.get_all_metadata()
-            progress.input_preview = self._safe_preview(run_input, max_length=700)
-            self._update_pending_agent_run(
+            progress.input_preview = safe_preview(run_input, max_length=700)
+            self.journal.update_pending_run(
                 agent_key=agent_key,
                 active_context_id=active_context_id,
                 input_preview=progress.input_preview,
@@ -1158,13 +1164,13 @@ class TurnRunner:
                 and (name := tool_event_info(item).get("tool_name"))
             ]
             self.context_manager.add_execution(execution)
-            self._record_runtime_event(
+            self.journal.record_event(
                 event_type="attempt_completed",
                 output=output,
                 extra={"retry_count": progress.attempt},
             )
             if answered:
-                self._update_pending_agent_run(
+                self.journal.update_pending_run(
                     agent_key=agent_key,
                     active_context_id=active_context_id,
                     input_preview=progress.input_preview,
@@ -1204,15 +1210,15 @@ class TurnRunner:
                 )
             if not progress.recorded_failure:
                 try:
-                    self._update_pending_agent_run(
+                    self.journal.update_pending_run(
                         agent_key=agent_key,
                         active_context_id=active_context_id,
                         input_preview=progress.input_preview,
                         status="failed",
                         retry_count=progress.attempt,
-                        last_error=self._safe_preview(str(exc), max_length=700),
+                        last_error=safe_preview(str(exc), max_length=700),
                     )
-                    self._record_runtime_event(
+                    self.journal.record_event(
                         event_type="execution_failed",
                         output=str(exc),
                         extra={"exception_type": type(exc).__name__},

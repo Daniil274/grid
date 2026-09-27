@@ -12,32 +12,32 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 
+def safe_preview(value: Any, max_length: Optional[int] = 500) -> str:
+    """Convert arbitrary runtime data to a compact preview string."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(value)
+    text = text.strip()
+    if max_length is not None and len(text) > max_length:
+        return text[:max_length] + "..."
+    return text
+
+
 class RunJournal:
-    """What the factory records about its runs, for recovery and the timeline.
+    """The pending-run record of the turns in one conversation store, and the
+    runtime events of their attempts (context manager metadata)."""
 
-    The pending-run record of a turn (resumable after a crash) and the
-    runtime events of its attempts, both kept by the context manager. Relies on
-    ``self.context_manager`` and ``self.config``.
-    """
+    def __init__(self, context_manager: Any, config: Any) -> None:
+        self.context_manager = context_manager
+        self.config = config
 
-    @staticmethod
-    def _safe_preview(value: Any, max_length: Optional[int] = 500) -> str:
-        """Convert arbitrary runtime data to a compact preview string."""
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            text = value
-        else:
-            try:
-                text = json.dumps(value, ensure_ascii=False, default=str)
-            except Exception:
-                text = str(value)
-        text = text.strip()
-        if max_length is not None and len(text) > max_length:
-            return text[:max_length] + "..."
-        return text
-
-    def _runtime_event_preview_limit(self) -> Optional[int]:
+    def _preview_limit(self) -> Optional[int]:
         """Max length for tool_events in context metadata; None = keep full payloads."""
         settings = getattr(self.config.config.settings, "agent_logging", None)
         if not settings or not getattr(settings, "enabled", True):
@@ -47,7 +47,7 @@ class RunJournal:
             return None
         return 700
 
-    def _update_pending_agent_run(
+    def update_pending_run(
         self,
         *,
         agent_key: str,
@@ -97,7 +97,7 @@ class RunJournal:
         self.context_manager.set_metadata("pending_agent_run", payload)
         return payload
 
-    def _record_runtime_event(
+    def record_event(
         self,
         *,
         event_type: str,
@@ -120,15 +120,15 @@ class RunJournal:
         }
         if tool_name:
             event["tool_name"] = tool_name
-        preview_limit = self._runtime_event_preview_limit()
+        preview_limit = self._preview_limit()
         if arguments is not None:
-            event["arguments"] = self._safe_preview(arguments, max_length=preview_limit)
+            event["arguments"] = safe_preview(arguments, max_length=preview_limit)
         if output is not None:
-            event["output"] = self._safe_preview(output, max_length=preview_limit)
+            event["output"] = safe_preview(output, max_length=preview_limit)
         if extra:
             for key, value in extra.items():
                 if value is not None:
-                    event[key] = self._safe_preview(
+                    event[key] = safe_preview(
                         value, max_length=preview_limit or 300
                     )
         pending = self.context_manager.get_metadata("pending_agent_run")

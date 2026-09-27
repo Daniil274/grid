@@ -2,13 +2,15 @@
 Unit tests for core/agent_factory.py module.
 """
 
-import pytest
-from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 from core.agent_factory import AgentFactory
 from core.config import Config
 from core.config.prompt_sections import PromptSection
+from core.factory.failures import is_retriable
 from core.fallback_model import AllModelsFailedError, FallbackModel
 from utils.exceptions import AgentError
 
@@ -186,24 +188,18 @@ class TestAgentFactory:
         assert Path(factory._agent_session_db_path).resolve() == expected.resolve()
         assert expected.parent.exists()
 
-    def test_is_retriable_agent_exception_detects_transient_errors(self, config_file):
+    def test_transient_provider_failures_are_retried(self):
         """Test transient provider/network failures are treated as retriable."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-
-        assert factory._is_retriable_agent_exception(Exception("Connection error while streaming response"))
-        assert factory._is_retriable_agent_exception(AgentError("rate limit exceeded by provider"))
-        assert factory._is_retriable_agent_exception(Exception("all providers exhausted"))
-        assert factory._is_retriable_agent_exception(Exception("HTTP 503: upstream_unavailable"))
-        assert factory._is_retriable_agent_exception(AgentError("upstream unavailable"))
-        assert factory._is_retriable_agent_exception(Exception("server_error: Сервис временно недоступен"))
-        assert not factory._is_retriable_agent_exception(Exception("tool arguments are invalid"))
+        assert is_retriable(Exception("Connection error while streaming response"))
+        assert is_retriable(AgentError("rate limit exceeded by provider"))
+        assert is_retriable(Exception("all providers exhausted"))
+        assert is_retriable(Exception("HTTP 503: upstream_unavailable"))
+        assert is_retriable(AgentError("upstream unavailable"))
+        assert is_retriable(Exception("server_error: Сервис временно недоступен"))
+        assert not is_retriable(Exception("tool arguments are invalid"))
 
     def test_all_models_failed_is_not_retried(self):
-        factory = object.__new__(AgentFactory)
-        assert not factory._is_retriable_agent_exception(
-            AllModelsFailedError("all failed")
-        )
+        assert not is_retriable(AllModelsFailedError("all failed"))
     
     def test_is_reasoning_model_name(self, config_file):
         """Test reasoning model detection."""

@@ -32,7 +32,6 @@ from core.application.agent_runtime_support import AgentRuntimeSupport
 from core.compact import AutoCompactTrackingState
 from core.config.config import Config
 from core.factory.auto_run import AutoRunTools
-from core.factory.failures import FailureRules
 from core.factory.journal import RunJournal
 from core.factory.mcp import McpSetup
 from core.factory.models import ModelSetup
@@ -81,7 +80,7 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup, FailureRules, RunJournal, PolicyWiring):
+class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup, PolicyWiring):
     """
     Enterprise Agent Factory with advanced features:
     - Configuration validation
@@ -157,6 +156,8 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup,
             persist_path=str(Path(self.config.get_logs_directory()) / "context.json"),
         )
 
+        # What is recorded about the runs, for recovery after a crash and the timeline.
+        self.journal = RunJournal(self.context_manager, self.config)
         self._agent_session_db_path = session_db_path or self._build_agent_session_db_path()
 
         self._runtime_support = AgentRuntimeSupport(
