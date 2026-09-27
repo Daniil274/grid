@@ -141,7 +141,7 @@ async def test_editing_the_first_message_starts_the_agent_fresh(factory):
 async def test_a_session_summarized_since_the_edit_point_is_not_cut(factory):
     context_id = await three_turns(factory)
     second = user_message_id(factory, context_id, "second")
-    with patch("core.agent_factory.compact_conversation", new=AsyncMock(return_value=summarized())), patch.object(
+    with patch("core.factory.turns.compact_conversation", new=AsyncMock(return_value=summarized())), patch.object(
         factory, "_get_compact_client_and_model", return_value=(object(), "m")
     ):
         assert await factory.compact_session("worker", context_id, force=True)

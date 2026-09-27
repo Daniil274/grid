@@ -40,7 +40,7 @@ class TestAgentFactory:
         factory.config.get_provider.return_value = provider
         factory.config.get_proxy_for_provider.return_value = None
 
-        with patch("core.agent_factory.AsyncOpenAI") as client_class:
+        with patch("core.factory.models.AsyncOpenAI") as client_class:
             factory._make_openai_client(
                 api_key="test-key",
                 base_url="https://api.example.com/v1",
@@ -230,8 +230,8 @@ class TestAgentFactory:
         config = Config(str(config_file))
         factory = AgentFactory(config)
         
-        with patch('core.agent_factory.AsyncOpenAI') as mock_openai, \
-             patch('core.agent_factory.VisionChatCompletionsModel') as mock_model, \
+        with patch('core.factory.models.AsyncOpenAI') as mock_openai, \
+             patch('core.factory.models.VisionChatCompletionsModel') as mock_model, \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
@@ -271,7 +271,7 @@ class TestAgentFactory:
 
         first_model = Mock()
         backup_model = Mock()
-        with patch('core.agent_factory.VisionChatCompletionsModel', side_effect=[first_model, backup_model]), \
+        with patch('core.factory.models.VisionChatCompletionsModel', side_effect=[first_model, backup_model]), \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
@@ -300,8 +300,8 @@ class TestAgentFactory:
         model_cfg = config.get_model("gpt-4")
         model_cfg.preserve_reasoning_content = True
 
-        with patch('core.agent_factory.AsyncOpenAI'), \
-             patch('core.agent_factory.VisionChatCompletionsModel') as mock_model, \
+        with patch('core.factory.models.AsyncOpenAI'), \
+             patch('core.factory.models.VisionChatCompletionsModel') as mock_model, \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_resolve_tools_for_names', return_value=([], []), new_callable=AsyncMock), \
@@ -326,8 +326,8 @@ class TestAgentFactory:
         config = Config(str(config_file))
         factory = AgentFactory(config)
         
-        with patch('core.agent_factory.AsyncOpenAI'), \
-             patch('core.agent_factory.VisionChatCompletionsModel'), \
+        with patch('core.factory.models.AsyncOpenAI'), \
+             patch('core.factory.models.VisionChatCompletionsModel'), \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
@@ -355,8 +355,8 @@ class TestAgentFactory:
         config = Config(str(config_file))
         factory = AgentFactory(config)
         
-        with patch('core.agent_factory.AsyncOpenAI'), \
-             patch('core.agent_factory.VisionChatCompletionsModel'), \
+        with patch('core.factory.models.AsyncOpenAI'), \
+             patch('core.factory.models.VisionChatCompletionsModel'), \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
@@ -414,7 +414,7 @@ class TestAgentFactory:
         
         # Mock the tool configs to be found properly
         with patch.object(config, 'get_tool') as mock_get_tool, \
-             patch('core.agent_factory.resolve_tool', side_effect=lambda name, loader: Mock()) as mock_resolve:
+             patch('core.factory.tools.resolve_tool', side_effect=lambda name, loader: Mock()) as mock_resolve:
             
             # Mock tool configs as function type
             mock_tool_config = Mock()

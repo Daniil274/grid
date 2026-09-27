@@ -229,7 +229,7 @@ async def test_a_session_past_the_threshold_is_summarized_and_the_chat_is_kept(f
 
     compact = AsyncMock(return_value=summarized())
     runner = ScriptedRunner("Continued.")
-    with use(runner), patch("core.agent_factory.compact_conversation", new=compact), patch.object(
+    with use(runner), patch("core.factory.turns.compact_conversation", new=compact), patch.object(
         factory, "_get_compact_client_and_model", return_value=(object(), "m")
     ):
         await factory.run_agent("worker", "Go on", context_id=context_id)
@@ -248,7 +248,7 @@ async def test_a_session_within_the_threshold_is_left_alone(factory):
         await factory.run_agent("worker", "Start")
     context_id = factory.context_manager.get_current_context_id()
     compact = AsyncMock(return_value=summarized())
-    with use(ScriptedRunner("Second.")), patch("core.agent_factory.compact_conversation", new=compact):
+    with use(ScriptedRunner("Second.")), patch("core.factory.turns.compact_conversation", new=compact):
         await factory.run_agent("worker", "Go on", context_id=context_id)
     compact.assert_not_awaited()
 
@@ -259,14 +259,14 @@ async def test_compaction_stops_after_repeated_failures(factory):
     await session.add_items([{"role": "user", "content": "x" * 400_000}])
     compact = AsyncMock(side_effect=RuntimeError("summary model down"))
     limit = factory.compact_config.auto.max_consecutive_failures
-    with patch("core.agent_factory.compact_conversation", new=compact), patch.object(
+    with patch("core.factory.turns.compact_conversation", new=compact), patch.object(
         factory, "_get_compact_client_and_model", return_value=(object(), "m")
     ):
         for _ in range(limit + 2):
             assert await factory.compact_session("worker", context_id) is None
     assert compact.await_count == limit
     # An explicit /compact still tries.
-    with patch("core.agent_factory.compact_conversation", new=AsyncMock(return_value=summarized())), patch.object(
+    with patch("core.factory.turns.compact_conversation", new=AsyncMock(return_value=summarized())), patch.object(
         factory, "_get_compact_client_and_model", return_value=(object(), "m")
     ):
         assert await factory.compact_session("worker", context_id, force=True)
@@ -282,7 +282,7 @@ async def test_a_context_overflow_summarizes_the_session_and_retries_once(factor
         "unused",
     )
     compact = AsyncMock(return_value=summarized())
-    with use(runner), patch("core.agent_factory.compact_conversation", new=compact), patch.object(
+    with use(runner), patch("core.factory.turns.compact_conversation", new=compact), patch.object(
         factory, "_get_compact_client_and_model", return_value=(object(), "m")
     ):
         with pytest.raises(Exception, match="context_length_exceeded"):
