@@ -4,7 +4,7 @@ const vm=require('node:vm');
 const fs=require('node:fs');
 const flush=async()=>{for(let i=0;i<25;i++)await Promise.resolve();};
 function harness(decide, tts=false){
- const nodes=new Map(), intervals=[], submitted=[], decisions=[], audios=[];
+ const nodes=new Map(), intervals=[], submitted=[], decisions=[], audios=[], commands=[];
  let processor, transcript='', busy=false, cancelled=0;
  const element=()=>({textContent:'',style:{},dataset:{},classList:{toggle(){}},setAttribute(){},addEventListener(type,fn){this[type]=fn;}});
  const doc={createElement:element,querySelector:()=>({prepend(){}}),getElementById(id){if(!nodes.has(id))nodes.set(id,element());return nodes.get(id);}};
@@ -27,28 +27,29 @@ function harness(decide, tts=false){
   }};
  vm.runInNewContext(fs.readFileSync('web_chat/voice.js','utf8'),sandbox);
  const ui=sandbox.VoiceUI;
- ui.setup({getContextId:()=> 'ctx',getDraft:()=> 'typed draft',isStreaming:()=>busy,getAssistantText:()=> 'prior answer',sendVoiceMessage:async text=>{submitted.push(text);busy=true;},interruptAgent:()=>{cancelled++;},ensureConversation:async()=>{}});
+ ui.setup({getContextId:()=> 'ctx',getDraft:()=> 'typed draft',isStreaming:()=>busy,getAssistantText:()=> 'prior answer',sendVoiceMessage:async text=>{submitted.push(text);busy=true;},interruptAgent:()=>{cancelled++;},ensureConversation:async()=>{},command:async(action,argument)=>{commands.push([action,argument??null]);return 'done';}});
  function frame(level){processor.onaudioprocess({inputBuffer:{getChannelData:()=>new Float32Array(1600).fill(level)}});}
- return {ui,submitted,decisions,audios,get cancelled(){return cancelled;},setBusy(v){busy=v;},
+ return {ui,submitted,decisions,audios,commands,get cancelled(){return cancelled;},setBusy(v){busy=v;},
   async start(){nodes.get('voice-mic-btn').click();await flush();},
   onset(){frame(.1);frame(.1);},
   async utterance(text){transcript=text;frame(.1);frame(.1);for(let i=0;i<8;i++)frame(0);await flush();},
   async tick(){intervals.forEach(fn=>fn());await flush();},
  };
 }
-test('wait accumulates thought; only semantic respond dispatches it',async()=>{
- const h=harness(({text})=>({action:text.includes('файл')?'respond':'wait'}));await h.start();
+test('wait accumulates the thought; a message sends it whole',async()=>{
+ const h=harness(({text})=>({action:text.includes('файл')?'message':'wait'}));await h.start();
  await h.utterance('Я хотел бы');await h.tick();assert.equal(h.submitted.length,0);
  await h.utterance('прочитать файл');await h.tick();assert.deepEqual(h.submitted,['Я хотел бы прочитать файл']);h.ui.cleanup();
 });
-test('semantic interrupt cancels once; replacement waits for agent terminal event',async()=>{
- const h=harness(()=>({action:'interrupt',replacement:true}));await h.start();h.setBusy(true);
- await h.utterance('Нет, объясни другое');await h.tick();assert.equal(h.cancelled,1);assert.equal(h.submitted.length,0);
- h.setBusy(false);await h.tick();assert.deepEqual(h.submitted,['Нет, объясни другое']);h.ui.cleanup();
+test('a message while the agent works is sent at once; the chat decides its delivery',async()=>{
+ const h=harness(()=>({action:'message'}));await h.start();h.setBusy(true);
+ await h.utterance('Нет, объясни другое');await h.tick();
+ assert.deepEqual(h.submitted,['Нет, объясни другое']);assert.equal(h.cancelled,0);h.ui.cleanup();
 });
-test('pure stop never creates a new agent run',async()=>{
- const h=harness(()=>({action:'interrupt',replacement:false}));await h.start();h.setBusy(true);
- await h.utterance('Стоп');h.setBusy(false);await h.tick();assert.equal(h.cancelled,1);assert.equal(h.submitted.length,0);h.ui.cleanup();
+test('a spoken stop runs the stop command and sends nothing to the agent',async()=>{
+ const h=harness(()=>({action:'stop'}));await h.start();h.setBusy(true);
+ await h.utterance('Стоп');h.setBusy(false);await h.tick();
+ assert.deepEqual(h.commands,[['stop',null]]);assert.equal(h.submitted.length,0);h.ui.cleanup();
 });
 test('new speech invalidates a late semantic respond',async()=>{
  let resolve;const h=harness(()=>new Promise(r=>resolve=r));await h.start();

@@ -17,6 +17,8 @@ from web_chat.voice_turns import COMMANDS, endings, register_turn_routes
 def voice_space(config, source=None, **extra):
     """A space whose deployment's voice settings are *config*; *source* resolves model keys."""
     source = source if source is not None else object()
+    # Voice is off unless configured: these tests turn it on unless they say otherwise.
+    config = {**config, "voice": {"enabled": True, **(config.get("voice") or {})}}
     deployment = SimpleNamespace(voice_config_dict=lambda: config, voice_source=lambda: ("voice.yaml", source))
     return SimpleNamespace(deployment=deployment, **extra)
 
@@ -201,3 +203,12 @@ def test_the_next_phrase_is_the_awaited_text_a_cancel_or_unfinished(reply, actio
     )
     assert (response.json()["action"], response.json()["argument"]) == (action, argument)
     assert list(requests[0]["questions"]) == ["reply"]  # not a new command
+
+
+def test_voice_control_is_off_unless_the_config_turns_it_on():
+    space = voice_space({})
+    space.deployment.voice_config_dict = lambda: {"voice": {"decision_model": "jev"}}
+
+    response = TestClient(turn_app(space)).post("/api/voice/decide", json={"text": "Привет", "context_id": "c"})
+
+    assert response.status_code == 403

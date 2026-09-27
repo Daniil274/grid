@@ -55,8 +55,8 @@ function decorateCode(container) {
   }
 }
 
-function actionButton(label, path, onClick) {
-  return h("button.msgAction", { type: "button", title: label, "aria-label": label, on: { click: onClick } }, icon(path, { size: 14 }));
+function actionButton(label, path, onClick, extraClass = "") {
+  return h("button.msgAction", { type: "button", class: extraClass, title: label, "aria-label": label, on: { click: onClick } }, icon(path, { size: 14 }));
 }
 
 /**
@@ -94,7 +94,7 @@ export function createMessage({
 
   const speakButton =
     isAssistant && onSpeak
-      ? actionButton(SPEECH_UI.idle.title, ICONS.volume, () => onSpeak(id))
+      ? actionButton(SPEECH_UI.idle.title, ICONS.volume, () => onSpeak(id), "msgAction--speak")
       : null;
 
   const actions = h(

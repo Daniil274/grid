@@ -786,7 +786,7 @@ class TestServiceAndConfig:
         model_file.parent.mkdir(parents=True, exist_ok=True)
         model_file.write_bytes(b"fake")
         runtime.config_dict.return_value = {
-            "voice": {"tts": {"model_path": str(model_rel)}}
+            "voice": {"enabled": True, "tts": {"model_path": str(model_rel)}}
         }
         proc = processor_factory()
         with patch.object(voice_module, "SpeechProcessor", return_value=proc):

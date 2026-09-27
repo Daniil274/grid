@@ -303,6 +303,7 @@ class WebChatServer:
                     "user": {"id": user.id, "username": user.username, "role": user.role},
                     "accounts": self.auth is not None,
                     "personal_agents": personal is not None and personal.enabled,
+                    "voice": self.deployment.voice_enabled(),
                     "systems": system_options(
                         registry,
                         frozenset(personal.keys()) if personal else frozenset(),

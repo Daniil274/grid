@@ -106,5 +106,6 @@ routing:
 # spoken turn from a pause, an interruption or noise; it must be a Decisions
 # model from `models` above.
 voice:
-  enabled: true
+  # Voice (speech in, answers read aloud, spoken commands) is off; true turns it on.
+  enabled: false
   decision_model: router

@@ -124,6 +124,9 @@ class _DummyDeployment:
     def voice_config_dict(self):
         return {}
 
+    def voice_enabled(self):
+        return False
+
     def config_dict(self):
         return {
             "agents": {
@@ -175,6 +178,7 @@ def test_web_chat_index_and_bootstrap_are_available():
     assert "Grid Chat" in index_response.text
     assert bootstrap_response.status_code == 200
     assert bootstrap_response.json()["default_system"] == "test_system"
+    assert bootstrap_response.json()["voice"] is False
 
 
 def test_action_review_routes_list_and_resolve_pending_review():

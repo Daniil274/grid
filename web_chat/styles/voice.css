@@ -179,3 +179,8 @@
     display: none;
   }
 }
+
+/* Voice off on this server (voice.enabled): no read-aloud buttons either. */
+body:not([data-voice="on"]) .msgAction--speak {
+  display: none;
+}

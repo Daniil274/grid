@@ -132,7 +132,7 @@ def _agents(space: Any) -> List[Dict[str, Optional[str]]]:
 def _decision_model(deployment: Any):
     config = deployment.voice_config_dict()
     voice = config.get("voice") or {}
-    if not voice.get("enabled", True):
+    if not voice.get("enabled", False):
         raise HTTPException(403, "Voice is disabled")
     key = voice.get("decision_model") or (config.get("routing") or {}).get("model")
     if not key:

@@ -60,7 +60,8 @@ logger = logging.getLogger("grid.web_chat.voice")
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULT_VOICE_CONFIG: Dict[str, Any] = {
-    "enabled": True,
+    # Off unless the config turns it on (voice.enabled: true).
+    "enabled": False,
     "stt": {
         "model_size": "small",
         "device": "cuda",
@@ -371,11 +372,11 @@ class VoiceService:
                 f"Silero TTS model not found at {model_path}; "
                 "set voice.tts.model_path or place speech-text/model.pt"
             )
-        if not config.get("enabled", True):
+        if not config.get("enabled", False):
             issues.append("Voice features are disabled in configuration")
 
         status = {
-            "enabled": bool(config.get("enabled", True)),
+            "enabled": bool(config.get("enabled", False)),
             "stt_available": stt_available,
             "tts_available": openrouter_available or windows_available or (backend == "silero" and torch_available and tts_model_found),
             "tts_backend": backend,
@@ -546,7 +547,7 @@ class VoiceService:
     # ── Public operations ─────────────────────────────────────────────────
 
     def _ensure_enabled(self, config: Dict[str, Any]) -> None:
-        if not config.get("enabled", True):
+        if not config.get("enabled", False):
             raise VoiceDisabledError("Voice features are disabled in configuration")
 
     async def transcribe(self, wav_bytes: bytes) -> Dict[str, Any]:

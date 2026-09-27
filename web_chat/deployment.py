@@ -154,6 +154,12 @@ class Deployment:
         path, _ = self.voice_source()
         return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
+    def voice_enabled(self) -> bool:
+        """Whether the chat offers voice at all: ``voice.enabled``, off by default.
+        Off, the voice routes refuse (403) and the page shows no voice controls."""
+        voice = self.voice_config_dict().get("voice") or {}
+        return isinstance(voice, dict) and voice.get("enabled", False) is True
+
     # -- the base system's config file ---------------------------------------
     def config_dict(self) -> Dict[str, Any]:
         return yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}

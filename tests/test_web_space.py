@@ -289,3 +289,12 @@ def test_a_single_system_keeps_its_own_voice_settings(minimal_config, monkeypatc
     path, source = deployment.voice_source()
     assert path == deployment.config_path
     assert source is deployment.config
+
+
+def test_voice_is_off_unless_the_config_turns_it_on(minimal_config, monkeypatch):
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+    assert Deployment(config_path=str(minimal_config), routing_path=None).voice_enabled() is False
+
+    minimal_config.write_text(minimal_config.read_text(encoding="utf-8") + "voice:\n  enabled: true\n", encoding="utf-8")
+
+    assert Deployment(config_path=str(minimal_config), routing_path=None).voice_enabled() is True

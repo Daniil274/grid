@@ -51,6 +51,8 @@ const store = createStore({
   accounts: false,
   // The server lets this user build agents of their own.
   personalAgents: false,
+  // The server offers voice (voice.enabled); off, no voice control is shown.
+  voice: false,
 });
 
 /** Icon-only buttons declare their glyph in markup; fill them in one pass. */
@@ -324,6 +326,7 @@ async function boot() {
       user: bootstrap.user ?? null,
       accounts: Boolean(bootstrap.accounts),
       personalAgents: Boolean(bootstrap.personal_agents),
+      voice: Boolean(bootstrap.voice),
     });
     await refreshConversations();
   }
@@ -352,7 +355,9 @@ async function boot() {
   const [latest] = store.get().conversations;
   if (latest) await chat.openConversation(latest.id);
 
-  globalThis.VoiceUI?.setup({
+  // Voice controls and read-aloud buttons exist only when the server offers voice.
+  document.body.dataset.voice = store.get().voice ? "on" : "off";
+  if (store.get().voice) globalThis.VoiceUI?.setup({
     getContextId: () => store.get().contextId,
     getDraft: () => composer.value,
     setDraft: (value) => composer.setValue(value),
