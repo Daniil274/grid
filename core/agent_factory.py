@@ -34,7 +34,7 @@ from core.config.config import Config
 from core.factory.auto_run import AutoRunTools
 from core.factory.journal import RunJournal
 from core.factory.mcp import McpSetup
-from core.factory.models import ModelSetup
+from core.factory.models import ModelProvider
 from core.factory.policy import PolicyWiring
 from core.factory.run_context import (
     AutoRunToolContext,
@@ -80,7 +80,7 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup, PolicyWiring):
+class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, PolicyWiring):
     """
     Enterprise Agent Factory with advanced features:
     - Configuration validation
@@ -186,8 +186,6 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup,
 
         # Session management for agent memory (per agent/context pair)
         self._agent_sessions = self._runtime_support.agent_sessions
-        # Track emitted warnings to avoid log spam (e.g., Responses API fallbacks)
-        self._responses_warning_keys: set[str] = set()
         self._stream_observer: StreamObserver = (
             stream_observer or ConsoleStreamObserver()
         )
@@ -206,6 +204,8 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup,
         # Per-session compact tracking state (circuit breaker lives here)
         self._compact_tracking = AutoCompactTrackingState()
         self.compact_config = layered_compact(policy_config, self.config)
+        # Models, clients and call settings of this config.
+        self.models = ModelProvider(self.config, self._runtime_support, self.compact_config)
 
         # Initialize pipeline registry for emergency shutdown
         from core.tracing.pipeline_registry import PipelineRegistry
@@ -269,6 +269,14 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup,
         return self._runtime_support.get_agent_session(agent_key, context_id)
 
 
+    def resolve_model_key(self, key: Optional[str]) -> str:
+        """The model key *key* stands for (aliases, the default); see ModelProvider."""
+        return self.models.resolve_key(key)
+
+    def get_openai_client_for_model(self, model_key: str) -> tuple[Any, str]:
+        """(client, model name) for *model_key*; see ModelProvider."""
+        return self.models.client_for(model_key)
+
     async def create_agent(
         self,
         agent_key: str,
@@ -302,12 +310,12 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup,
             model_keys = agent_config.model_keys()
             candidates: list[ModelCandidate] = []
             for model_key in model_keys:
-                sdk_model, candidate_config = self._create_sdk_model(model_key)
+                sdk_model, candidate_config = self.models.sdk_model(model_key)
                 candidates.append(
                     ModelCandidate(
                         key=model_key,
                         model=sdk_model,
-                        settings=self._build_model_settings(
+                        settings=self.models.settings(
                             candidate_config, agent_config.parallel_tool_calls
                         ),
                     )
@@ -350,7 +358,7 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup,
                 name=agent_config.name,
                 instructions=instructions,
                 model=model,
-                model_settings=self._build_model_settings(
+                model_settings=self.models.settings(
                     model_config, agent_config.parallel_tool_calls
                 ),
                 tools=tools,
@@ -404,7 +412,7 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup,
         )
 
         # CRITICAL: Validate that the model is in the allowed models whitelist
-        if not self._is_model_allowed(resolved_model_key):
+        if not self.models.is_allowed(resolved_model_key):
             error_msg = (
                 f"❌ MODEL VALIDATION FAILED ❌\n"
                 f"Model '{resolved_model_key}' is not in the allowed models whitelist.\n"
@@ -437,7 +445,7 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup,
         )
 
         # The same model, client and flags create_agent gives a configured agent.
-        model, model_cfg = self._create_sdk_model(resolved_model_key)
+        model, model_cfg = self.models.sdk_model(resolved_model_key)
 
         tools: List[Any] = []
         mcp_servers_list: List[Any] = []
@@ -518,7 +526,7 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, McpSetup, ModelSetup,
             name=name,
             instructions=enhanced_instructions,
             model=model,
-            model_settings=self._build_model_settings(model_cfg),
+            model_settings=self.models.settings(model_cfg),
             tools=tools,
             mcp_servers=mcp_servers_list,
         )

@@ -1,8 +1,9 @@
-"""Models, their clients and settings, as the config describes them.
+"""Models, their clients and settings, as a system's config describes them.
 
-Resolves model keys (allowed list, fallbacks), builds the OpenAI-compatible
-clients and the SDK models an agent runs on, and the settings each call uses.
-Relies on ``self.config`` and ``self._runtime_support``.
+ModelProvider resolves model keys (the allowed list, aliases), builds the
+OpenAI-compatible clients and the Agents SDK models an agent runs on, and
+the settings of each call; it knows each agent's context window and which
+model summarizes a session. It holds the config and nothing of a run.
 """
 
 from __future__ import annotations
@@ -25,27 +26,26 @@ logger = logging.getLogger("grid.agent_factory")
 DEFAULT_CONTEXT_WINDOW = 128_000
 
 
-class ModelSetup:
-    """Models, their clients and settings, as the config describes them.
+class ModelProvider:
+    """The models of one system's config, ready for agents to run on."""
 
-    Resolves model keys (allowed list, fallbacks), builds the OpenAI-compatible
-    clients and the SDK models an agent runs on, and the settings each call uses.
-    Relies on ``self.config`` and ``self._runtime_support``.
-    """
+    def __init__(self, config: Any, runtime_support: Any, compact_config: Any) -> None:
+        self.config = config
+        self._runtime_support = runtime_support
+        self.compact_config = compact_config
+        # Responses API warnings already logged, so each is logged once.
+        self._responses_warning_keys: set[str] = set()
 
-    # ---------------------------------------------------------------------
-    # Lightweight model resolution helpers for API (e.g., Cline endpoint)
-    # ---------------------------------------------------------------------
-    def _is_model_allowed(self, model_key: str) -> bool:
+    def is_allowed(self, model_key: str) -> bool:
         """Whether settings.allowed_models permits *model_key*; no list allows every model."""
         allowed = self.config.config.settings.allowed_models
         return not allowed or model_key in allowed
 
-    def resolve_model_key(self, key: Optional[str]) -> str:
+    def resolve_key(self, key: Optional[str]) -> str:
         """Resolve an input key into a model key using runtime support services."""
         return self._runtime_support.resolve_model_key(key)
 
-    def _make_openai_client(
+    def make_client(
         self,
         *,
         api_key: str,
@@ -80,15 +80,15 @@ class ModelSetup:
             )
         return AsyncOpenAI(**kwargs)
 
-    def get_openai_client_for_model(self, model_key: str) -> tuple[AsyncOpenAI, str]:
+    def client_for(self, model_key: str) -> tuple[AsyncOpenAI, str]:
         """Create OpenAI client and return (client, model_name) using configuration."""
         return self._runtime_support.get_openai_client_for_model(model_key)
 
-    def _is_reasoning_model_name(self, model_name: str) -> bool:
+    def is_reasoning_model_name(self, model_name: str) -> bool:
         """Heuristic check for reasoning-style models requiring Responses API."""
         return self._runtime_support.is_reasoning_model_name(model_name)
 
-    def _build_model_settings(
+    def settings(
         self, model_config: Any, parallel_tool_calls: bool = False
     ) -> ModelSettings:
         """Build ModelSettings from model config, applying reasoning overrides if configured.
@@ -126,7 +126,7 @@ class ModelSetup:
             parallel_tool_calls=parallel_tool_calls,
         )
 
-    def _create_sdk_model(self, model_key: str) -> tuple[Any, Any]:
+    def sdk_model(self, model_key: str) -> tuple[Any, Any]:
         """Create one Agents SDK model and return it with its config."""
         model_config = self.config.get_model(model_key)
         provider_config = self.config.get_provider(model_config.provider)
@@ -140,7 +140,7 @@ class ModelSetup:
                 },
             )
 
-        client = self._make_openai_client(
+        client = self.make_client(
             api_key=api_key,
             base_url=provider_config.base_url,
             timeout=provider_config.timeout,
@@ -203,7 +203,7 @@ class ModelSetup:
             )
         return model, model_config
 
-    def _get_compact_client_and_model(
+    def compact_client_and_model(
         self, key: Optional[str]
     ) -> tuple[Optional[AsyncOpenAI], Optional[str]]:
         """Resolve the client/model to use for full compact."""
@@ -211,17 +211,17 @@ class ModelSetup:
         summary_model_key = getattr(compact_cfg, "summary_model", None)
         if summary_model_key:
             try:
-                return self.get_openai_client_for_model(summary_model_key)
+                return self.client_for(summary_model_key)
             except Exception:
                 logger.warning(
                     "Configured compact.summary_model '%s' is unavailable; falling back to resolved model",
                     summary_model_key,
                 )
         if key:
-            return self.get_openai_client_for_model(self.resolve_model_key(key))
+            return self.client_for(self.resolve_key(key))
         return None, None
 
-    def _context_window(self, agent_key: Optional[str]) -> int:
+    def context_window(self, agent_key: Optional[str]) -> int:
         """The context window of *agent_key*'s model; a default for unknown agents."""
         try:
             return self.config.get_model(self.config.get_agent(agent_key).primary_model).context_window

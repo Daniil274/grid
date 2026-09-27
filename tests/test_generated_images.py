@@ -10,7 +10,13 @@ from unittest.mock import AsyncMock
 
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
-from core.generated_images import ImageCollector, ReportingStream, collecting, image_urls, report
+from core.generated_images import (
+    ImageCollector,
+    ReportingStream,
+    collecting,
+    image_urls,
+    report,
+)
 from core.vision_model import VisionChatCompletionsModel
 from schemas.schemas import ImageContent
 from tests.test_run_agent import ScriptedRunner, factory, use  # noqa: F401 - fixture
@@ -130,9 +136,9 @@ def test_modalities_are_requested_next_to_reasoning_settings(factory):
     model = factory.config.get_model("m").model_copy(
         update={"modalities": ["image", "text"], "reasoning": {"enabled": False}}
     )
-    settings = factory._build_model_settings(model)
+    settings = factory.models.settings(model)
     assert settings.extra_body == {"reasoning": {"enabled": False}, "modalities": ["image", "text"]}
-    assert factory._build_model_settings(factory.config.get_model("m")).extra_body is None
+    assert factory.models.settings(factory.config.get_model("m")).extra_body is None
 
 
 def test_the_chat_receives_an_image_event():

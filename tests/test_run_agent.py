@@ -230,7 +230,7 @@ async def test_a_session_past_the_threshold_is_summarized_and_the_chat_is_kept(f
     compact = AsyncMock(return_value=summarized())
     runner = ScriptedRunner("Continued.")
     with use(runner), patch("core.factory.turns.compact_conversation", new=compact), patch.object(
-        factory, "_get_compact_client_and_model", return_value=(object(), "m")
+        factory.models, "compact_client_and_model", return_value=(object(), "m")
     ):
         await factory.run_agent("worker", "Go on", context_id=context_id)
 
@@ -260,14 +260,14 @@ async def test_compaction_stops_after_repeated_failures(factory):
     compact = AsyncMock(side_effect=RuntimeError("summary model down"))
     limit = factory.compact_config.auto.max_consecutive_failures
     with patch("core.factory.turns.compact_conversation", new=compact), patch.object(
-        factory, "_get_compact_client_and_model", return_value=(object(), "m")
+        factory.models, "compact_client_and_model", return_value=(object(), "m")
     ):
         for _ in range(limit + 2):
             assert await factory.compact_session("worker", context_id) is None
     assert compact.await_count == limit
     # An explicit /compact still tries.
     with patch("core.factory.turns.compact_conversation", new=AsyncMock(return_value=summarized())), patch.object(
-        factory, "_get_compact_client_and_model", return_value=(object(), "m")
+        factory.models, "compact_client_and_model", return_value=(object(), "m")
     ):
         assert await factory.compact_session("worker", context_id, force=True)
 
@@ -283,7 +283,7 @@ async def test_a_context_overflow_summarizes_the_session_and_retries_once(factor
     )
     compact = AsyncMock(return_value=summarized())
     with use(runner), patch("core.factory.turns.compact_conversation", new=compact), patch.object(
-        factory, "_get_compact_client_and_model", return_value=(object(), "m")
+        factory.models, "compact_client_and_model", return_value=(object(), "m")
     ):
         with pytest.raises(Exception, match="context_length_exceeded"):
             await factory.run_agent("worker", "Go on", context_id=context_id)
@@ -317,7 +317,7 @@ async def test_every_model_call_clears_old_tool_outputs_past_the_budget(factory)
 
 
 def test_the_model_whitelist_allows_only_listed_models(factory):
-    assert factory._is_model_allowed("anything")  # no list: every model
+    assert factory.models.is_allowed("anything")  # no list: every model
     factory.config.config.settings.allowed_models = ["m"]
-    assert factory._is_model_allowed("m")
-    assert not factory._is_model_allowed("other")
+    assert factory.models.is_allowed("m")
+    assert not factory.models.is_allowed("other")

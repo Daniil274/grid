@@ -11,6 +11,7 @@ from core.agent_factory import AgentFactory
 from core.config import Config
 from core.config.prompt_sections import PromptSection
 from core.factory.failures import is_retriable
+from core.factory.models import ModelProvider
 from core.fallback_model import AllModelsFailedError, FallbackModel
 from utils.exceptions import AgentError
 
@@ -21,14 +22,11 @@ class TestAgentFactory:
     @pytest.mark.parametrize("reasoning", [None, {"effort": "low"}])
     def test_parallel_tool_calls_follow_the_agent_setting(self, reasoning):
         """Off unless the agent opts in, with or without reasoning overrides."""
-        factory = object.__new__(AgentFactory)
+        models = ModelProvider(config=None, runtime_support=None, compact_config=None)
         model_config = Mock(max_tokens=100, reasoning=reasoning, modalities=None)
 
-        assert factory._build_model_settings(model_config).parallel_tool_calls is False
-        assert (
-            factory._build_model_settings(model_config, True).parallel_tool_calls
-            is True
-        )
+        assert models.settings(model_config).parallel_tool_calls is False
+        assert models.settings(model_config, True).parallel_tool_calls is True
 
     def test_coordinator_example_batches_tool_calls(self):
         config = Config("examples/coordinator-pipeline/config.yaml")
@@ -36,14 +34,14 @@ class TestAgentFactory:
         assert config.get_agent("general_purpose").parallel_tool_calls is False
 
     def test_openai_client_uses_configured_provider_headers(self):
-        factory = object.__new__(AgentFactory)
         provider = Mock(default_headers={"User-Agent": "grid-test/1.0"})
-        factory.config = Mock()
-        factory.config.get_provider.return_value = provider
-        factory.config.get_proxy_for_provider.return_value = None
+        config = Mock()
+        config.get_provider.return_value = provider
+        config.get_proxy_for_provider.return_value = None
+        models = ModelProvider(config=config, runtime_support=None, compact_config=None)
 
         with patch("core.factory.models.AsyncOpenAI") as client_class:
-            factory._make_openai_client(
+            models.make_client(
                 api_key="test-key",
                 base_url="https://api.example.com/v1",
                 provider_key="example",
@@ -207,18 +205,18 @@ class TestAgentFactory:
         factory = AgentFactory(config)
         
         # Reasoning models
-        assert factory._is_reasoning_model_name("o3-mini")
-        assert factory._is_reasoning_model_name("o4-mini-high")
-        assert factory._is_reasoning_model_name("deepseek-r1")
-        assert factory._is_reasoning_model_name("reasoning-model")
-        assert factory._is_reasoning_model_name("thinking-ai")
+        assert factory.models.is_reasoning_model_name("o3-mini")
+        assert factory.models.is_reasoning_model_name("o4-mini-high")
+        assert factory.models.is_reasoning_model_name("deepseek-r1")
+        assert factory.models.is_reasoning_model_name("reasoning-model")
+        assert factory.models.is_reasoning_model_name("thinking-ai")
         
         # Non-reasoning models
-        assert not factory._is_reasoning_model_name("gpt-4")
-        assert not factory._is_reasoning_model_name("claude-3")
-        assert not factory._is_reasoning_model_name("llama2")
-        assert not factory._is_reasoning_model_name("")
-        assert not factory._is_reasoning_model_name(None)
+        assert not factory.models.is_reasoning_model_name("gpt-4")
+        assert not factory.models.is_reasoning_model_name("claude-3")
+        assert not factory.models.is_reasoning_model_name("llama2")
+        assert not factory.models.is_reasoning_model_name("")
+        assert not factory.models.is_reasoning_model_name(None)
 
     @pytest.mark.asyncio
     async def test_create_agent_success(self, config_file):
@@ -302,7 +300,7 @@ class TestAgentFactory:
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_resolve_tools_for_names', return_value=([], []), new_callable=AsyncMock), \
              patch.object(factory, '_build_dynamic_agent_instructions', return_value="instr"), \
-             patch.object(factory, '_is_model_allowed', return_value=True):
+             patch.object(factory.models, 'is_allowed', return_value=True):
 
             mock_model.return_value = Mock()
             mock_agent_class.return_value = Mock()

@@ -152,7 +152,7 @@ class TurnRunner:
         """
         max_images = self.config.config.settings.image_processing.max_images_per_request
         clear_outputs = context_budget_filter(
-            self._context_window(agent_key), self.compact_config
+            self.models.context_window(agent_key), self.compact_config
         )
 
         def budget(items: List[Any], instructions: Optional[str]) -> ModelInputData:
@@ -420,7 +420,7 @@ class TurnRunner:
         """
         context_id = context_id or self.get_active_context_id()
         items = await self._get_agent_session(agent_key, context_id).get_items()
-        window = self._context_window(agent_key)
+        window = self.models.context_window(agent_key)
         return {
             "tokens": request_tokens(items),
             "window": window,
@@ -448,7 +448,7 @@ class TurnRunner:
         if not items:
             return None
         tokens_before = request_tokens(items)
-        window = self._context_window(agent_key)
+        window = self.models.context_window(agent_key)
         if not force:
             if tokens_before <= get_auto_compact_threshold(window, compact_cfg):
                 return None
@@ -461,7 +461,7 @@ class TurnRunner:
                 return None
         logger.info("Compacting the session of %s: ~%d/%d tokens", agent_key, tokens_before, window)
         try:
-            client, model = self._get_compact_client_and_model(agent_key)
+            client, model = self.models.compact_client_and_model(agent_key)
             result = await compact_conversation(
                 messages=session_transcript(items),
                 llm_client=client,
