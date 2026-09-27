@@ -1,0 +1,2 @@
+# This example uses the root project dependencies.
+# External runtime requirement: FFmpeg with ffmpeg and ffprobe on PATH.

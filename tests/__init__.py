@@ -1,3 +1,1 @@
-"""
-Test package for Grid Agent System.
-"""
+# Grid tests package

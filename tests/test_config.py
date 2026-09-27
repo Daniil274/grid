@@ -6,7 +6,7 @@ import pytest
 import os
 import yaml
 from pathlib import Path
-from unittest.mock import patch, Mock
+from unittest.mock import patch
 
 from core.config import Config
 from utils.exceptions import ConfigError
@@ -59,7 +59,7 @@ class TestConfig:
         
         # Test get_working_directory
         working_dir = config.get_working_directory()
-        assert working_dir == "/tmp/test"
+        assert working_dir == os.path.abspath("/tmp/test")
         
         # Test set_working_directory (when allowed)
         new_dir = "/tmp/new_test"
@@ -77,7 +77,7 @@ class TestConfig:
         config = Config(str(modified_config_file))
         original_working_dir = config._working_directory
         
-        with patch('core.config.logger') as mock_logger:
+        with patch('core.config.config.logger') as mock_logger:
             config.set_working_directory("/new/path")
             mock_logger.warning.assert_called_with("Path override is disabled in configuration")
             assert config._working_directory == original_working_dir
@@ -89,18 +89,45 @@ class TestConfig:
         # Test with relative path
         relative_path = "test/file.txt"
         absolute_path = config.get_absolute_path(relative_path)
-        assert absolute_path == "/tmp/test/test/file.txt"
+        expected_path = (Path(config.get_working_directory()) / relative_path).as_posix()
+        assert absolute_path == expected_path
         
         # Test with already absolute path
-        abs_path = "/already/absolute/path.txt"
+        abs_path = str((Path(config.get_working_directory()) / "already_absolute_path.txt").resolve())
         result = config.get_absolute_path(abs_path)
-        assert result == abs_path
+        assert result == abs_path.replace('\\', '/')
     
     def test_get_config_directory(self, config_file):
         """Test get_config_directory method."""
         config = Config(str(config_file))
         config_dir = config.get_config_directory()
-        assert config_dir == "/tmp/config"
+        assert config_dir == os.path.abspath("/tmp/config")
+
+    def test_relative_working_directory_is_resolved_from_config_location(self, temp_dir, sample_config):
+        """Relative settings.working_directory should resolve from config.yaml directory."""
+        workspace_dir = temp_dir / "workspace"
+        workspace_dir.mkdir()
+        sample_config["settings"]["working_directory"] = "./workspace"
+        config_path = temp_dir / "relative_config.yaml"
+        with open(config_path, 'w') as f:
+            yaml.dump(sample_config, f)
+
+        config = Config(str(config_path))
+
+        assert config.get_working_directory() == str(workspace_dir.resolve())
+
+    def test_relative_config_directory_is_resolved_from_config_location(self, temp_dir, sample_config):
+        """Relative settings.config_directory should resolve from config.yaml directory."""
+        conf_dir = temp_dir / "conf"
+        conf_dir.mkdir()
+        sample_config["settings"]["config_directory"] = "./conf"
+        config_path = temp_dir / "relative_config_dir.yaml"
+        with open(config_path, 'w') as f:
+            yaml.dump(sample_config, f)
+
+        config = Config(str(config_path))
+
+        assert config.get_config_directory() == str(conf_dir.resolve())
     
     def test_provider_methods(self, config_file):
         """Test provider-related methods."""
@@ -127,7 +154,7 @@ class TestConfig:
         config = Config(str(config_file))
         
         with patch.dict(os.environ, {}, clear=True):
-            with patch('core.config.logger') as mock_logger:
+            with patch('core.config.config.logger') as mock_logger:
                 api_key = config.get_api_key("openai")
                 assert api_key is None
                 mock_logger.warning.assert_called_with("No API key found for provider 'openai'")
@@ -261,8 +288,33 @@ class TestConfig:
         assert "Base prompt for test agent." in prompt
         assert "Can read files." in prompt
         assert "Can write files." in prompt
-        assert "Доступные инструменты:" in prompt
+        assert "Available tools:" in prompt
     
+    def test_build_agent_prompt_sections(self, config_file, sample_config):
+        """Test building structured prompt sections."""
+        sample_config["prompt_templates"] = {
+            "test_prompt": "Base prompt for test agent."
+        }
+        sample_config["tools"]["file_read"]["prompt_addition"] = "Can read files."
+        sample_config["tools"]["file_write"]["prompt_addition"] = "Can write files."
+
+        modified_config_file = config_file.parent / "sectioned_config.yaml"
+        with open(modified_config_file, 'w') as f:
+            yaml.dump(sample_config, f)
+
+        config = Config(str(modified_config_file))
+
+        sections = config.build_agent_prompt_sections("test_agent")
+
+        assert [section.key for section in sections] == [
+            "base_prompt",
+            "tool_capabilities",
+        ]
+        assert sections[0].scope == "static"
+        assert "Base prompt for test agent." in sections[0].content
+        assert "Can read files." in sections[1].content
+        assert "Can write files." in sections[1].content
+
     def test_build_agent_prompt_with_custom_prompt(self, config_file, sample_config):
         """Test building agent prompt with custom prompt."""
         sample_config["agents"]["test_agent"]["custom_prompt"] = "Custom prompt for agent."

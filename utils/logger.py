@@ -5,11 +5,110 @@ Enterprise-grade logging for Grid system with structured logging and multiple ou
 import logging
 import sys
 import json
+import threading
+from contextvars import ContextVar, Token
 from datetime import datetime
 from typing import Any, Dict, Optional
+from utils.grid_paths import get_default_logs_dir
 from pathlib import Path
 from functools import lru_cache
-import re
+
+
+def format_verbose_block(title: str, content: Any) -> str:
+    """Format a verbose log section (shared by verbose.log and session logs)."""
+    border = "=" * 80
+    try:
+        if isinstance(content, (dict, list)):
+            formatted_content = json.dumps(content, ensure_ascii=False, indent=2)
+        else:
+            formatted_content = str(content)
+    except Exception:
+        formatted_content = str(content)
+    return f"\n{border}\n{title}\n{border}\n{formatted_content}\n{border}\n"
+
+
+class SessionLogManager:
+    """Mirrors grid.verbose output into per-context session log files.
+
+    Turns of several conversations - on a web server, of several users - run at
+    once in one process. A record belongs to the session active in the task
+    that logged it: :meth:`activate` sets a context variable, which the tasks a
+    run starts inherit, and one handler on grid.verbose appends every record to
+    that session's file. A record logged outside any session goes to none, and
+    one run's settings (its log directory) never change another's.
+    """
+
+    _lock = threading.Lock()
+    _enabled = False
+    _verbose_level = "full"
+    _log_dir: Optional[Path] = None
+    _current: ContextVar[Optional[Path]] = ContextVar("grid_session_log", default=None)
+    _handler: Optional[logging.Handler] = None
+
+    @classmethod
+    def configure(
+        cls,
+        *,
+        enabled: bool,
+        level: str = "full",
+        log_dir: Optional[Path] = None,
+    ) -> None:
+        """Defaults for :meth:`activate` calls that bring no settings of their own."""
+        with cls._lock:
+            cls._enabled = enabled
+            cls._verbose_level = (level or "full").lower()
+            if log_dir is not None:
+                cls._log_dir = log_dir
+
+    @staticmethod
+    def _mirrors(enabled: bool, level: Optional[str]) -> bool:
+        return enabled and (level or "full").lower() in ("full", "detailed")
+
+    @classmethod
+    def uses_verbose_mirror(cls) -> bool:
+        return cls._mirrors(cls._enabled, cls._verbose_level)
+
+    @classmethod
+    def activate(
+        cls,
+        context_id: str,
+        *,
+        log_dir: Optional[Path] = None,
+        enabled: Optional[bool] = None,
+        level: Optional[str] = None,
+    ) -> Optional[Token]:
+        """Mirror this task's verbose output to ``<log_dir>/sessions/<context_id>.log``
+        until :meth:`deactivate` gets the returned token; None when not mirroring.
+        Settings not given come from :meth:`configure`."""
+        enabled = cls._enabled if enabled is None else enabled
+        level = cls._verbose_level if level is None else level
+        if not context_id or not cls._mirrors(enabled, level):
+            return None
+        session_dir = (log_dir or cls._log_dir or get_default_logs_dir()) / "sessions"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        cls._install_handler()
+        return cls._current.set(session_dir / f"{context_id}.log")
+
+    @classmethod
+    def deactivate(cls, token: Optional[Token]) -> None:
+        """End the mirroring :meth:`activate` started in this task."""
+        if token is not None:
+            cls._current.reset(token)
+
+    @classmethod
+    def _install_handler(cls) -> None:
+        with cls._lock:
+            if cls._handler is None:
+                handler = _SessionRoutingHandler(cls._current)
+                handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+                logging.getLogger("grid.verbose").addHandler(handler)
+                cls._handler = handler
+
+    @classmethod
+    def write_verbose(cls, title: str, content: Any) -> None:
+        if not cls.uses_verbose_mirror():
+            return
+        logging.getLogger("grid.verbose").debug(format_verbose_block(title, content))
 
 
 class JSONFormatter(logging.Formatter):
@@ -107,6 +206,24 @@ class NonLockingFileHandler(logging.Handler):
             pass
 
 
+class _SessionRoutingHandler(logging.Handler):
+    """Appends each record to the session log of the task that logged it."""
+
+    def __init__(self, current: "ContextVar[Optional[Path]]") -> None:
+        super().__init__(logging.DEBUG)
+        self._current = current
+
+    def emit(self, record: logging.LogRecord) -> None:
+        path = self._current.get()
+        if path is None:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as file:
+                file.write(self.format(record) + "\n")
+        except OSError:
+            self.handleError(record)
+
+
 class Logger:
     """Centralized logger with support for structured logging."""
     
@@ -117,6 +234,22 @@ class Logger:
         """Initialize logger for given name."""
         self.name = name
         self.logger = self._get_logger(name)
+
+    @classmethod
+    def get_logger(cls, name: str) -> logging.Logger:
+        """Return a standard logger instance under the unified grid.* namespace.
+
+        Accepts either short names ("tool") or existing logger names
+        ("grid.tool", module paths, etc.) and normalizes them to a single
+        hierarchy where possible.
+        """
+        if not name:
+            normalized_name = "grid"
+        elif name == "grid" or name.startswith("grid."):
+            normalized_name = name
+        else:
+            normalized_name = f"grid.{name}"
+        return logging.getLogger(normalized_name)
     
     @classmethod
     def configure(
@@ -162,11 +295,11 @@ class Logger:
             if Path(log_dir).is_absolute():
                 log_path = Path(log_dir)
             else:
-                # Force use of project root logs directory
-                import os
-                project_root = os.environ.get('PROJECT_ROOT', '/workspaces/grid')
-                log_path = Path(project_root) / "logs"
-            
+                # Determine the project root directory (where this file is located)
+                # This file is at <project_root>/utils/logger.py
+                project_root = Path(__file__).parent.parent.resolve()
+                log_path = project_root / log_dir
+
             log_path.mkdir(parents=True, exist_ok=True)
             
             # General log file
@@ -179,6 +312,20 @@ class Logger:
             error_handler.setLevel(logging.ERROR)
             error_handler.setFormatter(JSONFormatter())
             logging.getLogger().addHandler(error_handler)
+
+            # Verbose log file (full prompts, results, tools) - NO CONSOLE
+            verbose_logger = logging.getLogger("grid.verbose")
+            verbose_logger.propagate = False  # Don't send to root logger (console)
+            verbose_logger.setLevel(logging.DEBUG)
+            # Remove old handlers to prevent duplicates on reconfigure
+            for h in verbose_logger.handlers[:]:
+                verbose_logger.removeHandler(h)
+                
+            verbose_handler = logging.FileHandler(log_path / "verbose.log", encoding='utf-8')
+            verbose_handler.setFormatter(logging.Formatter(
+                '%(asctime)s | %(message)s'
+            ))
+            verbose_logger.addHandler(verbose_handler)
             
             # Legacy agent logs (timestamped)
             if enable_legacy_logs:
@@ -193,7 +340,7 @@ class Logger:
     def _get_logger(cls, name: str) -> logging.Logger:
         """Get or create logger instance."""
         if name not in cls._loggers:
-            logger = logging.getLogger(f"grid.{name}")
+            logger = cls.get_logger(name)
             cls._loggers[name] = logger
         return cls._loggers[name]
     
@@ -232,15 +379,23 @@ class Logger:
     def setup_file_logging(self, file_path: str, level: int = logging.DEBUG) -> None:
         """Attach a file handler to this logger.
         Args:
-            file_path: Path to the log file to write
+            file_path: Path to the log file to write (absolute or relative to project root)
             level: Minimum level for this handler
         """
         try:
-            # Ensure parent directory exists
+            # Convert to Path object
             path_obj = Path(file_path)
+
+            # If relative path, resolve it relative to project root, not current working directory
+            if not path_obj.is_absolute():
+                # This file is at <project_root>/utils/logger.py
+                project_root = Path(__file__).parent.parent.resolve()
+                path_obj = project_root / path_obj
+
+            # Ensure parent directory exists
             if path_obj.parent and not path_obj.parent.exists():
                 path_obj.parent.mkdir(parents=True, exist_ok=True)
-            
+
             handler = NonLockingFileHandler(path_obj, level=level)
             handler.setLevel(level)
             handler.setFormatter(LegacyFormatter())
@@ -297,7 +452,7 @@ class Logger:
     def log_tool_call(self, tool_name: str, args: Dict[str, Any]) -> None:
         """Log tool call."""
         # Legacy format logging (without emojis for compatibility)
-        # Не печатаем сырые аргументы, только краткую сводку
+        # Don't print raw arguments, only a brief summary
         try:
             summary = ", ".join(f"{k}={('<json>' if isinstance(v, str) and v.strip().startswith('{') else (str(v)[:30] + ('...' if len(str(v))>30 else '')))}" for k, v in list(args.items())[:5])
         except Exception:
@@ -385,6 +540,53 @@ class Logger:
             config_path=config_path,
             event_type="config_reload"
         )
+
+    def log_verbose(self, title: str, content: Any) -> None:
+        """
+        Log detailed data to verbose log file only (never console).
+        When session logging is active (agent_logging level full/detailed),
+        the same payload is mirrored to logs/sessions/<context_id>.log.
+        """
+        logging.getLogger("grid.verbose").debug(format_verbose_block(title, content))
+
+    @classmethod
+    def configure_agent_logging(
+        cls,
+        *,
+        enabled: bool,
+        level: str = "full",
+        log_dir: Optional[str] = None,
+    ) -> None:
+        """Process-wide defaults for session log mirroring (settings.agent_logging)."""
+        SessionLogManager.configure(enabled=enabled, level=level, log_dir=cls._logs_path(log_dir))
+
+    @classmethod
+    def activate_session_log(
+        cls,
+        context_id: str,
+        *,
+        log_dir: Optional[str] = None,
+        level: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> Optional[Token]:
+        """Mirror this task's verbose output to <log_dir>/sessions/<context_id>.log;
+        pass the returned token to :meth:`deactivate_session_log`."""
+        return SessionLogManager.activate(
+            context_id, log_dir=cls._logs_path(log_dir), level=level, enabled=enabled
+        )
+
+    @classmethod
+    def deactivate_session_log(cls, token: Optional[Token]) -> None:
+        """Stop the mirroring the token's activation started."""
+        SessionLogManager.deactivate(token)
+
+    @staticmethod
+    def _logs_path(log_dir: Optional[str]) -> Optional[Path]:
+        """*log_dir* as a path: absolute as given, relative under the default logs directory."""
+        if not log_dir:
+            return None
+        path = Path(log_dir).expanduser()
+        return path if path.is_absolute() else get_default_logs_dir() / path
 
 
 # Legacy compatibility functions

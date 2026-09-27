@@ -1,191 +1,299 @@
-## Grid Agent System
+# Grid
 
-An orchestration system for AI agents focused on engineering tasks, with clear architecture, strict logging, security, and an OpenAI-compatible API.
+Grid — среда для создания и запуска систем из AI-агентов. Она объединяет модели, инструменты, память, маршрутизацию и наблюдаемость в одном конфигурируемом приложении.
 
-### Purpose
-- **Orchestration**: hierarchical coordination of specialized agents (files, Git, task analysis) with efficient context management.
-- **Tools**: a unified tool layer (filesystem, Git, MCP) with optimization for small open-source models.
-- **API**: OpenAI-compatible endpoints for integration with external clients and tools.
-- **Observability**: a unified logger, tool call tracing, and agent session persistence.
-- **Efficiency**: smart delegation and context optimization for resource-constrained models.
+Проект подходит для инженерных ассистентов, исследовательских сценариев, автоматизации рабочих процессов и экспериментов с несколькими специализированными агентами.
 
-## Capabilities
-- **Agents**: configurable profiles (model, tools, prompt). Support for subagents as tools (`call_*`).
-- **Tools**: file read/write/search, Git operations, MCP integration.
-- **Context**: context propagation between agents and tools, memory sessions (`SQLiteSession`).
-- **Security**: security-aware factory, middleware for authentication, rate limiting, and basic guardrails.
-- **API**: Chat Completions/Completions (OpenAI-compatible), agents, and system routes.
-- **Logging**: unified structured logs, tool call journal, metric collection.
+## Возможности
 
-## Architecture
-- `core/`
-  - `config.py`: loads and validates `config.yaml`, manages paths, providers, models, and agents.
-  - `agent_factory.py`: creates/caches agents, assembles tools, runs via `Runner.run`, unified logging, sessions.
-  - `security_agent_factory.py`: factory extension with security guardrails for selected agent types.
-  - `context.py`: manages dialogue and execution context.
-- `tools/`
-  - `file_tools.py`: filesystem operations.
-  - `git_tools.py`: Git wrappers with validation and logging.
-  - `function_tools.py`: integrator and registry of available tools, aliases, statistics.
-  - `mcp.py`: MCP integration (if enabled).
-- `api/`
-  - `main.py`: FastAPI app, middleware, error handlers, routes.
-  - `routers/`: OpenAI-compatible endpoints, agent CRUD, system endpoints.
-- `utils/`: unified logger, metrics, formatters, exceptions.
-- `schemas.py`: Pydantic schemas for configuration and execution.
+- конфигурируемые агенты и модели от разных провайдеров;
+- встроенные инструменты для файлов, Git, поиска и выполнения рабочих операций;
+- подключение внешних инструментов через MCP;
+- делегирование задач и параллельная работа фоновых агентов;
+- диалоговый CLI и браузерный интерфейс;
+- долговременный контекст, история запусков и журналирование;
+- маршрутизация запросов между несколькими агентными системами;
+- визуализация хода выполнения и диагностика контекста;
+- опциональная проверка действий политиками безопасности;
+- поддержка изображений и дополнительных голосовых компонентов.
 
-## Installation
-1) Clone and environment
-```
-git clone <repo-url>
-cd agents
+## Требования
+
+- Python 3.11 или новее;
+- Git;
+- API-ключ хотя бы одного настроенного провайдера моделей;
+- Docker и Docker Compose — только для контейнерного запуска.
+
+## Локальная установка
+
+Клонируйте репозиторий и создайте виртуальное окружение:
+
+```bash
+git clone https://github.com/AgentsSDK/grid.git
+cd grid
 python -m venv .venv
-# Windows PowerShell
-. .venv\Scripts\Activate.ps1
-# Linux/macOS
+```
+
+Активируйте окружение.
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Linux и macOS:
+
+```bash
 source .venv/bin/activate
 ```
-2) Dependencies
-```
-pip install -r requirements.txt           # core and CLI
-pip install -r requirements-api.txt       # API dependencies (FastAPI/uvicorn, etc.)
-```
-3) Configuration
-```
-copy config.yaml.example config.yaml       # Windows
-# or
-cp config.yaml.example config.yaml         # Linux/macOS
-```
-Fill in `config.yaml` for your environment (see the “Configuration” section).
 
-4) Environment variables
-Create a `.env` (following `.env.example`, if present) and set API keys, or use environment variables corresponding to `providers.*.api_key_env`.
+Установите Grid:
 
-Note for Windows/pytest: add the current folder to `PYTHONPATH` for the session:
-```
-$env:PYTHONPATH = "."
+```bash
+python -m pip install --upgrade pip
+python -m pip install -e .
 ```
 
-## Running
-### CLI (local agent)
-- Chat mode:
-```
-python agent_chat.py
-```
-- Single request:
-```
-python agent_chat.py --message "List files in current directory"
-```
-- Explicit agent:
-```
-python agent_chat.py --agent file_agent --message "Read config.yaml"
+Для разработки установите дополнительные зависимости:
+
+```bash
+python -m pip install -e ".[dev]"
 ```
 
-### API (FastAPI)
-- Helper launcher:
+## Настройка
+
+Создайте локальные файлы из примеров:
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+Copy-Item config.yaml.example config.yaml
 ```
-python start_api.py
+
+Linux и macOS:
+
+```bash
+cp .env.example .env
+cp config.yaml.example config.yaml
 ```
-- Or directly via uvicorn:
-```
-uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
-```
-Docs: `http://localhost:8000/docs`
-Health check: `http://localhost:8000/health`
 
-## Configuration
-Configuration is defined in `config.yaml` and validated via Pydantic (`schemas.py`).
+В `.env` укажите ключи используемых провайдеров. В `config.yaml` выберите модели, агентов и доступные им инструменты, а также задайте рабочий каталог. Пример конфигурации рассчитан на адаптацию под конкретное окружение: проверьте пути и команды внешних MCP-серверов перед первым запуском.
 
-### General settings (`settings`)
-- `default_agent`: default agent.
-- `max_history`: context history size.
-- `max_turns`: turn limit for agents (applies to subagents-tools as well).
-- `agent_timeout`: agent execution timeout (sec).
-- `working_directory`: process working directory (set on configuration start).
-- `config_directory`: configuration directory.
-- `allow_path_override`: allow changing the working directory from code.
-- `mcp_enabled`: enable MCP globally.
-- `agent_logging`: agent logging parameters.
+Секреты не следует добавлять в `config.yaml`, Docker-образ или Git. Передавайте их через переменные окружения.
 
-### Providers (`providers`)
-- Base URL, API key (via environment variable), timeouts, and retries.
+### OpenCode Go
 
-### Models (`models`)
-- Model identifier, provider, temperature, token limits, etc.
-- `use_responses_api`: a flag to use the Responses API for reasoning models (specified in the model config, not hard-coded in code). If a provider does not support it, the system will automatically and quietly (with deduplicated warnings) fall back to Chat Completions [[memory:5609856]].
+Основные конфиги используют OpenCode Go для быстрых рабочих моделей и OpenRouter
+для крупных моделей, роутера и политики (`typesafe/jev-1.13`). Укажите
+`OPENCODE_API_KEY` и `OPENROUTER_API_KEY` в `.env` и используйте `routing.yaml`. В `agents.<имя>.model` можно задать строку или
+упорядоченный массив: каждый запрос сначала идёт в первую модель, а при ошибке —
+в следующую.
 
-Example model:
 ```yaml
-models:
-  gpt-4:
-    name: "gpt-4"
-    provider: "openai"
-    temperature: 0.7
-    max_tokens: 4000
-    use_responses_api: false
+model: [paid-strong, paid-backup]
 ```
 
-### Agents (`agents`)
-- Name, model, tools, base/custom prompt, description.
-- Tool types: `function` (direct tools), `agent` (invokes a subagent via `call_*`), `mcp` (tools from an MCP server).
+## Запуск
 
-Example agent:
+### Браузерный интерфейс
+
+```bash
+grid-web-chat --routing routing.yaml --path . --host 127.0.0.1 --port 8000
+```
+
+После запуска откройте <http://127.0.0.1:8000>.
+
+Кнопка **Stop** работает в два нажатия: первое даёт агенту закончить текущий шаг (ответ модели и вызванные инструменты) и сохранить его, второе (**Stop now**) останавливает сразу. Любая досрочная остановка — Stop, `agent_timeout`, `max_turns`, ошибка модели или провайдера, падение процесса — остаётся в чате отдельным сообщением с причиной. **Continue** под ним продолжает ту же задачу тем же агентом: вся история его шагов, вызовов инструментов и их результатов хранится в SDK-сессии, а вызовы, прерванные на середине, агент получает списком с пометкой «результат неизвестен». Обычное сообщение после остановки тоже продолжает прерванную задачу. Подробности — в `core/interruption.py`.
+
+**Редактирование и ветки.** Любое своё сообщение можно исправить прямо в пузыре: чат разветвляется перед ним, старая версия остаётся, переключатель «‹ 2/3 ›» показывает версии. Агент в новой ветке помнит все шаги до правки — вызовы инструментов включительно — и ничего после (`ContextManager.fork_context`, `AgentFactory.fork_conversation`).
+
+**Сообщения во время работы агента.** Пока агент работает, сообщение можно отправить: *сразу* (агент останавливается и берёт его), *на следующем шаге* (агент получает его, не останавливаясь) или *после хода* (оно ждёт в очереди над полем ввода). Режим выбирает пользователь или модель решений (`web_chat/delivery.py`, `core/steering.py`).
+
+**Голосовое управление** выключено по умолчанию (`voice.enabled: false` в `routing.yaml`): без него голосовые маршруты отвечают 403, а в интерфейсе нет голосовых кнопок. `voice.enabled: true` включает его. Модель решений (`voice.decision_model` в `routing.yaml`) превращает фразу в команду чата: сообщение агенту, стоп, продолжить, исправить последнее сообщение, переключить версию, новый/другой чат, выбор агента, сжатие контекста, чтение вслух, переименование, удаление (с голосовым подтверждением), отправка или отмена ожидающих сообщений (`web_chat/voice_turns.py`).
+
+### Сайт для нескольких пользователей
+
+С флагом `--accounts` веб-чат становится сайтом с входом: у каждого пользователя своё пространство — чаты, SDK-сессии агентов и рабочая папка (`web_chat/space.py`). Все данные сервера лежат в `--data-dir` (по умолчанию `~/.grid/web`): база аккаунтов `accounts.db` и по каталогу `users/<id>/` на пользователя.
+
+```bash
+grid-web-chat accounts create-admin --username admin   # пароль спросит в консоли
+grid-web-chat --accounts --host 0.0.0.0 --port 8000
+grid-web-chat accounts invite                           # код приглашения: /login#invite=...
+```
+
+Чаты прежнего однопользовательского сервера переносятся в пространство пользователя командой `grid-web-chat accounts import-chats --username admin` (с теми же `--routing`/`--config`/`--path`, что и при запуске): чаты и SDK-сессии копируются, исходные файлы остаются; в пространство, где уже есть записи, команда ничего не пишет.
+
+Регистрация только по приглашению: его создаёт администратор (в консоли или через `/api/admin/invites`), оно задаёт роль, истекает и принимает одного человека. Системные конфиги общие для всех — видеть и менять их может только администратор. Сессия — cookie `HttpOnly`, `SameSite=Lax` (за HTTPS ещё и `Secure`); запросы, меняющие данные, и websocket принимаются только со страниц самого сервера (`web_chat/security.py`), попытки входа ограничены по частоте.
+
+Агенты выполняют команды, поэтому с аккаунтами агенты каждого пользователя работают в его собственном контейнере — независимо от `isolation.enabled` в конфиге (однопользовательский запуск следует этому флагу, в примерах он выключен). Сервер не стартует без рабочего Docker и не строит пространство, если контейнер пользователя не поднялся. `--trusted-users` снимает это требование, когда все пользователи доверенные. Контейнер пользователя работает от непривилегированного `agent`, без Linux capabilities и без возможности их получить, с лимитами `isolation.memory` (по умолчанию `2g`), `isolation.cpus` (`2`) и `isolation.pids_limit` (`512`); Docker не перезапускает его сам — его поднимает пространство пользователя. Контейнер, созданный с другими настройками, пересоздаётся (рабочая папка — смонтированный каталог — сохраняется). Сами инструменты работают в процессе сервера, поэтому агенты такого пространства получают только те, что объявили в `TOOL_ISOLATION`, что остаются на стороне пользователя (`utils/tool_isolation.py`): `container` — команды идут в его контейнер (`bash_tool`, git, beads), `workspace` — работа только внутри его рабочей папки или с публичным интернетом (файлы, поиск, `web_fetch`). Инструмент без объявления — например, управление рабочим столом, ffmpeg, инструменты самоулучшения Grid — таким агентам не выдаётся.
+
+**Выкладка.** Запускайте сервер на отдельном хосте или VM с Docker (контейнеры пользователей запускает он сам, поэтому образ из раздела ниже для этого режима не подходит), слушая только `127.0.0.1`, и поставьте перед ним HTTPS-прокси. Примеры — `deploy/Caddyfile` и `deploy/grid-web-chat.service` (systemd). На хосте нужны Docker-демон, Docker CLI (`docker exec` вызывают `bash_tool`, git и beads) и Python-пакет `docker`, а также собранный образ `isolation.image` (по умолчанию `grid-agent:latest`). Прокси на той же машине uvicorn считает доверенным по умолчанию: реальный адрес клиента доходит до ограничения попыток входа, а cookie получает `Secure`. Прокси на другой машине перечислите в `--forwarded-allow-ips`; если страницы открываются с другого адреса, чем тот, на который прокси шлёт запросы, укажите его в `--allowed-origin https://chat.example.com`. Резервная копия — каталог `--data-dir` целиком (база аккаунтов — SQLite в режиме WAL: копируйте при остановленном сервере или через `sqlite3 accounts.db ".backup copy.db"`).
+
+**Свои агенты.** Пользователь собирает собственных агентов в панели **My agents** — из шаблонов, которые разрешил оператор. Агент сохраняет промпт, навыки и настройки шаблона, получает инструкции владельца, может использовать только инструменты шаблона (или часть их) и модель шаблона либо одну из разрешённых; политика действий оператора проверяет его как любого другого. Агенты видны только владельцу и хранятся в его пространстве (`users/<id>/agents.json`, `web_chat/personal_agents.py`). Разрешение задаётся в каталоге (`routing.yaml`) или в конфиге одной системы:
+
 ```yaml
-agents:
-  file_agent:
-    name: "File Agent"
-    model: "gpt-4"
-    tools: ["file_read", "file_write", "file_list"]
-    base_prompt: "with_files"
-    description: "File operations specialist"
+personal_agents:
+  enabled: true
+  templates:                 # система -> агенты, от которых можно отталкиваться
+    engineering: [engineer]
+  models: [deepseek-flash-latest]   # модели на выбор помимо модели шаблона
+  max_agents: 20
+  max_instructions_chars: 8000
 ```
 
-### Tools (`tools`)
-- `function`: connected from `tools/file_tools.py`, `tools/git_tools.py`, and the registry in `tools/function_tools.py`.
-- `agent`: creates a `call_<agent_key>` tool to invoke a subagent with context passing. Supports context sharing parameters (`context_strategy`, `context_depth`, `include_tool_history`).
-- `mcp`: third-party MCP server tools (enabled when `mcp_enabled`).
+**Лимиты.** Там же оператор ограничивает, сколько может запускать один пользователь (`web_chat/limits.py`): ходов одновременно по всем его чатам и ходов за сутки (UTC; счётчик хранится в базе аккаунтов и виден администратору в `/api/admin/users`). Лимит проверяется при любом начале хода — новое сообщение, Continue, сообщение из очереди; отклонённое сообщение из очереди остаётся в ней.
 
-Specifics of agent-tools:
-- Accept input in the `input` field. For compatibility, aliases `task`, `message`, `prompt` are supported and are automatically normalized to `input`.
-- Subagent execution inherits `max_turns` from `settings.max_turns` and uses its own `SQLiteSession`.
-
-## API (OpenAI-compatible)
-Main routes (prefix `/v1`):
-- `POST /chat/completions` — OpenAI Chat Completions compatible. Supports `stream`.
-- `POST /completions` — legacy format, converted to internal Chat Completions and back.
-- `GET /agents` etc. — list and details of agents.
-- `GET /system/health` — health check.
-
-Format and context converter is located at `api/utils/openai_converter.py` (routing in `api/routers/openai_compatible.py`).
-
-## Logging and Observability
-- Unified logger (`utils/unified_logger.py`) for agent runs, tool calls, and results.
-- Structured logs, writing to `logs/`, agent sessions stored in `logs/agent_sessions.db`.
-- Deduplication of Responses API warnings (reduces log noise).
-- On API startup, the context is cleared and saved context files are removed.
-
-## Security
-- Security-aware factory (`core/security_agent_factory.py`) applies guardrails to specified agents.
-- Middleware: authentication, request security, rate limiting.
-- Git commands run with parameter validation and timeouts; filesystem operations verify path existence/type.
-
-## Testing
+```yaml
+user_limits:
+  running_turns: 2      # по умолчанию 2
+  turns_per_day: 200    # по умолчанию без ограничения
 ```
-# In Windows before running tests in PowerShell:
+
+### Диалоговый CLI
+
+```bash
+agent-chat --config config.yaml
+```
+
+Одноразовый запрос можно передать без интерактивного режима:
+
+```bash
+agent-chat --config config.yaml --message "Проанализируй проект и предложи следующий шаг"
+```
+
+### Служебные интерфейсы
+
+Установленный пакет также предоставляет:
+
+- `grid` — управляющие и диагностические команды;
+- `grid-timeline` — просмотр трасс выполнения;
+- `python -m context_inspector` — инспектор сохранённого контекста;
+- `grid serve-mcp` — MCP-сервер для запуска Grid workers из совместимого клиента.
+
+Список параметров любой команды доступен через `--help`.
+
+## Запуск в контейнере
+
+Образ содержит Grid, web-интерфейс и зависимости штатных систем: Git, CodeGraph,
+Beads/Dolt и FFmpeg. Compose дополнительно запускает закрытые от внешней сети
+SearXNG и Valkey для инструмента web search. Исходный код не требуется
+монтировать внутрь контейнера.
+
+Web chat стартует с общим каталогом маршрутизации проекта `routing.yaml` и выбирает систему через autoroute. Укажите ключи провайдеров в `.env`, затем запустите:
+
+```bash
+docker compose up --build
+```
+
+Интерфейс будет доступен по адресу <http://localhost:8000>. Текущий каталог подключается как рабочее пространство `/workspace`. Чтобы использовать другой каталог, задайте его перед запуском:
+
+Windows PowerShell:
+
+```powershell
+$env:GRID_WORKSPACE = "C:\path\to\project"
+docker compose up --build
+```
+
+Linux и macOS:
+
+```bash
+GRID_WORKSPACE=/path/to/project docker compose up --build
+```
+
+Образ можно использовать и без Compose:
+
+```bash
+docker build -t grid-agent-system .
+docker run --rm -it \
+  --env-file .env \
+  -p 8000:8000 \
+  -v "$(pwd):/workspace" \
+  grid-agent-system
+```
+
+Чтобы запустить одну конкретную систему без каталога маршрутизации, переопределите команду образа и передайте `grid-web-chat --config /path/to/config.yaml` явно.
+
+Для запуска другой команды переопределите стандартную команду образа, например:
+
+```bash
+docker compose run --rm grid grid --help
+docker compose run --rm grid agent-chat --config /app/examples/coder/config.yaml
+```
+
+Конфигурации систем лежат в образе в `/app/examples/<система>/config.yaml`.
+
+Docker socket намеренно не подключается к контейнеру. Если конкретная конфигурация запускает дочерние Docker-контейнеры, доступ к сокету нужно настраивать отдельно с учётом связанных рисков безопасности.
+
+В контекст сборки не попадают `.env`, логи, трассировки и локальные базы данных
+(`.dockerignore`). Версии CodeGraph, Dolt и Beads зафиксированы в `Dockerfile`.
+
+### Эволюция Grid в контейнерах
+
+Grid улучшает себя сам: система администратора в контейнере-мастерской готовит
+изменения, а контроллер на хосте оценивает их в изолированных контейнерах по
+сценариям и после подтверждения оператора переносит в ветку `stable`.
+
+```powershell
+grid-control init --repo C:\grid-evolution\evolution.git --from . --ref HEAD
+grid-control --state C:\grid-evolution\experiments.db serve --repo C:\grid-evolution\evolution.git --policy C:\grid-evolution\policy.json --port 8010
+docker compose --profile evolution up -d workshop     # интерфейс на http://localhost:8001
+```
+
+Полная установка, настройка политики и сценариев, работа и обслуживание описаны в
+[docs/evolution-setup.md](docs/evolution-setup.md), устройство и гарантии — в
+[docs/self-improvement.md](docs/self-improvement.md).
+
+## Сборка пакета
+
+```bash
+python -m pip install build
+python -m build
+```
+
+Команда создаёт sdist и wheel в каталоге `dist/`. Для проверки артефактов рекомендуется устанавливать wheel в чистое виртуальное окружение.
+
+## Тесты
+
+```bash
+pytest -q
+```
+
+В Windows при запуске тестов непосредственно из checkout может потребоваться:
+
+```powershell
 $env:PYTHONPATH = "."
 pytest -q
 ```
-Coverage:
-```
-pytest --cov=. --cov-report=html
-```
 
-## Troubleshooting
-- `ModuleNotFoundError: No module named 'api'` when running `pytest` in Windows — set `PYTHONPATH`:
-  - For the session: `$env:PYTHONPATH = "."`
-- `Max turns exceeded` — increase `settings.max_turns` or simplify the task.
-- Tool schema error: use `input` (or `task`/`message`/`prompt`, which are normalized automatically).
-- Responses API warnings — provider does not support it; set `use_responses_api: false` for the model or use a compatible provider.
+## Структура конфигурации
 
-## License
-MIT. See the `LICENSE` file.
+Основной файл конфигурации описывает:
+
+- провайдеров и доступные модели;
+- профили агентов и их назначение;
+- локальные, агентные и MCP-инструменты;
+- рабочие каталоги, лимиты и журналирование;
+- маршрутизацию, память и политики выполнения.
+
+Полный пример находится в `config.yaml.example`. Каталог `examples/` содержит отдельные сценарии, которые можно использовать как отправную точку.
+
+## Безопасность
+
+Grid способен читать и изменять файлы, выполнять команды и обращаться к внешним сервисам в зависимости от выданных инструментов. Используйте минимально необходимый набор разрешений, изолированное рабочее пространство и отдельные тестовые учётные данные.
+
+Политика действий может работать в режиме аудита или блокировки. Она дополняет, но не заменяет системную изоляцию контейнера, файловые разрешения и контроль внешних сервисов.
+
+## Документация
+
+- [Режим Grid workers для Codex](CODEX_WORKERS.md)
+- [Политики действий](ACTION_POLICY.md)
+- [Пример полной конфигурации](config.yaml.example)
+- [Примеры сценариев](examples)
+- [Контроллер самоулучшения](docs/self-improvement.md)
+- [Эволюция в контейнерах: руководство оператора](docs/evolution-setup.md)
+
+## Лицензия
+
+Проект распространяется по лицензии MIT. См. [LICENSE](LICENSE).

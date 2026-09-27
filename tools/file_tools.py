@@ -1,498 +1,404 @@
 """
-Файловые инструменты для агентов.
+File tools for agents.
 
-Поддерживает:
-- Чтение и запись файлов
-- Получение информации о файлах
-- Список файлов в директории
-- Поиск файлов по имени и содержимому
+Paths are resolved inside the working directory of the running agent.
 """
 
 import os
 import re
-import time
 from pathlib import Path
 from typing import List, Any
+
 from agents import function_tool
 from utils.logger import Logger
+from utils import confined_fs
+from utils.path_utils import display_agent_path_auto, resolve_agent_path_auto
+from utils.text_patch import PatchError, apply_patch, keep_newlines, replace_once
+
+
+tool_logger = Logger("tool")
+
 
 def log_tool_call(tool_name: str, data: dict) -> None:
-    Logger("tool").log_tool_call(tool_name, data)
+    tool_logger.log_tool_call(tool_name, data)
+
 
 def log_tool_result(tool_name: str, result: str | Exception = "") -> None:
-    Logger("tool").info(f"TOOL_RESULT | {tool_name} | {result}")
+    tool_logger.info(f"TOOL_RESULT | {tool_name} | {result}")
+
 
 def log_tool_error(tool_name: str, error: str | Exception) -> None:
-    Logger("tool").error(f"TOOL_ERROR | {tool_name} | {error}")
+    tool_logger.error(f"TOOL_ERROR | {tool_name} | {error}")
+
+
+def _resolve_tool_path(raw_path: str) -> tuple[str, str]:
+    """Resolve a tool path and preserve a safe agent-visible representation."""
+    visible_path = display_agent_path_auto(raw_path)
+    resolved_path = resolve_agent_path_auto(raw_path)
+    return visible_path, resolved_path
+
+
+MAX_MATCHES = 200
+_SKIPPED_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+
+
+def _refuse_git_internals(visible_path: str, resolved: str) -> str | None:
+    """Git's own files are never changed by file tools: an edited .git/config or
+    hook runs commands the next time git does. Returns the refusal, if any."""
+    if ".git" in Path(resolved).parts:
+        return f"❌ {visible_path} is inside .git: git internals cannot be changed with file tools"
+    return None
+
+
+def _read_existing(path: Path) -> str | None:
+    """Current text with its own line endings, or None for a missing file."""
+    if not path.is_file():
+        return None
+    with confined_fs.open_file(path, encoding="utf-8", newline="") as file:
+        return file.read()
+
+
+def _write(path: Path, text: str) -> None:
+    """Write text exactly as given: no newline translation on Windows."""
+    confined_fs.write_text(path, text, newline="")
+
+
+@function_tool
+def edit_file_patch(filepath: str, patch_content: str) -> str:
+    """Apply a unified diff to a file.
+
+    Each changed block starts with an ``@@`` line (line numbers are optional)
+    followed by lines prefixed with ' ' (unchanged context), '-' (remove) or
+    '+' (add). A block is found by its context and removed lines, so copy them
+    exactly from the file. The file keeps its line endings. To replace one
+    exact fragment, file_replace is simpler.
+
+    Args:
+        filepath: Path to the file
+        patch_content: The unified diff
+
+    Returns:
+        str: Result message
+    """
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("edit_file_patch", {"filepath": visible_path, "patch_length": len(patch_content)})
+    try:
+        visible_path, filepath = _resolve_tool_path(filepath)
+        refused = _refuse_git_internals(visible_path, filepath)
+        if refused:
+            return refused
+        path = Path(filepath)
+        original = _read_existing(path)
+        if original is None:
+            return f"❌ File {visible_path} not found"
+        updated = apply_patch(original, patch_content)
+        _write(path, updated)
+        delta = updated.count("\n") - original.count("\n")
+        log_tool_result("edit_file_patch", f"Patch applied ({delta:+d} lines)")
+        return f"✅ Applied patch to {visible_path} ({delta:+d} lines)"
+    except PatchError as e:
+        log_tool_error("edit_file_patch", str(e))
+        return f"❌ Patch not applied to {visible_path}: {e}"
+    except Exception as e:
+        log_tool_error("edit_file_patch", str(e))
+        return f"❌ Error applying patch to {visible_path}: {str(e)}"
+
+
+@function_tool
+def replace_in_file(filepath: str, old_text: str, new_text: str) -> str:
+    """Replace one exact fragment of a file with new text.
+
+    old_text must occur exactly once: copy it from the file with its
+    indentation, and add neighbouring lines if it is not unique. The rest of the
+    file, its formatting and its line endings stay untouched. Prefer this to
+    rewriting a file for a focused change.
+
+    Args:
+        filepath: Path to the file
+        old_text: The exact text to replace (whole or partial lines)
+        new_text: The text to put in its place
+    """
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("replace_in_file", {"filepath": visible_path, "old_length": len(old_text),
+                                      "new_length": len(new_text)})
+    try:
+        visible_path, filepath = _resolve_tool_path(filepath)
+        refused = _refuse_git_internals(visible_path, filepath)
+        if refused:
+            return refused
+        path = Path(filepath)
+        original = _read_existing(path)
+        if original is None:
+            return f"❌ File {visible_path} not found"
+        _write(path, replace_once(original, old_text, new_text))
+        log_tool_result("replace_in_file", "Replaced")
+        return f"✅ Replaced text in {visible_path}"
+    except PatchError as e:
+        log_tool_error("replace_in_file", str(e))
+        return f"❌ Nothing replaced in {visible_path}: {e}"
+    except Exception as e:
+        log_tool_error("replace_in_file", str(e))
+        return f"❌ Error editing {visible_path}: {str(e)}"
+
+
+@function_tool
+def delete_file(filepath: str) -> str:
+    """Delete one file of the working directory (not a directory).
+
+    Use it for files created by mistake, such as scratch or test files.
+
+    Args:
+        filepath: Path to the file
+    """
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("delete_file", {"filepath": visible_path})
+    try:
+        visible_path, filepath = _resolve_tool_path(filepath)
+        refused = _refuse_git_internals(visible_path, filepath)
+        if refused:
+            return refused
+        path = Path(filepath)
+        if not path.exists():
+            return f"❌ File {visible_path} not found"
+        if not path.is_file():
+            return f"❌ {visible_path} is a directory: only files can be deleted"
+        confined_fs.unlink(path)
+        log_tool_result("delete_file", "Deleted")
+        return f"✅ Deleted {visible_path}"
+    except Exception as e:
+        log_tool_error("delete_file", str(e))
+        return f"❌ Error deleting {visible_path}: {str(e)}"
+
 
 @function_tool
 def read_file(filepath: str) -> str:
     """
-    Читает содержимое файла.
-    
+    Reads file content.
+
     Args:
-        filepath: Путь к файлу
-        
+        filepath: Path to the file
+
     Returns:
-        str: Содержимое файла
+        str: File content
     """
-    # Универсальное логирование
-    log_tool_call("read_file", {"filepath": filepath})
-    
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("read_file", {"filepath": visible_path})
     try:
+        visible_path, filepath = _resolve_tool_path(filepath)
         path = Path(filepath)
         if not path.exists():
-            log_tool_error("read_file", f"Файл {filepath} не найден")
-            return f"❌ Файл {filepath} не найден"
-        
+            log_tool_error("read_file", f"File {visible_path} not found")
+            return f"❌ File {visible_path} not found"
+
         if not path.is_file():
-            log_tool_error("read_file", f"{filepath} не является файлом")
-            return f"❌ {filepath} не является файлом"
-        
-        content = path.read_text(encoding='utf-8')
+            log_tool_error("read_file", f"{visible_path} is not a file")
+            return f"❌ {visible_path} is not a file"
+
+        content = confined_fs.read_text(path)
         lines_count = len(content.splitlines())
-        
-        log_tool_result("read_file", f"Прочитано {lines_count} строк")
-        return f"📄 Содержимое файла {filepath}:\n\n{content}"
-        
+
+        log_tool_result("read_file", f"Read {lines_count} lines")
+        return f"📄 File content {visible_path}:\n\n{content}"
+
     except Exception as e:
         log_tool_error("read_file", str(e))
-        return f"❌ Ошибка при чтении {filepath}: {str(e)}"
+        return f"❌ Error reading {visible_path}: {str(e)}"
 
-@function_tool 
-def get_file_info(filepath: str) -> str:
-    """
-    Получает информацию о файле.
-    
-    Args:
-        filepath: Путь к файлу
-        
-    Returns:
-        str: Информация о файле
-    """
-
-    
-    log_tool_call("get_file_info", {"filepath": filepath})
-    
-    try:
-        path = Path(filepath)
-        if not path.exists():
-            log_tool_error("get_file_info", f"Файл {filepath} не найден")
-            return f"❌ Файл {filepath} не найден"
-        
-        if not path.is_file():
-            log_tool_error("get_file_info", f"{filepath} не является файлом")
-            return f"❌ {filepath} не является файлом"
-        
-        stat = path.stat()
-        content = path.read_text(encoding='utf-8')
-        lines_count = len(content.splitlines())
-        extension = path.suffix.lower()
-        
-        log_tool_result("get_file_info", f"Файл {stat.st_size} байт, {lines_count} строк")
-        
-        result = f"""📄 Информация о файле {filepath}:
-• Имя: {path.name}
-• Размер: {stat.st_size} байт
-• Строк: {lines_count}
-• Расширение: {extension if extension else 'без расширения'}"""
-        
-        return result
-        
-    except Exception as e:
-        log_tool_error("get_file_info", str(e))
-        return f"❌ Ошибка при получении информации о {filepath}: {str(e)}"
-
-@function_tool
-def list_files(directory: str = ".") -> str:
-    """
-    Показывает список файлов в директории.
-    
-    Args:
-        directory: Путь к директории
-        
-    Returns:
-        str: Список файлов
-    """
-
-    
-    log_tool_call("list_files", {"directory": directory})
-    
-    try:
-        path = Path(directory)
-        if not path.exists():
-            log_tool_error("list_files", f"Директория {directory} не найдена")
-            return f"❌ Директория {directory} не найдена"
-        
-        if not path.is_dir():
-            log_tool_error("list_files", f"{directory} не является директорией")
-            return f"❌ {directory} не является директорией"
-        
-        files = []
-        dirs = []
-        for item in sorted(path.iterdir()):
-            if item.is_file():
-                size = item.stat().st_size
-                files.append(f"📄 {item.name} ({size} байт)")
-            elif item.is_dir():
-                dirs.append(f"📁 {item.name}/")
-        
-        total_items = len(files) + len(dirs)
-        log_tool_result("list_files", f"Найдено {total_items} элементов")
-        
-        if total_items == 0:
-            return f"📂 Директория {directory} пуста"
-        
-        all_items = dirs + files  # Директории сначала
-        result = f"📂 Содержимое директории {directory} ({total_items} элементов):\n\n" + "\n".join(all_items)
-        return result
-        
-    except Exception as e:
-        log_tool_error("list_files", str(e))
-        return f"❌ Ошибка при чтении директории {directory}: {str(e)}"
 
 @function_tool
 def write_file(filepath: str, content: str) -> str:
-    """
-    Записывает содержимое в файл.
-    
-    Args:
-        filepath: Путь к файлу
-        content: Содержимое для записи
-        
-    Returns:
-        str: Результат операции
-    """
+    """Create a file or replace its whole content.
 
-    
-    log_tool_call("write_file", {"filepath": filepath, "content_length": len(content)})
-    
+    An existing file keeps its line endings. To change part of a file use
+    file_replace or file_edit_patch rather than rewriting it.
+    """
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("write_file", {"filepath": visible_path, "content_length": len(content)})
     try:
+        visible_path, filepath = _resolve_tool_path(filepath)
+        refused = _refuse_git_internals(visible_path, filepath)
+        if refused:
+            return refused
         path = Path(filepath)
-        
-        # Создаем родительские директории если нужно
-        path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Записываем файл
-        path.write_text(content, encoding='utf-8')
-        
-        size = path.stat().st_size
-        lines_count = len(content.splitlines())
-        
-        log_tool_result("write_file", f"Записано {lines_count} строк, {size} байт")
-        return f"✅ Файл {filepath} успешно записан ({size} байт)"
-        
+        existing = _read_existing(path)
+        confined_fs.make_dirs(path.parent)
+        _write(path, keep_newlines(existing, content))
+        log_tool_result("write_file", f"Wrote {len(content)} chars")
+        verb = "Replaced" if existing is not None else "Created"
+        return f"✅ {verb} file {visible_path}"
     except Exception as e:
         log_tool_error("write_file", str(e))
-        return f"❌ Ошибка при записи файла {filepath}: {str(e)}"
+        return f"❌ Error writing {visible_path}: {str(e)}"
+
 
 @function_tool
-def search_files(
-    search_pattern: str, 
-    directory: str = ".", 
-    use_regex: bool = False,
-    search_in_content: bool = False,
-    file_extensions: str = "",
-    max_results: int = 50
-) -> str:
-    """
-    Поиск файлов и директорий по имени или содержимому с поддержкой регулярных выражений.
-    
-    Args:
-        search_pattern: Паттерн для поиска (строка или regex)
-        directory: Директория для поиска (по умолчанию текущая)
-        use_regex: Использовать регулярные выражения (по умолчанию False)
-        search_in_content: Искать в содержимом файлов (по умолчанию False)
-        file_extensions: Фильтр по расширениям файлов, разделенных запятой (например: "py,js,txt")
-        max_results: Максимальное количество результатов (по умолчанию 50)
-        
-    Returns:
-        str: Результаты поиска
-    """
-    start_time = time.time()
-    args = {
-        "search_pattern": search_pattern,
-        "directory": directory,
-        "use_regex": use_regex,
-        "search_in_content": search_in_content,
-        "file_extensions": file_extensions,
-        "max_results": max_results
-    }
-    log_tool_call("search_files", args)
-    
+def append_file(filepath: str, content: str) -> str:
+    """Append content to a file."""
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("append_file", {"filepath": visible_path, "content_length": len(content)})
     try:
-        base_path = Path(directory)
-        if not base_path.exists():
-            result = f"ОШИБКА: Директория {directory} не найдена"
-            log_tool_result("search_files", result)
-            return result
-        
-        if not base_path.is_dir():
-            result = f"ОШИБКА: {directory} не является директорией"
-            log_tool_result("search_files", result)
-            return result
-        
-        # Подготавливаем паттерн для поиска
-        if use_regex:
-            try:
-                pattern = re.compile(search_pattern, re.IGNORECASE)
-            except re.error as e:
-                result = f"ОШИБКА: Некорректное регулярное выражение '{search_pattern}': {str(e)}"
-                log_tool_result("search_files", result)
-                return result
-        else:
-            # Простой поиск - конвертируем в regex для единообразия
-            escaped_pattern = re.escape(search_pattern)
-            pattern = re.compile(escaped_pattern, re.IGNORECASE)
-        
-        # Подготавливаем фильтр расширений
-        extensions = []
-        if file_extensions:
-            extensions = [ext.strip().lower() for ext in file_extensions.split(',')]
-            extensions = [ext if ext.startswith('.') else f'.{ext}' for ext in extensions]
-        
-        results = []
-        
-        # Логгируем начало поиска
-        from utils.logger import log_custom
-        log_custom('debug', 'file_operation', f"Начало поиска в: {directory}", pattern=search_pattern, use_regex=use_regex)
-        
-        # Рекурсивно обходим директории
-        for root, dirs, files in os.walk(base_path):
-            root_path = Path(root)
-            
-            # Поиск в именах директорий
-            for dir_name in dirs:
-                if len(results) >= max_results:
-                    break
-                    
-                if pattern.search(dir_name):
-                    dir_path = root_path / dir_name
-                    relative_path = dir_path.relative_to(base_path)
-                    results.append(f"📁 {relative_path}/ (директория)")
-            
-            # Поиск в именах файлов
-            for file_name in files:
-                if len(results) >= max_results:
-                    break
-                
-                file_path = root_path / file_name
-                file_extension = file_path.suffix.lower()
-                
-                # Фильтрация по расширениям
-                if extensions and file_extension not in extensions:
-                    continue
-                
-                match_found = False
-                match_info = ""
-                
-                # Поиск по имени файла
-                if pattern.search(file_name):
-                    match_found = True
-                    match_info = "имя файла"
-                
-                # Поиск в содержимом файла (только для текстовых файлов)
-                if search_in_content and not match_found:
-                    try:
-                        # Проверяем, что файл текстовый
-                        if file_extension in ['.py', '.js', '.json', '.md', '.txt', '.yml', '.yaml', '.html', '.css', '.xml', '.csv']:
-                            content = file_path.read_text(encoding='utf-8', errors='ignore')
-                            if pattern.search(content):
-                                match_found = True
-                                match_info = "содержимое файла"
-                    except Exception:
-                        # Игнорируем ошибки чтения файлов
-                        pass
-                
-                if match_found:
-                    relative_path = file_path.relative_to(base_path)
-                    file_size = file_path.stat().st_size
-                    results.append(f"📄 {relative_path} ({file_size} байт) - найдено в: {match_info}")
-            
-            if len(results) >= max_results:
-                break
-        
-        # Логгируем результаты поиска
-        log_custom('debug', 'file_operation', f"Поиск завершен", found_count=len(results))
-        
-        # Формируем результат
-        if not results:
-            result = f"Поиск по паттерну '{search_pattern}' в {directory} не дал результатов"
-        else:
-            result_header = f"Результаты поиска по паттерну '{search_pattern}' в {directory}:\n"
-            result_header += f"Найдено {len(results)} результат(ов)"
-            if len(results) >= max_results:
-                result_header += f" (показаны первые {max_results})"
-            result_header += "\n\n"
-            
-            result = result_header + "\n".join(results)
-        
-        log_tool_result("search_files", result)
-        return result
-        
+        visible_path, filepath = _resolve_tool_path(filepath)
+        refused = _refuse_git_internals(visible_path, filepath)
+        if refused:
+            return refused
+        path = Path(filepath)
+        confined_fs.make_dirs(path.parent)
+        with confined_fs.open_file(path, "a", encoding="utf-8") as f:
+            f.write(content)
+        log_tool_result("append_file", f"Appended {len(content)} chars")
+        return f"✅ Appended to file {visible_path}"
     except Exception as e:
-        log_tool_error("search_files", e)
-        result = f"ОШИБКА при поиске: {str(e)}"
-        log_tool_result("search_files", result)
-        return result
+        log_tool_error("append_file", str(e))
+        return f"❌ Error appending to {visible_path}: {str(e)}"
+
 
 @function_tool
-def edit_file_patch(filepath: str, patch_content: str) -> str:
-    """
-    Редактирует файл с помощью патча в формате unified diff.
-    
-    Args:
-        filepath: Путь к файлу для редактирования
-        patch_content: Содержимое патча в формате unified diff
-        
-    Returns:
-        str: Результат операции
-    """
-    start_time = time.time()
-    args = {"filepath": filepath, "patch_content_length": patch_content}
-    log_tool_call("edit_file_patch", args)
-    
+def list_files(directory: str = ".") -> str:
+    """List files in a directory."""
+    visible_dir = display_agent_path_auto(directory)
+    log_tool_call("list_files", {"directory": visible_dir})
     try:
+        visible_dir, directory = _resolve_tool_path(directory)
+        path = Path(directory)
+        if not path.exists():
+            log_tool_error("list_files", f"Directory {visible_dir} not found")
+            return f"❌ Directory {visible_dir} not found"
+        if not path.is_dir():
+            log_tool_error("list_files", f"{visible_dir} is not a directory")
+            return f"❌ {visible_dir} is not a directory"
+
+        entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        if not entries:
+            return f"📂 Directory {visible_dir} is empty"
+
+        lines = [f"📂 Files in {visible_dir}:"]
+        for entry in entries:
+            prefix = "📄" if entry.is_file() else "📁"
+            lines.append(f"{prefix} {entry.name}")
+
+        log_tool_result("list_files", f"Listed {len(entries)} entries")
+        return "\n".join(lines)
+    except Exception as e:
+        log_tool_error("list_files", str(e))
+        return f"❌ Error listing {visible_dir}: {str(e)}"
+
+
+@function_tool
+def search_files(directory: str, pattern: str) -> str:
+    """Find files whose name matches a regex below a directory (skips .git and caches)."""
+    visible_dir = display_agent_path_auto(directory)
+    log_tool_call("search_files", {"directory": visible_dir, "pattern": pattern})
+    try:
+        visible_dir, directory = _resolve_tool_path(directory)
+        path = Path(directory)
+        if not path.exists() or not path.is_dir():
+            return f"❌ Directory {visible_dir} not found"
+
+        regex = re.compile(pattern, re.IGNORECASE)
+        matches: List[str] = []
+        for root, dirs, files in os.walk(path):
+            dirs[:] = sorted(d for d in dirs if d not in _SKIPPED_DIRS)
+            for file in sorted(files):
+                if regex.search(file):
+                    # Relative to the searched directory: host paths stay private.
+                    matches.append((Path(root) / file).relative_to(path).as_posix())
+
+        if not matches:
+            return f"🔍 No files matching '{pattern}' in {visible_dir}"
+
+        log_tool_result("search_files", f"Found {len(matches)} matches")
+        shown = matches[:MAX_MATCHES]
+        more = (f"\n... and {len(matches) - len(shown)} more: narrow the pattern"
+                if len(matches) > len(shown) else "")
+        return f"🔍 Matching files in {visible_dir}:\n" + "\n".join(shown) + more
+    except Exception as e:
+        log_tool_error("search_files", str(e))
+        return f"❌ Error searching in {visible_dir}: {str(e)}"
+
+
+@function_tool
+def search_content(filepath: str, query: str) -> str:
+    """Find lines containing a text (case-insensitive), with line numbers.
+
+    The path may be one file or a directory: a directory is searched
+    recursively (skipping .git, caches and binary files) and every match is
+    shown as path:line.
+    """
+    visible_path = display_agent_path_auto(filepath)
+    log_tool_call("search_content", {"filepath": visible_path, "query": query})
+    try:
+        visible_path, filepath = _resolve_tool_path(filepath)
         path = Path(filepath)
         if not path.exists():
-            result = f"ОШИБКА: Файл {filepath} не найден"
-            log_tool_result("edit_file_patch", result)
-            return result
-        
-        if not path.is_file():
-            result = f"ОШИБКА: {filepath} не является файлом"
-            log_tool_result("edit_file_patch", result)
-            return result
-        
-        # Логгируем информацию о редактировании
-        from utils.logger import log_custom
-        original_content = path.read_text(encoding='utf-8')
-        original_lines = original_content.splitlines(keepends=True)
-        log_custom('debug', 'file_operation', f"Редактирование файла: {filepath}", 
-                  original_lines=len(original_lines), patch_lines=len(patch_content.splitlines()))
-        
-        # Парсим патч
-        patch_lines = patch_content.splitlines()
-        new_lines = original_lines.copy()
-        
-        i = 0
-        while i < len(patch_lines):
-            line = patch_lines[i]
-            
-            # Ищем заголовок патча (начинается с --- или +++)
-            if line.startswith('---') or line.startswith('+++'):
-                i += 1
-                continue
-            
-            # Ищем блок изменений (начинается с @@)
-            if line.startswith('@@'):
-                # Парсим номера строк
-                try:
-                    # Формат: @@ -old_start,old_count +new_start,new_count @@
-                    parts = line.split(' ')
-                    old_info = parts[1]  # -old_start,old_count
-                    new_info = parts[2]  # +new_start,new_count
-                    
-                    old_start = int(old_info.split(',')[0][1:]) - 1  # Убираем минус и вычитаем 1
-                    new_start = int(new_info.split(',')[0][1:]) - 1  # Убираем плюс и вычитаем 1
-                    
-                    i += 1
-                    
-                    # Обрабатываем строки блока
-                    old_line_num = old_start
-                    new_line_num = new_start
-                    
-                    while i < len(patch_lines):
-                        patch_line = patch_lines[i]
-                        
-                        if patch_line.startswith('@@'):
-                            # Новый блок изменений
-                            break
-                        elif patch_line.startswith('---') or patch_line.startswith('+++'):
-                            # Конец патча
-                            break
-                        elif patch_line.startswith(' '):
-                            # Контекстная строка - оставляем как есть
-                            if old_line_num < len(new_lines):
-                                new_lines[old_line_num] = patch_line[1:]  # Убираем пробел
-                            old_line_num += 1
-                            new_line_num += 1
-                        elif patch_line.startswith('-'):
-                            # Удаляемая строка
-                            if old_line_num < len(new_lines):
-                                del new_lines[old_line_num]
-                            # new_line_num не увеличиваем
-                        elif patch_line.startswith('+'):
-                            # Добавляемая строка
-                            if old_line_num < len(new_lines):
-                                new_lines.insert(old_line_num, patch_line[1:] + '\n')  # Убираем плюс и добавляем перенос
-                            else:
-                                new_lines.append(patch_line[1:] + '\n')
-                            old_line_num += 1
-                            new_line_num += 1
-                        else:
-                            # Пустая строка или комментарий
-                            pass
-                        
-                        i += 1
-                    
-                except (ValueError, IndexError) as e:
-                    result = f"ОШИБКА: Некорректный формат патча в строке '{line}': {str(e)}"
-                    log_tool_result("edit_file_patch", result)
-                    return result
-            else:
-                i += 1
-        
-        # Записываем обновленное содержимое
-        new_content = ''.join(new_lines)
-        path.write_text(new_content, encoding='utf-8')
-        
-        # Подсчитываем изменения
-        original_line_count = len(original_lines)
-        new_line_count = len(new_lines)
-        changes = new_line_count - original_line_count
-        
-        # Логгируем результат редактирования
-        log_custom('debug', 'file_operation', f"Файл обновлен: {filepath}", 
-                  changes=changes, new_lines=new_line_count)
-        
-        result = f"✅ Файл {filepath} успешно обновлен патчем"
-        if changes != 0:
-            result += f" (изменено строк: {changes:+d})"
-        
-        log_tool_result("edit_file_patch", result)
-        return result
-        
-    except Exception as e:
-        log_tool_error("edit_file_patch", e)
-        result = f"ОШИБКА при применении патча к файлу {filepath}: {str(e)}"
-        log_tool_result("edit_file_patch", result)
-        return result
+            return f"❌ {visible_path} not found"
+        needle = query.lower()
 
-# ============================================================================
-# СЛОВАРЬ ФАЙЛОВЫХ ИНСТРУМЕНТОВ
-# ============================================================================
+        def lines_of(file: Path) -> list[tuple[int, str]]:
+            try:
+                text = confined_fs.read_text(file)
+            except (UnicodeDecodeError, OSError):
+                return []
+            return [(n, line) for n, line in enumerate(text.splitlines(), start=1)
+                    if needle in line.lower()]
+
+        if path.is_file():
+            try:
+                confined_fs.read_text(path)
+            except UnicodeDecodeError:
+                return f"❌ {visible_path} is not a text file"
+            matches = [f"{n}: {line}" for n, line in lines_of(path)]
+        else:
+            matches = []
+            for root, dirs, files in os.walk(path):
+                dirs[:] = sorted(d for d in dirs if d not in _SKIPPED_DIRS)
+                for name in sorted(files):
+                    file = Path(root) / name
+                    relative = file.relative_to(path).as_posix()
+                    matches += [f"{relative}:{n}: {line}" for n, line in lines_of(file)]
+                    if len(matches) > MAX_MATCHES:
+                        break
+        if not matches:
+            return f"🔍 No matches for '{query}' in {visible_path}"
+
+        log_tool_result("search_content", f"Found {len(matches)} matching lines")
+        shown = matches[:MAX_MATCHES]
+        more = ("\n... and more: use a more specific query or path"
+                if len(matches) > len(shown) else "")
+        return f"🔍 Matching lines in {visible_path}:\n" + "\n".join(shown) + more
+    except Exception as e:
+        log_tool_error("search_content", str(e))
+        return f"❌ Error searching content in {visible_path}: {str(e)}"
+
 
 FILE_TOOLS = {
     "file_read": read_file,
     "file_write": write_file,
+    "file_append": append_file,
     "file_list": list_files,
-    "file_info": get_file_info,
     "file_search": search_files,
+    "file_content_search": search_content,
     "file_edit_patch": edit_file_patch,
+    "file_replace": replace_in_file,
+    "file_delete": delete_file,
 }
 
+
 def get_file_tools() -> List[Any]:
-    """Возвращает список всех файловых инструментов."""
+    """Returns all file tool functions."""
     return list(FILE_TOOLS.values())
 
-def get_file_tools_by_names(tool_names: List[str]) -> List[Any]:
-    """Возвращает список файловых инструментов по их именам."""
-    tools = []
-    for name in tool_names:
-        if name in FILE_TOOLS:
-            tools.append(FILE_TOOLS[name])
-        else:
-            from utils.logger import Logger
-            Logger(__name__).warning(f"Файловый инструмент '{name}' не найден")
-    return tools 
+
+# Where these tools act (utils.tool_isolation): in the server, inside the run's workspace (utils.path_utils)
+from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
+
+TOOL_ISOLATION = {
+    "file_append": _WORKSPACE,
+    "file_content_search": _WORKSPACE,
+    "file_delete": _WORKSPACE,
+    "file_edit_patch": _WORKSPACE,
+    "file_list": _WORKSPACE,
+    "file_read": _WORKSPACE,
+    "file_replace": _WORKSPACE,
+    "file_search": _WORKSPACE,
+    "file_write": _WORKSPACE,
+}

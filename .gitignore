@@ -1,5 +1,5 @@
 # Grid Agent System .gitignore
-
+nanobot/
 # Python
 __pycache__/
 *.py[cod]
@@ -13,6 +13,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+# The web chat's own JS modules, not a Python build directory.
+!web_chat/js/lib/
 lib64/
 parts/
 sdist/
@@ -22,7 +24,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+*.safetensors
 # Virtual environments
 .env
 .venv
@@ -50,7 +52,6 @@ ehthumbs.db
 Thumbs.db
 
 # Grid specific
-config.yaml
 .env
 logs/
 *.log
@@ -60,6 +61,10 @@ test_*.txt
 demo_*.py
 *_demo.*
 traces/
+
+# User data isolation (per-user workspaces and memory)
+workspace/user_*/
+data/user_*/
 
 # Dependencies
 node_modules/
@@ -88,5 +93,96 @@ private/
 *.key
 *.pem
 *.crt
+assets/
 
+ocr_output/
 workspace/*
+.claude/*
+nul
+tools/DeepSeek-OCR/
+ocr_cache/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+# Agent runtime state (trace database) written into the working directory
+.grid/
+# Generated JSON lives under the runtime directories below. Source manifests
+# and package metadata must stay visible to Git.
+examples/*/data/
+examples/*/workspace/
+tools/DeepSeek-OCR-2/
+*.ogg
+*.wav
+*.pt
+speech-text/
+workspace/screenshots/
+voice_agent/workspace/screenshots/
+ISKOR-autotest
+data/
+
+# Dolt database files (added by bd init)
+.dolt/
+scripts/
+*.bak
+plans/
+.beads/
+
+# bv (beads viewer) local config and caches
+.bv/
+tmp/
+
+# Local scratch, debug, and planning artifacts
+.tmp/
+/.tmp_*
+scratch/
+debug/
+debug-*.log
+/*.patch
+/*_debug.py
+/*_bridge.py
+/*_smoke.py
+
+# Local indexes and caches
+# .codegraph/ is a local index. Executables and dependency lockfiles stay visible.
+.codegraph/
+
+# Local agent/editor state at repo root only.
+# Example-local instructions (.agents, .codex, .cursor/rules) stay committable.
+/.kilo/
+/.cursor/
+/.claude/
+/.codex/
+
+# Runtime artifacts under examples
+examples/*/runs/
+examples/*/.beads/
+examples/*/.claude/
+examples/*/.codex/hooks.json
+examples/*/.cursor/hooks.json
+examples/*/**/*.gate.lock*
+examples/*/eval/**/manifest.jsonl
+examples/*/eval/**/stt-results.jsonl
+examples/*/eval/**/_source/
+examples/*/eval/**/*.wav
+examples/*/eval/**/*.mp3
+examples/*/eval/**/*.ogg
+examples/*/eval/**/*.flac
+
+# One-off debug and smoke logs
+voice-*.log
+*-smoke.log
+*-stderr.log
+/voice-app.log
+/voice-grid-http.log
+/voice-grid-stderr.log
+/voice-model-smoke.log
+/voice-turns-app.log
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
+
+# Local binaries
+*.exe

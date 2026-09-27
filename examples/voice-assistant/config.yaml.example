@@ -1,0 +1,99 @@
+# Run from the repository: python -m web_chat --config examples/voice-assistant/config.yaml.example --path .
+settings:
+  default_agent: assistant
+  working_directory: ../..
+  allow_path_override: true
+  max_turns: 30
+  agent_timeout: 300
+  mcp_enabled: false
+  project_tools:
+    enabled: true
+    tools_directory: ../coder/tools
+isolation:
+  enabled: false
+
+providers:
+  openrouter:
+    name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    timeout: 60
+    max_retries: 1
+
+models:
+  mercury:
+    name: inception/mercury-2.5
+    provider: openrouter
+    temperature: 0.3
+    max_tokens: 4096
+    context_window: 40000
+    streaming_enabled: true
+  jev:
+    name: typesafe/jev-1.13
+    provider: openrouter
+
+routing:
+  model: jev
+  api: decisions
+
+voice:
+  enabled: true
+  decision_model: jev
+  auto_route: true
+  stt:
+    model_size: large-v3-turbo
+    device: cuda
+    device_index: 0
+    compute_type: int8_float16
+    language: ru
+    beam_size: 5
+    initial_prompt: "Mercury, Jev, OpenRouter, CUDA, Whisper, Grid, FastAPI, WebSocket, pytest."
+  tts:
+    backend: openrouter
+    model: x-ai/grok-voice-tts-1.0
+    voice: eve
+    api_key_env: OPENROUTER_API_KEY
+    timeout: 60
+    sample_rate: 24000
+    pronunciations:
+      Mercury: "Меркьюри"
+      Jev: "Джев"
+      OpenRouter: "Оупен Раутер"
+      CUDA: "Куда"
+
+tools:
+  file_read:
+    type: function
+  glob_tool:
+    type: function
+  grep_tool:
+    type: function
+  file_edit:
+    type: function
+  file_write:
+    type: function
+  bash_tool:
+    type: function
+
+agents:
+  assistant:
+    name: Голосовой помощник
+    model: mercury
+    tools: [file_read, glob_tool, grep_tool]
+    description: Общение, объяснение, вопросы о проекте, чтение и поиск файлов без изменения.
+    custom_prompt: |
+      Отвечай по-русски, если пользователь не просит другой язык. Сначала дай короткий
+      содержательный ответ, затем необходимые детали. Твой ответ может быть озвучен.
+      Для простого вопроса достаточно 1–3 предложений. Не озвучивай внутренние рассуждения.
+      Не утверждай, что выполнил действие, пока инструмент не подтвердил результат.
+      Используй инструменты для проверки фактов о проекте. Не выдумывай содержимое файлов.
+  engineer:
+    name: Инженер
+    model: mercury
+    tools: [file_read, glob_tool, grep_tool, file_edit, file_write, bash_tool]
+    description: Изменить код или файлы, исправить ошибку, запустить команды и тесты по поручению пользователя.
+    custom_prompt: |
+      Ты инженер проекта. Выполняй порученную работу инструментами и проверяй результат.
+      Сохраняй существующие изменения пользователя. Не читай и не выводи секреты.
+      Отвечай по-русски. Начинай итог с короткого результата, пригодного для озвучки.
+      Не утверждай, что тесты пройдены, если ты их не запускал.

@@ -2,7 +2,6 @@
 Unit tests for utils/exceptions.py module - simplified version.
 """
 
-import pytest
 from utils.exceptions import (
     GridError, ConfigError, AgentError, ContextError, ToolError
 )

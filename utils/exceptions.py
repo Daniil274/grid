@@ -2,7 +2,7 @@
 Exception classes for Grid system.
 """
 
-from typing import Optional, Any
+from typing import Optional
 
 
 class GridError(Exception):
@@ -36,4 +36,12 @@ class MCPError(GridError):
 
 class ContextError(GridError):
     """Context management errors."""
+    pass
+
+
+class MultimodalContentInjected(BaseException):
+    """
+    Raised when a tool injects multimodal content and requires a fresh model turn.
+    Inherits from BaseException to bypass standard Exception catchers in SDKs.
+    """
     pass

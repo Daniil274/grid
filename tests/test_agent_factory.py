@@ -2,19 +2,54 @@
 Unit tests for core/agent_factory.py module.
 """
 
-import pytest
-import asyncio
-from unittest.mock import Mock, AsyncMock, patch, MagicMock
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 from core.agent_factory import AgentFactory
 from core.config import Config
-from utils.exceptions import AgentError, ConfigError
-from schemas import AgentExecution
+from core.config.prompt_sections import PromptSection
+from core.factory.failures import is_retriable
+from core.factory.models import ModelProvider
+from core.fallback_model import AllModelsFailedError, FallbackModel
+from utils.exceptions import AgentError
 
 
 class TestAgentFactory:
     """Test AgentFactory class functionality."""
+
+    @pytest.mark.parametrize("reasoning", [None, {"effort": "low"}])
+    def test_parallel_tool_calls_follow_the_agent_setting(self, reasoning):
+        """Off unless the agent opts in, with or without reasoning overrides."""
+        models = ModelProvider(config=None, runtime_support=None, compact_config=None)
+        model_config = Mock(max_tokens=100, reasoning=reasoning, modalities=None)
+
+        assert models.settings(model_config).parallel_tool_calls is False
+        assert models.settings(model_config, True).parallel_tool_calls is True
+
+    def test_coordinator_example_batches_tool_calls(self):
+        config = Config("examples/coordinator-pipeline/config.yaml")
+        assert config.get_agent("coordinator").parallel_tool_calls is True
+        assert config.get_agent("general_purpose").parallel_tool_calls is False
+
+    def test_openai_client_uses_configured_provider_headers(self):
+        provider = Mock(default_headers={"User-Agent": "grid-test/1.0"})
+        config = Mock()
+        config.get_provider.return_value = provider
+        config.get_proxy_for_provider.return_value = None
+        models = ModelProvider(config=config, runtime_support=None, compact_config=None)
+
+        with patch("core.factory.models.AsyncOpenAI") as client_class:
+            models.make_client(
+                api_key="test-key",
+                base_url="https://api.example.com/v1",
+                provider_key="example",
+            )
+
+        assert client_class.call_args.kwargs["default_headers"] == {
+            "User-Agent": "grid-test/1.0"
+        }
     
     def test_agent_factory_init(self, config_file):
         """Test agent factory initialization."""
@@ -25,7 +60,7 @@ class TestAgentFactory:
         assert factory.context_manager is not None
         assert len(factory._agent_cache) == 0
         assert len(factory._tool_cache) == 0
-        assert len(factory._mcp_servers) == 0
+        assert len(factory.mcp) == 0
         assert len(factory._agent_sessions) == 0
     
     def test_agent_factory_init_with_working_directory(self, config_file, temp_dir):
@@ -33,16 +68,12 @@ class TestAgentFactory:
         config = Config(str(config_file))
         factory = AgentFactory(config, str(temp_dir))
         
-        # AgentFactory passes working_directory override to Config constructor
-        # But Config prioritizes settings.working_directory from YAML over constructor parameter
-        # From sample_config, working_directory="/tmp/test" which doesn't exist,
-        # so Config should fall back to the constructor parameter
+        # AgentFactory calls config.set_working_directory with the override
+        # Since allow_path_override is True in sample_config, it should update the working directory
         assert factory.config is config
         
-        # Since "/tmp/test" doesn't exist, Config should use the constructor override
-        # However, get_working_directory() returns config.settings.working_directory if set
-        # So we verify the factory has config reference
-        assert factory.config.get_working_directory() == "/tmp/test"  # From sample_config
+        # We verify the factory updated the config's working directory
+        assert factory.config.get_working_directory() == str(temp_dir)
     
     @pytest.mark.asyncio
     async def test_agent_factory_initialize(self, config_file):
@@ -117,11 +148,14 @@ class TestAgentFactory:
             mock_session = Mock()
             mock_session_class.return_value = mock_session
             
-            session = factory._get_agent_session("test_agent")
+            session = factory._get_agent_session("test_agent", "test_context")
             
             assert session is mock_session
-            assert "test_agent" in factory._agent_sessions
-            mock_session_class.assert_called_once_with("agent_test_agent")
+            assert ("test_agent", "test_context") in factory._agent_sessions
+            mock_session_class.assert_called_once_with(
+                session_id="agent_test_agent_test_context",
+                db_path=factory._agent_session_db_path,
+            )
     
     def test_get_agent_session_reuses_existing(self, config_file):
         """Test that _get_agent_session reuses existing session."""
@@ -133,11 +167,37 @@ class TestAgentFactory:
             mock_session = Mock()
             mock_session_class.return_value = mock_session
             
-            session1 = factory._get_agent_session("test_agent")
-            session2 = factory._get_agent_session("test_agent")
+            session1 = factory._get_agent_session("test_agent", "test_context")
+            session2 = factory._get_agent_session("test_agent", "test_context")
             
             assert session1 is session2
             mock_session_class.assert_called_once()  # Only called once
+
+    def test_persistent_session_db_path_lives_under_user_logs(self, config_file, monkeypatch, tmp_path):
+        """Test durable session DB path is created under ~/.grid/logs by default."""
+        grid_home = tmp_path / "grid_home"
+        monkeypatch.setenv("USERPROFILE", str(grid_home))  # Windows
+        monkeypatch.setenv("HOME", str(grid_home))
+
+        config = Config(str(config_file))
+        factory = AgentFactory(config)
+
+        expected = grid_home / ".grid" / "logs" / "agent_sessions.db"
+        assert Path(factory._agent_session_db_path).resolve() == expected.resolve()
+        assert expected.parent.exists()
+
+    def test_transient_provider_failures_are_retried(self):
+        """Test transient provider/network failures are treated as retriable."""
+        assert is_retriable(Exception("Connection error while streaming response"))
+        assert is_retriable(AgentError("rate limit exceeded by provider"))
+        assert is_retriable(Exception("all providers exhausted"))
+        assert is_retriable(Exception("HTTP 503: upstream_unavailable"))
+        assert is_retriable(AgentError("upstream unavailable"))
+        assert is_retriable(Exception("server_error: Сервис временно недоступен"))
+        assert not is_retriable(Exception("tool arguments are invalid"))
+
+    def test_all_models_failed_is_not_retried(self):
+        assert not is_retriable(AllModelsFailedError("all failed"))
     
     def test_is_reasoning_model_name(self, config_file):
         """Test reasoning model detection."""
@@ -145,32 +205,32 @@ class TestAgentFactory:
         factory = AgentFactory(config)
         
         # Reasoning models
-        assert factory._is_reasoning_model_name("o3-mini")
-        assert factory._is_reasoning_model_name("o4-mini-high")
-        assert factory._is_reasoning_model_name("deepseek-r1")
-        assert factory._is_reasoning_model_name("reasoning-model")
-        assert factory._is_reasoning_model_name("thinking-ai")
+        assert factory.models.is_reasoning_model_name("o3-mini")
+        assert factory.models.is_reasoning_model_name("o4-mini-high")
+        assert factory.models.is_reasoning_model_name("deepseek-r1")
+        assert factory.models.is_reasoning_model_name("reasoning-model")
+        assert factory.models.is_reasoning_model_name("thinking-ai")
         
         # Non-reasoning models
-        assert not factory._is_reasoning_model_name("gpt-4")
-        assert not factory._is_reasoning_model_name("claude-3")
-        assert not factory._is_reasoning_model_name("llama2")
-        assert not factory._is_reasoning_model_name("")
-        assert not factory._is_reasoning_model_name(None)
-    
-    @pytest.mark.asyncio 
+        assert not factory.models.is_reasoning_model_name("gpt-4")
+        assert not factory.models.is_reasoning_model_name("claude-3")
+        assert not factory.models.is_reasoning_model_name("llama2")
+        assert not factory.models.is_reasoning_model_name("")
+        assert not factory.models.is_reasoning_model_name(None)
+
+    @pytest.mark.asyncio
     async def test_create_agent_success(self, config_file):
         """Test successful agent creation."""
         config = Config(str(config_file))
         factory = AgentFactory(config)
         
-        with patch('core.agent_factory.AsyncOpenAI') as mock_openai, \
-             patch('core.agent_factory.OpenAIChatCompletionsModel') as mock_model, \
+        with patch('core.factory.models.AsyncOpenAI') as mock_openai, \
+             patch('core.factory.models.VisionChatCompletionsModel') as mock_model, \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
              patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
-             patch.object(factory, '_create_mcp_servers', return_value=[], new_callable=AsyncMock):
+             patch.object(factory.mcp, 'for_tools', return_value=[], new_callable=AsyncMock):
             
             mock_client = Mock()
             mock_openai.return_value = mock_client
@@ -192,6 +252,67 @@ class TestAgentFactory:
             assert call_args[1]['name'] == "Test Agent"
             assert call_args[1]['instructions'] == "Test instructions"
             assert call_args[1]['model'] is mock_model_instance
+
+    @pytest.mark.asyncio
+    async def test_create_agent_builds_ordered_model_fallback(self, config_file):
+        """A model list becomes one SDK model that preserves configured order."""
+        config = Config(str(config_file))
+        config.config.models["gpt-4-backup"] = config.config.models["gpt-4"].model_copy(
+            update={"name": "gpt-4-backup"}
+        )
+        config.config.agents["test_agent"].model = ["gpt-4", "gpt-4-backup"]
+        factory = AgentFactory(config, str(config_file.parent))
+
+        first_model = Mock()
+        backup_model = Mock()
+        with patch('core.factory.models.VisionChatCompletionsModel', side_effect=[first_model, backup_model]), \
+             patch('core.agent_factory.Agent') as mock_agent_class, \
+             patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
+             patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
+             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
+             patch.object(factory.mcp, 'for_tools', return_value=[], new_callable=AsyncMock):
+            mock_agent_class.return_value = Mock()
+            await factory.create_agent("test_agent")
+
+        fallback = mock_agent_class.call_args.kwargs["model"]
+        assert isinstance(fallback, FallbackModel)
+        assert [candidate.key for candidate in fallback.candidates] == [
+            "gpt-4",
+            "gpt-4-backup",
+        ]
+        assert [candidate.model for candidate in fallback.candidates] == [
+            first_model,
+            backup_model,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_create_dynamic_agent_passes_model_config_flags(self, config_file):
+        """Dynamic agents must apply the same VisionChatCompletionsModel flags as create_agent."""
+        config = Config(str(config_file))
+        factory = AgentFactory(config)
+
+        model_cfg = config.get_model("gpt-4")
+        model_cfg.preserve_reasoning_content = True
+
+        with patch('core.factory.models.AsyncOpenAI'), \
+             patch('core.factory.models.VisionChatCompletionsModel') as mock_model, \
+             patch('core.agent_factory.Agent') as mock_agent_class, \
+             patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
+             patch.object(factory, '_resolve_tools_for_names', return_value=([], []), new_callable=AsyncMock), \
+             patch.object(factory, '_build_dynamic_agent_instructions', return_value="instr"), \
+             patch.object(factory.models, 'is_allowed', return_value=True):
+
+            mock_model.return_value = Mock()
+            mock_agent_class.return_value = Mock()
+
+            await factory.create_dynamic_agent(
+                name="dyn-test",
+                instructions="do work",
+                model_key="gpt-4",
+            )
+
+            mock_model.assert_called_once()
+            assert mock_model.call_args.kwargs["preserve_reasoning_content"] is True
     
     @pytest.mark.asyncio
     async def test_create_agent_with_force_reload(self, config_file):
@@ -199,13 +320,13 @@ class TestAgentFactory:
         config = Config(str(config_file))
         factory = AgentFactory(config)
         
-        with patch('core.agent_factory.AsyncOpenAI'), \
-             patch('core.agent_factory.OpenAIChatCompletionsModel'), \
+        with patch('core.factory.models.AsyncOpenAI'), \
+             patch('core.factory.models.VisionChatCompletionsModel'), \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
              patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
-             patch.object(factory, '_create_mcp_servers', return_value=[], new_callable=AsyncMock):
+             patch.object(factory.mcp, 'for_tools', return_value=[], new_callable=AsyncMock):
             
             mock_agent1 = Mock()
             mock_agent2 = Mock()
@@ -228,13 +349,13 @@ class TestAgentFactory:
         config = Config(str(config_file))
         factory = AgentFactory(config)
         
-        with patch('core.agent_factory.AsyncOpenAI'), \
-             patch('core.agent_factory.OpenAIChatCompletionsModel'), \
+        with patch('core.factory.models.AsyncOpenAI'), \
+             patch('core.factory.models.VisionChatCompletionsModel'), \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
              patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
              patch.object(factory, '_build_agent_instructions', return_value="Test instructions"), \
-             patch.object(factory, '_create_mcp_servers', return_value=[], new_callable=AsyncMock):
+             patch.object(factory.mcp, 'for_tools', return_value=[], new_callable=AsyncMock):
             
             mock_agent = Mock()
             mock_agent_class.return_value = mock_agent
@@ -260,151 +381,22 @@ class TestAgentFactory:
         with pytest.raises(AgentError, match="Failed to create agent"):
             await factory.create_agent("invalid_agent")
     
-    @pytest.mark.asyncio
-    async def test_run_agent_success(self, config_file):
-        """Test successful agent run."""
+
+
+    def test_build_agent_instructions_include_prompt_and_paths(self, config_file):
+        """Instructions come from the instructions builder: prompt, paths, context reference."""
         config = Config(str(config_file))
         factory = AgentFactory(config)
-        
-        with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
-             patch('core.agent_factory.Runner') as mock_runner, \
-             patch('asyncio.wait_for', new_callable=AsyncMock) as mock_wait_for, \
-             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"):
-            
-            mock_agent = Mock()
-            mock_agent.name = "Test Agent"
-            mock_create.return_value = mock_agent
-            
-            mock_result = Mock()
-            mock_result.final_output = "Test response"
-            mock_wait_for.return_value = mock_result
-            
-            response = await factory.run_agent("test_agent", "test message")
-            
-            assert response == "Test response"
-            mock_create.assert_called_once_with("test_agent", None)
-            mock_wait_for.assert_called_once()
-    
-    @pytest.mark.asyncio
-    async def test_run_agent_with_context_path(self, config_file):
-        """Test agent run with context path."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
-             patch('core.agent_factory.Runner') as mock_runner, \
-             patch('asyncio.wait_for', new_callable=AsyncMock) as mock_wait_for, \
-             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"):
-            
-            mock_agent = Mock()
-            mock_agent.name = "Test Agent"
-            mock_create.return_value = mock_agent
-            
-            mock_result = Mock()
-            mock_result.final_output = "Test response"
-            mock_wait_for.return_value = mock_result
-            
-            await factory.run_agent("test_agent", "test message", "/test/path")
-            
-            mock_create.assert_called_once_with("test_agent", "/test/path")
-    
-    @pytest.mark.asyncio
-    async def test_run_agent_timeout(self, config_file):
-        """Test agent run timeout."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
-             patch('asyncio.wait_for', side_effect=asyncio.TimeoutError), \
-             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"):
-            
-            mock_agent = Mock()
-            mock_agent.name = "Test Agent"
-            mock_create.return_value = mock_agent
-            
-            with pytest.raises(AgentError, match="Agent execution timed out"):
-                await factory.run_agent("test_agent", "test message")
-    
-    @pytest.mark.asyncio
-    async def test_run_agent_streaming(self, config_file, capsys):
-        """Test agent run with streaming."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        # Simple test - just verify streaming parameter can be passed
-        with patch.object(factory, 'run_agent') as mock_run:
-            mock_run.return_value = "Test result"
-            
-            result = await factory.run_agent("test_agent", "test message", streaming=True)
-            
-            mock_run.assert_called_once_with("test_agent", "test message", streaming=True)
-            assert result == "Test result"
-    
-    @pytest.mark.asyncio
-    async def test_run_agent_empty_response(self, config_file):
-        """Test agent run with empty response."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        with patch.object(factory, 'create_agent', new_callable=AsyncMock) as mock_create, \
-             patch('asyncio.wait_for', new_callable=AsyncMock) as mock_wait_for, \
-             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"):
-            
-            mock_agent = Mock()
-            mock_agent.name = "Test Agent"
-            mock_create.return_value = mock_agent
-            
-            # Mock empty result - use string result to avoid Mock len() issue
-            mock_wait_for.return_value = ""  # Return empty string directly
-            
-            response = await factory.run_agent("test_agent", "test message")
-            
-            # Should return fallback message
-            assert "Агент выполнил задачу, но не предоставил текстовый ответ" in response
-    
-    def test_build_agent_instructions_basic(self, config_file):
-        """Test building basic agent instructions."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        with patch.object(config, 'build_agent_prompt', return_value="Base prompt"):
-            instructions = factory._build_agent_instructions("test_agent")
-            
-            assert "Base prompt" in instructions
-            assert "Информация о путях:" in instructions
-            assert "Рабочая директория:" in instructions
-    
-    def test_build_agent_instructions_with_context_path(self, config_file):
-        """Test building agent instructions with context path."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        with patch.object(config, 'build_agent_prompt', return_value="Base prompt"):
+        base = [PromptSection(key="base_prompt", content="Base prompt", scope="static")]
+
+        with patch.object(config, "build_agent_prompt_sections", return_value=base):
             instructions = factory._build_agent_instructions("test_agent", "/test/context")
-            
-            assert "Base prompt" in instructions
-            assert "Контекстный путь: /test/context" in instructions
-    
-    def test_build_path_context(self, config_file):
-        """Test building path context."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        context = factory._build_path_context()
-        
-        assert "Информация о путях:" in context
-        assert "Рабочая директория:" in context
-        assert "Директория конфигурации:" in context
-    
-    def test_build_path_context_with_context_path(self, config_file):
-        """Test building path context with context path."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        context = factory._build_path_context("/test/context")
-        
-        assert "Контекстный путь: /test/context" in context
-        assert "Абсолютный контекстный путь:" in context
+
+        assert instructions.startswith("Base prompt")
+        assert "Path information:" in instructions
+        assert "Context path: /test/context" in instructions
+        assert "Context ID: " in instructions
+
     
     @pytest.mark.asyncio
     async def test_get_agent_tools_caching(self, config_file):
@@ -416,7 +408,7 @@ class TestAgentFactory:
         
         # Mock the tool configs to be found properly
         with patch.object(config, 'get_tool') as mock_get_tool, \
-             patch('core.agent_factory.get_tools_by_names', return_value=[Mock(), Mock()]) as mock_get_tools:
+             patch('core.factory.tools.resolve_tool', side_effect=lambda name, loader: Mock()) as mock_resolve:
             
             # Mock tool configs as function type
             mock_tool_config = Mock()
@@ -430,51 +422,14 @@ class TestAgentFactory:
             tools2 = await factory._get_agent_tools(agent_config)
             assert tools1 is tools2
             
-            # get_tools_by_names should be called once with function tools
-            mock_get_tools.assert_called_once_with(["file_read", "file_write"])
+            # Each function tool was resolved once, with this config's loader
+            assert [call.args for call in mock_resolve.call_args_list] == [
+                ("file_read", config.project_tools_loader),
+                ("file_write", config.project_tools_loader),
+            ]
     
-    def test_extract_tools_used_success(self, config_file):
-        """Test extracting tools used from result."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        # Mock result with tool_calls
-        mock_result = Mock()
-        mock_call1 = Mock()
-        mock_call1.name = "tool1"
-        mock_call2 = Mock()
-        mock_call2.name = "tool2"
-        mock_result.tool_calls = [mock_call1, mock_call2]
-        
-        tools = factory._extract_tools_used(mock_result)
-        
-        assert tools == ["tool1", "tool2"]
-    
-    def test_extract_tools_used_no_tool_calls(self, config_file):
-        """Test extracting tools when no tool_calls attribute."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        mock_result = Mock()
-        # No tool_calls attribute
-        del mock_result.tool_calls
-        
-        tools = factory._extract_tools_used(mock_result)
-        
-        assert tools == []
-    
-    def test_extract_tools_used_exception(self, config_file):
-        """Test extracting tools with exception."""
-        config = Config(str(config_file))
-        factory = AgentFactory(config)
-        
-        mock_result = Mock()
-        mock_result.tool_calls = None  # This will cause AttributeError when iterating
-        
-        tools = factory._extract_tools_used(mock_result)
-        
-        assert tools == []
-    
+
+
     def test_context_management_methods(self, config_file):
         """Test context management methods."""
         config = Config(str(config_file))
@@ -524,7 +479,7 @@ class TestAgentFactory:
         
         mock_server = Mock()
         mock_server.cleanup = AsyncMock()
-        factory._mcp_servers["test"] = mock_server
+        factory.mcp._servers["test"] = mock_server
         
         await factory.cleanup()
         
@@ -534,7 +489,7 @@ class TestAgentFactory:
         
         # Should clear caches
         assert len(factory._agent_sessions) == 0
-        assert len(factory._mcp_servers) == 0
+        assert len(factory.mcp) == 0
         assert len(factory._agent_cache) == 0
     
     @pytest.mark.asyncio

@@ -1,0 +1,38 @@
+# systemd unit for a Grid web chat with accounts.
+#
+# Paths assume Grid in /opt/grid (with its .venv and .env) and the server's
+# data - accounts and user spaces - in /var/lib/grid-web. The base system's
+# config must have `isolation.enabled: true`: every user's agents then run in a
+# container of their own. Starting those containers needs the Docker daemon,
+# and membership in the docker group is as good as root on this machine - run
+# Grid on a host or VM dedicated to it.
+
+[Unit]
+Description=Grid web chat (accounts)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=grid
+Group=grid
+SupplementaryGroups=docker
+WorkingDirectory=/opt/grid
+EnvironmentFile=/opt/grid/.env
+ExecStart=/opt/grid/.venv/bin/grid-web-chat --accounts \
+    --routing routing.yaml \
+    --data-dir /var/lib/grid-web \
+    --host 127.0.0.1 --port 8000 \
+    --secure-cookies
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/grid-web /opt/grid
+
+[Install]
+WantedBy=multi-user.target

@@ -4,15 +4,11 @@ Unit tests for core/context.py module.
 
 import pytest
 import json
-import tempfile
-from pathlib import Path
-from datetime import datetime
-from unittest.mock import patch, Mock
-import os
+from unittest.mock import patch
 import time
 
 from core.context import ContextManager
-from schemas import ContextMessage, AgentExecution
+from schemas import AgentExecution
 from utils.exceptions import ContextError
 
 
@@ -47,7 +43,7 @@ class TestContextManager:
         message = cm._conversation_history[0]
         assert message.role == "user"
         assert message.content == "Hello, world!"
-        assert message.metadata is None
+        assert set(message.metadata) == {"message_id"}  # every message gets an id
     
     def test_add_message_with_metadata(self):
         """Test adding message with metadata."""
@@ -60,7 +56,8 @@ class TestContextManager:
         message = cm._conversation_history[0]
         assert message.role == "assistant"
         assert message.content == "Response"
-        assert message.metadata == metadata
+        assert {k: v for k, v in message.metadata.items() if k != "message_id"} == metadata
+        assert message.metadata["message_id"]
     
     def test_add_message_history_trimming(self):
         """Test that message history is trimmed when exceeding max_history."""
@@ -88,8 +85,13 @@ class TestContextManager:
         with open(persist_path, 'r') as f:
             data = json.load(f)
         
-        assert len(data["conversation_history"]) == 1
-        assert data["conversation_history"][0]["content"] == "Test message"
+        contexts = data["contexts"]
+        assert len(contexts) == 1
+        active_id = data.get("active_context_id")
+        assert active_id in contexts
+        conversation_history = contexts[active_id]["conversation_history"]
+        assert len(conversation_history) == 1
+        assert conversation_history[0]["content"] == "Test message"
     
     def test_add_message_error_handling(self):
         """Test error handling in add_message."""
@@ -158,9 +160,9 @@ class TestContextManager:
         
         context = cm.get_conversation_context()
         
-        assert "Предыдущий диалог" in context
-        assert "Пользователь: Hello" in context
-        assert "Ассистент: Hi there!" in context
+        assert context.startswith("Previous dialogue")
+        assert "User: Hello" in context
+        assert "Assistant: Hi there!" in context
     
     def test_get_conversation_context_with_limit(self):
         """Test getting conversation context with message limit."""
@@ -232,7 +234,7 @@ class TestContextManager:
         
         assert len(recent) == 2
         assert all(ex.agent_name == "target_agent" for ex in recent)
-    
+
     def test_clear_history(self):
         """Test clearing all history."""
         cm = ContextManager()
@@ -267,9 +269,15 @@ class TestContextManager:
         cm.add_message("user", "test")
         assert persist_path.exists()
         
-        cm.clear_history()
+        new_context_id = cm.clear_history()
         
-        assert not persist_path.exists()
+        assert persist_path.exists()
+        with open(persist_path, 'r') as f:
+            data = json.load(f)
+        assert data.get("active_context_id") == new_context_id
+        contexts = data.get("contexts", {})
+        assert new_context_id in contexts
+        assert contexts[new_context_id]["conversation_history"] == []
     
     def test_get_context_stats(self):
         """Test getting context statistics."""
@@ -296,6 +304,8 @@ class TestContextManager:
         assert "memory_usage_mb" in stats
         assert stats["last_user_message"] == "Hello"
         assert stats["last_assistant_message"] == "Hi"
+        assert stats["current_context_id"]
+        assert stats["current_context_id"] in stats["available_contexts"]
     
     def test_get_conversation_history(self):
         """Test getting raw conversation history."""
@@ -370,8 +380,14 @@ class TestContextManager:
         )
         cm1.add_execution(execution)
         
+        # Get the context ID from the first manager
+        context_id = cm1._current_context_id
+        
         # Create new context manager with same persistence path
         cm2 = ContextManager(max_history=5, persist_path=str(persist_path))
+        
+        # Activate the saved context to access its data
+        cm2.activate_context(context_id)
         
         # Verify data was loaded
         assert len(cm2._conversation_history) == 2
@@ -435,10 +451,10 @@ class TestContextManager:
             task_input="Continue conversation"
         )
         
-        assert "Контекст диалога" in context
+        assert "Conversation context" in context
         assert "Continue conversation" in context
-        assert "Пользователь: Hello" in context
-        assert "Ассистент: Hi" in context
+        assert "User: Hello" in context
+        assert "Assistant: Hi" in context
     
     def test_context_for_agent_tool_smart(self):
         """Test smart context strategy for agent tool."""
@@ -448,10 +464,10 @@ class TestContextManager:
         # Task with conversation keywords should include conversation
         context = cm.get_context_for_agent_tool(
             strategy="smart",
-            task_input="продолжи анализ файла"
+            task_input="continue file analysis"
         )
         
-        assert "файла" in context or "Контекст" in context
+        assert "file" in context or "Context" in context
     
     def test_add_tool_result_as_message(self):
         """Test adding tool result as message."""
@@ -462,7 +478,7 @@ class TestContextManager:
         assert len(cm._conversation_history) == 1
         message = cm._conversation_history[0]
         assert message.role == "assistant"
-        assert "Результат инструмента file_reader" in message.content
+        assert "Tool result of file_reader" in message.content
         assert "File content: Hello World" in message.content
     
     def test_add_tool_result_as_message_empty_output(self):
@@ -518,7 +534,7 @@ class TestContextManager:
             thread.start()
         
         for thread in threads:
-            thread.join(timeout=10)  # Таймаут 10 сек для каждого потока
+            thread.join(timeout=10)  # 10 sec timeout for each thread
             if thread.is_alive():
                 pytest.fail(f"Thread {thread.name} did not finish within timeout")
         
@@ -528,7 +544,7 @@ class TestContextManager:
         assert len(cm._conversation_history) == 20  # 2 threads * 10 messages
 
     def test_thread_safety_simple(self):
-        """Простой тест thread safety без deadlock'ов."""
+        """Simple thread safety test without deadlocks."""
         import threading
         import time
         

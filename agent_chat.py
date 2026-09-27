@@ -1,42 +1,67 @@
 #!/usr/bin/env python3
 """
-Legacy chat interface for Grid Agent System.
-Simplified version of the main.py CLI for backward compatibility.
+Command-line chat with Grid agents (the `agent-chat` command).
+
+Without --agent/--config every message is routed across the systems of the
+routing catalog; with them, the chosen agent answers.
 """
 
+import signal
 import asyncio
 import argparse
 import sys
+import threading
 import time
 import logging
 import os
+import re
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+def _configure_utf8_console() -> None:
+    """Keep model output printable on Windows consoles with legacy code pages."""
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_configure_utf8_console()
 
 # Add grid package to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Use Proactor event loop on Windows to support asyncio subprocess APIs (required for MCP)
-if sys.platform == "win32":
-    try:
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    except Exception:
-        pass
-
 from core.config import Config
 from core.agent_factory import AgentFactory
-from core.tracing_config import configure_tracing_from_env
+from core.run_stream import ConsoleStreamObserver
+from core.routing import AutoRouter
+from core.tool_check import ToolIssue, agent_issues, diagnose, summarize
+try:
+    # Optional: only available when Docker SDK is installed and Docker is running
+    from core.managers.container_manager import ContainerManager
+except Exception:
+    ContainerManager = None
+from core.tracing.config import configure_tracing_from_env
 from utils.exceptions import GridError
+from utils.cli_chat import CliChatRenderer
+from utils.grid_paths import get_default_logs_dir
 from utils.logger import Logger
+from utils.multimodal_converter import MultimodalConverter
+from utils.image_utils import ImageUtils
 
 # Configure tracing instead of logging
 configure_tracing_from_env()
 
-# Configure logging: console + files
+# Initial logging (console + files); will be reconfigured after config load if agent_logging.enabled is set
 Logger.configure(
     level="INFO",
-    log_dir=str(Path(__file__).parent / "logs"),
-    enable_console=True,
-    enable_json=True,
+    log_dir=str(get_default_logs_dir()),
+    enable_console=False,
+    enable_json=False,
     enable_legacy_logs=True,
     force_reconfigure=True,
 )
@@ -47,14 +72,172 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("openai.agents").setLevel(logging.CRITICAL)
 logging.getLogger("grid").setLevel(logging.INFO)
 
+
+def parse_message_with_images(user_input: str) -> tuple[str, list[str]]:
+    """
+    Parse user input to extract text and image paths.
+
+    Syntax: "text & 'path/to/image.png'" or "text & path/to/image.png"
+    Multiple images: "text & image1.png & image2.jpg"
+
+    Returns:
+        Tuple of (text_message, list_of_image_paths)
+    """
+    if '&' not in user_input:
+        return user_input, []
+
+    # Split by & to get text and image parts
+    parts = user_input.split('&')
+    text = parts[0].strip()
+    image_paths = []
+
+    for part in parts[1:]:
+        part = part.strip()
+
+        # Remove quotes if present
+        if part.startswith("'") and part.endswith("'"):
+            part = part[1:-1]
+        elif part.startswith('"') and part.endswith('"'):
+            part = part[1:-1]
+
+        # Validate image source
+        if part:
+            source_type, error = ImageUtils.validate_image_source(part)
+            if source_type != 'invalid':
+                image_paths.append(part)
+            else:
+                print(f"Warning: Invalid image source: {part} - {error}")
+
+    return text, image_paths
+
+
+def prepare_agent_message(text: str, image_paths: list[str]) -> str:
+    """
+    Prepare message for agent with optional images.
+
+    According to Agents SDK examples, images should be sent as a list of messages
+    where each message has "role" and "content" fields. Content can be a list
+    of content parts with "type": "input_image" or "type": "input_text".
+
+    Args:
+        text: Text message
+        image_paths: List of image paths
+
+    Returns:
+        Formatted message for agent (text string or JSON string with proper message format)
+    """
+    if not image_paths:
+        return text
+
+    # Create multimodal message
+    message = MultimodalConverter.create_multimodal_message(
+        role="user",
+        text=text,
+        image_sources=image_paths,
+        timestamp=datetime.now().isoformat()
+    )
+
+    # Convert to Agents SDK format - get content parts
+    content = MultimodalConverter.context_message_to_agents_sdk(message)
+
+    # According to Agents SDK examples, we need to format as a message with role and content
+    # Format: {"role": "user", "content": [...]}
+    import json
+    if isinstance(content, str):
+        # Simple text - return as is
+        return content
+    else:
+        # Multimodal - wrap in proper message format
+        # Agents SDK expects: [{"role": "user", "content": [...]}]
+        message_dict = {
+            "role": "user",
+            "content": content
+        }
+        return json.dumps(message_dict)
+
+
+async def print_token_status(chat_ui: CliChatRenderer, factory: Any, config: Config, agent_key: str) -> None:
+    """How full the agent's context is: its session against the model's window."""
+    usage = await factory.context_usage(agent_key)
+    percent = round(usage["tokens"] / max(1, usage["window"]) * 100, 1)
+    chat_ui.print_status(
+        f"Tokens: ~{usage['tokens']:,} / {usage['window']:,} ({percent}%), "
+        f"compacts past ~{usage['threshold']:,}",
+        style="bright_black",
+    )
+
+
+def get_agent_skill_status(config: Config, agent_key: str) -> tuple[list[tuple[str, Path]], list[str]]:
+    """Return declared system skills split into found and missing."""
+    found: list[tuple[str, Path]] = []
+    missing: list[str] = []
+
+    try:
+        agent_cfg = config.get_agent(agent_key)
+    except Exception:
+        return found, missing
+
+    skills_dir = Path(config.config_path).parent / "skills"
+    for skill_name in agent_cfg.system_skills:
+        skill_path = None
+        for ext in (".md", ".txt"):
+            candidate = skills_dir / f"{skill_name}{ext}"
+            if candidate.exists():
+                skill_path = candidate
+                break
+        if skill_path is not None:
+            found.append((skill_name, skill_path))
+        else:
+            missing.append(skill_name)
+
+    return found, missing
+
+
+def print_agent_skill_status(config: Config, agent_key: str) -> None:
+    """Print startup summary of system skills for the selected agent."""
+    found, missing = get_agent_skill_status(config, agent_key)
+    declared_total = len(found) + len(missing)
+
+    print("Skills")
+    if declared_total == 0:
+        print(f"Skills - Agent '{agent_key}' has no system_skills defined")
+        return
+
+    print(f"Skills - Agent '{agent_key}' declared skills: {declared_total}")
+    if found:
+        print("  Found:")
+        for skill_name, skill_path in found:
+            print(f"    - {skill_name}: {skill_path}")
+    if missing:
+        print("  Not found:")
+        for skill_name in missing:
+            print(f"    - {skill_name}")
+
+
+def print_tool_issues(chat_ui: CliChatRenderer, title: str, issues: List[ToolIssue]) -> None:
+    """Explain, before any agent runs, which tools will fail and how to fix them.
+
+    Nothing is disabled: the agent keeps these tools and may still call them.
+    """
+    if not issues:
+        return
+    lines = summarize(issues)
+    chat_ui.print_status(
+        f"{title}: {len(lines)} problem(s). The tools stay enabled, but calls to them will likely fail:",
+        style="red",
+    )
+    for line in lines:
+        chat_ui.print_status(f"  - {line}", style="yellow")
+
+
 async def main():
-    """Главная функция."""
+    """Main entry point."""
     parser = argparse.ArgumentParser(description="Legacy Grid agent chat interface")
     parser.add_argument(
         "--agent", "-a",
         type=str,
         default=None,
-        help="Agent name (default from config)"
+        help="Agent name (default: routed per message when routing.model is set, else default_agent)"
     )
     parser.add_argument(
         "--path", "-p",
@@ -77,194 +260,602 @@ async def main():
     parser.add_argument(
         "--config", "-c",
         type=str,
-        default="config.yaml",
-        help="Configuration file path"
+        default=None,
+        help="Config of a single system (default: route messages across the systems in --routing)"
+    )
+    parser.add_argument(
+        "--routing",
+        type=str,
+        default=str(Path(__file__).parent / "routing.yaml"),
+        help="System catalog used when neither --agent nor --config is given"
+    )
+    parser.add_argument(
+        "--user-id", "-u",
+        type=str,
+        default="default_user",
+        help="User identifier for isolation"
+    )
+    parser.add_argument(
+        "--timeline",
+        action="store_true",
+        help="Start embedded timeline dashboard (default: run separately via python -m timeline)",
     )
     
     args = parser.parse_args()
     
     try:
         # Beautiful initialization
-        print("Запуск Grid Agent System...")
+        print("Starting Grid Agent System...")
         
+        # Optional embedded timeline (normally: python -m timeline in another terminal)
+        timeline_handle = None
+        timeline_task = None
+        if args.timeline:
+            try:
+                from timeline.integration import run_timeline_server, TimelineHandle
+                timeline_handle = TimelineHandle()
+                timeline_task = asyncio.create_task(
+                    run_timeline_server(handle=timeline_handle, port=8789)
+                )
+            except Exception as _tl_err:
+                print(f"Timeline server not started: {_tl_err}")
+
         # Load configuration
         print("Load Config")
-        config = Config(args.config, args.path)
-        print("Load Config - Конфигурация загружена")
-        
+        # Without --agent/--config every message is routed across the systems in --routing;
+        # the session starts in the catalog's default system.
+        auto_router = None
+        if not args.agent and not args.config and Path(args.routing).exists():
+            auto_router = AutoRouter.from_config(Config(args.routing), working_directory=args.path)
+        if auto_router:
+            config_path = str(auto_router.system_config_path(auto_router.default_system()))
+        else:
+            config_path = args.config or "config.yaml"
+        config = Config(config_path, args.path)
+        print("Load Config - Configuration loaded")
+
+        # Container isolation (optional)
+        # If enabled, we run tools (git/beads/mcp) inside a per-user container.
+        container_id = None
+        user_workspace = None
+        try:
+            isolation_cfg = getattr(config.config, "isolation", None)
+            isolation_enabled = False
+            if isolation_cfg:
+                isolation_enabled = getattr(isolation_cfg, "enabled", False) if not isinstance(isolation_cfg, dict) else bool(isolation_cfg.get("enabled", False))
+
+            if isolation_enabled:
+                # Container workspace is separate from the agent's working_directory concept.
+                # If user explicitly passed --path, use that path as-is;
+                # otherwise use a fixed ./workspace/user_{id} base so containers
+                # are never recreated just because working_directory config changed.
+                if args.path is not None:
+                    user_workspace = Path(args.path).resolve()
+                else:
+                    user_workspace = Path(config.config_path).resolve().parent / "workspace" / f"user_{args.user_id}"
+                user_workspace.mkdir(parents=True, exist_ok=True)
+
+                if ContainerManager:
+                    cm = ContainerManager(config)
+                    if cm.enabled:
+                        container = cm.get_or_create_container(str(args.user_id), workspace=user_workspace)
+                        if container:
+                            container_id = container.id
+                            print(f"🐳 Container isolation enabled: {container.name} ({container_id[:12]})")
+                        else:
+                            print("⚠️ Container isolation enabled in config, but container could not be created. Falling back to local tools.")
+                    else:
+                        print("⚠️ Container isolation enabled in config, but Docker client is unavailable. Falling back to local tools.")
+                else:
+                    print("⚠️ Container isolation enabled in config, but Docker SDK is unavailable. Falling back to local tools.")
+
+                # Reload config with per-user working directory (keeps CLI behavior deterministic)
+                config = Config(config_path, str(user_workspace))
+
+        except Exception as e:
+            print(f"⚠️ Failed to initialize container isolation: {e}. Falling back to local tools.")
+
+        # Reconfigure logging from config (e.g. disable console when agent_logging.enabled is False)
+        agent_logging = config.config.settings.agent_logging
+        logs_dir = config.get_logs_directory()
+        Logger.configure(
+            level="INFO",
+            log_dir=logs_dir,
+            enable_console=False,
+            enable_json=False,
+            enable_legacy_logs=agent_logging.enabled,
+            force_reconfigure=True,
+        )
+        Logger.configure_agent_logging(
+            enabled=agent_logging.enabled,
+            level=agent_logging.level,
+            log_dir=logs_dir,
+        )
+
+        chat_ui = CliChatRenderer(enabled=True)
+        stream_observer = ConsoleStreamObserver(
+            render_text_deltas=False,
+            renderer=chat_ui,
+        )
+
         # Create factory
         print("Initialize SecurityAwareAgentFactory")
-        factory = AgentFactory(config, args.path)
-        print("Initialize SecurityAwareAgentFactory - Фабрика агентов инициализирована")
-        
+        # An action policy enabled in the routing config governs every system it
+        # routes to, using the router's own model registry for the validator.
+        policy_config = auto_router.root_config if auto_router else None
+        factory = AgentFactory(
+            config=config,
+            working_directory=config.get_working_directory(),
+            container_id=container_id,
+            stream_observer=stream_observer,
+            policy_config=policy_config,
+        )
+        print("Initialize SecurityAwareAgentFactory - Agent factory initialized")
+        selected_context_id: Optional[str] = None
+        last_context_id: Optional[str] = None
+        # Update timeline dashboard with factory for rerun support
+        if timeline_handle is not None:
+            timeline_handle.update_factory(factory)
+
+        def extract_context_id_from_text(text: Optional[str]) -> Optional[str]:
+            if not text:
+                return None
+            match = re.search(r"ctx-[0-9a-f]{8}", text)
+            return match.group(0) if match else None
+
+        def is_context_id(value: Optional[str]) -> bool:
+            return bool(value and re.fullmatch(r"ctx-[0-9a-f]{8}", value))
+
+
         # Tracing is configured automatically by Agents SDK
-        
+
         # Determine agent
         agent_key = args.agent or config.get_default_agent()
+        print_agent_skill_status(config, agent_key)
+
+        # Tool problems must be visible before the first message, not as a failed
+        # call mid-task. Kept per system to warn again when a message is routed.
+        system_issues: Dict[str, List[ToolIssue]] = {}
+        if auto_router:
+            for system_name, issues in auto_router.diagnose_systems().items():
+                if isinstance(issues, str):
+                    chat_ui.print_status(f"System '{system_name}' does not load: {issues}", style="red")
+                    continue
+                system_issues[system_name] = issues
+                print_tool_issues(chat_ui, f"System '{system_name}'", issues)
+            if not system_issues:
+                chat_ui.print_status(f"Systems checked: {', '.join(auto_router.systems())} - all healthy", style="green")
+        elif args.agent:
+            issues = agent_issues(config, diagnose(config), agent_key)
+            print_tool_issues(chat_ui, f"Agent '{agent_key}'", issues)
+            if not issues:
+                chat_ui.print_status(f"Agent '{agent_key}' checked: all tools available", style="green")
+        else:
+            issues = diagnose(config)
+            print_tool_issues(chat_ui, f"System '{config.config_path.parent.name}'", issues)
+            if not issues:
+                chat_ui.print_status("System checked: all tools available", style="green")
+        warned_routes: set = set()
+
+        if auto_router is None and not args.agent:
+            # A single system can still route between its own agents (routing.model in its config)
+            auto_router = AutoRouter.from_config(config, working_directory=args.path)
+        factories = {config.config_path.resolve(): factory}
+
+        async def apply_route(text: str) -> None:
+            """Point factory, config and agent_key at the system and agent chosen for *text*."""
+            nonlocal factory, config, agent_key, selected_context_id
+            if auto_router is None:
+                return
+            route = await auto_router.route(text)
+            system_key = route.config.config_path.resolve()
+            if system_key not in factories:
+                factories[system_key] = AgentFactory(
+                    config=route.config,
+                    working_directory=route.config.get_working_directory(),
+                    container_id=container_id,
+                    stream_observer=stream_observer,
+                    policy_config=policy_config,
+                )
+            routed_factory = factories[system_key]
+            if routed_factory is not factory:
+                # Context ids belong to one factory; the routed system continues its own session.
+                factory = routed_factory
+                selected_context_id = None
+                if timeline_handle is not None:
+                    timeline_handle.update_factory(factory)
+            config = factory.config
+            agent_key = route.agent
+            chat_ui.print_status(f"Route: {route.system} -> {agent_key}", style="cyan")
+            if route.warning:
+                chat_ui.print_status(f"Routing warning: {route.warning}", style="yellow")
+            if (route.system, agent_key) not in warned_routes:
+                # Once per agent: the full report was printed at startup.
+                warned_routes.add((route.system, agent_key))
+                if route.system not in system_issues and not auto_router.root_config.config.routing.systems:
+                    system_issues[route.system] = diagnose(config)
+                print_tool_issues(
+                    chat_ui,
+                    f"Agent '{agent_key}'",
+                    agent_issues(config, system_issues.get(route.system, []), agent_key),
+                )
+
+        activated_existing_context = False
+        if is_context_id(args.context_path):
+            try:
+                selected_context_id = factory.activate_context(args.context_path)
+                last_context_id = selected_context_id
+                activated_existing_context = True
+                print(f"Context - Activated saved context: {selected_context_id}")
+            except Exception as exc:
+                print(f"⚠️ Failed to activate context {args.context_path}: {exc}")
+
+        if not activated_existing_context:
+            print("Context - New session created, old contexts accessible by ID")
         
-        # Автоматически очищаем контекст при запуске - агенты не должны помнить предыдущие чаты
-        print("Clear Context")
-        factory.clear_context()
+        # Let the timeline server task complete its startup (print URL, etc.)
+        # before we enter interactive mode or single-message mode.
+        await asyncio.sleep(0)
         
-        # Также удаляем файл с сохраненным контекстом, если он существует
-        context_file = "logs/context.json"
-        if os.path.exists(context_file):
-            os.remove(context_file)
-            print(f"Удален файл сохраненного контекста: {context_file}")
+        print("Grid Agent System ready for work")
         
-        print("Clear Context - Контекст очищен при запуске")
         
-        print("Grid Agent System готов к работе")
+        chat_ui.print_banner(
+            agent_key="auto (routed per message)" if auto_router else agent_key,
+            working_directory=config.get_working_directory(),
+            context_path=args.context_path,
+        )
         
-        print("\n" + "="*60)
-        print("🤖 Grid Agent System ")
-        print("="*60)
-        print(f"Агент: {agent_key}")
-        print(f"Рабочая директория: {config.get_working_directory()}")
-        if args.context_path:
-            print(f"Контекстный путь: {args.context_path}")
-        print("="*60)
-        
+        # ── Ctrl+C handling ───────────────────────────────────────────
+        # Use asyncio's native signal handler so SIGINT cancels the current
+        # task cleanly instead of raising KeyboardInterrupt at random places.
+        _shutdown_flag = False
+        _main_task = asyncio.current_task()
+
+        def _on_sigint():
+            nonlocal _shutdown_flag
+            if _shutdown_flag:
+                print("\nForce exit...")
+                os._exit(1)
+            _shutdown_flag = True
+            # Cancel the main task to trigger CancelledError cleanly
+            if _main_task:
+                loop.call_soon_threadsafe(_main_task.cancel)
+
+        loop = asyncio.get_running_loop()
+        try:
+            loop.add_signal_handler(signal.SIGINT, _on_sigint)
+        except NotImplementedError:
+            # Windows ProactorEventLoop supports subprocesses but not
+            # add_signal_handler; use the regular signal module there.
+            # Handle the press right in the signal handler, not via the loop:
+            # if the loop is blocked by sync code, a second Ctrl+C must still exit.
+            signal.signal(signal.SIGINT, lambda _signum, _frame: _on_sigint())
+
         if args.message:
             # Single message mode
-            print(f"Обработка сообщения")
-            
-            try:
-                # Track agent execution
-                print(f"Agent {agent_key} (agent: {agent_key})")
-                
-                start_time = time.time()
-                use_streaming = True  # Включаем стриминг для режима одного сообщения
-                response = await factory.run_agent(agent_key, args.message, args.context_path, stream=use_streaming)
-                duration = time.time() - start_time
-                
-                # Try to get token usage information
-                token_usage = None
-                try:
-                    # Estimate token usage (approximation since we don't have direct access)
-                    # This is a rough estimate - in production you'd want to capture real usage
-                    estimated_prompt_tokens = len(args.message.split()) * 1.3  # rough estimate
-                    estimated_completion_tokens = len(response.split()) * 1.3
-                    
-                    # Try to get model from agent config
-                    agent_config = config.get_agent(agent_key)
-                    model_name = getattr(agent_config, 'model', 'unknown')
-                    
-                    # Token calculation removed
-                except Exception as e:
-                    pass  # Ignore token calculation errors
-                
-                print(f"\nОтвет сгенерирован ({duration:.2f}с, {len(response)} символов)")
+            print("Processing message")
 
-                print("Success")
-                
+            try:
+                # Parse message for images
+                text, image_paths = parse_message_with_images(args.message)
+
+                # Show image info if any
+                if image_paths:
+                    print(f"Images found: {len(image_paths)}")
+                    for img_path in image_paths:
+                        info = ImageUtils.get_image_info(img_path)
+                        if info['valid']:
+                            size_mb = info['size_bytes'] / (1024 * 1024) if info['size_bytes'] else 0
+                            print(f"   - {img_path} ({size_mb:.2f} MB, {info['mime_type']})")
+                        else:
+                            print(f"   - {img_path} (error: {info['error']})")
+
+                # Prepare message for agent
+                agent_message = prepare_agent_message(text, image_paths)
+
+                chat_ui.print_rule("Running")
+                chat_ui.print_user_message(text)
+                await apply_route(text)
+                chat_ui.print_status(f"Agent: {agent_key}", style="cyan")
+
+                start_time = time.time()
+                use_streaming = True
+                inline_context_id = extract_context_id_from_text(text)
+                request_context_id = inline_context_id or selected_context_id
+                use_active_context = request_context_id is None
+
+                if request_context_id:
+                    chat_ui.print_status(f"Context: {request_context_id}", style="bright_black")
+                else:
+                    chat_ui.print_status("Context: active session", style="bright_black")
+
+                response = await factory.run_agent(
+                    agent_key,
+                    agent_message,
+                    args.context_path,
+                    context_id=request_context_id,
+                    stream=use_streaming,
+                    use_active_context=use_active_context,
+                    user_id=args.user_id if hasattr(args, "user_id") else None
+                )
+                last_context_id = factory.get_active_context_id()
+                duration = time.time() - start_time
+
+                chat_ui.print_rule(f"Response in {duration:.2f}s")
+                chat_ui.print_assistant_message(response, agent_name=agent_key)
+                if last_context_id:
+                    chat_ui.print_status(f"Context ID: {last_context_id}", style="bright_black")
+                    selected_context_id = last_context_id
+
+                await print_token_status(chat_ui, factory, config, agent_key)
+
             except Exception as e:
-                print("Operation completed")
-                print(f"❌ Ошибка: {e}")
+                print(f"Error: {e}")
+            except asyncio.CancelledError:
+                print("\nInterrupted.")
         else:
             # Interactive mode
             print("\nCommands:")
             print("  'exit' or 'quit' - Exit")
-            print("  'clear' - Clear conversation history")
-            print("  'context' - Show context info")
+            print("  'clear' - Start new context (old contexts saved)")
+            print("  'context' or '/context' - Show current context info")
+            print("  'contexts' or '/contexts' - List all saved context IDs")
+            print("  'use <context_id>' - Switch to a saved context")
+            print("  'compact' or '/compact' - Force context compaction (LLM summary)")
             print("  'help' - Show this help")
+            print("\nContext IDs:")
+            print("  Use context ID in message: 'ctx-abc12345 your message'")
+            print("  Old contexts are automatically saved and accessible")
+            print("\nImages:")
+            print("  Use '&' to attach images: 'Your message & path/to/image.png'")
+            print("  Multiple images: 'Message & image1.jpg & image2.png'")
             print("-" * 60)
+            
+            async def ainput(prompt: str = "") -> str:
+                print(prompt, end="", flush=True)
+                loop = asyncio.get_running_loop()
+                future = loop.create_future()
+
+                def deliver(setter, value) -> None:
+                    if not future.done():
+                        setter(value)
+
+                def read_line() -> None:
+                    try:
+                        result, setter = sys.stdin.readline(), future.set_result
+                    except BaseException as exc:
+                        result, setter = exc, future.set_exception
+                    try:
+                        loop.call_soon_threadsafe(deliver, setter, result)
+                    except RuntimeError:
+                        pass  # loop already closed
+
+                # A daemon thread instead of the default executor: asyncio.run() joins
+                # executor threads on exit, and one blocked in readline() hung Ctrl+C.
+                threading.Thread(target=read_line, name="stdin-reader", daemon=True).start()
+                try:
+                    line = await future
+                except asyncio.CancelledError:
+                    # Ctrl+C in run_in_executor manifests as CancelledError,
+                    # translate to KeyboardInterrupt for uniform handling.
+                    raise KeyboardInterrupt()
+                if not line:
+                    raise EOFError
+                return line.rstrip('\n')
             
             while True:
                 try:
-                    user_input = input("\n👤 You: ").strip()
+                    user_input = await ainput("\nYou: ")
+                    user_input = user_input.strip()
                     
                     if user_input.lower() in ['exit', 'quit']:
-                        print("👋 Goodbye!")
+                        print("Goodbye!")
                         break
                     elif user_input.lower() == 'clear':
                         print("Clear Context")
-                        factory.clear_context()
-                        print("Clear Context - Контекст очищен")
-                        print("Success")
+                        cleared_id = factory.clear_context()
+                        selected_context_id = None
+                        last_context_id = cleared_id
+                        print("Clear Context - New context created")
+                        print(f"New context ID: {cleared_id}")
+                        print("Old contexts are saved and accessible by ID")
                         continue
-                    elif user_input.lower() == 'context':
+                    elif user_input.lower() in {'context', '/context'}:
                         print("Get Context")
                         context_info = factory.get_context_info()
-                        print("Get Context - Информация о контексте получена")
+                        print("Get Context - Context information retrieved")
+
+                        # What the model reads: the agent's session, not the visible chat.
+                        usage = await factory.context_usage(agent_key)
+                        estimated_tokens = usage["tokens"]
+                        context_window = usage["window"]
+                        context_pct = round(estimated_tokens / max(1, context_window) * 100, 1)
                         
-                        print(f"\n📋 Информация о контексте:")
-                        print(f"   Сообщений: {context_info.get('conversation_messages', 0)}")
-                        print(f"   История выполнения: {context_info.get('execution_history', 0)}")
-                        print(f"   Использование памяти: {context_info.get('memory_usage_mb', 0):.2f} МБ")
+                        print("\n📋 Context info:")
+                        print(f"   Messages: {context_info.get('conversation_messages', 0)}")
+                        print(f"   Execution history: {context_info.get('execution_history', 0)}")
+                        print(f"   Memory usage: {context_info.get('memory_usage_mb', 0):.2f} MB")
+                        print(f"   Estimated tokens: {estimated_tokens}")
+                        if context_window:
+                            print(f"   Model window: {context_window} tokens")
+                            print(f"   Filled: {context_pct}%")
+                        active_id = context_info.get('current_context_id')
+                        if active_id:
+                            print(f"   Active context ID: {active_id}")
+                        if selected_context_id:
+                            print(f"   Selected for next runs: {selected_context_id}")
+                        if last_context_id and last_context_id != selected_context_id:
+                            print(f"   Last response context ID: {last_context_id}")
+                        available_ids = [cid for cid in context_info.get('available_contexts', []) if cid != active_id]
+                        if available_ids:
+                            print(f"   Known contexts: {', '.join(available_ids)}")
                         if context_info.get('last_user_message'):
                             last_msg = context_info['last_user_message']
-                            print(f"   Последнее сообщение: {last_msg}")
+                            print(f"   Last message: {last_msg}")
+                        continue
+                    elif user_input.lower() in {'contexts', '/contexts'}:
+                        ids = factory.list_context_ids()
+                        if not ids:
+                            print('No saved contexts yet.')
+                        else:
+                            print('Known contexts:')
+                            for ctx_id in ids:
+                                marker = ' (selected)' if ctx_id == selected_context_id else ''
+                                print(f'  - {ctx_id}{marker}')
+                        continue
+                    elif user_input.lower().startswith('use '):
+                        target_id = user_input[4:].strip()
+                        if not target_id:
+                            print('Provide context id after "use".')
+                            continue
+                        try:
+                            selected_context_id = factory.activate_context(target_id)
+                            last_context_id = selected_context_id
+                            print(f'Switched to context {selected_context_id}')
+                        except Exception as exc:
+                            print(f'Failed to switch context: {exc}')
+                        continue
+                    elif user_input.lower() in {'/compact', 'compact'}:
+                        print("Compacting context...")
+                        try:
+                            # The agent's session is summarized; the chat stays as it is.
+                            outcome = await factory.compact_session(
+                                agent_key, factory.get_active_context_id(), force=True
+                            )
+                            if outcome is None:
+                                print("Nothing was compacted (empty context, or the summary failed - see the log).")
+                            else:
+                                print(
+                                    f"Compact complete: ~{outcome['tokens_before']:,} -> "
+                                    f"~{outcome['tokens_after']:,} tokens."
+                                )
+                        except Exception as ce:
+                            print(f"Compact error: {ce}")
                         continue
                     elif user_input.lower() == 'help':
                         print("\nAvailable commands:")
                         print("  exit, quit - Exit the chat")
-                        print("  clear - Clear conversation history")
-                        print("  context - Show context information")
+                        print("  clear - Start new context (old contexts saved)")
+                        print("  context, /context - Show current context information")
+                        print("  contexts, /contexts - List all saved context IDs")
+                        print("  use <context_id> - Switch to a saved context")
+                        print("  compact, /compact - Force context compaction (LLM summary)")
                         print("  help - Show this help message")
+                        print("\nContext IDs:")
+                        print("  Use in message: 'ctx-abc12345 your message'")
+                        print("  Each session starts fresh, old contexts auto-saved")
+                        print("\nImages:")
+                        print("  Attach images using '&': 'Your message & path/to/image.png'")
+                        print("  Multiple images: 'Message & img1.jpg & img2.png'")
+                        print("  Images are saved in context and accessible after restart")
                         continue
                     elif not user_input:
                         continue
-                    
+
+                    # Parse message for images
+                    text, image_paths = parse_message_with_images(user_input)
+
+                    # Show image info if any
+                    if image_paths:
+                        print(f"Images found: {len(image_paths)}")
+                        for img_path in image_paths:
+                            info = ImageUtils.get_image_info(img_path)
+                            if info['valid']:
+                                size_mb = info['size_bytes'] / (1024 * 1024) if info['size_bytes'] else 0
+                                print(f"   - {img_path} ({size_mb:.2f} MB, {info['mime_type']})")
+                            else:
+                                print(f"   - {img_path} (error: {info['error']})")
+
+                    # Prepare message for agent
+                    agent_message = prepare_agent_message(text, image_paths)
+
                     # Process user message with beautiful logging
                     try:
-                        # Track execution with token counting
-                        print(f"Agent {agent_key} (agent: {agent_key})")
-                        
+                        chat_ui.print_rule("Running")
+                        chat_ui.print_user_message(text)
+                        await apply_route(text)
                         start_time = time.time()
-                        use_streaming = True  # Включаем стриминг для интерактивного режима
-                        response = await factory.run_agent(agent_key, user_input, args.context_path, stream=use_streaming)
-                        duration = time.time() - start_time
-                        
-                        # Try to get token usage information
-                        token_usage = None
-                        try:
-                            estimated_prompt_tokens = len(user_input.split()) * 1.3
-                            estimated_completion_tokens = len(response.split()) * 1.3
-                            
-                            agent_config = config.get_agent(agent_key)
-                            model_name = getattr(agent_config, 'model', 'unknown')
-                            # Token calculation removed
-                        except Exception:
-                            pass
-                        
-                        print(f"\nОтвет получен ({duration:.2f}с, {len(response)} символов)")
-                        
-                        # При стриминге ответ уже выведен в реальном времени, добавляем только новую строку
-                        if use_streaming:
-                            print(f"\n")  # Добавляем новую строку после стримингового вывода
+                        use_streaming = True
+                        inline_context_id = extract_context_id_from_text(text)
+                        request_context_id = inline_context_id or selected_context_id
+                        use_active_context = request_context_id is None
+
+                        if request_context_id:
+                            chat_ui.print_status(f"Context: {request_context_id}", style="bright_black")
                         else:
-                            print(f"\n🤖 {agent_key}: {response}")
-                        
+                            chat_ui.print_status("Context: active session", style="bright_black")
+
+                        response = await factory.run_agent(
+                            agent_key,
+                            agent_message,
+                            args.context_path,
+                            context_id=request_context_id,
+                            stream=use_streaming,
+                            use_active_context=use_active_context,
+                            user_id=args.user_id if hasattr(args, "user_id") else None
+                        )
+                        last_context_id = factory.get_active_context_id()
+                        duration = time.time() - start_time
+
+                        chat_ui.print_rule(f"Response in {duration:.2f}s")
+                        chat_ui.print_assistant_message(response, agent_name=agent_key)
+                        if last_context_id:
+                            chat_ui.print_status(f"Context ID: {last_context_id}", style="bright_black")
+                            selected_context_id = last_context_id
+
+                        await print_token_status(chat_ui, factory, config, agent_key)
+
                     except Exception as e:
-                        print("Operation completed")
-                        print(f"❌ Ошибка: {e}")
+                        print(f"Error: {e}")
                     
                 except KeyboardInterrupt:
-                    print("\n\n👋 Interrupted. Goodbye!")
+                    print("\n\nInterrupted. Goodbye!")
+                    break
+                except asyncio.CancelledError:
+                    print("\n\nInterrupted. Goodbye!")
                     break
                 except EOFError:
-                    print("\n\n👋 EOF. Goodbye!")
+                    print("\n\nEOF. Goodbye!")
                     break
         
         # Beautiful cleanup and session summary
-        print("Cleanup")
-        await factory.cleanup()
-        print("Cleanup - Ресурсы освобождены")
+        try:
+            print("Cleanup")
+            for routed_factory in factories.values():
+                await routed_factory.cleanup()
+            if timeline_task is not None:
+                timeline_task.cancel()
+                await asyncio.gather(timeline_task, return_exceptions=True)
+            print("Cleanup - Resources freed")
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\nCleanup interrupted.")
         
         # Session summary
-        print("Grid Agent System завершил работу")
+        print("Grid Agent System finished")
         
     except GridError as e:
-        print(f"Ошибка Grid: {e}")
-        print(f"❌ Grid Error: {e}")
+        print(f"Grid Error: {e}")
         sys.exit(1)
+    except asyncio.CancelledError:
+        print("\nInterrupted.")
+        sys.exit(0)
     except Exception as e:
-        print(f"Неожиданная ошибка: {e}")
-        print(f"❌ Unexpected Error: {e}")
+        print(f"Unexpected error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
 
+def cli() -> None:
+    """Run the asynchronous chat entry point from a console script."""
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Clean exit on Ctrl+C — suppress the ugly asyncio.run() traceback.
+        # The inner loop already printed "Interrupted. Goodbye!" so just exit.
+        print()
+        sys.exit(0)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli()

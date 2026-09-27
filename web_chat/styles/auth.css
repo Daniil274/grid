@@ -1,0 +1,87 @@
+/** The sign-in page: one card in the middle of the screen. */
+
+.authPage {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  padding: 24px 16px;
+  overflow: auto;
+  background:
+    radial-gradient(60rem 30rem at 50% -10%, var(--accent-soft), transparent 70%),
+    var(--bg);
+}
+
+.authCard {
+  display: grid;
+  gap: 22px;
+  width: min(100%, 380px);
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-1);
+  box-shadow: var(--shadow-2);
+}
+
+.authCard__head {
+  display: grid;
+  gap: 6px;
+}
+
+.authCard__head h1 {
+  font-size: 22px;
+}
+
+.authCard__head p,
+.authCard__foot {
+  color: var(--text-2);
+  font-size: 13.5px;
+}
+
+.authForm {
+  display: grid;
+  gap: 14px;
+}
+
+.authField {
+  display: grid;
+  gap: 6px;
+}
+
+.authField > span {
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+.authField > small {
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.authField input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  transition: border-color 120ms var(--ease);
+}
+
+.authField input:focus {
+  border-color: var(--accent-line);
+  outline: none;
+}
+
+.authError {
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.authForm__submit {
+  justify-content: center;
+  width: 100%;
+  padding-block: 10px;
+}

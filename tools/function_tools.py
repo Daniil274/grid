@@ -1,188 +1,259 @@
 """
-Function tools for Grid agents - integration layer for file and git tools.
+Function tools for Grid agents - registry of the shared tools in tools/.
+
+Tool modules are discovered automatically from the tools/ directory.
+Each *_tools.py file that exports a dict named *_TOOLS is registered.
+Modules are imported lazily — only when a specific tool is first requested.
 """
 
-from typing import List, Any, Dict
-from .file_tools import FILE_TOOLS, get_file_tools, get_file_tools_by_names
-from .git_tools import GIT_TOOLS, get_git_tools, get_git_tools_by_names
+import importlib
+import pkgutil
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from .file_tools import FILE_TOOLS, TOOL_ISOLATION as _FILE_ISOLATION, get_file_tools
+from .git_tools import GIT_TOOLS, TOOL_ISOLATION as _GIT_ISOLATION, TOOL_REQUIREMENTS as _GIT_REQUIREMENTS, get_git_tools
+
+_eager_requirements: Dict[str, Any] = dict(_GIT_REQUIREMENTS)
+_eager_isolation: Dict[str, str] = {**_FILE_ISOLATION, **_GIT_ISOLATION}
 
 # ============================================================================
-# COMBINED TOOLS REGISTRY
+# AUTO-DISCOVERY: find all *_tools.py in this package (tools/)
+# Maps module_name -> list of *_TOOLS dict names to try
 # ============================================================================
 
-# Импортируем мок инструменты для тестов
-try:
-    from tests.mock_tools import MOCK_TOOLS
-    HAS_MOCK_TOOLS = True
-except ImportError:
-    MOCK_TOOLS = {}
-    HAS_MOCK_TOOLS = False
+def _discover_tool_modules() -> Dict[str, str]:
+    """
+    Scan the tools/ package for *_tools.py files.
+    Returns {dotted_module_path: dict_attr_name} for each candidate.
+    Skips file_tools and git_tools (already loaded eagerly above).
+    """
+    skip = {"tools.file_tools", "tools.git_tools", "tools.function_tools"}
+    result = {}
+    tools_path = Path(__file__).parent
+    for _, mod_name, _ in pkgutil.iter_modules([str(tools_path)]):
+        if not mod_name.endswith("_tools"):
+            continue
+        full_name = f"tools.{mod_name}"
+        if full_name in skip:
+            continue
+        # Convention: FOO_tools.py → FOO_TOOLS dict
+        dict_attr = mod_name.upper()
+        result[full_name] = dict_attr
+    return result
 
-# Объединяем все инструменты
-AVAILABLE_TOOLS = {
-    **FILE_TOOLS,
-    **GIT_TOOLS,
-    **MOCK_TOOLS,  # Добавляем мок инструменты
-}
 
-# Добавляем дополнительные инструменты для совместимости
+_MODULE_MAP: Dict[str, str] = _discover_tool_modules()  # {mod_path: dict_attr}
+_loaded_modules: Dict[str, Dict] = {}  # {mod_path: tool_dict}
+_load_errors: Dict[str, str] = {}  # {mod_path: "ErrorType: message"}
+_requirements: Dict[str, Any] = {}  # {tool_name: Requires}
+_isolation: Dict[str, str] = {}  # {tool_name: where it acts (utils.tool_isolation)}
+_all_loaded = False
+
+
+def _load_module(mod_path: str) -> Dict:
+    if mod_path not in _loaded_modules:
+        dict_attr = _MODULE_MAP[mod_path]
+        try:
+            mod = importlib.import_module(mod_path)
+            _loaded_modules[mod_path] = getattr(mod, dict_attr, {})
+            _requirements.update(getattr(mod, "TOOL_REQUIREMENTS", None) or {})
+            _isolation.update(getattr(mod, "TOOL_ISOLATION", None) or {})
+        except Exception as exc:
+            _loaded_modules[mod_path] = {}
+            _load_errors[mod_path] = f"{type(exc).__name__}: {exc}"
+    return _loaded_modules[mod_path]
+
+
+def load_errors() -> Dict[str, str]:
+    """Shared tool modules that failed to import, with the reason."""
+    _load_all_modules()
+    return dict(_load_errors)
+
+
+def tool_requirements(name: str) -> Any:
+    """What shared tool *name* (or its alias) needs from the environment, or None."""
+    lookup = TOOL_ALIASES.get(name, name)
+    if lookup in FILE_TOOLS or lookup in GIT_TOOLS:
+        return _eager_requirements.get(lookup)
+    _load_all_modules()
+    return _requirements.get(lookup)
+
+
+def tool_isolation(name: str, project_loader: Optional[Any] = None) -> Optional[str]:
+    """Where tool *name* acts (utils.tool_isolation), as the tool itself
+    resolves: a project tool of *project_loader* first, then a shared tool.
+    None when the tool declares nothing."""
+    if project_loader is not None and project_loader.has_tool(name):
+        return project_loader.isolation.get(name)
+    lookup = TOOL_ALIASES.get(name, name)
+    if lookup in _eager_isolation:
+        return _eager_isolation[lookup]
+    _load_all_modules()
+    return _isolation.get(lookup)
+
+
+def _load_all_modules() -> None:
+    global _all_loaded
+    if not _all_loaded:
+        for mod_path in _MODULE_MAP:
+            _load_module(mod_path)
+        try:
+            from tests.mock_tools import MOCK_TOOLS
+            _loaded_modules["tests.mock_tools"] = MOCK_TOOLS
+        except ImportError:
+            pass
+        _all_loaded = True
+
+
+class _LazyToolsDict:
+    """Dict-like proxy that auto-discovers and loads tool modules on demand."""
+
+    def __contains__(self, name: str) -> bool:
+        if name in FILE_TOOLS or name in GIT_TOOLS:
+            return True
+        for mod_path in _MODULE_MAP:
+            if name in _load_module(mod_path):
+                return True
+        return False
+
+    def __getitem__(self, name: str) -> Any:
+        if name in FILE_TOOLS:
+            return FILE_TOOLS[name]
+        if name in GIT_TOOLS:
+            return GIT_TOOLS[name]
+        for mod_path in _MODULE_MAP:
+            mod = _load_module(mod_path)
+            if name in mod:
+                return mod[name]
+        raise KeyError(name)
+
+    def keys(self):
+        _load_all_modules()
+        seen = set()
+        for d in [FILE_TOOLS, GIT_TOOLS] + list(_loaded_modules.values()):
+            for k in d:
+                if k not in seen:
+                    seen.add(k)
+                    yield k
+
+    def values(self):
+        for k in self.keys():
+            yield self[k]
+
+    def items(self):
+        for k in self.keys():
+            yield k, self[k]
+
+    def get(self, name: str, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+
+AVAILABLE_TOOLS = _LazyToolsDict()
+
+# Alternative names that configs and models use for the same tools.
 TOOL_ALIASES = {
-    # File operations
     "read_file": "file_read",
-    "write_file": "file_write", 
+    "read": "file_read",
+    "write_file": "file_write",
+    "write": "file_write",
     "list_files": "file_list",
-    "get_file_info": "file_info",
     "search_files": "file_search",
     "edit_file_patch": "file_edit_patch",
-    
-    # Git operations - основные
-    "git_status": "git_status",
-    "git_log": "git_log",
-    "git_diff": "git_diff",
-    "git_branch_list": "git_branch_list",
-    "git_add_file": "git_add_file",
-    "git_add_all": "git_add_all",
-    "git_commit": "git_commit",
-    "git_checkout_branch": "git_checkout_branch",
-    
-    # Git operations - инициализация и настройка
-    "git_init": "git_init",
-    "git_config": "git_config",
-    "git_clone": "git_clone",
-    
-    # Git operations - удаленные репозитории
-    "git_remote_info": "git_remote_info",
-    "git_remote_add": "git_remote_add",
-    "git_remote_remove": "git_remote_remove",
-    "git_fetch": "git_fetch",
-    "git_pull": "git_pull",
-    "git_push": "git_push",
-    
-    # Git operations - управление ветками и слияние
-    "git_merge": "git_merge",
-    "git_reset": "git_reset",
-    "git_stash": "git_stash",
-    
-    # Git operations - теги
-    "git_tag": "git_tag",
-    "git_tag_list": "git_tag_list",
+    "replace_in_file": "file_replace",
+    "delete_file": "file_delete",
+    "append_to_file": "file_append",
 }
 
+def resolve_tool(name: str, project_loader: Optional[Any]) -> Optional[Any]:
+    """The tool called *name*: a project tool of *project_loader* first, then a
+    system tool (by name or alias); None when neither has it.
+
+    The loader is the one of the config the tool is for (Config.project_tools_loader),
+    passed explicitly: two systems - or two users' turns - resolving tools at the
+    same time must each get their own system's project tools.
+    """
+    if project_loader is not None and project_loader.has_tool(name):
+        tool = project_loader.get_tool(name)
+        if tool:
+            return tool
+    # The alias first, so lazy modules of unrelated tools are not loaded.
+    return AVAILABLE_TOOLS.get(TOOL_ALIASES.get(name, name))
+
+
 def get_tools_by_names(tool_names: List[str]) -> List[Any]:
+    """The tools called *tool_names*, through the process-wide project loader.
+
+    For callers without a config at hand; an unknown name is logged and left
+    out. Code that knows its config uses :func:`resolve_tool` with that
+    config's loader instead.
     """
-    Возвращает список инструментов по их именам.
-    
-    Args:
-        tool_names: Список имен инструментов
-        
-    Returns:
-        List[Any]: Список функций инструментов
-    """
+    from core.managers.project_tools_loader import get_project_loader
+
+    project_loader = get_project_loader()
     tools = []
-    
     for name in tool_names:
-        # Проверяем прямое совпадение
-        if name in AVAILABLE_TOOLS:
-            tools.append(AVAILABLE_TOOLS[name])
-        # Проверяем алиасы
-        elif name in TOOL_ALIASES:
-            actual_name = TOOL_ALIASES[name]
-            if actual_name in AVAILABLE_TOOLS:
-                tools.append(AVAILABLE_TOOLS[actual_name])
-            else:
-                from utils.logger import Logger
-                Logger(__name__).warning(f"Инструмент '{actual_name}' (алиас для '{name}') не найден")
-        else:
-            # Попробуем найти в отдельных модулях
-            if name.startswith('file_') or name in ['read_file', 'write_file', 'list_files', 'get_file_info', 'search_files', 'edit_file_patch']:
-                file_tools = get_file_tools_by_names([name])
-                tools.extend(file_tools)
-            elif name.startswith('git_') or name in ['git_status', 'git_log', 'git_diff', 'git_branch_list', 'git_add_file', 'git_commit', 'git_checkout_branch', 'git_pull', 'git_remote_info']:
-                git_tools = get_git_tools_by_names([name])
-                tools.extend(git_tools)
-            else:
-                from utils.logger import Logger
-                Logger(__name__).warning(f"Инструмент '{name}' не найден")
-    
+        tool = resolve_tool(name, project_loader)
+        if tool is None:
+            from utils.logger import Logger
+            Logger(__name__).warning(f"Tool '{name}' not found in project or system tools")
+            continue
+        tools.append(tool)
     return tools
 
 def get_all_tools() -> List[Any]:
     """
-    Возвращает все доступные инструменты.
+    Returns all available tools.
     
     Returns:
-        List[Any]: Список всех функций инструментов
+        List[Any]: List of all tool functions
     """
     return list(AVAILABLE_TOOLS.values())
 
 def get_file_tools_list() -> List[Any]:
-    """Возвращает только файловые инструменты."""
+    """Returns only file tools."""
     return get_file_tools()
 
 def get_git_tools_list() -> List[Any]:
-    """Возвращает только Git инструменты."""
+    """Returns only Git tools."""
     return get_git_tools()
 
 def get_available_tool_names() -> List[str]:
     """
-    Возвращает список имен всех доступных инструментов.
+    Returns the list of names of all available tools.
     
     Returns:
-        List[str]: Список имен инструментов
+        List[str]: List of tool names
     """
     return list(AVAILABLE_TOOLS.keys()) + list(TOOL_ALIASES.keys())
 
 def get_tool_info(tool_name: str) -> Dict[str, Any]:
     """
-    Возвращает информацию об инструменте.
+    Returns information about a tool.
     
     Args:
-        tool_name: Имя инструмента
+        tool_name: Tool name
         
     Returns:
-        Dict[str, Any]: Информация об инструменте
+        Dict[str, Any]: Tool information
     """
-    # Получаем реальное имя через алиас если нужно
+    # Get the real name via alias if needed
     actual_name = TOOL_ALIASES.get(tool_name, tool_name)
     
     if actual_name not in AVAILABLE_TOOLS:
-        return {"error": f"Инструмент '{tool_name}' не найден"}
+        return {"error": f"Tool '{tool_name}' not found"}
     
     tool_func = AVAILABLE_TOOLS[actual_name]
     
     return {
         "name": actual_name,
         "alias": tool_name if tool_name != actual_name else None,
-        "description": tool_func.__doc__ or "Описание не доступно",
+        "description": tool_func.__doc__ or "Description not available",
         "module": tool_func.__module__,
         "type": "file" if actual_name.startswith("file_") else "git" if actual_name.startswith("git_") else "other"
     }
-
-# ============================================================================
-# BACKWARDS COMPATIBILITY
-# ============================================================================
-
-# Экспортируем основные функции для обратной совместимости
-from .file_tools import read_file, write_file, list_files, get_file_info, search_files, edit_file_patch
-
-# Если git_tools.py экспортирует функции напрямую, добавим их
-try:
-    from .git_tools import (
-        # Основные операции
-        git_status, git_log, git_diff, git_branch_list, git_add_file, git_add_all,
-        git_commit, git_checkout_branch,
-        # Инициализация и настройка
-        git_init, git_config, git_clone,
-        # Удаленные репозитории
-        git_remote_info, git_remote_add, git_remote_remove, git_fetch, git_pull, git_push,
-        # Управление ветками и слияние
-        git_merge, git_reset, git_stash,
-        # Теги
-        git_tag, git_tag_list
-    )
-except ImportError:
-    # Git инструменты могут быть не готовы
-    pass
 
 # ============================================================================
 # TOOL STATISTICS AND MONITORING  
@@ -190,10 +261,10 @@ except ImportError:
 
 def get_tool_stats() -> Dict[str, Any]:
     """
-    Возвращает статистику по инструментам.
+    Returns tool statistics.
     
     Returns:
-        Dict[str, Any]: Статистика инструментов
+        Dict[str, Any]: Tool statistics
     """
     file_tools_count = len([name for name in AVAILABLE_TOOLS.keys() if name.startswith('file_')])
     git_tools_count = len([name for name in AVAILABLE_TOOLS.keys() if name.startswith('git_')])
@@ -206,6 +277,6 @@ def get_tool_stats() -> Dict[str, Any]:
         "available_names": get_available_tool_names()
     }
 
-# Информация о модуле
+# Module information
 __version__ = "2.0.0"
 __description__ = "Enhanced Grid Agent Tools with beautiful logging"
