@@ -4,7 +4,7 @@ One request and its answer (run_agent, continue_agent): the request is
 stored, the agent runs with retries on passing failures, a graceful Stop or a
 failure leaves an interruption the next turn resumes, messages sent meanwhile
 are steered in, the session is compacted when it outgrows the window, and a
-conversation can fork before an edited message. Relies on the whole factory.
+conversation can fork before an edited message.
 """
 
 from __future__ import annotations
@@ -14,17 +14,10 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from agents import (
-    Agent,
-    RunConfig,
-    RunItemStreamEvent,
-    SQLiteSession,
-)
+from agents import Agent, RunConfig, RunItemStreamEvent, SQLiteSession
 from agents.exceptions import (
     MaxTurnsExceeded,
     ModelBehaviorError,
-)
-from agents.exceptions import (
     UserError as AgentsUserError,
 )
 from agents.run import CallModelData, ModelInputData
@@ -49,9 +42,9 @@ from core.factory.failures import (
 from core.factory.journal import safe_preview
 from core.factory.run_context import (
     GridRunContext,
-    _get_runner,
-    _RunProgress,
-    _TurnStopped,
+    RunProgress,
+    TurnStopped,
+    get_runner,
     with_images,
 )
 from core.generated_images import ImageCollector, collecting, generated_so_far
@@ -97,13 +90,10 @@ OVERFLOW_RETRY_NOTE = (
 
 
 class TurnRunner:
-    """A turn of a conversation: its runs, retries, stops, resumption and compaction.
+    """Runs the turns of the factory's conversations.
 
-    One request and its answer (run_agent, continue_agent): the request is
-    stored, the agent runs with retries on passing failures, a graceful Stop or a
-    failure leaves an interruption the next turn resumes, messages sent meanwhile
-    are steered in, the session is compacted when it outgrows the window, and a
-    conversation can fork before an edited message. Relies on the whole factory.
+    Mixed into AgentFactory (core.agent_factory); relies on the whole factory:
+    config, context manager, sessions, models, tools, journal, policy.
     """
 
     MALFORMED_TOOL_CALL_RETRIES = 2
@@ -234,7 +224,7 @@ class TurnRunner:
         set_current_factory(self)
         try:
             while True:
-                result = _get_runner().run_streamed(
+                result = get_runner().run_streamed(
                     starting_agent=agent,
                     input=input_message,
                     context=run_ctx,
@@ -507,12 +497,12 @@ class TurnRunner:
         *,
         stream: bool,
         observer: Any,
-        progress: "_RunProgress",
+        progress: "RunProgress",
     ) -> Tuple[str, Any]:
         """One run of the agent. Returns its answer text and the SDK result.
 
         A run that ends without an answer and without failing raises
-        _TurnStopped - settings.agent_timeout, max_turns, a model-side error
+        TurnStopped - settings.agent_timeout, max_turns, a model-side error
         that a retry would repeat, the user's graceful Stop. Other errors
         propagate for _run_with_retries to judge.
         """
@@ -552,7 +542,7 @@ class TurnRunner:
                     steering = control.steering if control is not None else None
                     if steering is not None:
                         steering.new_run()
-                    result = progress.result = _get_runner().run_streamed(
+                    result = progress.result = get_runner().run_streamed(
                         agent,
                         run_input,
                         context=run_ctx,
@@ -574,7 +564,7 @@ class TurnRunner:
                         if control is not None:
                             control.detach(result)
                 else:
-                    result = progress.result = await _get_runner().run(
+                    result = progress.result = await get_runner().run(
                         agent,
                         run_input,
                         context=run_ctx,
@@ -586,21 +576,21 @@ class TurnRunner:
             if not deadline.expired():
                 raise
             logger.warning("Agent %s stopped after %s s", agent_key, timeout)
-            raise _TurnStopped(
+            raise TurnStopped(
                 StopReason.TIMEOUT, f"no answer within settings.agent_timeout ({timeout} s)"
             ) from None
         except MaxTurnsExceeded:
             logger.warning("Agent %s reached max_turns (%s)", agent_key, max_turns)
-            raise _TurnStopped(
+            raise TurnStopped(
                 StopReason.MAX_TURNS, f"settings.max_turns is {max_turns}"
             ) from None
         except (ModelBehaviorError, AgentsUserError) as exc:
             logger.warning("Agent %s stopped: %s: %s", agent_key, type(exc).__name__, exc)
-            raise _TurnStopped(StopReason.ERROR, f"{type(exc).__name__}: {exc}") from None
+            raise TurnStopped(StopReason.ERROR, f"{type(exc).__name__}: {exc}") from None
         # A graceful Stop ends the stream after a step. If that step was the
         # final answer, the turn is simply done.
         if control is not None and control.stop_requested and result.final_output is None:
-            raise _TurnStopped(StopReason.USER_STOP)
+            raise TurnStopped(StopReason.USER_STOP)
         return self._final_text(result, fragments), result
 
     async def _run_with_retries(
@@ -613,7 +603,7 @@ class TurnRunner:
         *,
         stream: bool,
         observer: Any,
-        progress: "_RunProgress",
+        progress: "RunProgress",
     ) -> Tuple[str, Any]:
         """Run until an answer: transient provider errors are retried with backoff.
 
@@ -631,7 +621,7 @@ class TurnRunner:
         try:
             while True:
                 if control is not None and control.stop_requested:
-                    raise _TurnStopped(StopReason.USER_STOP)
+                    raise TurnStopped(StopReason.USER_STOP)
                 self.journal.update_pending_run(
                     agent_key=agent_key,
                     active_context_id=run_ctx.context_id,
@@ -654,7 +644,7 @@ class TurnRunner:
                         observer=observer,
                         progress=progress,
                     )
-                except _TurnStopped:
+                except TurnStopped:
                     raise
                 except Exception as exc:
                     if not trimmed and is_prompt_too_long_error(exc) and session is not None:
@@ -711,7 +701,7 @@ class TurnRunner:
                     # Stop ends the wait for the provider, too.
                     if control is not None:
                         if await control.wait(delay):
-                            raise _TurnStopped(StopReason.USER_STOP)
+                            raise TurnStopped(StopReason.USER_STOP)
                     else:
                         await asyncio.sleep(delay)
         finally:
@@ -909,7 +899,7 @@ class TurnRunner:
         task: str,
         reason: StopReason,
         detail: str,
-        progress: "_RunProgress",
+        progress: "RunProgress",
         turn_id: Optional[str],
         images: Optional[List[str]] = None,
     ) -> Interruption:
@@ -983,7 +973,7 @@ class TurnRunner:
         execution = AgentExecution(
             agent_name=agent_key, start_time=time.time(), input_message=shown_message
         )
-        progress = _RunProgress(input_preview=safe_preview(shown_message, max_length=700))
+        progress = RunProgress(input_preview=safe_preview(shown_message, max_length=700))
         control = RunControl()
         # Images an image model generates during the turn: shown as they come,
         # stored with the answer (core.generated_images).
@@ -1127,7 +1117,7 @@ class TurnRunner:
                         observer=observer,
                         progress=progress,
                     )
-            except _TurnStopped as stop:
+            except TurnStopped as stop:
                 interruption = self._record_interruption(
                     context_id=active_context_id,
                     agent_key=agent_key,

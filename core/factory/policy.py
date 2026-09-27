@@ -2,8 +2,7 @@
 
 Builds the factory's ActionGate from the operator's config, gives each
 run the trusted task it is judged against, and wraps every tool so its calls
-pass the gate. Relies on ``self.config``, ``self.action_gate`` and
-``self.context_manager``.
+pass the gate.
 """
 
 from __future__ import annotations
@@ -20,12 +19,10 @@ logger = logging.getLogger("grid.agent_factory")
 
 
 class PolicyWiring:
-    """The action policy's hold on the factory's runs (core.action_policy).
+    """The factory's side of the action policy.
 
-    Builds the factory's ActionGate from the operator's config, gives each
-    run the trusted task it is judged against, and wraps every tool so its calls
-    pass the gate. Relies on ``self.config``, ``self.action_gate`` and
-    ``self.context_manager``.
+    Mixed into AgentFactory (core.agent_factory); relies on self.config,
+    self.action_gate, self.context_manager.
     """
 
     def _build_action_gate(

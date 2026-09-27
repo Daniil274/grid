@@ -3,8 +3,7 @@
 Function tools resolve through the config's own project loader (and are
 withheld in an isolated space unless confined, utils.tool_isolation); agent
 tools run sub-agents that share the turn's context, policy chain and stop;
-every output is bounded. Relies on the factory's config, caches, context
-manager and the policy wiring.
+every output is bounded.
 """
 
 from __future__ import annotations
@@ -20,13 +19,11 @@ from agents import Agent, RunContextWrapper, function_tool
 from agents.exceptions import (
     MaxTurnsExceeded,
     ModelBehaviorError,
-)
-from agents.exceptions import (
     UserError as AgentsUserError,
 )
 
 from core.action_policy import delegated_state
-from core.factory.run_context import GridRunContext, _get_runner
+from core.factory.run_context import GridRunContext, get_runner
 from core.interruption import StopRequested
 from core.run_stream import interrupted_run_report, run_output_text
 from schemas import AgentConfig, AgentExecution
@@ -43,16 +40,13 @@ CONTEXT_ID_REGEX = re.compile(r"ctx-[0-9a-fA-F]{8,}")
 
 
 class ToolAssembly:
-    """The tools an agent gets: function tools, sub-agents and their limits.
+    """Builds the tools of the factory's agents.
 
-    Function tools resolve through the config's own project loader (and are
-    withheld in an isolated space unless confined, utils.tool_isolation); agent
-    tools run sub-agents that share the turn's context, policy chain and stop;
-    every output is bounded. Relies on the factory's config, caches, context
-    manager and the policy wiring.
+    Mixed into AgentFactory (core.agent_factory); relies on self.config,
+    self.context_manager, self.container_id, the caches, self.models, PolicyWiring
+    and TurnRunner.
     """
 
-    # ---------------------------------------------------------------------
     async def _resolve_tools_for_names(
         self, tool_names: List[str]
     ) -> tuple[List[Any], List[str]]:
@@ -662,7 +656,7 @@ class ToolAssembly:
             run_error: Optional[str] = None
             result = None
             try:
-                result = _get_runner().run_streamed(
+                result = get_runner().run_streamed(
                     starting_agent=local_sub_agent,
                     input=enhanced_input,
                     context=sub_run_ctx,

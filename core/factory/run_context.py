@@ -8,14 +8,7 @@ container, the policy state and the run's stop control.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Dict,
-    List,
-    Optional,
-    Union,
-)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import agents
 
@@ -29,7 +22,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class _RunProgress:
+class RunProgress:
     """Where a turn stands: its pending-run record and what its runs did so far."""
 
     input_preview: str
@@ -73,7 +66,7 @@ def with_images(text: str, images: List[str]) -> Union[str, List[Any]]:
         *(ImageContent(type="image_url", image_url=ImageUrl(url=url)) for url in images),
     ]
 
-class _TurnStopped(Exception):
+class TurnStopped(Exception):
     """A run that ended before its answer without failing: timeout, turn limit,
     a model-side error that retrying would repeat, or the user's graceful Stop.
     The turn records it as an interruption and answers with its summary."""
@@ -135,6 +128,6 @@ class GridRunContext:
         None  # Graceful Stop of the user's turn, shared with its sub-agents
     )
 
-def _get_runner() -> Any:
+def get_runner() -> Any:
     """The SDK's Runner as it is now, so a patched ``agents.Runner`` applies."""
     return agents.Runner

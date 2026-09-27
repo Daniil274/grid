@@ -2,20 +2,14 @@
 
 ``auto_run_tools`` of an agent's config: one-time ones once per user and
 agent, per-message ones on every request; their output becomes part of the
-agent's input. Relies on ``self.config``, ``self.container_id``,
-``self._stream_observer`` and ``self._initialized_agents``.
+agent's input.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import (
-    Any,
-    Dict,
-    List,
-    Tuple,
-)
+from typing import Any, Dict, List, Tuple
 
 from agents import Agent
 
@@ -28,12 +22,10 @@ logger = logging.getLogger("grid.agent_factory")
 
 
 class AutoRunTools:
-    """Tools the operator has an agent run before its model is asked.
+    """Runs the operator's auto_run_tools of an agent.
 
-    ``auto_run_tools`` of an agent's config: one-time ones once per user and
-    agent, per-message ones on every request; their output becomes part of the
-    agent's input. Relies on ``self.config``, ``self.container_id``,
-    ``self._stream_observer`` and ``self._initialized_agents``.
+    Mixed into AgentFactory (core.agent_factory); relies on self.config,
+    self.container_id, self._stream_observer, self._initialized_agents.
     """
 
     def _substitute_tool_params(

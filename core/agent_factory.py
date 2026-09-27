@@ -1,10 +1,10 @@
 """The factory that builds and runs Grid's agents.
 
 AgentFactory reads a system's config and gives out its agents - models,
-tools, MCP servers, instructions - and runs conversation turns with them. It
-is composed of parts, one responsibility each, in core.factory: the turn
-runner, tool assembly, auto-run tools, MCP servers, models, failure rules,
-the run journal and the policy wiring. This module keeps what ties them
+tools, MCP servers, instructions - and runs conversation turns with them. Its
+parts live in core.factory (see there): the objects it holds (models, MCP
+servers, the run journal) and the behaviour mixed into it (turns, tools,
+auto-run tools, the policy wiring). This module keeps what ties them
 together: construction, the agent builders, caches and the context API.
 """
 
@@ -12,24 +12,17 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import (
-    Any,
-    Dict,
-    List,
-    Optional,
-)
+from typing import Any, Dict, List, Optional
 
-# OpenAI Agents SDK imports
 import agents
 from agents import Agent, SQLiteSession
 from dotenv import load_dotenv
 
 from core import sdk_patches
 from core.application.agent_runtime_support import AgentRuntimeSupport
-
-# Compact system integration
 from core.compact import AutoCompactTrackingState
 from core.config.config import Config
+from core.context import ContextManager
 from core.factory.auto_run import AutoRunTools
 from core.factory.journal import RunJournal
 from core.factory.mcp import McpServers
@@ -48,8 +41,6 @@ from core.interruption import RunControl
 from core.run_stream import ConsoleStreamObserver, StreamObserver
 from core.tracing.config import ImmediateTraceProcessor, get_tracing_config
 from utils.exceptions import AgentError, ConfigError
-
-from .context import ContextManager
 
 #: What callers import from here; the parts live in core.factory.
 __all__ = [
@@ -74,20 +65,19 @@ _TRACING_CONFIG_LOCK = threading.Lock()
 
 
 def __getattr__(name: str) -> Any:
+    """``core.agent_factory.Runner`` is the SDK's Runner as it is now (patched
+    or not): runs resolve it at call time (core.factory.run_context.get_runner)."""
     if name == "Runner":
         return getattr(agents, "Runner")
     raise AttributeError(name)
 
 
 class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, PolicyWiring):
-    """
-    Enterprise Agent Factory with advanced features:
-    - Configuration validation
-    - Agent caching and reuse
-    - Context management
-    - MCP integration
-    - Comprehensive logging and tracing
-    - Session-based memory for agents
+    """Builds a system's agents and runs its conversation turns.
+
+    One factory per system config. It caches the agents it built, keeps each
+    agent's SDK session per conversation, and shares one context manager with
+    the other factories of a web space, so a conversation survives routing.
     """
 
     def __init__(
@@ -379,9 +369,7 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, PolicyWiring):
             raise AgentError(error_msg, details={"agent_key": agent_key}) from e
 
 
-    # ---------------------------------------------------------------------
     # Dynamic agents (not declared in config.yaml)
-    # ---------------------------------------------------------------------
     async def create_dynamic_agent(
         self,
         *,
@@ -533,7 +521,6 @@ class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, PolicyWiring):
         setattr(agent, "_grid_model_key", resolved_model_key)
         return agent
 
-    # ---------------------------------------------------------------------
     def _load_system_skill(self, skill_name: str) -> Optional[str]:
         """Load a system skill file, delegating to config."""
         return self.config._load_skill_file(skill_name)
