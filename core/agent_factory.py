@@ -34,6 +34,7 @@ from core.factory.run_context import (
     layered_compact,
     with_images,
 )
+from core.factory.sessions import SessionUpkeep
 from core.factory.tools import ToolAssembly
 from core.factory.turns import TOOL_CALL_CORRECTION, TurnRunner
 from core.fallback_model import FallbackModel, ModelCandidate
@@ -72,7 +73,7 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-class AgentFactory(TurnRunner, ToolAssembly, AutoRunTools, PolicyWiring):
+class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, PolicyWiring):
     """Builds a system's agents and runs its conversation turns.
 
     One factory per system config. It caches the agents it built, keeps each

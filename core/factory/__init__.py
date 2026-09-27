@@ -15,7 +15,8 @@ Behaviour mixed into AgentFactory - it works on the factory's shared state
 which part of it:
 
 - ``turns.TurnRunner``: a conversation turn - runs, retries, stops,
-  resumption, steering, compaction, forks
+  resumption, steering
+- ``sessions.SessionUpkeep``: the agents' sessions - how full, compaction, forks
 - ``tools.ToolAssembly``: function tools, sub-agent tools, output limits
 - ``auto_run.AutoRunTools``: tools the operator runs before the model is asked
 - ``policy.PolicyWiring``: the action policy's hold on runs and tools
