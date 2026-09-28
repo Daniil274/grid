@@ -34,7 +34,9 @@ dependencies = [
     "openai-agents>=0.7,<0.8",  # core/sdk_patches.py replaces SDK internals
     "mcp>=1.19,<2",
     "httpx>=0.25.0",
-    "openai>=1.0.0",
+    # openai 2.45 made InputTokensDetails.cache_write_tokens required, which
+    # openai-agents 0.7 does not pass: agents.usage.Usage() fails.
+    "openai>=2.16,<2.45",
     "pydantic>=2.0.0",
     "PyYAML>=6.0",
     "ruamel.yaml>=0.18.10",

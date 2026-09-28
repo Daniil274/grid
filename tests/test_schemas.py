@@ -23,10 +23,10 @@ class TestToolType:
     
     def test_tool_type_membership(self):
         """Test ToolType membership."""
-        assert "function" in ToolType
-        assert "mcp" in ToolType
-        assert "agent" in ToolType
-        assert "invalid" not in ToolType
+        # By value: `"function" in ToolType` raises TypeError before Python 3.12.
+        values = {tool_type.value for tool_type in ToolType}
+        assert {"function", "mcp", "agent"} <= values
+        assert "invalid" not in values
 
 
 class TestProviderConfig:
