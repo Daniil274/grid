@@ -53,6 +53,7 @@ logger = logging.getLogger("grid.web_chat.server")
 ROOT = Path(__file__).resolve().parent
 INDEX_HTML = ROOT / "index.html"
 LOGIN_HTML = ROOT / "login.html"
+REVIEW_HTML = ROOT / "review.html"
 
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
@@ -136,9 +137,16 @@ class WebChatServer:
 
         register_personal_agent_routes(api, self.current_space)
         if reviews is not None:
-            from web_chat.review.http import register_review_routes
+            from web_chat.review.http import register_admin_review_routes, register_review_routes
 
             register_review_routes(api, reviews, self.current_user, self.current_space)
+            register_admin_review_routes(
+                api,
+                reviews,
+                admins_only(self.current_user),
+                spaces,
+                auth.accounts.user if auth is not None else (lambda user_id: None),
+            )
         if auth is not None:
             auth.register_routes(self.app, guard=self._guard, current_user=self.current_user)
         else:
@@ -286,7 +294,8 @@ class WebChatServer:
             return self._settings_payload(space)
 
     def _register_pages(self) -> None:
-        """The chat page, and with accounts the sign-in page in front of it."""
+        """The chat page, the admins' review page, and with accounts the sign-in
+        page in front of them."""
         app, auth = self.app, self.auth
 
         def page(path: Path) -> HTMLResponse:
@@ -299,6 +308,20 @@ class WebChatServer:
             if auth is not None and auth.user_of(request) is None:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(INDEX_HTML)
+
+        if self.reviews is not None:
+
+            @app.get("/admin/review", response_class=HTMLResponse)
+            async def review_page(request: Request) -> Any:
+                # The page is a shell; every review it shows comes through
+                # the admin-only API, which checks again.
+                if auth is not None:
+                    user = auth.user_of(request)
+                    if user is None:
+                        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+                    if not user.is_admin:
+                        return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+                return page(REVIEW_HTML)
 
         if auth is None:
             return

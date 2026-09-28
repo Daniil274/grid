@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
+  <title>Grid Reviews</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles/tokens.css">
+  <link rel="stylesheet" href="/static/styles/base.css">
+  <link rel="stylesheet" href="/static/styles/review.css">
+</head>
+<body class="reviewPage">
+  <header class="reviewPage__bar">
+    <a class="btn btn--ghost" href="/" id="back">Back to chat</a>
+    <h1 class="reviewPage__title">Reviews</h1>
+    <span class="reviewPage__hint">Answers users reported, frozen with what the agent had and did.</span>
+  </header>
+
+  <div class="reviewPage__body">
+    <aside class="reviewList" aria-label="Reviews">
+      <div class="reviewList__filters" id="filters" role="tablist" aria-label="Status"></div>
+      <div class="reviewList__items" id="review-list"></div>
+      <section class="reviewPick" id="pick" hidden aria-label="Review an unreported chat">
+        <h2 class="reviewPick__title">Review a chat the user did not report</h2>
+        <p class="reviewPick__hint">The user will see the review in their list; every look is written to the audit log.</p>
+        <label class="reviewPick__field">User
+          <select id="pick-user"></select>
+        </label>
+        <div class="reviewPick__chats" id="pick-chats"></div>
+        <div class="reviewPick__answers" id="pick-answers"></div>
+      </section>
+    </aside>
+
+    <main class="reviewCase" id="case" aria-live="polite">
+      <p class="reviewCase__empty">Choose a review on the left.</p>
+    </main>
+  </div>
+
+  <script type="module" src="/static/js/review/page.js"></script>
+</body>
+</html>

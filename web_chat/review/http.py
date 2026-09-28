@@ -1,21 +1,33 @@
-"""The review routes a user has: file one from their chat, see their own.
+"""The review routes: a user files and sees their own; admins examine them all.
+
+A user, in their own space (web_chat.server's dependencies):
 
     POST /api/chat/conversations/{context_id}/reviews   {message_id, note} -> the review
-    GET  /api/reviews                                   the user's reviews, newest first
+    GET  /api/reviews                                   their reviews, newest first
 
-Both act for the identified user in their own space (web_chat.server's
-dependencies); a user never reaches another's conversation or reviews here.
+Admins:
+
+    GET   /api/admin/reviews[?status=]                  every review, newest first
+    GET   /api/admin/reviews/{id}                       one review with its evidence
+    PATCH /api/admin/reviews/{id}                       {status}
+
+and, only when the policy's admin_any_chat is on (web_chat.review.desk):
+
+    GET  /api/admin/review-chats/{user_id}                          the user's conversations
+    GET  /api/admin/review-chats/{user_id}/{context_id}             its agent answers
+    POST /api/admin/review-chats/{user_id}/{context_id}/reviews     {message_id, note}
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from web_chat.identity import User
 from web_chat.review.desk import ReviewDesk, ReviewRefused
+from web_chat.review.store import Status
 
 #: What a user sees of their review: origin says whether they filed it or an
 #: admin opened it on their chat; which admin stays with the admins.
@@ -51,6 +63,89 @@ def register_review_routes(
     @api.get("/api/reviews")
     async def my_reviews(user: User = Depends(current_user)) -> list[dict[str, Any]]:
         return [_public(review.to_dict()) for review in desk.of_user(user)]
+
+
+class StatusChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Status
+
+
+def register_admin_review_routes(
+    api: APIRouter,
+    desk: ReviewDesk,
+    admin: Callable[..., Any],
+    spaces: Any,
+    find_user: Callable[[str], Optional[User]],
+) -> None:
+    """*admin* passes admins only; *spaces* lends a user's space (web_chat.spaces);
+    *find_user* names the owner of a user id - the admin themself is always known."""
+
+    def owner_of(user_id: str, actor: User) -> User:
+        owner = actor if user_id == actor.id else find_user(user_id)
+        if owner is None:
+            raise HTTPException(status_code=404, detail="No such user")
+        return owner
+
+    def refused(exc: ReviewRefused) -> HTTPException:
+        return HTTPException(status_code=exc.status, detail=str(exc))
+
+    @api.get("/api/admin/reviews")
+    async def all_reviews(status: Optional[Status] = None, _: User = Depends(admin)) -> dict[str, Any]:
+        return {
+            "reviews": [review.to_dict() for review in desk.all(status)],
+            "admin_any_chat": desk.admin_any_chat,
+        }
+
+    @api.get("/api/admin/reviews/{review_id}")
+    async def one_review(review_id: str, _: User = Depends(admin)) -> dict[str, Any]:
+        found = desk.case(review_id) if review_id.isalnum() else None
+        if found is None:
+            raise HTTPException(status_code=404, detail="Review not found")
+        review, evidence = found
+        return {"review": review.to_dict(), "evidence": evidence}
+
+    @api.patch("/api/admin/reviews/{review_id}")
+    async def change_status(review_id: str, body: StatusChange, _: User = Depends(admin)) -> dict[str, Any]:
+        if not (review_id.isalnum() and desk.set_status(review_id, body.status)):
+            raise HTTPException(status_code=404, detail="Review not found")
+        return {"id": review_id, "status": body.status}
+
+    @api.get("/api/admin/review-chats/{user_id}")
+    async def chats(user_id: str, actor: User = Depends(admin)) -> list[dict[str, Any]]:
+        owner = owner_of(user_id, actor)
+        try:
+            # Before the space: leasing it may start the user's container.
+            desk.require_any_chat()
+            async with spaces.use(owner.id) as space:
+                return desk.chats_of(space, actor, owner)
+        except ReviewRefused as exc:
+            raise refused(exc) from None
+
+    @api.get("/api/admin/review-chats/{user_id}/{context_id}")
+    async def answers(user_id: str, context_id: str, actor: User = Depends(admin)) -> list[dict[str, Any]]:
+        owner = owner_of(user_id, actor)
+        try:
+            # Before the space: leasing it may start the user's container.
+            desk.require_any_chat()
+            async with spaces.use(owner.id) as space:
+                return desk.answers_in(space, actor, owner, context_id)
+        except ReviewRefused as exc:
+            raise refused(exc) from None
+
+    @api.post("/api/admin/review-chats/{user_id}/{context_id}/reviews", status_code=201)
+    async def open_review(
+        user_id: str, context_id: str, body: ReviewRequest, actor: User = Depends(admin)
+    ) -> dict[str, Any]:
+        owner = owner_of(user_id, actor)
+        try:
+            # Before the space: leasing it may start the user's container.
+            desk.require_any_chat()
+            async with spaces.use(owner.id) as space:
+                review = await desk.open(space, actor, owner, context_id, body.message_id, body.note)
+        except ReviewRefused as exc:
+            raise refused(exc) from None
+        return review.to_dict()
 
 
 def _public(row: dict[str, Any]) -> dict[str, Any]:
