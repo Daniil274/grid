@@ -69,7 +69,15 @@ class PipelineInfo:
     shutdown_completed_at: Optional[datetime] = None
     serial_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     serial_owner_token: Optional[str] = None
-    serial_depth: int = 0
+
+
+@dataclass(frozen=True)
+class _SerialHold:
+    """A pipeline's serial lock as one step took it: what that step gives back."""
+
+    lock: asyncio.Lock
+    owner_token: str
+    context_token: contextvars.Token
 
 
 class PipelineRegistry:
@@ -234,60 +242,48 @@ class PipelineRegistry:
             current[pipeline_id] = value
         return var.set(current)
 
-    async def _enter_serial_scope(self, pipeline_id: str) -> Optional[contextvars.Token]:
+    async def _enter_serial_scope(self, pipeline_id: str) -> Optional["_SerialHold"]:
+        """Take the pipeline's serial lock, or join the scope of the step holding it.
+
+        A step inside the holder's subtree - its context carries the holder's
+        token - runs at once and changes nothing shared: only the step that took
+        the lock gives it back (:meth:`_exit_serial_scope`). A nested step that
+        outlives the holder, or never ends, cannot keep the pipeline locked.
+        Returns the hold to give back, or None when the step joined a scope.
+        """
         async with self._lock:
             pipeline = self._pipelines.get(pipeline_id)
             if pipeline is None:
                 raise ValueError(f"Pipeline {pipeline_id} not found")
-
             current_owner = _pipeline_lock_tokens.get().get(pipeline_id)
-            if current_owner and current_owner == pipeline.serial_owner_token:
-                pipeline.serial_depth += 1
+            if current_owner is not None and current_owner == pipeline.serial_owner_token:
                 return None
-
             serial_lock = pipeline.serial_lock
 
         await serial_lock.acquire()
-
+        # No await from here on: a cancellation cannot leave the lock taken
+        # with nobody recorded as its holder.
+        pipeline = self._pipelines.get(pipeline_id)
+        if pipeline is None:
+            serial_lock.release()
+            raise ValueError(f"Pipeline {pipeline_id} not found")
         owner_token = uuid.uuid4().hex
-        token = self._set_context_map_value(_pipeline_lock_tokens, pipeline_id, owner_token)
+        pipeline.serial_owner_token = owner_token
+        return _SerialHold(
+            lock=serial_lock,
+            owner_token=owner_token,
+            context_token=self._set_context_map_value(_pipeline_lock_tokens, pipeline_id, owner_token),
+        )
 
-        async with self._lock:
-            pipeline = self._pipelines.get(pipeline_id)
-            if pipeline is None:
-                _pipeline_lock_tokens.reset(token)
-                serial_lock.release()
-                raise ValueError(f"Pipeline {pipeline_id} not found")
-
-            pipeline.serial_owner_token = owner_token
-            pipeline.serial_depth = 1
-
-        return token
-
-    async def _exit_serial_scope(self, pipeline_id: str, token: Optional[contextvars.Token]) -> None:
-        should_release = False
-
-        async with self._lock:
-            pipeline = self._pipelines.get(pipeline_id)
-            if pipeline is None:
-                return
-
-            current_owner = _pipeline_lock_tokens.get().get(pipeline_id)
-            if not current_owner or current_owner != pipeline.serial_owner_token:
-                return
-
-            pipeline.serial_depth = max(0, pipeline.serial_depth - 1)
-            if pipeline.serial_depth == 0:
-                pipeline.serial_owner_token = None
-                should_release = True
-
-        if token is not None:
-            _pipeline_lock_tokens.reset(token)
-
-        if should_release:
-            pipeline = self._pipelines.get(pipeline_id)
-            if pipeline and pipeline.serial_lock.locked():
-                pipeline.serial_lock.release()
+    def _exit_serial_scope(self, pipeline_id: str, hold: Optional["_SerialHold"]) -> None:
+        """Give back what :meth:`_enter_serial_scope` took; nothing for a joined scope."""
+        if hold is None:
+            return
+        _pipeline_lock_tokens.reset(hold.context_token)
+        pipeline = self._pipelines.get(pipeline_id)
+        if pipeline is not None and pipeline.serial_owner_token == hold.owner_token:
+            pipeline.serial_owner_token = None
+        hold.lock.release()
 
     async def run_serialized_step(
         self,
@@ -305,11 +301,11 @@ class PipelineRegistry:
         Nested calls within the same pipeline are re-entrant, which preserves depth-first
         execution of precompiled agent/tool subtrees.
         """
-        serial_token = await self._enter_serial_scope(pipeline_id)
+        serial_hold = await self._enter_serial_scope(pipeline_id)
         async with self._lock:
             pipeline = self._pipelines.get(pipeline_id)
             if pipeline is None:
-                await self._exit_serial_scope(pipeline_id, serial_token)
+                self._exit_serial_scope(pipeline_id, serial_hold)
                 raise ValueError(f"Pipeline {pipeline_id} not found")
             if pipeline.status not in (
                 PipelineStatus.EMERGENCY_STOPPED,
@@ -345,7 +341,7 @@ class PipelineRegistry:
             raise
         finally:
             _pipeline_step_ids.reset(step_token)
-            await self._exit_serial_scope(pipeline_id, serial_token)
+            self._exit_serial_scope(pipeline_id, serial_hold)
 
     async def get_pipeline_by_context(self, context_id: str) -> Optional[PipelineInfo]:
         """
