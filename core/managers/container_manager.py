@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 try:
     import docker
     from docker.errors import NotFound, DockerException
@@ -82,28 +82,18 @@ class ContainerManager:
         }
         return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
 
-    def get_or_create_container(self, user_id: str, workspace: Optional[Path] = None) -> Optional[Container]:
-        """
-        Get existing container for user or create a new one.
-
-        Args:
-            user_id: User identifier
-            workspace: Explicit workspace path. When provided it is used as-is
-                       instead of computing ``workspace_root / "user_{user_id}"``.
-
-        Returns:
-            Container object or None if failed
-        """
+    def get_or_create_container(self, user_id: str, workspace: Path) -> Optional[Container]:
+        """The running container of *user_id*, with *workspace* - a host
+        directory - mounted at CONTAINER_WORKDIR; made when missing. None
+        when isolation is off or Docker fails."""
         if not self.enabled or not self.client:
             return None
 
         container_name = f"grid-agent-{user_id}"
-
-        # Determine the expected host path for the container workdir
-        if workspace is not None:
-            expected_host_path = str(Path(workspace).resolve())
-        else:
-            expected_host_path = str((Path(self.config.get_working_directory()) / f"user_{user_id}").resolve())
+        # One spelling of the host path for the mount and its check: a path
+        # spelled differently would recreate the container on every call.
+        workspace = Path(workspace).resolve()
+        expected_host_path = str(workspace)
 
         try:
             container = self.client.containers.get(container_name)
@@ -149,28 +139,13 @@ class ContainerManager:
             logger.warning("Cannot tell which build of %s container %s runs: %s", self.image, container.name, exc)
             return True
 
-    def _create_container(self, user_id: str, container_name: str, workspace: Optional[Path] = None) -> Optional[Container]:
-        """Create and start a new container for the user."""
+    def _create_container(self, user_id: str, container_name: str, workspace: Path) -> Optional[Container]:
+        """Create and start the container of *user_id*; *workspace* is resolved."""
         try:
-            # Resolve user workspace path on host.
-            # If an explicit workspace was provided (e.g. caller passed --path), use it directly.
-            # Otherwise fall back to the legacy behaviour: append user_{user_id} to workspace root.
-            if workspace is not None:
-                user_workspace = Path(workspace)
-            else:
-                workspace_root = Path(self.config.get_working_directory())
-                user_workspace = workspace_root / f"user_{user_id}"
-            user_workspace.mkdir(parents=True, exist_ok=True)
-            
-            # Mounts: Host path -> Container path
-            volumes = {
-                str(user_workspace.absolute()): {
-                    'bind': CONTAINER_WORKDIR,
-                    'mode': 'rw'
-                }
-            }
-            
-            logger.info(f"Creating container {container_name} with workspace {user_workspace}")
+            workspace.mkdir(parents=True, exist_ok=True)
+            # The workspace is the only host directory the container sees.
+            volumes = {str(workspace): {"bind": CONTAINER_WORKDIR, "mode": "rw"}}
+            logger.info("Creating container %s with workspace %s", container_name, workspace)
 
             # Docker Desktop (Windows/macOS) does not support network_mode="host" for Linux containers.
             # Use host networking only on Linux.
@@ -222,46 +197,3 @@ class ContainerManager:
         except Exception as e:
             logger.error(f"Failed to create container {container_name}: {e}")
             return None
-
-    def exec_command(self, container_id: str, cmd: list[str], workdir: Optional[str] = None, env: Dict[str, str] = None) -> Tuple[int, str, str]:
-        """
-        Execute command in container.
-
-        Args:
-            container_id: Container ID or name
-            cmd: Command to execute (list of strings)
-            workdir: Working directory inside container (default: CONTAINER_WORKDIR)
-            env: Environment variables
-            
-        Returns:
-            Tuple (exit_code, stdout, stderr)
-        """
-        if not self.enabled or not self.client:
-            # Fallback to local execution if isolation disabled (should be handled by caller, but safety check)
-            return -1, "", "Isolation disabled"
-
-        workdir = workdir or CONTAINER_WORKDIR
-        try:
-            container = self.client.containers.get(container_id)
-            
-            # docker-py exec_run returns (exit_code, output)
-            # output combines stdout/stderr usually, or we can use socket
-            # For simplicity using exec_run
-            
-            exec_result = container.exec_run(
-                cmd,
-                workdir=workdir,
-                environment=env,
-                user="agent"
-            )
-            
-            return exec_result.exit_code, exec_result.output.decode('utf-8', errors='replace'), ""
-            
-        except Exception as e:
-            logger.error(f"Error executing command in {container_id}: {e}")
-            return -1, "", str(e)
-
-    def get_container_id(self, user_id: str) -> Optional[str]:
-        """Helper to get container ID string."""
-        container = self.get_or_create_container(user_id)
-        return container.id if container else None

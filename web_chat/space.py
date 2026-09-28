@@ -131,7 +131,9 @@ class UserSpace:
 
     # -- construction ------------------------------------------------------
     def _build(self) -> None:
-        config, workspace = self._workspace_config()
+        config = self._workspace_config()
+        workspace = Path(config.get_working_directory()).resolve()
+        workspace.mkdir(parents=True, exist_ok=True)
         isolated = self.require_isolation or isolation_enabled(config)
         container_id = self._start_container(config, workspace) if isolated else None
         if self.require_isolation and container_id is None:
@@ -142,8 +144,7 @@ class UserSpace:
 
         self.config = config
         self.container_id = container_id
-        self.workspace_path = Path(config.get_working_directory()).resolve()
-        self.workspace_path.mkdir(parents=True, exist_ok=True)
+        self.workspace_path = workspace
 
         if self.layout is not None:
             self.conversations_path = self.layout.conversations
@@ -181,32 +182,24 @@ class UserSpace:
             ", ".join(self.registry.keys()),
         )
 
-    def _workspace_config(self) -> tuple[Config, Optional[Path]]:
-        """The base config bound to this space's workspace, and that workspace.
+    def _workspace_config(self) -> Config:
+        """The base config bound to this space's workspace.
 
-        The workspace is None when the config decides it (single user without
-        isolation or ``--path``).
+        The workspace is the space's own with a layout; on a one-user server it
+        is ``--path``, else the config's - or, when the config isolates its
+        agents, ``workspace/user_<id>`` beside the config, so the container
+        never mounts the config's directory itself.
         """
         config_path = str(self.deployment.config_path)
         if self.layout is not None:
-            workspace = self.layout.workspace.resolve()
-            workspace.mkdir(parents=True, exist_ok=True)
-            return Config(config_path, str(workspace)), workspace
+            return Config(config_path, str(self.layout.workspace.resolve()))
         config = Config(config_path, self.deployment.working_directory)
-        if not isolation_enabled(config):
-            return config, None
-        workspace = self._single_user_isolated_workspace()
-        return Config(config_path, str(workspace)), workspace
+        if not isolation_enabled(config) or self.deployment.working_directory is not None:
+            return config
+        workspace = self.deployment.config_path.parent / "workspace" / f"user_{self.user_id}"
+        return Config(config_path, str(workspace.resolve()))
 
-    def _single_user_isolated_workspace(self) -> Path:
-        if self.deployment.working_directory is not None:
-            workspace = Path(self.deployment.working_directory).expanduser().resolve()
-        else:
-            workspace = (self.deployment.config_path.parent / "workspace" / f"user_{self.user_id}").resolve()
-        workspace.mkdir(parents=True, exist_ok=True)
-        return workspace
-
-    def _start_container(self, config: Config, workspace: Optional[Path]) -> Optional[str]:
+    def _start_container(self, config: Config, workspace: Path) -> Optional[str]:
         manager = ContainerManager(config, enabled=True if self.require_isolation else None)
         if not manager.enabled:
             return None
