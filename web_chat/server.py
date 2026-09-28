@@ -93,12 +93,15 @@ class WebChatServer:
         allowed_origins: tuple[str, ...] = (),
         action_review_token: Optional[str] = None,
         warm_user: Optional[str] = DEFAULT_USER,
+        reviews: Optional[Any] = None,
     ) -> None:
         """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
         accounts; without it ``identify`` decides, by default the single local
         user. ``allowed_origins`` are other sites' origins trusted like the
         server's own (a reverse proxy's public address). ``warm_user``'s space is
-        built and its default agent warmed at startup; None warms nobody."""
+        built and its default agent warmed at startup; None warms nobody.
+        ``reviews`` is the web_chat.review.desk.ReviewDesk users file reviews
+        of answers with; None offers no reviews."""
         if auth is not None and identify is not None:
             raise ValueError("Pass auth or identify, not both")
         self.deployment = deployment
@@ -109,6 +112,7 @@ class WebChatServer:
         self._guard = OriginGuard(allowed_origins)
         self._warm_user = warm_user
         self._sweeper: Optional[asyncio.Task] = None
+        self.reviews = reviews
 
         self.voice: Optional[Any] = None
 
@@ -131,6 +135,10 @@ class WebChatServer:
         from web_chat.agents_api import register_personal_agent_routes
 
         register_personal_agent_routes(api, self.current_space)
+        if reviews is not None:
+            from web_chat.review.http import register_review_routes
+
+            register_review_routes(api, reviews, self.current_user, self.current_space)
         if auth is not None:
             auth.register_routes(self.app, guard=self._guard, current_user=self.current_user)
         else:
@@ -317,6 +325,7 @@ class WebChatServer:
                     "accounts": self.auth is not None,
                     "personal_agents": personal is not None and personal.enabled,
                     "voice": self.voice is not None and self.deployment.voice_enabled(),
+                    "reviews": self.reviews is not None and self.reviews.enabled,
                     "systems": system_options(
                         registry,
                         frozenset(personal.keys()) if personal else frozenset(),

@@ -1,0 +1,79 @@
+/**
+ * Reports of answers for review (web_chat/review): the button under an
+ * answer and the dialog that sends one.
+ */
+
+/* Reviews off on this server (review.enabled): no report buttons. */
+body:not([data-reviews="on"]) .msgAction--report {
+  display: none;
+}
+
+.reportDialog {
+  width: min(520px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.reportDialog::backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+
+.reportDialog__form {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+}
+
+.reportDialog__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.reportDialog__note {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text);
+  font: inherit;
+}
+
+.reportDialog__note:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+
+.reportDialog__consent {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.reportDialog__status {
+  min-height: 1em;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.reportDialog__status[data-tone="error"] {
+  color: var(--danger);
+}
+
+.reportDialog__status:empty {
+  display: none;
+}
+
+.reportDialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

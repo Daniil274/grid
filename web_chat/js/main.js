@@ -24,6 +24,7 @@ import { ICONS } from "./ui/icons.js";
 import { createThemeToggle } from "./ui/theme.js";
 import { copyText, toast } from "./ui/toast.js";
 import { createTranscript } from "./ui/transcript.js";
+import { openReportDialog } from "./ui/report-dialog.js";
 
 const store = createStore({
   systems: [],
@@ -53,6 +54,7 @@ const store = createStore({
   personalAgents: false,
   // The server offers voice (voice.enabled); off, no voice control is shown.
   voice: false,
+  reviews: false,
 });
 
 /** Icon-only buttons declare their glyph in markup; fill them in one pass. */
@@ -122,6 +124,15 @@ async function boot() {
     onEditMessage: (edited) => void chat.editMessage(edited),
     onSwitchVersion: (contextId) => void chat.switchVersion(contextId),
     onSpeakMessage: (id) => chat.toggleSpeech(id),
+    onReportMessage: ({ id }) => {
+      const contextId = store.get().contextId;
+      openReportDialog({
+        send: async (note) => {
+          await api.reportAnswer(contextId, id, note);
+          toast("Report sent. Thank you!", { tone: "success" });
+        },
+      });
+    },
     onContinue: () => chat.continueTurn(),
   });
 
@@ -327,6 +338,7 @@ async function boot() {
       accounts: Boolean(bootstrap.accounts),
       personalAgents: Boolean(bootstrap.personal_agents),
       voice: Boolean(bootstrap.voice),
+      reviews: Boolean(bootstrap.reviews),
     });
     await refreshConversations();
   }
@@ -355,6 +367,8 @@ async function boot() {
   const [latest] = store.get().conversations;
   if (latest) await chat.openConversation(latest.id);
 
+  // The report button under answers shows only when the server takes reports.
+  document.body.dataset.reviews = store.get().reviews ? "on" : "off";
   // Voice controls and read-aloud buttons exist only when the server offers voice.
   document.body.dataset.voice = store.get().voice ? "on" : "off";
   if (store.get().voice) globalThis.VoiceUI?.setup({

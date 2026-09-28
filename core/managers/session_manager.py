@@ -13,6 +13,11 @@ from agents import SQLiteSession
 logger = logging.getLogger("grid.session_manager")
 
 
+def agent_session_id(agent_key: str, context_id: str) -> str:
+    """The SDK session id of one agent in one conversation."""
+    return f"agent_{agent_key}_{context_id}"
+
+
 class SessionManager:
     """
     Manages agent sessions with proper lifecycle management.
@@ -48,7 +53,7 @@ class SessionManager:
         """
         session_key = (agent_key, context_id)
         if session_key not in self._agent_sessions:
-            session_id = f"agent_{agent_key}_{context_id}"
+            session_id = agent_session_id(agent_key, context_id)
             self._agent_sessions[session_key] = self._session_factory(session_id)
             logger.debug(
                 "Created new session",

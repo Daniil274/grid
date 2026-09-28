@@ -297,6 +297,25 @@ class UserLimitsPolicy(BaseModel):
     )
 
 
+class ReviewPolicy(BaseModel):
+    """Reviews of agent answers: users report a bad one, admins examine it (web_chat.review)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(default=True, description="Whether users can file reviews of agent answers")
+    reviews_per_day: int = Field(default=20, ge=1, le=1000, description="Reviews one user may file per UTC day")
+    max_note_chars: int = Field(
+        default=2000, ge=1, le=20000, description="Longest note a user may attach to a review"
+    )
+    admin_any_chat: bool = Field(
+        default=False,
+        description=(
+            "Whether an admin may open a review on any user's conversation, without the user filing it; "
+            "each such review is marked as opened by that admin and shown to the user"
+        ),
+    )
+
+
 class GridConfig(BaseModel):
     """Complete Grid system configuration."""
     settings: Settings = Field(default_factory=Settings)
@@ -317,6 +336,10 @@ class GridConfig(BaseModel):
     user_limits: UserLimitsPolicy = Field(
         default_factory=UserLimitsPolicy,
         description="How much one user of a multi-user web chat may run",
+    )
+    review: ReviewPolicy = Field(
+        default_factory=ReviewPolicy,
+        description="Reviews of agent answers, filed by users and examined by admins",
     )
     
     @field_validator('agents')
