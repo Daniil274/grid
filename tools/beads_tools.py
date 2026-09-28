@@ -5,6 +5,7 @@ This module provides tools for Grid agents to interact with Beads,
 a git-backed, dependency-aware graph issue tracker.
 """
 
+import asyncio
 import logging
 import subprocess
 import json
@@ -171,6 +172,16 @@ def _run_bd_via_docker_run(args: List[str], cwd: str, context: Any) -> Dict[str,
         return {"success": False, "output": "", "error": str(e), "data": None, "exit_code": -1}
 
 
+#: How long one bd command may run.
+BD_TIMEOUT_SECONDS = 30
+
+
+async def _bd(args: List[str], **kwargs: Any) -> Dict[str, Any]:
+    """:func:`_run_bd_command` in a worker thread: the tools are coroutines on
+    the server's event loop, which must not wait for a process."""
+    return await asyncio.to_thread(_run_bd_command, args, **kwargs)
+
+
 def _run_bd_command(args: List[str], cwd: Optional[str] = None, container_id: Optional[str] = None, context: Any = None) -> Dict[str, Any]:
     """
     Run a 'bd' command and return the result.
@@ -192,16 +203,19 @@ def _run_bd_command(args: List[str], cwd: Optional[str] = None, container_id: Op
         env["BEADS_DAEMON"] = "0"
         
         if container_id:
-            # docker exec -i -w <container_root> <container_id> <command>
+            # `timeout` ends bd inside the container too: stopping the docker
+            # client alone would leave bd running there, holding its database.
             workdir = _map_path_to_container(cwd, context)
-            docker_cmd = ["docker", "exec", "-i", "-w", workdir, "-e", "BEADS_DAEMON=0", container_id] + cmd
-            
+            docker_cmd = [
+                "docker", "exec", "-w", workdir, "-e", "BEADS_DAEMON=0", container_id,
+                "timeout", "-k", "5", str(BD_TIMEOUT_SECONDS), *cmd,
+            ]
             result = subprocess.run(
                 docker_cmd,
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
-                timeout=30
+                timeout=BD_TIMEOUT_SECONDS + 10,
             )
         else:
             result = subprocess.run(
@@ -211,7 +225,7 @@ def _run_bd_command(args: List[str], cwd: Optional[str] = None, container_id: Op
                 text=True,
                 encoding='utf-8',
                 env=env,
-                timeout=30
+                timeout=BD_TIMEOUT_SECONDS,
             )
         
         success = result.returncode == 0
@@ -527,7 +541,7 @@ async def beads_init(context: RunContextWrapper, directory: str = ".") -> str:
         return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
-    res = _run_bd_command(["init"], cwd=directory, container_id=container_id, context=context)
+    res = await _bd(["init"], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         # "already a beads database" or similar is often success for idempotent init
         if "already" in (res.get("error") or "").lower() or "already" in (res.get("output") or "").lower():
@@ -550,7 +564,7 @@ async def beads_ready(context: RunContextWrapper, directory: str = ".") -> str:
         return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
-    res = _run_bd_command(["ready"], cwd=directory, container_id=container_id, context=context)
+    res = await _bd(["ready"], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error: {res['error'] or res['output']}"
     return res["output"]
@@ -584,7 +598,7 @@ async def beads_create(
     if description:
         args.extend(["--description", description])
     
-    res = _run_bd_command(args, cwd=directory, container_id=container_id, context=context)
+    res = await _bd(args, cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error creating bead: {res['error'] or res['output']}"
     return res["output"]
@@ -604,7 +618,7 @@ async def beads_show(context: RunContextWrapper, bead_id: str, directory: str = 
         return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
-    res = _run_bd_command(["show", bead_id], cwd=directory, container_id=container_id, context=context)
+    res = await _bd(["show", bead_id], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error showing bead {bead_id}: {res['error'] or res['output']}"
     return res["output"]
@@ -650,7 +664,7 @@ async def beads_update(
     if notes:
         args.extend(["--notes", notes])
         
-    res = _run_bd_command(args, cwd=directory, container_id=container_id, context=context)
+    res = await _bd(args, cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error updating bead {bead_id}: {res['error'] or res['output']}"
     return res["output"]
@@ -676,7 +690,7 @@ async def beads_close(
         return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
-    res = _run_bd_command(["close", bead_id, "--reason", reason], cwd=directory, container_id=container_id, context=context)
+    res = await _bd(["close", bead_id, "--reason", reason], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error closing bead {bead_id}: {res['error'] or res['output']}"
     return res["output"]
@@ -696,7 +710,7 @@ async def beads_sync(context: RunContextWrapper, directory: str = ".") -> str:
         return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
-    res = _run_bd_command(["sync"], cwd=directory, container_id=container_id, context=context)
+    res = await _bd(["sync"], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error syncing beads: {res['error'] or res['output']}"
     return res["output"]
@@ -727,7 +741,7 @@ async def beads_dep(
     if action not in ["add", "remove"]:
         return "❌ Error: action must be 'add' or 'remove'"
         
-    res = _run_bd_command(["dep", action, child_id, parent_id], cwd=directory, container_id=container_id, context=context)
+    res = await _bd(["dep", action, child_id, parent_id], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error managing dependency: {res['error'] or res['output']}"
     return res["output"]
@@ -786,7 +800,7 @@ async def beads_list(
     if status:
         args.extend(["--status", status])
     
-    res = _run_bd_command(args, cwd=directory, container_id=container_id, context=context)
+    res = await _bd(args, cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error listing beads: {res['error'] or res['output']}"
 

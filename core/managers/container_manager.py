@@ -78,7 +78,7 @@ class ContainerManager:
             "memory": self.settings.memory,
             "cpus": self.settings.cpus,
             "pids_limit": self.settings.pids_limit,
-            "hardening": ["cap_drop:ALL", "no-new-privileges", "no-restart"],
+            "hardening": ["cap_drop:ALL", "no-new-privileges", "no-restart", "init"],
         }
         return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -191,6 +191,9 @@ class ContainerManager:
                 pids_limit=self.settings.pids_limit,
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges=true"],
+                # An init as PID 1 reaps orphaned processes (bd leaves some); without
+                # it they stay zombies until pids_limit refuses every new process.
+                init=True,
                 **run_kwargs,
             )
             return container
