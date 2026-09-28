@@ -190,7 +190,7 @@ class ContainerManager:
                 nano_cpus=int(self.settings.cpus * 1e9),
                 pids_limit=self.settings.pids_limit,
                 cap_drop=["ALL"],
-                security_opt=["no-new-privileges:true"],
+                security_opt=["no-new-privileges=true"],
                 **run_kwargs,
             )
             return container

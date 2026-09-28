@@ -113,7 +113,7 @@ jobs:
       - name: Check the sandbox tools
         if: matrix.image == 'grid-agent'
         run: |
-          docker run --rm --cap-drop ALL --security-opt no-new-privileges:true grid-agent:ci sh -euc '
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges=true grid-agent:ci sh -euc '
             test "$(id -un)" = agent
             test "$(pwd)" = /workspace
             codegraph --version

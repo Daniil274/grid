@@ -66,7 +66,7 @@ def test_a_container_is_limited_and_unprivileged_and_not_restarted_by_docker(man
     [(image, run)] = client.runs
     assert image == "grid-agent:latest"
     assert run["mem_limit"] == "1g" and run["nano_cpus"] == 1_500_000_000 and run["pids_limit"] == 256
-    assert run["cap_drop"] == ["ALL"] and run["security_opt"] == ["no-new-privileges:true"]
+    assert run["cap_drop"] == ["ALL"] and run["security_opt"] == ["no-new-privileges=true"]
     assert "restart_policy" not in run
     assert run["user"] == "agent"
     assert run["labels"] == {PROFILE_LABEL: manager.profile}

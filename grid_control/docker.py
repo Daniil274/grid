@@ -162,7 +162,7 @@ class DockerRuntime:
         return [
             "--read-only",
             "--cap-drop=ALL",
-            "--security-opt=no-new-privileges:true",
+            "--security-opt=no-new-privileges=true",
             "--pids-limit=256",
             "--memory=1g",
             "--cpus=2",
