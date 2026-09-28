@@ -127,8 +127,9 @@ class PolicyWiring:
     def _wrap_tool_with_policy(self, tool: Any, tool_name: str, kind: str) -> Any:
         """Route a call through the policy gate of the factory that runs it.
 
-        Tool objects are shared between agents and factories, so the gate is
-        resolved from the run context and the wrapper is applied once.
+        A tool object is shared by the factory's agents (each factory wraps
+        copies of its own: ToolAssembly._resolve_function_tools), so the gate
+        is resolved from the run context and the wrapper is applied once.
         """
         if not hasattr(tool, "on_invoke_tool") or getattr(
             tool, "_grid_policy_gated", False

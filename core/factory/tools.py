@@ -8,6 +8,7 @@ every output is bounded.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -241,7 +242,13 @@ class ToolAssembly:
     def _resolve_function_tools(self, tool_keys: List[str]) -> List[Any]:
         """Each function tool by key, from this factory's own config: its project
         tools first, then the system's. An unknown key is logged and left out;
-        each tool keeps its own key for its output limit."""
+        each tool keeps its own key for its output limit.
+
+        The registries hand every factory the same tool objects, and wrapping
+        replaces a tool's on_invoke_tool: each factory wraps a copy of its own.
+        Wrapping the shared object would stack every factory's wrappers on it,
+        and one user's calls would run through another's factory - its
+        pipeline, its conversations, its limits."""
         loader = self.config.project_tools_loader
         tools: List[Any] = []
         for tool_key in tool_keys:
@@ -256,7 +263,7 @@ class ToolAssembly:
             if tool is None:
                 logger.warning("Tool '%s' not found in project or system tools; skipped", tool_key)
                 continue
-            tools.append(self._wrap_tool_with_output_limit(tool, tool_key))
+            tools.append(self._wrap_tool_with_output_limit(copy.copy(tool), tool_key))
         return tools
 
     async def _get_agent_tools(
