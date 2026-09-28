@@ -267,6 +267,20 @@ $env:PYTHONPATH = "."
 pytest -q
 ```
 
+Тесты интерфейса чата: `node --test tests/*.test.mjs tests/*.test.cjs`.
+
+## CI/CD
+
+- **CI** (`.github/workflows/ci.yml`) — на каждый pull request и push в `feature/**`, `fix/**`, `refactor/**`: ruff (только ошибки: синтаксис, неопределённые имена), pytest на Python 3.11 и 3.12, тесты интерфейса на Node 22, сборка обоих образов и проверка инструментов песочницы (пользователь `agent`, codegraph, bd, dolt, rg, git).
+- **CD** (`.github/workflows/cd.yml`) — на push в `main` и теги `v*`: сначала те же проверки, затем пакет (`dist/` в артефактах) и публикация образов в GitHub Container Registry:
+  - `ghcr.io/<владелец>/grid-agent-system` — сервер;
+  - `ghcr.io/<владелец>/grid-agent` — песочница пользователей.
+
+  Теги образов: `main` и `sha-<коммит>` для `main`; `1.2.3`, `1.2`, `latest` и `sha-<коммит>` для тега `v1.2.3`. Тег версии создаёт GitHub Release с пакетом и заметками из коммитов.
+- **Dependabot** (`.github/dependabot.yml`) раз в неделю предлагает обновления actions и базовых образов.
+
+Выпуск версии: `git tag v1.2.3 && git push hub v1.2.3`. Опубликованную песочницу сервер с аккаунтами берёт через `isolation.image: ghcr.io/<владелец>/grid-agent:1.2.3`. Пакеты GHCR после первой публикации приватные: сделайте их публичными в настройках пакета или выполните `docker login ghcr.io` на хосте сервера.
+
 ## Структура конфигурации
 
 Основной файл конфигурации описывает:

@@ -1,5 +1,12 @@
 name: CD
 
+# main and version tags: the CI checks, then the Python package, then both
+# images on GitHub Container Registry; a version tag also makes a release.
+#
+#   ghcr.io/<owner>/grid-agent-system   the server (Dockerfile)
+#   ghcr.io/<owner>/grid-agent          the per-user sandbox (docker/agent/Dockerfile)
+#
+# Tags: main -> main, sha-<short>; v1.2.3 -> 1.2.3, 1.2, latest, sha-<short>.
 on:
   push:
     branches:
@@ -9,20 +16,26 @@ on:
       - "v*"
   workflow_dispatch:
 
-# Read-only token: nothing here pushes, comments or releases.
+# Each job asks for what it needs beyond reading.
 permissions:
   contents: read
 
+# Publishing runs one at a time per ref and is never cut off halfway.
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   package:
     runs-on: ubuntu-latest
-
+    needs: checks
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
@@ -32,34 +45,90 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build
 
-      - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: python-dist
           path: dist/*
+          if-no-files-found: error
 
-  docker:
+  images:
     runs-on: ubuntu-latest
-    needs: package
-
+    needs: checks
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: grid-agent-system
+            context: .
+            file: ./Dockerfile
+          - image: grid-agent
+            context: docker/agent
+            file: docker/agent/Dockerfile
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Registry names are lowercase; the owner may not be.
+      - name: Image name
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          flavor: latest=false
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha
+
+      - name: Build and push ${{ matrix.image }}
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
-          push: false
-          tags: grid-agent-system:${{ github.sha }}
-          outputs: type=docker,dest=/tmp/grid-agent-system.tar
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
-      - name: Upload Docker image artifact
-        uses: actions/upload-artifact@v4
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [package, images]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          name: docker-image
-          path: /tmp/grid-agent-system.tar
+          name: python-dist
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
