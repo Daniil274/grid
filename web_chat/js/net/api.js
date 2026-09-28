@@ -55,6 +55,10 @@ export const api = {
   adminReports: (status) => request(`/api/admin/reviews${status ? `?status=${encodeURIComponent(status)}` : ""}`),
   adminReport: (id) => request(`/api/admin/reviews/${encodeURIComponent(id)}`),
   setReportStatus: (id, status) => request(`/api/admin/reviews/${encodeURIComponent(id)}`, json("PATCH", { status })),
+  /** The review agents' analysis of a report: its state, and a new turn of it. */
+  reportAnalysis: (id) => request(`/api/admin/reviews/${encodeURIComponent(id)}/analysis`),
+  analyseReport: (id, message = "") =>
+    request(`/api/admin/reviews/${encodeURIComponent(id)}/analysis`, json("POST", { message })),
   /** Admins, when the server allows it: pick an answer the user did not report. */
   reviewChats: (userId) => request(`/api/admin/review-chats/${encodeURIComponent(userId)}`),
   reviewAnswers: (userId, contextId) =>

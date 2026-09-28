@@ -34,6 +34,8 @@ const nodes = {
 };
 
 const state = { status: "new", selected: null };
+/** How often the page asks how a running analysis turn is doing. */
+const POLL_MS = 2000;
 
 // -- the list ---------------------------------------------------------------------
 function renderFilters() {
@@ -84,7 +86,7 @@ async function loadList() {
 async function openCase(id) {
   state.selected = id;
   const { review, evidence } = await api.adminReport(id);
-  const tabs = evidenceTabs(evidence);
+  const tabs = [{ title: "Analysis", render: () => analysisView(review.id) }, ...evidenceTabs(evidence)];
   const panel = h("div.reviewCase__panel");
   const tabBar = h("div.reviewCase__tabs", { role: "tablist" });
   const show = (index) => {
@@ -220,6 +222,103 @@ function sessionView({ session_id: id, items = [], earlier_items_left_out: earli
 }
 
 const codeBlock = (text) => h("pre.evidence__code", {}, h("code", { text }));
+
+// -- the review agents' analysis ------------------------------------------------------
+/**
+ * The conversation with the review agents and the proposals they recorded.
+ * While a turn runs the view polls; it stops once another review is opened.
+ */
+function analysisView(reviewId) {
+  const log = h("div.analysis__log");
+  const proposals = h("div.analysis__proposals");
+  const status = h("p.analysis__status", { role: "status" });
+  const input = h("textarea.analysis__input", {
+    rows: 3,
+    placeholder: "Ask the review agents a follow-up question…",
+    "aria-label": "Question for the review agents",
+  });
+  const send = h("button.btn.btn--primary", { type: "button", text: "Analyze" });
+
+  const render = (analysis) => {
+    replace(
+      log,
+      analysis.messages.length
+        ? analysis.messages.map((message) =>
+            h(
+              "article.analysisMsg",
+              { dataset: { role: message.role } },
+              h("div.analysisMsg__head", { text: message.role === "user" ? "Admin" : "Review agents" }),
+              h("pre.evidence__text", { text: message.content }),
+            ),
+          )
+        : h("p.evidence__note", { text: "Not analyzed yet. Analyze to let the review agents find the cause." }),
+    );
+    replace(proposals, analysis.proposals.map(proposalCard));
+    status.dataset.tone = analysis.error ? "error" : "";
+    status.textContent = analysis.running ? "The review agents are working…" : analysis.error ?? "";
+    send.disabled = analysis.running;
+    send.textContent = analysis.messages.length ? "Ask" : "Analyze";
+  };
+
+  const poll = async () => {
+    if (state.selected !== reviewId || !log.isConnected) return;
+    const analysis = await api.reportAnalysis(reviewId);
+    render(analysis);
+    if (analysis.running) setTimeout(poll, POLL_MS);
+    else void loadList();
+  };
+
+  send.addEventListener("click", async () => {
+    send.disabled = true;
+    try {
+      render(await api.analyseReport(reviewId, input.value.trim()));
+      input.value = "";
+      setTimeout(poll, POLL_MS);
+    } catch (error) {
+      toast(error.message, { tone: "error" });
+      send.disabled = false;
+    }
+  });
+
+  queueMicrotask(poll);
+  return h(
+    "div.analysis",
+    {},
+    log,
+    status,
+    h("div.analysis__ask", {}, input, send),
+    h("h3.analysis__title", { text: "Proposals" }),
+    proposals,
+  );
+}
+
+function proposalCard(proposal) {
+  return h(
+    "article.proposal",
+    { dataset: { confidence: proposal.confidence ?? "" } },
+    h("header.proposal__head", {},
+      h("strong", { text: proposal.title }),
+      h("span.reviewTag", { text: proposal.cause }),
+      h("span.reviewTag", { text: `confidence: ${proposal.confidence}` })),
+    h("p.proposal__summary", { text: proposal.summary }),
+    proposal.evidence?.length ? h("p.proposal__evidence", { text: `Evidence: ${proposal.evidence.join(", ")}` }) : null,
+    proposal.scenario ? h("details.evidenceItem", {}, h("summary", { text: "How to check it" }), h("pre.evidence__text", { text: proposal.scenario })) : null,
+    proposal.change
+      ? h("details.evidenceItem", { open: true },
+          h("summary", { text: "Change" }),
+          codeBlock(proposal.change),
+          h("button.btn.btn--ghost.reviewPick__open", { type: "button", text: "Download patch", on: { click: () => download(`${proposal.id}.patch`, proposal.change) } }))
+      : null,
+  );
+}
+
+function download(name, text) {
+  const link = h("a", { href: URL.createObjectURL(new Blob([`${text}\n`], { type: "text/x-diff" })), download: name });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
 
 // -- an answer the user did not report ------------------------------------------------
 async function setUpPicker() {

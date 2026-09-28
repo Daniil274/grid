@@ -208,10 +208,12 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
 
 def open_reviews(deployment, root: Path):
     """The review desk of this server, keeping its reviews under *root* (web_chat.review)."""
+    from web_chat.review.agents import ReviewAgents
     from web_chat.review.desk import ReviewDesk
     from web_chat.review.store import ReviewStore
 
-    return ReviewDesk(ReviewStore(root), lambda: deployment.review_policy)
+    store = ReviewStore(root)
+    return ReviewDesk(store, lambda: deployment.review_policy, agents=ReviewAgents(store, root))
 
 
 if __name__ == "__main__":

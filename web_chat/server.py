@@ -209,6 +209,8 @@ class WebChatServer:
             await self.spaces.close()
             if self.voice is not None:
                 self.voice.close()
+            if self.reviews is not None and self.reviews.agents is not None:
+                await self.reviews.agents.close()
 
     async def _sweep_forever(self) -> None:
         """Periodic upkeep: idle spaces go, and with accounts, dead sessions."""

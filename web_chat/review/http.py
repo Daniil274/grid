@@ -10,6 +10,8 @@ Admins:
     GET   /api/admin/reviews[?status=]                  every review, newest first
     GET   /api/admin/reviews/{id}                       one review with its evidence
     PATCH /api/admin/reviews/{id}                       {status}
+    GET   /api/admin/reviews/{id}/analysis              the review agents' conversation and proposals
+    POST  /api/admin/reviews/{id}/analysis              {message?}: start a turn of the analysis
 
 and, only when the policy's admin_any_chat is on (web_chat.review.desk):
 
@@ -65,6 +67,12 @@ def register_review_routes(
         return [_public(review.to_dict()) for review in desk.of_user(user)]
 
 
+class AnalysisRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(default="", max_length=20000)
+
+
 class StatusChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -110,6 +118,33 @@ def register_admin_review_routes(
         if not (review_id.isalnum() and desk.set_status(review_id, body.status)):
             raise HTTPException(status_code=404, detail="Review not found")
         return {"id": review_id, "status": body.status}
+
+    def analysis_agents() -> Any:
+        if desk.agents is None:
+            raise HTTPException(status_code=404, detail="Review agents are not set up on this server")
+        return desk.agents
+
+    @api.get("/api/admin/reviews/{review_id}/analysis")
+    async def analysis(review_id: str, _: User = Depends(admin)) -> dict[str, Any]:
+        agents = analysis_agents()
+        if not review_id.isalnum() or desk.store.get(review_id) is None:
+            raise HTTPException(status_code=404, detail="Review not found")
+        return agents.state(review_id)
+
+    @api.post("/api/admin/reviews/{review_id}/analysis", status_code=202)
+    async def analyse(review_id: str, body: AnalysisRequest, _: User = Depends(admin)) -> dict[str, Any]:
+        from web_chat.review.agents import AnalysisBusy
+
+        agents = analysis_agents()
+        if not review_id.isalnum():
+            raise HTTPException(status_code=404, detail="Review not found")
+        try:
+            await agents.ask(review_id, body.message)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Review not found") from None
+        except AnalysisBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return agents.state(review_id)
 
     @api.get("/api/admin/review-chats/{user_id}")
     async def chats(user_id: str, actor: User = Depends(admin)) -> list[dict[str, Any]]:

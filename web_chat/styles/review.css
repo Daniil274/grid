@@ -360,3 +360,96 @@ body:not([data-reviews="on"]) .msgAction--report {
     border-bottom: 1px solid var(--line);
   }
 }
+
+/* -- The review agents' analysis --------------------------------------------- */
+
+.analysis {
+  display: grid;
+  gap: 12px;
+}
+
+.analysis__log {
+  display: grid;
+  gap: 8px;
+}
+
+.analysisMsg {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+}
+
+.analysisMsg[data-role="user"] {
+  border-color: var(--accent-line);
+}
+
+.analysisMsg__head {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.analysis__status {
+  min-height: 1em;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.analysis__status:empty {
+  display: none;
+}
+
+.analysis__status[data-tone="error"] {
+  color: var(--danger);
+}
+
+.analysis__ask {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.analysis__input {
+  width: 100%;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text);
+  font: inherit;
+}
+
+.analysis__title {
+  margin: 8px 0 0;
+  font-size: 15px;
+}
+
+.proposal {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+}
+
+.proposal__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposal__summary,
+.proposal__evidence {
+  margin: 0;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.proposal__evidence {
+  color: var(--text-3);
+}
