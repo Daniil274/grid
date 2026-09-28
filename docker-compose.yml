@@ -12,8 +12,11 @@ services:
     depends_on:
       searxng:
         condition: service_healthy
+    # This host only: without --accounts the chat has no sign-in, and its agents
+    # run commands. Reach it through an SSH tunnel, or put the server with
+    # accounts behind HTTPS (README, "Сайт для нескольких пользователей").
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ${GRID_WORKSPACE:-.}:/workspace
     command:
@@ -49,7 +52,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
     volumes:
       - workshop-data:/workspace
     command:
