@@ -1,4 +1,4 @@
-"""Per-user containers: limited, unprivileged, not restarted by Docker, recreated on new settings."""
+"""Per-user containers: limited, unprivileged, not restarted by Docker, recreated on new settings or a new image build."""
 
 from types import SimpleNamespace
 
@@ -9,10 +9,18 @@ from core.managers.container_manager import CONTAINER_WORKDIR, PROFILE_LABEL, Co
 from schemas.schemas import IsolationConfig
 
 
+#: The build the image tag names in these tests.
+CURRENT_BUILD = "sha256:current"
+
+
 class FakeContainer:
-    def __init__(self, name, source, labels, status="running"):
+    def __init__(self, name, source, labels, status="running", image=CURRENT_BUILD):
         self.name, self.id, self.status = name, f"id-{name}", status
-        self.attrs = {"Mounts": [{"Destination": CONTAINER_WORKDIR, "Source": source}], "Config": {"Labels": labels}}
+        self.attrs = {
+            "Mounts": [{"Destination": CONTAINER_WORKDIR, "Source": source}],
+            "Config": {"Labels": labels},
+            "Image": image,
+        }
         self.removed = False
         self.started = False
 
@@ -28,6 +36,7 @@ class FakeClient:
         self.existing = {}
         self.runs = []
         self.containers = self
+        self.images = SimpleNamespace(get=lambda name: SimpleNamespace(id=CURRENT_BUILD))
 
     def get(self, name):
         if name not in self.existing:
@@ -82,6 +91,18 @@ def test_a_current_container_is_reused_and_started(manager, tmp_path):
 
     assert manager.get_or_create_container("u1", workspace=tmp_path) is current
     assert current.started and not current.removed and client.runs == []
+
+
+def test_a_container_of_an_older_image_build_is_recreated(manager, tmp_path):
+    manager, client = manager
+    source = str(tmp_path.resolve())
+    old = client.existing["grid-agent-u1"] = FakeContainer(
+        "grid-agent-u1", source, labels={PROFILE_LABEL: manager.profile}, image="sha256:older"
+    )
+
+    manager.get_or_create_container("u1", workspace=tmp_path)
+
+    assert old.removed and len(client.runs) == 1
 
 
 def test_changing_a_limit_changes_the_profile(monkeypatch):

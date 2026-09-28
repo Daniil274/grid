@@ -124,6 +124,10 @@ class ContainerManager:
                 )
                 container.remove(force=True)
                 return self._create_container(user_id, container_name, workspace=workspace)
+            if not self._runs_current_image(container):
+                logger.info("Container %s runs an older build of %s. Recreating.", container_name, self.image)
+                container.remove(force=True)
+                return self._create_container(user_id, container_name, workspace=workspace)
 
             if container.status != "running":
                 container.start()
@@ -134,6 +138,16 @@ class ContainerManager:
         except Exception as e:
             logger.error(f"Error getting container {container_name}: {e}")
             return None
+
+    def _runs_current_image(self, container: Container) -> bool:
+        """Whether *container* runs the build the image tag names now: after a
+        rebuild of the image the container is recreated on the new one. Its
+        workspace is a host directory, so nothing of the user's is lost."""
+        try:
+            return container.attrs.get("Image") == self.client.images.get(self.image).id
+        except Exception as exc:  # the tag is gone or Docker does not say: keep what runs
+            logger.warning("Cannot tell which build of %s container %s runs: %s", self.image, container.name, exc)
+            return True
 
     def _create_container(self, user_id: str, container_name: str, workspace: Optional[Path] = None) -> Optional[Container]:
         """Create and start a new container for the user."""
