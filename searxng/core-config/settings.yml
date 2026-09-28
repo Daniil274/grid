@@ -2,7 +2,12 @@
 # Grid changes. Engines come from the image, so they always match its version
 # (a full copy of an older default file listed engines newer images dropped).
 # https://docs.searxng.org/admin/settings/settings.html
-use_default_settings: true
+use_default_settings:
+  engines:
+    # Tor onion search: fails to load without a Tor proxy, which Grid does not run.
+    remove:
+      - ahmia
+      - torch
 
 general:
   instance_name: "Grid search"
