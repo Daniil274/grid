@@ -623,7 +623,8 @@ def register_voice_routes(
     One service per app (stored on ``app.state.grid_voice_service``); calling
     this twice on the same app reuses the existing service. There is no
     global service cache. ``dependencies`` run before every route - the web
-    chat's identification of the user.
+    chat's identification of the user. The caller closes the service
+    (``service.close()``) when the app stops.
     """
     service = getattr(app.state, "grid_voice_service", None)
     if service is not None:
@@ -709,10 +710,5 @@ def register_voice_routes(
         except Exception as exc:
             raise _error_response(exc, "Voice warmup failed") from exc
         return JSONResponse(result)
-
-    @app.on_event("shutdown")
-    async def _voice_shutdown() -> None:
-        # shutdown(wait=False) is non-blocking; safe to call on the loop.
-        service.close()
 
     return service

@@ -715,10 +715,12 @@ class TestBusyAndCancel:
 
         asyncio.run(scenario())
 
-    def test_shutdown_closes_executors_without_blocking(self, voice_app):
+    def test_close_shuts_the_executors_down_without_blocking(self, voice_app):
+        # The app's owner closes the service when the app stops (web_chat.server).
         service = voice_app.state.test_service
         with TestClient(voice_app) as client:
             assert client.get("/api/voice/status").status_code == 200
+        service.close()
         assert service._closed is True
         assert service._stt_executor._shutdown
         assert service._tts_executor._shutdown

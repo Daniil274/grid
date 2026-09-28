@@ -18,13 +18,8 @@ SAME_SITE = {"Origin": "http://testserver"}
 
 
 class Deployment:
-    """What the server reads of the deployment in these tests: voice settings."""
-
-    def voice_source(self):
-        return "voice.yaml", None
-
-    def voice_config_dict(self):
-        return {}
+    """The deployment of these tests: a server with accounts reads nothing of it
+    until a space is built, and FakeSpace builds none."""
 
 
 @pytest.fixture(autouse=True)
@@ -120,7 +115,15 @@ def test_an_invite_link_signs_the_new_user_in(client, accounts):
 def test_the_api_refuses_requests_without_a_session(client):
     assert client.get("/api/chat/bootstrap").status_code == 401
     assert client.post("/api/chat/conversations").status_code == 401
-    assert client.get("/api/voice/status").status_code == 401
+
+
+def test_a_server_with_accounts_offers_no_voice(server, accounts):
+    accounts.create_user("alice", PASSWORD)
+    alice = signed_in(server, "alice")
+
+    assert server.voice is None
+    assert alice.get("/api/voice/status").status_code == 404
+    assert alice.post("/api/voice/decide", json={}).status_code == 404
 
 
 def test_each_user_sees_only_their_own_conversations(server, accounts):

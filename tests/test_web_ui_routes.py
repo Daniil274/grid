@@ -181,6 +181,15 @@ def test_web_chat_index_and_bootstrap_are_available():
     assert bootstrap_response.json()["voice"] is False
 
 
+def test_a_single_user_server_closes_its_voice_when_it_stops():
+    server = WebChatServer(_DummyDeployment(), SpacePool(lambda user_id: _DummySpace()), warm_user=None)
+
+    with TestClient(server.app, headers=SAME_SITE):
+        assert server.voice is not None and not server.voice._closed
+
+    assert server.voice._closed
+
+
 def test_action_review_routes_list_and_resolve_pending_review():
     space = _DummySpace()
     client = TestClient(_server(space).app, headers=SAME_SITE)

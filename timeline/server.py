@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
@@ -109,17 +110,21 @@ def create_app(
 
     # Local tools, reachable by every page the operator's browser opens: a
     # change (rerun, edit, reload) must come from their own page.
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        loop_holder["loop"] = asyncio.get_running_loop()
+        try:
+            yield
+        finally:
+            tracer.unregister_ws_callback(_on_tracer_event)
+
     app = FastAPI(
-        title="Agent Timeline", docs_url=None, redoc_url=None, dependencies=[Depends(same_site_only())]
+        title="Agent Timeline",
+        docs_url=None,
+        redoc_url=None,
+        dependencies=[Depends(same_site_only())],
+        lifespan=lifespan,
     )
-
-    @app.on_event("startup")
-    async def _startup() -> None:
-        loop_holder["loop"] = asyncio.get_event_loop()
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
-        tracer.unregister_ws_callback(_on_tracer_event)
 
     # ── Routes ───────────────────────────────────────────────────────────────
 

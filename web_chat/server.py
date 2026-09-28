@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
@@ -110,7 +110,9 @@ class WebChatServer:
         self._warm_user = warm_user
         self._sweeper: Optional[asyncio.Task] = None
 
-        self.app = FastAPI(title="Grid Web Chat", docs_url=None, redoc_url=None)
+        self.voice: Optional[Any] = None
+
+        self.app = FastAPI(title="Grid Web Chat", docs_url=None, redoc_url=None, lifespan=self._lifespan)
 
         @self.app.middleware("http")
         async def security_headers(request: Request, call_next):
@@ -131,14 +133,23 @@ class WebChatServer:
         register_personal_agent_routes(api, self.current_space)
         if auth is not None:
             auth.register_routes(self.app, guard=self._guard, current_user=self.current_user)
+        else:
+            self._register_voice(api, identified)
+        self.app.include_router(api)
+
+    def _register_voice(self, api: APIRouter, identified: list) -> None:
+        """Speech, for a server without accounts only.
+
+        It runs on models loaded once for the whole server and no user limit
+        counts it, so a server with accounts does not offer it at all: its
+        routes are not there. A single-user server offers it when the config
+        turns it on (``voice.enabled``).
+        """
         from web_chat.voice import register_voice_routes
         from web_chat.voice_turns import register_turn_routes
 
         register_turn_routes(api, self.current_space)
-        self.app.include_router(api)
-        # Speech is shared by all users and owns its lifecycle on the app.
-        self.voice = register_voice_routes(self.app, deployment, dependencies=identified)
-        self._register_lifecycle()
+        self.voice = register_voice_routes(self.app, self.deployment, dependencies=identified)
 
     def _dependencies(self):
         """The route dependencies: the identified user, and that user's space."""
@@ -165,21 +176,23 @@ class WebChatServer:
     def _mount_static(self) -> None:
         self.app.mount("/static", RevalidatedStaticFiles(directory=str(ROOT)), name="static")
 
-    def _register_lifecycle(self) -> None:
-        @self.app.on_event("startup")
-        async def _startup() -> None:
-            if self._warm_user is not None:
-                async with self.spaces.use(self._warm_user) as space:
-                    space.schedule_warmup()
-            self._sweeper = asyncio.get_running_loop().create_task(self._sweep_forever(), name="space-sweeper")
-
-        @self.app.on_event("shutdown")
-        async def _shutdown() -> None:
-            if self._sweeper is not None:
-                self._sweeper.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self._sweeper
+    @asynccontextmanager
+    async def _lifespan(self, _app: FastAPI) -> AsyncIterator[None]:
+        """Warm the first space and sweep spaces while the app serves; then close
+        the spaces and speech."""
+        if self._warm_user is not None:
+            async with self.spaces.use(self._warm_user) as space:
+                space.schedule_warmup()
+        self._sweeper = asyncio.get_running_loop().create_task(self._sweep_forever(), name="space-sweeper")
+        try:
+            yield
+        finally:
+            self._sweeper.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._sweeper
             await self.spaces.close()
+            if self.voice is not None:
+                self.voice.close()
 
     async def _sweep_forever(self) -> None:
         """Periodic upkeep: idle spaces go, and with accounts, dead sessions."""
@@ -303,7 +316,7 @@ class WebChatServer:
                     "user": {"id": user.id, "username": user.username, "role": user.role},
                     "accounts": self.auth is not None,
                     "personal_agents": personal is not None and personal.enabled,
-                    "voice": self.deployment.voice_enabled(),
+                    "voice": self.voice is not None and self.deployment.voice_enabled(),
                     "systems": system_options(
                         registry,
                         frozenset(personal.keys()) if personal else frozenset(),
