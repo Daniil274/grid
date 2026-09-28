@@ -345,12 +345,13 @@ async function boot() {
 
   // Who is signed in, on a server with accounts; the system configs are
   // shared by all users, so only admins get to open them.
-  store.subscribe(({ user, accounts, personalAgents: ownAgents }) => {
+  store.subscribe(({ user, accounts, personalAgents: ownAgents, reviews }) => {
     $("#account").hidden = !accounts;
     $("#account-name").textContent = user?.username ?? "";
     $("#open-settings").hidden = user?.role !== "admin";
     $("#open-admin").hidden = !accounts || user?.role !== "admin";
     $("#open-agents").hidden = !ownAgents;
+    $("#open-reviews").hidden = !reviews || user?.role !== "admin";
     // The timeline is the operator's local tool (grid-timeline), not the site's.
     $("#open-timeline").hidden = accounts;
   });

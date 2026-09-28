@@ -296,3 +296,98 @@ def test_a_user_files_a_review_from_their_chat_and_sees_it(tmp_path, space):
     assert "opened_by" not in filed.json() and "user_id" not in filed.json()
     assert missing.status_code == 404
     assert [row["id"] for row in mine.json()] == [filed.json()["id"]]
+
+
+# -- admins ---------------------------------------------------------------------------
+BOSS = User(id="b" * 32, username="boss", role="admin")
+
+
+def _clients(tmp_path, space, **policy):
+    """Alice and an admin on one server; the X-User header says who asks.
+
+    Without accounts the routes know no user but the asking admin, so the
+    admin's "own" chats here are the shared test space.
+    """
+    users = {ALICE.id: ALICE, BOSS.id: BOSS}
+
+    async def identify(connection):
+        return users[connection.headers["X-User"]]
+
+    server = WebChatServer(
+        SimpleNamespace(voice_enabled=lambda: False), SpacePool(lambda user_id: space), identify=identify,
+        warm_user=None, reviews=_desk(tmp_path, **policy),
+    )
+    return (
+        TestClient(server.app, headers={**SAME_SITE, "X-User": ALICE.id}),
+        TestClient(server.app, headers={**SAME_SITE, "X-User": BOSS.id}),
+    )
+
+
+def test_admins_read_every_review_with_its_evidence_and_move_it_on(tmp_path, space):
+    space.say("user", "hi")
+    answer = space.say("assistant", "hello", agent="coder")
+    as_alice, as_boss = _clients(tmp_path, space)
+    filed = as_alice.post(f"/api/chat/conversations/{space.context_id}/reviews", json={"message_id": answer}).json()
+
+    listed = as_boss.get("/api/admin/reviews").json()
+    case = as_boss.get(f"/api/admin/reviews/{filed['id']}").json()
+    moved = as_boss.patch(f"/api/admin/reviews/{filed['id']}", json={"status": "in_review"})
+
+    assert [row["username"] for row in listed["reviews"]] == ["alice"] and listed["admin_any_chat"] is False
+    assert case["evidence"]["target"]["message_id"] == answer
+    assert moved.status_code == 200 and as_alice.get("/api/reviews").json()[0]["status"] == "in_review"
+    assert as_alice.get("/api/admin/reviews").status_code == 403
+    assert as_boss.patch(f"/api/admin/reviews/{filed['id']}", json={"status": "gone"}).status_code == 422
+
+
+def test_unreported_chats_stay_closed_to_admins_by_default(tmp_path, space):
+    _, as_boss = _clients(tmp_path, space)
+
+    assert as_boss.get(f"/api/admin/review-chats/{BOSS.id}").status_code == 403
+
+
+def test_with_the_policy_an_admin_picks_an_answer_and_opens_a_review(tmp_path, space, caplog):
+    space.say("user", "hi")
+    answer = space.say("assistant", "hello", agent="coder")
+    as_alice, as_boss = _clients(tmp_path, space, admin_any_chat=True)
+
+    chats = as_boss.get(f"/api/admin/review-chats/{BOSS.id}").json()
+    answers = as_boss.get(f"/api/admin/review-chats/{BOSS.id}/{space.context_id}").json()
+    with caplog.at_level("WARNING", logger="grid.web_chat.review.audit"):
+        opened = as_boss.post(
+            f"/api/admin/review-chats/{BOSS.id}/{space.context_id}/reviews", json={"message_id": answer, "note": "check"}
+        ).json()
+
+    assert space.context_id in [chat["id"] for chat in chats]
+    assert answers == [{"id": answer, "agent": "coder", "timestamp": answers[0]["timestamp"], "preview": "hello"}]
+    assert opened["origin"] == "admin" and opened["opened_by"] == BOSS.id
+    assert any("opened review" in record.getMessage() for record in caplog.records)
+    assert as_alice.get(f"/api/admin/review-chats/{ALICE.id}").status_code == 403
+    assert as_boss.get("/api/admin/review-chats/nobody").status_code == 404
+
+
+async def test_a_review_an_admin_opened_shows_in_its_owners_list(tmp_path, space):
+    space.say("user", "hi")
+    answer = space.say("assistant", "hello", agent="coder")
+    desk = _desk(tmp_path, admin_any_chat=True)
+
+    review = await desk.open(space, BOSS, ALICE, space.context_id, answer, "")
+
+    assert review.user_id == ALICE.id and review.opened_by == BOSS.id
+    assert [mine.id for mine in desk.of_user(ALICE)] == [review.id]
+    # An admin's review is not the user's: it does not count against their day.
+    assert desk.store.count_filed_since(ALICE.id, 0) == 0
+
+
+def test_the_review_page_is_there_only_with_reviews(tmp_path, space):
+    def page(reviews):
+        server = WebChatServer(
+            SimpleNamespace(voice_enabled=lambda: False), SpacePool(lambda user_id: space), identify=_alice,
+            warm_user=None, reviews=reviews,
+        )
+        return TestClient(server.app).get("/admin/review", follow_redirects=False)
+
+    shown = page(_desk(tmp_path))
+
+    assert shown.status_code == 200 and "Grid Reviews" in shown.text
+    assert page(None).status_code == 404

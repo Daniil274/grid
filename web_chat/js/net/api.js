@@ -51,6 +51,19 @@ export const api = {
   reportAnswer: (contextId, messageId, note) =>
     request(`/api/chat/conversations/${encodeURIComponent(contextId)}/reviews`, json("POST", { message_id: messageId, note })),
   myReports: () => request("/api/reviews"),
+  /** Admins: every report, one with its evidence, its status. */
+  adminReports: (status) => request(`/api/admin/reviews${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  adminReport: (id) => request(`/api/admin/reviews/${encodeURIComponent(id)}`),
+  setReportStatus: (id, status) => request(`/api/admin/reviews/${encodeURIComponent(id)}`, json("PATCH", { status })),
+  /** Admins, when the server allows it: pick an answer the user did not report. */
+  reviewChats: (userId) => request(`/api/admin/review-chats/${encodeURIComponent(userId)}`),
+  reviewAnswers: (userId, contextId) =>
+    request(`/api/admin/review-chats/${encodeURIComponent(userId)}/${encodeURIComponent(contextId)}`),
+  openReport: (userId, contextId, messageId, note) =>
+    request(
+      `/api/admin/review-chats/${encodeURIComponent(userId)}/${encodeURIComponent(contextId)}/reviews`,
+      json("POST", { message_id: messageId, note }),
+    ),
   signOut: () => request("/api/auth/logout", { method: "POST" }),
   changePassword: (current, next) => request("/api/auth/password", json("POST", { current, new: next })),
   adminUsers: () => request("/api/admin/users"),
