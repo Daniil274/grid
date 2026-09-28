@@ -18,6 +18,8 @@ export const ICONS = {
   sliders: "M4 7h10M18 7h2M4 17h4M12 17h8M15 4v6M8 14v6",
   clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4",
+  // A magnifier over a bug: report a problem with an answer for review.
+  inspect: "M10.5 3a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15zM21 21l-5.2-5.2M10.5 7.5a2 2.6 0 1 0 0 5.2 2 2.6 0 0 0 0-5.2zM7.2 9.2h1.3M12.5 9.2h1.3M7.2 11.8h1.3M12.5 11.8h1.3M9.6 6.6l-.6-.9M11.4 6.6l.6-.9",
   arrowDown: "M12 5v14M6 13l6 6 6-6",
   theme: "M12 3a9 9 0 0 0 0 18 7 7 0 0 1 0-18z",
   timeline: "M6 4v16M6 8h12M6 16h8",

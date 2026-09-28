@@ -155,6 +155,8 @@ def single_user_options(deployment, args: argparse.Namespace) -> dict:
         "identify": single_user(args.user_id),
         "action_review_token": action_review_token,
         "warm_user": args.user_id,
+        # Beside the single user's own records (web_chat.space.single_user_records).
+        "reviews": open_reviews(deployment, Path(deployment.config.get_logs_directory()) / "reviews"),
     }
 
 
@@ -200,7 +202,16 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
         "auth": SessionAuth(accounts, secure_cookies=args.secure_cookies),
         "allowed_origins": tuple(args.allowed_origin),
         "warm_user": None,
+        "reviews": open_reviews(deployment, data_dir / "reviews"),
     }
+
+
+def open_reviews(deployment, root: Path):
+    """The review desk of this server, keeping its reviews under *root* (web_chat.review)."""
+    from web_chat.review.desk import ReviewDesk
+    from web_chat.review.store import ReviewStore
+
+    return ReviewDesk(ReviewStore(root), lambda: deployment.review_policy)
 
 
 if __name__ == "__main__":

@@ -47,6 +47,10 @@ export const api = {
   getSettings: () => request("/api/settings"),
   saveSettings: (config) => request("/api/settings/structured", json("PUT", { config })),
   saveYaml: (yamlContent) => request("/api/settings/yaml", json("PUT", { yaml_content: yamlContent })),
+  /** Report a problem with an answer: freezes it for the admins (web_chat/review). */
+  reportAnswer: (contextId, messageId, note) =>
+    request(`/api/chat/conversations/${encodeURIComponent(contextId)}/reviews`, json("POST", { message_id: messageId, note })),
+  myReports: () => request("/api/reviews"),
   signOut: () => request("/api/auth/logout", { method: "POST" }),
   changePassword: (current, next) => request("/api/auth/password", json("POST", { current, new: next })),
   adminUsers: () => request("/api/admin/users"),
