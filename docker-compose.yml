@@ -66,7 +66,6 @@ services:
     restart: unless-stopped
     environment:
       SEARXNG_BASE_URL: http://searxng:8080/
-      SEARXNG_REDIS_URL: redis://valkey:6379/0
     volumes:
       - ./searxng/core-config:/etc/searxng:ro
       - searxng-data:/var/cache/searxng
