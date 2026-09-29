@@ -453,3 +453,20 @@ body:not([data-reviews="on"]) .msgAction--report {
 .proposal__evidence {
   color: var(--text-3);
 }
+
+.proposal__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposal__result {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.proposal__result[data-tone="error"] {
+  color: var(--danger);
+}

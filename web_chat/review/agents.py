@@ -2,8 +2,8 @@
 
 The analysis of a review is a conversation with the reviewer agent
 (examples/context-review), kept in that review's workbench
-(web_chat.review.workbench) with the agents' SDK sessions beside all the
-workbenches. An admin starts it and asks follow-up questions on the review
+(web_chat.review.workbench) together with the agents' SDK sessions, so no
+review sees another's. An admin starts it and asks follow-up questions on the review
 page; each question is one turn, run in the background while the page polls
 :meth:`ReviewAgents.state`.
 
@@ -56,7 +56,7 @@ class ReviewAgents:
         build_factory: Optional[Callable[[Workbench, ContextManager], Any]] = None,
     ) -> None:
         """*root* holds the workbenches (``root/work/<id>``) and the agents'
-        sessions; *build_factory* makes the AgentFactory of one turn (tests)."""
+        logs; *build_factory* makes the AgentFactory of one turn (tests)."""
         self.store = store
         self.root = root
         self._config_path = config_path
@@ -64,6 +64,7 @@ class ReviewAgents:
         self._build_factory = build_factory or self._agent_factory
         self._turns: dict[str, asyncio.Task] = {}
         self._errors: dict[str, str] = {}
+        self._asking = asyncio.Lock()
 
     def workbench(self, review_id: str) -> Workbench:
         if not review_id.isalnum():
@@ -79,6 +80,12 @@ class ReviewAgents:
 
         Raises LookupError for an unknown review and AnalysisBusy while a turn runs.
         """
+        # One ask at a time: preparing the workbench awaits, and a second ask in
+        # between would otherwise start a second turn of the same review.
+        async with self._asking:
+            await self._ask(review_id, message)
+
+    async def _ask(self, review_id: str, message: Optional[str]) -> None:
         if self.running(review_id):
             raise AnalysisBusy("The review agents are still working on this review.")
         review = self.store.get(review_id)
@@ -139,7 +146,9 @@ class ReviewAgents:
             config=Config(str(self._config_path), str(workbench.root)),
             working_directory=str(workbench.root),
             context_manager=manager,
-            session_db_path=str(self.root / "agent_sessions.db"),
+            # In the workbench: the session id is the same for every review
+            # (agent and conversation are), so one store for all would mix them.
+            session_db_path=str(workbench.root / "agent_sessions.db"),
             logs_directory=str(self.root / "logs"),
         )
 

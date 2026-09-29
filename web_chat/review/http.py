@@ -12,6 +12,9 @@ Admins:
     PATCH /api/admin/reviews/{id}                       {status}
     GET   /api/admin/reviews/{id}/analysis              the review agents' conversation and proposals
     POST  /api/admin/reviews/{id}/analysis              {message?}: start a turn of the analysis
+    POST  /api/admin/reviews/{id}/proposals/{p}/check   does the proposal's patch apply to this code
+    POST  /api/admin/reviews/{id}/proposals/{p}/evolve  send it to the evolution loop as a task
+    GET   /api/admin/reviews/{id}/proposals/{p}/task    what became of that task
 
 and, only when the policy's admin_any_chat is on (web_chat.review.desk):
 
@@ -22,13 +25,16 @@ and, only when the policy's admin_any_chat is on (web_chat.review.desk):
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from web_chat.identity import User
-from web_chat.review.desk import ReviewDesk, ReviewRefused
+from web_chat.review.agents import AnalysisBusy
+from web_chat.review.desk import ReviewDesk, ReviewRefused, audit
+from web_chat.review.evolution import EvolutionError, check_patch
 from web_chat.review.store import Status
 
 #: What a user sees of their review: origin says whether they filed it or an
@@ -98,11 +104,15 @@ def register_admin_review_routes(
     def refused(exc: ReviewRefused) -> HTTPException:
         return HTTPException(status_code=exc.status, detail=str(exc))
 
+    # Proposals being sent right now: a second click must not send a second task.
+    sending: set[tuple[str, str]] = set()
+
     @api.get("/api/admin/reviews")
     async def all_reviews(status: Optional[Status] = None, _: User = Depends(admin)) -> dict[str, Any]:
         return {
             "reviews": [review.to_dict() for review in desk.all(status)],
             "admin_any_chat": desk.admin_any_chat,
+            "evolution": desk.evolution is not None,
         }
 
     @api.get("/api/admin/reviews/{review_id}")
@@ -133,8 +143,6 @@ def register_admin_review_routes(
 
     @api.post("/api/admin/reviews/{review_id}/analysis", status_code=202)
     async def analyse(review_id: str, body: AnalysisRequest, _: User = Depends(admin)) -> dict[str, Any]:
-        from web_chat.review.agents import AnalysisBusy
-
         agents = analysis_agents()
         if not review_id.isalnum():
             raise HTTPException(status_code=404, detail="Review not found")
@@ -145,6 +153,56 @@ def register_admin_review_routes(
         except AnalysisBusy as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         return agents.state(review_id)
+
+    def proposal_of(review_id: str, proposal_id: str) -> tuple[Any, dict[str, Any]]:
+        agents = analysis_agents()
+        if not review_id.isalnum():
+            raise HTTPException(status_code=404, detail="Review not found")
+        workbench = agents.workbench(review_id)
+        proposal = workbench.proposal(proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        return workbench, proposal
+
+    @api.post("/api/admin/reviews/{review_id}/proposals/{proposal_id}/check")
+    async def check(review_id: str, proposal_id: str, _: User = Depends(admin)) -> dict[str, Any]:
+        _, proposal = proposal_of(review_id, proposal_id)
+        return await asyncio.to_thread(check_patch, proposal.get("change") or "")
+
+    @api.post("/api/admin/reviews/{review_id}/proposals/{proposal_id}/evolve", status_code=201)
+    async def evolve(review_id: str, proposal_id: str, actor: User = Depends(admin)) -> dict[str, Any]:
+        if desk.evolution is None:
+            raise HTTPException(
+                status_code=503,
+                detail="The evolution loop is not set up: GRID_CONTROL_URL and GRID_CONTROL_TASK_TOKEN",
+            )
+        workbench, proposal = proposal_of(review_id, proposal_id)
+        key = (review_id, proposal_id)
+        if proposal.get("task") or key in sending:
+            raise HTTPException(status_code=409, detail="This proposal was sent already")
+        sending.add(key)
+        try:
+            task_id = await asyncio.to_thread(desk.evolution.send, review_id, proposal)
+            record = workbench.mark_sent(proposal_id, task_id)
+        except EvolutionError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        finally:
+            sending.discard(key)
+        audit.warning(
+            "Admin %s (%s) sent proposal %s of review %s as task %s",
+            actor.username, actor.id, proposal_id, review_id, task_id,
+        )
+        return record
+
+    @api.get("/api/admin/reviews/{review_id}/proposals/{proposal_id}/task")
+    async def task(review_id: str, proposal_id: str, _: User = Depends(admin)) -> dict[str, Any]:
+        _, proposal = proposal_of(review_id, proposal_id)
+        if not proposal.get("task") or desk.evolution is None:
+            raise HTTPException(status_code=404, detail="This proposal was not sent")
+        try:
+            return await asyncio.to_thread(desk.evolution.status, proposal["task"]["id"])
+        except EvolutionError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
 
     @api.get("/api/admin/review-chats/{user_id}")
     async def chats(user_id: str, actor: User = Depends(admin)) -> list[dict[str, Any]]:

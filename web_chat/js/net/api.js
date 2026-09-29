@@ -20,6 +20,9 @@ async function request(url, options = {}) {
   return payload;
 }
 
+const proposalUrl = (id, proposalId, action) =>
+  `/api/admin/reviews/${encodeURIComponent(id)}/proposals/${encodeURIComponent(proposalId)}/${action}`;
+
 const json = (method, body) => ({
   method,
   headers: { "Content-Type": "application/json" },
@@ -59,6 +62,10 @@ export const api = {
   reportAnalysis: (id) => request(`/api/admin/reviews/${encodeURIComponent(id)}/analysis`),
   analyseReport: (id, message = "") =>
     request(`/api/admin/reviews/${encodeURIComponent(id)}/analysis`, json("POST", { message })),
+  /** A proposal: does its patch apply here; send it to the evolution loop; what became of it. */
+  checkProposal: (id, proposalId) => request(proposalUrl(id, proposalId, "check"), { method: "POST" }),
+  evolveProposal: (id, proposalId) => request(proposalUrl(id, proposalId, "evolve"), { method: "POST" }),
+  proposalTask: (id, proposalId) => request(proposalUrl(id, proposalId, "task")),
   /** Admins, when the server allows it: pick an answer the user did not report. */
   reviewChats: (userId) => request(`/api/admin/review-chats/${encodeURIComponent(userId)}`),
   reviewAnswers: (userId, contextId) =>

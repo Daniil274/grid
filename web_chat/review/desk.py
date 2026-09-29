@@ -54,12 +54,15 @@ class ReviewDesk:
         policy: Callable[[], ReviewPolicy],
         *,
         agents: Optional[Any] = None,
+        evolution: Optional[Any] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         """*agents* (web_chat.review.agents.ReviewAgents) analyse reviews for
-        the admins; None offers no analysis."""
+        the admins; *evolution* (web_chat.review.evolution.EvolutionOutbox)
+        sends their proposals to the evolution loop. None offers neither."""
         self.store = store
         self.agents = agents
+        self.evolution = evolution
         self._policy = policy
         self._clock = clock
         # One filing per user at a time, so the daily limit counts every one.

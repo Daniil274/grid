@@ -105,6 +105,18 @@ class ControlClient:
     def status(self, experiment: str) -> Dict[str, Any]:
         return self._call("GET", f"/experiments/{experiment}").json()
 
+    def tasks(self) -> list:
+        """Tasks the operator's side sent, waiting for the workshop."""
+        return self._call("GET", "/tasks").json()
+
+    def take_task(self, task: str) -> Dict[str, Any]:
+        """Claim an open task; the controller gives it to nobody else."""
+        return self._call("POST", f"/tasks/{task}/take").json()
+
+    def link_task(self, task: str, experiment: str) -> Dict[str, Any]:
+        """Record that a taken task became *experiment*."""
+        return self._call("POST", f"/tasks/{task}/link", json={"experiment": experiment}).json()
+
 
 class Workshop:
     def __init__(self, path: Path):

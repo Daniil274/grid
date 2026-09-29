@@ -33,7 +33,7 @@ const nodes = {
   pickAnswers: document.getElementById("pick-answers"),
 };
 
-const state = { status: "new", selected: null };
+const state = { status: "new", selected: null, evolution: false };
 /** How often the page asks how a running analysis turn is doing. */
 const POLL_MS = 2000;
 
@@ -54,8 +54,9 @@ function renderFilters() {
 }
 
 async function loadList() {
-  const { reviews, admin_any_chat: anyChat } = await api.adminReports(state.status || null);
+  const { reviews, admin_any_chat: anyChat, evolution } = await api.adminReports(state.status || null);
   nodes.pick.hidden = !anyChat;
+  state.evolution = evolution;
   replace(
     nodes.list,
     reviews.length
@@ -253,7 +254,7 @@ function analysisView(reviewId) {
           )
         : h("p.evidence__note", { text: "Not analyzed yet. Analyze to let the review agents find the cause." }),
     );
-    replace(proposals, analysis.proposals.map(proposalCard));
+    replace(proposals, analysis.proposals.map((proposal) => proposalCard(reviewId, proposal)));
     status.dataset.tone = analysis.error ? "error" : "";
     status.textContent = analysis.running ? "The review agents are working…" : analysis.error ?? "";
     send.disabled = analysis.running;
@@ -292,7 +293,7 @@ function analysisView(reviewId) {
   );
 }
 
-function proposalCard(proposal) {
+function proposalCard(reviewId, proposal) {
   return h(
     "article.proposal",
     { dataset: { confidence: proposal.confidence ?? "" } },
@@ -309,7 +310,53 @@ function proposalCard(proposal) {
           codeBlock(proposal.change),
           h("button.btn.btn--ghost.reviewPick__open", { type: "button", text: "Download patch", on: { click: () => download(`${proposal.id}.patch`, proposal.change) } }))
       : null,
+    proposalActions(reviewId, proposal),
   );
+}
+
+/** Check the patch against this code; send the proposal on, or show what became of it. */
+function proposalActions(reviewId, proposal) {
+  const result = h("p.proposal__result", { role: "status" });
+  const show = (text, tone = "") => {
+    result.textContent = text;
+    result.dataset.tone = tone;
+  };
+  const check = h("button.btn.btn--ghost.reviewPick__open", {
+    type: "button",
+    text: "Check patch",
+    disabled: !proposal.change,
+    on: {
+      click: async () => {
+        const { applies, detail } = await api.checkProposal(reviewId, proposal.id);
+        show(applies === true ? "Applies to this code." : applies === false ? `Does not apply: ${detail}` : detail, applies === false ? "error" : "");
+      },
+    },
+  });
+  const send = h("button.btn.btn--primary.reviewPick__open", {
+    type: "button",
+    text: "Send to evolution",
+    hidden: Boolean(proposal.task) || !state.evolution,
+    on: {
+      click: async () => {
+        send.disabled = true;
+        try {
+          const task = await api.evolveProposal(reviewId, proposal.id);
+          send.hidden = true;
+          show(`Sent as task ${task.id}: the workshop will take it.`);
+        } catch (error) {
+          send.disabled = false;
+          show(error.message, "error");
+        }
+      },
+    },
+  });
+  if (proposal.task) {
+    show(`Sent as task ${proposal.task.id}…`);
+    api.proposalTask(reviewId, proposal.id)
+      .then((task) => show(`Task ${task.id}: ${task.status}${task.experiment ? ` · experiment ${task.experiment}: ${task.verdict}` : ""}`))
+      .catch((error) => show(error.message, "error"));
+  }
+  return h("div.proposal__actions", {}, check, send, result);
 }
 
 function download(name, text) {

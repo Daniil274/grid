@@ -153,6 +153,12 @@ tools:
   control_status:
     type: function
     description: Read an experiment's status and evidence from the controller.
+  control_tasks:
+    type: function
+    description: List tasks the operator sent - proposals from reviews of agent answers, with evidence and a suggested diff.
+  control_take_task:
+    type: function
+    description: Claim one task before working on it, so nobody else takes it.
 
   # ── Specialists ─────────────────────────────────────────────────
   call_architect:
@@ -195,6 +201,8 @@ agents:
       - control_trial
       - control_submit
       - control_status
+      - control_tasks
+      - control_take_task
       - call_architect
       - call_improver
     system_skills:

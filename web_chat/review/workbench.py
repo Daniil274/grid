@@ -10,6 +10,9 @@
         source/            Grid's code and configs as they ran
             SOURCE.md      where they come from
         proposals/         what propose_change wrote (examples/context-review)
+        sent/              which proposals went to the evolution loop, as which task
+        conversation.json  the analysis conversation (web_chat.review.agents)
+        agent_sessions.db  the review agents' SDK sessions
 
 The agents' file tools are confined to this directory, so a review reaches
 nothing else: no other review, no user's space, no server file. The source is
@@ -22,11 +25,13 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import shutil
+import time
 import subprocess
 import tarfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 from web_chat.review.evidence import PROJECT_ROOT
 
@@ -35,6 +40,9 @@ SOURCE_PARTS = (
     "core", "web_chat", "tools", "utils", "schemas", "examples", "timeline", "grid_control",
     "context_inspector", "routing.yaml", "agent_chat.py", "grid.py", "pyproject.toml", "README.md",
 )
+#: A proposal's id: the stem of its file.
+PROPOSAL_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+
 _SKIPPED_DIRS = {"__pycache__", "logs", "data", "workspace", ".codegraph", "node_modules", ".grid"}
 #: A copy takes source and config text only: no media, databases or caches.
 _SOURCE_SUFFIXES = {
@@ -69,16 +77,30 @@ class Workbench:
         (self.root / "README.md").write_text(_readme(review, evidence, source_note), encoding="utf-8")
 
     def proposals(self) -> list[dict[str, Any]]:
-        """The proposals written so far, oldest first; a malformed file is skipped."""
+        """The proposals written so far, oldest first, each with the task it was
+        sent as (or None); a malformed file is skipped."""
         found = []
         for path in sorted(self.proposals_dir.glob("*.json")) if self.proposals_dir.exists() else []:
-            try:
-                proposal = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
+            proposal = _read_json(path)
             if isinstance(proposal, dict):
-                found.append({"id": path.stem, **proposal})
+                found.append({**proposal, "id": path.stem, "task": _read_json(self._sent(path.stem))})
         return found
+
+    def proposal(self, proposal_id: str) -> Optional[dict[str, Any]]:
+        if not PROPOSAL_ID.fullmatch(proposal_id):
+            return None
+        return next((proposal for proposal in self.proposals() if proposal["id"] == proposal_id), None)
+
+    def mark_sent(self, proposal_id: str, task_id: str) -> dict[str, Any]:
+        """Record that *proposal_id* went to the evolution loop as *task_id*."""
+        record = {"id": task_id, "sent_at": time.time()}
+        path = self._sent(proposal_id)
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(record), encoding="utf-8")
+        return record
+
+    def _sent(self, proposal_id: str) -> Path:
+        return self.root / "sent" / f"{proposal_id}.json"
 
 
 # -- the case ------------------------------------------------------------------------
@@ -101,6 +123,13 @@ def _write_case(case: Path, review: dict[str, Any], evidence: dict[str, Any]) ->
     }
     for name, text in files.items():
         (case / name).write_text(text, encoding="utf-8")
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def _json(value: Any) -> str:

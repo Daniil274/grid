@@ -72,7 +72,7 @@ def test_a_malformed_proposal_file_is_skipped(tmp_path):
     (bench.proposals_dir / "1.json").write_text('{"title": "fix it"}', encoding="utf-8")
     (bench.proposals_dir / "2.json").write_text("not json", encoding="utf-8")
 
-    assert bench.proposals() == [{"id": "1", "title": "fix it"}]
+    assert bench.proposals() == [{"id": "1", "title": "fix it", "task": None}]
 
 
 # -- turns ------------------------------------------------------------------------------

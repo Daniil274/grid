@@ -210,10 +210,16 @@ def open_reviews(deployment, root: Path):
     """The review desk of this server, keeping its reviews under *root* (web_chat.review)."""
     from web_chat.review.agents import ReviewAgents
     from web_chat.review.desk import ReviewDesk
+    from web_chat.review.evolution import EvolutionOutbox
     from web_chat.review.store import ReviewStore
 
     store = ReviewStore(root)
-    return ReviewDesk(store, lambda: deployment.review_policy, agents=ReviewAgents(store, root))
+    return ReviewDesk(
+        store,
+        lambda: deployment.review_policy,
+        agents=ReviewAgents(store, root),
+        evolution=EvolutionOutbox.from_env(),
+    )
 
 
 if __name__ == "__main__":

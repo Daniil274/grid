@@ -261,3 +261,35 @@ def test_the_same_content_cannot_be_submitted_twice(tmp_path, control):
         workshop.begin(client)
         (workshop.path / "routing.yaml").write_text("routing: {a: 1}\n", encoding="utf-8")
         workshop.submit(client, "Same change in a new experiment")
+
+
+async def test_a_task_from_the_operator_becomes_the_workshops_experiment(tmp_path, source, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from tools import control_tools
+    from utils.path_utils import factory_path_context
+
+    repository = Repository.create(tmp_path / "evolution.git", source)
+    store = Store(tmp_path / "control.db")
+    app = create_app(Controller(store, PassingRuntime()), repository.path, _policy(), TOKEN, "o" * 32)
+    workshop = Workshop(tmp_path / "workshop")
+    with TestClient(app, headers={"Authorization": "Bearer " + TOKEN}) as http:
+        operator = TestClient(app, headers={"Authorization": "Bearer " + "o" * 32})
+        task = operator.post("/tasks", json={"title": "Better notes", "summary": "They were thin."}).json()["id"]
+        workshop.init(ControlClient(http))
+        monkeypatch.setattr(control_tools.ControlClient, "from_env", classmethod(lambda cls: ControlClient(http)))
+        factory = SimpleNamespace(config=SimpleNamespace(get_working_directory=lambda: str(workshop.path)), container_id=None)
+
+        async def call(tool, **arguments):
+            with factory_path_context(factory):
+                return await tool.on_invoke_tool(None, json.dumps(arguments))
+
+        listed = await call(control_tools.control_tasks)
+        taken = await call(control_tools.control_take_task, task_id=task)
+        (workshop.path / "notes.md").write_text("better notes\n", encoding="utf-8")
+        report = await call(control_tools.control_submit, message="Better notes", task_id=task)
+
+    assert [item["id"] for item in listed["tasks"]] == [task] and taken["status"] == "taken"
+    assert report["task"] == task
+    assert store.task(task)["experiment"] == report["id"]

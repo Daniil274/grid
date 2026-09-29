@@ -21,6 +21,12 @@ class Store:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY, experiment TEXT NOT NULL, time TEXT DEFAULT CURRENT_TIMESTAMP, data TEXT NOT NULL)"
             )
+            # Tasks the operator's side sends to the workshop (see service.py):
+            # open until the workshop takes one, then linked to its experiment.
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, created TEXT DEFAULT CURRENT_TIMESTAMP,"
+                " status TEXT NOT NULL CHECK (status IN ('open', 'taken')), experiment TEXT, data TEXT NOT NULL)"
+            )
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -115,6 +121,37 @@ class Store:
             **json.loads(row[1]),
             "events": [{"time": stamp, **json.loads(data)} for stamp, data in events],
         }
+
+    # -- tasks ---------------------------------------------------------------------
+    def add_task(self, task: str, data: dict[str, Any]) -> None:
+        with self.connect() as db:
+            db.execute("INSERT INTO tasks (id, status, data) VALUES (?, 'open', ?)", (task, json.dumps(data)))
+
+    def open_tasks(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT id, created, data FROM tasks WHERE status='open' ORDER BY rowid").fetchall()
+        return [{"id": task, "created": created, **json.loads(data)} for task, created, data in rows]
+
+    def task(self, task: str) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute("SELECT created, status, experiment, data FROM tasks WHERE id=?", (task,)).fetchone()
+        if row is None:
+            raise ValueError("Unknown task")
+        created, status, experiment, data = row
+        return {"id": task, "created": created, "status": status, "experiment": experiment, **json.loads(data)}
+
+    def take_task(self, task: str) -> None:
+        with self.connect() as db:
+            if db.execute("UPDATE tasks SET status='taken' WHERE id=? AND status='open'", (task,)).rowcount != 1:
+                raise ValueError("The task is not open")
+
+    def link_task(self, task: str, experiment: str) -> None:
+        """Record the experiment a taken task became."""
+        with self.connect() as db:
+            if db.execute(
+                "UPDATE tasks SET experiment=? WHERE id=? AND status='taken'", (experiment, task)
+            ).rowcount != 1:
+                raise ValueError("Only a taken task can be linked to an experiment")
 
     @contextmanager
     def lease(self, experiment: str) -> Iterator[None]:
