@@ -36,6 +36,36 @@ def test_resolve_agent_path_maps_agent_root_absolute_to_working_dir(tmp_path: Pa
     assert resolved == str((tmp_path / "docs" / "guide.md").resolve())
 
 
+def test_container_shell_paths_resolve_to_the_workspace(tmp_path: Path):
+    # The shell of a run with a container works in /workspace: `pwd` shows it,
+    # and the agent passes such paths on to the file tools.
+    factory = _DummyFactory(str(tmp_path), container_id="container-1")
+
+    assert resolve_agent_path("/workspace", factory) == str(tmp_path.resolve())
+    assert resolve_agent_path("/workspace/", factory) == str(tmp_path.resolve())
+    assert resolve_agent_path("/workspace/grid/README.md", factory) == str(
+        (tmp_path / "grid" / "README.md").resolve()
+    )
+    assert display_agent_path("/workspace", factory) == "."
+    assert display_agent_path("/workspace/grid", factory) == "grid"
+
+
+def test_container_workdir_prefix_is_matched_by_whole_name(tmp_path: Path):
+    factory = _DummyFactory(str(tmp_path), container_id="container-1")
+
+    assert resolve_agent_path("/workspace-evil/x", factory) == str(
+        (tmp_path / "workspace-evil" / "x").resolve()
+    )
+    with pytest.raises(ValueError, match="escapes working directory"):
+        resolve_agent_path("/workspace/../../etc/passwd", factory)
+
+
+def test_without_a_container_workspace_is_an_ordinary_name(tmp_path: Path):
+    factory = _DummyFactory(str(tmp_path))
+
+    assert resolve_agent_path("/workspace/a", factory) == str((tmp_path / "workspace" / "a").resolve())
+
+
 def test_resolve_agent_path_blocks_escape_above_working_dir(tmp_path: Path):
     factory = _DummyFactory(str(tmp_path))
 
