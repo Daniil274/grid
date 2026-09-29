@@ -170,7 +170,7 @@ def test_policy_decision_is_attached_to_action_without_extra_row():
     assert step["title"] == "file_delete"
     assert step["tone"] == "warning"
     assert step["policy"]["decision"] == "review"
-    assert step["policy"]["label"] == "Policy: review"
+    assert step["policy"]["label"] == "Policy: review · action"
     assert "file_delete" in step["policy"]["title"]
 
 

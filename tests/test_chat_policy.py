@@ -191,7 +191,8 @@ async def test_chain_disabled_requests_only_one_verdict(root):
 
 
 @pytest.mark.parametrize(
-    "action,chain", [("allow", "allow"), ("allow", "deny"), ("review", "allow")]
+    "action,chain",
+    [("allow", "allow"), ("allow", "deny"), ("deny", "deny"), ("review", "allow")],
 )
 async def test_payment_failure_uses_chat_and_enforces_its_verdict(root, action, chain):
     hosts = []
@@ -222,7 +223,8 @@ async def test_payment_failure_uses_chat_and_enforces_its_verdict(root, action, 
         invoke.assert_awaited_once()
     else:
         assert json.loads(result)["rule"] == (
-            "policy_deny" if chain == "deny" else "policy_review"
+            # A chain-only deny is held for the host, like a review.
+            "policy_deny" if action == "deny" else "policy_review"
         )
         invoke.assert_not_awaited()
 

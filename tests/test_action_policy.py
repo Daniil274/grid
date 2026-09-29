@@ -213,9 +213,55 @@ async def test_denied_call_is_blocked_and_reported_to_the_agent():
     ]
 
 
-async def test_chain_verdict_alone_blocks_the_call():
+async def test_chain_verdict_alone_holds_the_call_for_the_host():
+    # The call itself passed; a deny of the run's history cannot be undone by
+    # the agent, so it is held for review instead of refusing the turn.
     gate, _, state, ctx = setup_gate(("allow", "deny"))
-    assert json.loads(await call(gate, ctx))["rule"] == "policy_deny"
+    blocked = json.loads(await call(gate, ctx))
+    assert blocked["rule"] == "policy_review"
+    assert blocked["approval_id"]
+    assert blocked["verdicts"] == {"action": "allow", "chain": "deny"}
+    assert blocked["objected"] == ["chain"]
+    assert "earlier actions" in blocked["next_step"]
+    assert gate.pending_reviews()[0]["objected"] == ["chain"]
+    # Unlike an ordinary review it spends the denial budget: a run that keeps
+    # drifting still stops.
+    assert state.denials == 1
+
+    assert gate.resolve_review(blocked["approval_id"], approve=True) is True
+    assert (await call(gate, ctx)).startswith("ran:")
+
+
+async def test_a_run_held_for_its_chain_again_and_again_stops():
+    gate, _, state, ctx = setup_gate(("allow", "deny"), max_denials_per_run=2)
+    await call(gate, ctx)
+    assert json.loads(await call(gate, ctx))["run_stopped"] is True
+    assert json.loads(await call(gate, ctx))["rule"] == "run_stopped"
+
+
+async def test_an_ordinary_review_spends_no_denial_budget():
+    gate, _, state, ctx = setup_gate(("review", "allow"))
+    blocked = json.loads(await call(gate, ctx))
+    assert blocked["rule"] == "policy_review"
+    assert state.denials == 0
+    assert gate.pending_reviews()[0]["objected"] == ["action"]
+
+
+@pytest.mark.parametrize("action", ["deny", "review"])
+async def test_chain_deny_stays_a_deny_when_the_call_itself_is_in_doubt(action):
+    gate, _, state, ctx = setup_gate((action, "deny"))
+    blocked = json.loads(await call(gate, ctx))
+    assert blocked["rule"] == "policy_deny"
+    assert "approval_id" not in blocked
+    assert blocked["objected"] == ["action", "chain"]
+    assert state.denials == 1
+
+
+async def test_blocked_result_names_the_question_that_objected():
+    gate, _, _, ctx = setup_gate(("deny", "allow"))
+    blocked = json.loads(await call(gate, ctx))
+    assert blocked["verdicts"] == {"action": "deny", "chain": "allow"}
+    assert blocked["objected"] == ["action"]
 
 
 async def test_repeated_denials_stop_the_run():

@@ -155,10 +155,16 @@ def is_policy_block(result: Any) -> bool:
 class PolicyDenied(Exception):
     """An operator rule blocked a call."""
 
-    def __init__(self, rule: str, approval_id: str | None = None):
+    def __init__(
+        self,
+        rule: str,
+        approval_id: str | None = None,
+        verdicts: dict | None = None,
+    ):
         super().__init__(rule)
         self.rule = rule
         self.approval_id = approval_id
+        self.verdicts = verdicts
 
 
 @dataclass(frozen=True)
@@ -170,6 +176,9 @@ class PendingApproval:
     kind: str
     created_at: float
     expires_at: float
+    # The questions that did not allow the call: "chain" alone tells the host
+    # that the call itself passed and the run's history is what is in question.
+    objected: tuple[str, ...] = ()
 
 
 class ActionValidator:
@@ -295,6 +304,11 @@ class ChatActionValidator(ActionValidator):
         return answer
 
 
+def _objected(verdicts: dict | None) -> tuple[str, ...]:
+    """The questions whose verdict was not ``allow``, in question order."""
+    return tuple(name for name, value in (verdicts or {}).items() if value != "allow")
+
+
 def merge(verdicts: dict) -> str:
     """The strictest verdict wins; a call executes only when nothing objects."""
     values = set(verdicts.values())
@@ -339,7 +353,12 @@ class ActionGate:
         }
 
     def _request_review(
-        self, run: ActionRunState, tool: str, kind: str, digest: str
+        self,
+        run: ActionRunState,
+        tool: str,
+        kind: str,
+        digest: str,
+        verdicts: dict | None = None,
     ) -> str:
         now = time.time()
         with self._review_lock:
@@ -359,6 +378,7 @@ class ActionGate:
                 kind=kind,
                 created_at=now,
                 expires_at=now + self.config.review_ttl_seconds,
+                objected=_objected(verdicts),
             )
             return approval_id
 
@@ -376,6 +396,7 @@ class ActionGate:
                     "kind": item.kind,
                     "created_at": item.created_at,
                     "expires_at": item.expires_at,
+                    "objected": list(item.objected),
                 }
                 for item in sorted(
                     self._reviews.values(), key=lambda review: review.created_at
@@ -559,10 +580,12 @@ class ActionGate:
         # Never log arguments, tool output, credentials or provider error bodies.
         logger.info("ACTION_POLICY %s", json.dumps(event, ensure_ascii=True))
 
-    def _deny(self, run, tool, kind, digest, rule, approval_id=None):
+    def _deny(self, run, tool, kind, digest, rule, approval_id=None, verdicts=None):
         # Neither pending review nor an infrastructure outage is a violation.
-        # Attempt budgets still bound repeated calls.
-        if rule not in ("policy_review", "policy_unavailable"):
+        # Attempt budgets still bound repeated calls. A review held only for
+        # the chain's deny still counts: a run that keeps drifting must stop.
+        held_for_chain = rule == "policy_review" and (verdicts or {}).get("chain") == "deny"
+        if rule not in ("policy_review", "policy_unavailable") or held_for_chain:
             run.denials += 1
             if run.denials >= self.config.max_denials_per_run:
                 run.stopped = True
@@ -585,6 +608,21 @@ class ActionGate:
         }
         if approval_id is not None:
             payload["approval_id"] = approval_id
+        if verdicts:
+            # Which question objected: without it the agent cannot tell a call
+            # that is out of scope from a run whose history is in question, and
+            # keeps issuing calls that are blocked for the same reason.
+            payload["verdicts"] = dict(verdicts)
+            payload["objected"] = list(_objected(verdicts))
+            if verdicts.get("action") == "allow" and verdicts.get("chain") != "allow":
+                payload["next_step"] = (
+                    "This call itself was judged within the task; the policy "
+                    "questions the run's earlier actions, so other calls in this "
+                    "run may be held the same way until the host reviews them. "
+                    "Do not probe or work around the policy. Finish what you "
+                    "can without tool calls and name the blocked steps in your "
+                    "final report."
+                )
         if rule == "policy_unavailable":
             payload["infrastructure_error"] = True
             payload["next_step"] = (
@@ -756,6 +794,18 @@ class ActionGate:
             failures = judgment.failures
             verdicts = judgment.verdicts or {"action": "unavailable"}
             verdict = merge(verdicts) if judgment.verdicts else "unavailable"
+            if verdict == "deny" and verdicts.get("chain") == "deny" and all(
+                value == "allow" for name, value in verdicts.items() if name != "chain"
+            ):
+                # The call itself passed; only the trajectory is in question.
+                # A call the action question doubts too stays denied: there the
+                # history is what makes a doubtful call a violation.
+                # Past calls cannot be undone, so a hard deny here would refuse
+                # every later call of the turn - the chain is shared with
+                # sub-agents - on the strength of one uncertain judgment of
+                # history. The host decides instead: still blocked in enforce,
+                # never allowed without approval.
+                verdict = "review"
             decision_meta = {
                 "source": "validator",
                 "latency_ms": round((time.monotonic() - validator_started) * 1000, 3),
@@ -794,11 +844,11 @@ class ActionGate:
                     raise PolicyDenied("run_stopped")
                 if verdict != "allow" and self.config.mode == "enforce":
                     approval_id = (
-                        self._request_review(run, tool_name, kind, digest)
+                        self._request_review(run, tool_name, kind, digest, verdicts)
                         if verdict == "review"
                         else None
                     )
-                    raise PolicyDenied("policy_" + verdict, approval_id)
+                    raise PolicyDenied("policy_" + verdict, approval_id, verdicts)
                 if (
                     verdict not in ("allow", "unavailable")
                     and self.config.mode == "shadow"
@@ -816,6 +866,7 @@ class ActionGate:
                     digest,
                     exc.rule,
                     approval_id=exc.approval_id,
+                    verdicts=exc.verdicts,
                 )
         except (ValueError, TypeError, KeyError, OSError):
             async with run.lock:

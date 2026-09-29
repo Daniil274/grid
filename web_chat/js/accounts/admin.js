@@ -84,7 +84,7 @@ export class AccountsDrawer {
         ? h(
             "table.adminTable",
             {},
-            h("thead", {}, h("tr", {}, ["User", "Tool", "Asked", "Expires", ""].map((title) => h("th", { text: title })))),
+            h("thead", {}, h("tr", {}, ["User", "Tool", "Held by", "Asked", "Expires", ""].map((title) => h("th", { text: title })))),
             h(
               "tbody",
               {},
@@ -94,6 +94,8 @@ export class AccountsDrawer {
                   {},
                   h("td", { text: review.username }),
                   h("td", {}, h("code", { text: review.tool })),
+                  // "chain" alone: the call itself passed, the run's earlier actions did not.
+                  h("td", { text: (review.objected || []).join(", ") || "—" }),
                   h("td", { text: when(review.created_at) }),
                   h("td", { text: when(review.expires_at) }),
                   h(

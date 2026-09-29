@@ -127,7 +127,12 @@ Two questions go to the model in one request:
   assembled a violation step by step? Disable with `check_chain: false`.
 
 The strictest verdict wins: a call runs only when both configured questions
-return `allow`. For Decisions responses, the runtime validates the probability payload for
+return `allow`. One exception narrows a deny to `review`: when the call itself
+passes (`action` is `allow`) and only `chain` denies. Past calls
+cannot be undone and the chain is shared with sub-agents, so a hard deny there
+would refuse every later call of the turn on one judgment of history; the host
+decides instead. The call is still blocked in `enforce` and never runs without
+approval. For Decisions responses, the runtime validates the probability payload for
 consistency but does not replace the declared choice with a numeric threshold;
 uncertainty must be expressed as `review` by the policy prompt itself.
 
@@ -168,7 +173,11 @@ on the next run.
 
 ## Result of a block
 
-The agent receives a JSON `blocked` result naming the rule. It is told to go on
+The agent receives a JSON `blocked` result naming the rule; a validator
+verdict also carries `verdicts` and `objected`, the questions that did not
+allow the call, so the agent can tell an out-of-scope call from a run whose
+history is in question. The webchat badge names them too (`Policy: review ·
+chain`). It is told to go on
 with the rest of the task and report the blocked step, not to probe the policy:
 probing reads as drift to the chain check and would block the rest of the run.
 Denials are counted; reaching `max_denials_per_run` stops the run. Neither pending

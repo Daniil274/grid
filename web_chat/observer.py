@@ -198,6 +198,14 @@ class WebStreamObserver:
             "deny": "Policy: deny",
             "unavailable": "Policy unavailable",
         }[decision]
+        objected = [
+            name
+            for name in ("action", "chain")
+            if event.get(name) in {"deny", "review", "unavailable"}
+        ]
+        if decision in {"review", "deny"} and objected:
+            # "chain" means the call itself passed and the run's history did not.
+            label += " · " + ", ".join(objected)
         if shadow and decision != "allow":
             label += " · shadow"
         badge = {
