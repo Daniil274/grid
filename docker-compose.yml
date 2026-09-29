@@ -69,6 +69,10 @@ services:
     restart: unless-stopped
     environment:
       SEARXNG_BASE_URL: http://searxng:8080/
+    # For a Grid server running on this host (SEARXNG_URL=http://localhost:8080);
+    # published on 127.0.0.1 only, like the chat.
+    ports:
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./searxng/core-config:/etc/searxng:ro
       - searxng-data:/var/cache/searxng

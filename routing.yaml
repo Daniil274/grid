@@ -7,6 +7,12 @@
 #
 # The administrator system (examples/system-admin) is deliberately absent: it
 # changes Grid and runs only in the workshop container, never against this copy.
+#
+# The desktop system (examples/windows-computer-use) is absent too: it drives the
+# GUI of the machine Grid runs on, which on a shared server is the server itself,
+# and its tools work only on Windows. The video system (examples/video-editor)
+# is absent as well: its tools run ffmpeg on the host, so a server with accounts
+# withholds them (utils/tool_isolation.py) and its agents would have none.
 
 # Policy gate. Enabled here, it governs every system the router picks, using the
 # router's own provider credentials for the validator. See ACTION_POLICY.md.
@@ -87,19 +93,6 @@ routing:
         subsystem, a big feature or a migration across many files, where the work
         is split into tracked tasks for researcher, executor and verifier agents.
         Not for quick fixes or single-file changes.
-    video:
-      config: examples/video-editor/config.yaml
-      description: >-
-        Working with video files and footage (mp4, mov, clips): inspect footage,
-        detect scenes, annotate, cut and join clips, add subtitles, build cutlists
-        and edit lists, render previews and final versions, and quality-check
-        rendered output.
-    desktop:
-      config: examples/windows-computer-use/config.yaml
-      description: >-
-        Controlling this Windows computer through its GUI like a person: open
-        and use applications, click, type, press hotkeys, switch windows, fill
-        forms in programs. Pick when the task must be done on screen.
 
 # Voice in the web chat. Routing across systems, the chat reads this section
 # from the catalog, not from a system's config. decision_model tells a finished
