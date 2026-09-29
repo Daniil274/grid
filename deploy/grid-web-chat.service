@@ -22,7 +22,7 @@ SupplementaryGroups=docker
 WorkingDirectory=/opt/grid
 EnvironmentFile=/opt/grid/.env
 ExecStart=/opt/grid/.venv/bin/grid-web-chat --accounts \
-    --routing routing.yaml \
+    --routing deploy/routing.yaml \
     --data-dir /var/lib/grid-web \
     --host 127.0.0.1 --port 8000 \
     --secure-cookies
