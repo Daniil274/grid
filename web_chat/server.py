@@ -23,6 +23,7 @@ import asyncio
 import hmac
 import logging
 from contextlib import asynccontextmanager, suppress
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
@@ -81,6 +82,14 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "same-origin",
 }
+
+
+@lru_cache(maxsize=1)
+def config_schema() -> dict[str, Any]:
+    """The JSON schema of a config file (schemas.GridConfig)."""
+    from schemas import GridConfig
+
+    return GridConfig.model_json_schema()
 
 
 class WebChatServer:
@@ -266,15 +275,25 @@ class WebChatServer:
             return {}
         return {account.user.id: account.user.username for account in self.auth.accounts.accounts()}
 
-    def _settings_payload(self, space: UserSpace) -> dict[str, Any]:
-        raw = self.deployment.config_dict()
+    def _settings_payload(self, space: UserSpace, target: Optional[str] = None) -> dict[str, Any]:
+        """One config file as the configuration page edits it, and the others it may open."""
+        file = self.deployment.config_file(target)
+        raw = self.deployment.config_dict(file.key)
         cfg = space.config.config
         return {
+            "target": file.key,
+            "kind": file.kind,
+            "files": [
+                {"key": item.key, "name": item.name, "kind": item.kind, "path": str(item.path)}
+                for item in self.deployment.config_files()
+            ],
             "config": raw,
-            "raw_yaml": self.deployment.config_yaml(),
+            "raw_yaml": self.deployment.config_yaml(file.key),
+            # The forms are drawn from the schema, so every setting it knows is editable.
+            "schema": config_schema(),
             "meta": {
                 "default_agent": cfg.settings.default_agent,
-                "config_path": str(self.deployment.config_path),
+                "config_path": str(file.path),
                 "workspace_path": str(space.workspace_path),
                 "persist_path": str(space.conversations_path),
                 "isolation_enabled": bool(getattr(cfg.isolation, "enabled", False)),
@@ -287,13 +306,13 @@ class WebChatServer:
             },
         }
 
-    async def _configs_changed(self, user: User) -> dict[str, Any]:
+    async def _configs_changed(self, user: User, target: Optional[str] = None) -> dict[str, Any]:
         """After a config edit: retire what is free, answer from a fresh space."""
         self.spaces.invalidate()
         await self.spaces.sweep()
         async with self.spaces.use(user.id) as space:
             space.schedule_warmup()
-            return self._settings_payload(space)
+            return self._settings_payload(space, target)
 
     def _register_pages(self) -> None:
         """The chat page, the admins' review page, and with accounts the sign-in
@@ -565,8 +584,11 @@ class WebChatServer:
 
         # The system configs are shared by every user: only admins see or edit them.
         @api.get("/api/settings", dependencies=[Depends(admin)])
-        async def get_settings(space: UserSpace = Depends(current_space)) -> JSONResponse:
-            return JSONResponse(self._settings_payload(space))
+        async def get_settings(target: Optional[str] = None, space: UserSpace = Depends(current_space)) -> JSONResponse:
+            try:
+                return JSONResponse(self._settings_payload(space, target))
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
 
         # Saving takes no lease on the user's space: the edit retires spaces,
         # and one held by the request itself could not be rebuilt.
@@ -575,20 +597,20 @@ class WebChatServer:
             body: SettingsStructuredUpdateRequest, user: User = Depends(admin)
         ) -> JSONResponse:
             try:
-                self.deployment.save_structured_config(body.config)
+                self.deployment.save_structured_config(body.config, body.target)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return JSONResponse(await self._configs_changed(user))
+            return JSONResponse(await self._configs_changed(user, body.target))
 
         @api.put("/api/settings/yaml")
         async def save_yaml_settings(
             body: SettingsYamlUpdateRequest, user: User = Depends(admin)
         ) -> JSONResponse:
             try:
-                self.deployment.save_yaml_config(body.yaml_content)
+                self.deployment.save_yaml_config(body.yaml_content, body.target)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return JSONResponse(await self._configs_changed(user))
+            return JSONResponse(await self._configs_changed(user, body.target))
 
         @api.websocket("/api/chat/ws/{context_id}")
         async def chat_ws(websocket: WebSocket, context_id: str, space: UserSpace = Depends(current_space)) -> None:

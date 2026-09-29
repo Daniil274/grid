@@ -13,11 +13,15 @@ class PrepareAgentRequest(BaseModel):
 
 
 class SettingsStructuredUpdateRequest(BaseModel):
+    """``target`` names the file (web_chat.deployment.config_files); none is the default system's."""
+
     config: Dict[str, Any]
+    target: Optional[str] = None
 
 
 class SettingsYamlUpdateRequest(BaseModel):
     yaml_content: str
+    target: Optional[str] = None
 
 
 class ConversationRenameRequest(BaseModel):

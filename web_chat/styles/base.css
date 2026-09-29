@@ -13,7 +13,7 @@ body {
 }
 
 body {
-  background: var(--bg);
+  background: radial-gradient(1100px 520px at 62% -12%, var(--accent-soft), transparent 70%) no-repeat, var(--bg);
   color: var(--text);
   font-family: var(--font);
   font-size: 15px;

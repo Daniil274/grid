@@ -308,3 +308,34 @@ test("only supported image files within the size limit are attached", () => {
   assert.match(rejectReason({ name: "big.jpg", type: "image/jpeg", size: 20 * 1024 * 1024 }), /15 MB/);
   assert.equal(MAX_IMAGES, 8);
 });
+
+import { SchemaKit, child, humanize, rootSlot } from "../web_chat/js/settings/schema-form.js";
+
+test("config forms create a nested section only when a field in it is set", () => {
+  const config = { settings: { max_turns: 5 } };
+  const slot = child(child(rootSlot(() => config), "isolation"), "memory");
+
+  assert.equal(slot.get(), undefined);
+  slot.set(undefined);
+  assert.deepEqual(config, { settings: { max_turns: 5 } });
+
+  slot.set("1g");
+  assert.deepEqual(config.isolation, { memory: "1g" });
+  slot.set(undefined);
+  assert.deepEqual(config.isolation, {});
+});
+
+test("config forms follow refs and unwrap optional fields", () => {
+  const kit = new SchemaKit({
+    $defs: { Limits: { properties: { cpus: { type: "number" } } } },
+  });
+
+  const limits = kit.resolve({ anyOf: [{ $ref: "#/$defs/Limits" }, { type: "null" }], description: "Caps" });
+
+  assert.equal(limits.nullable, true);
+  assert.equal(limits.description, "Caps");
+  assert.deepEqual(Object.keys(limits.properties), ["cpus"]);
+  assert.equal(kit.resolve({ anyOf: [{ type: "string" }, { type: "array" }] }).kind, "json");
+  assert.equal(humanize("mcp_enabled"), "MCP enabled");
+  assert.equal(humanize("use_responses_api"), "Use responses API");
+});

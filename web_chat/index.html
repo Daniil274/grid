@@ -91,7 +91,8 @@
       <section class="chatScroll" id="chat-scroll">
         <div class="welcome" id="welcome">
           <h1>What should Grid work on?</h1>
-          <p>The same runtime as <code>agent_chat</code> - with context, tools, and every reasoning step on show.</p>
+          <p>Leave it on <strong>Auto</strong> and the router picks who answers each message, or choose a system and an agent yourself.</p>
+          <div class="systemCards" id="welcome-systems"></div>
           <div class="welcome__chips">
             <button class="promptChip" type="button" data-prompt="Analyze the current project and suggest the next steps.">
               Explore the project
@@ -256,83 +257,20 @@
     </div>
   </div>
 
-  <div class="drawer" id="settings" role="dialog" aria-label="System configuration">
+  <div class="drawer" id="settings" role="dialog" aria-label="Configuration">
     <div class="drawer__backdrop" id="settings-backdrop"></div>
     <div class="drawer__panel">
       <header class="drawer__head">
         <div>
-          <h2>System configuration</h2>
-          <p>Agents, tools, prompts and runtime settings - no manual YAML required.</p>
+          <h2 id="settings-title">Configuration</h2>
+          <p class="drawer__path" id="settings-subtitle"></p>
         </div>
         <button class="iconBtn" id="settings-close" type="button" aria-label="Close configuration" data-icon="close"></button>
       </header>
 
-      <div class="tabs" id="settings-tabs" role="tablist">
-        <button class="tab is-active" data-tab="system" type="button">System</button>
-        <button class="tab" data-tab="agents" type="button">Agents</button>
-        <button class="tab" data-tab="tools" type="button">Tools</button>
-        <button class="tab" data-tab="prompts" type="button">Prompts</button>
-        <button class="tab" data-tab="yaml" type="button">YAML</button>
-      </div>
-
-      <div class="drawer__body">
-        <section class="pane" id="pane-system">
-          <div class="card">
-            <h3>General</h3>
-            <div class="formGrid" id="system-form"></div>
-          </div>
-          <div class="card">
-            <h3>Runtime</h3>
-            <div class="factGrid" id="runtime-facts"></div>
-          </div>
-        </section>
-
-        <section class="pane" id="pane-agents" hidden>
-          <div class="master">
-            <div class="master__list">
-              <div class="master__head">
-                <h3>Agents</h3>
-                <button class="btn btn--ghost" id="add-agent" type="button" data-icon="plus">Add</button>
-              </div>
-              <div class="recordList" id="agents-list"></div>
-            </div>
-            <div class="master__detail" id="agent-editor"></div>
-          </div>
-        </section>
-
-        <section class="pane" id="pane-tools" hidden>
-          <div class="master">
-            <div class="master__list">
-              <div class="master__head">
-                <h3>Tools</h3>
-                <button class="btn btn--ghost" id="add-tool" type="button" data-icon="plus">Add</button>
-              </div>
-              <div class="recordList" id="tools-list"></div>
-            </div>
-            <div class="master__detail" id="tool-editor"></div>
-          </div>
-        </section>
-
-        <section class="pane" id="pane-prompts" hidden>
-          <div class="master">
-            <div class="master__list">
-              <div class="master__head">
-                <h3>Prompts</h3>
-                <button class="btn btn--ghost" id="add-prompt" type="button" data-icon="plus">Add</button>
-              </div>
-              <div class="recordList" id="prompts-list"></div>
-            </div>
-            <div class="master__detail" id="prompt-editor"></div>
-          </div>
-        </section>
-
-        <section class="pane" id="pane-yaml" hidden>
-          <div class="card card--flush">
-            <h3>Raw YAML</h3>
-            <textarea id="yaml-editor" class="yamlEditor" spellcheck="false"></textarea>
-          </div>
-        </section>
-      </div>
+      <nav class="fileTabs" id="settings-files" aria-label="Config files"></nav>
+      <div class="tabs" id="settings-tabs" role="tablist"></div>
+      <div class="drawer__body" id="settings-body"></div>
 
       <footer class="drawer__foot">
         <span class="drawer__status" id="settings-status"></span>

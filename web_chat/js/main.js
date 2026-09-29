@@ -25,6 +25,7 @@ import { createThemeToggle } from "./ui/theme.js";
 import { copyText, toast } from "./ui/toast.js";
 import { createTranscript } from "./ui/transcript.js";
 import { openReportDialog } from "./ui/report-dialog.js";
+import { createWelcomeSystems } from "./ui/welcome.js";
 
 const store = createStore({
   systems: [],
@@ -207,6 +208,7 @@ async function boot() {
     store,
     onChange: selectRoute,
   });
+  createWelcomeSystems({ container: $("#welcome-systems"), store, onChange: selectRoute });
 
   createThemeToggle($("#theme-toggle"));
 
@@ -218,26 +220,11 @@ async function boot() {
       saveButton: $("#settings-save"),
       reloadButton: $("#settings-reload"),
       status: $("#settings-status"),
+      title: $("#settings-title"),
+      subtitle: $("#settings-subtitle"),
+      files: $("#settings-files"),
       tabs: $("#settings-tabs"),
-      panes: {
-        system: $("#pane-system"),
-        agents: $("#pane-agents"),
-        tools: $("#pane-tools"),
-        prompts: $("#pane-prompts"),
-        yaml: $("#pane-yaml"),
-      },
-      systemForm: $("#system-form"),
-      runtimeFacts: $("#runtime-facts"),
-      agentsList: $("#agents-list"),
-      agentEditor: $("#agent-editor"),
-      addAgent: $("#add-agent"),
-      toolsList: $("#tools-list"),
-      toolEditor: $("#tool-editor"),
-      addTool: $("#add-tool"),
-      promptsList: $("#prompts-list"),
-      promptEditor: $("#prompt-editor"),
-      addPrompt: $("#add-prompt"),
-      yaml: $("#yaml-editor"),
+      body: $("#settings-body"),
     },
     { onSaved: reloadRuntime },
   );

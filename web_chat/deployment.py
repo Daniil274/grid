@@ -14,9 +14,11 @@ can still route between its own agents.
 
 from __future__ import annotations
 
+import io
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -28,6 +30,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_CONFIG = "config.yaml"
 DEFAULT_ROUTING = "routing.yaml"
+#: The target that names the routing catalog among the editable config files.
+CATALOG_TARGET = "__catalog__"
+
+
+@dataclass(frozen=True)
+class ConfigFile:
+    """One file the configuration page edits: the catalog or a system's config."""
+
+    key: str
+    name: str
+    kind: str  # "catalog" or "system"
+    path: Path
 
 
 def resolve_path(path_value: str) -> Path:
@@ -156,27 +170,114 @@ class Deployment:
         voice = self.voice_config_dict().get("voice") or {}
         return isinstance(voice, dict) and voice.get("enabled", False) is True
 
-    # -- the base system's config file ---------------------------------------
-    def config_dict(self) -> Dict[str, Any]:
-        return yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
+    # -- the config files an admin edits ----------------------------------------
+    def config_files(self) -> List[ConfigFile]:
+        """Every file the configuration page edits: the catalog, then each system.
 
-    def config_yaml(self) -> str:
-        return self.config_path.read_text(encoding="utf-8")
+        A system whose path the catalog names twice is listed once, under its
+        first key.
+        """
+        files: List[ConfigFile] = []
+        if self.catalog is not None and self.routing_path is not None:
+            files.append(ConfigFile(CATALOG_TARGET, "Routing", "catalog", self.routing_path))
+        seen: set[Path] = set()
+        for key, path in self._system_paths().items():
+            if path not in seen:
+                seen.add(path)
+                files.append(ConfigFile(key, key.replace("_", " ").replace("-", " ").title(), "system", path))
+        return files
 
-    def save_structured_config(self, payload: Dict[str, Any]) -> None:
-        """Validate and write the base config; the caller rebuilds the spaces."""
+    def _system_paths(self) -> Dict[str, Path]:
+        """The config file of each system, by key; one system without a catalog."""
+        systems = self.catalog.config.routing.systems if self.catalog is not None else {}
+        if not systems:
+            return {self.config_path.parent.name or "system": self.config_path}
+        base = self.catalog.config_path.resolve().parent
+        paths: Dict[str, Path] = {}
+        for key, system in systems.items():
+            path = Path(system.config)
+            paths[key] = (path if path.is_absolute() else base / path).resolve()
+        return paths
+
+    def config_file(self, target: Optional[str] = None) -> ConfigFile:
+        """The file *target* names; None is the default system's, the base config."""
+        files = self.config_files()
+        if target is None:
+            base = self.config_path.resolve()
+            return next((file for file in files if file.path.resolve() == base), files[0])
+        for file in files:
+            if file.key == target:
+                return file
+        raise KeyError(f"No config file '{target}'")
+
+    def config_dict(self, target: Optional[str] = None) -> Dict[str, Any]:
+        return yaml.safe_load(self.config_file(target).path.read_text(encoding="utf-8")) or {}
+
+    def config_yaml(self, target: Optional[str] = None) -> str:
+        return self.config_file(target).path.read_text(encoding="utf-8")
+
+    def save_structured_config(self, payload: Dict[str, Any], target: Optional[str] = None) -> None:
+        """Validate and write a config; the caller rebuilds the spaces.
+
+        The edit is merged into the file as it stands, so its comments, key
+        order and the layout of what did not change survive.
+        """
         from schemas import GridConfig
 
         GridConfig(**payload)
-        self.config_path.write_text(
-            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False, width=120), encoding="utf-8"
-        )
+        path = self.config_file(target).path
+        path.write_text(merge_yaml(path.read_text(encoding="utf-8"), payload), encoding="utf-8")
         self.load()
 
-    def save_yaml_config(self, yaml_content: str) -> None:
-        """Validate and write the base config as given; the caller rebuilds the spaces."""
+    def save_yaml_config(self, yaml_content: str, target: Optional[str] = None) -> None:
+        """Validate and write a config as given; the caller rebuilds the spaces."""
         from schemas import GridConfig
 
         GridConfig(**(yaml.safe_load(yaml_content) or {}))
-        self.config_path.write_text(yaml_content, encoding="utf-8")
+        self.config_file(target).path.write_text(yaml_content, encoding="utf-8")
         self.load()
+
+
+def _round_trip() -> Any:
+    from ruamel.yaml import YAML
+
+    loader = YAML()
+    loader.preserve_quotes = True
+    loader.width = 4096
+    loader.indent(mapping=2, sequence=4, offset=2)
+    return loader
+
+
+def _merge(node: Any, value: Any) -> Any:
+    """*value* written over *node*, keeping *node*'s objects where nothing changed.
+
+    Kept objects carry their comments and scalar styles (a folded description
+    stays folded); only what the edit changed is new.
+    """
+    if isinstance(node, dict) and isinstance(value, dict):
+        for key in [key for key in node if key not in value]:
+            del node[key]
+        for key, item in value.items():
+            node[key] = _merge(node[key], item) if key in node else item
+        return node
+    if isinstance(node, list) and isinstance(value, list) and len(node) == len(value):
+        for index, item in enumerate(value):
+            node[index] = _merge(node[index], item)
+        return node
+    # True == 1 in Python, but not in the file.
+    if node == value and isinstance(node, bool) == isinstance(value, bool):
+        return node
+    return value
+
+
+def merge_yaml(text: str, payload: Dict[str, Any]) -> str:
+    """The YAML *text* changed to hold *payload*, its comments kept."""
+    loader = _round_trip()
+    document = loader.load(text)
+    if not isinstance(document, dict):
+        document = payload
+    else:
+        _merge(document, payload)
+    buffer = io.StringIO()
+    loader.dump(document, buffer)
+    return buffer.getvalue()

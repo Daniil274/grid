@@ -9,6 +9,10 @@
  * An agent can only be pinned inside a pinned system: with the system on Auto
  * there is no list to pin from, so choosing Auto for the system also releases
  * the agent.
+ *
+ * Picking a system leaves the popover open, its agents now listed beside it:
+ * the next choice is usually one of them. Picking an agent, or Auto for the
+ * system, is a complete choice and closes it.
  */
 
 import { h, icon, replace } from "../lib/dom.js";
@@ -25,6 +29,11 @@ const agentMeta = (agent) =>
   ]
     .filter(Boolean)
     .join(" · ");
+
+const systemMeta = (system) => {
+  const count = system.agents?.length ?? 0;
+  return `${count} agent${count === 1 ? "" : "s"}`;
+};
 
 /** Tools that will fail and why, as the server's health check reported them. */
 function issuesNote(issues) {
@@ -45,6 +54,8 @@ function option({ title, description, meta, issues, active, disabled, onPick }) 
       type: "button",
       class: active ? "is-active" : "",
       disabled,
+      // The description is clamped to a few lines; the whole of it is here.
+      title: description || null,
       on: disabled ? {} : { click: onPick },
     },
     h(
@@ -97,11 +108,16 @@ export function createRoutePicker({ button, nameNode, metaNode, popover, systemL
         option({
           title: system.name,
           description: system.error || system.description,
-          meta: system.error ? "unavailable" : system.config_path,
+          meta: system.error ? "unavailable" : systemMeta(system),
           issues: system.issues,
           active: state.systemKey === system.key,
           disabled: Boolean(system.error),
-          onPick: () => pick({ systemKey: system.key, agentKey: AUTO }),
+          // Keep the pinned agent when the same system is picked again.
+          onPick: () =>
+            pick(
+              { systemKey: system.key, agentKey: state.systemKey === system.key ? state.agentKey : AUTO },
+              { keepOpen: true },
+            ),
         }),
       );
     }
@@ -145,8 +161,8 @@ export function createRoutePicker({ button, nameNode, metaNode, popover, systemL
     ]);
   };
 
-  function pick(selection) {
-    close();
+  function pick(selection, { keepOpen = false } = {}) {
+    if (!keepOpen) close();
     onChange(selection);
   }
 

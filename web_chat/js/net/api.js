@@ -47,9 +47,11 @@ export const api = {
     request(`/api/chat/conversations/${encodeURIComponent(id)}/activate`, { method: "POST" }),
   prepareAgent: (systemKey, agentKey) =>
     request("/api/chat/prepare-agent", json("POST", { system_key: systemKey, agent_key: agentKey })),
-  getSettings: () => request("/api/settings"),
-  saveSettings: (config) => request("/api/settings/structured", json("PUT", { config })),
-  saveYaml: (yamlContent) => request("/api/settings/yaml", json("PUT", { yaml_content: yamlContent })),
+  /** A config file: `target` is the catalog's or a system's key (web_chat/deployment.py); none is the default system's. */
+  getSettings: (target) => request(`/api/settings${target ? `?target=${encodeURIComponent(target)}` : ""}`),
+  saveSettings: (config, target) => request("/api/settings/structured", json("PUT", { config, target })),
+  saveYaml: (yamlContent, target) =>
+    request("/api/settings/yaml", json("PUT", { yaml_content: yamlContent, target })),
   /** Report a problem with an answer: freezes it for the admins (web_chat/review). */
   reportAnswer: (contextId, messageId, note) =>
     request(`/api/chat/conversations/${encodeURIComponent(contextId)}/reviews`, json("POST", { message_id: messageId, note })),
