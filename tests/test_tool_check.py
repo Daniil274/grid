@@ -51,7 +51,7 @@ def _write(path, data):
     return path
 
 
-def _config(tmp_path, *, agents, tools, api_key="k", mcp_enabled=False):
+def _config(tmp_path, *, agents, tools, api_key="k", mcp_enabled=False, isolation=False):
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir(exist_ok=True)
     (tools_dir / "good.py").write_text(GOOD_TOOL, encoding="utf-8")
@@ -68,6 +68,7 @@ def _config(tmp_path, *, agents, tools, api_key="k", mcp_enabled=False):
         "providers": {"p": provider},
         "models": {"m": {"name": "m", "provider": "p"}},
         "tools": tools,
+        "isolation": {"enabled": isolation},
         "agents": {
             key: {"name": key, "model": "m", "description": f"{key} agent", "tools": agent_tools}
             for key, agent_tools in agents.items()
@@ -163,6 +164,30 @@ def test_mcp_tool_of_an_agent_without_mcp_is_reported(tmp_path):
 
     assert any("MCP is off" in problem for problem in problems)
     assert any("needs 'definitely-not-a-real-program' on PATH" in problem for problem in problems)
+
+
+def test_isolated_mcp_server_is_not_looked_up_on_the_host(tmp_path):
+    tools = {"srv": {"type": "mcp", "description": "server", "server_command": ["definitely-not-a-real-program"]}}
+    config = _config(tmp_path, agents={"a": ["srv"]}, tools=tools, mcp_enabled=True, isolation=True)
+
+    problems = {issue.problem for issue in diagnose(config)}
+
+    assert not any("on PATH" in problem and "MCP server" in problem for problem in problems)
+
+
+def test_confined_space_reports_host_tools_as_withheld_and_skips_host_path(tmp_path):
+    tools = {
+        "srv": {"type": "mcp", "description": "server", "server_command": ["definitely-not-a-real-program"]},
+        **_fn("needs_program"),
+    }
+    config = _config(tmp_path, agents={"a": ["srv", "needs_program"]}, tools=tools, mcp_enabled=True)
+
+    issues = diagnose(config, confined=True)
+
+    assert not any("on PATH" in issue.problem for issue in issues)
+    withheld = [issue for issue in issues if issue.tool == "needs_program"]
+    assert [issue.kind for issue in withheld] == [CONFIG]
+    assert "withheld on this server" in withheld[0].problem
 
 
 def test_missing_api_key_means_the_agent_and_its_callers_cannot_run(tmp_path):

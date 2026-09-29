@@ -1,5 +1,9 @@
 isolation:
   enabled: false
+  # A server with accounts runs every user in a container made with these
+  # limits (this is its default system). The host has 2 GB of RAM: a 2g limit
+  # restrained nothing, and one heavy build could take the web chat down.
+  memory: 768m
 
 settings:
   default_agent: "engineer"

@@ -3,7 +3,9 @@
 Runs before any agent does, so the person sees the problem at startup or when a
 message is routed, not as a failed tool call in the middle of a task. It never
 disables anything: every agent keeps all of its tools; a tool whose check fails
-may still work (a service can come up, a key can be exported later).
+may still work (a service can come up, a key can be exported later). The one
+exception is not its doing: a server that isolates its agents withholds tools
+that act on the host, and the check says so.
 
 Two kinds of issues:
 
@@ -25,6 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from core.config.config import Config
 from core.managers.project_tools_loader import get_project_loader, set_project_loader
 from schemas import ToolType
+from utils.tool_isolation import is_confined
 from utils.tool_requirements import unmet
 
 CONFIG = "config"
@@ -66,12 +69,17 @@ class ToolIssue:
         }
 
 
-def diagnose(config: Config, *, requires: Iterable[str] = ()) -> List[ToolIssue]:
-    """Every problem of one system, config and environment alike."""
+def diagnose(config: Config, *, requires: Iterable[str] = (), confined: bool = False) -> List[ToolIssue]:
+    """Every problem of one system, config and environment alike.
+
+    ``confined``: the system runs in a space that isolates its agents whatever
+    the config says (a server with accounts, AgentFactory ``confine_tools``):
+    commands run in the user's container, and tools that act on the host are
+    withheld."""
     previous_loader = get_project_loader()
     set_project_loader(config.project_tools_loader)
     try:
-        return _Diagnosis(config).run(requires)
+        return _Diagnosis(config, confined=confined).run(requires)
     finally:
         set_project_loader(previous_loader)
 
@@ -125,9 +133,11 @@ def summarize(issues: Iterable[ToolIssue]) -> List[str]:
 
 
 class _Diagnosis:
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, confined: bool = False) -> None:
         self.config = config
         self.grid = config.config
+        self.confined = confined
+        self.isolated = confined or bool(getattr(self.grid.isolation, "enabled", False))
         self.loader = config.project_tools_loader
         self.issues: List[ToolIssue] = []
         self._requirements_checked: Dict[str, List[str]] = {}
@@ -140,7 +150,7 @@ class _Diagnosis:
         for program in requires:
             if shutil.which(program) is None:
                 self.add(ENVIRONMENT, f"required program '{program}' is not on PATH")
-        if getattr(self.grid.isolation, "enabled", False) and shutil.which("docker") is None:
+        if self.isolated and shutil.which("docker") is None:
             self.add(
                 ENVIRONMENT,
                 "isolation is enabled, but docker is not on PATH: agents cannot start their container",
@@ -231,11 +241,20 @@ class _Diagnosis:
                      agent=agent_key, tool=tool_name,
                      hint="Set settings.mcp_enabled: true or mcp_enabled: true on the agent")
         command = (tool.server_command or [None])[0]
-        if command and shutil.which(command) is None:
+        # Isolated, the server starts inside the agent's container (docker exec),
+        # so the host's PATH says nothing about it; the image carries its tools.
+        if command and not self.isolated and shutil.which(command) is None:
             self.add(ENVIRONMENT, f"MCP server needs '{command}' on PATH", agent=agent_key, tool=tool_name,
                      hint=(tool.prompt_addition and _install_hint(tool.prompt_addition)) or f"Install {command}")
 
     def _check_function_tool(self, agent_key: str, tool_name: str) -> None:
+        from tools.function_tools import tool_isolation
+
+        if self.confined and not is_confined(tool_isolation(tool_name, self.loader)):
+            self.add(CONFIG, "withheld on this server: it acts on the host, not in the user's container or workspace",
+                     agent=agent_key, tool=tool_name,
+                     hint="Declare TOOL_ISOLATION for it once it keeps to the user's side (utils/tool_isolation.py)")
+            return
         requires = self._requirements(tool_name)
         if self._implemented(tool_name):
             for reason in self._unmet(tool_name, requires):

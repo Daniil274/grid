@@ -170,6 +170,7 @@ class UserSpace:
             build_factory=self._build_factory,
             working_directory=str(self.workspace_path) if self.layout else self.deployment.working_directory,
             customize=self.personal_agents.apply if self.personal_agents is not None else None,
+            confined=self.require_isolation,
         )
         self._prepared.clear()
 
