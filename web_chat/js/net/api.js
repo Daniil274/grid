@@ -31,6 +31,11 @@ const json = (method, body) => ({
 
 export const api = {
   bootstrap: () => request("/api/chat/bootstrap"),
+  uploadFiles: (files) => {
+    const body = new FormData();
+    for (const file of files) body.append("files", file);
+    return request("/api/workspace/uploads", { method: "POST", body });
+  },
   listConversations: () => request("/api/chat/conversations"),
   getConversation: (id) => request(`/api/chat/conversations/${encodeURIComponent(id)}`),
   createConversation: (selection) => request("/api/chat/conversations", json("POST", selection)),

@@ -568,7 +568,7 @@
   font-size: 12px;
 }
 
-/* -- attached images ---------------------------------------------------- */
+/* -- attachments ------------------------------------------------------- */
 .composer.is-dropping {
   border-color: var(--accent);
   background: var(--accent-soft);
@@ -599,6 +599,38 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.attachment--file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(240px, 100%);
+  height: 64px;
+  padding: 10px 30px 10px 12px;
+  color: var(--text-2);
+}
+
+.attachment--file > .icon {
+  flex-shrink: 0;
+}
+
+.attachment__info {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.attachment__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.attachment__size {
+  color: var(--text-3);
+  font-size: 11px;
 }
 
 .attachment__remove {

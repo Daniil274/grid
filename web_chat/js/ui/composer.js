@@ -9,16 +9,18 @@
  * The first Stop lets the agent finish its current step; while it does, the
  * button reads "Stop now" and a second press cancels the turn outright.
  *
- * Images come from the attach button, a paste or a drop onto the composer.
- * Each is shrunk in the browser (lib/images.js) and shown as a thumbnail that
- * can be removed; they go out with the next message, text optional.
+ * Images are shrunk and sent to the model; other files are uploaded into the
+ * workspace and linked in the next message. Both can be picked, pasted or
+ * dropped, previewed and removed before sending, with text optional.
  *
  * Continue appears while the conversation ends with a turn that stopped early
  * and can still be resumed (`store.resumable`).
  */
 
 import { h, icon } from "../lib/dom.js";
-import { MAX_IMAGES, imageToDataUrl, rejectReason } from "../lib/images.js";
+import { ACCEPTED_TYPES, MAX_IMAGES, imageToDataUrl, rejectReason } from "../lib/images.js";
+import { fileSize, withFiles } from "../lib/files.js";
+import { api } from "../net/api.js";
 import { ICONS } from "./icons.js";
 import { toast } from "./toast.js";
 
@@ -39,10 +41,11 @@ export function createComposer({
   onContinue,
 }) {
   const root = input.closest(".composer") ?? input.parentElement;
-  /** @type {{id: number, url: string}[]} attached images, in order */
+  // Pending entries reserve a place immediately, including across overlapping drops.
   let attachments = [];
-  let converting = 0; // images still being read; Send waits for them
   let nextId = 0;
+  const uploads = () => store.get().uploads ?? { enabled: false, max_file_mb: 25, max_files: 10 };
+  const count = (kind) => attachments.filter((item) => item.kind === kind).length;
 
   const resize = () => {
     input.style.height = "auto";
@@ -54,6 +57,7 @@ export function createComposer({
     ?? stopButton.appendChild(document.createTextNode("Stop"));
 
   const hasContent = () => Boolean(input.value.trim()) || attachments.length > 0;
+  const pending = () => attachments.some((item) => item.pending);
 
   const syncButtons = ({ streaming, stopping, resumable }) => {
     // While the agent works a message can still be sent: the chosen delivery
@@ -65,23 +69,30 @@ export function createComposer({
     stopButton.title = stopping
       ? "The agent is finishing its current step - click to stop it right now"
       : "Stop after the current step";
-    sendButton.disabled = converting > 0 || !hasContent();
+    sendButton.disabled = pending() || !hasContent();
     continueButton.hidden = streaming || !resumable;
-    attachButton.disabled = attachments.length + converting >= MAX_IMAGES;
+    attachButton.disabled = count("image") >= MAX_IMAGES && (!uploads().enabled || count("file") >= uploads().max_files);
+    fileInput.setAttribute("accept", uploads().enabled ? "" : ACCEPTED_TYPES.join(","));
+    attachButton.title = uploads().enabled ? "Attach files (or paste / drop them)" : "Attach images (or paste / drop them)";
+    attachButton.setAttribute("aria-label", uploads().enabled ? "Attach files" : "Attach images");
     input.setAttribute("aria-busy", String(streaming));
   };
   const sync = () => syncButtons(store.get());
 
   const renderTray = () => {
     tray.replaceChildren(
-      ...attachments.map(({ id, url }) =>
+      ...attachments.map(({ id, kind, name, url, bytes, pending: loading }) =>
         h(
-          "div.attachment",
-          {},
-          h("img.attachment__img", { src: url, alt: "Attached image" }),
+          kind === "image" && !loading ? "div.attachment" : "div.attachment.attachment--file",
+          { "aria-busy": String(loading) },
+          kind === "image" && !loading
+            ? h("img.attachment__img", { src: url, alt: name })
+            : [icon(ICONS.file, { size: 22 }), h("div.attachment__info", {},
+              h("span.attachment__name", { text: name, title: name }),
+              h("span.attachment__size", { text: loading ? "Preparing…" : fileSize(bytes) }))],
           h(
             "button.attachment__remove",
-            { type: "button", title: "Remove image", "aria-label": "Remove image", on: { click: () => remove(id) } },
+            { type: "button", title: "Remove attachment", "aria-label": `Remove ${name}`, on: { click: () => remove(id) } },
             icon(ICONS.close, { size: 12 }),
           ),
         ),
@@ -96,35 +107,46 @@ export function createComposer({
     renderTray();
   };
 
-  /** Read, shrink and show the images among *files*; others are refused with a reason. */
+  /** Preview supported images; upload other files and keep the server's actual path. */
   const attach = async (files) => {
     for (const file of files) {
-      const reason = rejectReason(file);
+      const kind = ACCEPTED_TYPES.includes(file.type) ? "image" : "file";
+      const limits = uploads();
+      const maximum = kind === "image" ? MAX_IMAGES : limits.max_files;
+      const reason = kind === "image" ? rejectReason(file)
+        : !limits.enabled ? "File uploads are off on this server."
+        : file.size > limits.max_file_mb * 1024 * 1024 ? `${file.name} is larger than ${limits.max_file_mb} MB.` : null;
       if (reason) {
         toast(reason, { tone: "error" });
         continue;
       }
-      if (attachments.length + converting >= MAX_IMAGES) {
-        toast(`A message can carry at most ${MAX_IMAGES} images.`, { tone: "error" });
-        break;
+      if (count(kind) >= maximum) {
+        toast(`A message can carry at most ${maximum} ${kind === "image" ? "images" : "files"}.`, { tone: "error" });
+        continue;
       }
-      converting += 1;
-      sync();
+      const item = { id: (nextId += 1), kind, name: file.name || "Image", bytes: file.size, pending: true };
+      attachments.push(item);
+      renderTray();
       try {
-        attachments.push({ id: (nextId += 1), url: await imageToDataUrl(file) });
+        if (kind === "image") item.url = await imageToDataUrl(file);
+        else {
+          const result = await api.uploadFiles([file]);
+          Object.assign(item, result.files[0]);
+        }
+        item.pending = false;
       } catch (error) {
-        toast(`${file.name || "The image"} could not be read.`, { tone: "error" });
+        attachments = attachments.filter(({ id }) => id !== item.id);
+        toast(kind === "image" ? `${file.name || "The image"} could not be read.` : error.message, { tone: "error" });
       } finally {
-        converting -= 1;
         renderTray();
       }
     }
   };
 
   const submit = () => {
-    if (converting > 0 || !hasContent()) return;
-    const text = input.value.trim();
-    const images = attachments.map((item) => item.url);
+    if (pending() || !hasContent()) return;
+    const text = withFiles(input.value.trim(), attachments.filter((item) => item.kind === "file"));
+    const images = attachments.filter((item) => item.kind === "image").map((item) => item.url);
     const delivery = store.get().streaming && deliverySelect.value !== "auto" ? deliverySelect.value : null;
     input.value = "";
     attachments = [];
@@ -145,9 +167,9 @@ export function createComposer({
     }
   });
 
-  // A pasted screenshot is an attachment; pasted text stays text.
+  // Pasted files are attachments; a plain text paste stays text.
   input.addEventListener("paste", (event) => {
-    const files = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
+    const files = [...(event.clipboardData?.files ?? [])];
     if (!files.length) return;
     event.preventDefault();
     void attach(files);

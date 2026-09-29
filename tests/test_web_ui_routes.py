@@ -3,6 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from schemas.schemas import UploadsPolicy
 from timeline.server import create_app as create_timeline_app
 from web_chat.server import WebChatServer
 from web_chat.spaces import SpacePool
@@ -117,6 +118,7 @@ class _DummySpace:
 
 class _DummyDeployment:
     config_path = Path("config.yaml")
+    uploads_policy = UploadsPolicy()
 
     def voice_source(self):
         return self.config_path, None

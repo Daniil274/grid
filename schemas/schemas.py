@@ -284,6 +284,17 @@ class PersonalAgentsPolicy(BaseModel):
     max_instructions_chars: int = Field(default=8000, ge=100, le=100_000)
 
 
+class UploadsPolicy(BaseModel):
+    """Files users upload into their workspace from the web chat (web_chat.uploads)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    max_file_mb: int = Field(default=25, ge=1, le=1024, description="Largest file one upload may be")
+    max_files: int = Field(default=10, ge=1, le=100, description="Files one upload may carry")
+    quota_mb: int = Field(default=500, ge=1, description="What a user's uploads/ may hold in all")
+
+
 class UserLimitsPolicy(BaseModel):
     """How much one user of a multi-user web chat may run (web_chat.limits)."""
 
@@ -332,6 +343,10 @@ class GridConfig(BaseModel):
     personal_agents: PersonalAgentsPolicy = Field(
         default_factory=PersonalAgentsPolicy,
         description="Agents users of a multi-user web chat may build for themselves",
+    )
+    uploads: UploadsPolicy = Field(
+        default_factory=UploadsPolicy,
+        description="Files users upload into their workspace from the web chat",
     )
     user_limits: UserLimitsPolicy = Field(
         default_factory=UserLimitsPolicy,

@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from core.config import Config
-from schemas.schemas import PersonalAgentsPolicy, ReviewPolicy, UserLimitsPolicy
+from schemas.schemas import PersonalAgentsPolicy, ReviewPolicy, UploadsPolicy, UserLimitsPolicy
 
 logger = logging.getLogger("grid.web_chat.deployment")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -131,6 +131,11 @@ class Deployment:
     def user_limits(self) -> UserLimitsPolicy:
         """How much one user may run: the catalog's ``user_limits``, or the single system's."""
         return (self.catalog or self.config).config.user_limits
+
+    @property
+    def uploads_policy(self) -> UploadsPolicy:
+        """What users may upload: the catalog's ``uploads``, or the single system's."""
+        return (self.catalog or self.config).config.uploads
 
     @property
     def review_policy(self) -> ReviewPolicy:

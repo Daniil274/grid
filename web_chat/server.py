@@ -145,6 +145,9 @@ class WebChatServer:
         from web_chat.agents_api import register_personal_agent_routes
 
         register_personal_agent_routes(api, self.current_space)
+        from web_chat.uploads import register_upload_routes
+
+        register_upload_routes(api, self.current_space, lambda: self.deployment.uploads_policy)
         if reviews is not None:
             from web_chat.review.http import register_admin_review_routes, register_review_routes
 
@@ -369,6 +372,11 @@ class WebChatServer:
                     "accounts": self.auth is not None,
                     "personal_agents": personal is not None and personal.enabled,
                     "voice": self.voice is not None and self.deployment.voice_enabled(),
+                    "uploads": {
+                        "enabled": self.deployment.uploads_policy.enabled,
+                        "max_file_mb": self.deployment.uploads_policy.max_file_mb,
+                        "max_files": self.deployment.uploads_policy.max_files,
+                    },
                     "reviews": self.reviews is not None and self.reviews.enabled,
                     "systems": system_options(
                         registry,

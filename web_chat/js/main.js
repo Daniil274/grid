@@ -56,6 +56,7 @@ const store = createStore({
   // The server offers voice (voice.enabled); off, no voice control is shown.
   voice: false,
   reviews: false,
+  uploads: { enabled: false, max_file_mb: 25, max_files: 10 },
 });
 
 /** Icon-only buttons declare their glyph in markup; fill them in one pass. */
@@ -326,6 +327,7 @@ async function boot() {
       personalAgents: Boolean(bootstrap.personal_agents),
       voice: Boolean(bootstrap.voice),
       reviews: Boolean(bootstrap.reviews),
+      uploads: bootstrap.uploads ?? { enabled: false, max_file_mb: 25, max_files: 10 },
     });
     await refreshConversations();
   }
