@@ -55,6 +55,12 @@ def _sandbox_root(factory: Any) -> Path:
     return Path(factory.config.get_working_directory()).resolve()
 
 
+#: Where a run's container mounts its workspace (core.managers.container_manager).
+#: Commands there run in it, so ``pwd`` shows paths under it: an agent passes
+#: them on to the file tools.
+CONTAINER_WORKDIR = "/workspace"
+
+
 def _is_within(base: Path, candidate: Path) -> bool:
     """Check that candidate is base or a child of base."""
     return candidate == base or base in candidate.parents
@@ -66,7 +72,8 @@ def _resolve_inside_working_dir(file_path: str, working_dir: Path, container_id:
 
     Agents must never access anything above the configured working directory.
     Absolute paths are interpreted as agent-root paths, except when they already
-    point inside the working directory (a leaked host path).
+    point inside the working directory (a leaked host path) or, in a run with a
+    container, under CONTAINER_WORKDIR - the path its shell shows.
     """
     normalized = (file_path or ".").replace("\\", "/")
     if normalized in ("", ".", "/"):
@@ -78,6 +85,10 @@ def _resolve_inside_working_dir(file_path: str, working_dir: Path, container_id:
         if _is_within(working_dir, host_candidate):
             return host_candidate
 
+        if container_id and (
+            normalized == CONTAINER_WORKDIR or normalized.startswith(CONTAINER_WORKDIR + "/")
+        ):
+            normalized = normalized[len(CONTAINER_WORKDIR):] or "/"
         relative_part = normalized.lstrip("/")
         candidate = (working_dir / relative_part).resolve()
     else:
