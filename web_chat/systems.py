@@ -91,13 +91,16 @@ class SystemRegistry:
         catalog: Optional[Config] = None,
         working_directory: Optional[str] = None,
         customize: Optional[Callable[[str, Config], set[str]]] = None,
+        confined: bool = False,
     ) -> None:
         """``customize(system_key, config)`` adjusts a system's config once, when
         it is first loaded - the space's personal agents (web_chat.personal_agents) -
-        and returns the agent keys it changed."""
+        and returns the agent keys it changed. ``confined``: the space isolates
+        its agents whatever a config says (core.tool_check.diagnose)."""
         self._base_config = base_config
         self._build_factory = build_factory
         self._customize = customize
+        self._confined = confined
         # The configs customized so far, by system key.
         self._customized: Dict[str, Config] = {}
         self._catalog = catalog
@@ -204,7 +207,7 @@ class SystemRegistry:
         if cached and time.monotonic() - cached[0] < ISSUES_TTL_SECONDS:
             return cached[1]
         requires = self._router.system_requires(system_key) if self.has_catalog else []
-        issues = diagnose(self.config(system_key), requires=requires)
+        issues = diagnose(self.config(system_key), requires=requires, confined=self._confined)
         self._issues[system_key] = (time.monotonic(), issues)
         return issues
 
