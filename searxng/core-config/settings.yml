@@ -17,6 +17,42 @@ search:
   formats:
     - html
     - json
+  # An engine that answers "too many requests" sits out 3 minutes by default;
+  # web_search sends bursts (an agent searches several queries at once), so a
+  # short ban keeps an engine that only needed a pause in the next answer.
+  suspended_times:
+    SearxEngineTooManyRequests: 60
+    SearxEngineAccessDenied: 120
+
+outgoing:
+  # The image's 3 s drops engines that answer, only slowly, from a small host.
+  request_timeout: 5.0
+  max_request_timeout: 12.0
+
+# Engines for a server in a data centre, checked from one: DuckDuckGo and Qwant
+# answer its address with a CAPTCHA and Bing with nothing, while Google, Yandex,
+# Yahoo, Yep, Startpage and Mojeek - off in the image - answer. Several engines
+# for each query: one engine being blocked or rate limited does not empty the
+# results. Check one engine with /search?q=test&format=json&engines=<name>.
+engines:
+  - name: google
+    disabled: false
+  - name: yandex
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: yep
+    disabled: false
+  - name: startpage
+    inactive: false
+  - name: mojeek
+    inactive: false
+  - name: duckduckgo
+    disabled: true
+  - name: google news
+    disabled: false
+  - name: bing news
+    disabled: false
 
 server:
   bind_address: "0.0.0.0"
