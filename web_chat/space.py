@@ -227,6 +227,13 @@ class UserSpace:
         )
 
     @property
+    def agent_sessions_path(self) -> Path:
+        """The SQLite file of the agents' SDK sessions (AgentFactory's session_db_path)."""
+        if self.layout is not None:
+            return self.layout.agent_sessions
+        return single_user_records(self.config)[1]
+
+    @property
     def workspace_label(self) -> str:
         """The workspace as shown to the user: its path on a one-user server;
         on a shared one, where it lives on the server is not the user's business."""

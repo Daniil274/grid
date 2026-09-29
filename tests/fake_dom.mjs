@@ -148,6 +148,27 @@ class FakeElement extends FakeNode {
     return this.findAll(className)[0] ?? null;
   }
 
+  /** Descendants matching ".class" or a tag name: the selectors the UI uses. */
+  querySelectorAll(selector) {
+    const matches = selector.startsWith(".")
+      ? (el) => el.classList.contains(selector.slice(1))
+      : (el) => el.tagName === selector.toUpperCase();
+    const found = [];
+    const walk = (node) => {
+      for (const child of node.childNodes) {
+        if (!(child instanceof FakeElement)) continue;
+        if (matches(child)) found.push(child);
+        walk(child);
+      }
+    };
+    walk(this);
+    return found;
+  }
+
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
   /** Direct children carrying a class. */
   childrenWith(className) {
     return this.childNodes.filter((child) => child instanceof FakeElement && child.classList.contains(className));

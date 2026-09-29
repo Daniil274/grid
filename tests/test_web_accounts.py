@@ -301,3 +301,23 @@ def test_a_space_whose_container_cannot_start_is_refused(accounts):
         with alice.websocket_connect("/api/chat/ws/ctx"):
             pass
     assert closed.value.code == 1008
+
+
+def test_only_signed_in_admins_get_the_review_page(accounts, tmp_path):
+    from schemas.schemas import ReviewPolicy
+    from web_chat.review.desk import ReviewDesk
+    from web_chat.review.store import ReviewStore
+
+    desk = ReviewDesk(ReviewStore(tmp_path / "reviews"), ReviewPolicy)
+    server = WebChatServer(Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None, reviews=desk)
+    accounts.create_user("alice", PASSWORD)
+    accounts.create_user("boss", PASSWORD, role="admin")
+
+    stranger = TestClient(server.app, headers=SAME_SITE).get("/admin/review", follow_redirects=False)
+    user = signed_in(server, "alice").get("/admin/review", follow_redirects=False)
+    admin = signed_in(server, "boss").get("/admin/review", follow_redirects=False)
+
+    assert stranger.status_code == 303 and stranger.headers["location"] == "/login"
+    assert user.status_code == 303 and user.headers["location"] == "/"
+    assert admin.status_code == 200
+    assert signed_in(server, "alice").get("/api/admin/reviews").status_code == 403

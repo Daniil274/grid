@@ -45,7 +45,9 @@ export function createScrollFollower(container) {
   };
 }
 
-export function createTranscript({ container, emptyState, jumpButton, onEditMessage, onSpeakMessage, onContinue, onSwitchVersion }) {
+export function createTranscript({
+  container, emptyState, jumpButton, onEditMessage, onSpeakMessage, onReportMessage, onContinue, onSwitchVersion,
+}) {
   /** Live message handles by id - the speech player reports state by id. */
   const messages = new Map();
   const scrollFollower = createScrollFollower(container);
@@ -113,7 +115,7 @@ export function createTranscript({ container, emptyState, jumpButton, onEditMess
     /** @returns the message handle, so the caller can stream into it. */
     add(options) {
       setEmpty(false);
-      const message = createMessage({ ...options, onEdit: onEditMessage, onSpeak: onSpeakMessage, onContinue, onSwitchVersion });
+      const message = createMessage({ ...options, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion });
       messages.set(message.id, message);
       container.append(message.el);
       scrollToBottom(true);
@@ -190,7 +192,7 @@ export function createTranscript({ container, emptyState, jumpButton, onEditMess
 
     /** Insert a message just before *anchor* - a message the user sent mid-turn. */
     addBefore(anchor, options) {
-      const message = createMessage({ ...options, onEdit: onEditMessage, onSpeak: onSpeakMessage, onContinue, onSwitchVersion });
+      const message = createMessage({ ...options, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion });
       messages.set(message.id, message);
       container.insertBefore(message.el, anchor.el);
       return message;

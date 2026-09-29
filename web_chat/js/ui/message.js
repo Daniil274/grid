@@ -72,12 +72,14 @@ function actionButton(label, path, onClick, extraClass = "") {
  * @param {?string} [options.messageId] the stored message's id
  * @param {?{index: number, total: number, targets: string[]}} [options.versions]
  * @param {(id: string) => void} [options.onSpeak] assistant messages only
+ * @param {(answer: {id: string, text: string}) => void} [options.onReport] assistant
+ *   messages only: report a problem with this answer for review
  * @param {() => void} [options.onContinue] resumes an interrupted turn
  * @param {"continuation"|null} [options.kind] a Continue: a marker, not a bubble
  * @param {string[]} [options.images] data URLs of attached images
  */
 export function createMessage({
-  role, content = "", author = "", timestamp, onEdit, onSpeak, onContinue, onSwitchVersion,
+  role, content = "", author = "", timestamp, onEdit, onSpeak, onReport, onContinue, onSwitchVersion,
   kind = null, images = [], messageId = null, versions = null,
 }) {
   if (kind === "continuation") return createContinuationMarker({ timestamp });
@@ -103,6 +105,9 @@ export function createMessage({
     actionButton("Copy message", ICONS.copy, () => copyText(text, "Message copied")),
     role === "user" && onEdit ? actionButton("Edit (starts a new branch)", ICONS.edit, () => startEdit()) : null,
     speakButton,
+    isAssistant && onReport
+      ? actionButton("Report a problem with this answer", ICONS.inspect, () => startReport(), "msgAction--report")
+      : null,
   );
 
   const authorNode = h("span.msg__author", { text: author || ROLE_LABEL[role] || role });
@@ -149,6 +154,14 @@ export function createMessage({
   const paintSoon = onFrame(paint);
 
   if (text) paint();
+
+  const startReport = () => {
+    if (!storedId) {
+      body.append(h("p.msg__notice", { text: "This answer can be reported once its turn is saved." }));
+      return;
+    }
+    onReport({ id: storedId, text });
+  };
 
   /** The text becomes an editor in place; saving sends it into a new branch. */
   const startEdit = () => {

@@ -1,0 +1,472 @@
+/**
+ * Reports of answers for review (web_chat/review): the button under an
+ * answer and the dialog that sends one.
+ */
+
+/* Reviews off on this server (review.enabled): no report buttons. */
+body:not([data-reviews="on"]) .msgAction--report {
+  display: none;
+}
+
+.reportDialog {
+  width: min(520px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.reportDialog::backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+
+.reportDialog__form {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+}
+
+.reportDialog__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.reportDialog__note {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text);
+  font: inherit;
+}
+
+.reportDialog__note:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+
+.reportDialog__consent {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.reportDialog__status {
+  min-height: 1em;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.reportDialog__status[data-tone="error"] {
+  color: var(--danger);
+}
+
+.reportDialog__status:empty {
+  display: none;
+}
+
+.reportDialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* -- The admins' review page (/admin/review) -------------------------------- */
+
+.reviewPage {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.reviewPage__bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.reviewPage__title {
+  margin: 0;
+  font-size: 18px;
+}
+
+.reviewPage__hint {
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.reviewPage__body {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) 1fr;
+  min-height: 0;
+}
+
+.reviewList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+}
+
+.reviewList__filters,
+.reviewCase__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.reviewChip {
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.reviewChip[aria-selected="true"] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.reviewList__items {
+  display: grid;
+  gap: 8px;
+}
+
+.reviewList__empty,
+.reviewCase__empty,
+.evidence__note {
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.reviewItem {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reviewItem[data-selected="true"] {
+  border-color: var(--accent-line);
+}
+
+.reviewItem__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.reviewItem__head span,
+.reviewItem__route {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.reviewItem__note {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-size: 13px;
+}
+
+.reviewItem__tags {
+  display: flex;
+  gap: 6px;
+}
+
+.reviewTag {
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-3);
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.reviewTag--warn {
+  color: var(--warn);
+}
+
+.reviewPick {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.reviewPick__title {
+  margin: 0;
+  font-size: 14px;
+}
+
+.reviewPick__hint {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.reviewPick__field {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.reviewPick__chats,
+.reviewPick__answers {
+  display: grid;
+  gap: 4px;
+}
+
+.reviewPick__chat {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--bg-1);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reviewPick__answer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.reviewPick__open {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.reviewCase {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 20px 24px;
+  overflow-y: auto;
+}
+
+.reviewCase__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.reviewCase__head h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.reviewCase__meta,
+.reviewCase__origin {
+  margin: 4px 0 0;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.reviewCase__origin {
+  color: var(--warn);
+}
+
+.reviewCase__note {
+  margin: 0;
+  padding: 10px 14px;
+  border-left: 3px solid var(--accent-line);
+  background: var(--bg-1);
+  white-space: pre-wrap;
+}
+
+.evidence {
+  display: grid;
+  gap: 8px;
+}
+
+.evidenceMsg,
+.evidenceItem {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+}
+
+.evidenceMsg[data-target="true"] {
+  border-color: var(--accent-line);
+}
+
+.evidenceMsg__head,
+.evidenceItem summary {
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: default;
+}
+
+.evidenceItem summary {
+  cursor: pointer;
+}
+
+.evidence__text,
+.evidence__code {
+  margin: 6px 0 0;
+  overflow-x: auto;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.evidence__code {
+  white-space: pre;
+}
+
+@media (max-width: 800px) {
+  .reviewPage__body {
+    grid-template-columns: 1fr;
+  }
+
+  .reviewList {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+/* -- The review agents' analysis --------------------------------------------- */
+
+.analysis {
+  display: grid;
+  gap: 12px;
+}
+
+.analysis__log {
+  display: grid;
+  gap: 8px;
+}
+
+.analysisMsg {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+}
+
+.analysisMsg[data-role="user"] {
+  border-color: var(--accent-line);
+}
+
+.analysisMsg__head {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.analysis__status {
+  min-height: 1em;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.analysis__status:empty {
+  display: none;
+}
+
+.analysis__status[data-tone="error"] {
+  color: var(--danger);
+}
+
+.analysis__ask {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.analysis__input {
+  width: 100%;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text);
+  font: inherit;
+}
+
+.analysis__title {
+  margin: 8px 0 0;
+  font-size: 15px;
+}
+
+.proposal {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+}
+
+.proposal__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposal__summary,
+.proposal__evidence {
+  margin: 0;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.proposal__evidence {
+  color: var(--text-3);
+}
+
+.proposal__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposal__result {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.proposal__result[data-tone="error"] {
+  color: var(--danger);
+}

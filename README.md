@@ -148,6 +148,43 @@ user_limits:
   turns_per_day: 200    # по умолчанию без ограничения
 ```
 
+### Разборы ответов
+
+Под каждым ответом агента есть кнопка с лупой и жуком — «Report a problem with this answer». Пользователь пишет, что пошло не так, и соглашается, что администраторы увидят разговор до этого ответа. Сервер замораживает всё, что стояло за ответом (`web_chat/review`):
+
+- разговор;
+- шаги хода с вызовами инструментов и решениями политики;
+- запуски агентов;
+- контекст, отправленный модели;
+- SDK-сессию агента;
+- его конфиг и коммит Grid.
+
+Секреты вычищаются, длинные тексты обрезаются. Разборы лежат вне пространств пользователей: с аккаунтами в `<data-dir>/reviews`, без них — в каталоге логов системы. Работает в обоих режимах.
+
+Администратор открывает их на странице **Reviews** (`/admin/review`):
+
+- список со статусами (new, in review, proposed, closed);
+- снимок по вкладкам, только как текст;
+- вкладка **Analysis**: агенты системы `context-review` ([examples/context-review](examples/context-review/README.md)) находят причину, доказывают её ссылками на снимок и исходники той версии и записывают предложения — причину, доказательства, дифф и сценарий проверки.
+
+У агентов разбора только чтение рабочей папки разбора и запись предложений: ни shell, ни сети.
+
+Что можно сделать с предложением:
+
+- проверить, ложится ли его патч на текущий код (`git apply --check`, ничего не меняется);
+- скачать патч;
+- отправить его в контур эволюции задачей контроллера: для этого на веб-сервере нужны `GRID_CONTROL_URL` и `GRID_CONTROL_TASK_TOKEN`, см. [docs/evolution-setup.md](docs/evolution-setup.md). Мастерская возьмёт задачу, проверит правку на сценариях, а в `stable` её перенесёт оператор.
+
+```yaml
+review:
+  enabled: true           # кнопка у пользователей
+  reviews_per_day: 20     # на пользователя
+  max_note_chars: 2000
+  admin_any_chat: false   # разрешить администратору разбирать чаты, о которых не сообщали
+```
+
+С `admin_any_chat: true` администратор может выбрать ответ в любом чате пользователя. Каждый просмотр и каждый такой разбор пишется в журнал аудита `grid.web_chat.review.audit`, а разбор показывается пользователю в его списке как открытый администратором.
+
 ### Диалоговый CLI
 
 ```bash
@@ -301,7 +338,7 @@ Grid способен читать и изменять файлы, выполн�
 - [Политики действий](ACTION_POLICY.md)
 - [Режим Grid workers для Codex](CODEX_WORKERS.md)
 - [Справочник параметров конфигурации](config.yaml.example)
-- Системы: [engineering](examples/coder/README.md), [pipeline](examples/coordinator-pipeline/README.md), [video](examples/video-editor/README.md), [desktop](examples/windows-computer-use/README.md), [system-admin](examples/system-admin/README.md), [voice-assistant](examples/voice-assistant/README.md)
+- Системы: [context-review](examples/context-review/README.md), [engineering](examples/coder/README.md), [pipeline](examples/coordinator-pipeline/README.md), [video](examples/video-editor/README.md), [desktop](examples/windows-computer-use/README.md), [system-admin](examples/system-admin/README.md), [voice-assistant](examples/voice-assistant/README.md)
 - Выкладка сайта с аккаунтами: [systemd](deploy/grid-web-chat.service), [Caddy](deploy/Caddyfile)
 - [Пути и границы изоляции пользователей](docs/audits/2026-09-28-isolation-paths.md)
 - [Аудиты безопасности](docs/audits)

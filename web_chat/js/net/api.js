@@ -20,6 +20,9 @@ async function request(url, options = {}) {
   return payload;
 }
 
+const proposalUrl = (id, proposalId, action) =>
+  `/api/admin/reviews/${encodeURIComponent(id)}/proposals/${encodeURIComponent(proposalId)}/${action}`;
+
 const json = (method, body) => ({
   method,
   headers: { "Content-Type": "application/json" },
@@ -47,6 +50,31 @@ export const api = {
   getSettings: () => request("/api/settings"),
   saveSettings: (config) => request("/api/settings/structured", json("PUT", { config })),
   saveYaml: (yamlContent) => request("/api/settings/yaml", json("PUT", { yaml_content: yamlContent })),
+  /** Report a problem with an answer: freezes it for the admins (web_chat/review). */
+  reportAnswer: (contextId, messageId, note) =>
+    request(`/api/chat/conversations/${encodeURIComponent(contextId)}/reviews`, json("POST", { message_id: messageId, note })),
+  myReports: () => request("/api/reviews"),
+  /** Admins: every report, one with its evidence, its status. */
+  adminReports: (status) => request(`/api/admin/reviews${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  adminReport: (id) => request(`/api/admin/reviews/${encodeURIComponent(id)}`),
+  setReportStatus: (id, status) => request(`/api/admin/reviews/${encodeURIComponent(id)}`, json("PATCH", { status })),
+  /** The review agents' analysis of a report: its state, and a new turn of it. */
+  reportAnalysis: (id) => request(`/api/admin/reviews/${encodeURIComponent(id)}/analysis`),
+  analyseReport: (id, message = "") =>
+    request(`/api/admin/reviews/${encodeURIComponent(id)}/analysis`, json("POST", { message })),
+  /** A proposal: does its patch apply here; send it to the evolution loop; what became of it. */
+  checkProposal: (id, proposalId) => request(proposalUrl(id, proposalId, "check"), { method: "POST" }),
+  evolveProposal: (id, proposalId) => request(proposalUrl(id, proposalId, "evolve"), { method: "POST" }),
+  proposalTask: (id, proposalId) => request(proposalUrl(id, proposalId, "task")),
+  /** Admins, when the server allows it: pick an answer the user did not report. */
+  reviewChats: (userId) => request(`/api/admin/review-chats/${encodeURIComponent(userId)}`),
+  reviewAnswers: (userId, contextId) =>
+    request(`/api/admin/review-chats/${encodeURIComponent(userId)}/${encodeURIComponent(contextId)}`),
+  openReport: (userId, contextId, messageId, note) =>
+    request(
+      `/api/admin/review-chats/${encodeURIComponent(userId)}/${encodeURIComponent(contextId)}/reviews`,
+      json("POST", { message_id: messageId, note }),
+    ),
   signOut: () => request("/api/auth/logout", { method: "POST" }),
   changePassword: (current, next) => request("/api/auth/password", json("POST", { current, new: next })),
   adminUsers: () => request("/api/admin/users"),

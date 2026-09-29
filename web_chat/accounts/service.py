@@ -140,6 +140,11 @@ class Accounts:
         record = self._store.user_by_name(username) if USERNAME.fullmatch(username) else None
         return record.user if record else None
 
+    def user(self, user_id: str) -> Optional[User]:
+        """The user with id *user_id*, or None."""
+        record = self._store.user_by_id(user_id)
+        return record.user if record else None
+
     def has_users(self) -> bool:
         return self._store.count_users() > 0
 

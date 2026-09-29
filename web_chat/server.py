@@ -53,6 +53,7 @@ logger = logging.getLogger("grid.web_chat.server")
 ROOT = Path(__file__).resolve().parent
 INDEX_HTML = ROOT / "index.html"
 LOGIN_HTML = ROOT / "login.html"
+REVIEW_HTML = ROOT / "review.html"
 
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
@@ -93,12 +94,15 @@ class WebChatServer:
         allowed_origins: tuple[str, ...] = (),
         action_review_token: Optional[str] = None,
         warm_user: Optional[str] = DEFAULT_USER,
+        reviews: Optional[Any] = None,
     ) -> None:
         """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
         accounts; without it ``identify`` decides, by default the single local
         user. ``allowed_origins`` are other sites' origins trusted like the
         server's own (a reverse proxy's public address). ``warm_user``'s space is
-        built and its default agent warmed at startup; None warms nobody."""
+        built and its default agent warmed at startup; None warms nobody.
+        ``reviews`` is the web_chat.review.desk.ReviewDesk users file reviews
+        of answers with; None offers no reviews."""
         if auth is not None and identify is not None:
             raise ValueError("Pass auth or identify, not both")
         self.deployment = deployment
@@ -109,6 +113,7 @@ class WebChatServer:
         self._guard = OriginGuard(allowed_origins)
         self._warm_user = warm_user
         self._sweeper: Optional[asyncio.Task] = None
+        self.reviews = reviews
 
         self.voice: Optional[Any] = None
 
@@ -131,6 +136,17 @@ class WebChatServer:
         from web_chat.agents_api import register_personal_agent_routes
 
         register_personal_agent_routes(api, self.current_space)
+        if reviews is not None:
+            from web_chat.review.http import register_admin_review_routes, register_review_routes
+
+            register_review_routes(api, reviews, self.current_user, self.current_space)
+            register_admin_review_routes(
+                api,
+                reviews,
+                admins_only(self.current_user),
+                spaces,
+                auth.accounts.user if auth is not None else (lambda user_id: None),
+            )
         if auth is not None:
             auth.register_routes(self.app, guard=self._guard, current_user=self.current_user)
         else:
@@ -193,6 +209,8 @@ class WebChatServer:
             await self.spaces.close()
             if self.voice is not None:
                 self.voice.close()
+            if self.reviews is not None and self.reviews.agents is not None:
+                await self.reviews.agents.close()
 
     async def _sweep_forever(self) -> None:
         """Periodic upkeep: idle spaces go, and with accounts, dead sessions."""
@@ -278,7 +296,8 @@ class WebChatServer:
             return self._settings_payload(space)
 
     def _register_pages(self) -> None:
-        """The chat page, and with accounts the sign-in page in front of it."""
+        """The chat page, the admins' review page, and with accounts the sign-in
+        page in front of them."""
         app, auth = self.app, self.auth
 
         def page(path: Path) -> HTMLResponse:
@@ -291,6 +310,20 @@ class WebChatServer:
             if auth is not None and auth.user_of(request) is None:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(INDEX_HTML)
+
+        if self.reviews is not None:
+
+            @app.get("/admin/review", response_class=HTMLResponse)
+            async def review_page(request: Request) -> Any:
+                # The page is a shell; every review it shows comes through
+                # the admin-only API, which checks again.
+                if auth is not None:
+                    user = auth.user_of(request)
+                    if user is None:
+                        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+                    if not user.is_admin:
+                        return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+                return page(REVIEW_HTML)
 
         if auth is None:
             return
@@ -317,6 +350,7 @@ class WebChatServer:
                     "accounts": self.auth is not None,
                     "personal_agents": personal is not None and personal.enabled,
                     "voice": self.voice is not None and self.deployment.voice_enabled(),
+                    "reviews": self.reviews is not None and self.reviews.enabled,
                     "systems": system_options(
                         registry,
                         frozenset(personal.keys()) if personal else frozenset(),

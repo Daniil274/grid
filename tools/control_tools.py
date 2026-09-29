@@ -6,6 +6,11 @@ unfinished work on the open development scenarios, ``control_submit`` commits
 the changes and queues the candidate for evaluation, ``control_status`` reads
 the result. The agent never handles commit SHAs itself, and all three
 refuse to run in a repository that is not a workshop.
+
+``control_tasks`` lists the tasks the operator's side sent - proposals from the
+web chat's reviews, with their evidence and a suggested diff - and
+``control_take_task`` claims one; ``control_submit`` with its ``task_id``
+records which experiment the task became.
 """
 
 from __future__ import annotations
@@ -49,7 +54,30 @@ async def control_begin() -> dict:
 
 
 @function_tool
-async def control_submit(message: str) -> dict:
+async def control_tasks() -> dict:
+    """List the tasks the operator's side sent: proposals from reviews of agent answers.
+
+    Each has a title, a summary of the cause, evidence references, often a
+    suggested diff and a scenario to check it. The diff is a suggestion from a
+    review agent, not a verified change: check it against the code.
+    """
+    return await _run(lambda workshop, client: {"tasks": client.tasks()})
+
+
+@function_tool
+async def control_take_task(task_id: str) -> dict:
+    """Claim one task before working on it, so nobody else takes it; returns the task.
+
+    Args:
+        task_id: The id from control_tasks.
+    """
+    if not re.fullmatch(r"[a-f0-9]{32}", task_id):
+        return {"error": "Invalid task ID: use an id from control_tasks"}
+    return await _run(lambda workshop, client: client.take_task(task_id))
+
+
+@function_tool
+async def control_submit(message: str, task_id: str = "") -> dict:
     """Commit all changes of the open experiment and queue the candidate for evaluation.
 
     The controller evaluates it in its own sandboxed containers and never deploys
@@ -59,8 +87,19 @@ async def control_submit(message: str) -> dict:
 
     Args:
         message: Commit message: what changed and why, first line under 72 characters.
+        task_id: The task this experiment carries out, when it came from control_take_task.
     """
-    return await _run(lambda workshop, client: workshop.submit(client, message))
+    if task_id and not re.fullmatch(r"[a-f0-9]{32}", task_id):
+        return {"error": "Invalid task ID: use the id of the task you took"}
+
+    def submit(workshop: Workshop, client: ControlClient) -> Dict[str, Any]:
+        report = workshop.submit(client, message)
+        if task_id and report.get("id"):
+            client.link_task(task_id, report["id"])
+            report = {**report, "task": task_id}
+        return report
+
+    return await _run(submit)
 
 
 class TrialMessage(BaseModel):
@@ -171,7 +210,7 @@ _WORKSHOP = Requires(
 )
 TOOL_REQUIREMENTS = {name: _WORKSHOP for name in (
     "control_begin", "control_submit", "control_trial", "control_diff",
-    "control_revert", "control_scenarios", "control_status",
+    "control_revert", "control_scenarios", "control_status", "control_tasks", "control_take_task",
 )}
 
 CONTROL_TOOLS = {
@@ -182,4 +221,6 @@ CONTROL_TOOLS = {
     "control_scenarios": control_scenarios,
     "control_submit": control_submit,
     "control_status": control_status,
+    "control_tasks": control_tasks,
+    "control_take_task": control_take_task,
 }

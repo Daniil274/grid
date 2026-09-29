@@ -72,6 +72,7 @@ def main() -> None:
                 args.repo.resolve(),
                 policy,
                 os.environ.get("GRID_CONTROL_TOKEN", ""),
+                os.environ.get("GRID_CONTROL_TASK_TOKEN") or None,
             )
             uvicorn.run(app, host=args.host, port=args.port)
             return
