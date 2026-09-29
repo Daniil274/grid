@@ -90,3 +90,33 @@ def test_without_a_container_links_inside_the_workspace_keep_working(workspace):
 def test_a_path_outside_the_workspace_is_refused(in_container):
     with pytest.raises(ValueError, match="escapes"):
         confined_fs.read_text(in_container.parent / "secret.txt")
+
+
+@linux_only
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() != 0, reason="giving files away needs root")
+def test_a_server_running_as_root_gives_what_it_makes_to_the_workspace_owner(in_container):
+    # The container's unprivileged user owns the workspace; files the server
+    # made as root it could not change.
+    os.chown(in_container, 1000, 1000)
+    target = in_container / "src" / "notes.txt"
+    (in_container / "old.txt").write_text("root's", encoding="utf-8")
+
+    confined_fs.make_dirs(target.parent)
+    confined_fs.write_text(target, "hello")
+    confined_fs.write_text(in_container / "old.txt", "rewritten")
+    confined_fs.read_text(in_container / "old.txt")
+
+    for path in (target.parent, target, in_container / "old.txt"):
+        assert (path.stat().st_uid, path.stat().st_gid) == (1000, 1000), path
+
+
+@linux_only
+def test_reading_changes_no_owner(in_container, monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    given = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: given.append(fd))
+    (in_container / "a.txt").write_text("x", encoding="utf-8")
+
+    confined_fs.read_text(in_container / "a.txt")
+
+    assert given == []

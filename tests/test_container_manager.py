@@ -35,6 +35,7 @@ class FakeClient:
     def __init__(self):
         self.existing = {}
         self.runs = []
+        self.probes = []
         self.containers = self
         self.images = SimpleNamespace(get=lambda name: SimpleNamespace(id=CURRENT_BUILD))
 
@@ -43,7 +44,10 @@ class FakeClient:
             raise module.NotFound("missing")
         return self.existing[name]
 
-    def run(self, image, **kwargs):
+    def run(self, image, command=None, **kwargs):
+        if command is not None:  # the question of which uid the image runs as
+            self.probes.append((image, command, kwargs))
+            return b"1000\n1000\n"
         self.runs.append((image, kwargs))
         return FakeContainer(kwargs["name"], next(iter(kwargs["volumes"])), kwargs["labels"])
 
@@ -130,3 +134,55 @@ def test_an_explicit_choice_overrides_the_configs_flag(monkeypatch):
     assert ContainerManager(off).enabled is False
     assert ContainerManager(off, enabled=True).enabled is True
     assert ContainerManager(on, enabled=False).enabled is False
+
+
+def _chowns(monkeypatch, euid):
+    monkeypatch.setattr(module.os, "geteuid", lambda: euid, raising=False)
+    calls = []
+    monkeypatch.setattr(module.os, "lchown", lambda path, uid, gid: calls.append((path, uid, gid)))
+    return calls
+
+
+def test_a_server_running_as_root_gives_the_workspace_to_the_containers_user(manager, tmp_path, monkeypatch):
+    # The server makes the workspace, so it is root's: the container's user
+    # could not write its own workspace.
+    manager, client = manager
+    calls = _chowns(monkeypatch, 0)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "file").write_text("x")
+    (tmp_path / "link").symlink_to("/etc/passwd")
+
+    manager.get_or_create_container("u1", workspace=tmp_path)
+    manager.get_or_create_container("u2", workspace=tmp_path)
+
+    root = str(tmp_path.resolve())
+    owned = {path for path, uid, gid in calls if (uid, gid) == (1000, 1000)}
+    assert {root, f"{root}/sub", f"{root}/sub/file", f"{root}/link"} <= owned
+    assert len(client.probes) == 1  # asked of the image once
+    [(_, _, probe)] = client.probes
+    assert probe["user"] == "agent" and probe["remove"] and probe["network_disabled"]
+
+
+def test_a_server_not_running_as_root_leaves_ownership_alone(manager, tmp_path, monkeypatch):
+    manager, client = manager
+    calls = _chowns(monkeypatch, 1000)
+
+    manager.get_or_create_container("u1", workspace=tmp_path)
+
+    assert calls == [] and client.probes == [] and len(client.runs) == 1
+
+
+def test_an_image_that_cannot_say_its_uid_still_gets_a_container(manager, tmp_path, monkeypatch):
+    manager, client = manager
+    calls = _chowns(monkeypatch, 0)
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("no such image")
+
+    monkeypatch.setattr(manager, "_agent_ids_of", None)
+    original_run = client.run
+    client.run = lambda image, command=None, **kwargs: refuse() if command else original_run(image, **kwargs)
+
+    manager.get_or_create_container("u1", workspace=tmp_path)
+
+    assert calls == [] and len(client.runs) == 1

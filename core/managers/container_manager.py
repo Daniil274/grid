@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 try:
     import docker
     from docker.errors import NotFound, DockerException
@@ -28,7 +28,8 @@ except ImportError:  # pragma: no cover - environment-dependent
 logger = logging.getLogger("grid.container_manager")
 
 # Path inside the container where the host workspace is mounted. Docker forbids bind to "/", so we use /workspace.
-# Agent-facing paths are shown as "/"; this is the actual mount point for docker.
+# Agent-facing paths are shown as "/"; this is the actual mount point for docker,
+# and file tools take paths under it too (utils.path_utils.CONTAINER_WORKDIR).
 CONTAINER_WORKDIR = "/workspace"
 
 #: The label naming the settings a container was made with (ContainerManager.profile).
@@ -48,6 +49,7 @@ class ContainerManager:
 
         self.config = config
         self.client = None
+        self._agent_ids_of: Optional[Tuple[int, int]] = None
         self.enabled = False
 
         isolation_config = getattr(config.config, "isolation", None)
@@ -79,6 +81,9 @@ class ContainerManager:
             "cpus": self.settings.cpus,
             "pids_limit": self.settings.pids_limit,
             "hardening": ["cap_drop:ALL", "no-new-privileges", "no-restart", "init"],
+            # Containers made before the workspace was given to their user are
+            # recreated, and so their workspace given.
+            "workspace_owner": "agent",
         }
         return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -139,10 +144,47 @@ class ContainerManager:
             logger.warning("Cannot tell which build of %s container %s runs: %s", self.image, container.name, exc)
             return True
 
+    def _agent_ids(self) -> Optional[Tuple[int, int]]:
+        """The uid and gid the image's commands run as, asked of the image once.
+        None when it cannot be told."""
+        if self._agent_ids_of is None:
+            try:
+                output = self.client.containers.run(
+                    self.image, ["sh", "-c", "id -u; id -g"], user="agent",
+                    remove=True, network_disabled=True,
+                )
+                uid, gid = (int(value) for value in output.decode().split())
+                self._agent_ids_of = (uid, gid)
+            except Exception as exc:
+                logger.warning("Cannot tell which uid %s runs as: %s", self.image, exc)
+                return None
+        return self._agent_ids_of
+
+    def _own_workspace(self, workspace: Path) -> None:
+        """Give *workspace* to the container's user when this server runs as root.
+
+        The server makes the directory, so it is root's, and the container's
+        unprivileged user could not write its own workspace. Called while no
+        container of the space runs: nothing swaps a directory for a link
+        during the walk, and links themselves are changed, never followed.
+        """
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            return
+        ids = self._agent_ids()
+        if ids is None:
+            return
+        uid, gid = ids
+        for directory, dirs, files in os.walk(workspace):
+            for name in [directory, *(os.path.join(directory, entry) for entry in dirs + files)]:
+                stat = os.lstat(name)
+                if (stat.st_uid, stat.st_gid) != (uid, gid):
+                    os.lchown(name, uid, gid)
+
     def _create_container(self, user_id: str, container_name: str, workspace: Path) -> Optional[Container]:
         """Create and start the container of *user_id*; *workspace* is resolved."""
         try:
             workspace.mkdir(parents=True, exist_ok=True)
+            self._own_workspace(workspace)
             # The workspace is the only host directory the container sees.
             volumes = {str(workspace): {"bind": CONTAINER_WORKDIR, "mode": "rw"}}
             logger.info("Creating container %s with workspace %s", container_name, workspace)

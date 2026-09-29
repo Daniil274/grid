@@ -64,6 +64,21 @@ def _confined(path: Any) -> Optional[Tuple[Path, List[str]]]:
     return root, list(relative.parts)
 
 
+def _give_to_workspace_owner(fd: int, root: Path) -> None:
+    """Give what the server made to the owner of the workspace.
+
+    A server running as root makes root's files, and the container's
+    unprivileged user - the owner of its workspace (core.managers.
+    container_manager) - could then not change them.
+    """
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    owner = os.stat(root)
+    made = os.fstat(fd)
+    if (made.st_uid, made.st_gid) != (owner.st_uid, owner.st_gid):
+        os.fchown(fd, owner.st_uid, owner.st_gid)
+
+
 def _walk(root: Path, names: List[str], *, create: bool) -> int:
     """A descriptor of the directory *names* below *root*, reached without
     following links; missing directories are made when *create*."""
@@ -78,6 +93,11 @@ def _walk(root: Path, names: List[str], *, create: bool) -> int:
                     raise
                 os.mkdir(name, 0o777, dir_fd=fd)
                 next_fd = os.open(name, flags, dir_fd=fd)
+                try:
+                    _give_to_workspace_owner(next_fd, root)
+                except BaseException:
+                    os.close(next_fd)
+                    raise
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                     raise LinkRefused() from None
@@ -117,6 +137,12 @@ def open_file(
         raise
     finally:
         os.close(parent)
+    if flags & os.O_CREAT:
+        try:
+            _give_to_workspace_owner(fd, root)
+        except BaseException:
+            os.close(fd)
+            raise
     if "b" in mode:
         return os.fdopen(fd, mode)
     return os.fdopen(fd, mode, encoding=encoding or "utf-8", errors=errors, newline=newline)
