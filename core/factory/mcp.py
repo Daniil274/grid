@@ -5,6 +5,11 @@ server is keyed by its tool, and by the working directory and container it
 was started for: one started for another workspace or container is never
 handed out. With a container the server runs inside it (``docker exec``),
 confined like the agent's own commands.
+
+Each server lives in a task of its own, which connects it, keeps it open and
+closes it. The MCP client's streams belong to the task that opened them
+(anyio cancel scopes): a server connected in the task of a web request died
+with that request, and the next turn got it from the cache closed.
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.managers.mcp_manager import ResilientMCPServerStdio
 
@@ -28,6 +33,8 @@ class McpServers:
         self.container_id = container_id
         self._container_workdir = container_workdir
         self._servers: Dict[str, Any] = {}
+        # The task that owns each server, and the event that tells it to close.
+        self._owners: Dict[str, Tuple["asyncio.Task[None]", asyncio.Event]] = {}
 
     def __len__(self) -> int:
         return len(self._servers)
@@ -91,6 +98,11 @@ class McpServers:
         if self.container_id:
             cache_key += f"::{self.container_id}"
 
+        owner = self._owners.get(cache_key)
+        if owner is not None and owner[0].done():
+            logger.warning("MCP server %s has stopped; starting it again", cache_key)
+            self._servers.pop(cache_key, None)
+            self._owners.pop(cache_key, None)
         if cache_key in self._servers:
             logger.debug("Reusing cached MCP server: %s", cache_key)
             return self._servers[cache_key]
@@ -191,16 +203,58 @@ class McpServers:
             max_output_tokens=max_output_tokens,
         )
 
-        await server.connect()
+        self._owners[cache_key] = await self._start(server)
         logger.info(f"MCP server connected successfully: {tool_name}")
         self._servers[cache_key] = server
         return server
 
+    async def _start(self, server: Any) -> Tuple["asyncio.Task[None]", asyncio.Event]:
+        """Connect *server* in a task of its own; it stays open until the
+        returned event is set, and the same task then closes it."""
+        connected: "asyncio.Future[None]" = asyncio.get_running_loop().create_future()
+        stop = asyncio.Event()
+
+        async def own() -> None:
+            try:
+                await server.connect()
+            except asyncio.CancelledError:
+                connected.cancel()
+                raise
+            except Exception as exc:
+                connected.set_exception(exc)
+                return
+            connected.set_result(None)
+            try:
+                await stop.wait()
+            finally:
+                try:
+                    await server.cleanup()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to clean up MCP server %s: %s", getattr(server, "name", "unknown"), exc, exc_info=exc
+                    )
+
+        task = asyncio.create_task(own(), name=f"mcp-server:{getattr(server, 'name', 'unknown')}")
+        try:
+            await asyncio.shield(connected)
+        except asyncio.CancelledError:
+            # The caller gave up: the server is never handed out, so close it.
+            stop.set()
+            raise
+        return task, stop
+
     async def close(self) -> None:
         """Disconnect every server; a failure is logged, the rest still close."""
-        for server in self._servers.values():
+        owners = self._owners
+        self._owners = {}
+        for _, stop in owners.values():
+            stop.set()
+        for key, server in self._servers.items():
             try:
-                await server.cleanup()
+                if key in owners:
+                    await owners[key][0]  # its own task closes it
+                else:
+                    await server.cleanup()
             except asyncio.CancelledError:
                 logger.debug("MCP cleanup cancelled", exc_info=True)
             except Exception as exc:
