@@ -1,0 +1,87 @@
+settings:
+  default_agent: main
+  working_directory: .
+  allow_path_override: true
+  max_turns: 100
+  mcp_enabled: true
+  max_tool_output_tokens: 12000
+  project_tools:
+    enabled: true
+    tools_directory: ../../examples/coder/tools
+providers:
+  opencode:
+    name: opencode
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: OPENCODE_API_KEY
+    default_headers:
+      User-Agent: grid-agent-system/1.0
+      x-opencode-session: grid-coder
+    timeout: 300
+    max_retries: 3
+models:
+  glm-flash:
+    name: glm-5.3-flash
+    provider: opencode
+  deepseek-flash-latest:
+    name: deepseek-v4.1-flash
+    provider: opencode
+tools:
+  file_read:
+    type: function
+    description: Read a file
+  file_write:
+    type: function
+    description: Create a file or replace its whole content
+  file_replace:
+    type: function
+    description: Replace one exact fragment of a file
+  file_edit_patch:
+    type: function
+    description: Apply a unified diff to a file
+  file_append:
+    type: function
+    description: Append content to a file
+  file_list:
+    type: function
+    description: List files in a directory
+  file_search:
+    type: function
+    description: Find files by name regex
+  file_content_search:
+    type: function
+    description: Find lines containing a text
+  bash_tool:
+    type: function
+    description: Run shell commands in the workspace container (converters, pip, scripts)
+  doc_tools:
+    type: mcp
+    tool_package: tools/doc_tools
+    description: Stdlib-only documentation analysis, linting, TOC, link checks, terminology and format conversion
+agents:
+  main:
+    name: Docs Ops
+    model: [glm-flash, deepseek-flash-latest]
+    mcp_enabled: true
+    description: >-
+      Documentation operations in the workspace: write and edit technical
+      docs, lint, TOC, link checks, terminology, statistics, and format
+      conversion of any kind (Markdown/HTML/txt/CSV, and doc/docx/odt/pdf via
+      shell converters or small scripts). Not for code changes in a repo or
+      internet research.
+    tools:
+      - file_read
+      - file_write
+      - file_replace
+      - file_edit_patch
+      - file_append
+      - file_list
+      - file_search
+      - file_content_search
+      - bash_tool
+      - doc_tools
+    system_skills: [docops]
+    custom_prompt: |
+      Ты — технический писатель и оператор документации с доступом к терминалу. Отвечай на языке пользователя.
+      Следуй протоколу из навыка docops. Любую конвертацию делай, а не советуй: сначала проверь наличие конвертеров в терминале, если нет — пробуй установить (pip/npm) или напиши короткий скрипт. Отказывай, только если реально попробовал и получил ошибку; тогда назови команду и текст ошибки.
+      Завершай коротким отчётом: какие файлы созданы/изменены, что проверено и с каким результатом, что осталось непроверенным.
+      Не выдумывай содержимое, которого нет в исходниках; при отсутствии входных данных сообщи об этом и ничего не создавай.

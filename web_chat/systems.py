@@ -43,6 +43,27 @@ class SystemInfo:
     name: str
     description: str
     config_path: Path
+    #: "" for a catalog system; "draft" or "mine" for a system of this space only.
+    badge: str = ""
+
+
+@dataclass(frozen=True)
+class ExtraSystem:
+    """A system one space has beside the catalog's (web_chat.system_hub).
+
+    An admin's space has the created systems still in draft, to test them; a
+    user's space has the systems the user built from their own agents. Only a
+    ``routable`` one is offered to the router; the others run when picked by hand.
+    """
+
+    key: str
+    name: str
+    description: str
+    config_path: Path
+    load: Callable[[], Config]
+    routable: bool
+    badge: str
+    requires: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -92,11 +113,16 @@ class SystemRegistry:
         working_directory: Optional[str] = None,
         customize: Optional[Callable[[str, Config], set[str]]] = None,
         confined: bool = False,
+        extras: Optional[Callable[[], List[ExtraSystem]]] = None,
+        admin: bool = True,
     ) -> None:
         """``customize(system_key, config)`` adjusts a system's config once, when
         it is first loaded - the space's personal agents (web_chat.personal_agents) -
         and returns the agent keys it changed. ``confined``: the space isolates
-        its agents whatever a config says (core.tool_check.diagnose)."""
+        its agents whatever a config says (core.tool_check.diagnose). ``extras()``
+        lists the systems of this space only (:class:`ExtraSystem`); it is asked
+        again by :meth:`refresh_extras`. ``admin`` False hides the catalog's
+        ``admins_only`` systems: they are not listed, pinned or routed to."""
         self._base_config = base_config
         self._build_factory = build_factory
         self._customize = customize
@@ -110,6 +136,56 @@ class SystemRegistry:
         self._factories: Dict[str, Any] = {}
         self._issues: Dict[str, Tuple[float, List[ToolIssue]]] = {}
         self._base_key = _key_for(base_config.config_path)
+        self._admin = admin
+        self._extras_source = extras
+        self._extras: Dict[str, ExtraSystem] = {}
+        self._extra_configs: Dict[str, Config] = {}
+        self.refresh_extras()
+
+    # -- the space's own systems ---------------------------------------------
+    def refresh_extras(self) -> None:
+        """Ask again for the space's own systems; what they built is dropped.
+
+        Only with a catalog: the extras stand beside the catalog's systems.
+        """
+        dropped = set(self._extras)
+        extras: Dict[str, ExtraSystem] = {}
+        if self._extras_source is not None and self.has_catalog:
+            listed = set(self._router.systems())
+            for extra in self._extras_source():
+                if extra.key in listed or extra.key in extras:
+                    logger.error("System '%s' of this space collides with another; left out", extra.key)
+                    continue
+                extras[extra.key] = extra
+        self._extras = extras
+        for key in dropped | set(extras):
+            self._extra_configs.pop(key, None)
+            self._factories.pop(key, None)
+            self._issues.pop(key, None)
+
+    def extra(self, system_key: str) -> Optional[ExtraSystem]:
+        return self._extras.get(system_key)
+
+    def route_candidates(self) -> Dict[str, str]:
+        """The systems the router picks from in this space, as key -> description."""
+        return self._route_candidates() if self.has_catalog else {}
+
+    async def probe(self, message: str, candidates: Dict[str, str]) -> str:
+        """The system the router would pick for *message* among *candidates*."""
+        return await self._choose(message, candidates, self.default_key(), None)
+
+    def _hidden(self) -> set:
+        """The catalog systems this space may not use: admins-only ones for a user."""
+        if getattr(self, "_admin", True) or self._catalog is None:
+            return set()
+        return {key for key, system in self._catalog.config.routing.systems.items() if system.admins_only}
+
+    def _route_candidates(self) -> Dict[str, str]:
+        """What the router picks a system from: the catalog's and the routable extras."""
+        hidden = self._hidden()
+        candidates = {key: text for key, text in self._router.systems().items() if key not in hidden}
+        candidates.update({key: extra.description for key, extra in self._extras.items() if extra.routable})
+        return candidates
 
     # -- catalog -----------------------------------------------------------
     @property
@@ -123,6 +199,18 @@ class SystemRegistry:
         return self._router is not None
 
     def systems(self) -> list[SystemInfo]:
+        return self._catalog_systems() + [
+            SystemInfo(
+                key=extra.key,
+                name=extra.name,
+                description=" ".join((extra.description or "").split()),
+                config_path=extra.config_path,
+                badge=extra.badge,
+            )
+            for extra in self._extras.values()
+        ]
+
+    def _catalog_systems(self) -> list[SystemInfo]:
         if not self.has_catalog:
             return [
                 SystemInfo(
@@ -135,11 +223,12 @@ class SystemRegistry:
         return [
             SystemInfo(
                 key=key,
-                name=_title(key),
+                name=self._router.system_name(key) or _title(key),
                 description=" ".join((description or "").split()),
                 config_path=self._router.system_config_path(key),
             )
             for key, description in self._router.systems().items()
+            if key not in self._hidden()
         ]
 
     def keys(self) -> list[str]:
@@ -149,6 +238,11 @@ class SystemRegistry:
         return self._router.default_system() if self.has_catalog else self._base_key
 
     def config(self, system_key: str) -> Config:
+        extra = self._extras.get(system_key)
+        if extra is not None:
+            if system_key not in self._extra_configs:
+                self._extra_configs[system_key] = extra.load()
+            return self._extra_configs[system_key]
         routed = self.has_catalog and system_key in self._router.systems()
         config = self._router.system_config(system_key) if routed else self._base_config
         key = system_key if routed else self._base_key
@@ -206,7 +300,11 @@ class SystemRegistry:
         cached = self._issues.get(system_key)
         if cached and time.monotonic() - cached[0] < ISSUES_TTL_SECONDS:
             return cached[1]
-        requires = self._router.system_requires(system_key) if self.has_catalog else []
+        extra = self._extras.get(system_key)
+        if extra is not None:
+            requires = list(extra.requires)
+        else:
+            requires = self._router.system_requires(system_key) if self.has_catalog else []
         issues = diagnose(self.config(system_key), requires=requires, confined=self._confined)
         self._issues[system_key] = (time.monotonic(), issues)
         return issues
@@ -231,9 +329,10 @@ class SystemRegistry:
         """
         known = self.keys()
         pinned_system = system_key if system_key in known else None
-        routed_system = pinned_system is None and len(known) > 1
+        candidates = self._route_candidates() if self.has_catalog else {}
+        routed_system = pinned_system is None and len(candidates) > 1
         chosen_system = pinned_system or (
-            await self._choose(message, self._router.systems(), self.default_key(), previous[0] if previous else None)
+            await self._choose(message, candidates, self.default_key(), previous[0] if previous else None)
             if routed_system
             else self.default_key()
         )

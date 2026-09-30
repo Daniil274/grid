@@ -138,6 +138,8 @@ class _Diagnosis:
         self.grid = config.config
         self.confined = confined
         self.isolated = confined or bool(getattr(self.grid.isolation, "enabled", False))
+        # A package is read once, however many agents use its tool.
+        self._packages_checked: set = set()
         self.loader = config.project_tools_loader
         self.issues: List[ToolIssue] = []
         self._requirements_checked: Dict[str, List[str]] = {}
@@ -240,12 +242,30 @@ class _Diagnosis:
             self.add(CONFIG, "is an MCP tool, but MCP is off for this agent: its server will not start",
                      agent=agent_key, tool=tool_name,
                      hint="Set settings.mcp_enabled: true or mcp_enabled: true on the agent")
+        if tool.tool_package:
+            self._check_tool_package(agent_key, tool_name, tool.tool_package)
+            return
         command = (tool.server_command or [None])[0]
         # Isolated, the server starts inside the agent's container (docker exec),
         # so the host's PATH says nothing about it; the image carries its tools.
         if command and not self.isolated and shutil.which(command) is None:
             self.add(ENVIRONMENT, f"MCP server needs '{command}' on PATH", agent=agent_key, tool=tool_name,
                      hint=(tool.prompt_addition and _install_hint(tool.prompt_addition)) or f"Install {command}")
+
+    def _check_tool_package(self, agent_key: str, tool_name: str, relative: str) -> None:
+        """Read the package, never run it (core.tool_packages): its problems are the config's."""
+        from core.tool_packages import PackageError, analyze, package_dir
+
+        if tool_name in self._packages_checked:
+            return
+        self._packages_checked.add(tool_name)
+        try:
+            info = analyze(package_dir(self.config.config_path.parent, relative))
+        except PackageError as exc:
+            self.add(CONFIG, str(exc), tool=tool_name)
+            return
+        for issue in info.issues:
+            self.add(CONFIG, f"tool package: {issue}", tool=tool_name)
 
     def _check_function_tool(self, agent_key: str, tool_name: str) -> None:
         from tools.function_tools import tool_isolation

@@ -155,23 +155,9 @@ class ModelProvider:
         except Exception:
             use_responses = False
 
-        base_url_lower = (provider_config.base_url or "").lower()
-        provider_supports_responses = "api.openai.com" in base_url_lower
-        if use_responses and not provider_supports_responses:
-            warn_key = f"{model_config.provider}|{provider_config.base_url}|{model_config.name}|no_support"
-            if warn_key not in self._responses_warning_keys:
-                self._responses_warning_keys.add(warn_key)
-                logger.warning(
-                    "Responses API requested for provider without support",
-                    extra={
-                        "provider": model_config.provider,
-                        "base_url": provider_config.base_url,
-                        "model": model_config.name,
-                    },
-                )
-            use_responses = False
-
-        if use_responses and provider_supports_responses:
+        # An explicit use_responses_api is trusted for any provider: some
+        # (OpenCode Go muse-spark) serve a model only over /responses.
+        if use_responses:
             try:
                 from agents import OpenAIResponsesModel  # type: ignore
 

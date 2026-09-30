@@ -325,6 +325,7 @@ async function boot() {
       user: bootstrap.user ?? null,
       accounts: Boolean(bootstrap.accounts),
       personalAgents: Boolean(bootstrap.personal_agents),
+      systemsPage: Boolean(bootstrap.systems_page),
       voice: Boolean(bootstrap.voice),
       reviews: Boolean(bootstrap.reviews),
       uploads: bootstrap.uploads ?? { enabled: false, max_file_mb: 25, max_files: 10 },
@@ -334,13 +335,14 @@ async function boot() {
 
   // Who is signed in, on a server with accounts; the system configs are
   // shared by all users, so only admins get to open them.
-  store.subscribe(({ user, accounts, personalAgents: ownAgents, reviews }) => {
+  store.subscribe(({ user, accounts, personalAgents: ownAgents, reviews, systemsPage }) => {
     $("#account").hidden = !accounts;
     $("#account-name").textContent = user?.username ?? "";
     $("#open-settings").hidden = user?.role !== "admin";
     $("#open-admin").hidden = !accounts || user?.role !== "admin";
     $("#open-agents").hidden = !ownAgents;
     $("#open-reviews").hidden = !reviews || user?.role !== "admin";
+    $("#open-systems").hidden = !systemsPage;
     // The timeline is the operator's local tool (grid-timeline), not the site's.
     $("#open-timeline").hidden = accounts;
   });
@@ -354,8 +356,19 @@ async function boot() {
   });
 
   await reloadRuntime();
+  // "Open in chat" on the systems page: a new chat with that system pinned.
+  const params = new URLSearchParams(location.search);
+  const pinned = params.get("system");
   const [latest] = store.get().conversations;
-  if (latest) await chat.openConversation(latest.id);
+  if (pinned && store.get().systems.some((system) => system.key === pinned)) {
+    history.replaceState(null, "", "/");
+    store.set({ systemKey: pinned, agentKey: null });
+    await chat.startConversation();
+    // "Describe it to the builder": the request waits in the composer, to read and send.
+    if (params.get("prompt")) composer.setValue(params.get("prompt"));
+  } else if (latest) {
+    await chat.openConversation(latest.id);
+  }
 
   // The report button under answers shows only when the server takes reports.
   document.body.dataset.reviews = store.get().reviews ? "on" : "off";

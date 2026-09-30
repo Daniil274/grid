@@ -80,6 +80,9 @@ class ToolConfig(BaseModel):
     
     # For MCP tools
     server_command: Optional[List[str]] = None
+    #: A tool package (core.tool_packages) relative to this config: the server is
+    #: started from it where the agents' commands run, and server_command is not used.
+    tool_package: Optional[str] = None
     env_vars: Optional[Dict[str, str]] = None
     add_working_directory: Optional[bool] = None
     
@@ -238,6 +241,10 @@ class RoutedSystemConfig(BaseModel):
     config: str = Field(description="Path to the system's config.yaml, relative to this config file")
     requires: List[str] = Field(default_factory=list, description="External programs that must be on PATH, e.g. ffmpeg")
     description: str = Field(default="", description="What the system is for; the router picks by this text")
+    admins_only: bool = Field(
+        default=False,
+        description="Only admins of a web chat with accounts see it, pick it or get it from the router",
+    )
 
 
 class RoutingConfig(BaseModel):
@@ -257,6 +264,13 @@ class RoutingConfig(BaseModel):
     default_system: Optional[str] = Field(
         default=None,
         description="System used when the router fails. Defaults to the first listed system."
+    )
+    systems_dir: Optional[str] = Field(
+        default=None,
+        description=(
+            "Directory of systems created from the web chat (core.system_store), relative to this "
+            "config file. Its published systems are routed like the ones listed in systems."
+        ),
     )
 
 
@@ -282,6 +296,12 @@ class PersonalAgentsPolicy(BaseModel):
     )
     max_agents: int = Field(default=20, ge=1, le=200)
     max_instructions_chars: int = Field(default=8000, ge=100, le=100_000)
+    max_systems: int = Field(
+        default=5, ge=0, le=50, description="Systems of their own agents one user may build; 0 offers none"
+    )
+    max_system_members: int = Field(
+        default=6, ge=1, le=20, description="Agents one user system may hold"
+    )
 
 
 class UploadsPolicy(BaseModel):

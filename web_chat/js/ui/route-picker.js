@@ -30,9 +30,12 @@ const agentMeta = (agent) =>
     .filter(Boolean)
     .join(" · ");
 
+/** The space's own systems (web_chat/system_hub.py): an admin's drafts, the user's own. */
+const BADGES = { draft: "draft · admins only", mine: "yours" };
+
 const systemMeta = (system) => {
   const count = system.agents?.length ?? 0;
-  return `${count} agent${count === 1 ? "" : "s"}`;
+  return [BADGES[system.badge], `${count} agent${count === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
 };
 
 /** Tools that will fail and why, as the server's health check reported them. */

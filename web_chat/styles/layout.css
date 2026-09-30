@@ -242,6 +242,12 @@
 }
 
 .topbar {
+  /* backdrop-filter makes the bar a stacking context: its popovers can rise no
+     higher than the bar itself, so the bar sits above the transcript (whose
+     sticky and positioned rows would otherwise paint over the route popover)
+     and below the scrim and drawers. */
+  position: relative;
+  z-index: 15;
   display: flex;
   gap: 12px;
   align-items: center;

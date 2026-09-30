@@ -98,6 +98,7 @@ only-include = [
     "examples/video-editor",
     "examples/windows-computer-use",
     "examples/system-admin",
+    "examples/system-builder",
     "policies",
     "routing.yaml",
 ]

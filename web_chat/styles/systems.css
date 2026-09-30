@@ -1,0 +1,202 @@
+/** The systems page (/systems): the list, a system's tabs, the editors. */
+
+.systemsPage__spacer {
+  flex: 1;
+}
+
+.statusChip {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.statusChip[data-status="published"],
+.statusChip[data-status="active"],
+.statusChip[data-status="imported"] {
+  border-color: color-mix(in srgb, var(--ok, #3fb950) 60%, transparent);
+  color: var(--ok, #3fb950);
+}
+
+.statusChip[data-status="draft"],
+.statusChip[data-status="submitted"],
+.statusChip[data-status="pending"] {
+  border-color: color-mix(in srgb, var(--warn) 60%, transparent);
+  color: var(--warn);
+}
+
+.statusChip[data-status="archived"],
+.statusChip[data-status="declined"],
+.statusChip[data-status="withdrawn"] {
+  color: var(--text-3);
+}
+
+.systemActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.systemSection {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+}
+
+.systemSection h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.systemSection__hint {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.systemText {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.checkList {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.checkList[data-tone="error"] {
+  color: var(--danger);
+}
+
+.checkList[data-tone="warn"] {
+  color: var(--warn);
+}
+
+.checkOk {
+  margin: 0;
+  color: var(--ok, #3fb950);
+  font-size: 13px;
+}
+
+.statTiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.statTile {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.statTile__value {
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.statTile__label {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.systemTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.systemTable th,
+.systemTable td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.systemTable th {
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.systemTable td.is-hit {
+  color: var(--ok, #3fb950);
+}
+
+.systemTable td.is-miss {
+  color: var(--text-3);
+}
+
+.codeArea {
+  width: 100%;
+  min-height: 420px;
+  resize: vertical;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.memberCard {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.memberCard__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.systemStatus {
+  min-height: 1em;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.systemStatus[data-tone="error"] {
+  color: var(--danger);
+}
+
+.systemStatus[data-tone="ok"] {
+  color: var(--ok, #3fb950);
+}
+
+.systemStatus:empty {
+  display: none;
+}

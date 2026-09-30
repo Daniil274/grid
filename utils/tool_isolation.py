@@ -13,6 +13,10 @@ declares where each of its tools acts, in a module-level ``TOOL_ISOLATION``:
 - :data:`CONTAINER`: runs its commands in the run's container when there is one.
 - :data:`WORKSPACE`: runs in the server process, but only inside the run's
   workspace, on the public internet, or on nothing of the machine at all.
+- :data:`SYSTEMS`: runs in the server process on the web chat's created
+  systems only (core.system_store) - the system builder's tools. The tools
+  themselves use the store granted to the user: a private store for users,
+  the shared store for admins (web_chat.space).
 - anything else, and a tool that declares nothing: acts on the host machine -
   its desktop, its programs, the server's own files.
 
@@ -27,9 +31,10 @@ from typing import Optional
 
 CONTAINER = "container"
 WORKSPACE = "workspace"
+SYSTEMS = "systems"
 
 #: What an isolating space may give its agents.
-CONFINED = frozenset({CONTAINER, WORKSPACE})
+CONFINED = frozenset({CONTAINER, WORKSPACE, SYSTEMS})
 
 
 def is_confined(isolation: Optional[str]) -> bool:

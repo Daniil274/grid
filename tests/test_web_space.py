@@ -236,6 +236,9 @@ def _registry(*, agents: dict[str, str], hang: bool = False) -> SystemRegistry:
     registry._router = SimpleNamespace(router=SimpleNamespace(choose=choose))
     registry._factories = {}
     registry._base_key = "solo"
+    registry._extras_source = None
+    registry._extras = {}
+    registry._extra_configs = {}
     registry.choose = choose
     return registry
 

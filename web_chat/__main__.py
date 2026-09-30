@@ -147,11 +147,26 @@ def single_user_options(deployment, args: argparse.Namespace) -> dict:
     from web_chat.space import UserSpace
     from web_chat.spaces import SpacePool
 
+    from web_chat.system_activity import SystemActivity
+
     action_review_token = secrets.token_urlsafe(32)
     print(f"Working directory: {deployment.config.get_working_directory()}")
     print(f"Action review token: {action_review_token}")
+    records = Path(deployment.config.get_logs_directory())
+    activity = SystemActivity(records / "system_activity.json")
     return {
-        "spaces": SpacePool(lambda user_id: UserSpace(deployment, user_id=user_id)),
+        # The one user owns the server: they test the drafts.
+        "spaces": (
+            pool := SpacePool(
+                lambda user_id: UserSpace(
+                    deployment, user_id=user_id, activity=activity, admin=True,
+                    # What the system builder makes shows in every space once it is free.
+                    on_systems_changed=lambda: pool.invalidate(),
+                )
+            )
+        ),
+        "activity": activity,
+        "submissions_dir": records / "system_submissions",
         "identify": single_user(args.user_id),
         "action_review_token": action_review_token,
         "warm_user": args.user_id,
@@ -179,9 +194,12 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
                 "(the docker SDK is missing or the daemon does not answer). Start Docker, or pass "
                 "--trusted-users if every user may run commands on this machine."
             )
+    from web_chat.system_activity import SystemActivity
+
     data_dir = args.data_dir.expanduser().resolve()
     accounts = open_accounts(data_dir)
     users_dir = data_dir / "users"
+    activity = SystemActivity(data_dir / "systems" / "activity.json")
 
     def build(user_id: str) -> UserSpace:
         if not USER_ID.fullmatch(user_id):
@@ -192,17 +210,25 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
             layout=SpaceLayout.under(users_dir / user_id),
             require_isolation=not args.trusted_users,
             turn_counter=accounts,
+            activity=activity,
+            # Drafts, admins-only systems and the system builder are for admins;
+            # a role change applies when the space is next built.
+            admin=bool((user := accounts.user(user_id)) and user.is_admin),
+            on_systems_changed=lambda: pool.invalidate(),
         )
 
     print(f"Data: {data_dir}")
     if not accounts.has_users():
         print("No accounts yet. Create the first admin: grid-web-chat accounts create-admin --username NAME")
+    pool = SpacePool(build, idle_seconds=IDLE_SPACE_SECONDS)
     return {
-        "spaces": SpacePool(build, idle_seconds=IDLE_SPACE_SECONDS),
+        "spaces": pool,
         "auth": SessionAuth(accounts, secure_cookies=args.secure_cookies),
         "allowed_origins": tuple(args.allowed_origin),
         "warm_user": None,
         "reviews": open_reviews(deployment, data_dir / "reviews"),
+        "activity": activity,
+        "submissions_dir": data_dir / "systems" / "submissions",
     }
 
 

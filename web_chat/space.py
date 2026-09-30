@@ -9,7 +9,10 @@ space is what one user owns on top of them:
 - a factory per system, all sharing the space's conversations, so routing a
   follow-up to another system keeps the conversation intact,
 - the turns running in the space (web_chat.turns),
-- with a layout of its own, the user's personal agents (web_chat.personal_agents).
+- with a layout of its own, the user's personal agents (web_chat.personal_agents)
+  and the systems built from them (web_chat.user_systems),
+- for an admin, the created systems still in draft, to test them by hand
+  (core.system_store).
 
 Where the state lives is the space's :class:`SpaceLayout`. A server for one
 person keeps the layout it always had: conversations and sessions in the base
@@ -25,16 +28,19 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from core.agent_factory import AgentFactory
 from core.config import Config
 from core.context import ContextManager
 from core.managers.container_manager import ContainerManager
+from core.system_store import BuilderAccess, SystemStore
 from web_chat.deployment import Deployment, isolation_enabled
 from web_chat.limits import TurnCounter, TurnLimits
 from web_chat.personal_agents import PersonalAgentError, PersonalAgents, PersonalAgentStore
-from web_chat.systems import Resolution, SystemRegistry
+from web_chat.system_activity import SystemActivity
+from web_chat.systems import ExtraSystem, Resolution, SystemRegistry
+from web_chat.user_systems import UserSystemError, UserSystems, UserSystemStore
 from web_chat.turns import TurnBoard
 
 logger = logging.getLogger("grid.web_chat.space")
@@ -56,6 +62,8 @@ class SpaceLayout:
     personal_agents: Path
     #: The session logs of the user's turns.
     logs: Path
+    #: The user's own systems.
+    user_systems: Path
 
     @classmethod
     def under(cls, root: Path) -> "SpaceLayout":
@@ -66,6 +74,7 @@ class SpaceLayout:
             workspace=root / "workspace",
             personal_agents=root / "agents.json",
             logs=root / "logs",
+            user_systems=root / "systems.json",
         )
 
 
@@ -94,6 +103,9 @@ class UserSpace:
         layout: Optional[SpaceLayout] = None,
         require_isolation: bool = False,
         turn_counter: Optional[TurnCounter] = None,
+        activity: Optional[SystemActivity] = None,
+        admin: bool = False,
+        on_systems_changed: Optional[Callable[[], None]] = None,
     ) -> None:
         """``layout`` None keeps the single-user layout (see the module docs).
 
@@ -104,12 +116,22 @@ class UserSpace:
 
         ``turn_counter`` counts the user's turns per day; given one, the
         deployment's ``user_limits`` apply to the space (web_chat.limits).
+
+        ``activity`` counts the turns per system (web_chat.system_activity).
+        ``admin``: the space of an admin, or of the one user: it offers the
+        created systems in draft, to be picked by hand, the catalog's
+        ``admins_only`` systems, and access to the shared builder store.
+        Other users receive access to their private builder store.
+        ``on_systems_changed`` is called for shared changes so every space picks them up.
         """
         self.deployment = deployment
         self.user_id = user_id
         self.layout = layout
         self.require_isolation = require_isolation
         self.turns = TurnBoard()
+        self.activity = activity
+        self.admin = admin
+        self.on_systems_changed = on_systems_changed
         self.limits = (
             TurnLimits(user_id, lambda: deployment.user_limits, turn_counter) if turn_counter is not None else None
         )
@@ -125,6 +147,7 @@ class UserSpace:
         self.conversations_path: Path
         self.conversations: ContextManager
         self.personal_agents: Optional[PersonalAgents]
+        self.user_systems: Optional[UserSystems]
         self.registry: SystemRegistry
 
         self._build()
@@ -164,13 +187,28 @@ class UserSpace:
             if self.layout is not None
             else None
         )
+        self.user_systems = (
+            UserSystems(
+                UserSystemStore(self.layout.user_systems),
+                lambda: self.deployment.personal_agents_policy,
+                self.fresh_config,
+            )
+            if self.layout is not None
+            else None
+        )
+        self.built_systems = (
+            SystemStore(self.layout.user_systems.parent / "built_systems")
+            if self.layout is not None and not self.admin else None
+        )
         self.registry = SystemRegistry(
             base_config=config,
             catalog=self.deployment.catalog,
             build_factory=self._build_factory,
-            working_directory=str(self.workspace_path) if self.layout else self.deployment.working_directory,
+            working_directory=self._configs_workdir,
             customize=self.personal_agents.apply if self.personal_agents is not None else None,
             confined=self.require_isolation,
+            extras=self._extra_systems,
+            admin=self.admin,
         )
         self._prepared.clear()
 
@@ -182,6 +220,71 @@ class UserSpace:
             self.workspace_path,
             ", ".join(self.registry.keys()),
         )
+
+    @property
+    def _configs_workdir(self) -> Optional[str]:
+        """The working directory the space's system configs are loaded with."""
+        return str(self.workspace_path) if self.layout else self.deployment.working_directory
+
+    def fresh_config(self, system_key: str) -> Config:
+        """A new load of a system's config as its file says, for this space."""
+        return Config(str(self.deployment.system_config_path(system_key)), self._configs_workdir)
+
+    def _extra_systems(self) -> List[ExtraSystem]:
+        """The systems of this space beside the catalog's (SystemRegistry.refresh_extras)."""
+        extras: List[ExtraSystem] = []
+        store = self.deployment.created_store
+        if self.admin and store is not None:
+            for manifest in store.list():
+                if manifest.status != "draft":
+                    continue
+                path = store.config_path(manifest.key)
+                extras.append(
+                    ExtraSystem(
+                        key=manifest.key,
+                        name=manifest.name,
+                        description=manifest.description,
+                        config_path=path,
+                        load=lambda path=path: Config(str(path), self._configs_workdir),
+                        routable=False,
+                        badge="draft",
+                        requires=tuple(manifest.requires),
+                    )
+                )
+        if self.user_systems is not None and self.user_systems.enabled:
+            for system in self.user_systems.list():
+                try:
+                    path = self.deployment.system_config_path(system.base)
+                except KeyError:
+                    logger.error("User system %s is built on '%s', which is gone; left out", system.key, system.base)
+                    continue
+                extras.append(
+                    ExtraSystem(
+                        key=system.key,
+                        name=system.name,
+                        description=system.description,
+                        config_path=path,
+                        load=lambda key=system.key: self.user_systems.build(key),
+                        routable=system.active,
+                        badge="mine",
+                    )
+                )
+        if self.built_systems is not None:
+            access = self._builder_access()
+            for manifest in self.built_systems.list():
+                if manifest.status == "archived":
+                    continue
+                extras.append(ExtraSystem(
+                    key=access.system_key(manifest.key),
+                    name=manifest.name,
+                    description=manifest.description,
+                    config_path=self.built_systems.config_path(manifest.key),
+                    load=lambda key=manifest.key, access=access: access.load(key, str(self.workspace_path)),
+                    routable=manifest.status == "published",
+                    badge="mine",
+                    requires=tuple(manifest.requires),
+                ))
+        return extras
 
     def _workspace_config(self) -> Config:
         """The base config bound to this space's workspace.
@@ -215,8 +318,11 @@ class UserSpace:
         return None
 
     def _build_factory(self, config: Config) -> AgentFactory:
-        """One factory per system; history is shared so conversations survive routing."""
-        return AgentFactory(
+        """One factory per system; history is shared so conversations survive routing.
+
+        Every factory carries access to the store this user may build in.
+        """
+        factory = AgentFactory(
             config=config,
             working_directory=config.get_working_directory(),
             context_manager=self.conversations,
@@ -226,6 +332,38 @@ class UserSpace:
             logs_directory=str(self.layout.logs) if self.layout else None,
             confine_tools=self.require_isolation,
         )
+        factory.system_builder = self._builder_access()
+        return factory
+
+    def _builder_access(self) -> Optional[BuilderAccess]:
+        store = self.deployment.created_store if self.admin else self.built_systems
+        if store is None:
+            return None
+        activity = self.activity
+
+        def record(key: str, event: str, note: str) -> None:
+            if activity is not None:
+                activity.record_event(access.system_key(key), event, by=self.user_id, note=note)
+
+        def changed() -> None:
+            if self.admin and self.on_systems_changed is not None:
+                self.on_systems_changed()
+            elif not self.admin:
+                self.registry.refresh_extras()
+
+        access = BuilderAccess(
+            store=store,
+            catalog=self.deployment.catalog,
+            base_config=self.deployment.config,
+            user_id=self.user_id,
+            image=self.config.config.isolation.image,
+            record=record,
+            changed=changed,
+            shared=self.admin,
+            max_systems=None if self.admin else self.deployment.personal_agents_policy.max_systems,
+            count_other=lambda: len(self.user_systems.list()) if self.user_systems is not None else 0,
+        )
+        return access
 
     @property
     def agent_sessions_path(self) -> Path:
@@ -318,6 +456,22 @@ class UserSpace:
                     factories[system].forget_agent(key)
                 self._prepared.discard((system, key))
         return result
+
+    # -- user systems --------------------------------------------------------
+    def change_user_systems(self, edit: Callable[[UserSystems], T]) -> T:
+        """Apply *edit* to the user's systems; the next turn runs them as they are now."""
+        if self.user_systems is None:
+            raise UserSystemError("Systems of your own need a server with accounts.")
+        result = edit(self.user_systems)
+        self.refresh_extras()
+        return result
+
+    def refresh_extras(self) -> None:
+        """The space's own systems changed: the registry asks again, built agents go."""
+        before = {system.key for system in self.registry.systems() if system.badge}
+        self.registry.refresh_extras()
+        after = {system.key for system in self.registry.systems() if system.badge}
+        self._prepared = {(system, agent) for system, agent in self._prepared if system not in before | after}
 
     # -- action reviews ----------------------------------------------------
     def pending_action_reviews(self) -> list[dict[str, Any]]:

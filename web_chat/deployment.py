@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from core.config import Config
+from core.system_store import SystemStore
 from schemas.schemas import PersonalAgentsPolicy, ReviewPolicy, UploadsPolicy, UserLimitsPolicy
 
 logger = logging.getLogger("grid.web_chat.deployment")
@@ -203,6 +204,24 @@ class Deployment:
             path = Path(system.config)
             paths[key] = (path if path.is_absolute() else base / path).resolve()
         return paths
+
+    # -- systems created from the web chat (core.system_store) --------------------
+    @property
+    def created_store(self) -> Optional[SystemStore]:
+        """The catalog's ``routing.systems_dir``, or None when it names none."""
+        from core.system_store import store_for_catalog
+
+        return store_for_catalog(self.catalog) if self.catalog is not None else None
+
+    def system_config_path(self, key: str) -> Path:
+        """The config file of a catalog system or of a created one."""
+        paths = self._system_paths()
+        if key in paths:
+            return paths[key]
+        store = self.created_store
+        if store is not None and store.exists(key):
+            return store.config_path(key).resolve()
+        raise KeyError(f"No system '{key}'")
 
     def config_file(self, target: Optional[str] = None) -> ConfigFile:
         """The file *target* names; None is the default system's, the base config."""

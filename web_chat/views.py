@@ -141,6 +141,8 @@ def system_options(
                 "key": system.key,
                 "name": system.name,
                 "description": system.description,
+                # "draft": an admin's untested created system; "mine": the user's own.
+                "badge": system.badge,
                 "config_path": str(system.config_path) if reveal_paths else "",
                 "default_agent": default_agent,
                 "agents": agents,

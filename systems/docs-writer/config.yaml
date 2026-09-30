@@ -1,0 +1,117 @@
+settings:
+  default_agent: writer
+  working_directory: ./workspace
+  allow_path_override: true
+  max_turns: 100
+  mcp_enabled: true
+  max_tool_output_tokens: 12000
+  project_tools:
+    enabled: true
+    tools_directory: ../../examples/coder/tools
+providers:
+  opencode:
+    name: opencode
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: OPENCODE_API_KEY
+    timeout: 300
+    max_retries: 3
+models:
+  glm-flash:
+    name: glm-5.3-flash
+    provider: opencode
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    streaming_enabled: true
+    preserve_reasoning_content: true
+    reasoning:
+      effort: medium
+  deepseek-flash-latest:
+    name: deepseek-v4.1-flash
+    provider: opencode
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    streaming_enabled: true
+    preserve_reasoning_content: true
+    reasoning:
+      effort: low
+tools:
+  file_read:
+    type: function
+    description: Reads file content.
+  file_write:
+    type: function
+    description: Create or overwrite a file.
+  file_edit_patch:
+    type: function
+    description: Apply a unified diff to a file.
+  file_replace:
+    type: function
+    description: Replace one exact fragment of a file with new text.
+  file_append:
+    type: function
+    description: Append content to a file.
+  file_list:
+    type: function
+    description: List files in a directory.
+  file_search:
+    type: function
+    description: Find files by name regex.
+  file_content_search:
+    type: function
+    description: Find lines containing text.
+  file_delete:
+    type: function
+    description: Delete one file of the working directory.
+  bash_tool:
+    type: function
+    description: Runs shell commands in the working directory.
+    prompt_addition: |
+      `bash_tool(command, working_dir=".", timeout=60, description="")`
+      Только для настоящих shell-операций (проверка наличия программ, сборка, конвертация внешними утилитами). Чтение/запись файлов — профильными инструментами.
+  doc_stats:
+    type: mcp
+    tool_package: tools/doc_tools
+    description: Lightweight documentation analysis in the workspace (stdlib only)
+agents:
+  writer:
+    name: Docs writer
+    model: [glm-flash, deepseek-flash-latest]
+    mcp_enabled: true
+    tools:
+      - file_read
+      - file_write
+      - file_edit_patch
+      - file_replace
+      - file_append
+      - file_list
+      - file_search
+      - file_content_search
+      - file_delete
+      - bash_tool
+      - doc_stats
+    description: >-
+      Documentation work in the user's workspace: writing and editing technical
+      docs (README, guides, API references, changelogs), style and structure
+      review, format conversion of text documents (Markdown/HTML/plain text)
+      without heavy dependencies, doc statistics, TOC and broken-link checks,
+      glossaries and consistency fixes. Runs on text formats in the working
+      folder. Not for: coding projects or code changes in a repository
+      (use engineering system), internet research, image or notebook work.
+    custom_prompt: |
+      Ты — технический писатель системы Grid. Работаешь с документацией в рабочей папке пользователя.
+
+      Задачи: написание и правка документации (README, гайды, API-справки, changelog, справочники),
+      структурная и стилистическая правка, приведение к единому стилю и терминологии,
+      конвертация текстовых форматов (Markdown ↔ HTML ↔ plain text) лёгкими средствами,
+      анализ документов (объём, читаемость, заголовки, оглавление, битые относительные ссылки).
+
+      Правила:
+      - Читай файл перед правкой; правь точечно (file_replace / file_edit_patch), а не переписыванием всего.
+      - Markdown пиши по распространённому стилю: заголовки по порядку без пропусков уровней, одна H1 на документ.
+      - Перед конвертацией объёмных файлов используй doc_stats, чтобы оценить объём; создавай новый файл рядом, не затирая исходник, если пользователь не просил замену.
+      - bash_tool — только когда профильный инструментария не хватает (например, pandoc/libreoffice, если установлены; заранее проверь наличие командой `command -v`).
+      - Не используй тяжёлые зависимости; не устанавливай пакеты без нужды.
+      - В конце кратко отчёт: что сделано, какие файлы созданы/изменены, что не проверено.
+      - Отвечай на языке пользователя.

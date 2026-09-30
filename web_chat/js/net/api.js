@@ -97,4 +97,30 @@ export const api = {
   createAgent: (spec) => request("/api/agents", json("POST", spec)),
   updateAgent: (key, spec) => request(`/api/agents/${encodeURIComponent(key)}`, json("PUT", spec)),
   deleteAgent: (key) => request(`/api/agents/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  /** The systems page (web_chat/system_hub.py). */
+  systems: () => request("/api/systems"),
+  system: (kind, key) => request(`/api/systems/${encodeURIComponent(kind)}/${encodeURIComponent(key)}`),
+  saveSystemAcceptance: (kind, key, yaml) => request(`/api/systems/${encodeURIComponent(kind)}/${encodeURIComponent(key)}/acceptance`, json("PUT", { yaml })),
+  probeSystem: (kind, key, messages) => request("/api/systems/probe", json("POST", { kind, key, messages })),
+  createSystem: (body) => request("/api/systems/created", json("POST", body)),
+  describeSystem: (key, patch) => request(`/api/systems/created/${encodeURIComponent(key)}`, json("PATCH", patch)),
+  saveSystemConfig: (key, yaml) => request(`/api/systems/created/${encodeURIComponent(key)}/config`, json("PUT", { yaml })),
+  setSystemStatus: (key, status) =>
+    request(`/api/systems/created/${encodeURIComponent(key)}/status`, json("POST", { status })),
+  deleteSystem: (key) => request(`/api/systems/created/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  describeBuiltSystem: (key, patch) => request(`/api/systems/built/${encodeURIComponent(key)}`, json("PATCH", patch)),
+  saveBuiltSystemConfig: (key, yaml) => request(`/api/systems/built/${encodeURIComponent(key)}/config`, json("PUT", { yaml })),
+  activateBuiltSystem: (key, active) => request(`/api/systems/built/${encodeURIComponent(key)}/active`, json("POST", { active })),
+  deleteBuiltSystem: (key) => request(`/api/systems/built/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  createMySystem: (spec) => request("/api/systems/mine", json("POST", spec)),
+  updateMySystem: (key, spec) => request(`/api/systems/mine/${encodeURIComponent(key)}`, json("PUT", spec)),
+  deleteMySystem: (key) => request(`/api/systems/mine/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  activateMySystem: (key, active) =>
+    request(`/api/systems/mine/${encodeURIComponent(key)}/active`, json("POST", { active })),
+  submitMySystem: (key, note) => request(`/api/systems/mine/${encodeURIComponent(key)}/submit`, json("POST", { note })),
+  withdrawMySystem: (key) => request(`/api/systems/mine/${encodeURIComponent(key)}/submit`, { method: "DELETE" }),
+  importSubmission: (id, key, name) =>
+    request(`/api/systems/submissions/${encodeURIComponent(id)}/import`, json("POST", { key, name: name || null })),
+  declineSubmission: (id, note) =>
+    request(`/api/systems/submissions/${encodeURIComponent(id)}/decline`, json("POST", { note })),
 };

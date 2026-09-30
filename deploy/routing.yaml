@@ -70,6 +70,9 @@ routing:
   model: router
   api: decisions
   default_system: engineering
+  # Systems created from the web chat's systems page (core/system_store.py):
+  # the published ones are routed next to the ones listed below.
+  systems_dir: ../systems
   systems:
     engineering:
       config: ../examples/coder/config.yaml
@@ -86,6 +89,28 @@ routing:
         subsystem, a big feature or a migration across many files, where the work
         is split into tracked tasks for researcher, executor and verifier agents.
         Not for quick fixes or single-file changes.
+    builder:
+      config: ../examples/system-builder/config.yaml
+      # Each user builds in their own store; admins curate the shared store.
+      admins_only: false
+      description: >-
+        Creating a new Grid system for this server, or changing a draft of one:
+        design its agents, write its config, prompts and skills, write new tools
+        for it with tests, and leave it as a draft for its owner to try and activate. Only for
+        making systems, never for using them.
+
+# What users of a server with accounts may build (web_chat/personal_agents.py,
+# web_chat/user_systems.py): agents of their own, and systems of several of them
+# handing work to each other - each agent derived from a template listed here,
+# with the template's tools or fewer. The systems page (/systems) is where users
+# build systems and offer them to the admins.
+personal_agents:
+  enabled: true
+  templates:
+    engineering: [engineer, general_purpose, web_spider]
+  max_agents: 20
+  max_systems: 5
+  max_system_members: 6
 
 # Voice in the web chat. Routing across systems, the chat reads this section
 # from the catalog, not from a system's config. decision_model tells a finished

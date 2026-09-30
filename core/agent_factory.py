@@ -132,6 +132,9 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
         self.container_id = container_id
         self._logs_directory = Path(logs_directory) if logs_directory else None
         self.confine_tools = confine_tools
+        # core.system_store.BuilderAccess, set by an admin's web chat space: the
+        # system builder's tools act only with it (tools/system_builder_tools.py).
+        self.system_builder = None
         if working_directory:
             self.config.set_working_directory(working_directory)
 

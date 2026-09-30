@@ -107,7 +107,15 @@ class McpServers:
             logger.debug("Reusing cached MCP server: %s", cache_key)
             return self._servers[cache_key]
 
-        server_command = tool_config.server_command or []
+        package = getattr(tool_config, "tool_package", None)
+        if package:
+            # A tool package (core.tool_packages): deployed where the tools run
+            # - into the container, or a host cache without one - and served there.
+            server_command, package_env = await self._package_command(tool_name, package)
+            if not server_command:
+                return None
+        else:
+            server_command, package_env = tool_config.server_command or [], {}
         if not server_command:
             logger.error(f"MCP tool '{tool_name}' has no server_command configured")
             return None
@@ -118,7 +126,7 @@ class McpServers:
         if command.lower() in ("npx", "npx.cmd") and "-y" not in args:
             args.insert(0, "-y")
 
-        env = dict(tool_config.env_vars or {})
+        env = {**package_env, **dict(tool_config.env_vars or {})}
 
         # Add working directory to args if configured (CRITICAL FIX for filesystem MCP)
         if getattr(tool_config, "add_working_directory", False):
@@ -207,6 +215,24 @@ class McpServers:
         logger.info(f"MCP server connected successfully: {tool_name}")
         self._servers[cache_key] = server
         return server
+
+    async def _package_command(self, tool_name: str, relative: str) -> Tuple[List[str], Dict[str, str]]:
+        """The command and environment of a tool package's server; empty when it cannot run."""
+        from pathlib import Path
+
+        from core.tool_packages import PackageError, ensure_in_container, ensure_on_host, package_dir
+
+        try:
+            package = package_dir(Path(self.config.config_path).parent, relative)
+            deployment = (
+                await ensure_in_container(self.container_id, package)
+                if self.container_id
+                else await ensure_on_host(package)
+            )
+        except PackageError as exc:
+            logger.error("Tool package of MCP tool '%s' cannot run: %s", tool_name, exc)
+            return [], {}
+        return deployment.command("serve"), deployment.env()
 
     async def _start(self, server: Any) -> Tuple["asyncio.Task[None]", asyncio.Event]:
         """Connect *server* in a task of its own; it stays open until the

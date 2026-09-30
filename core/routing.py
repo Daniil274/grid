@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 import httpx
 
@@ -20,6 +20,9 @@ from core.config.config import Config
 from core.managers.model_manager import ModelManager
 from core.managers.project_tools_loader import get_project_loader, set_project_loader
 from core.tool_check import CONFIG, ToolIssue, diagnose
+
+if TYPE_CHECKING:
+    from core.system_store import SystemStore
 
 logger = logging.getLogger("grid.routing")
 
@@ -179,6 +182,9 @@ class AutoRouter:
         self.working_directory = working_directory
         self._configs: Dict[str, Config] = {}
         self._last: Optional[Route] = None
+        # Read once: a router lives as long as the configs it was built from,
+        # and publishing a system rebuilds the web chat's routers.
+        self._created = {manifest.key: manifest for manifest in self._created_store_published()}
 
     @classmethod
     def from_config(
@@ -205,12 +211,28 @@ class AutoRouter:
             router = Router(client, model_name)
         return cls(root_config, router, working_directory=working_directory)
 
+    def created_store(self) -> Optional["SystemStore"]:
+        """The systems created from the web chat, when the catalog names their directory."""
+        from core.system_store import store_for_catalog
+
+        return store_for_catalog(self.root_config)
+
+    def _created_store_published(self) -> list:
+        store = self.created_store()
+        if store is None:
+            return []
+        listed = self.root_config.config.routing.systems
+        # The catalog's own systems win: a created one never shadows them.
+        return [manifest for manifest in store.published() if manifest.key not in listed]
+
     def systems(self) -> Dict[str, str]:
-        """Candidate systems as name -> description."""
+        """Candidate systems as name -> description: the catalog's, then the published created ones."""
         routing = self.root_config.config.routing
-        if not routing.systems:
+        if not routing.systems and not self._created:
             return {DEFAULT_SYSTEM: ""}
-        return {name: system.description for name, system in routing.systems.items()}
+        systems = {name: system.description for name, system in routing.systems.items()}
+        systems.update({key: manifest.description for key, manifest in self._created.items()})
+        return systems
 
     def default_system(self) -> str:
         """System used at startup and when routing to another one fails."""
@@ -221,8 +243,10 @@ class AutoRouter:
     def system_config_path(self, name: str) -> Path:
         """Resolved path of the config file of system *name*."""
         routing = self.root_config.config.routing
-        if name == DEFAULT_SYSTEM and not routing.systems:
+        if name == DEFAULT_SYSTEM and not routing.systems and not self._created:
             return self.root_config.config_path.resolve()
+        if name in self._created and name not in routing.systems:
+            return self.created_store().config_path(name).resolve()
         path = Path(routing.systems[name].config)
         if not path.is_absolute():
             path = self.root_config.config_path.resolve().parent / path
@@ -268,9 +292,16 @@ class AutoRouter:
             set_project_loader(previous_loader)
         return problems
 
+    def system_name(self, name: str) -> Optional[str]:
+        """The name a created system was given; None for a catalog system, named by its key."""
+        manifest = self._created.get(name)
+        return manifest.name if manifest is not None else None
+
     def system_requires(self, name: str) -> List[str]:
         """Programs routing.yaml says system *name* needs on PATH."""
         system = self.root_config.config.routing.systems.get(name)
+        if system is None and name in self._created:
+            return list(self._created[name].requires)
         return list(system.requires) if system else []
 
     @staticmethod

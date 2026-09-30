@@ -94,6 +94,13 @@ class WebStreamObserver:
         # The ``agent`` step this observer's steps nest under; None at the top.
         self._parent_id: Optional[str] = None
         self._block: Optional[Step] = None
+        # Calls the policy held in this turn, sub-agents included: one counter,
+        # shared by the nested views (web_chat.system_activity).
+        self._held = [0]
+
+    @property
+    def policy_blocks(self) -> int:
+        return self._held[0]
 
     def nested(
         self, agent_label: str, call_id: Optional[str] = None
@@ -114,6 +121,7 @@ class WebStreamObserver:
         child._pending_by_call = self._pending_by_call
         child._pending_policies = self._pending_policies
         child._tool_names = self._tool_names
+        child._held = self._held
         block = self._calls_by_id.get(call_id) if call_id else None
         if block is None and call_id is None:
             # Without an id, adopt the caller's call only when it is unambiguous.
@@ -169,6 +177,8 @@ class WebStreamObserver:
             return
         mode = str(event.get("mode") or "")
         shadow = mode == "shadow"
+        if decision != "allow" and not shadow:
+            self._held[0] += 1
         tone = {
             "allow": "positive",
             "review": "warning",

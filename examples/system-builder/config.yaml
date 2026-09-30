@@ -1,0 +1,205 @@
+# System builder: the web chat's system for creating systems.
+#
+# It writes new Grid systems from a description - config, prompts, skills and
+# tool packages - as drafts in the catalog's systems_dir (core/system_store.py),
+# checks them and tests their tools in a throwaway container. It never
+# publishes: an admin reads, tries and publishes a draft on the systems page
+# (/systems). Each user receives only their permitted system store.
+
+settings:
+  default_agent: builder
+  max_history: 100
+  max_turns: 200
+  agent_timeout: 1800
+  mcp_enabled: true
+  max_tool_output_tokens: 16000
+  working_directory: .
+  allow_path_override: true
+  agent_logging:
+    enabled: true
+    level: full
+    save_prompts: true
+    save_conversations: true
+    save_executions: true
+
+  debug: true
+isolation:
+  enabled: true
+
+# 40k windows: compaction as in engineering. Only reads are compacted: the
+# builder's writes answer with the health it acts on next.
+compact:
+  enabled: true
+  summary_max_output_tokens: 4000
+  auto:
+    enabled: true
+    max_output_tokens_for_summary: 4000
+    buffer_tokens: 10000
+    max_consecutive_failures: 3
+  micro:
+    enabled: true
+    preserve_last_n: 4
+    compactable_tools:
+      - builder_catalog
+      - builder_tool_set
+      - builder_read
+      - builder_check
+
+providers:
+  opencode:
+    name: opencode
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: OPENCODE_API_KEY
+    default_headers:
+      User-Agent: grid-agent-system/1.0
+      x-opencode-session: grid-coder
+    timeout: 300
+    max_retries: 3
+
+# Flash models only, the ones engineering runs on.
+  openrouter:
+    name: openrouter
+    base_url: 'https://openrouter.ai/api/v1'
+    api_key_env: OPENROUTER_API_KEY
+    timeout: 300
+    max_retries: 2
+models:
+  glm-flash:
+    name: glm-5.3-flash
+    provider: opencode
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: GLM 5.3 Flash via OpenCode Go
+    streaming_enabled: true
+    preserve_reasoning_content: true
+    reasoning:
+      effort: medium
+  deepseek-flash-latest:
+    name: deepseek-v4.1-flash
+    provider: opencode
+    temperature: 0.2
+    max_tokens: 8192
+    context_window: 40000
+    description: DeepSeek V4.1 Flash via OpenCode Go
+    streaming_enabled: true
+    preserve_reasoning_content: true
+    reasoning:
+      effort: low
+
+  claude-sonnet-5.5:
+    name: anthropic/claude-sonnet-5.5
+    provider: openrouter
+    temperature: 0.2
+    # Thinking shares max_tokens with the answer; at 8192 a long design step
+    # used all of it on reasoning and the turn ended empty (ctx-4d78668a).
+    # effort: medium leaves about half of the budget for text and tool calls.
+    max_tokens: 32000
+    context_window: 80000
+    reasoning:
+      effort: medium
+  muse-spark-1.3-contributor:
+    name: muse-spark-1.3-contributor
+    provider: opencode
+    temperature: 0.5
+    max_tokens: 32000
+    context_window: 128000
+    preserve_reasoning_content: false
+    use_responses_api: true
+    request_timeout: 300
+tools:
+  builder_compare:
+    type: function
+    description: Compare current reports on identical scenarios without hiding regressions.
+  builder_evaluate:
+    type: function
+    description: Run revision-bound acceptance scenarios in disposable sandboxes.
+  builder_fork:
+    type: function
+    description: Copy an existing system into a new draft for safe changes.
+  builder_catalog:
+    type: function
+    description: What a new system can be made of - systems, models, ready tools.
+  builder_tool_set:
+    type: function
+    description: The tools of one ready tool set and where each acts.
+  builder_read:
+    type: function
+    description: Read a file of a catalog or created system.
+  builder_check:
+    type: function
+    description: Check a created system as the router does.
+  builder_create:
+    type: function
+    description: Create a new draft system from a config written from scratch.
+  builder_write:
+    type: function
+    description: Write a file of a draft - config, skill, tool package, README.
+  builder_delete:
+    type: function
+    description: Delete a file of a draft.
+  builder_describe:
+    type: function
+    description: Change a draft's name, router description or required programs.
+  builder_test_tools:
+    type: function
+    description: Run a tool package's tests in a throwaway container.
+
+agents:
+  builder:
+    name: System builder
+    model: muse-spark-1.3-contributor
+    description: >-
+      Creates new Grid systems for this server from a description of what they
+      should do: designs their agents, writes their configs, prompts and skills,
+      writes new tools for them as tested tool packages, and leaves them as drafts
+      for their owner to try and activate. Also changes drafts. Not for using a
+      system, only for making or changing one.
+    tools:
+      - builder_compare
+      - builder_evaluate
+      - builder_fork
+      - builder_catalog
+      - builder_tool_set
+      - builder_read
+      - builder_check
+      - builder_create
+      - builder_write
+      - builder_delete
+      - builder_describe
+      - builder_test_tools
+    system_skills: [building, quality]
+    custom_prompt: |
+      Ты — конструктор систем Grid на этом сервере. По описанию пользователя ты
+      создаёшь новую систему: проектируешь её агентов, пишешь её config.yaml с нуля,
+      промпты и навыки, а когда готовых инструментов не хватает — пишешь новые
+      инструменты как пакеты инструментов с тестами. Результат — черновик, который
+      владелец проверит на странице Systems. builder_catalog.shared показывает,
+      создаёшь ли ты общую систему администратора или личную систему пользователя.
+      Личную систему видит только владелец, который может включить её для своего
+      роутера. Общую систему публикует администратор. Сам статус не меняй.
+
+      Порядок работы описан в навыке building. Главное:
+      - начни с builder_catalog и прочитай близкую систему из каталога как образец;
+      - если shared: false, соблюдай private_rules из каталога; новые инструменты
+        делай только пакетами MCP, не через импорт project_tools на сервере;
+      - если задача неясна настолько, что от ответа зависит устройство системы,
+        спроси одним сообщением и дождись ответа; мелочи решай сам и назови решения;
+      - каждый новый инструмент — с тестами, и builder_test_tools должен пройти;
+      - до сборки определи результат, критерии приёмки, ограничения и поведение
+        при сбоях; запиши контракт quality.yaml по навыку quality;
+      - для изменения активной системы используй builder_fork;
+      - после конфигурационных проверок запусти builder_evaluate; проваленные
+        сценарии исправляй по причине, не ослабляй их ожидаемый результат;
+      - максимум три цикла исправления и повторной оценки; при недоступной
+        среде или исчерпанном бюджете оставь черновик и честно назови блокер;
+      - готовность означает healthy: true и quality.ready: true в builder_check;
+        это проверка сценариев разработки, не гарантия качества любых запросов;
+      - в конце кратко перечисли: ключ черновика, агентов, инструменты (готовые и
+        новые), результаты проверки и тестов, чего не хватает машине, и что
+        владельцу сделать дальше (открыть /systems, попробовать, включить для
+        своего роутера; общую систему администратор может опубликовать).
+
+      Пиши по-русски, если пользователь пишет по-русски.
+    mcp_enabled: true
+    parallel_tool_calls: true

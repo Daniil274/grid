@@ -20,6 +20,9 @@ def test_server_catalog_is_the_main_one_without_host_only_systems():
 
     main_systems = main["routing"].pop("systems")
     server_systems = server["routing"].pop("systems")
+    # Relative to each file; test_server_catalog_paths_resolve_like_the_main_ones compares them.
+    main["routing"].pop("systems_dir")
+    server["routing"].pop("systems_dir")
     main["settings"]["action_policy"].pop("policy_file")
     server["settings"]["action_policy"].pop("policy_file")
     assert server == main
@@ -34,6 +37,7 @@ def test_server_catalog_paths_resolve_like_the_main_ones():
 
     for name in server.systems():
         assert server.system_config_path(name) == main.system_config_path(name)
+    assert server.created_store().root == main.created_store().root == ROOT / "systems"
 
     def policy(config):
         loaded = config.root_config.config.settings.action_policy

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
+  <title>Grid Systems</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles/tokens.css">
+  <link rel="stylesheet" href="/static/styles/base.css">
+  <link rel="stylesheet" href="/static/styles/settings.css">
+  <link rel="stylesheet" href="/static/styles/review.css">
+  <link rel="stylesheet" href="/static/styles/systems.css">
+</head>
+<body class="reviewPage systemsPage">
+  <header class="reviewPage__bar">
+    <a class="btn btn--ghost" href="/">Back to chat</a>
+    <h1 class="reviewPage__title">Systems</h1>
+    <span class="reviewPage__hint" id="hint">New systems: test them, follow them, publish them.</span>
+    <span class="systemsPage__spacer"></span>
+    <button class="btn btn--primary" id="new-system" type="button" hidden>New system</button>
+  </header>
+
+  <div class="reviewPage__body">
+    <aside class="reviewList" aria-label="Systems">
+      <div class="reviewList__filters" id="filters" role="tablist" aria-label="Show"></div>
+      <div class="reviewList__items" id="system-list"></div>
+    </aside>
+
+    <main class="reviewCase" id="detail" aria-live="polite">
+      <p class="reviewCase__empty">Choose a system on the left, or make a new one.</p>
+    </main>
+  </div>
+
+  <script type="module" src="/static/js/systems/page.js"></script>
+</body>
+</html>

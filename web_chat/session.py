@@ -83,6 +83,7 @@ class AgentTurn:
         self._edit_of = edit_of
         self._requested = (system_key, agent_key)
         self._factory: Any = None  # set once the turn knows where it runs
+        self._resolution: Optional[Resolution] = None
         self._stop_requested = False
         #: How the turn ended: "answered", "interrupted", "error" or "stopped".
         self.outcome: Optional[str] = None
@@ -210,6 +211,7 @@ class AgentTurn:
             with suppress(WebSocketDisconnect, RuntimeError, OSError):
                 if await self._announce_interruption() and self.outcome != "stopped":
                     self.outcome = "interrupted"
+            self._record_activity()
             # Release before "done": the client may submit its next turn at once.
             self._session.release()
             with suppress(WebSocketDisconnect, RuntimeError, OSError):
@@ -223,7 +225,7 @@ class AgentTurn:
     async def _produce(self) -> None:
         space = self._session.space
         try:
-            resolution = await self._resolve()
+            resolution = self._resolution = await self._resolve()
             label = self._session.agent_label(resolution.system, resolution.agent)
             self._observer.agent_label = label
             self._warn_about_tools(resolution, label)
@@ -414,6 +416,24 @@ class AgentTurn:
                 self._subscribers.discard(session)
 
     # -- persistence -------------------------------------------------------
+    def _record_activity(self) -> None:
+        """Count the turn for the system that ran it (web_chat.system_activity)."""
+        space, resolution = self._session.space, self._resolution
+        activity = getattr(space, "activity", None)
+        if activity is None or resolution is None:
+            return
+        try:
+            activity.record_turn(
+                resolution.system,
+                agent=resolution.agent,
+                outcome=self.outcome or "error",
+                duration_ms=self._recorder.elapsed_ms,
+                user_id=space.user_id,
+                policy_blocks=self._observer.policy_blocks,
+            )
+        except Exception:
+            logger.exception("Recording the turn's activity failed")
+
     def _persist_trace(self) -> None:
         # Only onto this turn's answer: a stopped turn stored none, and the other
         # assistant entries are sub-agent reports, which are not answers.

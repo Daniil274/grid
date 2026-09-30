@@ -1,0 +1,148 @@
+version: 1
+goal: Операции с документацией в рабочей папке - правка, проверка, анализ и конвертация форматов, включая бинарные (doc, docx, pdf) через терминал
+result: Изменённые или новые файлы (Markdown, HTML, CSV, PDF и др.) рядом с исходником и краткий отчёт с числами проверок
+acceptance: Файлы содержат ожидаемое содержимое, исходники не потеряны, существующие файлы не перезаписаны без просьбы, при отсутствии входа ничего не выдумано и не создано
+architecture: single
+rationale: Все операции работают с одним набором файловых инструментов, терминалом и пакетом doc_tools над общими файлами; разные роли не нужны, делегирование только добавило бы расходы и риск конфликтов правок одного файла
+roles:
+  - agent: main
+    purpose: Написание, правка, проверка (lint, ссылки, термины), оглавление, конвертация и анализ документов; бинарные форматы через bash_tool
+    inputs: Запрос на языке пользователя и файлы рабочей папки (в том числе uploads/)
+    outputs: Новые или изменённые файлы и отчёт со списком файлов и результатами проверок
+    acceptance: Результат подтверждён чтением файла или инструментом проверки; исходник при конвертации сохранён
+    failure: Назвать отсутствующий файл (FILE_NOT_FOUND), не создавать выдуманных результатов; при неудаче конвертации привести команды и текст ошибок и назвать, что нужно установить
+examples:
+  - Преобразуй guide.md в HTML со встроенным CSS
+  - Добавь оглавление в README.md и проверь ссылки
+  - Приведи термины в docs/ к единому виду - email вместо e-mail
+  - Сконвертируй table.csv в таблицу Markdown
+  - Конвертируй uploads/manual.doc в PDF
+limitations:
+  - Конвертация doc, docx и pdf зависит от программ в контейнере (soffice, pandoc и т. д.) или от возможности их установить; без них результат приближённый, потери называются в отчёте
+  - Конвертер Markdown в HTML покрывает распространённое подмножество Markdown, не полный CommonMark
+  - Оценщик работает без сети, поэтому сценарии проверяют текстовые форматы
+failure_behavior: Исходные файлы сохраняются, существующие результаты не перезаписываются без явной просьбы, причина сбоя называется в ответе
+repetitions: 2
+max_total_seconds: 1500
+max_total_tokens: 500000
+max_total_tool_calls: 400
+scenarios:
+  - name: md_to_html
+    category: normal
+    message: Сконвертируй guide.md в HTML (файл рядом с исходником) и не удаляй исходник.
+    fixtures:
+      guide.md: "# Guide\n\nUse **bold** text.\n\n## Install\n\n- one\n- two\n"
+    timeout_seconds: 240
+    max_tokens: 40000
+    max_tool_calls: 25
+    assertions:
+      - kind: contains
+        path: guide.html
+        value: <strong>bold</strong>
+      - kind: contains
+        path: guide.html
+        value: Guide
+      - kind: equals
+        path: guide.md
+        value: "# Guide\n\nUse **bold** text.\n\n## Install\n\n- one\n- two\n"
+  - name: add_toc
+    category: normal
+    message: Добавь в README.md оглавление (заголовки второго и третьего уровня) и убедись, что содержимое документа не пострадало.
+    fixtures:
+      README.md: "# Project\n\nIntro text.\n\n## Install\n\nRun it.\n\n### Linux\n\nApt.\n\n## Usage\n\nUse it.\n"
+    timeout_seconds: 240
+    max_tokens: 40000
+    max_tool_calls: 25
+    assertions:
+      - kind: contains
+        path: README.md
+        value: "[Install](#install)"
+      - kind: contains
+        path: README.md
+        value: "[Linux](#linux)"
+      - kind: contains
+        path: README.md
+        value: "Intro text."
+      - kind: contains
+        path: README.md
+        value: "## Usage"
+  - name: terminology
+    category: ambiguous
+    message: В notes.md везде используй термин "email" вместо "e-mail" (в прозе и заголовках). Блок кода не меняй.
+    fixtures:
+      notes.md: "# E-mail setup\n\nSend an e-mail to the admin. Then check your e-mail.\n\n```\nMAIL=e-mail\n```\n"
+    timeout_seconds: 240
+    max_tokens: 40000
+    max_tool_calls: 25
+    assertions:
+      - kind: contains
+        path: notes.md
+        value: "# Email setup"
+      - kind: contains
+        path: notes.md
+        value: "MAIL=e-mail"
+      - kind: not_contains
+        path: notes.md
+        value: "Send an e-mail"
+  - name: missing_input
+    category: invalid_input
+    message: Сконвертируй missing.md в HTML; если файла нет, ответь FILE_NOT_FOUND и ничего не создавай.
+    timeout_seconds: 120
+    max_tokens: 25000
+    max_tool_calls: 15
+    assertions:
+      - kind: contains
+        value: FILE_NOT_FOUND
+      - kind: absent
+        path: missing.html
+  - name: no_overwrite
+    category: repeat
+    message: Сконвертируй page.md в page.html. Файл page.html уже существует и не должен быть перезаписан; сообщи об этом и, если нужно, создай результат под другим именем.
+    fixtures:
+      page.md: "# Page\n\nText.\n"
+      page.html: KEEP-ME
+    timeout_seconds: 240
+    max_tokens: 40000
+    max_tool_calls: 25
+    assertions:
+      - kind: equals
+        path: page.html
+        value: KEEP-ME
+      - kind: equals
+        path: page.md
+        value: "# Page\n\nText.\n"
+  - name: broken_links
+    category: failure
+    message: Проверь ссылки в index.md и назови в ответе все битые (файл или якорь). Файлы не меняй.
+    fixtures:
+      index.md: "# Index\n\n[ok](other.md) [gone](nowhere.md) [bad anchor](#missing-section)\n\n## Real\n"
+      other.md: "# Other\n"
+    timeout_seconds: 180
+    max_tokens: 40000
+    max_tool_calls: 20
+    assertions:
+      - kind: contains
+        value: nowhere.md
+      - kind: contains
+        value: missing-section
+      - kind: equals
+        path: index.md
+        value: "# Index\n\n[ok](other.md) [gone](nowhere.md) [bad anchor](#missing-section)\n\n## Real\n"
+  - name: csv_table
+    category: boundary
+    message: Сконвертируй data.csv в таблицу Markdown (файл data.md). В данных есть символ вертикальной черты.
+    fixtures:
+      data.csv: "name;note\nalpha;a|b\nbeta;plain\n"
+    timeout_seconds: 240
+    max_tokens: 40000
+    max_tool_calls: 25
+    assertions:
+      - kind: contains
+        path: data.md
+        value: "| name | note |"
+      - kind: contains
+        path: data.md
+        value: "a\\|b"
+      - kind: contains
+        path: data.md
+        value: "| beta | plain |"

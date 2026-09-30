@@ -55,6 +55,7 @@ ROOT = Path(__file__).resolve().parent
 INDEX_HTML = ROOT / "index.html"
 LOGIN_HTML = ROOT / "login.html"
 REVIEW_HTML = ROOT / "review.html"
+SYSTEMS_HTML = ROOT / "systems.html"
 
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
@@ -104,6 +105,8 @@ class WebChatServer:
         action_review_token: Optional[str] = None,
         warm_user: Optional[str] = DEFAULT_USER,
         reviews: Optional[Any] = None,
+        activity: Optional[Any] = None,
+        submissions_dir: Optional[Path] = None,
     ) -> None:
         """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
         accounts; without it ``identify`` decides, by default the single local
@@ -111,7 +114,9 @@ class WebChatServer:
         server's own (a reverse proxy's public address). ``warm_user``'s space is
         built and its default agent warmed at startup; None warms nobody.
         ``reviews`` is the web_chat.review.desk.ReviewDesk users file reviews
-        of answers with; None offers no reviews."""
+        of answers with; None offers no reviews. ``activity`` records what the
+        systems do (web_chat.system_activity); ``submissions_dir`` keeps the user
+        systems offered to everyone (web_chat.system_hub)."""
         if auth is not None and identify is not None:
             raise ValueError("Pass auth or identify, not both")
         self.deployment = deployment
@@ -123,6 +128,16 @@ class WebChatServer:
         self._warm_user = warm_user
         self._sweeper: Optional[asyncio.Task] = None
         self.reviews = reviews
+        from web_chat.system_activity import SystemActivity
+        from web_chat.system_hub import SubmissionStore, SystemHub
+
+        self.systems = SystemHub(
+            deployment,
+            spaces,
+            activity if activity is not None else SystemActivity(None),
+            SubmissionStore(submissions_dir),
+            self._usernames,
+        )
 
         self.voice: Optional[Any] = None
 
@@ -148,6 +163,9 @@ class WebChatServer:
         from web_chat.uploads import register_upload_routes
 
         register_upload_routes(api, self.current_space, lambda: self.deployment.uploads_policy)
+        from web_chat.system_hub import register_system_routes
+
+        register_system_routes(api, self.systems, self.current_user, self.current_space, admins_only(self.current_user))
         if reviews is not None:
             from web_chat.review.http import register_admin_review_routes, register_review_routes
 
@@ -333,6 +351,13 @@ class WebChatServer:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(INDEX_HTML)
 
+        @app.get("/systems", response_class=HTMLResponse)
+        async def systems_page(request: Request) -> Any:
+            # A shell: what it shows comes through the API, which checks who asks.
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(SYSTEMS_HTML)
+
         if self.reviews is not None:
 
             @app.get("/admin/review", response_class=HTMLResponse)
@@ -371,6 +396,10 @@ class WebChatServer:
                     "user": {"id": user.id, "username": user.username, "role": user.role},
                     "accounts": self.auth is not None,
                     "personal_agents": personal is not None and personal.enabled,
+                    # The systems page: admins run it, users build systems of their own there.
+                    "systems_page": user.is_admin
+                    or (space.user_systems is not None and space.user_systems.enabled)
+                    or getattr(space, "built_systems", None) is not None,
                     "voice": self.voice is not None and self.deployment.voice_enabled(),
                     "uploads": {
                         "enabled": self.deployment.uploads_policy.enabled,
