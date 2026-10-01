@@ -225,12 +225,14 @@ class ActionValidator:
                 transport=transport,
             )
 
-        validator = build(config.model, config)
-        validator.fallbacks = [
+        # Tried in this order: the first model, then each next one only when
+        # those before it are unavailable (core.policy_resilience).
+        primary, *reserves = [
             build(key, config.model_copy(update={"model": key, "fallback_models": ()}))
-            for key in config.fallback_models
+            for key in config.routes
         ]
-        return validator
+        primary.fallbacks = reserves
+        return primary
 
     def questions(self, chain: bool) -> dict:
         action = self.prompts.action

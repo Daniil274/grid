@@ -45,7 +45,18 @@ The external file may contain the `action_policy` mapping directly, below an
 `policies/action-policy.yaml`. Nested policy-file references are rejected.
 
 `validator.model` and `validator.fallback_models` reference the existing model
-registry. Each model selects its policy adapter with `policy_api: decisions`
+registry. `validator.model` may also be a list of keys in order of preference:
+the first is always tried first, the second only when the first is unavailable
+(an error, a timeout or an open circuit), then the third, and so on; every new
+check starts from the first again. Without an explicit `max_attempts` there is
+one attempt per listed model (at least two).
+
+```yaml
+validator:
+  model: [policy, policy_reserve, policy_chat]
+```
+
+ Each model selects its policy adapter with `policy_api: decisions`
 (the default) or `policy_api: chat`. Unknown keys fail at factory construction.
 Every route uses the same operator policy, questions and projected evidence.
 

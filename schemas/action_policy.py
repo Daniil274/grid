@@ -13,28 +13,44 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class ActionValidatorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model: str | None = Field(
+    model: str | tuple[str, ...] | None = Field(
         default=None,
-        min_length=1,
-        description="Key from models; required when the policy is enabled.",
+        description=(
+            "Key from models, or keys in order of preference: the first is "
+            "always tried first, the next one only when those before it are "
+            "unavailable. Required when the policy is enabled."
+        ),
     )
     timeout_seconds: float = Field(default=5, gt=0, le=60)
     fallback_models: tuple[str, ...] = Field(default=(), max_length=4)
+    # Defaults to one attempt per route, at least two.
     max_attempts: int = Field(default=2, ge=1, le=10)
     retry_backoff_seconds: float = Field(default=0.25, ge=0, le=5)
     max_concurrency: int = Field(default=4, ge=1, le=100)
     circuit_failure_threshold: int = Field(default=3, ge=1, le=100)
     circuit_cooldown_seconds: float = Field(default=15, gt=0, le=300)
 
+    @property
+    def routes(self) -> tuple[str, ...]:
+        """Model keys in the order they are tried: model, then fallback_models."""
+        primary = (self.model,) if isinstance(self.model, str) else self.model or ()
+        return (*primary, *self.fallback_models)
+
     @model_validator(mode="after")
     def validate_routes(self):
-        keys = (self.model, *self.fallback_models)
-        if any(not key.strip() for key in self.fallback_models):
-            raise ValueError("Fallback model keys must not be blank")
+        if isinstance(self.model, tuple) and not self.model:
+            raise ValueError("Validator model list must not be empty")
+        keys = self.routes
+        if any(not key.strip() for key in keys):
+            raise ValueError("Validator model keys must not be blank")
         if len(set(keys)) != len(keys):
             raise ValueError("Validator model keys must be unique")
-        if self.max_attempts < len(self.fallback_models) + 1:
-            raise ValueError("max_attempts must cover the primary and fallback models")
+        if len(keys) > 5:
+            raise ValueError("At most 5 validator models")
+        if "max_attempts" not in self.model_fields_set:
+            object.__setattr__(self, "max_attempts", max(2, len(keys)))
+        if self.max_attempts < len(keys):
+            raise ValueError("max_attempts must cover every validator model")
         return self
 
 

@@ -1,5 +1,5 @@
 isolation:
-  enabled: false
+  enabled: true
   # A server with accounts runs every user in a container made with these
   # limits (this is its default system). The host has 2 GB of RAM: a 2g limit
   # restrained nothing, and one heavy build could take the web chat down.
@@ -22,7 +22,7 @@ settings:
     policy_file: ../../policies/action-policy.yaml
     mode: "enforce"
     validator:
-      model: policy-validator
+      model: [policy-validator-jev, policy-validator-mercury]
       # The whole judgment, retry included; one request is bounded by the
       # model's request_timeout.
       timeout_seconds: 15
@@ -105,8 +105,18 @@ providers:
     max_retries: 3
 
 models:
-  policy-validator:
+  policy-validator-jev:
     name: "typesafe/jev-1.13"
+    provider: "openrouter"
+    temperature: 0
+    max_tokens: 1024
+    description: "Decisions model for action-policy checks"
+    # A stalled request is dropped after this long and retried within
+    # validator.timeout_seconds.
+    request_timeout: 6
+
+  policy-validator-mercury:
+    name: "inception/mercury-decide:free"
     provider: "openrouter"
     temperature: 0
     max_tokens: 1024

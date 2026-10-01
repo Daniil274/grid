@@ -494,3 +494,49 @@ async def test_reserve_decisions_transport_blocks_and_both_clients_are_closed():
     finally:
         await gate.aclose()
     assert all(client.is_closed for client in clients)
+
+
+def test_model_list_orders_routes_and_covers_them_with_attempts():
+    config = settings(model=["first", "second", "third"])
+    assert config.routes == ("first", "second", "third")
+    assert config.max_attempts == 3
+    assert settings(model="only").max_attempts == 2
+    assert settings(model=["a"], fallback_models=("b",)).routes == ("a", "b")
+    for bad in ([], ["a", "a"], ["a", ""], ["a", "b", "c", "d", "e", "f"]):
+        with pytest.raises(ValidationError):
+            settings(model=bad)
+    with pytest.raises(ValidationError):
+        settings(model=["a", "b", "c"], max_attempts=2)
+
+
+async def test_model_list_is_tried_in_order_until_one_answers():
+    routes = [
+        validator("first", side_effect=http_error(503)),
+        validator("second", side_effect=httpx.ConnectError("offline")),
+        validator("third"),
+    ]
+    runner = PolicyRunner(settings(model=["first", "second", "third"]), routes)
+    judgment = await runner.evaluate({}, chain=True)
+    assert judgment.verdicts == ALLOW and judgment.model == "third"
+    assert [event["route"] for event in judgment.attempts] == [
+        "first",
+        "second",
+        "third",
+    ]
+    # The next check starts from the first model again.
+    routes[0].evaluate.side_effect = None
+    judgment = await runner.evaluate({}, chain=True)
+    assert [event["route"] for event in judgment.attempts] == ["first"]
+
+
+def test_model_list_is_loaded_from_operator_registry():
+    from core.config.config import Config
+
+    root = Config("routing.yaml")
+    policy = root.config.settings.action_policy
+    root.config.settings.action_policy = policy.model_copy(
+        update={"validator": settings(model=["policy", "router"])}
+    )
+    primary = ActionValidator.from_config(root)
+    assert primary.config.model == "policy"
+    assert [route.config.model for route in primary.fallbacks] == ["router"]

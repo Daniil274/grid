@@ -223,7 +223,7 @@ export class SettingsDrawer {
     return {
       "settings.default_agent": { kind: "select", options: keys("agents") },
       "settings.allowed_models": { kind: "multi", options: models },
-      "settings.action_policy.validator.model": { kind: "select", options: models },
+      "settings.action_policy.validator.model": { kind: "ordered", options: models },
       "agents.*.model": { kind: "ordered", options: models },
       "agents.*.tools": { kind: "multi", options: keys("tools") },
       "agents.*.base_prompt": { kind: "select", options: () => [...new Set(["base", ...keys("prompt_templates")()])] },
