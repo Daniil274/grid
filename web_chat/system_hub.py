@@ -43,6 +43,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -55,8 +56,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from core.config import Config
 from core.managers.project_tools_loader import get_project_loader, set_project_loader
-from core.system_quality import AcceptanceSuite, load_evidence, quality_summary, require_quality, save_evidence
+from core.system_quality import AcceptanceSuite, evidence_dir, load_evidence, quality_summary, require_quality, revision, save_evidence, system_files
 from core.system_store import (
+    BuilderAccess,
     StoreError,
     inspect_system,
     SystemManifest,
@@ -142,7 +144,7 @@ class ImportRequest(BaseModel):
 class ProbeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["catalog", "created", "mine", "built"]
+    kind: Literal["catalog", "created", "mine", "built", "library"]
     key: str
     messages: List[str] = Field(min_length=1, max_length=MAX_PROBE_MESSAGES)
 
@@ -154,7 +156,9 @@ class SubmissionRecord(BaseModel):
     id: str
     user_id: str
     username: str = ""
-    system: UserSystem
+    kind: Literal["mine", "built"] = "mine"
+    system: UserSystem | SystemManifest
+    revision: str = ""
     note: str = ""
     at: float
     state: Literal["pending", "imported", "declined", "withdrawn"] = "pending"
@@ -175,6 +179,10 @@ class SubmissionStore:
         if self.root is None or not submission_id.isalnum():
             raise KeyError(submission_id)
         return self.root / f"{submission_id}.json"
+
+    def package_dir(self, submission_id: str) -> Path:
+        self._path(submission_id)  # validate the ID and configured root
+        return self.root / submission_id
 
     def list(self) -> List[SubmissionRecord]:
         if self.root is None or not self.root.is_dir():
@@ -466,6 +474,10 @@ class SystemHub:
                         by=record.username or record.user_id,
                         at=record.at,
                     )
+        elif store is not None:
+            for manifest in store.published():
+                item("library", manifest.key, manifest.name, manifest.description, "published",
+                     origin=manifest.origin.model_dump(), updated_at=manifest.updated_at)
         mine = space.user_systems
         if mine is not None:
             for system in mine.list():
@@ -484,7 +496,8 @@ class SystemHub:
             for manifest in built.list():
                 item("built", manifest.key, manifest.name, manifest.description,
                      "active" if manifest.status == "published" else manifest.status,
-                     chat_key=access.system_key(manifest.key), updated_at=manifest.updated_at)
+                     chat_key=access.system_key(manifest.key), updated_at=manifest.updated_at,
+                     submission=self._built_submission_view(user.id, manifest.key))
         builder = self._builder_key()
         return {
             "admin": user.is_admin,
@@ -572,6 +585,7 @@ class SystemHub:
                 "status": "active" if manifest.status == "published" else manifest.status,
                 "active": manifest.status == "published",
                 "chat_key": chat_key,
+                "submission": self._built_submission_view(user.id, key),
                 "config_yaml": store.config_text(key),
                 "quality": quality_summary(store.directory(key)),
                 "acceptance": load_evidence(store.directory(key), "acceptance"),
@@ -610,6 +624,20 @@ class SystemHub:
                 ),
                 "activity": self.activity.summary(key, names=names),
             }
+        if kind == "library":
+            manifest = self._manifest(self.store, key)
+            if manifest.status != "published":
+                raise HTTPException(status_code=404, detail="No such published system")
+            activity = self.activity.summary(key)
+            activity["recent"] = []
+            activity["events"] = []
+            return {
+                "kind": kind,
+                **manifest.model_dump(),
+                "inspection": inspect_system(lambda: space.fresh_config(key),
+                                             requires=manifest.requires, confined=confined),
+                "activity": activity,
+            }
         if kind == "mine":
             mine = self._mine(space)
             system = self._user_system(mine, key)
@@ -625,6 +653,26 @@ class SystemHub:
             self._admin(user)
             record = self.submissions.get(key)
             snapshot = record.system
+
+            if record.kind == "built":
+                directory = self.submissions.package_dir(key)
+                try:
+                    if revision(directory) != record.revision:
+                        raise ValueError("The submitted package changed or is incomplete.")
+                except (OSError, ValueError) as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from None
+                return {
+                    "kind": kind,
+                    "key": record.id,
+                    "name": snapshot.name,
+                    "description": snapshot.description,
+                    "status": record.state,
+                    "submission": record.model_dump(),
+                    "spec": None,
+                    "quality": quality_summary(directory),
+                    "inspection": inspect_system(lambda: Config(str(directory / "config.yaml")), confined=True),
+                    "activity": self.activity.summary(snapshot.key, names=names),
+                }
 
             def load() -> Config:
                 config = space.fresh_config(snapshot.base)
@@ -719,6 +767,11 @@ class SystemHub:
         elif body.kind == "created":
             self._admin(user)
             description = self._manifest(self.store, body.key).description
+        elif body.kind == "library":
+            manifest = self._manifest(self.store, body.key)
+            if manifest.status != "published":
+                raise HTTPException(status_code=404, detail="No such published system")
+            description = manifest.description
         else:
             self._admin(user)
             if body.key not in self._catalog_keys():
@@ -903,6 +956,94 @@ class SystemHub:
         self.activity.record_event(key, "submitted", by=self._who(user), note=note)
         return system.model_dump()
 
+    def _built_submission_view(self, user_id: str, key: str) -> Optional[Dict[str, Any]]:
+        records = [record for record in self.submissions.list()
+                   if record.kind == "built" and record.user_id == user_id and record.system.key == key]
+        if not records:
+            return None
+        record = records[-1]
+        return {"id": record.id, "at": record.at, "state": record.state,
+                "note": record.decision_note, "system_key": record.system_key}
+
+    def submit_built(self, user: User, space: UserSpace, key: str, note: str) -> Dict[str, Any]:
+        if self.submissions.root is None:
+            raise HTTPException(status_code=400, detail="This server takes no submissions")
+        store = self._built(space)
+        manifest = self._manifest(store, key)
+        if not manifest.description.strip():
+            raise HTTPException(status_code=400, detail="Describe the system before offering it.")
+        if any(record.kind == "built" and record.state == "pending" and
+               record.user_id == user.id and record.system.key == key for record in self.submissions.list()):
+            raise HTTPException(status_code=400, detail="This system is already waiting for the admins.")
+        if sum(record.user_id == user.id for record in self.submissions.list()) >= 50:
+            raise HTTPException(status_code=400, detail="At most 50 submissions can be kept per user.")
+        source = store.directory(key)
+        try:
+            # Public systems require a quality contract; the general publish
+            # gate remains optional for older admin-created systems.
+            if not (source / "quality.yaml").is_file():
+                raise ValueError("Add a quality.yaml contract and evaluate the system before submission.")
+            require_quality(source)
+            access = space._builder_access()
+            access.validate(store.config_text(key), key)
+            inspection = inspect_system(lambda: access.load(key, str(space.workspace_path)), confined=True)
+            if not inspection["loaded"] or inspection["config"]:
+                raise ValueError("Fix the system's configuration before submission.")
+            before = revision(source)
+            record = SubmissionRecord(
+                id="s" + uuid.uuid4().hex[:12], user_id=user.id, username=user.username,
+                kind="built", system=manifest, note=note, at=time.time(), revision=before,
+            )
+            destination = self.submissions.package_dir(record.id)
+            destination.mkdir(parents=True)
+            try:
+                for path in system_files(source):
+                    target = destination / path.relative_to(source)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, target)
+                if revision(source) != before or revision(destination) != before:
+                    raise ValueError("The system changed while it was being submitted; try again.")
+                # Evaluation reports live beside the writable package. Freeze
+                # them with the package so an admin can inspect the evidence
+                # that passed the submission gate for this exact revision.
+                reports = evidence_dir(source)
+                frozen_reports = evidence_dir(destination)
+                if reports.is_symlink():
+                    raise ValueError("Quality evidence directory cannot be a symbolic link.")
+                if reports.is_dir():
+                    frozen_reports.mkdir(parents=True)
+                    total = 0
+                    for report in sorted(reports.glob("*.json")):
+                        info = report.lstat()
+                        total += info.st_size
+                        if not report.is_file() or report.is_symlink() or info.st_size > 512 * 1024 or total > 16 * 1024 * 1024:
+                            raise ValueError("Quality evidence contains an unsafe or oversized file.")
+                        shutil.copyfile(report, frozen_reports / report.name)
+                if revision(destination) != before:
+                    raise ValueError("The submitted package changed while evidence was copied.")
+                require_quality(destination)
+                self.submissions.save(record)
+            except BaseException:
+                shutil.rmtree(destination, ignore_errors=True)
+                shutil.rmtree(evidence_dir(destination), ignore_errors=True)
+                raise
+        except (StoreError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        self.activity.record_event(key, "submitted", by=self._who(user), note=note)
+        return {"key": key, "submission": self._built_submission_view(user.id, key)}
+
+    def withdraw_built(self, user: User, space: UserSpace, key: str) -> Dict[str, Any]:
+        self._manifest(self._built(space), key)
+        records = [record for record in self.submissions.list()
+                   if record.kind == "built" and record.state == "pending" and
+                   record.user_id == user.id and record.system.key == key]
+        if not records:
+            raise HTTPException(status_code=400, detail="This system has no pending submission.")
+        record = records[-1]
+        self.submissions.save(record.model_copy(update={"state": "withdrawn", "decided_at": time.time()}))
+        self.activity.record_event(key, "submission withdrawn", by=self._who(user))
+        return {"key": key, "submission": self._built_submission_view(user.id, key)}
+
     def withdraw_submission(self, user: User, space: UserSpace, key: str) -> Dict[str, Any]:
         system = self._user_system(self._mine(space), key)
         if system.submission is None:
@@ -937,6 +1078,8 @@ class SystemHub:
         store = self.store
         key = self._new_key(body.key)
         snapshot = record.system
+        if record.kind == "built":
+            return await self._import_built_submission(user, record, key, body.name)
         try:
             base = _loading(lambda: self._fresh(snapshot.base))
             check_spec(snapshot, base, self.deployment.personal_agents_policy)
@@ -964,6 +1107,62 @@ class SystemHub:
         )
         self.activity.record_event(key, "imported", by=self._who(user), note=f"from {record.username or record.user_id}'s {snapshot.name}")
         self.activity.record_event(snapshot.key, "imported", by=self._who(user), note=f"as {key}")
+        await self.configs_changed()
+        return manifest.model_dump()
+
+    async def _import_built_submission(
+        self, user: User, record: SubmissionRecord, key: str, name: Optional[str]
+    ) -> Dict[str, Any]:
+        source = self.submissions.package_dir(record.id)
+        store = self.store
+        try:
+            if not record.revision or revision(source) != record.revision:
+                raise ValueError("The submitted package changed or is incomplete.")
+            text = (source / "config.yaml").read_text(encoding="utf-8")
+            access = BuilderAccess(
+                store=SystemStore(self.submissions.root), catalog=self.deployment.catalog,
+                base_config=self.deployment.config, user_id=record.user_id,
+                image=self.deployment.config.config.isolation.image,
+                record=lambda *_: None, changed=lambda: None, shared=False,
+            )
+            access.validate(text, record.id)
+            inspection = inspect_system(lambda: _loading(lambda: Config(str(source / "config.yaml"))), confined=True)
+            if not inspection["loaded"] or inspection["config"]:
+                raise ValueError("The submitted config no longer passes private-system checks.")
+            _validate(text)
+            manifest = store.create(
+                SystemManifest(
+                    key=key, name=name or record.system.name,
+                    description=record.system.description, requires=record.system.requires,
+                    origin=SystemOrigin(kind="user", user_id=record.user_id,
+                                        username=record.username, source=record.system.key),
+                ), text,
+            )
+            try:
+                for path in system_files(source):
+                    relative = path.relative_to(source)
+                    if relative.as_posix() in {"config.yaml", "system.yaml"}:
+                        continue
+                    target = store.directory(key) / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, target)
+                copied = inspect_system(lambda: _loading(lambda: Config(str(store.config_path(key)))), confined=True)
+                if not copied["loaded"] or copied["config"]:
+                    raise ValueError("The imported draft does not load after copying.")
+                if revision(source) != record.revision:
+                    raise ValueError("The submitted package changed during import.")
+            except BaseException:
+                store.delete(key)
+                raise
+        except (StoreError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        self.submissions.save(record.model_copy(update={
+            "state": "imported", "decided_at": time.time(),
+            "decided_by": self._who(user), "system_key": key,
+        }))
+        self.activity.record_event(key, "imported", by=self._who(user),
+                                   note=f"from {record.username or record.user_id}'s {record.system.name}")
+        self.activity.record_event(record.system.key, "imported", by=self._who(user), note=f"as {key}")
         await self.configs_changed()
         return manifest.model_dump()
 
@@ -1042,6 +1241,18 @@ def register_system_routes(
     @api.delete("/api/systems/built/{key}")
     async def delete_built(key: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
         return JSONResponse(hub.edit_built(space, key, delete=True))
+
+    @api.post("/api/systems/built/{key}/submit")
+    async def submit_built(
+        key: str, body: NoteRequest, user: User = Depends(current_user), space: UserSpace = Depends(current_space)
+    ) -> JSONResponse:
+        return JSONResponse(hub.submit_built(user, space, key, body.note))
+
+    @api.delete("/api/systems/built/{key}/submit")
+    async def withdraw_built(
+        key: str, user: User = Depends(current_user), space: UserSpace = Depends(current_space)
+    ) -> JSONResponse:
+        return JSONResponse(hub.withdraw_built(user, space, key))
 
     @api.patch("/api/systems/created/{key}")
     async def update(key: str, body: UpdateSystemRequest, user: User = Depends(admin)) -> JSONResponse:

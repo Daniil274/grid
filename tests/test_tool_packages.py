@@ -255,3 +255,26 @@ def test_offline():
         ["docker", "ps", "-a", "--filter", "name=grid-tooltest", "--format", "{{.Names}}"], capture_output=True, text=True
     )
     assert leftover.stdout.strip() == ""
+
+
+def test_a_failed_network_disconnect_never_runs_package_code(package, monkeypatch):
+    import core.tool_packages as tool_packages
+
+    calls = []
+
+    async def fake_run(args, **_kwargs):
+        calls.append(args)
+        if args[:3] == ["docker", "network", "disconnect"]:
+            return 1, "", "network failure"
+        return 0, "", ""
+
+    async def fake_deploy(*_args, **_kwargs):
+        return tool_packages.Deployment(root="/opt/grid-tools/test", python="python3")
+
+    monkeypatch.setattr(tool_packages, "_run", fake_run)
+    monkeypatch.setattr(tool_packages, "ensure_in_container", fake_deploy)
+    result = asyncio.run(sandbox_test("grid-agent:latest", package))
+
+    assert result["stage"] == "network" and not result["ok"]
+    assert not any(call[:2] == ["docker", "exec"] for call in calls)
+    assert calls[-1][:3] == ["docker", "rm", "-f"]

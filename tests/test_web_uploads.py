@@ -73,6 +73,25 @@ def test_generated_documents_can_be_downloaded_too(upload_app):
     )
 
 
+def test_live_download_is_bounded_and_has_no_stale_content_length(upload_app, monkeypatch):
+    from web_chat import uploads
+
+    _, client, _, workspaces = upload_app
+    client.post("/api/workspace/uploads", files={"files": ("report.txt", b"old")})
+    original = uploads.open_in_workspace
+
+    def changed_after_open(workspace, relative):
+        opened = original(workspace, relative)
+        (workspaces["alice"] / relative).write_bytes(b"new and longer")
+        return opened
+
+    monkeypatch.setattr(uploads, "open_in_workspace", changed_after_open)
+    response = client.get("/api/workspace/files/uploads/report.txt")
+    assert response.status_code == 200
+    assert response.content == b"new"
+    assert "content-length" not in response.headers
+
+
 def test_repeated_names_preserve_existing_files(upload_app):
     _, client, _, workspaces = upload_app
     first = client.post(

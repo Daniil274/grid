@@ -65,7 +65,7 @@ def collect(space: Any, context_id: str, message_id: str, *, redactor: Optional[
     answer_meta = dict(getattr(answer, "metadata", None) or {})
     conversation_meta = view.get("metadata") or {}
     agent = answer_meta.get("agent") or conversation_meta.get("routed_agent")
-    system = conversation_meta.get("routed_system")
+    system = answer_meta.get("system") or conversation_meta.get("routed_system")
     shown, earlier = bounded(messages[: index + 1], MAX_MESSAGES)
     latest = not any(
         getattr(message, "role", None) == "assistant" and not is_tool_result(message)
@@ -93,7 +93,7 @@ def collect(space: Any, context_id: str, message_id: str, *, redactor: Optional[
             "executions": _executions(manager, context_id, _turn_start(messages, index), getattr(answer, "timestamp", None)),
         },
         "model_context": _model_context(conversation_meta, latest),
-        "agent_session": _agent_session(space, agent, context_id),
+        "agent_session": _agent_session(space, agent, context_id, system),
         "config": _config(space, system, agent),
     }
     return (redactor or Redactor(environment_secrets())).value(evidence)
@@ -195,8 +195,12 @@ def _model_context(metadata: dict[str, Any], latest: bool) -> dict[str, Any]:
     }
 
 
-def _agent_session(space: Any, agent: Optional[str], context_id: str) -> dict[str, Any]:
-    session_id = agent_session_id(agent, context_id) if agent else None
+def _agent_session(space: Any, agent: Optional[str], context_id: str,
+                   system: Optional[str] = None) -> dict[str, Any]:
+    namespace = None
+    if system and getattr(space, "layout", None) is not None and system != space.registry.default_key():
+        namespace = system
+    session_id = agent_session_id(agent, context_id, namespace) if agent else None
     path = getattr(space, "agent_sessions_path", None)
     if session_id is None or path is None or not Path(path).exists():
         return {"session_id": session_id, "items": [], "earlier_items_left_out": 0}

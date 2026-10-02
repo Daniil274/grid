@@ -318,7 +318,12 @@ def register_upload_routes(
 
         def chunks():
             with handle:
-                while block := handle.read(CHUNK):
+                remaining = size
+                while remaining:
+                    block = handle.read(min(CHUNK, remaining))
+                    if not block:
+                        break
+                    remaining -= len(block)
                     yield block
 
         # Always an attachment: a workspace file is never rendered as a page of this site.
@@ -329,7 +334,9 @@ def register_upload_routes(
             chunks(),
             media_type="application/octet-stream",
             headers={
-                "Content-Length": str(size),
+                # The agent can still truncate or rewrite this open inode.
+                # StreamingResponse must not promise the old size as its
+                # Content-Length, and a growing file must not stream forever.
                 "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
                 "Cache-Control": "no-store",
             },

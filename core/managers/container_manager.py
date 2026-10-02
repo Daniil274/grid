@@ -134,6 +134,23 @@ class ContainerManager:
             logger.error(f"Error getting container {container_name}: {e}")
             return None
 
+    def stop_container(self, user_id: str, container_id: str) -> None:
+        """Stop this user's exact container when its space is retired.
+
+        Checking the ID prevents a late close from stopping a replacement
+        container that a newer space started under the same name.
+        """
+        if not self.enabled or not self.client:
+            return
+        try:
+            container = self.client.containers.get(f"grid-agent-{user_id}")
+            if container.id == container_id and container.status == "running":
+                container.stop(timeout=5)
+        except NotFound:
+            return
+        except Exception as exc:
+            logger.warning("Could not stop the container of %s: %s", user_id, exc)
+
     def _runs_current_image(self, container: Container) -> bool:
         """Whether *container* runs the build the image tag names now: after a
         rebuild of the image the container is recreated on the new one. Its

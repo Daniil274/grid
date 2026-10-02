@@ -92,6 +92,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
         container_id: Optional[str] = None,
         policy_config: Optional[Config] = None,
         session_db_path: Optional[str] = None,
+        session_namespace: Optional[str] = None,
         logs_directory: Optional[str] = None,
         confine_tools: bool = False,
     ):
@@ -158,6 +159,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             context_manager=self.context_manager,
             container_id=self.container_id,
             session_factory=self._create_persistent_sqlite_session,
+            session_namespace=session_namespace,
         )
         self.instructions_builder = self._runtime_support.instructions_builder
 
@@ -655,7 +657,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             await gate.aclose()
         await self.mcp.close()
 
-        # Clear agent sessions
+        # Release session connections; the history belongs to the conversation.
         await self._runtime_support.cleanup_sessions()
 
         # Kill stale dolt server started by beads inside the container (network_mode=host
@@ -676,4 +678,3 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
         # Clear caches
         self.clear_cache()
         self._agent_sessions.clear()
-

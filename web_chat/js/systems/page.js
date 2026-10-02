@@ -87,9 +87,8 @@ function filters() {
   const admin = state.overview?.admin;
   const mineOn = state.overview?.user_systems?.enabled || state.overview?.items.some((item) => ["mine", "built"].includes(item.kind));
   const all = [["", "All"]];
-  if (admin) {
-    all.push(["draft", "Drafts"], ["published", "Published"], ["submitted", "Submitted"]);
-  }
+  if (admin) all.push(["draft", "Drafts"], ["published", "Published"], ["submitted", "Submitted"]);
+  else if (state.overview?.items.some((item) => item.kind === "library")) all.push(["published", "Library"]);
   if (mineOn) all.push(["mine", "Mine"]);
   if (admin) all.push(["catalog", "Catalog"], ["archived", "Archived"]);
   return all;
@@ -229,6 +228,7 @@ function renderDetail() {
 function origin(detail) {
   if (detail.kind === "built") return `your system · made with the builder · changed ${when(detail.updated_at)}`;
   if (detail.kind === "catalog") return `${detail.key} · written by the operator in the catalog; edit it in the chat's settings`;
+  if (detail.kind === "library") return `${detail.key} · shared system · published ${when(detail.published_at)}`;
   if (detail.kind === "created") {
     const from = detail.origin?.kind === "user"
       ? `imported from ${detail.origin.username || detail.origin.user_id}'s system`
@@ -237,7 +237,8 @@ function origin(detail) {
   }
   if (detail.kind === "mine") return `your system · built on ${detail.base} · changed ${when(detail.updated_at)}`;
   const record = detail.submission;
-  return `submitted by ${record.username || record.user_id} on ${when(record.at)} · built on ${detail.spec.base}`;
+  return `submitted by ${record.username || record.user_id} on ${when(record.at)}`
+    + (detail.spec?.base ? ` · built on ${detail.spec.base}` : " · made with the builder");
 }
 
 /** Open a new chat with the system pinned (web_chat/js/main.js reads ?system=). */
@@ -255,6 +256,16 @@ function actions(detail, line) {
       href: `/?system=${encodeURIComponent(state.overview.builder)}&prompt=${encodeURIComponent(`Измени мою систему ${key}. `)}`,
       text: "Edit with builder",
     }));
+    if (detail.submission?.state === "pending") {
+      buttons.push(button("Withdraw submission", "ghost", () =>
+        act(line, () => api.withdrawBuiltSystem(key), "Submission withdrawn")));
+    } else {
+      buttons.push(button("Offer to everyone", "ghost", () => {
+        const note = prompt("A note for the admins (optional): what is it for, how did you test it?", "");
+        if (note === null) return;
+        void act(line, () => api.submitBuiltSystem(key, note), "Submitted: the admins will look at it");
+      }));
+    }
     buttons.push(button("Delete", "danger", () => {
       if (confirm(`Delete ${detail.name} and its files?`)) void act(line, () => api.deleteBuiltSystem(key), "Deleted", null);
     }));
@@ -262,6 +273,7 @@ function actions(detail, line) {
   if (detail.kind === "catalog") {
     buttons.push(openInChat(key));
   }
+  if (detail.kind === "library") buttons.push(openInChat(key));
   if (detail.kind === "created") {
     if (detail.status !== "archived") buttons.push(openInChat(key));
     if (detail.status === "draft") {
@@ -342,7 +354,7 @@ function tabBody(detail) {
 // -- overview ---------------------------------------------------------------------
 function overviewTab(detail) {
   const inspection = detail.inspection;
-  const submission = detail.kind === "mine" ? detail.submission : null;
+  const submission = ["mine", "built"].includes(detail.kind) ? detail.submission : null;
   return h(
     "div.reviewCase",
     { style: { padding: "0" } },

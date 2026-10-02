@@ -26,15 +26,15 @@ settings:
 isolation:
   enabled: true
 
-# 40k windows: compaction as in engineering. Only reads are compacted: the
-# builder's writes answer with the health it acts on next.
+# Leave room for the builder's 32k-token answer and tool schemas within its
+# 128k context. Only reads are compacted: writes return the health used next.
 compact:
   enabled: true
   summary_max_output_tokens: 4000
   auto:
     enabled: true
     max_output_tokens_for_summary: 4000
-    buffer_tokens: 10000
+    buffer_tokens: 32000
     max_consecutive_failures: 3
   micro:
     enabled: true

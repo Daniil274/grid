@@ -23,12 +23,16 @@ class FakeContainer:
         }
         self.removed = False
         self.started = False
+        self.stopped = False
 
     def remove(self, force=False):
         self.removed = True
 
     def start(self):
         self.started = True
+
+    def stop(self, timeout=5):
+        self.stopped = True
 
 
 class FakeClient:
@@ -96,6 +100,17 @@ def test_a_current_container_is_reused_and_started(manager, tmp_path):
 
     assert manager.get_or_create_container("u1", workspace=tmp_path) is current
     assert current.started and not current.removed and client.runs == []
+
+
+def test_retiring_a_space_stops_only_its_exact_container(manager, tmp_path):
+    manager, client = manager
+    current = client.existing["grid-agent-u1"] = FakeContainer(
+        "grid-agent-u1", str(tmp_path), labels={PROFILE_LABEL: manager.profile}
+    )
+    manager.stop_container("u1", "old-container-id")
+    assert not current.stopped
+    manager.stop_container("u1", current.id)
+    assert current.stopped
 
 
 def test_a_container_of_an_older_image_build_is_recreated(manager, tmp_path):

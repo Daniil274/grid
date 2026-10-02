@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from core.system_store import SystemManifest
 from web_chat.deployment import CATALOG_TARGET, Deployment, merge_yaml
 
 SYSTEM = """\
@@ -97,6 +98,54 @@ def test_a_single_system_is_the_only_file(tmp_path: Path, monkeypatch: pytest.Mo
 
     assert [(file.key, file.kind) for file in deployment.config_files()] == [("coder", "system")]
     assert deployment.config_file(None).path == config.resolve()
+
+
+@pytest.fixture
+def builder_deployment(catalog: Path) -> Deployment:
+    raw = yaml.safe_load(catalog.read_text())
+    raw["routing"]["systems_dir"] = "created"
+    catalog.write_text(yaml.safe_dump(raw))
+    return Deployment(routing_path=str(catalog))
+
+
+@pytest.mark.parametrize("status", ["draft", "published", "archived"])
+def test_builder_configs_are_discovered_and_editable(builder_deployment: Deployment, status: str) -> None:
+    deployment = builder_deployment
+    store = deployment.created_store
+    # Created after the deployment was loaded: no restart should be necessary.
+    store.create(SystemManifest(key="docops", name="Docs Ops", status=status), SYSTEM)
+
+    file = deployment.config_file("docops")
+    assert (file.name, file.kind, file.path) == ("Docs Ops", "system", store.config_path("docops").resolve())
+    assert deployment.config_file().key == "coder"
+    assert deployment.config_yaml("docops") == SYSTEM
+
+    config = deployment.config_dict("docops")
+    config["settings"]["max_turns"] = 9
+    deployment.save_structured_config(config, "docops")
+    assert yaml.safe_load(store.config_text("docops"))["settings"]["max_turns"] == 9
+    deployment.save_yaml_config(SYSTEM, "docops")
+    assert store.config_text("docops") == SYSTEM
+    assert store.get("docops").status == status
+    assert deployment.config_dict("coder")["settings"]["max_turns"] == 5
+
+
+def test_deleted_builder_config_disappears(builder_deployment: Deployment) -> None:
+    deployment = builder_deployment
+    deployment.created_store.create(SystemManifest(key="docops", name="Docs Ops"), SYSTEM)
+    assert deployment.config_file("docops")
+    deployment.created_store.delete("docops")
+    assert "docops" not in [file.key for file in deployment.config_files()]
+    with pytest.raises(KeyError):
+        deployment.config_file("docops")
+
+
+def test_builder_configs_do_not_shadow_catalog_targets(builder_deployment: Deployment) -> None:
+    deployment = builder_deployment
+    original = deployment.config_file("coder")
+    deployment.created_store.create(SystemManifest(key="coder", name="Another coder"), SYSTEM)
+    assert deployment.config_file("coder") == original
+    assert [file.key for file in deployment.config_files()].count("coder") == 1
 
 
 def test_saving_a_system_other_than_the_default(catalog: Path) -> None:

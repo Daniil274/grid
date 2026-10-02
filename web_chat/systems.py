@@ -109,6 +109,7 @@ class SystemRegistry:
         *,
         base_config: Config,
         build_factory: Callable[[Config], Any],
+        build_factory_for_key: Optional[Callable[[Config, str], Any]] = None,
         catalog: Optional[Config] = None,
         working_directory: Optional[str] = None,
         customize: Optional[Callable[[str, Config], set[str]]] = None,
@@ -125,6 +126,7 @@ class SystemRegistry:
         ``admins_only`` systems: they are not listed, pinned or routed to."""
         self._base_config = base_config
         self._build_factory = build_factory
+        self._build_factory_for_key = build_factory_for_key
         self._customize = customize
         self._confined = confined
         # The configs customized so far, by system key.
@@ -264,7 +266,13 @@ class SystemRegistry:
     def factory(self, system_key: str) -> Any:
         """The factory for a system, built on first use and cached after."""
         if system_key not in self._factories:
-            self._factories[system_key] = self._build_factory(self.config(system_key))
+            config = self.config(system_key)
+            build_for_key = getattr(self, "_build_factory_for_key", None)
+            self._factories[system_key] = (
+                build_for_key(config, system_key)
+                if build_for_key is not None
+                else self._build_factory(config)
+            )
         return self._factories[system_key]
 
     def agents(self, system_key: str) -> Dict[str, Any]:
@@ -392,6 +400,14 @@ class SystemRegistry:
         return default
 
     async def close(self) -> None:
+        for key, factory in list(self._factories.items()):
+            cleanup = getattr(factory, "cleanup", None)
+            if cleanup is not None:
+                try:
+                    await cleanup()
+                except Exception:
+                    logger.exception("Closing factory for system %s failed", key)
+        self._factories.clear()
         http = getattr(getattr(self._router, "router", None), "http", None)
         if http is not None:
             await http.aclose()

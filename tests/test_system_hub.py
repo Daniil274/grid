@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from core.config import Config
 from core.routing import AutoRouter, check_system
+from core.system_quality import evidence_dir, save_evidence
 from core.system_store import StoreError, SystemManifest, SystemStore, relocate_config
 from schemas.schemas import PersonalAgentsPolicy
 from web_chat.deployment import Deployment
@@ -402,6 +403,11 @@ def test_an_admin_makes_tests_and_publishes_a_system(deployment, tmp_path):
 
     # Published: everyone's router offers it.
     assert "writers" in [s["key"] for s in client.get("/api/chat/bootstrap", headers=ALICE).json()["systems"]]
+    library = client.get("/api/systems", headers=ALICE).json()
+    assert any(item["kind"] == "library" and item["key"] == "writers" for item in library["items"])
+    public = client.get("/api/systems/library/writers", headers=ALICE).json()
+    assert public["inspection"]["loaded"] and "config_yaml" not in public and "config_path" not in public
+    assert public["activity"]["recent"] == [] and public["activity"]["events"] == []
     events = client.get("/api/systems/created/writers", headers=ROOT).json()["activity"]["events"]
     assert [event["event"] for event in events] == ["published", "described", "created"]
     assert client.delete("/api/systems/created/writers", headers=ROOT).status_code == 400
@@ -440,6 +446,81 @@ def test_a_user_builds_submits_and_an_admin_imports(deployment, tmp_path):
     assert mine["submission"]["state"] == "imported" and mine["submission"]["system_key"] == "research"
     detail = client.get("/api/systems/created/research", headers=ROOT).json()
     assert detail["inspection"]["config"] == []
+
+
+def test_a_private_builder_system_is_frozen_and_imported_as_admin_draft(deployment, tmp_path, monkeypatch):
+    client = client_for(deployment, tmp_path)
+    alice = space_of(deployment, "alice")
+    access = alice._builder_access()
+    source = alice.built_systems
+    config = yaml.safe_load(BASE)
+    config["settings"]["allow_path_override"] = True
+    config["settings"]["config_directory"] = "."
+    config["providers"] = access.providers()
+    config["tools"] = {}
+    for agent in config["agents"].values():
+        agent["tools"] = []
+    config["models"] = {key: value for key, value in config["models"].items()
+                        if key in deployment.config.config.models}
+    text = yaml.safe_dump(config)
+    access.validate(text, "private-team")
+    source.create(manifest("private-team"), text)
+    directory = source.directory("private-team")
+
+    refused = client.post("/api/systems/built/private-team/submit", headers=ALICE, json={"note": "ready"})
+    assert refused.status_code == 400 and "quality.yaml" in refused.text
+    (directory / "quality.yaml").write_text("test contract\n", encoding="utf-8")
+    save_evidence(directory, "evaluation", {"revision": "example", "passed": True})
+    monkeypatch.setattr("web_chat.system_hub.require_quality", lambda root: None)
+    submitted = client.post("/api/systems/built/private-team/submit", headers=ALICE, json={"note": "tested"})
+    assert submitted.status_code == 200, submitted.text
+    submission_id = submitted.json()["submission"]["id"]
+    assert (evidence_dir(tmp_path / "submissions" / submission_id) / "evaluation.json").is_file()
+    assert submission_id.startswith("s")
+    assert client.get(f"/api/systems/submission/{submission_id}", headers=BOB).status_code == 403
+    assert client.get(f"/api/systems/submission/{submission_id}", headers=ROOT).json()["inspection"]["loaded"]
+    assert client.post("/api/systems/built/private-team/submit", headers=ALICE, json={"note": "again"}).status_code == 400
+
+    snapshot = tmp_path / "submissions" / submission_id / "config.yaml"
+    frozen = snapshot.read_bytes()
+    (directory / "config.yaml").write_text("broken: true\n", encoding="utf-8")
+    assert snapshot.read_bytes() == frozen
+    snapshot.write_text("broken: true\n", encoding="utf-8")
+    tampered = client.post(f"/api/systems/submissions/{submission_id}/import", headers=ROOT,
+                           json={"key": "shared-team"})
+    assert tampered.status_code == 400 and "changed" in tampered.text
+    assert client.get("/api/systems/created/shared-team", headers=ROOT).status_code == 404
+    snapshot.write_bytes(frozen)
+    imported = client.post(f"/api/systems/submissions/{submission_id}/import", headers=ROOT,
+                           json={"key": "shared-team"})
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["status"] == "draft"
+    assert client.get("/api/systems/created/shared-team", headers=ALICE).status_code == 403
+    assert client.get("/api/systems/created/shared-team", headers=ROOT).json()["inspection"]["loaded"]
+    assert client.get("/api/systems/built/private-team", headers=ALICE).json()["submission"]["state"] == "imported"
+    (directory / "config.yaml").write_bytes(frozen)
+    second = client.post("/api/systems/built/private-team/submit", headers=ALICE, json={"note": "again"})
+    assert second.status_code == 200, second.text
+    assert client.delete("/api/systems/built/private-team/submit", headers=BOB).status_code == 404
+    assert client.delete("/api/systems/built/private-team/submit", headers=ALICE).json()["submission"]["state"] == "withdrawn"
+
+
+def test_library_hides_other_users_activity_and_private_drafts(deployment, tmp_path):
+    store = deployment.created_store
+    store.create(manifest("public-team"), BASE)
+    store.set_status("public-team", "published")
+    store.create(manifest("secret-draft"), BASE)
+    activity = SystemActivity(tmp_path / "activity.json")
+    activity.record_turn("public-team", agent="helper", outcome="answered", duration_ms=10, user_id="bob")
+    activity.record_event("public-team", "admin private note", by="root", note="not for users")
+    client = client_for(deployment, tmp_path)
+
+    public = client.get("/api/systems/library/public-team", headers=ALICE).json()
+    assert public["activity"]["turns"] == 1
+    assert public["activity"]["recent"] == [] and public["activity"]["events"] == []
+    assert client.get("/api/systems/library/secret-draft", headers=ALICE).status_code == 404
+    assert client.get("/api/systems/created/secret-draft", headers=ALICE).status_code == 403
+    assert client.get("/api/systems/created/public-team", headers=ROOT).json()["activity"]["recent"][0]["user"] == "bob"
 
 
 def test_the_routing_probe_puts_the_tested_system_among_the_candidates(deployment, tmp_path, monkeypatch):

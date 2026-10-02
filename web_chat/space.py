@@ -69,6 +69,7 @@ link text human-readable and link each file once. Only link files that
 exist in the workspace; never use this prefix for anything else.""",
 )
 
+
 @dataclass(frozen=True)
 class SpaceLayout:
     """Where a space keeps its state."""
@@ -225,6 +226,7 @@ class UserSpace:
             base_config=config,
             catalog=self.deployment.catalog,
             build_factory=self._build_factory,
+            build_factory_for_key=self._build_factory,
             working_directory=self._configs_workdir,
             customize=self.personal_agents.apply if self.personal_agents is not None else None,
             confined=self.require_isolation,
@@ -326,6 +328,7 @@ class UserSpace:
 
     def _start_container(self, config: Config, workspace: Path) -> Optional[str]:
         manager = ContainerManager(config, enabled=True if self.require_isolation else None)
+        self._container_manager = manager
         if not manager.enabled:
             return None
         try:
@@ -338,7 +341,7 @@ class UserSpace:
             return container.id
         return None
 
-    def _build_factory(self, config: Config) -> AgentFactory:
+    def _build_factory(self, config: Config, system_key: Optional[str] = None) -> AgentFactory:
         """One factory per system; history is shared so conversations survive routing.
 
         Every factory carries access to the store this user may build in.
@@ -350,6 +353,9 @@ class UserSpace:
             container_id=self.container_id,
             policy_config=self.deployment.policy_config,
             session_db_path=str(self.layout.agent_sessions) if self.layout else None,
+            # Preserve the default system's historical session IDs. Other
+            # systems get distinct IDs even if they reuse its agent keys.
+            session_namespace=(system_key if self.layout and system_key != self.registry.default_key() else None),
             logs_directory=str(self.layout.logs) if self.layout else None,
             confine_tools=self.require_isolation,
         )
@@ -532,7 +538,12 @@ class UserSpace:
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        await self.registry.close()
+        try:
+            await self.registry.close()
+        finally:
+            manager = getattr(self, "_container_manager", None)
+            if manager is not None and self.container_id:
+                await asyncio.to_thread(manager.stop_container, self.user_id, self.container_id)
 
     # -- conversation metadata --------------------------------------------
     def context_manager(self) -> ContextManager:

@@ -2,10 +2,11 @@
 Session Manager for agent sessions.
 
 Manages SQLite sessions for agents, providing session isolation
-per agent/context pair.
+per system/agent/context pair when a system namespace is supplied.
 """
 
 import asyncio
+import hashlib
 import logging
 from typing import Callable, Dict, Optional, Tuple
 from agents import SQLiteSession
@@ -13,8 +14,14 @@ from agents import SQLiteSession
 logger = logging.getLogger("grid.session_manager")
 
 
-def agent_session_id(agent_key: str, context_id: str) -> str:
-    """The SDK session id of one agent in one conversation."""
+def agent_session_id(agent_key: str, context_id: str, namespace: Optional[str] = None) -> str:
+    """The SDK session id of one agent, system and conversation.
+
+    An empty namespace keeps existing single-system session IDs readable.
+    """
+    if namespace:
+        system_id = hashlib.sha256(namespace.encode("utf-8")).hexdigest()[:16]
+        return f"system_{system_id}_agent_{agent_key}_{context_id}"
     return f"agent_{agent_key}_{context_id}"
 
 
@@ -22,16 +29,18 @@ class SessionManager:
     """
     Manages agent sessions with proper lifecycle management.
 
-    Each session is scoped to an (agent_key, context_id) pair,
+    Each session is scoped to a namespace and (agent_key, context_id) pair,
     ensuring that agent memory is properly isolated between
     different conversations and contexts.
     """
 
-    def __init__(self, session_factory: Optional[Callable[[str], SQLiteSession]] = None) -> None:
+    def __init__(self, session_factory: Optional[Callable[[str], SQLiteSession]] = None,
+                 *, namespace: Optional[str] = None) -> None:
         """Initialize SessionManager with empty session cache."""
         # Session management for agent memory (per agent/context pair)
         self._agent_sessions: Dict[Tuple[str, str], SQLiteSession] = {}
         self._session_factory = session_factory or SQLiteSession
+        self.namespace = namespace
 
     def get_agent_session(self, agent_key: str, context_id: str) -> SQLiteSession:
         """
@@ -53,7 +62,7 @@ class SessionManager:
         """
         session_key = (agent_key, context_id)
         if session_key not in self._agent_sessions:
-            session_id = agent_session_id(agent_key, context_id)
+            session_id = agent_session_id(agent_key, context_id, self.namespace)
             self._agent_sessions[session_key] = self._session_factory(session_id)
             logger.debug(
                 "Created new session",
@@ -68,7 +77,7 @@ class SessionManager:
 
     async def cleanup_sessions(self) -> None:
         """
-        Cleanup all active sessions and release resources.
+        Close active sessions and release resources without erasing history.
 
         This method properly closes all database connections
         and should be called during application shutdown.
@@ -84,7 +93,7 @@ class SessionManager:
 
         for session_key, session in list(self._agent_sessions.items()):
             try:
-                await session.clear_session()
+                session.close()
                 logger.debug(
                     "Session cleaned up",
                     extra={

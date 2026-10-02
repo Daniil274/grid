@@ -23,6 +23,7 @@ class AgentRuntimeSupport:
         context_manager: ContextManager,
         container_id: Optional[str] = None,
         session_factory: Optional[Callable[[str], SQLiteSession]] = None,
+        session_namespace: Optional[str] = None,
     ) -> None:
         self.model_manager = ModelManager(config)
         self.instructions_builder = InstructionsBuilder(
@@ -30,7 +31,7 @@ class AgentRuntimeSupport:
             context_manager=context_manager,
             container_id=container_id,
         )
-        self.session_manager = SessionManager(session_factory=session_factory)
+        self.session_manager = SessionManager(session_factory=session_factory, namespace=session_namespace)
 
     @property
     def agent_sessions(self) -> dict[tuple[str, str], SQLiteSession]:

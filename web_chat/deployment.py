@@ -178,10 +178,11 @@ class Deployment:
 
     # -- the config files an admin edits ----------------------------------------
     def config_files(self) -> List[ConfigFile]:
-        """Every file the configuration page edits: the catalog, then each system.
+        """The catalog, its explicit systems, and the builder's shared systems.
 
         A system whose path the catalog names twice is listed once, under its
-        first key.
+        first key. Created systems are read fresh, including drafts and archives:
+        this is the admin editor, not the list of systems offered by the router.
         """
         files: List[ConfigFile] = []
         if self.catalog is not None and self.routing_path is not None:
@@ -191,6 +192,16 @@ class Deployment:
             if path not in seen:
                 seen.add(path)
                 files.append(ConfigFile(key, key.replace("_", " ").replace("-", " ").title(), "system", path))
+        store = self.created_store
+        if store is not None:
+            keys = {file.key for file in files}
+            for manifest in store.list():
+                path = store.config_path(manifest.key).resolve()
+                if manifest.key in keys or path in seen:
+                    continue
+                keys.add(manifest.key)
+                seen.add(path)
+                files.append(ConfigFile(manifest.key, manifest.name, "system", path))
         return files
 
     def _system_paths(self) -> Dict[str, Path]:

@@ -379,7 +379,15 @@ async def ensure_in_container(container: str, package: Path, *, timeout: float =
             raise PackageError(f"cannot copy the package into the container: {err.strip()}")
         if info.requirements:
             deps = f"{deployment.root}/deps"
-            await _run(["docker", "exec", "-u", "0", container, "sh", "-c", f"mkdir -p {deps} && chown {CONTAINER_USER} {deps}"])
+            # The runtime drops CAP_CHOWN even for uid 0. Only the unprivileged
+            # agent runs in this container, so make this one deps directory
+            # writable without changing the ownership of the package code.
+            code, _, err = await _run([
+                "docker", "exec", "-u", "0", container, "sh", "-c",
+                f"mkdir -p {deps} && chmod 0777 {deps}",
+            ])
+            if code != 0:
+                raise PackageError(f"cannot prepare dependencies in the container: {err.strip()}")
             code, out, err = await _run(
                 [
                     "docker", "exec", "-u", CONTAINER_USER, container,
@@ -435,6 +443,7 @@ async def sandbox_test(image: str, package: Path, *, timeout: float = TEST_TIMEO
     started = time.monotonic()
     code, _, err = await _run(
         ["docker", "run", "-d", "--rm", "--name", name, "--memory", memory, "--pids-limit", "256", "--cpus", "1",
+         "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--init",
          "--user", CONTAINER_USER, "--entrypoint", "sleep", image, str(int(timeout) + 120)],
         timeout=120,
     )
@@ -445,7 +454,11 @@ async def sandbox_test(image: str, package: Path, *, timeout: float = TEST_TIMEO
             deployment = await ensure_in_container(name, package, timeout=timeout)
         except PackageError as exc:
             return {"ok": False, "stage": "install", "error": str(exc), "describe": None, "tests": None}
-        offline = (await _run(["docker", "network", "disconnect", "-f", "bridge", name]))[0] == 0
+        code, _, err = await _run(["docker", "network", "disconnect", "-f", "bridge", name])
+        if code != 0:
+            return {"ok": False, "stage": "network", "error": f"cannot isolate sandbox network: {err.strip()}",
+                    "offline": False, "describe": None, "tests": None}
+        offline = True
         env = [part for key, value in deployment.env().items() for part in ("-e", f"{key}={value}")]
         results: Dict[str, Any] = {"offline": offline}
         for mode, workdir in (("describe", "/workspace"), ("test", "/tmp")):

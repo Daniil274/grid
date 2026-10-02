@@ -474,7 +474,6 @@ class TestAgentFactory:
         
         # Add mock sessions and servers
         mock_session = Mock()
-        mock_session.clear_session = AsyncMock()
         factory._agent_sessions["test"] = mock_session
         
         mock_server = Mock()
@@ -484,7 +483,8 @@ class TestAgentFactory:
         await factory.cleanup()
         
         # Should call cleanup methods
-        mock_session.clear_session.assert_called_once()
+        mock_session.close.assert_called_once()
+        mock_session.clear_session.assert_not_called()
         mock_server.cleanup.assert_called_once()
         
         # Should clear caches
@@ -500,7 +500,7 @@ class TestAgentFactory:
         
         # Add mock session that raises exception
         mock_session = Mock()
-        mock_session.clear_session = AsyncMock(side_effect=Exception("Cleanup error"))
+        mock_session.close.side_effect = Exception("Cleanup error")
         factory._agent_sessions["test"] = mock_session
         
         # Should not raise exception
