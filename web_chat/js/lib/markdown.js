@@ -13,6 +13,8 @@
  *    rest of the document.
  */
 
+import { highlight } from "./highlight.js";
+
 const SAFE_HREF = /^(https?:\/\/|mailto:|#|\/)/i;
 /** Sentinel around extracted code spans: escapeHtml never emits this entity, so it cannot collide. */
 const MARK = '&#0;';
@@ -115,7 +117,8 @@ function blocks(lines) {
         while (index < lines.length && !BLOCK.fenceEnd.test(lines[index])) body.push(lines[index++]);
         index += 1; // closing fence; absent mid-stream, which is fine
         const language = match[1] ? ` data-language="${match[1]}"` : "";
-        out.push(`<pre${language}><code>${body.join("\n")}</code></pre>`);
+        const source = body.join("\n");
+        out.push(`<pre${language}><code>${highlight(source, match[1])}</code></pre>`);
         break;
       }
 

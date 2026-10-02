@@ -381,6 +381,35 @@
   text-transform: uppercase;
 }
 
+/* Syntax highlighting: colour only, so the copy button's textContent is intact. */
+.tok--kw { color: var(--code-kw); }
+.tok--str { color: var(--code-str); }
+.tok--num { color: var(--code-num); }
+.tok--com { color: var(--code-com); }
+
+/* Diff colouring: block spans so the tint spans the full line width. */
+.dl--add {
+  display: block;
+  color: var(--ok);
+  background: var(--diff-add-bg);
+}
+
+.dl--del {
+  display: block;
+  color: var(--danger);
+  background: var(--diff-del-bg);
+}
+
+.dl--hunk {
+  display: block;
+  color: var(--accent-2);
+}
+
+.dl--meta {
+  display: block;
+  color: var(--text-3);
+}
+
 .tableScroll {
   overflow-x: auto;
 }

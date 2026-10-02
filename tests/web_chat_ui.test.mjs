@@ -339,3 +339,82 @@ test("config forms follow refs and unwrap optional fields", () => {
   assert.equal(humanize("mcp_enabled"), "MCP enabled");
   assert.equal(humanize("use_responses_api"), "Use responses API");
 });
+
+import { highlight } from "../web_chat/js/lib/highlight.js";
+
+test("diff fences classify added, removed, hunk and header lines", () => {
+  const html = renderMarkdown(
+    "```diff\n" +
+      "diff --git a/a b/a\n" +
+      "index 111..222 100644\n" +
+      "--- a/a\n" +
+      "+++ b/a\n" +
+      "@@ -1 +1 @@\n" +
+      "-old line\n" +
+      "+new line\n" +
+      " context line\n" +
+      "```",
+  );
+
+  assert.ok(html.includes('<span class="dl--meta">diff --git a/a b/a</span>'));
+  assert.ok(html.includes('<span class="dl--meta">index 111..222 100644</span>'));
+  assert.ok(html.includes('<span class="dl--meta">--- a/a</span>'));
+  assert.ok(html.includes('<span class="dl--meta">+++ b/a</span>'));
+  assert.ok(html.includes('<span class="dl--hunk">@@ -1 +1 @@</span>'));
+  assert.ok(html.includes('<span class="dl--del">-old line</span>'));
+  assert.ok(html.includes('<span class="dl--add">+new line</span>'));
+  // Context lines are emitted verbatim, without a span.
+  assert.ok(html.includes("\n context line</code>"));
+});
+
+test("a diff is recognised even without a language tag", () => {
+  const html = renderMarkdown("```\n@@ -1 +1 @@\n-gone\n+here\n```");
+  assert.ok(html.includes('<span class="dl--hunk">@@ -1 +1 @@</span>'));
+  assert.ok(html.includes('<span class="dl--add">+here</span>'));
+  assert.ok(html.includes('<span class="dl--del">-gone</span>'));
+});
+
+test("a fence cannot smuggle live markup past the highlighter", () => {
+  const html = renderMarkdown('```html\n<span class="tok">boom</span>\n<script>alert(1)</script>\n```');
+
+  // The angle brackets stay escaped; nothing the model wrote becomes an element.
+  assert.ok(html.includes("&lt;span"));
+  assert.ok(html.includes("&lt;/span&gt;"));
+  assert.ok(!/<script/i.test(html));
+  assert.ok(!html.includes('<span class="tok">boom'));
+
+  // Every span that survives is one of ours.
+  for (const span of html.match(/<span class="[^"]*"/g) ?? []) {
+    assert.ok(/^<span class="(?:tok tok--|dl--)\w+"/.test(span), span);
+  }
+});
+
+test("python and json fences are syntax highlighted", () => {
+  const py = renderMarkdown('```python\ndef f():\n    # note\n    return "x"\n```');
+  assert.ok(py.includes('<span class="tok tok--kw">def</span>'));
+  assert.ok(py.includes('<span class="tok tok--kw">return</span>'));
+  assert.ok(py.includes('<span class="tok tok--com"># note</span>'));
+  assert.ok(py.includes('<span class="tok tok--str">&quot;x&quot;</span>'));
+
+  const json = renderMarkdown('```json\n{"k": 1, "ok": false}\n```');
+  assert.ok(json.includes('<span class="tok tok--str">&quot;k&quot;</span>'));
+  assert.ok(json.includes('<span class="tok tok--num">1</span>'));
+  assert.ok(json.includes('<span class="tok tok--kw">false</span>'));
+});
+
+test("half-written fences highlight without throwing", () => {
+  assert.doesNotThrow(() => renderMarkdown('```python\ndef f(\n    "unterminated'));
+  assert.doesNotThrow(() => renderMarkdown("```diff\n@@ -1 +1 @@\n+only a half"));
+  assert.doesNotThrow(() => renderMarkdown("```js\nconst x = /* open"));
+
+  const html = renderMarkdown("```js\nconst x = /* open");
+  assert.ok(html.includes("<pre"));
+  assert.ok(html.includes("const"));
+});
+
+test("languages without a rule set stay plain text", () => {
+  const html = renderMarkdown("```brainfuck\n+++[>+<]-\n```");
+  assert.ok(!html.includes('class="tok'));
+  assert.ok(html.includes("+++["));
+  assert.equal(highlight("var x = 1; # c", "brainfuck"), "var x = 1; # c");
+});
