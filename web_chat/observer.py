@@ -29,6 +29,7 @@ from web_chat.trace import (
     context_refs,
     summarize,
 )
+from web_chat.tool_summaries import tool_subtitle, tool_title
 
 logger = logging.getLogger("grid.web_chat.observer")
 
@@ -328,10 +329,17 @@ class WebStreamObserver:
         info = tool_event_info(item)
         arguments = info.get("arguments")
         call_id = info.get("call_id")
+        tool_name = str(info.get("tool_name") or "")
+        name = _tool_display_name(info)
+        # Human heading/caption; fall back to the raw name and argument blob.
+        title = tool_title(tool_name, info.get("server_label")) or name
+        subtitle = tool_subtitle(tool_name, arguments)
+        if subtitle is None:
+            subtitle = clip(summarize(arguments, 160).replace("\n", " "), 120)
         fields = {
             # A sub-agent's block is titled by the agent; the call keeps its name.
-            "tool": _tool_display_name(info),
-            "subtitle": clip(summarize(arguments, 160).replace("\n", " "), 120),
+            "tool": name,
+            "subtitle": subtitle,
             "detail": summarize(arguments),
             "refs": context_refs(arguments),
         }
@@ -342,13 +350,13 @@ class WebStreamObserver:
             self._tool_names[block.id] = str(info.get("tool_name") or "")
             return
         step = self._recorder.open(
-            StepKind.TOOL, fields["tool"], parent_id=self._parent_id, **fields
+            StepKind.TOOL, title, parent_id=self._parent_id, **fields
         )
         self._calls_in_order.append(step)
-        self._tool_names[step.id] = str(info.get("tool_name") or "")
+        self._tool_names[step.id] = tool_name
         badge = self._pending_by_call.pop(call_id, None) if call_id else None
         if badge is None:
-            waiting = self._pending_policies.get(str(info.get("tool_name") or ""))
+            waiting = self._pending_policies.get(tool_name)
             badge = waiting.popleft() if waiting else None
         if badge is not None:
             self._recorder.update(step, **badge)
@@ -363,8 +371,12 @@ class WebStreamObserver:
             # Output without a matching call (resumed run, auto-run tool): still
             # worth showing, just without a duration.
             name = _tool_display_name(info)
+            title = (
+                tool_title(str(info.get("tool_name") or ""), info.get("server_label"))
+                or name
+            )
             self._recorder.note(
-                StepKind.TOOL, name, tool=name, body=output, parent_id=self._parent_id
+                StepKind.TOOL, title, tool=name, body=output, parent_id=self._parent_id
             )
             return
         self._recorder.close(step, body=output)

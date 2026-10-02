@@ -294,7 +294,7 @@ async def test_turn_streams_trace_steps_and_answer_separately():
     assert 'reasoning' in kinds and 'tool' in kinds and 'prepare' in kinds
 
     tool_step = next(step for step in steps.values() if step['kind'] == 'tool')
-    assert tool_step['title'] == 'read_file'
+    assert tool_step['title'] == 'Read file'
     assert tool_step['body'] == 'settings: {}'
     assert [ref['label'] for ref in tool_step['refs']] == ['config.yaml']
 

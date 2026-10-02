@@ -101,7 +101,8 @@ def test_tool_call_and_output_collapse_into_one_timed_step():
     steps = harness.steps()
     assert len(steps) == 1
     step = steps[0]
-    assert step["title"] == "read_file"
+    assert step["title"] == "Read file"
+    assert step["subtitle"] == "core/config.py"
     assert step["status"] == StepStatus.DONE.value
     assert step["body"] == "file contents"
     assert step["duration_ms"] is not None
@@ -118,7 +119,7 @@ def test_interleaved_tool_calls_match_their_own_output():
     )
 
     bodies = {step["title"]: step["body"] for step in harness.steps()}
-    assert bodies == {"search": "results", "read_file": "readme"}
+    assert bodies == {"search": "results", "Read file": "readme"}
 
 
 def test_orphan_tool_output_still_appears():
@@ -326,7 +327,8 @@ def test_narration_before_an_action_moves_into_the_trace():
     message, call = harness.steps()
     assert message["kind"] == StepKind.MESSAGE.value
     assert message["body"] == "Delegating to a subagent."
-    assert call["title"] == "Agent"
+    assert call["title"] == "Delegate to agent"
+    assert call["subtitle"] == "analyze"
     assert resets == [True]
     assert harness.tokens[-1] == "Final answer."
 
@@ -342,7 +344,8 @@ def test_subagent_work_lands_in_the_trace_but_not_in_the_answer():
     )
 
     parent, nested = harness.steps()
-    assert nested["title"] == "bash_tool"
+    assert nested["title"] == "Run command"
+    assert nested["subtitle"] == "git diff"
     assert nested["parent_id"] == parent["id"]
     assert nested["policy"]["decision"] == "allow"
     assert parent["policy"] is None
@@ -435,3 +438,52 @@ def test_failed_subagent_run_does_not_spin_forever():
     assert block["status"] == StepStatus.ERROR.value
     assert block["body"] == "Max turns exceeded"
     assert thinking["status"] == StepStatus.DONE.value
+
+
+def test_tool_steps_get_human_titles_and_argument_subtitles():
+    harness = Harness()
+    harness.feed(tool_called("search_files", "call-1", '{"pattern": "grid", "directory": "core"}'))
+    harness.feed(tool_called("run_command", "call-2", '{"command": "pytest -q\\nmore"}'))
+    harness.feed(tool_called("orchestrate", "call-3", '{"task": "Investigate the bug"}'))
+
+    steps = harness.steps()
+    assert [(s["title"], s["subtitle"]) for s in steps] == [
+        ("Search files", "grid in core"),
+        ("Run command", "pytest -q"),
+        ("Delegate to agent", "Investigate the bug"),
+    ]
+    # The raw tool name (used for policy badges) is preserved on the wire.
+    assert [s["tool"] for s in steps] == ["search_files", "run_command", "orchestrate"]
+    # Full arguments stay available in the expandable detail.
+    assert '"pattern": "grid"' in steps[0]["detail"]
+    assert '"directory": "core"' in steps[0]["detail"]
+
+
+def test_unknown_tool_keeps_raw_name_and_json_subtitle():
+    harness = Harness()
+    harness.feed(tool_called("mystery_tool", "call-1", '{"a": 1}'))
+    step = harness.steps()[0]
+    assert step["title"] == "mystery_tool"
+    assert "a" in step["subtitle"]
+
+
+def test_orphan_tool_output_uses_human_title():
+    harness = Harness()
+    harness.feed(tool_output("call-1", "ok"))
+    # no matching call: a bare output carries no tool name, so it stays generic
+    harness.feed(tool_called("read_file", "call-2", '{"filepath": "a.py"}'))
+    harness.feed(tool_output("call-2", "contents"))
+
+    steps = harness.steps()
+    assert steps[0]["title"] == "tool"
+    assert steps[-1]["title"] == "Read file"
+    assert steps[-1]["subtitle"] == "a.py"
+
+
+def test_malformed_arguments_fall_back_to_flat_json():
+    harness = Harness()
+    harness.feed(tool_called("read_file", "call-1", "not json"))
+    step = harness.steps()[0]
+    assert step["title"] == "Read file"
+    # Formatter dropped the caption; the old summarize-based subtitle remains.
+    assert step["subtitle"] == "not json"
