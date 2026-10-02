@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -43,6 +44,35 @@ class AnalysisBusy(RuntimeError):
     """A turn of this review's analysis is running already."""
 
 
+class ReviewProgress:
+    """Bounded activity summary for the polling view; no tool arguments or outputs."""
+
+    def __init__(self):
+        self.tool_calls = 0
+        self.last_event = "Waiting for model"
+        self.updated_at = time.time()
+
+    def handle_event(self, event, *, agent_key=None):
+        from core.run_stream import is_output_delta, tool_event_info
+        name = getattr(event, "name", None)
+        if name in {"tool_called", "tool_output"}:
+            tool = tool_event_info(event.item).get("tool_name") or "tool"
+            if name == "tool_called":
+                self.tool_calls += 1
+            self.last_event = f"{agent_key or AGENT}: {tool} — {'started' if name == 'tool_called' else 'finished'}"
+            self.updated_at = time.time()
+        data = getattr(event, "data", None)
+        if data is not None:
+            self.updated_at = time.time()
+            if is_output_delta(getattr(data, "type", None)):
+                self.last_event = f"{agent_key or AGENT}: writing response"
+                return getattr(data, "delta", None)
+        return None
+
+    def snapshot(self):
+        return {"tool_calls": self.tool_calls, "last_event": self.last_event, "updated_at": self.updated_at}
+
+
 class ReviewAgents:
     """Runs and records the analysis of reviews."""
 
@@ -64,6 +94,7 @@ class ReviewAgents:
         self._build_factory = build_factory or self._agent_factory
         self._turns: dict[str, asyncio.Task] = {}
         self._errors: dict[str, str] = {}
+        self._progress: dict[str, ReviewProgress] = {}
         self._asking = asyncio.Lock()
 
     def workbench(self, review_id: str) -> Workbench:
@@ -98,6 +129,7 @@ class ReviewAgents:
         if review.status == "new":
             self.store.set_status(review_id, "in_review")
         self._errors.pop(review_id, None)
+        self._progress[review_id] = ReviewProgress()
         self._turns[review_id] = asyncio.get_running_loop().create_task(
             self._turn(review_id, workbench, (message or "").strip() or FIRST_REQUEST),
             name=f"review-{review_id}",
@@ -109,6 +141,7 @@ class ReviewAgents:
         return {
             "running": self.running(review_id),
             "error": self._errors.get(review_id),
+            "progress": self._progress[review_id].snapshot() if review_id in self._progress else None,
             "messages": _conversation(workbench.root / "conversation.json"),
             "proposals": workbench.proposals(),
         }
@@ -127,7 +160,11 @@ class ReviewAgents:
             manager.ensure_context(CONVERSATION)
             factory = self._build_factory(workbench, manager)
             try:
-                await factory.run_agent(AGENT, message, context_id=CONVERSATION)
+                await factory.run_agent(AGENT, message, context_id=CONVERSATION,
+                                        stream=True, stream_observer=self._progress[review_id])
+                interruption = manager.pending_interruption(CONVERSATION)
+                if interruption is not None:
+                    self._errors[review_id] = interruption.summary()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

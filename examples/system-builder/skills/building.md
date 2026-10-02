@@ -28,8 +28,11 @@
 1. `builder_catalog`: какие есть системы, модели, готовые инструменты и наборы.
    Прочитай (`builder_read`) конфиг ближайшей системы из каталога — это образец
    формата и проверенных провайдеров и моделей.
-2. Спроектируй: какие задачи, сколько агентов (обычно один; несколько — только если
-   у них разные роли и инструменты), какие инструменты готовые, каких не хватает.
+2. Спроектируй многоагентную систему: координатор, исполнители по предметным
+   задачам и независимый проверяющий. Каждая роль — отдельный ключ в agents,
+   собственные инструкции и необходимые инструменты. Координатор вызывает их
+   через type: agent, передаёт входы и принимает проверяемые результаты.
+   Не заменяй делегирование переключением ролей в одном промпте.
 3. `builder_create` с полным `config.yaml` и описанием для роутера.
 4. Навыки и README — `builder_write`.
 5. Для каждого недостающего инструмента — пакет инструментов с тестами
@@ -65,10 +68,20 @@ providers:                           # скопируй ЦЕЛИКОМ из buil
     timeout: 300
     max_retries: 3
 models:                              # только модели из builder_catalog.models,
-  glm-flash:                         # с теми же name и provider; по умолчанию
-    name: glm-5.3-flash              # flash-модели, другие — только если
-    provider: opencode               # администратор попросил
+  glm-flash:                         # с теми же name и provider;
+    name: glm-5.3-flash              # выбирай модель по сложности роли
+    provider: opencode               # и требованиям качества пользователя
 tools:
+  call_writer:
+    type: agent
+    target_agent: writer
+    description: Produce the requested document artifact and report its path.
+    context_strategy: minimal
+  call_reviewer:
+    type: agent
+    target_agent: reviewer
+    description: Independently verify the artifact against acceptance criteria.
+    context_strategy: minimal
   word_stats:                        # новый инструмент: пакет
     type: mcp
     tool_package: tools/word_stats
@@ -76,16 +89,37 @@ tools:
   file_read:                         # готовый общий инструмент
     type: function
     description: Read a file
+  file_write:
+    type: function
+    description: Write the requested document artifact
 agents:
   main:
-    name: Text analyst
-    model: [glm-flash, deepseek-flash-latest]   # основная и запасная
+    name: Documentation coordinator
+    model: glm-flash
     description: >-
       Что делает агент — роутер читает это, если агент routable.
-    tools: [word_stats, file_read]
-    system_skills: [analysis]        # skills/analysis.md
+    tools: [call_writer, call_reviewer]
     custom_prompt: |
-      Роль, границы, признак завершения. Коротко; длинные протоколы — в навыки.
+      Передай исполнителю входные файлы и критерии приёмки. Затем передай
+      проверяющему пути результатов и исходные критерии. При замечаниях верни
+      их исполнителю; максимум три цикла. Итог: артефакты, проверка, ограничения.
+  writer:
+    name: Documentation writer
+    model: glm-flash
+    routable: false
+    tools: [file_read, file_write, word_stats]
+    custom_prompt: |
+      Создай запрошенный документ, сохрани исходники. Верни путь результата
+      и выполненные проверки. При отсутствии входа сообщи FILE_NOT_FOUND.
+  reviewer:
+    name: Documentation reviewer
+    model: glm-flash
+    routable: false
+    tools: [file_read, word_stats]
+    custom_prompt: |
+      Прочитай исходник и результат независимо от отчёта исполнителя.
+      Проверь критерии приёмки; верни конкретные дефекты либо подтверждение.
+      Не изменяй файлы. Если проверить невозможно, назови блокер.
 ```
 
 - Каждый инструмент, которым пользуется агент, объявлен в `tools`, иначе конфиг не загрузится.

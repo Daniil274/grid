@@ -139,7 +139,7 @@ def register_admin_review_routes(
         agents = analysis_agents()
         if not review_id.isalnum() or desk.store.get(review_id) is None:
             raise HTTPException(status_code=404, detail="Review not found")
-        return agents.state(review_id)
+        return await asyncio.to_thread(agents.state, review_id)
 
     @api.post("/api/admin/reviews/{review_id}/analysis", status_code=202)
     async def analyse(review_id: str, body: AnalysisRequest, _: User = Depends(admin)) -> dict[str, Any]:
@@ -152,7 +152,7 @@ def register_admin_review_routes(
             raise HTTPException(status_code=404, detail="Review not found") from None
         except AnalysisBusy as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
-        return agents.state(review_id)
+        return await asyncio.to_thread(agents.state, review_id)
 
     def proposal_of(review_id: str, proposal_id: str) -> tuple[Any, dict[str, Any]]:
         agents = analysis_agents()

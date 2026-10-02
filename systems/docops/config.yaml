@@ -56,32 +56,61 @@ tools:
   doc_tools:
     type: mcp
     tool_package: tools/doc_tools
-    description: Stdlib-only documentation analysis, linting, TOC, link checks, terminology and format conversion
+    description: Documentation analysis, linting, TOC, link checks, terminology, format conversion, text extraction and offline PDF
+  call_writer:
+    type: agent
+    target_agent: writer
+    description: Delegate text writing, editing, TOC, terminology and Markdown/HTML/CSV conversion to the writer agent
+    context_strategy: minimal
+  call_converter:
+    type: agent
+    target_agent: converter
+    description: Delegate text extraction and PDF conversion (including doc/docx) to the converter agent
+    context_strategy: minimal
+  call_reviewer:
+    type: agent
+    target_agent: reviewer
+    description: Independently verify source and result artifacts against acceptance criteria
+    context_strategy: minimal
 agents:
   main:
-    name: Docs Ops
+    name: Docs coordinator
     model: [glm-flash, deepseek-flash-latest]
     mcp_enabled: true
     description: >-
-      Documentation operations in the workspace: write and edit technical
-      docs, lint, TOC, link checks, terminology, statistics, and format
-      conversion of any kind (Markdown/HTML/txt/CSV, and doc/docx/odt/pdf via
-      shell converters or small scripts). Not for code changes in a repo or
-      internet research.
-    tools:
-      - file_read
-      - file_write
-      - file_replace
-      - file_edit_patch
-      - file_append
-      - file_list
-      - file_search
-      - file_content_search
-      - bash_tool
-      - doc_tools
-    system_skills: [docops]
+      Documentation operations coordinator: delegates writing, PDF conversion
+      and verification to specialized agents. Handles README, guides, lint, TOC,
+      links, terminology, Markdown/HTML/CSV and PDF from text or doc/docx.
+      Not for code changes, git, tests or internet research.
+    tools: [call_writer, call_converter, call_reviewer, file_read, file_list, file_search]
+    system_skills: [coordinator]
     custom_prompt: |
-      Ты — технический писатель и оператор документации с доступом к терминалу. Отвечай на языке пользователя.
-      Следуй протоколу из навыка docops. Любую конвертацию делай, а не советуй: сначала проверь наличие конвертеров в терминале, если нет — пробуй установить (pip/npm) или напиши короткий скрипт. Отказывай, только если реально попробовал и получил ошибку; тогда назови команду и текст ошибки.
-      Завершай коротким отчётом: какие файлы созданы/изменены, что проверено и с каким результатом, что осталось непроверенным.
-      Не выдумывай содержимое, которого нет в исходниках; при отсутствии входных данных сообщи об этом и ничего не создавай.
+      Ты — координатор Docs Ops. Сам файлы не правишь и не конвертируешь.
+      Разбери запрос, вызови call_writer и/или call_converter с путями и критериями приёмки, затем обязательно call_reviewer с путями исходников и результатов. Максимум три цикла правок. Итог: файлы, вердикт проверки, ограничения. Нет входа — FILE_NOT_FOUND, никого не вызывай. Не выдумывай содержимое.
+  writer:
+    name: Docs writer
+    model: [glm-flash, deepseek-flash-latest]
+    routable: false
+    mcp_enabled: true
+    tools: [file_read, file_write, file_replace, file_edit_patch, file_append, file_list, file_search, file_content_search, doc_tools]
+    system_skills: [writer]
+    custom_prompt: |
+      Ты — исполнитель текстовых задач. Прими от координатора пути, задачу и критерии. Разведай (file_read, doc_stats, doc_lint), правь точечно как единственный владелец файлов, новые файлы создавай целиком. Конвертации текстовых форматов — новым файлом рядом, без перезаписи без overwrite=true. После работы перечитай результат, прогони doc_lint и check_links. Верни пути и проверки. Нет входа — FILE_NOT_FOUND, ничего не создавай.
+  converter:
+    name: Docs converter
+    model: [glm-flash, deepseek-flash-latest]
+    routable: false
+    mcp_enabled: true
+    tools: [file_read, file_list, file_search, bash_tool, doc_tools]
+    system_skills: [converter]
+    custom_prompt: |
+      Ты — исполнитель PDF-конвертаций. Прими путь исходника и критерии. Сначала extract_text, затем convert_to_pdf или md_to_pdf (результат рядом, без перезаписи без overwrite=true). Pixel-perfect через soffice — только если просили точный макет Word. Проверь: файл есть, размер > 0, заголовок %PDF, исходник цел. Верни путь PDF, движок и ограничения (кириллица без TTF заменяется на ?). Нет файла — FILE_NOT_FOUND. Отказ только после реальных попыток, с командами и ошибками.
+  reviewer:
+    name: Docs reviewer
+    model: [glm-flash, deepseek-flash-latest]
+    routable: false
+    mcp_enabled: true
+    tools: [file_read, file_list, file_search, file_content_search, bash_tool, doc_tools]
+    system_skills: [reviewer]
+    custom_prompt: |
+      Ты — независимый проверяющий. Файлы не создаёшь и не правишь. Прочитай исходник и результат сам (file_read, extract_text, doc_lint, check_links; для PDF — ls/head/%PDF через bash только чтением). Сверь с критериями координатора. Верни PASS с перечислением проверенного либо FAIL с конкретными дефектами. Если проверить невозможно, назови блокер и непроверенные критерии.

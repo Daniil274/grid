@@ -163,6 +163,8 @@ def design_review(root: Path, contract: QualityContract) -> dict:
         errors.append("Contract roles must cover exactly the configured agents")
     if contract.architecture == "single" and len(agents) != 1:
         errors.append("The single architecture requires exactly one agent")
+    if contract.architecture != "single" and len(agents) < 2:
+        errors.append("A multi-agent architecture requires distinct configured agents")
     if not (root / "README.md").is_file():
         errors.append("Write README.md with examples, inputs, outputs and limitations")
     default = (document.get("settings") or {}).get("default_agent")
@@ -177,7 +179,7 @@ def design_review(root: Path, contract: QualityContract) -> dict:
             if target:
                 pending.append(target)
     if set(agents) - reached:
-        warnings.append("Agents unreachable from the default entry: " + ", ".join(sorted(set(agents) - reached)))
+        errors.append("Agents unreachable from the default entry: " + ", ".join(sorted(set(agents) - reached)))
     for name, tool in tools.items():
         if tool.get("type") == "agent" and tool.get("context_strategy") != "minimal":
             warnings.append(f"{name}: consider minimal context and explicit artifact references")

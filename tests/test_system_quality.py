@@ -59,6 +59,24 @@ def test_contract_rejects_vacuous_or_unbounded_checks():
         QualityContract.model_validate(document)
 
 
+def test_multiagent_contract_requires_distinct_reachable_agents(deployment):
+    _, root = create_system(deployment)
+    document = contract_document()
+    document["architecture"] = "coordinator"
+    contract = QualityContract.model_validate(document)
+    assert "A multi-agent architecture requires distinct configured agents" in design_review(root, contract)["errors"]
+    config = yaml.safe_load((root / "config.yaml").read_text())
+    config["agents"]["reviewer"] = dict(config["agents"]["main"])
+    document["roles"].append({**document["roles"][0], "agent": "reviewer"})
+    contract = QualityContract.model_validate(document)
+    (root / "config.yaml").write_text(yaml.safe_dump(config))
+    assert any("unreachable" in error for error in design_review(root, contract)["errors"])
+    config.setdefault("tools", {})["review"] = {"type": "agent", "target_agent": "reviewer", "context_strategy": "minimal"}
+    config["agents"]["main"].setdefault("tools", []).append("review")
+    (root / "config.yaml").write_text(yaml.safe_dump(config))
+    assert not design_review(root, contract)["errors"]
+
+
 def test_artifact_checks_inspect_values_and_refuse_links(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

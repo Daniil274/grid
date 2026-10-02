@@ -351,6 +351,50 @@ class TurnRunner:
         observer: Any,
         progress: "RunProgress",
     ) -> Tuple[str, Any]:
+        """Recover a missing model result once within the original deadline/session."""
+        deadline = asyncio.timeout(self.config.get_agent_timeout())
+        try:
+            async with deadline:
+                for recovery in range(2):
+                    try:
+                        return await self._run_attempt_once(
+                            agent, agent_key, run_input, run_ctx, session,
+                            stream=stream, observer=observer, progress=progress,
+                        )
+                    except TurnStopped as stop:
+                        recoverable = stop.reason == StopReason.ERROR and stop.detail in {
+                            "ModelBehaviorError: Model did not produce a final response!",
+                            "Model returned no final written report",
+                        }
+                        if not recoverable or recovery or session is None:
+                            raise
+                        if run_ctx.run_control is not None and run_ctx.run_control.stop_requested:
+                            raise TurnStopped(StopReason.USER_STOP) from None
+                        logger.warning("Agent %s: recovering missing model result once", agent_key)
+                        run_input = Interruption(
+                            reason=StopReason.ERROR, task="", agent=agent_key,
+                            detail=stop.detail, in_flight=progress.ledger.in_flight,
+                        ).resume_input() + (
+                            "\nUse saved tool results; do not repeat completed actions. "
+                            "Finish the remaining work and write a concrete final report."
+                        )
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            raise TurnStopped(StopReason.TIMEOUT, f"no answer within settings.agent_timeout ({self.config.get_agent_timeout()} s)") from None
+
+    async def _run_attempt_once(
+        self,
+        agent: Agent,
+        agent_key: str,
+        run_input: Union[str, List[Any]],
+        run_ctx: "GridRunContext",
+        session: Optional[SQLiteSession],
+        *,
+        stream: bool,
+        observer: Any,
+        progress: "RunProgress",
+    ) -> Tuple[str, Any]:
         """One run of the agent. Returns its answer text and the SDK result.
 
         A run that ends without an answer and without failing raises
@@ -443,6 +487,13 @@ class TurnRunner:
         # final answer, the turn is simply done.
         if control is not None and control.stop_requested and result.final_output is None:
             raise TurnStopped(StopReason.USER_STOP)
+        if not str(getattr(result, "final_output", None) or "").strip() and not generated_so_far():
+            items = getattr(result, "new_items", None) or []
+            # Narration before a tool call is not a completed result. Keep the
+            # legacy text-stream fallback only for runs without tool actions.
+            has_tools = any(getattr(item, "type", "") == "tool_call_item" for item in items)
+            if has_tools or not "".join(fragments).strip():
+                raise TurnStopped(StopReason.ERROR, "Model returned no final written report")
         return self._final_text(result, fragments), result
 
     async def _run_with_retries(

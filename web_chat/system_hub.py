@@ -279,28 +279,43 @@ def copy_config(source_path: Path, target_dir: Path, agents: Optional[List[str]]
 
 
 def blank_config(base: Config) -> str:
-    """A config with one agent and no tools, on the models of *base* (the server's default system).
-
-    Its first flash model when it has one: cheap until someone chooses otherwise.
-    """
+    """A connected coordinator, worker and reviewer using the base model."""
     raw = yaml.safe_load(Path(base.config_path).read_text(encoding="utf-8")) or {}
     models = raw.get("models") or {}
-    flash = [key for key, model in models.items() if "flash" in f"{key} {model.get('name', '')}".lower()]
-    model = flash[0] if flash else base.config.agents[base.get_default_agent()].primary_model
+    model = base.config.agents[base.get_default_agent()].primary_model
     used = models[model]
     document = {
         "settings": {"default_agent": "assistant", "working_directory": ".", "allow_path_override": True, "max_turns": 100},
         "providers": {used["provider"]: raw["providers"][used["provider"]]},
         "models": {model: used},
-        "tools": {},
+        "tools": {
+            "call_worker": {"type": "agent", "target_agent": "worker", "context_strategy": "minimal",
+                            "description": "Delegate the task with inputs and acceptance criteria."},
+            "call_reviewer": {"type": "agent", "target_agent": "reviewer", "context_strategy": "minimal",
+                              "description": "Independently check the result against the original criteria."},
+        },
         "agents": {
             "assistant": {
-                "name": "Assistant",
+                "name": "Coordinator",
                 "model": model,
-                "description": "Describe what this agent does: the router reads it.",
-                "tools": [],
-                "custom_prompt": "Describe the agent's role, its limits and when it is done.\n",
-            }
+                "description": "Coordinate execution and independent review of the user's task.",
+                "tools": ["call_worker", "call_reviewer"],
+                "custom_prompt": "Delegate execution to call_worker with inputs and acceptance criteria. "
+                                 "Send the result and original criteria to call_reviewer. Return findings to "
+                                 "the worker for correction, at most three cycles. Report the result, verification "
+                                 "and any unresolved limitations. Do not simulate the other agents' roles.\n",
+            },
+            "worker": {
+                "name": "Worker", "model": model, "routable": False, "tools": [],
+                "custom_prompt": "Execute the delegated task. Return the concrete result and evidence. "
+                                 "If required inputs or tools are unavailable, report the blocker explicitly.\n",
+            },
+            "reviewer": {
+                "name": "Reviewer", "model": model, "routable": False, "tools": [],
+                "custom_prompt": "Independently check the result against the original inputs and acceptance "
+                                 "criteria. Report specific defects or verified findings. Distinguish unverified "
+                                 "claims from evidence; never approve work you cannot check.\n",
+            },
         },
     }
     return yaml.safe_dump(document, allow_unicode=True, sort_keys=False)

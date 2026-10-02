@@ -28,9 +28,9 @@ class ModelCandidate:
 class FallbackModel(Model):
     """Try configured models from left to right for every model request.
 
-    Streaming events are buffered until one candidate finishes successfully.
-    This lets a later candidate replace a failed partial stream without leaking
-    duplicate text or tool calls to the runner.
+    Stream live once a candidate produces content. Only initial lifecycle
+    events are buffered; a failure after content escapes is propagated so a
+    second model cannot silently duplicate text or tool calls.
     """
 
     def __init__(self, candidates: Sequence[ModelCandidate]) -> None:
@@ -74,6 +74,7 @@ class FallbackModel(Model):
         errors: list[str] = []
         for index, candidate in enumerate(self.candidates):
             events: list[Any] = []
+            committed = False
             try:
                 call_args, call_kwargs = self._with_settings(
                     args, kwargs, candidate.settings
@@ -81,8 +82,19 @@ class FallbackModel(Model):
                 async for event in candidate.model.stream_response(
                     *call_args, **call_kwargs
                 ):
-                    events.append(event)
+                    if not committed:
+                        events.append(event)
+                        if getattr(event, "type", None) in {"response.created", "response.in_progress"}:
+                            continue
+                        committed = True
+                        for initial in events:
+                            yield initial
+                        events.clear()
+                    else:
+                        yield event
             except Exception as exc:
+                if committed:
+                    raise
                 errors.append(f"{candidate.key}: {type(exc).__name__}: {exc}")
                 logger.warning(
                     "Model '%s' stream failed%s: %s",

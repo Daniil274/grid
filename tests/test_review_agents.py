@@ -83,7 +83,7 @@ class FakeFactory:
         self.bench, self.manager, self.release = bench, manager, release
         self.asked, self.closed = [], False
 
-    async def run_agent(self, agent, message, context_id):
+    async def run_agent(self, agent, message, context_id, **kwargs):
         self.asked.append((agent, message, context_id))
         if self.release is not None:
             await self.release.wait()
@@ -146,7 +146,7 @@ async def test_a_failed_turn_is_reported_not_raised(tmp_path):
     store, agents = _agents(tmp_path, [])
 
     class Broken(FakeFactory):
-        async def run_agent(self, agent, message, context_id):
+        async def run_agent(self, agent, message, context_id, **kwargs):
             raise RuntimeError("the model is down")
 
     agents._build_factory = lambda bench, manager: Broken(bench, manager)
@@ -162,6 +162,31 @@ async def test_an_unknown_review_is_refused(tmp_path):
 
     with pytest.raises(LookupError):
         await agents.ask("nope")
+
+
+async def test_interrupted_result_is_visible_as_an_error(tmp_path):
+    from core.interruption import Interruption, StopReason
+    store, agents = _agents(tmp_path, [])
+
+    class Interrupted(FakeFactory):
+        async def run_agent(self, agent, message, context_id, **kwargs):
+            assert kwargs["stream"] is True
+            observer = kwargs["stream_observer"]
+            observer.handle_event(SimpleNamespace(name="tool_called", item=SimpleNamespace(
+                raw_item={"name": "read_file"}, type="tool_call_item")), agent_key=agent)
+            stop = Interruption(reason=StopReason.ERROR, task=message, agent=agent, detail="No final report")
+            self.manager.activate_context(context_id)
+            self.manager.add_message("assistant", stop.summary(), metadata=stop.message_metadata(context_id=context_id, turn_id=None))
+            return stop.summary()
+
+    agents._build_factory = lambda bench, manager: Interrupted(bench, manager)
+    await agents.ask("r1")
+    await _finish(agents)
+    state = agents.state("r1")
+    assert "No final report" in state["error"]
+    assert state["progress"]["tool_calls"] == 1
+    assert "read_file" in state["progress"]["last_event"]
+    assert store.get("r1").status == "in_review"
 
 
 # -- the proposal tool ------------------------------------------------------------------

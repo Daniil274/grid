@@ -16,7 +16,7 @@ from web_chat.server import WebChatServer
 from web_chat.space import SpaceLayout, UserSpace
 from web_chat.spaces import SpacePool
 from web_chat.system_activity import SystemActivity
-from web_chat.system_hub import copy_config, export_user_system
+from web_chat.system_hub import blank_config, copy_config, export_user_system
 from web_chat.user_systems import (
     MemberSpec,
     UserSystemError,
@@ -28,6 +28,18 @@ from web_chat.user_systems import (
 )
 
 SAME_SITE = {"Origin": "http://testserver"}
+
+
+def test_blank_system_has_real_delegation_and_independent_review(deployment, tmp_path):
+    base = Config(str(deployment.system_config_path("base")))
+    document = yaml.safe_load(blank_config(base))
+    entry = document["agents"][document["settings"]["default_agent"]]
+    targets = {document["tools"][name]["target_agent"] for name in entry["tools"]}
+    assert targets == {"worker", "reviewer"}
+    assert all(document["agents"][key]["routable"] is False for key in targets)
+    path = tmp_path / "team.yaml"
+    path.write_text(yaml.safe_dump(document))
+    assert set(Config(str(path)).config.agents) == {"assistant", "worker", "reviewer"}
 
 PROVIDERS = """
 models:

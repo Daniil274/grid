@@ -139,9 +139,53 @@ async def test_the_agent_timeout_ends_the_run_without_repeating_it(factory):
 
 
 async def test_an_empty_answer_says_so(factory):
-    with use(ScriptedRunner("")):
+    with use(ScriptedRunner("", "")):
         answer = await factory.run_agent("worker", "Go")
-    assert "finished without a written report" in answer
+    assert "Model returned no final written report" in answer
+    assert factory.context_manager.pending_interruption(factory.context_manager.get_current_context_id())
+
+
+async def test_empty_answer_recovers_in_same_session(factory):
+    runner = ScriptedRunner("", "Verified result.")
+    with use(runner):
+        answer = await factory.run_agent("worker", "Go")
+    assert answer.startswith("Verified result.")
+    assert runner.calls[0].session is runner.calls[1].session
+    assert "do not repeat completed actions" in runner.calls[1].input
+    messages = factory.context_manager.conversation_snapshot()
+    assert len([m for m in messages if m.role == "user"]) == 1
+
+
+async def test_missing_terminal_response_recovers_with_saved_tool_results(factory):
+    from agents.exceptions import ModelBehaviorError
+
+    class InterruptedRunner(ScriptedRunner):
+        async def run(self, agent, run_input, **kwargs):
+            if not self.calls:
+                await kwargs["session"].add_items([
+                    {"type": "function_call", "call_id": "write1", "name": "write_file", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "write1", "output": "saved result.pdf"},
+                ])
+            else:
+                saved = await kwargs["session"].get_items()
+                assert any(item.get("output") == "saved result.pdf" for item in saved)
+            return await super().run(agent, run_input, **kwargs)
+
+    runner = InterruptedRunner(ModelBehaviorError("Model did not produce a final response!"), "Created result.pdf")
+    with use(runner):
+        answer = await factory.run_agent("worker", "Create PDF")
+    assert answer.startswith("Created result.pdf")
+    assert len(runner.calls) == 2
+    assert runner.calls[0].session is runner.calls[1].session
+
+
+async def test_missing_terminal_response_recovery_is_bounded(factory):
+    from agents.exceptions import ModelBehaviorError
+    runner = ScriptedRunner(*[ModelBehaviorError("Model did not produce a final response!") for _ in range(2)])
+    with use(runner):
+        answer = await factory.run_agent("worker", "Go")
+    assert "Model did not produce a final response!" in answer
+    assert len(runner.calls) == 2
 
 
 async def test_text_tool_calls_are_retried_with_a_correction(factory):

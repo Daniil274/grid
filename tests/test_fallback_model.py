@@ -55,8 +55,8 @@ async def test_get_response_uses_models_left_to_right_and_their_settings():
 
 
 @pytest.mark.asyncio
-async def test_stream_discards_failed_partial_events_before_fallback():
-    primary = FakeModel(events=["partial"], stream_error=RuntimeError("stream failed"))
+async def test_stream_discards_initial_lifecycle_events_before_fallback():
+    primary = FakeModel(events=[SimpleNamespace(type="response.created")], stream_error=RuntimeError("stream failed"))
     backup = FakeModel(events=["complete", "done"])
     model = FallbackModel([
         _candidate("primary", primary),
@@ -79,6 +79,39 @@ async def test_stream_discards_failed_partial_events_before_fallback():
     assert events == ["complete", "done"]
     assert [settings.key for settings in primary.stream_settings] == ["primary"]
     assert [settings.key for settings in backup.stream_settings] == ["backup"]
+
+
+async def test_stream_delivers_content_before_provider_finishes():
+    import asyncio
+    release = asyncio.Event()
+
+    class SlowModel(FakeModel):
+        async def stream_response(self, *args, **kwargs):
+            yield "first token"
+            await release.wait()
+            yield "last token"
+
+    model = FallbackModel([_candidate("primary", SlowModel())])
+    stream = model.stream_response(model_settings=None)
+    try:
+        assert await asyncio.wait_for(anext(stream), 1) == "first token"
+        release.set()
+        assert await anext(stream) == "last token"
+    finally:
+        await stream.aclose()
+
+
+async def test_failure_after_content_does_not_mix_candidates():
+    backup = FakeModel(events=["replacement"])
+    model = FallbackModel([
+        _candidate("primary", FakeModel(events=["partial"], stream_error=RuntimeError("broken"))),
+        _candidate("backup", backup),
+    ])
+    stream = model.stream_response(model_settings=None)
+    assert await anext(stream) == "partial"
+    with pytest.raises(RuntimeError, match="broken"):
+        await anext(stream)
+    assert not backup.stream_settings
 
 
 @pytest.mark.asyncio

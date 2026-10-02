@@ -906,7 +906,7 @@ function newCreated() {
   const source = h(
     "select.control",
     {},
-    h("option", { value: "", text: "Blank: one agent, no tools" }),
+    h("option", { value: "", text: "New team: coordinator, worker, reviewer" }),
     sources.map((item) => h("option", { value: item, text: `Copy of ${item}` })),
   );
   const agentsBox = h("div");
@@ -917,7 +917,7 @@ function newCreated() {
   const loadAgents = async () => {
     agents = null;
     if (!source.value) {
-      replace(agentsBox, hintText("A blank system starts with one agent on the server's flash model; edit its config after."));
+      replace(agentsBox, hintText("Starts with connected coordinator, worker and reviewer agents. Configure their task-specific tools and instructions after creation."));
       return;
     }
     replace(agentsBox, hintText("Loading its agents…"));

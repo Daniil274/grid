@@ -324,6 +324,7 @@ def test_an_admin_can_start_a_blank_system(deployment, tmp_path):
     )
     assert created.status_code == 201, created.text
     config = yaml.safe_load(deployment.created_store.config_text("empty"))
-    assert list(config["agents"]) == ["assistant"] and config["agents"]["assistant"]["tools"] == []
+    assert set(config["agents"]) == {"assistant", "worker", "reviewer"}
+    assert set(config["agents"]["assistant"]["tools"]) == {"call_worker", "call_reviewer"}
     detail = client.get("/api/systems/created/empty", headers=ROOT).json()
     assert detail["inspection"]["loaded"] and detail["inspection"]["config"] == []

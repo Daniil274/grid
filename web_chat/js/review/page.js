@@ -240,23 +240,35 @@ function analysisView(reviewId) {
   });
   const send = h("button.btn.btn--primary", { type: "button", text: "Analyze" });
 
+  let previousMessages = null;
+  let previousProposals = null;
   const render = (analysis) => {
-    replace(
-      log,
-      analysis.messages.length
-        ? analysis.messages.map((message) =>
-            h(
-              "article.analysisMsg",
-              { dataset: { role: message.role } },
-              h("div.analysisMsg__head", { text: message.role === "user" ? "Admin" : "Review agents" }),
-              h("pre.evidence__text", { text: message.content }),
-            ),
-          )
-        : h("p.evidence__note", { text: "Not analyzed yet. Analyze to let the review agents find the cause." }),
-    );
-    replace(proposals, analysis.proposals.map((proposal) => proposalCard(reviewId, proposal)));
+    const messagesKey = JSON.stringify(analysis.messages);
+    if (messagesKey !== previousMessages) {
+      previousMessages = messagesKey;
+      replace(
+        log,
+        analysis.messages.length
+          ? analysis.messages.map((message) =>
+              h(
+                "article.analysisMsg",
+                { dataset: { role: message.role } },
+                h("div.analysisMsg__head", { text: message.role === "user" ? "Admin" : "Review agents" }),
+                h("pre.evidence__text", { text: message.content }),
+              ),
+            )
+          : h("p.evidence__note", { text: "Not analyzed yet. Analyze to let the review agents find the cause." }),
+      );
+    }
+    const proposalsKey = JSON.stringify(analysis.proposals);
+    if (proposalsKey !== previousProposals) {
+      previousProposals = proposalsKey;
+      replace(proposals, analysis.proposals.map((proposal) => proposalCard(reviewId, proposal)));
+    }
     status.dataset.tone = analysis.error ? "error" : "";
-    status.textContent = analysis.running ? "The review agents are working…" : analysis.error ?? "";
+    status.textContent = analysis.running
+      ? `${analysis.progress?.last_event ?? "The review agents are working…"} · ${analysis.progress?.tool_calls ?? 0} tool calls`
+      : analysis.error ?? "";
     send.disabled = analysis.running;
     send.textContent = analysis.messages.length ? "Ask" : "Analyze";
   };
