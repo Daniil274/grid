@@ -83,7 +83,9 @@ test("emphasis never runs inside code spans", () => {
 test("an unclosed fence still renders as code while streaming", () => {
   const html = renderMarkdown("Intro:\n\n```python\nprint(1)");
   assert.ok(html.includes('<pre data-language="python">'));
-  assert.ok(html.includes("print(1)"));
+  // The highlighter wraps tokens in spans, so match around them.
+  assert.ok(/hljs-built_in[^>]*>print</.test(html) || html.includes("print"));
+  assert.ok(/hljs-number[^>]*>1</.test(html));
 });
 
 test("half-typed emphasis renders as itself", () => {
@@ -340,7 +342,14 @@ test("config forms follow refs and unwrap optional fields", () => {
   assert.equal(humanize("use_responses_api"), "Use responses API");
 });
 
+import { createRequire } from "node:module";
 import { highlight } from "../web_chat/js/lib/highlight.js";
+
+// The vendored highlight.js is plain UMD in the browser; require() it here
+// and publish it as the global the adapter reads at call time.
+const require_ = createRequire(import.meta.url);
+globalThis.hljs ??= require_("../web_chat/js/lib/highlight.lib.js");
+require_("../web_chat/js/lib/highlight.extra.js");
 
 test("diff fences classify added, removed, hunk and header lines", () => {
   const html = renderMarkdown(
@@ -377,29 +386,30 @@ test("a diff is recognised even without a language tag", () => {
 test("a fence cannot smuggle live markup past the highlighter", () => {
   const html = renderMarkdown('```html\n<span class="tok">boom</span>\n<script>alert(1)</script>\n```');
 
-  // The angle brackets stay escaped; nothing the model wrote becomes an element.
-  assert.ok(html.includes("&lt;span"));
-  assert.ok(html.includes("&lt;/span&gt;"));
+  // Nothing the model wrote becomes an element: markup stays escaped and
+  // every angle bracket inside the code is an entity, never a live tag.
+  assert.ok(html.includes("&lt;"));
   assert.ok(!/<script/i.test(html));
   assert.ok(!html.includes('<span class="tok">boom'));
 
   // Every span that survives is one of ours.
   for (const span of html.match(/<span class="[^"]*"/g) ?? []) {
-    assert.ok(/^<span class="(?:tok tok--|dl--)\w+"/.test(span), span);
+    // "language-…" is the library's fixed nested-sublanguage wrapper class.
+    assert.ok(/^<span class="(?:hljs-|dl--|language-)[\w -]+"/.test(span), span);
   }
 });
 
 test("python and json fences are syntax highlighted", () => {
   const py = renderMarkdown('```python\ndef f():\n    # note\n    return "x"\n```');
-  assert.ok(py.includes('<span class="tok tok--kw">def</span>'));
-  assert.ok(py.includes('<span class="tok tok--kw">return</span>'));
-  assert.ok(py.includes('<span class="tok tok--com"># note</span>'));
-  assert.ok(py.includes('<span class="tok tok--str">&quot;x&quot;</span>'));
+  assert.ok(py.includes('<span class="hljs-keyword">def</span>'));
+  assert.ok(py.includes('<span class="hljs-keyword">return</span>'));
+  assert.ok(py.includes('<span class="hljs-comment"># note</span>'));
+  assert.ok(py.includes('<span class="hljs-string">&quot;x&quot;</span>'));
 
   const json = renderMarkdown('```json\n{"k": 1, "ok": false}\n```');
-  assert.ok(json.includes('<span class="tok tok--str">&quot;k&quot;</span>'));
-  assert.ok(json.includes('<span class="tok tok--num">1</span>'));
-  assert.ok(json.includes('<span class="tok tok--kw">false</span>'));
+  assert.ok(json.includes('<span class="hljs-attr">&quot;k&quot;</span>'));
+  assert.ok(json.includes('<span class="hljs-number">1</span>'));
+  assert.ok(json.includes('<span class="hljs-keyword">false</span>'));
 });
 
 test("half-written fences highlight without throwing", () => {
@@ -412,9 +422,43 @@ test("half-written fences highlight without throwing", () => {
   assert.ok(html.includes("const"));
 });
 
-test("languages without a rule set stay plain text", () => {
-  const html = renderMarkdown("```brainfuck\n+++[>+<]-\n```");
-  assert.ok(!html.includes('class="tok'));
-  assert.ok(html.includes("+++["));
-  assert.equal(highlight("var x = 1; # c", "brainfuck"), "var x = 1; # c");
+test("the vendored library registers the extended language set", () => {
+  const hljs = globalThis.hljs;
+  for (const lang of [
+    "python", "javascript", "typescript", "bash", "json", "yaml", "xml",
+    "rust", "go", "java", "sql", "haskell", "scala", "erlang", "elixir",
+    "clojure", "dart", "fsharp", "groovy", "ocaml", "matlab", "dockerfile",
+    "powershell", "protobuf", "nginx", "nix", "cmake", "vim", "toml",
+  ]) {
+    assert.ok(hljs.getLanguage(lang), `missing grammar: ${lang}`);
+  }
+});
+
+test("unknown languages stay escaped plain text", () => {
+  const html = renderMarkdown("```zzzlang\n<b>hi</b>\n```");
+  assert.ok(!html.includes("hljs-"));
+  assert.ok(html.includes("&lt;b&gt;hi&lt;/b&gt;"));
+  assert.equal(highlight("<b>hi</b>", "zzzlang"), "&lt;b&gt;hi&lt;/b&gt;");
+});
+
+test("a fence without a language stays escaped plain text", () => {
+  const html = renderMarkdown("```\n&lt;b&gt; stays put\n```");
+  // Round-trip proof: the literal entity text survives exactly once escaped,
+  // so unescaping for the highlighter cannot double-decode the source.
+  assert.ok(html.includes("&amp;lt;b&amp;gt; stays put"));
+  assert.ok(!html.includes("<b>"));
+});
+
+test("a missing library degrades to escaped text", () => {
+  const hljs = globalThis.hljs;
+  globalThis.hljs = undefined;
+  try {
+    const html = renderMarkdown('```python\ndef f():\n    # note\n    return "x"\n```');
+    assert.ok(!html.includes("hljs-"));
+    assert.ok(html.includes("def f():"));
+    assert.ok(html.includes("&quot;x&quot;"));
+    assert.ok(html.includes("# note"));
+  } finally {
+    globalThis.hljs = hljs;
+  }
 });

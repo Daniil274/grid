@@ -381,11 +381,17 @@
   text-transform: uppercase;
 }
 
-/* Syntax highlighting: colour only, so the copy button's textContent is intact. */
-.tok--kw { color: var(--code-kw); }
-.tok--str { color: var(--code-str); }
-.tok--num { color: var(--code-num); }
-.tok--com { color: var(--code-com); }
+/* Syntax highlighting (highlight.js v11): colour only, so the copy button's
+   textContent stays intact. The hljs-* token classes map onto the same code
+   palette as the previous in-house highlighter did. */
+.hljs-comment, .hljs-quote { color: var(--code-com); }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag,
+.hljs-section, .hljs-name, .hljs-selector-id, .hljs-selector-class { color: var(--code-kw); }
+.hljs-string, .hljs-regexp, .hljs-selector-attr, .hljs-attr,
+.hljs-attribute, .hljs-template-variable { color: var(--code-str); }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link { color: var(--code-num); }
+.hljs-title, .hljs-title.function_, .hljs-title.class_,
+.hljs-built_in, .hljs-type { color: var(--code-kw); }
 
 /* Diff colouring: block spans so the tint spans the full line width. */
 .dl--add {

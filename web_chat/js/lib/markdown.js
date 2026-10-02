@@ -8,6 +8,9 @@
  * 1. **Safety.** The source is escaped once, up front; every later stage works
  *    on escaped text. No tag in model output or tool results can reach the DOM,
  *    and link targets are filtered to safe schemes.
+ *    Fenced code is the one deliberate round trip: the escaped fence body is
+ *    restored with ``unescapeHtml`` (the exact inverse of ``escapeHtml``) and
+ *    the highlighter re-escapes its own output — still no live markup.
  * 2. **Streaming tolerance.** Half-typed emphasis and unclosed code fences are
  *    normal mid-stream; they render as themselves instead of corrupting the
  *    rest of the document.
@@ -26,6 +29,20 @@ export function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+/**
+ * Exact inverse of ``escapeHtml``. Escaped text only ever contains the five
+ * entity names that escapeHtml produces, so the round trip restores the raw
+ * code exactly — a fence can never smuggle live markup through it.
+ */
+export function unescapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&amp;", "&");
 }
 
 function safeHref(raw) {
@@ -118,7 +135,10 @@ function blocks(lines) {
         index += 1; // closing fence; absent mid-stream, which is fine
         const language = match[1] ? ` data-language="${match[1]}"` : "";
         const source = body.join("\n");
-        out.push(`<pre${language}><code>${highlight(source, match[1])}</code></pre>`);
+        // Round trip: the escaped fence body is restored with the exact
+        // inverse of escapeHtml, and the highlighter re-escapes its own
+        // output — the value still cannot contain a live tag.
+        out.push(`<pre${language}><code>${highlight(unescapeHtml(source), match[1])}</code></pre>`);
         break;
       }
 
