@@ -211,8 +211,11 @@ class IConfig(Protocol):
         """Get maximum turns for agent execution."""
         ...
 
-    def get_agent_timeout(self) -> int:
-        """Get agent execution timeout in seconds."""
+    def get_agent_timeout(self, agent_key: Optional[str] = None) -> int:
+        """Agent execution timeout in seconds; 0 means no timeout.
+
+        A per-agent ``timeout`` wins over ``settings.agent_timeout``.
+        """
         ...
 
     def is_mcp_enabled(self) -> bool:

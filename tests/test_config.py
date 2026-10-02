@@ -248,6 +248,62 @@ class TestConfig:
         # Test mcp_enabled
         assert config.is_mcp_enabled() is False
     
+    def test_agent_timeout_resolution(self, config_file, sample_config):
+        """A per-agent timeout wins over settings; 0 means no timeout."""
+        config = Config(str(config_file))
+
+        # No per-agent override: settings win.
+        assert config.get_agent_timeout() == config.config.settings.agent_timeout
+        assert config.get_agent_timeout("nonexistent_agent") == config.config.settings.agent_timeout
+
+        # A per-agent override applies to that agent alone.
+        sample_config["agents"]["patient_agent"] = {
+            "name": "Patient Agent",
+            "model": "gpt-4",
+            "tools": ["file_read"],
+            "base_prompt": "test_prompt",
+            "description": "Waits for its workers",
+            "timeout": 0,
+        }
+        modified_config_file = config_file.parent / "timeout_config.yaml"
+        with open(modified_config_file, 'w') as f:
+            yaml.dump(sample_config, f)
+
+        config = Config(str(modified_config_file))
+        assert config.get_agent_timeout("patient_agent") == 0
+        assert config.get_agent_timeout() == config.config.settings.agent_timeout
+
+    def test_platform_prompt_sections(self, config_file, sample_config):
+        """A deployment can append prompt sections shown to every agent."""
+        from unittest.mock import Mock
+
+        from core.config.prompt_sections import PromptSection
+        from core.managers.instructions_builder import InstructionsBuilder
+
+        sample_config["prompt_templates"] = {
+            "test_prompt": "This is a test prompt template."
+        }
+        platform_file = config_file.parent / "platform_config.yaml"
+        with open(platform_file, "w") as f:
+            yaml.dump(sample_config, f)
+
+        config = Config(str(platform_file))
+        builder = InstructionsBuilder(
+            config,
+            context_manager=Mock(get_current_context_id=lambda: None),
+            container_id="test_container",
+        )
+        assert builder.platform_sections == []
+
+        builder.platform_sections = [
+            PromptSection(key="workspace_file_links", scope="static", content="Handing files to the user")
+        ]
+        assembly = builder.assemble_model_context(
+            "test_agent",
+            include_conversation_context=False,
+            include_path_context=False,
+        )
+        assert any(s.key == "workspace_file_links" for s in assembly.sections)
     def test_prompt_template_methods(self, config_file, sample_config):
         """Test prompt template methods."""
         # Add prompt templates to config

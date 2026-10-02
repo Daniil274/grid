@@ -370,10 +370,13 @@ class TestSettings:
         with pytest.raises(ValidationError):
             Settings(max_turns=301)
         
+        # agent_timeout=0 is valid: it disables the agent execution timeout.
+        assert Settings(agent_timeout=0).agent_timeout == 0
+
         # Invalid agent_timeout
         with pytest.raises(ValidationError):
-            Settings(agent_timeout=20)
-        
+            Settings(agent_timeout=-1)
+
         with pytest.raises(ValidationError):
             Settings(agent_timeout=2000)
 

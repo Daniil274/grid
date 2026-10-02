@@ -99,7 +99,7 @@ async def hang():
 
 
 async def test_a_timeout_is_recorded_and_answered_with_its_summary(factory):
-    factory.config.get_agent_timeout = lambda: 0.05
+    factory.config.get_agent_timeout = lambda agent_key=None: 0.05
     with use(ScriptedRunner(hang)):
         answer = await factory.run_agent("worker", "Open Notepad")
     context_id = factory.context_manager.get_current_context_id()
@@ -107,7 +107,7 @@ async def test_a_timeout_is_recorded_and_answered_with_its_summary(factory):
     record = last_record(factory, context_id)
     assert record.reason is StopReason.TIMEOUT
     assert record.task == "Open Notepad"
-    assert "ran out of time" in answer and "settings.agent_timeout" in answer
+    assert "ran out of time" in answer and "the agent timeout" in answer
     # The record is the answer: no second assistant message.
     assert [m.role for m in stored(factory, context_id)] == ["user", "assistant"]
 
@@ -210,11 +210,11 @@ async def test_a_cancelled_turn_records_the_call_it_was_running(factory):
 
 
 async def test_continue_resumes_the_same_request_once(factory):
-    factory.config.get_agent_timeout = lambda: 0.05
+    factory.config.get_agent_timeout = lambda agent_key=None: 0.05
     with use(ScriptedRunner(hang)):
         await factory.run_agent("worker", "Open Notepad")
     context_id = factory.context_manager.get_current_context_id()
-    factory.config.get_agent_timeout = lambda: 30
+    factory.config.get_agent_timeout = lambda agent_key=None: 30
 
     runner = ScriptedRunner("Notepad is open.")
     with use(runner):
@@ -279,11 +279,11 @@ async def test_a_typed_message_resumes_with_the_calls_in_flight(factory):
 
 
 async def test_only_the_interrupted_agent_resumes_its_turn(factory):
-    factory.config.get_agent_timeout = lambda: 0.05
+    factory.config.get_agent_timeout = lambda agent_key=None: 0.05
     with use(ScriptedRunner(hang)):
         await factory.run_agent("worker", "Open Notepad")
     context_id = factory.context_manager.get_current_context_id()
-    factory.config.get_agent_timeout = lambda: 30
+    factory.config.get_agent_timeout = lambda agent_key=None: 30
 
     with use(ScriptedRunner("unused")), pytest.raises(AgentError):
         await factory.continue_agent("reviewer", context_id)

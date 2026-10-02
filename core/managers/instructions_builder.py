@@ -5,7 +5,7 @@ Structured model-context assembly for agents.
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from core.config.prompt_sections import ModelContextAssembly, PromptSection
 from core.config.protocols import IConfig, IContextManager
@@ -30,6 +30,10 @@ class InstructionsBuilder:
         self.config = config
         self.context_manager = context_manager
         self.container_id = container_id
+        # Sections a deployment appends for every agent, right after the path
+        # context. Nothing in core sets them; the web chat uses one to teach
+        # the workspace-file link convention (web_chat/space.py).
+        self.platform_sections: List[PromptSection] = []
 
     def assemble_model_context(
         self,
@@ -53,6 +57,9 @@ class InstructionsBuilder:
                         scope="dynamic",
                     )
                 )
+
+        if self.platform_sections:
+            sections.extend(self.platform_sections)
 
         context_reference = self._build_context_reference(context_id)
         if context_reference:

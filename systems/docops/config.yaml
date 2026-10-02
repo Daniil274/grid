@@ -75,6 +75,7 @@ tools:
 agents:
   main:
     name: Docs coordinator
+    timeout: 0  # No agent timeout: the coordinator must not be cut off mid-orchestration.
     model: [glm-flash, deepseek-flash-latest]
     mcp_enabled: true
     description: >-

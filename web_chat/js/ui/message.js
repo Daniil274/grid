@@ -150,6 +150,8 @@ export function createMessage({
   const paint = () => {
     body.innerHTML = renderMarkdown(text);
     decorateCode(body);
+    // Workspace-file links the agent emits (/api/workspace/files/<path>)
+    // download on click; nothing extra is needed here.
   };
   const paintSoon = onFrame(paint);
 

@@ -338,6 +338,7 @@ agents:
   # ── Координатор ─────────────────────────────────────────────────
   coordinator:
     name: Координатор
+    timeout: 0  # No agent timeout: the coordinator must not be cut off mid-orchestration.
     model:
       - claude-sonnet-5.5
       - gpt-6-sol

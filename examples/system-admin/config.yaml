@@ -179,6 +179,7 @@ tools:
 agents:
   administrator:
     name: System Administrator
+    timeout: 0  # No agent timeout: the coordinator must not be cut off mid-orchestration.
     model: glm-latest
     description: >-
       Creates new Grid systems (agents, prompts, tools, skills, routing entry) and

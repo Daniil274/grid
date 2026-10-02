@@ -130,11 +130,11 @@ async def test_the_agent_timeout_ends_the_run_without_repeating_it(factory):
         await asyncio.Event().wait()
 
     runner = ScriptedRunner(hang)
-    factory.config.get_agent_timeout = lambda: 0.05
+    factory.config.get_agent_timeout = lambda agent_key=None: 0.05
     with use(runner):
         answer = await factory.run_agent("worker", "Go")
 
-    assert "no answer within settings.agent_timeout" in answer
+    assert "no answer within the agent timeout" in answer
     assert len(runner.calls) == 1
 
 

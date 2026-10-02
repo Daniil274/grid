@@ -99,6 +99,7 @@ tools:
 agents:
   reviewer:
     name: Context Reviewer
+    timeout: 0  # No agent timeout: the coordinating reviewer must not be cut off mid-review.
     model: [glm-latest, grok-4.7]
     description: Examines a reported agent answer and finds why it went wrong.
     tools:

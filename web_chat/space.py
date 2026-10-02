@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from core.agent_factory import AgentFactory
 from core.config import Config
+from core.config.prompt_sections import PromptSection
 from core.context import ContextManager
 from core.managers.container_manager import ContainerManager
 from core.system_store import BuilderAccess, SystemStore
@@ -47,6 +48,26 @@ logger = logging.getLogger("grid.web_chat.space")
 
 T = TypeVar("T")
 
+
+# Taught to every agent in every system of a space: the chat renders a
+# markdown link to /api/workspace/files/<path> as a download of that
+# workspace file, so files an agent produces can be handed over in its
+# reply the way the user expects (see web_chat/uploads.py download_url).
+FILE_LINKS_SECTION = PromptSection(
+    key="workspace_file_links",
+    scope="static",
+    content="""## Handing files to the user
+
+When you create or update a file the user should receive, link it in your
+reply so the chat shows it as a download:
+
+[Report.pdf](/api/workspace/files/report.pdf)
+
+The link target is `/api/workspace/files/` followed by the file's path
+relative to the workspace root - the same path file tools report. Keep the
+link text human-readable and link each file once. Only link files that
+exist in the workspace; never use this prefix for anything else.""",
+)
 
 @dataclass(frozen=True)
 class SpaceLayout:
@@ -333,6 +354,8 @@ class UserSpace:
             confine_tools=self.require_isolation,
         )
         factory.system_builder = self._builder_access()
+        # Every agent in the space learns the workspace-file link convention.
+        factory.instructions_builder.platform_sections = [FILE_LINKS_SECTION]
         return factory
 
     def _builder_access(self) -> Optional[BuilderAccess]:

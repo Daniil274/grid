@@ -195,6 +195,7 @@ tools:
 agents:
   video_director:
     name: "Video Director"
+    timeout: 0  # No agent timeout: the coordinator must not be cut off mid-orchestration.
     model: "video-pro"
     system_skills:
       - video_pipeline

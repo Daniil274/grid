@@ -534,8 +534,16 @@ class Config:
         """Get maximum turns limit for agents."""
         return self.config.settings.max_turns
 
-    def get_agent_timeout(self) -> int:
-        """Get agent execution timeout in seconds."""
+    def get_agent_timeout(self, agent_key: Optional[str] = None) -> int:
+        """Agent execution timeout in seconds; 0 means no timeout.
+
+        A per-agent ``timeout`` wins over ``settings.agent_timeout`` so a
+        coordinating agent can outlive the system-wide limit.
+        """
+        if agent_key is not None:
+            agent = self.config.agents.get(agent_key)
+            if agent is not None and agent.timeout is not None:
+                return agent.timeout
         return self.config.settings.agent_timeout
 
     def get_proxy(self) -> Optional[str]:

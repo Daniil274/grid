@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from agents import Agent, RunConfig, RunItemStreamEvent, SQLiteSession
@@ -352,7 +353,9 @@ class TurnRunner:
         progress: "RunProgress",
     ) -> Tuple[str, Any]:
         """Recover a missing model result once within the original deadline/session."""
-        deadline = asyncio.timeout(self.config.get_agent_timeout())
+        timeout = self.config.get_agent_timeout(agent_key)
+        # 0 means no timeout: a coordinating agent runs as long as it needs.
+        deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
         try:
             async with deadline:
                 for recovery in range(2):
@@ -379,9 +382,9 @@ class TurnRunner:
                             "Finish the remaining work and write a concrete final report."
                         )
         except TimeoutError:
-            if not deadline.expired():
+            if timeout <= 0 or not deadline.expired():
                 raise
-            raise TurnStopped(StopReason.TIMEOUT, f"no answer within settings.agent_timeout ({self.config.get_agent_timeout()} s)") from None
+            raise TurnStopped(StopReason.TIMEOUT, f"no answer within the agent timeout ({timeout} s)") from None
 
     async def _run_attempt_once(
         self,
@@ -402,7 +405,7 @@ class TurnRunner:
         that a retry would repeat, the user's graceful Stop. Other errors
         propagate for _run_with_retries to judge.
         """
-        timeout = self.config.get_agent_timeout()
+        timeout = self.config.get_agent_timeout(agent_key)
         max_turns = self.config.get_max_turns()
         control = run_ctx.run_control
         fragments: List[str] = []
@@ -428,7 +431,7 @@ class TurnRunner:
                 persist=event.name == "tool_called",
             )
 
-        deadline = asyncio.timeout(timeout)
+        deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
         try:
             async with deadline:
                 if stream:
@@ -469,11 +472,11 @@ class TurnRunner:
                         run_config=self._run_config(agent_key),
                     )
         except TimeoutError:
-            if not deadline.expired():
+            if timeout <= 0 or not deadline.expired():
                 raise
             logger.warning("Agent %s stopped after %s s", agent_key, timeout)
             raise TurnStopped(
-                StopReason.TIMEOUT, f"no answer within settings.agent_timeout ({timeout} s)"
+                StopReason.TIMEOUT, f"no answer within the agent timeout ({timeout} s)"
             ) from None
         except MaxTurnsExceeded:
             logger.warning("Agent %s reached max_turns (%s)", agent_key, max_turns)
