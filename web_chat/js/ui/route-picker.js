@@ -115,12 +115,15 @@ export function createRoutePicker({ button, nameNode, metaNode, popover, systemL
           issues: system.issues,
           active: state.systemKey === system.key,
           disabled: Boolean(system.error),
-          // Keep the pinned agent when the same system is picked again.
+          // Keep the pinned agent when the same system is picked again; a
+          // system of one agent is that agent, with nothing left to choose.
           onPick: () =>
-            pick(
-              { systemKey: system.key, agentKey: state.systemKey === system.key ? state.agentKey : AUTO },
-              { keepOpen: true },
-            ),
+            system.agents.length === 1
+              ? pick({ systemKey: system.key, agentKey: system.agents[0].key })
+              : pick(
+                  { systemKey: system.key, agentKey: state.systemKey === system.key ? state.agentKey : AUTO },
+                  { keepOpen: true },
+                ),
         }),
       );
     }
@@ -177,7 +180,7 @@ export function createRoutePicker({ button, nameNode, metaNode, popover, systemL
   document.addEventListener("click", close);
   document.addEventListener("keydown", (event) => event.key === "Escape" && close());
 
-  store.subscribe((state) => {
+  store.watch(["systems", "systemKey", "agentKey", "multiSystem"], (state) => {
     renderChip(state);
     renderSystems(state);
     renderAgents(state);

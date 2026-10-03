@@ -114,5 +114,5 @@ export function createConversationList({ container, searchInput, store, onSelect
     render(store.get());
   });
 
-  store.subscribe(render);
+  store.watch(["conversations", "contextId", "rootId"], render);
 }

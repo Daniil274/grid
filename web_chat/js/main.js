@@ -86,6 +86,9 @@ async function refreshConversations() {
  * selection has nothing to warm - the agent is not known until a message lands.
  */
 async function selectRoute({ systemKey = null, agentKey = null }) {
+  // A system of one agent is that agent: there is nothing for routing to pick.
+  const system = store.get().systems.find((item) => item.key === systemKey);
+  if (system && !agentKey && system.agents?.length === 1) agentKey = system.agents[0].key;
   store.set({ systemKey, agentKey });
   if (!agentKey) return;
   try {

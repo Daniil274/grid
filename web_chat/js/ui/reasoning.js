@@ -119,12 +119,16 @@ function applyPolicy(policy, next) {
   policy.dataset.decision = next.policy?.decision || "";
 }
 
-/** Open/close state a reader can take over: once they click, auto-management stops. */
-function disclosure(root, head) {
+/**
+ * Open/close state a reader can take over: once they click, auto-management stops.
+ * `onOpen` runs whenever the row opens - rows build their hidden content then.
+ */
+function disclosure(root, head, onOpen = null) {
   let pinned = false;
   const setOpen = (open) => {
     root.classList.toggle("is-open", open);
     head.setAttribute("aria-expanded", String(open));
+    if (open) onOpen?.();
   };
   head.addEventListener("click", () => {
     pinned = true;
@@ -140,6 +144,10 @@ function disclosure(root, head) {
 /**
  * One timeline row. Returns handles so the panel can patch it in place rather
  * than rebuilding the DOM every time the server re-sends the step.
+ *
+ * What a row hides until it is opened - rendered thinking, tool input and
+ * result - is built when it opens: a stored chat holds hundreds of steps,
+ * some with tens of thousands of characters, and nearly all stay closed.
  */
 function createStepRow(step) {
   const inlineBody = INLINE_BODY_KINDS.has(step.kind);
@@ -147,9 +155,23 @@ function createStepRow(step) {
   const detail = h("div.step__detail");
   const refs = h("div.step__refsSlot");
   const body = inlineBody ? h("div.step__prose") : null;
+  let latest = step;
+  let stale = true;
+
+  /** Build the hidden part from the latest step; once per change, only when open. */
+  const fill = () => {
+    if (!stale) return;
+    stale = false;
+    // Streaming thinking is appended as it arrives; it is rendered once it lands.
+    if (body && latest.status !== "running") {
+      body.classList.remove("is-streaming");
+      body.innerHTML = renderMarkdown(latest.body);
+    }
+    replace(detail, [payload("Input", latest.detail), inlineBody ? null : payload("Result", latest.body)].filter(Boolean));
+  };
 
   const root = h("li.step", { dataset: { kind: step.kind, status: step.status, tone: step.tone || "neutral" } }, head, refs, body, detail);
-  const { suggest } = disclosure(root, head);
+  const { suggest } = disclosure(root, head, fill);
 
   /** Thinking stays open while it streams and folds away once it lands. */
   const settle = () => {
@@ -174,13 +196,11 @@ function createStepRow(step) {
     applyUsage(usage, next);
     timing.textContent = next.duration_ms == null ? "" : duration(next.duration_ms);
     replace(refs, refsRow(next.refs));
-    if (body && next.status !== "running") {
-      body.classList.remove("is-streaming");
-      body.innerHTML = renderMarkdown(next.body);
-    }
-    const blocks = [payload("Input", next.detail), inlineBody ? null : payload("Result", next.body)].filter(Boolean);
-    replace(detail, blocks);
-    root.classList.toggle("has-detail", blocks.length > 0 || Boolean(inlineBody && (next.status === "running" || next.body)));
+    latest = next;
+    stale = true;
+    if (root.classList.contains("is-open")) fill();
+    const hasBlocks = Boolean(next.detail) || Boolean(!inlineBody && next.body);
+    root.classList.toggle("has-detail", hasBlocks || Boolean(inlineBody && (next.status === "running" || next.body)));
     if (inlineBody) suggest(next.status === "running");
   };
 
@@ -244,8 +264,17 @@ function createAgentRow(step, turnStart) {
     refs,
     h("div.step__agent", {}, task, timeline.list, report),
   );
-  const { suggest } = disclosure(root, head);
   let current = step;
+  let stale = true;
+  /** The task and the report, built from the latest step when the block is open. */
+  const fill = () => {
+    if (!stale) return;
+    stale = false;
+    const asked = taskText(current.detail);
+    replace(task, payload("Task", asked, { markdown: asked !== current.detail }));
+    replace(report, payload(current.status === "error" ? "Error" : "Report", current.body, { markdown: current.status !== "error" }));
+  };
+  const { suggest } = disclosure(root, head, fill);
 
   const renderSubtitle = () => {
     const asked = taskText(current.detail || "").replace(/\s+/g, " ").trim() || current.subtitle;
@@ -267,9 +296,8 @@ function createAgentRow(step, turnStart) {
     applyUsage(usage, next);
     if (next.duration_ms != null) timing.textContent = duration(next.duration_ms);
     replace(refs, refsRow(next.refs));
-    const asked = taskText(next.detail);
-    replace(task, payload("Task", asked, { markdown: asked !== next.detail }));
-    replace(report, payload(next.status === "error" ? "Error" : "Report", next.body, { markdown: next.status !== "error" }));
+    stale = true;
+    if (root.classList.contains("is-open")) fill();
     renderSubtitle();
     // Like the panel: open while the sub-agent works, out of the way once it reports.
     if (next.status === "running") suggest(true);

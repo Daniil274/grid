@@ -43,7 +43,7 @@ export function createWelcomeSystems({ container, store, onChange }) {
         : null,
     );
 
-  store.subscribe((state) => {
+  store.watch(["systems", "systemKey", "agentKey", "multiSystem"], (state) => {
     const systems = state.systems.filter((system) => !system.error);
     if (!systems.length) {
       replace(container);

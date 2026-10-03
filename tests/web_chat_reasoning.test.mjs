@@ -53,6 +53,7 @@ test("a sub-agent's steps nest in its block, not in the caller's timeline", () =
 test("the block ends with the sub-agent's report", () => {
   const panel = createReasoningPanel();
   panel.hydrate([step("s1", { kind: "agent", title: "coder", detail: "fix it", body: "Fixed." })]);
+  panel.el.find("step__head").click();
 
   const labels = panel.el.findAll("payload__label").map((label) => label.textContent);
   assert.deepEqual(labels, ["Task", "Report"]);
@@ -61,6 +62,7 @@ test("the block ends with the sub-agent's report", () => {
 test("the task reads as the words the sub-agent was given", () => {
   const panel = createReasoningPanel();
   panel.hydrate([step("s1", { kind: "agent", title: "coder", detail: '{\n  "input": "Fix **the** test"\n}' })]);
+  panel.el.find("step__head").click();
 
   assert.match(panel.el.find("payload__body--prose").innerHTML, /Fix <strong>the<\/strong> test/);
 });
@@ -170,4 +172,22 @@ test("the server's own turn total is used when the steps didn't report one", () 
   panel.finish(900, true, { tokensIn: 4200, tokensOut: 800 });
 
   assert.match(panel.el.find("reasoning__timer").textContent, /↑4\.2k ↓800/);
+});
+
+test("a closed step builds its thinking and payloads only when opened", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("s1", { kind: "reasoning", title: "Thinking", body: "**long** plan" }),
+    step("s2", { title: "read_file", detail: '{"path": "a.md"}', body: "file text" }),
+  ]);
+  const [thinking, call] = rows(topList(panel));
+  // Stored chats keep hundreds of these closed: nothing heavy is rendered yet.
+  assert.equal(thinking.find("step__prose").innerHTML, "");
+  assert.equal(panel.el.findAll("payload__label").length, 0);
+  assert.ok(call.classList.contains("has-detail"));
+
+  thinking.find("step__head").click();
+  call.find("step__head").click();
+  assert.match(thinking.find("step__prose").innerHTML, /<strong>long<\/strong> plan/);
+  assert.deepEqual(panel.el.findAll("payload__label").map((label) => label.textContent), ["Input", "Result"]);
 });

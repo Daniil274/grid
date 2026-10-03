@@ -28,6 +28,5 @@ export function createQueueTray({ container, store, onSendNow, onDrop }) {
       ),
     );
   };
-  store.subscribe(render);
-  render(store.get());
+  store.watch(["queue"], render);
 }
