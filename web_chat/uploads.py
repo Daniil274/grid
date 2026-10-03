@@ -16,6 +16,11 @@ link anywhere in it. The server runs outside that container, often as root,
 so it never follows a link: ``uploads`` must be a real directory, a file is
 created with ``O_NOFOLLOW`` in that directory's descriptor, and a download is
 served only when its real path is inside the workspace.
+
+Without ``dir_fd`` (Windows) the same rules are checked by path: any link on
+the way - a symbolic link, a junction - is refused, and a file is created
+exclusively, so no existing link is ever opened. A Linux container's links do
+not act on a Windows host's paths (utils.confined_fs).
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
+
+from utils.confined_fs import SUPPORTED as BY_DESCRIPTOR
 
 UPLOADS_DIR = "uploads"
 CHUNK = 1024 * 1024
@@ -84,6 +91,24 @@ def safe_name(name: str) -> str:
     return name or "file"
 
 
+#: Binary files on Windows; 0 where the flag does not exist.
+O_BINARY = getattr(os, "O_BINARY", 0)
+
+
+def _server_is_root() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def _plain(info: os.stat_result, is_kind: Callable[[int], bool]) -> bool:
+    """Of the kind *is_kind* tells, and no link: not a symbolic link, not a
+    junction or another Windows reparse point."""
+    return (
+        not stat.S_ISLNK(info.st_mode)
+        and not getattr(info, "st_reparse_tag", 0)
+        and is_kind(info.st_mode)
+    )
+
+
 def _owner(workspace: Path) -> tuple[int, int]:
     info = os.stat(workspace)
     return info.st_uid, info.st_gid
@@ -95,7 +120,7 @@ def _uploads_fd(workspace: Path) -> int:
     try:
         try:
             os.mkdir(UPLOADS_DIR, 0o755, dir_fd=workspace_fd)
-            if os.geteuid() == 0:
+            if _server_is_root():
                 uid, gid = _owner(workspace)
                 os.chown(
                     UPLOADS_DIR, uid, gid, dir_fd=workspace_fd, follow_symlinks=False
@@ -116,25 +141,74 @@ def _uploads_fd(workspace: Path) -> int:
         os.close(workspace_fd)
 
 
-def _used_bytes(directory_fd: int) -> int:
-    total = 0
-    for entry in os.scandir(directory_fd):
+class Uploads:
+    """``<workspace>/uploads``, made when missing and never reached through a link.
+
+    Held by a descriptor where the system opens relative to one (Linux); by
+    path elsewhere, checked to be a real directory.
+    """
+
+    def __init__(self, workspace: Path) -> None:
+        self._fd: int | None = None
+        self._path = workspace / UPLOADS_DIR
+        if BY_DESCRIPTOR:
+            self._fd = _uploads_fd(workspace)
+            return
         try:
-            info = entry.stat(follow_symlinks=False)
-        except OSError:
-            continue
-        if stat.S_ISREG(info.st_mode):
-            total += info.st_size
-    return total
+            os.mkdir(self._path, 0o755)
+        except FileExistsError:
+            pass
+        if not _plain(os.lstat(self._path), stat.S_ISDIR):
+            raise UploadError(
+                "The workspace's uploads/ is not a plain directory; move it away to upload files."
+            )
+
+    def __enter__(self) -> "Uploads":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+
+    @property
+    def _here(self) -> int | Path:
+        return self._fd if self._fd is not None else self._path
+
+    def names(self) -> set[str]:
+        return set(os.listdir(self._here))
+
+    def used_bytes(self) -> int:
+        total = 0
+        for entry in os.scandir(self._here):
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+        return total
+
+    def create(self, name: str) -> int:
+        """A descriptor of the new file *name*; an existing name, link or not, is refused."""
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY
+        if self._fd is not None:
+            return os.open(name, flags | os.O_NOFOLLOW, 0o644, dir_fd=self._fd)
+        return os.open(self._path / name, flags, 0o644)
+
+    def unlink(self, name: str) -> None:
+        if self._fd is not None:
+            os.unlink(name, dir_fd=self._fd)
+        else:
+            os.unlink(self._path / name)
 
 
-def _free_name(directory_fd: int, name: str) -> str:
+def _free_name(existing: set[str], name: str) -> str:
     """*name*, or *name (2)*, … - the first that does not exist yet."""
     stem, dot, suffix = name.rpartition(".")
     if not dot or not stem:
         stem, suffix = name, ""
     candidate, number = name, 1
-    existing = set(os.listdir(directory_fd))
     while candidate in existing:
         number += 1
         candidate = f"{stem} ({number}).{suffix}" if suffix else f"{stem} ({number})"
@@ -146,16 +220,10 @@ async def save_upload(
 ) -> dict[str, Any]:
     """Write one uploaded file into ``uploads/``; what it became."""
     workspace = Path(workspace).resolve()
-    directory_fd = _uploads_fd(workspace)
-    try:
-        room = quota_bytes - _used_bytes(directory_fd)
-        name = _free_name(directory_fd, safe_name(upload.filename or "file"))
-        fd = os.open(
-            name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o644,
-            dir_fd=directory_fd,
-        )
+    with Uploads(workspace) as uploads:
+        room = quota_bytes - uploads.used_bytes()
+        name = _free_name(uploads.names(), safe_name(upload.filename or "file"))
+        fd = uploads.create(name)
         written = 0
         try:
             with os.fdopen(fd, "wb") as handle:
@@ -170,17 +238,15 @@ async def save_upload(
                             "Your uploads are full: delete some files of uploads/ first."
                         )
                     handle.write(chunk)
-                if os.geteuid() == 0:
+                if _server_is_root():
                     uid, gid = _owner(workspace)
                     os.fchown(handle.fileno(), uid, gid)
         except BaseException:
             try:
-                os.unlink(name, dir_fd=directory_fd)
+                uploads.unlink(name)
             except OSError:
                 pass
             raise
-    finally:
-        os.close(directory_fd)
     path = f"{UPLOADS_DIR}/{name}"
     return {
         "path": path,
@@ -207,7 +273,35 @@ def open_in_workspace(workspace: Path, relative: str) -> tuple[int, str, int]:
     parts = [part for part in str(relative or "").split("/") if part not in ("", ".")]
     if not parts or any(part == ".." or "\0" in part for part in parts):
         raise UploadError("No such file.")
-    fd = os.open(Path(workspace).resolve(), os.O_RDONLY | os.O_DIRECTORY)
+    opened = _open_by_descriptor if BY_DESCRIPTOR else _open_by_path
+    file_fd = opened(Path(workspace).resolve(), parts)
+    info = os.fstat(file_fd)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(file_fd)
+        raise UploadError("No such file.")
+    return file_fd, parts[-1], info.st_size
+
+
+def _open_by_path(workspace: Path, parts: list[str]) -> int:
+    """Without ``dir_fd``: every name on the way checked to be no link."""
+    path = workspace
+    for index, part in enumerate(parts):
+        path = path / part
+        last = index == len(parts) - 1
+        try:
+            plain = _plain(os.lstat(path), stat.S_ISREG if last else stat.S_ISDIR)
+        except OSError:
+            plain = False
+        if not plain:
+            raise UploadError("No such file.")
+    try:
+        return os.open(path, os.O_RDONLY | O_BINARY)
+    except OSError:
+        raise UploadError("No such file.") from None
+
+
+def _open_by_descriptor(workspace: Path, parts: list[str]) -> int:
+    fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in parts[:-1]:
             try:
@@ -226,11 +320,7 @@ def open_in_workspace(workspace: Path, relative: str) -> tuple[int, str, int]:
             raise UploadError("No such file.") from None
     finally:
         os.close(fd)
-    info = os.fstat(file_fd)
-    if not stat.S_ISREG(info.st_mode):
-        os.close(file_fd)
-        raise UploadError("No such file.")
-    return file_fd, parts[-1], info.st_size
+    return file_fd
 
 
 def register_upload_routes(
@@ -301,28 +391,26 @@ def register_upload_routes(
                 )
             workspace = Path(space.workspace_path).resolve()
             async with locks.setdefault(workspace, asyncio.Lock()):
-                directory_fd = _uploads_fd(workspace)
-                try:
-                    for item in files:
-                        saved.append(
-                            await save_upload(
-                                workspace,
-                                item,
-                                max_bytes=max_bytes,
-                                quota_bytes=limits.quota_mb * 1024 * 1024,
+                with Uploads(workspace) as uploads:
+                    try:
+                        for item in files:
+                            saved.append(
+                                await save_upload(
+                                    workspace,
+                                    item,
+                                    max_bytes=max_bytes,
+                                    quota_bytes=limits.quota_mb * 1024 * 1024,
+                                )
                             )
-                        )
-                except BaseException:
-                    # A batch is all-or-nothing: refused batches leave no files
-                    # that the client never learned how to refer to.
-                    for item in saved:
-                        try:
-                            os.unlink(item["name"], dir_fd=directory_fd)
-                        except FileNotFoundError:
-                            pass
-                    raise
-                finally:
-                    os.close(directory_fd)
+                    except BaseException:
+                        # A batch is all-or-nothing: refused batches leave no files
+                        # that the client never learned how to refer to.
+                        for item in saved:
+                            try:
+                                uploads.unlink(item["name"])
+                            except FileNotFoundError:
+                                pass
+                        raise
         except UploadError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         finally:
@@ -341,7 +429,11 @@ def register_upload_routes(
         # ``?inline=1`` shows a picture inside the chat's own page. Only a real
         # raster image qualifies - not an SVG, which is a scriptable document
         # rather than a picture; anything else stays a forced attachment.
-        media_type = image_media_type(os.pread(fd, 12, 0)) if inline else None
+        handle = os.fdopen(fd, "rb")
+        media_type = None
+        if inline:
+            media_type = image_media_type(handle.read(12))
+            handle.seek(0)
 
         def chunks():
             with handle:
@@ -357,7 +449,6 @@ def register_upload_routes(
         # rendered as a page of this site.
         from urllib.parse import quote
 
-        handle = os.fdopen(fd, "rb")
         return StreamingResponse(
             chunks(),
             media_type=media_type or "application/octet-stream",

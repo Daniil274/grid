@@ -10,6 +10,7 @@ from core.system_quality import (Assertion, QualityContract, Scenario, check_ass
                                  require_quality, revision, save_evidence)
 from tests.test_system_builder import access_for, call, private_config
 from tests import test_system_builder as builder_tests
+from tests.conftest import link
 
 
 @pytest.fixture
@@ -85,7 +86,8 @@ def test_artifact_checks_inspect_values_and_refuse_links(tmp_path):
     assert not check_assertion(Assertion(kind="json_equals", path="out.json", value={"words": 3}), "", workspace)["passed"]
     (workspace / "out.csv").write_text("name,count\na,2\n")
     assert check_assertion(Assertion(kind="csv_equals", path="out.csv", value=[{"name": "a", "count": "2"}]), "", workspace)["passed"]
-    (workspace / "secret").symlink_to(tmp_path / "secret")
+    (tmp_path / "secret").mkdir()
+    link(workspace / "secret", tmp_path / "secret", directory=True)
     for kind in ("exists", "absent"):
         assert not check_assertion(Assertion(kind=kind, path="secret"), "", workspace)["passed"]
 
