@@ -113,6 +113,8 @@ async def test_a_plan_model_is_signed_with_the_users_token_and_asks_for_what_the
     assert request.url.path == "/v1/responses"
     assert request.headers["authorization"] == "Bearer plan-token"
     assert body["store"] is False and body["stream"] is True
+    # an unstored reasoning item comes back with what it takes to send it again
+    assert body["include"] == ["reasoning.encrypted_content"]
     assert "max_output_tokens" not in body and "temperature" not in body and "previous_response_id" not in body
     assert body["instructions"] == "Be brief."
     assert all(item.get("role") != "system" for item in body["input"])
@@ -129,6 +131,7 @@ def test_a_keyed_provider_is_unchanged_and_a_plan_provider_refuses_the_environme
     models = ModelProvider(config, SimpleNamespace(access=ModelAccess()), None)
     assert models.settings(config.get_model("other")).max_tokens == 4000
     assert models.settings(config.get_model("other")).store is None
+    assert models.settings(config.get_model("other")).response_include is None
     from core.credentials import CredentialError
 
     with pytest.raises(CredentialError, match="ChatGPT"):
