@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS node-tools
+FROM node:26-bookworm-slim AS node-tools
 
 ARG CODEGRAPH_VERSION=1.6.0
 RUN npm install --global "@colbymchenry/codegraph@${CODEGRAPH_VERSION}"
