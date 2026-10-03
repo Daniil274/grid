@@ -46,8 +46,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     invite = commands.add_parser("invite", help="Create an invite")
     invite.add_argument("--role", choices=("user", "admin"), default="user")
+    invite.add_argument("--tier", default="", help="The plan the new user is on (a tier of the config; default tier if empty)")
     invite.add_argument("--days", type=float, default=7.0, help="How long the invite stays valid")
     invite.add_argument("--note", default="", help="Who the invite is for, for the list")
+
+    settier = commands.add_parser("set-tier", help="Move a user to another plan")
+    settier.add_argument("--username", required=True)
+    settier.add_argument("--tier", required=True, help="A tier of the config; '' for the default tier")
 
     commands.add_parser("list", help="List users and open invites")
 
@@ -64,11 +69,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if args.command == "create-admin":
             return _create_admin(accounts, args.username)
+        if args.command == "set-tier":
+            user = accounts.find_user(args.username)
+            if user is None:
+                raise AccountError(f"No user named {args.username!r}.")
+            accounts.set_tier(user.id, args.tier)
+            print(f"{user.username} is now on {args.tier or 'the default tier'}.")
+            return 0
         if args.command == "import-chats":
             return _import_chats(accounts, args)
         if args.command == "invite":
-            code, created = accounts.create_invite(None, role=args.role, ttl=args.days * 86400, note=args.note)
-            print(f"Invite for a new {created.role}, valid until {_when(created.expires_at)}:")
+            code, created = accounts.create_invite(
+                None, role=args.role, tier=args.tier, ttl=args.days * 86400, note=args.note
+            )
+            plan = f" on tier {created.tier}" if created.tier else ""
+            print(f"Invite for a new {created.role}{plan}, valid until {_when(created.expires_at)}:")
             print(f"  /login#invite={code}")
             print("Open it on the server's address, e.g. https://chat.example.com/login#invite=...")
             return 0
@@ -134,11 +149,15 @@ def _list(accounts: Accounts) -> None:
     print("Users:")
     for account in accounts.accounts():
         state = "disabled" if account.disabled else "active"
-        print(f"  {account.user.username:<32} {account.user.role:<6} {state:<9} since {_when(account.created_at)}")
+        tier = account.user.tier or "(default)"
+        print(
+            f"  {account.user.username:<32} {account.user.role:<6} {tier:<12} {state:<9} "
+            f"since {_when(account.created_at)}"
+        )
     print("Open invites:")
     for invite in accounts.invites():
         if invite.used_at is None:
-            print(f"  {invite.id}  {invite.role:<6} until {_when(invite.expires_at)}  {invite.note}")
+            print(f"  {invite.id}  {invite.role:<6} {invite.tier or '(default)':<12} until {_when(invite.expires_at)}  {invite.note}")
 
 
 def _when(timestamp: float) -> str:

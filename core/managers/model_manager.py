@@ -3,12 +3,11 @@ Model Manager for handling model resolution and client creation.
 """
 
 import logging
-from typing import Any, Dict, Optional, Tuple
-import httpx
+from typing import Optional, Tuple
 from openai import AsyncOpenAI
 
 from core.config.config import Config
-from utils.exceptions import AgentError
+from core.model_access import ModelAccess
 
 logger = logging.getLogger("grid.managers.model")
 
@@ -18,14 +17,17 @@ class ModelManager:
     Implements IModelManager protocol.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, access: Optional[ModelAccess] = None):
         """
         Initialize ModelManager.
-        
+
         Args:
             config: Configuration instance
+            access: Credentials and spend reporting of the clients; the
+                environment's keys, unmeasured, when omitted
         """
         self.config = config
+        self.access = access or ModelAccess()
 
     def resolve_model_key(self, key: Optional[str]) -> str:
         """
@@ -66,43 +68,23 @@ class ModelManager:
         provider_key: Optional[str] = None,
     ) -> AsyncOpenAI:
         """Create AsyncOpenAI client; avoid proxy for local providers."""
-        kwargs: Dict[str, Any] = dict(
+        return self.access.client(
+            self.config,
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
+            provider_key=provider_key,
         )
-        if provider_key:
-            default_headers = self.config.get_provider(provider_key).default_headers
-            if default_headers:
-                kwargs["default_headers"] = dict(default_headers)
-        proxy_url = self.config.get_proxy_for_provider(provider_key)
-        # We control proxy selection explicitly; disable env proxy usage in httpx.
-        if proxy_url:
-            kwargs["http_client"] = httpx.AsyncClient(
-                proxy=proxy_url,
-                timeout=float(timeout),
-                trust_env=False,
-            )
-        else:
-            kwargs["http_client"] = httpx.AsyncClient(
-                timeout=float(timeout),
-                trust_env=False,
-            )
-        return AsyncOpenAI(**kwargs)
 
     def get_openai_client_for_model(self, model_key: str) -> Tuple[AsyncOpenAI, str]:
         """
         Create OpenAI client and return (client, model_name) using configuration.
         """
+        self.access.check_model(self.config, model_key)
         model_cfg = self.config.get_model(model_key)
         provider_cfg = self.config.get_provider(model_cfg.provider)
-        api_key = self.config.get_api_key(model_cfg.provider)
-        if not api_key:
-            raise AgentError(
-                f"API key not found for provider '{model_cfg.provider}'",
-                details={"provider": model_cfg.provider, "env_var": provider_cfg.api_key_env},
-            )
+        api_key = self.access.api_key(self.config, model_cfg.provider)
         client = self._make_openai_client(
             api_key=api_key,
             base_url=provider_cfg.base_url,

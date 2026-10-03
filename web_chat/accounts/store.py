@@ -69,6 +69,26 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE usage ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE usage ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0;
     """,
+    # 4: the plan a user is on, and the plan an invite admits to. Empty means
+    # the server's default tier (config ``default_tier``), resolved when read.
+    """
+    ALTER TABLE users ADD COLUMN tier TEXT NOT NULL DEFAULT '';
+    ALTER TABLE invites ADD COLUMN tier TEXT NOT NULL DEFAULT '';
+    """,
+    # 5: credentials users stored for themselves (web_chat.vault). The secret
+    # is encrypted; the row says only what is stored and whether it still works.
+    """
+    CREATE TABLE credentials (
+        user_id    TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        kind       TEXT NOT NULL,
+        ciphertext BLOB NOT NULL,
+        hint       TEXT NOT NULL DEFAULT '',
+        status     TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok', 'needs_reauth')),
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (user_id, kind)
+    );
+    """,
 )
 
 
@@ -94,12 +114,26 @@ class SessionRecord:
 class InviteRecord:
     id: str
     role: Role
+    tier: str
     note: str
     created_by: Optional[str]
     created_at: float
     expires_at: float
     used_by: Optional[str]
     used_at: Optional[float]
+
+
+@dataclass(frozen=True)
+class CredentialRow:
+    """A stored credential: the sealed secret and what may be said about it."""
+
+    user_id: str
+    kind: str
+    ciphertext: bytes
+    hint: str
+    status: str
+    created_at: float
+    updated_at: float
 
 
 class AccountStore:
@@ -163,8 +197,8 @@ class AccountStore:
     def add_user(self, user: User, password_hash: str, created_at: float) -> None:
         """Insert a user; raises sqlite3.IntegrityError when the name is taken."""
         self._write(
-            "INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-            user.id, user.username, password_hash, user.role, created_at,
+            "INSERT INTO users (id, username, password_hash, role, tier, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            user.id, user.username, password_hash, user.role, user.tier, created_at,
         )
 
     def user_by_id(self, user_id: str) -> Optional[UserRecord]:
@@ -190,6 +224,33 @@ class AccountStore:
 
     def set_role(self, user_id: str, role: Role) -> bool:
         return self._write("UPDATE users SET role = ? WHERE id = ?", role, user_id) == 1
+
+    def set_tier(self, user_id: str, tier: str) -> bool:
+        return self._write("UPDATE users SET tier = ? WHERE id = ?", tier, user_id) == 1
+
+    # -- credentials -------------------------------------------------------------
+    def put_credential(self, user_id: str, kind: str, ciphertext: bytes, hint: str, now: float) -> None:
+        """Store (or replace) the user's credential of *kind*; it is usable again."""
+        self._write(
+            "INSERT INTO credentials (user_id, kind, ciphertext, hint, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'ok', ?, ?) "
+            "ON CONFLICT (user_id, kind) DO UPDATE SET ciphertext = excluded.ciphertext, hint = excluded.hint, "
+            "status = 'ok', updated_at = excluded.updated_at",
+            user_id, kind, ciphertext, hint, now, now,
+        )
+
+    def credential(self, user_id: str, kind: str) -> Optional[CredentialRow]:
+        row = self._one("SELECT * FROM credentials WHERE user_id = ? AND kind = ?", user_id, kind)
+        return _credential(row)
+
+    def credentials_of(self, user_id: str) -> list[CredentialRow]:
+        return [_credential(row) for row in self._all("SELECT * FROM credentials WHERE user_id = ?", user_id)]
+
+    def set_credential_status(self, user_id: str, kind: str, status: str) -> None:
+        self._write("UPDATE credentials SET status = ? WHERE user_id = ? AND kind = ?", status, user_id, kind)
+
+    def delete_credential(self, user_id: str, kind: str) -> bool:
+        return self._write("DELETE FROM credentials WHERE user_id = ? AND kind = ?", user_id, kind) == 1
 
     # -- sessions ----------------------------------------------------------------
     def add_session(self, token_hash: str, user_id: str, now: float, expires_at: float) -> None:
@@ -292,9 +353,10 @@ class AccountStore:
     # -- invites -----------------------------------------------------------------
     def add_invite(self, invite: InviteRecord, code_hash: str) -> None:
         self._write(
-            "INSERT INTO invites (id, code_hash, role, note, created_by, created_at, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            invite.id, code_hash, invite.role, invite.note, invite.created_by, invite.created_at, invite.expires_at,
+            "INSERT INTO invites (id, code_hash, role, tier, note, created_by, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            invite.id, code_hash, invite.role, invite.tier, invite.note, invite.created_by,
+            invite.created_at, invite.expires_at,
         )
 
     def invite_by_code(self, code_hash: str) -> Optional[InviteRecord]:
@@ -318,10 +380,19 @@ def _user(row: Optional[sqlite3.Row]) -> Optional[UserRecord]:
     if row is None:
         return None
     return UserRecord(
-        user=User(id=row["id"], username=row["username"], role=row["role"]),
+        user=User(id=row["id"], username=row["username"], role=row["role"], tier=row["tier"]),
         password_hash=row["password_hash"],
         disabled=bool(row["disabled"]),
         created_at=row["created_at"],
+    )
+
+
+def _credential(row: Optional[sqlite3.Row]) -> Optional[CredentialRow]:
+    if row is None:
+        return None
+    return CredentialRow(
+        row["user_id"], row["kind"], bytes(row["ciphertext"]), row["hint"], row["status"],
+        row["created_at"], row["updated_at"],
     )
 
 
@@ -331,6 +402,7 @@ def _invite(row: Optional[sqlite3.Row]) -> Optional[InviteRecord]:
     return InviteRecord(
         id=row["id"],
         role=row["role"],
+        tier=row["tier"],
         note=row["note"],
         created_by=row["created_by"],
         created_at=row["created_at"],

@@ -15,6 +15,7 @@ import { ChatController } from "./chat.js";
 import { AccountsDrawer } from "./accounts/admin.js";
 import { monitorServer } from "./net/server-monitor.js";
 import { PasswordDrawer } from "./accounts/password.js";
+import { PlanDrawer } from "./accounts/plan.js";
 import { PersonalAgentsDrawer } from "./agents/drawer.js";
 import { SettingsDrawer } from "./settings/drawer.js";
 import { createRoutePicker } from "./ui/route-picker.js";
@@ -274,6 +275,16 @@ async function boot() {
     status: $("#password-status"),
   });
 
+  const plan = new PlanDrawer({
+    drawer: $("#plan"),
+    backdrop: $("#plan-backdrop"),
+    closeButton: $("#plan-close"),
+    body: $("#plan-body"),
+    status: $("#plan-status"),
+    openButton: $("#open-plan"),
+  });
+  plan.start();
+
   // -- chrome ------------------------------------------------------------
   const openRail = () => document.body.classList.add("rail-open");
   const closeRail = () => document.body.classList.remove("rail-open");
@@ -305,6 +316,10 @@ async function boot() {
   $("#open-admin").addEventListener("click", () => {
     closeRail();
     accountsAdmin.open();
+  });
+  $("#open-plan").addEventListener("click", () => {
+    closeRail();
+    plan.open();
   });
   $("#open-password").addEventListener("click", () => {
     closeRail();

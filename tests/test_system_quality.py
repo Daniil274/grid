@@ -356,8 +356,11 @@ async def test_scenario_failure_paths_always_remove_sandbox(deployment, monkeypa
             return 1, "", "Docker unavailable"
         return 0, "", ""
 
+    built = []
+
     class Factory:
         def __init__(self, **kwargs):
+            built.append(kwargs)
             self.workspace = kwargs["working_directory"]
 
         async def run_agent(self, *args, **kwargs):
@@ -382,6 +385,8 @@ async def test_scenario_failure_paths_always_remove_sandbox(deployment, monkeypa
     assert result["passed"] is passes, result
     assert any(args[1:3] == ["rm", "-f"] for args in commands)
     if mode == "ok":
+        # The scenario runs on the owner's credentials and plan, never the environment's.
+        assert built[0]["model_access"] is access.model_access
         assert any(args[1:3] == ["network", "disconnect"] for args in commands)
         assert any(args[1] == "stop" for args in commands)
         assert result["tokens"] == 2

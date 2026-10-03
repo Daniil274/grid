@@ -169,6 +169,9 @@ def test_a_version_1_database_gains_the_usage_table(tmp_path):
     AccountStore(path).close()
     with sqlite3.connect(path) as db:
         db.execute("DROP TABLE usage")
+        db.execute("ALTER TABLE users DROP COLUMN tier")
+        db.execute("ALTER TABLE invites DROP COLUMN tier")
+        db.execute("DROP TABLE credentials")
         db.execute("PRAGMA user_version = 1")
 
     store = AccountStore(path)

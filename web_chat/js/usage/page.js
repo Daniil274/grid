@@ -28,6 +28,7 @@ function table() {
   }
   if (!report.models.length) body.append(h("tr", {}, h("td", { colspan: 7, class: "usageEmpty" }, "No responses for these filters.")));
 }
+const dollars = (amount = 0) => `$${amount >= 1 ? amount.toFixed(2) : amount.toFixed(4)}`;
 function render() {
   const summary = report.summary;
   $("metrics").replaceChildren(...[
@@ -37,7 +38,9 @@ function render() {
     ["Cached input", summary.cached_in, "As reported by providers"],
     ["Reasoning output", summary.reasoning_out, "As reported by providers"],
     ["Model responses", summary.responses, "Detailed records only"],
-  ].map(([label, value, hint]) => h("div", { class: "usageMetric" }, h("span", {}, label), h("strong", {}, number(value)), h("small", {}, hint))));
+    ["Cost to the server", dollars(summary.charged_usd), "Calls on the server's keys"],
+    ["Value of all calls", dollars(summary.cost_usd), "Own keys and plans included"],
+  ].map(([label, value, hint]) => h("div", { class: "usageMetric" }, h("span", {}, label), h("strong", {}, typeof value === "string" ? value : number(value)), h("small", {}, hint))));
   $("scope-label").hidden = !report.can_view_all;
   const selected = $("model").value;
   $("model").replaceChildren(h("option", { value: "" }, "All models"), ...report.model_options.map(row => h("option", { value: row.key }, `${row.model}${row.provider ? ` · ${row.provider}` : ""}`)));

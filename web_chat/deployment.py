@@ -23,8 +23,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from core.config import Config
+from core.pricing import Price, PriceBook
 from core.system_store import SystemStore
-from schemas.schemas import PersonalAgentsPolicy, ReviewPolicy, UploadsPolicy, UserLimitsPolicy
+from web_chat.entitlements import Plans
+from schemas.schemas import PersonalAgentsPolicy, PricingPolicy, ReviewPolicy, UploadsPolicy, UserLimitsPolicy
 
 logger = logging.getLogger("grid.web_chat.deployment")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +83,8 @@ class Deployment:
     ) -> None:
         """``working_directory`` is the ``--path`` override of a single-user
         server; spaces with a workspace of their own ignore it."""
+        self._price_stamp: Any = None
+        self._price_book = PriceBook()
         self.requested_config_path = config_path
         self.routing_path = resolve_path(routing_path) if routing_path else None
         self.working_directory = working_directory
@@ -132,6 +136,34 @@ class Deployment:
     def user_limits(self) -> UserLimitsPolicy:
         """How much one user may run: the catalog's ``user_limits``, or the single system's."""
         return (self.catalog or self.config).config.user_limits
+
+    @property
+    def plans(self) -> Plans:
+        """The plans users are on: the catalog's ``tiers`` and ``pools``, or the single system's."""
+        return Plans(lambda: (self.catalog or self.config).config)
+
+    @property
+    def pricing_policy(self) -> PricingPolicy:
+        """Where model costs come from: the catalog's ``pricing``, or the single system's."""
+        return (self.catalog or self.config).config.pricing
+
+    def price_book(self) -> PriceBook:
+        """The model prices of the configured snapshot (``pricing.prices_file``); empty without one.
+
+        Read again when the file changes, so a refreshed snapshot applies without a restart.
+        """
+        configured = self.pricing_policy.prices_file
+        path = (self.catalog or self.config).resolve_config_path(configured) if configured else None
+        stamp = (path, path.stat().st_mtime_ns if path is not None and path.is_file() else None)
+        if getattr(self, "_price_stamp", None) != stamp:
+            self._price_stamp = stamp
+            self._price_book = PriceBook.load(path)
+        return self._price_book
+
+    def unknown_price(self) -> Optional[Price]:
+        """What a model without a price is charged at (``pricing.unknown_price``)."""
+        declared = self.pricing_policy.unknown_price
+        return Price.from_mapping(declared) if declared else None
 
     @property
     def uploads_policy(self) -> UploadsPolicy:

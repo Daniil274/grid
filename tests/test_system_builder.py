@@ -328,3 +328,20 @@ def test_an_admin_can_start_a_blank_system(deployment, tmp_path):
     assert set(config["agents"]["assistant"]["tools"]) == {"call_worker", "call_reviewer"}
     detail = client.get("/api/systems/created/empty", headers=ROOT).json()
     assert detail["inspection"]["loaded"] and detail["inspection"]["config"] == []
+
+
+def test_a_private_system_cannot_set_the_price_of_its_models(deployment):
+    """A price in the owner's config would decide what the owner's calls cost the operator."""
+    alice = space_of(deployment, "alice", admin=False)
+    document = yaml.safe_load(private_config())
+    model = next(iter(document["models"].values()))
+    model["price"] = {"input": 0, "output": 0}
+    refused = call("builder_create", alice._builder_access(), key="cheap", name="Cheap", description="x",
+                   config_yaml=yaml.safe_dump(document))
+    assert "model prices of the server" in refused
+    assert alice.built_systems.list() == []
+
+
+def test_the_builders_evaluations_run_on_the_owners_model_access(deployment):
+    alice = space_of(deployment, "alice", admin=False)
+    assert alice._builder_access().model_access is alice.model_access

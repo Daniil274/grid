@@ -27,7 +27,7 @@ password takes tens of milliseconds of CPU, so it runs in a worker thread.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Collection, Literal, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -65,16 +65,19 @@ class PasswordChange(BaseModel):
 class UserUpdate(BaseModel):
     disabled: Optional[bool] = None
     role: Optional[Literal["admin", "user"]] = None
+    #: A tier of the server's config; "" returns the user to the default tier.
+    tier: Optional[str] = Field(default=None, max_length=32)
 
 
 class InviteRequest(BaseModel):
     role: Literal["admin", "user"] = "user"
+    tier: str = Field(default="", max_length=32)
     days: float = Field(default=7, gt=0, le=90)
     note: str = Field(default="", max_length=200)
 
 
 def user_payload(user: User) -> dict[str, Any]:
-    return {"id": user.id, "username": user.username, "role": user.role}
+    return {"id": user.id, "username": user.username, "role": user.role, "tier": user.tier}
 
 
 def usage_payload(accounts: Accounts, user: User) -> dict[str, Any]:
@@ -94,13 +97,23 @@ class SessionAuth:
         *,
         secure_cookies: Optional[bool] = None,
         limiter_factory: Callable[..., AttemptLimiter] = AttemptLimiter,
+        tiers: Optional[Callable[[], Collection[str]]] = None,
     ) -> None:
         """``secure_cookies`` None marks the cookie Secure exactly when the
-        request came over HTTPS."""
+        request came over HTTPS. ``tiers`` lists the tier names the server's
+        config defines; admins may assign only those."""
         self.accounts = accounts
+        self._tiers = tiers
         self._secure_cookies = secure_cookies
         self._per_account = limiter_factory(limit=PER_ACCOUNT_LIMIT, window=LIMIT_WINDOW)
         self._per_address = limiter_factory(limit=PER_ADDRESS_LIMIT, window=LIMIT_WINDOW)
+
+    def tier_names(self) -> list[str]:
+        return sorted(self._tiers()) if self._tiers is not None else []
+
+    def _check_tier(self, tier: str) -> None:
+        if tier and self._tiers is not None and tier not in self._tiers():
+            raise AccountError(f"Unknown tier {tier!r}. Defined: {', '.join(self.tier_names()) or 'none'}.")
 
     # -- identification --------------------------------------------------------------
     def user_of(self, connection: HTTPConnection) -> Optional[User]:
@@ -228,11 +241,19 @@ class SessionAuth:
             try:
                 if body.role is not None:
                     self.accounts.set_role(actor, user_id, body.role)
+                if body.tier is not None:
+                    self._check_tier(body.tier)
+                    self.accounts.set_tier(user_id, body.tier)
                 if body.disabled is not None:
                     self.accounts.set_disabled(actor, user_id, body.disabled)
             except AccountError as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
             return JSONResponse({"ok": True})
+
+        @admins.get("/tiers")
+        async def list_tiers() -> JSONResponse:
+            """The plans an admin may put a user or an invite on; empty when the config defines none."""
+            return JSONResponse({"tiers": self.tier_names()})
 
         @admins.get("/invites")
         async def list_invites() -> JSONResponse:
@@ -241,7 +262,13 @@ class SessionAuth:
         @admins.post("/invites")
         async def create_invite(body: InviteRequest, actor: User = Depends(admin)) -> JSONResponse:
             role: Role = body.role
-            code, invite = self.accounts.create_invite(actor, role=role, ttl=body.days * 86400, note=body.note)
+            try:
+                self._check_tier(body.tier)
+                code, invite = self.accounts.create_invite(
+                    actor, role=role, tier=body.tier, ttl=body.days * 86400, note=body.note
+                )
+            except AccountError as exc:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
             return JSONResponse({**invite.to_dict(), "code": code}, status_code=status.HTTP_201_CREATED)
 
         @admins.delete("/invites/{invite_id}")

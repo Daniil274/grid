@@ -171,7 +171,7 @@ async def run_scenario(access, snapshot: Path, scenario, *, token_limit: int, ca
                     confine_tools=True, policy_config=access.catalog or access.base_config,
                     context_manager=ContextManager(max_history=100, persist_path=str(folder / "context.json")),
                     session_db_path=str(folder / "sessions.db"), logs_directory=str(folder / "logs"),
-                    stream_observer=observer,
+                    stream_observer=observer, model_access=access.model_access,
                 )
                 task = asyncio.create_task(factory.run_agent(config.get_default_agent(), scenario.message,
                                                             stream=True, stream_observer=observer,

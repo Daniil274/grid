@@ -172,12 +172,21 @@ def single_user_options(deployment, args: argparse.Namespace) -> dict:
     records = Path(deployment.config.get_logs_directory())
     activity = SystemActivity(records / "system_activity.json")
     usage = UsageStore(records / "usage.db")
+    from web_chat.chatgpt import ChatGPTLogin, persistent_host_id
+    from web_chat.vault import local_vault
+
+    # The one user's own credentials - above all a ChatGPT sign-in - live beside their records.
+    chatgpt = ChatGPTLogin(persistent_host_id(records / "chatgpt_host_id"))
+    vault = local_vault(records, oauth={"chatgpt": chatgpt})
     return {
+        "vault": vault,
+        "chatgpt": chatgpt,
         # The one user owns the server: they test the drafts.
         "spaces": (
             pool := SpacePool(
                 lambda user_id: UserSpace(
                     deployment, user_id=user_id, activity=activity, usage=usage, admin=True,
+                    entitlement=lambda: deployment.plans.resolve(admin=True), own_credentials=vault,
                     # What the system builder makes shows in every space once it is free.
                     on_systems_changed=lambda: pool.invalidate(),
                 )
@@ -224,6 +233,25 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
     users_dir = data_dir / "users"
     activity = SystemActivity(data_dir / "systems" / "activity.json")
 
+    from web_chat.chatgpt import ChatGPTLogin, persistent_host_id
+    from web_chat.vault import Cipher, Vault
+
+    # Signing in with ChatGPT needs a loopback callback: only a user who opened this
+    # server at 127.0.0.1 on its own machine can (web_chat.chatgpt_api).
+    chatgpt = ChatGPTLogin(persistent_host_id(data_dir / "chatgpt_host_id"))
+    vault = Vault(accounts.store, Cipher.from_environment(), oauth={"chatgpt": chatgpt})
+    if not vault.enabled:
+        print("GRID_SECRETS_KEY is not set: users cannot store their own keys. Make one: python -m web_chat.vault new-key")
+
+    def entitlement_of(user_id: str):
+        """What the user's plan allows, read from their account at every use."""
+
+        def current():
+            user = accounts.user(user_id)
+            return deployment.plans.resolve(admin=bool(user and user.is_admin), tier=user.tier if user else "")
+
+        return current
+
     def build(user_id: str) -> UserSpace:
         if not USER_ID.fullmatch(user_id):
             raise ValueError(f"Not a user id: {user_id!r}")
@@ -235,6 +263,8 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
             turn_counter=accounts,
             activity=activity,
             usage=usage,
+            entitlement=entitlement_of(user_id),
+            own_credentials=vault,
             # Drafts, admins-only systems and the system builder are for admins;
             # a role change applies when the space is next built.
             admin=bool((user := accounts.user(user_id)) and user.is_admin),
@@ -247,8 +277,12 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
     pool = SpacePool(build, idle_seconds=IDLE_SPACE_SECONDS)
     return {
         "spaces": pool,
-        "auth": SessionAuth(accounts, secure_cookies=args.secure_cookies),
+        "auth": SessionAuth(
+            accounts, secure_cookies=args.secure_cookies, tiers=lambda: deployment.plans.tier_names()
+        ),
         "allowed_origins": tuple(args.allowed_origin),
+        "vault": vault,
+        "chatgpt": chatgpt,
         "warm_user": None,
         "reviews": open_reviews(deployment, data_dir / "reviews"),
         "activity": activity,

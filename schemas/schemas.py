@@ -4,7 +4,9 @@ These are copies of the main schemas to avoid circular imports.
 """
 
 from typing import List, Dict, Any, Optional, Union, Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+import re
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from enum import Enum
 from .action_policy import ActionPolicyConfig
 
@@ -25,6 +27,21 @@ class ProviderConfig(BaseModel):
     default_headers: Dict[str, str] = Field(default_factory=dict)
     timeout: int = Field(default=30, ge=1, le=300)
     max_retries: int = Field(default=2, ge=0, le=1000)
+    auth: Literal["api_key", "chatgpt"] = Field(
+        default="api_key",
+        description=(
+            "How requests are authorized: with an API key (default), or with the user's ChatGPT plan "
+            "(Sign in with ChatGPT, web_chat.chatgpt). A plan provider serves only Responses API models "
+            "and takes no key from the environment"
+        ),
+    )
+    price_source: Optional[str] = Field(
+        default=None,
+        description=(
+            "The models.dev provider id whose prices apply to this provider's models "
+            "(web_chat.prices); found by base_url when omitted"
+        ),
+    )
 
 
 class ModelConfig(BaseModel):
@@ -62,6 +79,11 @@ class ModelConfig(BaseModel):
     ``[image, text]`` asks an image-generation model (OpenRouter
     google/gemini-*-image and alike) to answer with pictures; they are shown in
     the chat and stored with the answer (core.generated_images).
+    """
+    price: Optional[Dict[str, Any]] = None
+    """Dollars per million tokens - ``{input, output, cache_read, cache_write}`` - for the
+    cost of calls to this model (core.pricing). Overrides the price snapshot; a model
+    that has neither is charged at ``unknown_price``.
     """
     preserve_reasoning_content: bool = False
     """When True, reasoning_content from thinking-enabled models is preserved in
@@ -358,6 +380,73 @@ class UserLimitsPolicy(BaseModel):
         ge=1,
         description="Model tokens (input plus output) one turn may spend; a turn past it stops at its next step",
     )
+    usd_per_turn: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Dollars one turn's model calls may cost the operator; a turn past it stops at its next step. "
+            "Calls on the user's own key or subscription are not counted (core.pricing)"
+        ),
+    )
+    usd_per_day: Optional[float] = Field(
+        default=None, gt=0, description="Dollars one user's calls may cost the operator per UTC day; None for no limit"
+    )
+    usd_per_month: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="Dollars one user's calls may cost the operator per UTC calendar month; None for no limit",
+    )
+
+
+_NAME = r"^[a-z][a-z0-9_-]{0,31}$"
+
+
+class TierPolicy(BaseModel):
+    """What one plan of a multi-user web chat gets (web_chat.entitlements)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(default="", description="How the plan is named in the interface")
+    pool: Optional[str] = Field(
+        default=None,
+        pattern=_NAME,
+        description=(
+            "The key pool the operator pays for this plan's calls with: ``default`` is the providers' own "
+            "keys, any other name is a key of the root ``pools``. None: the plan brings no key of its own"
+        ),
+    )
+    own_credentials: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Credentials the user may add for themselves: provider presets (``openrouter``, ``openai``, "
+            "``opencode-go``) or ``chatgpt``. A credential of the user's own wins over the pool"
+        ),
+    )
+    models: List[str] = Field(
+        default_factory=lambda: ["*"],
+        description="Glob patterns of the models the plan may use, matched against a model's key and its name",
+    )
+    limits: Optional[UserLimitsPolicy] = Field(
+        default=None, description="The plan's limits; the root ``user_limits`` when omitted"
+    )
+
+
+class PricingPolicy(BaseModel):
+    """Where the cost of a model call comes from (core.pricing)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prices_file: Optional[str] = Field(
+        default=None,
+        description="A models.dev price snapshot (python -m web_chat.prices refresh); beside the config when relative",
+    )
+    unknown_price: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Dollars per million tokens - {input, output, cache_read, cache_write} - charged for a model "
+            "that has no price, so a budget cannot be dodged with one nobody priced"
+        ),
+    )
 
 
 class ReviewPolicy(BaseModel):
@@ -408,6 +497,21 @@ class GridConfig(BaseModel):
         default_factory=ReviewPolicy,
         description="Reviews of agent answers, filed by users and examined by admins",
     )
+    pools: Dict[str, Dict[str, str]] = Field(
+        default_factory=dict,
+        description=(
+            "Key pools: pool name -> {environment variable a provider asks for -> variable holding the pool's key}. "
+            "A plan on the pool uses the replacement wherever a provider asks for the original"
+        ),
+    )
+    tiers: Dict[str, TierPolicy] = Field(
+        default_factory=dict,
+        description="The plans users of a multi-user web chat are on; none keeps one plan for everybody",
+    )
+    default_tier: str = Field(
+        default="new", pattern=_NAME, description="The plan of a user who has none assigned"
+    )
+    pricing: PricingPolicy = Field(default_factory=PricingPolicy)
     
     @field_validator('agents')
     @classmethod
@@ -430,6 +534,22 @@ class GridConfig(BaseModel):
                 if tool_name not in tools:
                     raise ValueError(f"Tool '{tool_name}' for agent '{agent_key}' not found")
         return v
+
+    @model_validator(mode="after")
+    def validate_tiers(self):
+        """Tier and pool names are well formed and every tier's pool exists."""
+        name = re.compile(_NAME)
+        for pool in self.pools:
+            if not name.fullmatch(pool) or pool == "default":
+                raise ValueError(f"Pool name {pool!r} is not a lowercase name, or is the reserved 'default'")
+        for tier_name, tier in self.tiers.items():
+            if not name.fullmatch(tier_name):
+                raise ValueError(f"Tier name {tier_name!r} is not a lowercase name")
+            if tier.pool not in (None, "default") and tier.pool not in self.pools:
+                raise ValueError(f"Tier '{tier_name}' uses pool '{tier.pool}', which is not defined under pools")
+        if self.tiers and self.default_tier not in self.tiers:
+            raise ValueError(f"default_tier '{self.default_tier}' is not one of the tiers: {', '.join(self.tiers)}")
+        return self
 
 
 class ImageUrl(BaseModel):

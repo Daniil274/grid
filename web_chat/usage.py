@@ -12,11 +12,27 @@ from typing import Iterable
 
 UNKNOWN_MODEL = "Unknown model"
 FIELDS = ("tokens_in", "tokens_out", "cached_in", "reasoning_out", "responses")
+#: Money columns, summed beside FIELDS: what the calls were worth, and the part
+#: the operator paid (calls on a user's own key or a subscription are not charged).
+COST_FIELDS = {
+    "cost_micro": "cost_micro",
+    "charged_micro": "CASE WHEN charged = 1 THEN cost_micro ELSE 0 END",
+}
+#: Columns added after the first release; an older database gains them on open.
+ADDED_COLUMNS = (
+    ("cost_micro", "INTEGER NOT NULL DEFAULT 0"),
+    ("cost_basis", "TEXT NOT NULL DEFAULT ''"),
+    ("credential_source", "TEXT NOT NULL DEFAULT ''"),
+    ("charged", "INTEGER NOT NULL DEFAULT 1"),
+)
 
 
 def counters(row: dict) -> dict:
     values = {key: int(row.get(key) or 0) for key in FIELDS}
     values["total_tokens"] = values["tokens_in"] + values["tokens_out"]
+    for key in COST_FIELDS:
+        values[key] = int(row.get(key) or 0)
+        values[key.replace("_micro", "_usd")] = values[key] / 1_000_000
     return values
 
 
@@ -47,6 +63,10 @@ class UsageStore:
                 CREATE INDEX IF NOT EXISTS usage_by_time ON usage_events(occurred_at);
                 CREATE TABLE IF NOT EXISTS usage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+            have = {row["name"] for row in self._db.execute("PRAGMA table_info(usage_events)")}
+            for name, definition in ADDED_COLUMNS:
+                if name not in have:
+                    self._db.execute(f"ALTER TABLE usage_events ADD COLUMN {name} {definition}")
             self._db.execute("INSERT OR IGNORE INTO usage_meta VALUES ('detailed_since', ?)", (str(time.time()),))
 
     def close(self) -> None:
@@ -55,15 +75,27 @@ class UsageStore:
 
     def record(self, *, event_id: str, user_id: str, model: str, provider: str = "",
                tokens_in: int, tokens_out: int, cached_in: int = 0, reasoning_out: int = 0,
-               occurred_at: float | None = None) -> None:
+               occurred_at: float | None = None, cost_micro: int = 0, cost_basis: str = "",
+               credential_source: str = "", charged: bool = True) -> None:
         incoming, outgoing = max(0, int(tokens_in)), max(0, int(tokens_out))
         with self._lock:
             self._db.execute(
-                "INSERT OR IGNORE INTO usage_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'response')",
+                "INSERT OR IGNORE INTO usage_events (id, user_id, occurred_at, model, provider, tokens_in, tokens_out, "
+                "cached_in, reasoning_out, responses, source, cost_micro, cost_basis, credential_source, charged) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'response', ?, ?, ?, ?)",
                 (event_id, user_id, occurred_at if occurred_at is not None else time.time(),
                  model or UNKNOWN_MODEL, provider, incoming, outgoing,
-                 min(incoming, max(0, int(cached_in))), min(outgoing, max(0, int(reasoning_out)))),
+                 min(incoming, max(0, int(cached_in))), min(outgoing, max(0, int(reasoning_out))),
+                 max(0, int(cost_micro)), cost_basis, credential_source, int(bool(charged))),
             )
+
+    def spent_micro(self, user_id: str, since: float) -> int:
+        """Micro-dollars the operator was charged for the user's calls since *since* (epoch seconds)."""
+        with self._lock:
+            return int(self._db.execute(
+                "SELECT COALESCE(SUM(cost_micro), 0) FROM usage_events WHERE user_id = ? AND occurred_at >= ? AND charged = 1",
+                (user_id, since),
+            ).fetchone()[0])
 
     def import_legacy(self, rows: Iterable[dict]) -> None:
         """One atomic baseline at installation; restarts never import it twice."""
@@ -78,7 +110,8 @@ class UsageStore:
                         continue
                     timestamp = datetime.combine(date.fromisoformat(row["day"]), datetime.min.time(), timezone.utc).timestamp()
                     self._db.execute(
-                        "INSERT OR IGNORE INTO usage_events VALUES (?, ?, ?, ?, '', ?, ?, 0, 0, 0, 'legacy')",
+                        "INSERT OR IGNORE INTO usage_events (id, user_id, occurred_at, model, provider, tokens_in, tokens_out, "
+                        "cached_in, reasoning_out, responses, source) VALUES (?, ?, ?, ?, '', ?, ?, 0, 0, 0, 'legacy')",
                         (f"legacy:{row['user_id']}:{row['day']}", row["user_id"], timestamp, UNKNOWN_MODEL, incoming, outgoing),
                     )
                 self._db.execute("INSERT INTO usage_meta VALUES ('legacy_imported', ?)", (str(time.time()),))
@@ -110,7 +143,10 @@ class UsageStore:
             conditions.extend(["provider = ?", "model = ?"])
             params.extend(model)
         where = " AND ".join(conditions)
-        sums = ", ".join(f"COALESCE(SUM({field}), 0) AS {field}" for field in FIELDS)
+        sums = ", ".join(
+            [f"COALESCE(SUM({field}), 0) AS {field}" for field in FIELDS]
+            + [f"COALESCE(SUM({expression}), 0) AS {name}" for name, expression in COST_FIELDS.items()]
+        )
         with self._lock:
             totals = dict(self._db.execute(f"SELECT {sums} FROM usage_events WHERE {where}", params).fetchone())
             models = [dict(row) for row in self._db.execute(

@@ -41,12 +41,13 @@ from typing import Any, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 
 from core.interruption import INTERRUPTED_TYPE, is_resumable
-from core.run_stream import field_of
+from core.pricing import format_usd
 from core.steering import SteerMessage
 from core.tool_check import summarize
 from web_chat.attachments import AttachmentError, agent_message, normalize_images
 from web_chat.delivery import DELIVERIES, MessageQueue, decide_delivery
 from web_chat.observer import WebStreamObserver
+from web_chat.spend import TurnSpend, tracking
 from web_chat.systems import Resolution
 from web_chat.trace import StepKind, TraceRecorder, is_tool_result
 
@@ -99,45 +100,16 @@ class AgentTurn:
         self._recorder = TraceRecorder(self._queue.put_nowait, on_usage=self._check_token_budget)
         #: Whether the turn was already stopped for passing its token budget.
         self._budget_hit = False
-        self._usage_sequence = 0
+        #: What this turn's model calls cost (web_chat.spend), and whether it was
+        #: already stopped for passing its dollar budget.
+        self._spend = TurnSpend(self._check_usd_budget)
+        self._usd_budget_hit = False
         self._observer = WebStreamObserver(
             self._recorder,
             emit_token=self._token,
             reset_answer=lambda: self._queue.put_nowait({"type": "answer_reset"}),
             emit_image=lambda url: self._queue.put_nowait({"type": "image", "url": url}),
-            on_usage=self._capture_model_usage,
         )
-
-    def _capture_model_usage(self, usage: Any, model: str, agent_key: Optional[str]) -> None:
-        store = getattr(self._session.space, "usage", None)
-        if store is None:
-            return
-        provider = ""
-        resolution = self._resolution
-        if resolution is not None:
-            try:
-                agent = resolution.config.get_agent(agent_key or resolution.agent)
-                candidates = [resolution.config.get_model(key) for key in agent.model_keys()]
-                if model:
-                    matches = [candidate for candidate in candidates if candidate.name == model]
-                    providers = {candidate.provider for candidate in matches}
-                    provider = next(iter(providers)) if len(providers) == 1 else ""
-                elif len(candidates) == 1:
-                    model, provider = candidates[0].name, candidates[0].provider
-            except Exception:  # a missing config must not hide reported usage
-                pass
-        self._usage_sequence += 1
-        try:
-            store.record(
-                event_id=f"{self.run_id}:{self._usage_sequence}", user_id=self._session.space.user_id,
-                model=model, provider=provider,
-                tokens_in=int(field_of(usage, "input_tokens", "prompt_tokens") or 0),
-                tokens_out=int(field_of(usage, "output_tokens", "completion_tokens") or 0),
-                cached_in=int(field_of(field_of(usage, "input_tokens_details", "prompt_tokens_details"), "cached_tokens") or 0),
-                reasoning_out=int(field_of(field_of(usage, "output_tokens_details", "completion_tokens_details"), "reasoning_tokens") or 0),
-            )
-        except Exception:
-            logger.exception("Recording model token usage failed")
 
     @property
     def message(self) -> str:
@@ -252,6 +224,27 @@ class AgentTurn:
         )
         self.request_stop()
 
+    def _check_usd_budget(self, charged_micro: int) -> None:
+        """Stop this turn at the next step once its calls cost more than the user_limits
+        ``usd_per_turn``; the spend arrives (web_chat.spend) as each call finishes."""
+        limits = getattr(self._session.space, "limits", None)
+        usd_budget = getattr(limits, "usd_budget", None)
+        budget = usd_budget() if callable(usd_budget) else None
+        if budget is None or self._usd_budget_hit or charged_micro <= budget:
+            return
+        self._usd_budget_hit = True
+        self._recorder.note(
+            StepKind.ERROR,
+            "Cost budget exceeded",
+            subtitle=f"{format_usd(charged_micro)} spent of the {format_usd(budget)} allowed for one turn",
+            body=(
+                "The turn stops at the next step; the work done so far stays. "
+                "Continue with a narrower request, or ask to raise user_limits.usd_per_turn."
+            ),
+            tone="warn",
+        )
+        self.request_stop()
+
     def _token_budget(self) -> Optional[int]:
         limits = getattr(self._session.space, "limits", None)
         token_budget = getattr(limits, "token_budget", None)
@@ -269,7 +262,9 @@ class AgentTurn:
                 await also_to.send({**event, "run_id": self.run_id})
 
     async def run(self) -> None:
-        producer = asyncio.create_task(self._produce())
+        # The producer starts from this context: its model calls count in the turn's spend.
+        with tracking(self._spend):
+            producer = asyncio.create_task(self._produce())
         stopped = False
         try:
             await self._consume()

@@ -49,6 +49,11 @@ class Config:
 
         return str((self.config_path.parent.resolve() / raw_path).resolve(strict=False))
 
+    def resolve_config_path(self, path: Optional[str]) -> Optional[Path]:
+        """A path the config names, as an absolute one: relative to the config file."""
+        resolved = self._resolve_config_relative_path(path)
+        return Path(resolved) if resolved else None
+
     @staticmethod
     def _merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
         """Recursively merge config mappings without mutating either input."""

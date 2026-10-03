@@ -24,6 +24,7 @@ export class AccountsDrawer {
   constructor(nodes, { currentUser }) {
     this.nodes = nodes;
     this.currentUser = currentUser;
+    this.tiers = [];
     this._bind();
     document.addEventListener("grid:server-status", (event) => this._renderServer(event.detail));
   }
@@ -71,8 +72,12 @@ export class AccountsDrawer {
   }
 
   async _load() {
-    const [reviews, users, invites, server] = await Promise.all([api.reviews(), api.adminUsers(), api.adminInvites(), api.adminServer()]);
+    const [reviews, users, invites, server, plans] = await Promise.all([
+      api.reviews(), api.adminUsers(), api.adminInvites(), api.adminServer(), api.adminTiers(),
+    ]);
     const names = new Map(users.map((user) => [user.id, user.username]));
+    this.tiers = plans.tiers;
+    this._renderInviteTiers();
     this._renderReviews(reviews);
     this._renderUsers(users);
     this._renderInvites(invites, names);
@@ -138,6 +143,26 @@ export class AccountsDrawer {
     );
   }
 
+  /** The plan choice of the invite form: only when the config defines plans. */
+  _renderInviteTiers() {
+    const select = this.nodes.inviteForm.elements.tier;
+    if (!select) return;
+    select.closest(".field").hidden = !this.tiers.length;
+    replace(select, h("option", { value: "", text: "default" }), this.tiers.map((tier) => h("option", { value: tier, text: tier })));
+  }
+
+  _tierSelect(user) {
+    return h(
+      "select.control.control--sm",
+      {
+        "aria-label": `Plan of ${user.username}`,
+        on: { change: (event) => this._act(() => api.updateUser(user.id, { tier: event.target.value }), `${user.username} is on ${event.target.value || "the default plan"}`) },
+      },
+      h("option", { value: "", text: "default", selected: !user.tier }),
+      this.tiers.map((tier) => h("option", { value: tier, text: tier, selected: user.tier === tier })),
+    );
+  }
+
   _renderUsers(users) {
     const me = this.currentUser()?.id;
     replace(
@@ -145,7 +170,7 @@ export class AccountsDrawer {
       h(
         "table.adminTable",
         {},
-        h("thead", {}, h("tr", {}, ["User", "Role", "State", "Turns today", "Tokens today", ""].map((title) => h("th", { text: title })))),
+        h("thead", {}, h("tr", {}, ["User", "Role", ...(this.tiers.length ? ["Plan"] : []), "State", "Turns today", "Tokens today", ""].map((title) => h("th", { text: title })))),
         h(
           "tbody",
           {},
@@ -156,6 +181,7 @@ export class AccountsDrawer {
               { class: user.disabled ? "is-muted" : "" },
               h("td", {}, h("strong", { text: user.username }), user.id === me ? h("span.adminTable__you", { text: " (you)" }) : null),
               h("td", { text: user.role }),
+              this.tiers.length ? h("td", {}, user.role === "admin" ? h("span", { text: "admin" }) : this._tierSelect(user)) : null,
               h("td", { text: user.disabled ? "disabled" : "active" }),
               h("td", { text: String(user.turns_today ?? 0) }),
               h("td", { text: tokens(user.tokens_today ?? 0) || "0" }),
@@ -198,7 +224,7 @@ export class AccountsDrawer {
         ? h(
             "table.adminTable",
             {},
-            h("thead", {}, h("tr", {}, ["Note", "Role", "Valid until", "State", ""].map((title) => h("th", { text: title })))),
+            h("thead", {}, h("tr", {}, ["Note", "Role", ...(this.tiers.length ? ["Plan"] : []), "Valid until", "State", ""].map((title) => h("th", { text: title })))),
             h(
               "tbody",
               {},
@@ -208,6 +234,7 @@ export class AccountsDrawer {
                   { class: state(invite) === "open" ? "" : "is-muted" },
                   h("td", { text: invite.note || "-" }),
                   h("td", { text: invite.role }),
+                  this.tiers.length ? h("td", { text: invite.tier || "default" }) : null,
                   h("td", { text: when(invite.expires_at) }),
                   h("td", { text: state(invite) }),
                   h(
@@ -234,6 +261,7 @@ export class AccountsDrawer {
     await this._act(async () => {
       invite = await api.createInvite({
         role: data.get("role"),
+        tier: String(data.get("tier") ?? ""),
         days: Number(data.get("days")),
         note: String(data.get("note") ?? "").trim(),
       });

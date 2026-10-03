@@ -356,6 +356,7 @@ class BuilderAccess:
         shared: bool = True,
         max_systems: Optional[int] = None,
         count_other: Optional[Callable[[], int]] = None,
+        model_access: Optional[Any] = None,
     ) -> None:
         self.store = store
         self.catalog = catalog
@@ -367,6 +368,9 @@ class BuilderAccess:
         self.shared = shared
         self.max_systems = max_systems
         self.count_other = count_other or (lambda: 0)
+        #: The owner's credentials, model filter and spend meter (core.model_access):
+        #: what evaluations run on, so they spend the owner's plan and no one else's.
+        self.model_access = model_access
 
     def system_key(self, key: str) -> str:
         if self.shared:
@@ -428,6 +432,9 @@ class BuilderAccess:
             trusted = self.base_config.config.models.get(name)
             if trusted is None or (model.name, model.provider) != (trusted.name, trusted.provider):
                 raise StoreError("Private systems use model keys and model names from builder_catalog.")
+            if model.price != trusted.price:
+                # A price here would decide what the owner's calls cost the operator.
+                raise StoreError("Private systems use the model prices of the server; do not set price.")
         for agent in config.agents.values():
             for skill in agent.system_skills or []:
                 if "/" in skill or "\\" in skill or skill in {".", ".."}:

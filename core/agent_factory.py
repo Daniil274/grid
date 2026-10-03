@@ -39,6 +39,7 @@ from core.factory.tools import ToolAssembly
 from core.factory.turns import TOOL_CALL_CORRECTION, TurnRunner
 from core.fallback_model import FallbackModel, ModelCandidate
 from core.interruption import RunControl
+from core.model_access import ModelAccess, ModelNotInPlan
 from core.run_stream import ConsoleStreamObserver, StreamObserver
 from core.tracing.config import ImmediateTraceProcessor, get_tracing_config
 from utils.exceptions import AgentError, ConfigError
@@ -95,6 +96,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
         session_namespace: Optional[str] = None,
         logs_directory: Optional[str] = None,
         confine_tools: bool = False,
+        model_access: Optional[ModelAccess] = None,
     ):
         """
         Initialize Agent Factory.
@@ -160,6 +162,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             container_id=self.container_id,
             session_factory=self._create_persistent_sqlite_session,
             session_namespace=session_namespace,
+            model_access=model_access,
         )
         self.instructions_builder = self._runtime_support.instructions_builder
 
@@ -178,6 +181,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
 
         # Caches
         self._agent_cache: Dict[str, Agent] = {}
+        self._access_signature: Optional[str] = None
         self._tool_cache: Dict[str, List[Any]] = {}
 
         # Session management for agent memory (per agent/context pair)
@@ -296,6 +300,11 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
         """
         # Use agent_key only for caching to ensure consistent sessions
         cache_key = agent_key
+        # Agents are built for what the user's plan allows; a changed plan rebuilds them.
+        signature = self.models.access.signature()
+        if self._access_signature is not None and signature != self._access_signature:
+            self._agent_cache.clear()
+        self._access_signature = signature
 
         if not force_reload and cache_key in self._agent_cache:
             return self._agent_cache[cache_key]
@@ -305,8 +314,14 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             agent_config = self.config.get_agent(agent_key)
             model_keys = agent_config.model_keys()
             candidates: list[ModelCandidate] = []
+            not_in_plan: list[ModelNotInPlan] = []
             for model_key in model_keys:
-                sdk_model, candidate_config = self.models.sdk_model(model_key)
+                try:
+                    sdk_model, candidate_config = self.models.sdk_model(model_key)
+                except ModelNotInPlan as refusal:
+                    # A fallback the plan excludes is skipped; the agent runs on the rest.
+                    not_in_plan.append(refusal)
+                    continue
                 candidates.append(
                     ModelCandidate(
                         key=model_key,
@@ -316,6 +331,8 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                         ),
                     )
                 )
+            if not candidates:
+                raise not_in_plan[0]
             model_config = self.config.get_model(agent_config.primary_model)
             model = (
                 candidates[0].model

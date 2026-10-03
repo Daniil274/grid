@@ -10,6 +10,7 @@ from core.config.config import Config
 from core.context import ContextManager
 from core.managers.instructions_builder import InstructionsBuilder
 from core.managers.model_manager import ModelManager
+from core.model_access import ModelAccess
 from core.managers.session_manager import SessionManager
 
 
@@ -24,14 +25,19 @@ class AgentRuntimeSupport:
         container_id: Optional[str] = None,
         session_factory: Optional[Callable[[str], SQLiteSession]] = None,
         session_namespace: Optional[str] = None,
+        model_access: Optional[ModelAccess] = None,
     ) -> None:
-        self.model_manager = ModelManager(config)
+        self.model_manager = ModelManager(config, model_access)
         self.instructions_builder = InstructionsBuilder(
             config=config,
             context_manager=context_manager,
             container_id=container_id,
         )
         self.session_manager = SessionManager(session_factory=session_factory, namespace=session_namespace)
+
+    @property
+    def access(self) -> ModelAccess:
+        return self.model_manager.access
 
     @property
     def agent_sessions(self) -> dict[tuple[str, str], SQLiteSession]:

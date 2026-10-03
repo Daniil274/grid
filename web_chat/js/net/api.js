@@ -89,12 +89,17 @@ export const api = {
   changePassword: (current, next) => request("/api/auth/password", json("POST", { current, new: next })),
   /** The signed-in user's own use of this server: today's and all-time turns and tokens. */
   usage: () => request("/api/auth/usage"),
+  plan: () => request("/api/plan", { cache: "no-store" }),
+  storeKey: (kind, secret) => request(`/api/credentials/${encodeURIComponent(kind)}`, json("PUT", { secret })),
+  removeCredential: (kind) => request(`/api/credentials/${encodeURIComponent(kind)}`, { method: "DELETE" }),
+  connectChatGPT: () => request("/api/chatgpt/connect", { method: "POST" }),
   usageReport: (query, options = {}) => request(`/api/usage?${new URLSearchParams(query)}`, { ...options, cache: "no-store" }),
   adminUsers: () => request("/api/admin/users"),
   reviews: () => request("/api/action-policy/reviews"),
   resolveReview: (id, decision) =>
     request(`/api/action-policy/reviews/${encodeURIComponent(id)}`, json("POST", { decision })),
   updateUser: (id, patch) => request(`/api/admin/users/${encodeURIComponent(id)}`, json("PATCH", patch)),
+  adminTiers: () => request("/api/admin/tiers"),
   adminInvites: () => request("/api/admin/invites"),
   createInvite: (invite) => request("/api/admin/invites", json("POST", invite)),
   revokeInvite: (id) => request(`/api/admin/invites/${encodeURIComponent(id)}`, { method: "DELETE" }),

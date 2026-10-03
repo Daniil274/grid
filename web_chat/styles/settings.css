@@ -709,3 +709,7 @@
     overflow-x: auto;
   }
 }
+
+/* Plan & keys */
+.planBudget { list-style: none; margin: 0 0 var(--space-2, 8px); padding: 0; display: grid; gap: 4px; }
+.control--sm { padding-block: 2px; font-size: 0.85em; }

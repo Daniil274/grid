@@ -4,7 +4,7 @@ The rules, all in one place:
 
 - A user joins only with an invite, which an admin makes (or the operator,
   from the command line: ``grid-web-chat accounts``). The invite fixes the new
-  user's role, expires, and admits one person: spending it and creating the
+  user's role and plan (tier), expires, and admits one person: spending it and creating the
   user are one transaction.
 - Signing in gives a session token, kept by the browser in a cookie. A
   session lasts :data:`SESSION_IDLE` past its last use and never more than
@@ -41,6 +41,8 @@ INVITE_TTL = 7 * 24 * 3600
 MAX_INVITE_TTL = 90 * 24 * 3600
 
 USERNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,31}")
+#: A tier is named in the server's config; here only its spelling is checked.
+TIER = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
 class AccountError(ValueError):
@@ -57,6 +59,7 @@ class Invite:
 
     id: str
     role: Role
+    tier: str
     note: str
     created_at: float
     expires_at: float
@@ -67,6 +70,7 @@ class Invite:
         return {
             "id": self.id,
             "role": self.role,
+            "tier": self.tier,
             "note": self.note,
             "created_at": self.created_at,
             "expires_at": self.expires_at,
@@ -90,11 +94,19 @@ class Account:
             "id": self.user.id,
             "username": self.user.username,
             "role": self.user.role,
+            "tier": self.user.tier,
             "disabled": self.disabled,
             "created_at": self.created_at,
             "turns_today": self.turns_today,
             "tokens_today": self.tokens_today,
         }
+
+
+def check_tier(tier: str) -> str:
+    """The tier as stored ("" is the server's default), or AccountError."""
+    if tier and not TIER.fullmatch(tier):
+        raise AccountError("A tier name is lowercase letters, digits, '_' or '-', starting with a letter.")
+    return tier
 
 
 def check_username(username: str) -> str:
@@ -113,12 +125,17 @@ class Accounts:
         self._store = store
         self._clock = clock
 
+    @property
+    def store(self) -> AccountStore:
+        """The accounts database, for what lives beside the accounts (web_chat.vault)."""
+        return self._store
+
     # -- users ---------------------------------------------------------------------
-    def create_user(self, username: str, password: str, role: Role = "user") -> User:
+    def create_user(self, username: str, password: str, role: Role = "user", tier: str = "") -> User:
         """Create a user directly: the operator's bootstrap and tests."""
         password_hash = self._new_password_hash(username, password)
         with self._store.transaction():
-            return self._add_user(username, password_hash, role)
+            return self._add_user(username, password_hash, role, tier)
 
     @staticmethod
     def _new_password_hash(username: str, password: str) -> str:
@@ -127,10 +144,10 @@ class Accounts:
         passwords.check_strength(password, username=check_username(username))
         return passwords.hash_password(password)
 
-    def _add_user(self, username: str, password_hash: str, role: Role) -> User:
+    def _add_user(self, username: str, password_hash: str, role: Role, tier: str = "") -> User:
         if role not in ROLES:
             raise AccountError(f"Unknown role {role!r}.")
-        user = User(id=uuid.uuid4().hex, username=check_username(username), role=role)
+        user = User(id=uuid.uuid4().hex, username=check_username(username), role=role, tier=check_tier(tier))
         try:
             self._store.add_user(user, password_hash, self._clock())
         except sqlite3.IntegrityError:
@@ -146,6 +163,12 @@ class Accounts:
         """The user with id *user_id*, or None."""
         record = self._store.user_by_id(user_id)
         return record.user if record else None
+
+    def tier_of(self, user_id: str) -> str:
+        """The tier the user is on now ("" for the server's default); read fresh,
+        so an admin's change applies to the user's next turn."""
+        record = self._store.user_by_id(user_id)
+        return record.user.tier if record else ""
 
     def has_users(self) -> bool:
         return self._store.count_users() > 0
@@ -216,6 +239,13 @@ class Accounts:
             self._store.set_role(user_id, role)
             self._store.delete_sessions_of(user_id)
 
+    def set_tier(self, user_id: str, tier: str) -> None:
+        """Move a user to another plan ("" returns them to the server's default)."""
+        check_tier(tier)
+        with self._store.transaction():
+            self._existing(user_id)
+            self._store.set_tier(user_id, tier)
+
     def _keep_an_admin(self) -> None:
         if self._store.count_active_admins() <= 1:
             raise AccountError("The server needs at least one active admin.")
@@ -228,7 +258,13 @@ class Accounts:
 
     # -- invites -------------------------------------------------------------------
     def create_invite(
-        self, created_by: Optional[User], *, role: Role = "user", ttl: float = INVITE_TTL, note: str = ""
+        self,
+        created_by: Optional[User],
+        *,
+        role: Role = "user",
+        tier: str = "",
+        ttl: float = INVITE_TTL,
+        note: str = "",
     ) -> tuple[str, Invite]:
         """A new invite: (the code to hand over, the invite as listed)."""
         if role not in ROLES:
@@ -239,6 +275,7 @@ class Accounts:
         record = InviteRecord(
             id=uuid.uuid4().hex,
             role=role,
+            tier=check_tier(tier),
             note=note.strip()[:200],
             created_by=created_by.id if created_by else None,
             created_at=now,
@@ -264,7 +301,7 @@ class Accounts:
             invite = self._store.invite_by_code(tokens.digest(code))
             if invite is None or invite.used_at is not None or invite.expires_at <= self._clock():
                 raise AccountError("This invite is not valid. Ask for a new one.")
-            user = self._add_user(username, password_hash, invite.role)
+            user = self._add_user(username, password_hash, invite.role, invite.tier)
             if not self._store.mark_invite_used(invite.id, user.id, self._clock()):
                 raise AccountError("This invite is not valid. Ask for a new one.")
             return user
@@ -330,6 +367,7 @@ def _invite(record: InviteRecord) -> Invite:
     return Invite(
         id=record.id,
         role=record.role,
+        tier=record.tier,
         note=record.note,
         created_at=record.created_at,
         expires_at=record.expires_at,

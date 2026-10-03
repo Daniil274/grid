@@ -25,6 +25,8 @@ class User:
     id: str
     username: str
     role: Role
+    #: The plan the user is on (web_chat.entitlements); "" is the server's default tier.
+    tier: str = ""
 
     @property
     def is_admin(self) -> bool:

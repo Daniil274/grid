@@ -40,7 +40,7 @@ class TestAgentFactory:
         config.get_proxy_for_provider.return_value = None
         models = ModelProvider(config=config, runtime_support=None, compact_config=None)
 
-        with patch("core.factory.models.AsyncOpenAI") as client_class:
+        with patch("core.model_access.AsyncOpenAI") as client_class:
             models.make_client(
                 api_key="test-key",
                 base_url="https://api.example.com/v1",

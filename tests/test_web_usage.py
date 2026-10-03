@@ -32,13 +32,16 @@ def report(store, **options):
 def test_persistence_idempotency_and_component_totals(tmp_path):
     path = tmp_path / "usage.db"
     store = UsageStore(path)
-    record(store, cached_in=70, reasoning_out=12)
-    record(store, cached_in=70, reasoning_out=12)
+    record(store, cached_in=70, reasoning_out=12, cost_micro=2500, cost_basis="reported")
+    record(store, cached_in=70, reasoning_out=12, cost_micro=2500, cost_basis="reported")
     since = report(store)["coverage"]["detailed_since"]
     store.close()
     reopened = UsageStore(path)
     result = report(reopened)
-    assert result["summary"] == dict(tokens_in=100, tokens_out=20, total_tokens=120, cached_in=70, reasoning_out=12, responses=1)
+    assert result["summary"] == dict(
+        tokens_in=100, tokens_out=20, total_tokens=120, cached_in=70, reasoning_out=12, responses=1,
+        cost_micro=2500, cost_usd=0.0025, charged_micro=2500, charged_usd=0.0025,
+    )
     assert result["coverage"]["detailed_since"] == since
     assert len(result["series"]) == 24
     assert result["series"][12]["total_tokens"] == 120
@@ -149,19 +152,6 @@ def test_api_bad_filters_are_client_errors(server, accounts, params, code):
     assert signed_in(server, "alice").get("/api/usage", params=params).status_code == code
 
 
-def config():
-    agents = {
-        "parent": AgentConfig(name="Parent", model=["primary", "fallback"]),
-        "child": AgentConfig(name="Child", model="small"),
-    }
-    models = {
-        "primary": SimpleNamespace(name="alpha", provider="p"),
-        "fallback": SimpleNamespace(name="beta", provider="other"),
-        "small": SimpleNamespace(name="tiny", provider="q"),
-    }
-    return SimpleNamespace(get_agent=agents.__getitem__, get_model=models.__getitem__)
-
-
 def completed(model, usage):
     return RawResponsesStreamEvent(data={"type": "response.completed", "response": {
         "id": "__fake_id__", "model": model, "usage": usage,
@@ -173,45 +163,80 @@ class Session:
         self.space = SimpleNamespace(usage=store, user_id="alice")
 
 
-def test_stream_accounts_every_response_and_nested_agent_with_fallback_provider():
-    store = UsageStore()
-    session = Session(store)
-    turn = AgentTurn(session, "hello", system_key=None, agent_key=None)
-    turn._resolution = SimpleNamespace(config=config(), agent="parent")
-    usage = {"input_tokens": 100, "output_tokens": 20,
-             "input_tokens_details": {"cached_tokens": 70},
-             "output_tokens_details": {"reasoning_tokens": 12}}
-    turn._observer.handle_event(completed("alpha", usage), agent_key="parent")
-    turn._observer.handle_event(completed("beta", usage), agent_key="parent")
-    child = turn._observer.nested("Child")
-    child.handle_event(completed("", usage), agent_key="child")
-    today = datetime.now(timezone.utc).date()
-    result = report(store, start=today, end=today)
-    assert {(row["model"], row["provider"]) for row in result["models"]} == {("alpha", "p"), ("beta", "other"), ("tiny", "q")}
-    assert result["summary"]["total_tokens"] == 360
-    assert result["summary"]["responses"] == 3
-    assert result["summary"]["cached_in"] == 210
-    assert result["summary"]["reasoning_out"] == 36
-    assert turn._recorder.tokens_in == 300
-    assert turn._recorder.tokens_out == 60
-
-
-def test_unidentified_models_stay_unknown_and_missing_usage_not_counted():
+def test_the_turn_still_counts_its_tokens_from_the_stream_but_the_record_comes_from_the_meter():
     store = UsageStore()
     turn = AgentTurn(Session(store), "hello", system_key=None, agent_key=None)
-    turn._resolution = SimpleNamespace(config=config(), agent="parent")
-    turn._observer.handle_event(completed("alpha", None))
-    turn._observer.handle_event(completed("", {"prompt_tokens": 5, "completion_tokens": 2}))
+    usage = {"input_tokens": 100, "output_tokens": 20}
+    turn._observer.handle_event(completed("alpha", usage), agent_key="parent")
+    turn._observer.nested("Child").handle_event(completed("", usage), agent_key="child")
+    assert (turn._recorder.tokens_in, turn._recorder.tokens_out) == (200, 40)
+    # Money is recorded where it is spent (core.metering), once: not again from the stream.
     today = datetime.now(timezone.utc).date()
-    result = report(store, start=today, end=today)
-    assert result["models"][0]["model"] == UNKNOWN_MODEL
-    assert result["summary"]["total_tokens"] == 7
-    assert result["summary"]["responses"] == 1
+    assert report(store, start=today, end=today)["summary"]["responses"] == 0
 
 
-def test_analytics_failure_does_not_interrupt_trace_accounting():
+def test_the_meter_records_each_call_for_the_user_and_adds_it_to_the_turn_in_progress():
+    from core.model_access import SpendEvent
+    from core.pricing import COMPUTED, Cost, TokenUsage
+    from web_chat.spend import SpaceMeter, TurnSpend, tracking
+
+    store = UsageStore()
+    meter = SpaceMeter("alice", store)
+    own = SpendEvent("p", "alpha", TokenUsage(100, 20, cached=70, reasoning=12), Cost(2500, COMPUTED), "pool:friends", True, False)
+    free = SpendEvent("p", "beta", TokenUsage(10, 5), Cost(900, COMPUTED), "own", False, False)
+    stops = []
+    turn = TurnSpend(stops.append)
+    with tracking(turn):
+        meter(own)
+        meter(free)
+    meter(own)  # outside any turn: recorded, counted in no turn
+    assert (turn.charged_micro, turn.total_micro, stops) == (2500, 3400, [2500])
+    today = datetime.now(timezone.utc).date()
+    summary = report(store, start=today, end=today)["summary"]
+    assert (summary["responses"], summary["cached_in"], summary["reasoning_out"]) == (3, 140, 24)
+    assert (summary["cost_micro"], summary["charged_micro"]) == (5900, 5000)
+
+
+def test_a_failing_store_never_breaks_a_call():
+    from core.model_access import SpendEvent
+    from core.pricing import COMPUTED, Cost, TokenUsage
+    from web_chat.spend import SpaceMeter
+
     def fail(**kwargs):
         raise OSError("disk failure")
-    turn = AgentTurn(Session(SimpleNamespace(record=fail)), "hello", system_key=None, agent_key=None)
-    turn._observer.handle_event(completed("alpha", {"input_tokens": 5, "output_tokens": 2}))
-    assert turn._recorder.tokens_in == 5 and turn._recorder.tokens_out == 2
+
+    SpaceMeter("alice", SimpleNamespace(record=fail))(
+        SpendEvent("p", "m", TokenUsage(1, 1), Cost(1, COMPUTED), "env", True, False)
+    )
+
+
+def test_spend_counts_only_what_the_operator_was_charged_since_a_moment():
+    store = UsageStore()
+    record(store, "a", at="2026-10-03T10:00:00", cost_micro=1000, credential_source="pool:friends")
+    record(store, "b", at="2026-10-03T12:00:00", cost_micro=4000, credential_source="pool:friends")
+    record(store, "c", at="2026-10-03T12:30:00", cost_micro=9000, credential_source="own", charged=False)
+    record(store, "d", at="2026-10-03T12:30:00", user="bob", cost_micro=7000)
+    assert store.spent_micro("alice", stamp("2026-10-03T00:00:00")) == 5000
+    assert store.spent_micro("alice", stamp("2026-10-03T11:00:00")) == 4000
+    assert store.spent_micro("nobody", 0) == 0
+    summary = report(store)["summary"]
+    assert (summary["cost_micro"], summary["charged_micro"]) == (14000, 5000)
+
+
+def test_a_database_from_before_money_gains_the_cost_columns(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "usage.db"
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE usage_events (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, occurred_at REAL NOT NULL,
+            model TEXT NOT NULL, provider TEXT NOT NULL, tokens_in INTEGER NOT NULL, tokens_out INTEGER NOT NULL,
+            cached_in INTEGER NOT NULL, reasoning_out INTEGER NOT NULL, responses INTEGER NOT NULL, source TEXT NOT NULL);
+        INSERT INTO usage_events VALUES ('x', 'alice', 1790000000, 'm', 'p', 10, 5, 0, 0, 1, 'response');
+    """)
+    old.commit()
+    old.close()
+    store = UsageStore(path)
+    assert store.spent_micro("alice", 0) == 0  # old rows count as free, charged
+    record(store, "y", cost_micro=300)
+    assert store.spent_micro("alice", 0) == 300

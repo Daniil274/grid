@@ -113,6 +113,8 @@ class WebChatServer:
         restart_path: Optional[Path] = None,
         restart_callback: Optional[Callable[[], None]] = None,
         usage: Optional[Any] = None,
+        vault: Optional[Any] = None,
+        chatgpt: Optional[Any] = None,
     ) -> None:
         """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
         accounts; without it ``identify`` decides, by default the single local
@@ -122,7 +124,9 @@ class WebChatServer:
         ``reviews`` is the web_chat.review.desk.ReviewDesk users file reviews
         of answers with; None offers no reviews. ``activity`` records what the
         systems do (web_chat.system_activity); ``submissions_dir`` keeps the user
-        systems offered to everyone (web_chat.system_hub)."""
+        systems offered to everyone (web_chat.system_hub). ``vault`` keeps the
+        credentials users store for themselves (web_chat.vault); ``chatgpt``
+        runs the ChatGPT subscription login (web_chat.chatgpt)."""
         if auth is not None and identify is not None:
             raise ValueError("Pass auth or identify, not both")
         self.deployment = deployment
@@ -203,6 +207,23 @@ class WebChatServer:
         from web_chat.system_hub import register_system_routes
 
         register_system_routes(api, self.systems, self.current_user, self.current_space, admins_only(self.current_user))
+        if vault is not None:
+            from web_chat.credentials_api import register_credential_routes
+
+            register_credential_routes(
+                api,
+                self.current_user,
+                plans=deployment.plans,
+                vault=vault,
+                spent_micro=self.usage.spent_micro,
+                chatgpt=chatgpt,
+            )
+            if chatgpt is not None:
+                from web_chat.chatgpt_api import register_chatgpt_routes
+
+                register_chatgpt_routes(
+                    self.app, api, self.current_user, login=chatgpt, vault=vault, plans=deployment.plans
+                )
         if reviews is not None:
             from web_chat.review.http import register_admin_review_routes, register_review_routes
 

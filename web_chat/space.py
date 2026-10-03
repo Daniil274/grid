@@ -35,10 +35,13 @@ from core.config import Config
 from core.config.prompt_sections import PromptSection
 from core.context import ContextManager
 from core.managers.container_manager import ContainerManager
+from core.model_access import ModelAccess
 from core.system_store import BuilderAccess, SystemStore
 from web_chat.deployment import Deployment, isolation_enabled
+from web_chat.entitlements import Entitlement, OwnCredentials, UserCredentials
 from web_chat.limits import TurnCounter, TurnLimits
 from web_chat.personal_agents import PersonalAgentError, PersonalAgents, PersonalAgentStore
+from web_chat.spend import SpaceMeter
 from web_chat.system_activity import SystemActivity
 from web_chat.systems import ExtraSystem, Resolution, SystemRegistry
 from web_chat.user_systems import UserSystemError, UserSystems, UserSystemStore
@@ -138,6 +141,8 @@ class UserSpace:
         usage: Optional[Any] = None,
         admin: bool = False,
         on_systems_changed: Optional[Callable[[], None]] = None,
+        entitlement: Optional[Callable[[], Entitlement]] = None,
+        own_credentials: Optional[OwnCredentials] = None,
     ) -> None:
         """``layout`` None keeps the single-user layout (see the module docs).
 
@@ -148,6 +153,12 @@ class UserSpace:
 
         ``turn_counter`` counts the user's turns per day; given one, the
         deployment's ``user_limits`` apply to the space (web_chat.limits).
+
+        ``entitlement`` returns what the user's plan allows now (web_chat.entitlements):
+        the key that pays for their calls, the models they may use, their limits.
+        Without it the user is the operator: the providers' own keys, every model,
+        the config's ``user_limits``. ``own_credentials`` holds the keys and tokens
+        the user stored for themselves.
 
         ``activity`` counts the turns per system (web_chat.system_activity).
         ``admin``: the space of an admin, or of the one user: it offers the
@@ -165,9 +176,15 @@ class UserSpace:
         self.usage = usage
         self.admin = admin
         self.on_systems_changed = on_systems_changed
+        self.entitlement = entitlement
+        policy = (lambda: entitlement().limits) if entitlement is not None else (lambda: deployment.user_limits)
         self.limits = (
-            TurnLimits(user_id, lambda: deployment.user_limits, turn_counter) if turn_counter is not None else None
+            TurnLimits(user_id, policy, turn_counter, spend=usage if hasattr(usage, "spent_micro") else None)
+            if turn_counter is not None
+            else None
         )
+        #: Credentials in and spend out of every model call this space's agents make.
+        self.model_access = self._model_access(entitlement, own_credentials)
         #: The accounts service this space counts its user's use through.
         self.turn_counter = turn_counter
 
@@ -188,6 +205,21 @@ class UserSpace:
         self._build()
 
     # -- construction ------------------------------------------------------
+    def _model_access(
+        self, entitlement: Optional[Callable[[], Entitlement]], own: Optional[OwnCredentials]
+    ) -> ModelAccess:
+        credentials = (
+            UserCredentials(self.user_id, entitlement, self.deployment.plans, own) if entitlement is not None else None
+        )
+        return ModelAccess(
+            credentials,
+            on_spend=SpaceMeter(self.user_id, self.usage),
+            prices=self.deployment.price_book(),
+            unknown_price=self.deployment.unknown_price(),
+            permits=(lambda key, name: entitlement().permits_model(key, name)) if entitlement is not None else None,
+            signature=(lambda: entitlement().signature()) if entitlement is not None else None,
+        )
+
     def _build(self) -> None:
         config = self._workspace_config()
         workspace = Path(config.get_working_directory()).resolve()
@@ -371,6 +403,7 @@ class UserSpace:
             session_namespace=(system_key if self.layout and system_key != self.registry.default_key() else None),
             logs_directory=str(self.layout.logs) if self.layout else None,
             confine_tools=self.require_isolation,
+            model_access=self.model_access,
         )
         factory.system_builder = self._builder_access()
         # Every agent in the space learns the workspace-file link convention.
@@ -404,6 +437,7 @@ class UserSpace:
             shared=self.admin,
             max_systems=None if self.admin else self.deployment.personal_agents_policy.max_systems,
             count_other=lambda: len(self.user_systems.list()) if self.user_systems is not None else 0,
+            model_access=self.model_access,
         )
         return access
 

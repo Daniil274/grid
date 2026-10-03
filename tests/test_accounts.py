@@ -329,3 +329,45 @@ def test_expired_sessions_are_purged(accounts, clock):
 
     assert accounts.purge_expired_sessions() == 1
     assert accounts.user_for_session(token) is None
+
+
+def test_users_and_invites_carry_a_tier_the_admin_can_change(tmp_path):
+    from web_chat.accounts import open_accounts
+    from web_chat.accounts.service import AccountError
+
+    accounts = open_accounts(tmp_path)
+    admin = accounts.create_user("admin1", "correct horse battery staple", role="admin")
+    assert accounts.tier_of(admin.id) == ""  # unassigned: the server's default tier
+    code, invite = accounts.create_invite(admin, tier="friend")
+    assert invite.tier == "friend"
+    friend = accounts.register(code, "friend1", "correct horse battery staple")
+    assert friend.tier == "friend" and accounts.tier_of(friend.id) == "friend"
+    accounts.set_tier(friend.id, "new")
+    assert accounts.tier_of(friend.id) == "new"
+    assert accounts.user(friend.id).tier == "new"
+    accounts.set_tier(friend.id, "")
+    assert accounts.tier_of(friend.id) == ""
+    for bad in ("Friend", "a b", "1x", "x" * 40):
+        with pytest.raises(AccountError):
+            accounts.set_tier(friend.id, bad)
+    with pytest.raises(AccountError):
+        accounts.set_tier("missing", "new")
+    assert accounts.accounts()[1].to_dict()["tier"] == ""
+
+
+def test_a_database_from_before_tiers_gets_the_columns_and_empty_tiers(tmp_path):
+    import sqlite3
+
+    from web_chat.accounts.store import AccountStore, MIGRATIONS
+
+    path = tmp_path / "accounts.db"
+    old = sqlite3.connect(path)
+    for number, script in enumerate(MIGRATIONS[:3], start=1):
+        for statement in filter(str.strip, script.split(";")):
+            old.execute(statement)
+    old.execute("PRAGMA user_version = 3")
+    old.execute("INSERT INTO users VALUES ('u1', 'olduser', 'h', 'user', 0, 1.0)")
+    old.commit()
+    old.close()
+    store = AccountStore(path)
+    assert store.user_by_id("u1").user.tier == ""

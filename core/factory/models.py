@@ -11,13 +11,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-import httpx
 from agents import ModelSettings
 from agents.model_settings import Reasoning
 from openai import AsyncOpenAI
 
+from core.model_access import ModelAccess
 from core.vision_model import VisionChatCompletionsModel
-from utils.exceptions import AgentError
 
 logger = logging.getLogger("grid.agent_factory")
 
@@ -45,6 +44,13 @@ class ModelProvider:
         """Resolve an input key into a model key using runtime support services."""
         return self._runtime_support.resolve_model_key(key)
 
+    @property
+    def access(self) -> Any:
+        """The credentials and spend reporting of this config's clients."""
+        if self._runtime_support is None:
+            return ModelAccess()
+        return self._runtime_support.access
+
     def make_client(
         self,
         *,
@@ -55,30 +61,14 @@ class ModelProvider:
         provider_key: Optional[str] = None,
     ) -> AsyncOpenAI:
         """Create AsyncOpenAI client; avoid proxy for local providers."""
-        kwargs: Dict[str, Any] = dict(
+        return self.access.client(
+            self.config,
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
+            provider_key=provider_key,
         )
-        if provider_key:
-            default_headers = self.config.get_provider(provider_key).default_headers
-            if default_headers:
-                kwargs["default_headers"] = dict(default_headers)
-        proxy_url = self.config.get_proxy_for_provider(provider_key)
-        # We control proxy selection explicitly; disable env proxy usage in httpx.
-        if proxy_url:
-            kwargs["http_client"] = httpx.AsyncClient(
-                proxy=proxy_url,
-                timeout=float(timeout),
-                trust_env=False,
-            )
-        else:
-            kwargs["http_client"] = httpx.AsyncClient(
-                timeout=float(timeout),
-                trust_env=False,
-            )
-        return AsyncOpenAI(**kwargs)
 
     def client_for(self, model_key: str) -> tuple[AsyncOpenAI, str]:
         """Create OpenAI client and return (client, model_name) using configuration."""
@@ -102,6 +92,7 @@ class ModelProvider:
           modalities: [image, text]      → extra_body {"modalities": [...]} (image generation)
         """
         max_tokens = getattr(model_config, "max_tokens", None)
+        plan_usage = self._uses_plan(model_config)
         reasoning_cfg: Optional[Dict[str, Any]] = getattr(
             model_config, "reasoning", None
         ) or {}
@@ -120,25 +111,29 @@ class ModelProvider:
             extra_body["modalities"] = list(modalities)
 
         return ModelSettings(
-            max_tokens=max_tokens,
+            # A ChatGPT plan takes no output cap and never stores the response (preview limits).
+            max_tokens=None if plan_usage else max_tokens,
+            store=False if plan_usage else None,
             reasoning=sdk_reasoning,
             extra_body=extra_body or None,
             parallel_tool_calls=parallel_tool_calls,
         )
 
+    def _uses_plan(self, model_config: Any) -> bool:
+        """Whether the model is served on the user's ChatGPT plan (provider ``auth: chatgpt``)."""
+        if self.config is None:
+            return False
+        try:
+            return self.config.get_provider(model_config.provider).auth == "chatgpt"
+        except Exception:  # noqa: BLE001 - an unknown provider is reported where the model is built
+            return False
+
     def sdk_model(self, model_key: str) -> tuple[Any, Any]:
         """Create one Agents SDK model and return it with its config."""
+        self.access.check_model(self.config, model_key)
         model_config = self.config.get_model(model_key)
         provider_config = self.config.get_provider(model_config.provider)
-        api_key = self.config.get_api_key(model_config.provider)
-        if not api_key:
-            raise AgentError(
-                f"API key not found for provider '{model_config.provider}'",
-                details={
-                    "provider": model_config.provider,
-                    "env_var": provider_config.api_key_env,
-                },
-            )
+        api_key = self.access.api_key(self.config, model_config.provider)
 
         client = self.make_client(
             api_key=api_key,
@@ -154,6 +149,8 @@ class ModelProvider:
             use_responses = bool(getattr(model_config, "use_responses_api", False))
         except Exception:
             use_responses = False
+        if provider_config.auth == "chatgpt":
+            use_responses = True  # a plan serves the Responses API only
 
         # An explicit use_responses_api is trusted for any provider: some
         # (OpenCode Go muse-spark) serve a model only over /responses.
