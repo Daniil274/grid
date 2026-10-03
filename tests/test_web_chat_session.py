@@ -698,6 +698,39 @@ async def test_a_waiting_message_can_be_dropped():
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_next_step_message_is_taken_back_from_the_agent():
+    run, started, release, seen = running_agent()
+    pending, withdrawn = {}, []
+
+    def steer(context_id, message):
+        pending[message.message_id] = message
+        return True
+
+    def withdraw_steer(context_id, message_id):
+        withdrawn.append(message_id)
+        return pending.pop(message_id, None) is not None
+
+    space, socket = space_for(run), Socket()
+    space.factory.steer = steer
+    space.factory.withdraw_steer = withdraw_steer
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
+    await socket.incoming.put('{"message":"refactor"}')
+    await asyncio.wait_for(started.wait(), 2)
+    await socket.incoming.put('{"message":"drop the tests","delivery":"next_step"}')
+    item = (await socket.event("queue"))["items"][0]
+    assert item["state"] == "steering"
+    await socket.incoming.put(json.dumps({"action": "unqueue", "id": item["id"]}))
+    assert (await socket.event("queue"))["items"] == []
+    assert withdrawn == [item["id"]] and pending == {}
+    release.set()
+    await socket.event("done")
+    await asyncio.sleep(0.1)
+    assert seen == ["refactor"]
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
 async def test_the_decision_model_chooses_when_the_user_did_not():
     run, started, release, seen = running_agent()
     space, socket = space_for(run), Socket()

@@ -48,6 +48,23 @@ def test_a_message_no_call_read_goes_back_to_its_sender():
     assert steering.undelivered() == []
 
 
+async def test_a_withdrawn_message_is_never_read():
+    steering = Steering()
+    delivered, back = [], []
+    steering.add(SteerMessage("m1", "cancel me", on_delivered=delivered.append, on_undelivered=back.append))
+    steering.add(SteerMessage("m2", "keep me", on_delivered=delivered.append))
+
+    assert steering.withdraw("m1")
+    assert not steering.withdraw("m1")
+    items = await steering.apply([{"role": "user", "content": "task"}], None)
+
+    assert [text_of(item) for item in items] == ["task", STEER_PREFIX + "keep me"]
+    assert [m.message_id for m in delivered] == ["m2"]
+    assert not steering.withdraw("m2")  # already read
+    steering.hand_back()
+    assert back == []
+
+
 class FilteringRunner:
     """A streamed run whose steps call the run's input filter, as the SDK does."""
 
@@ -104,6 +121,43 @@ async def test_a_running_turn_takes_a_message_at_its_next_step(factory):
     steer = next(m for m in chat if (m.metadata or {}).get("type") == "steer")
     assert steer.content == "keep the public API" and steer.role == "user"
     assert not factory.steer(context_id, SteerMessage("s2", "too late"))
+
+
+async def test_a_message_cancelled_before_the_next_step_does_not_reach_the_agent(factory):
+    context_id = factory.context_manager.start_new_context()
+    at_tool, release = asyncio.Event(), asyncio.Event()
+    base = [{"role": "user", "content": "Refactor the module"}]
+
+    async def tool_runs():
+        at_tool.set()
+        await release.wait()
+
+    def steps(model_call):
+        async def first_call():
+            await model_call(base)
+
+        async def second_call():
+            await model_call(base + [{"role": "assistant", "content": "read the file"}])
+
+        return [[first_call, called("c1"), tool_runs, returned("c1")], [second_call]]
+
+    runner = FilteringRunner(steps)
+    delivered = []
+    with patch("agents.Runner", runner):
+        turn = asyncio.create_task(
+            factory.run_agent("worker", "Refactor the module", context_id=context_id, stream=True, stream_observer=OBSERVER)
+        )
+        await at_tool.wait()
+        assert factory.steer(context_id, SteerMessage("s1", "drop the tests", on_delivered=delivered.append))
+        assert factory.withdraw_steer(context_id, "s1")
+        release.set()
+        await turn
+
+    assert all(STEER_PREFIX not in str(item) for call in runner.inputs for item in call)
+    assert delivered == []
+    chat = factory.context_manager.conversation_view(context_id)["messages"]
+    assert not any((m.metadata or {}).get("type") == "steer" for m in chat)
+    assert not factory.withdraw_steer(context_id, "s1")
 
 
 async def test_a_message_sent_as_the_turn_answers_is_handed_back(factory):

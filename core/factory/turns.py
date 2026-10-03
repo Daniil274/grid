@@ -747,6 +747,15 @@ class TurnRunner:
         control.steering.add(message)
         return True
 
+    def withdraw_steer(self, context_id: str, message_id: str) -> bool:
+        """Take back a message given by :meth:`steer` that the agent has not read.
+
+        False when no turn of this conversation runs here or the message was
+        already read - it is in the conversation then.
+        """
+        control = self._run_controls.get(context_id)
+        return control is not None and control.steering.withdraw(message_id)
+
     def request_stop(self, context_id: str) -> bool:
         """Ask the turn running in *context_id* to stop after its current step.
 
