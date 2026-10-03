@@ -65,18 +65,9 @@ class Config:
                 merged[key] = copy.deepcopy(value)
         return merged
 
-    def _load_action_policy_file(self, raw_config: Dict[str, Any]) -> None:
-        """Merge an external action-policy YAML before Pydantic validation."""
-        settings = raw_config.setdefault("settings", {})
-        policy = settings.get("action_policy")
-        if isinstance(policy, str):
-            policy = {"policy_file": policy}
-            settings["action_policy"] = policy
-        if not isinstance(policy, dict) or not policy.get("policy_file"):
-            return
-        policy_path = Path(
-            self._resolve_config_relative_path(str(policy["policy_file"])) or ""
-        )
+    def _read_policy_document(self, reference: str) -> Dict[str, Any]:
+        """A policy YAML referenced from this config, as a mapping."""
+        policy_path = Path(self._resolve_config_relative_path(reference) or "")
         if not policy_path.is_file():
             raise ConfigError(f"Action policy file {policy_path} not found")
         if policy_path.stat().st_size > 1024 * 1024:
@@ -84,6 +75,23 @@ class Config:
         document = yaml.safe_load(policy_path.read_text(encoding="utf-8")) or {}
         if not isinstance(document, dict):
             raise ConfigError("Action policy file must contain a YAML mapping")
+        return document
+
+    def _load_action_policy_file(self, raw_config: Dict[str, Any]) -> None:
+        """Merge external action-policy YAML before Pydantic validation."""
+        settings = raw_config.setdefault("settings", {})
+        policy = settings.get("action_policy")
+        if isinstance(policy, str):
+            policy = {"policy_file": policy}
+            settings["action_policy"] = policy
+        if not isinstance(policy, dict):
+            return
+        if isinstance(policy.get("system"), str):
+            # This system's addition to the base policy (ActionPolicySystem).
+            policy["system"] = self._read_policy_document(policy["system"])
+        if not policy.get("policy_file"):
+            return
+        document = self._read_policy_document(str(policy["policy_file"]))
         if "settings" in document:
             document = (document.get("settings") or {}).get("action_policy") or {}
         elif "action_policy" in document:
@@ -92,6 +100,9 @@ class Config:
             raise ConfigError("External action_policy must be a YAML mapping")
         if document.get("policy_file"):
             raise ConfigError("Nested action policy files are not supported")
+        if "system" in document:
+            # A shared policy file serves many systems; each adds its own part.
+            raise ConfigError("A system policy belongs to the system config, not to a policy file")
         settings["action_policy"] = self._merge_dicts(document, policy)
     
     def _load_config(self) -> None:

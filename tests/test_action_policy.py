@@ -1289,3 +1289,114 @@ def test_policy_model_request_timeout_comes_from_its_model_entry():
     # The router keeps its provider timeout; only the policy model is bounded.
     assert DecisionsModel.from_config(root, validator.model).timeout < validator.timeout_seconds / 2
     assert DecisionsModel.from_config(root, "router").timeout == 60
+
+
+SYSTEM_BASE = ActionPolicyConfig(
+    mode="enforce",
+    version="base-v1",
+    rules=({"id": "scope", "decision": "deny", "when": "Outside the task."},),
+    prompts={
+        "action": {
+            "instructions": "Judge the action.",
+            "criteria": {"allow": "a", "deny": "d", "review": "r"},
+        },
+        "chain": {
+            "instructions": "Judge the chain.",
+            "criteria": {"allow": "a", "deny": "d", "review": "r"},
+        },
+    },
+)
+
+
+def test_a_system_part_is_added_to_the_base_policy():
+    from schemas.action_policy import ActionPolicySystem
+
+    system = ActionPolicySystem(
+        version="sys-v1",
+        rules=({"id": "store", "decision": "deny", "when": "Writes another user's store."},),
+        action="Its own store is in scope.",
+    )
+    policy = SYSTEM_BASE.with_system(system)
+
+    assert policy.version == "base-v1+sys-v1"
+    assert [rule.id for rule in policy.rules] == ["scope", "store"]
+    assert policy.prompts.action.instructions == "Judge the action.\n\nIts own store is in scope."
+    assert policy.prompts.chain == SYSTEM_BASE.prompts.chain
+    assert policy.prompts.action.criteria == SYSTEM_BASE.prompts.action.criteria
+    assert (policy.mode, policy.system) == ("enforce", None)
+    # Without a part of its own, a system runs under the base as it is.
+    assert SYSTEM_BASE.with_system(None) == SYSTEM_BASE
+
+    with pytest.raises(ValueError):
+        SYSTEM_BASE.with_system(
+            ActionPolicySystem(version="x", rules=({"id": "scope", "decision": "review", "when": "w"},))
+        )
+
+
+def test_a_system_part_is_loaded_from_a_file_beside_the_config(tmp_path, monkeypatch):
+    from core.config.config import Config
+    from utils.exceptions import ConfigError
+
+    monkeypatch.setenv("POLICY_TEST_KEY", "test-key")
+    (tmp_path / "part.yaml").write_text("version: part-v1\naction: Its tracker is in scope.\n", encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    body = """
+settings:
+  default_agent: assistant
+  action_policy:
+    {policy}
+providers:
+  test: {{name: test, base_url: "https://example.com/v1", api_key_env: POLICY_TEST_KEY}}
+models:
+  m: {{name: decisions, provider: test}}
+agents:
+  assistant: {{name: Assistant, model: m, tools: []}}
+"""
+    config_path.write_text(body.format(policy="system: part.yaml"), encoding="utf-8")
+    system = Config(str(config_path)).config.settings.action_policy.system
+    assert (system.version, system.action) == ("part-v1", "Its tracker is in scope.")
+
+    # A shared policy file serves many systems and carries no system's part.
+    (tmp_path / "shared.yaml").write_text("version: s\nsystem: {version: x}\n", encoding="utf-8")
+    config_path.write_text(body.format(policy="policy_file: shared.yaml"), encoding="utf-8")
+    with pytest.raises(ConfigError):
+        Config(str(config_path))
+
+
+def test_shipped_system_guidance_reaches_only_its_own_system():
+    from core.config.config import Config
+
+    base = Config("routing.yaml").config.settings.action_policy
+    builder = Config("examples/system-builder/config.yaml").config.settings.action_policy.system
+    coder = Config("examples/coder/config.yaml").config.settings.action_policy.system
+    pipeline = Config("examples/coordinator-pipeline/config.yaml").config.settings.action_policy.system
+
+    def text(policy):
+        return policy.prompts.action.instructions + policy.prompts.chain.instructions
+
+    store, tracker = "хранилище систем", "трекере задач"
+    assert store not in text(base) and tracker not in text(base)
+    assert store in text(base.with_system(builder)) and tracker not in text(base.with_system(builder))
+    assert tracker in text(base.with_system(coder)) and store not in text(base.with_system(coder))
+    assert pipeline == coder
+
+
+def test_a_factory_judges_under_the_catalog_policy_with_its_own_part(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    from core.agent_factory import AgentFactory
+    from core.config.config import Config
+
+    root = validator_root_config()
+    factory = AgentFactory(
+        config=Config("examples/coder/config.yaml", str(tmp_path)),
+        working_directory=str(tmp_path),
+        tracing_level=None,
+        policy_config=root,
+    )
+    gate = factory.action_gate
+    base = root.config.settings.action_policy
+
+    assert gate.config.version == f"{base.version}+code-repository-v1"
+    assert gate.config.validator == base.validator
+    assert gate.validator.prompts == gate.config.prompts
+    assert "трекере задач" in gate.validator.prompts.action.instructions

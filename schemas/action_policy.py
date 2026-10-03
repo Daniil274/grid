@@ -83,6 +83,25 @@ class ActionPolicyPrompts(BaseModel):
     chain: ActionPolicyQuestion = Field(default_factory=ActionPolicyQuestion)
 
 
+class ActionPolicySystem(BaseModel):
+    """What one system adds to the policy it runs under.
+
+    The base policy - the routing catalog's, or the system's own when no catalog
+    policy is enabled - holds the rules every system shares. Guidance that is
+    true only of one system's tools and work (its stores, its tracker, its
+    version control) lives here, so it never reaches the validator judging
+    another system's calls. Operator-authored: private systems cannot set it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: str = Field(min_length=1)
+    rules: tuple[ActionPolicyRule, ...] = ()
+    # Appended to the base question's instructions; criteria stay the base's.
+    action: str = ""
+    chain: str = ""
+
+
 class ActionPolicyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -128,3 +147,38 @@ class ActionPolicyConfig(BaseModel):
     max_attempts_per_turn: int = Field(default=1000, ge=1)
     max_denials_per_run: int = Field(default=3, ge=1)
     validator: ActionValidatorConfig = Field(default_factory=ActionValidatorConfig)
+    # This system's addition to whichever base policy governs it. A string in
+    # the YAML is a file resolved relative to the system config.
+    system: ActionPolicySystem | None = None
+
+    def with_system(self, system: "ActionPolicySystem | None") -> "ActionPolicyConfig":
+        """This policy as the base, with one system's rules and guidance added.
+
+        The base's own ``system`` is never carried over: a catalog policy
+        governs many systems and adds nothing system-specific to any of them.
+        """
+        if system is None:
+            return self.model_copy(update={"system": None})
+        ids = [rule.id for rule in (*self.rules, *system.rules)]
+        if len(set(ids)) != len(ids):
+            raise ValueError("System policy rules must not reuse the ids of base rules")
+
+        def extended(question: ActionPolicyQuestion, extra: str) -> ActionPolicyQuestion:
+            if not extra.strip():
+                return question
+            instructions = "\n\n".join(
+                part for part in (question.instructions.strip(), extra.strip()) if part
+            )
+            return question.model_copy(update={"instructions": instructions})
+
+        return self.model_copy(
+            update={
+                "version": f"{self.version}+{system.version}",
+                "rules": (*self.rules, *system.rules),
+                "prompts": ActionPolicyPrompts(
+                    action=extended(self.prompts.action, system.action),
+                    chain=extended(self.prompts.chain, system.chain),
+                ),
+                "system": None,
+            }
+        )

@@ -16,6 +16,9 @@ settings:
   working_directory: .
   config_directory: .
   allow_path_override: true
+  # Added to the catalog's policy for this system's calls only.
+  action_policy:
+    system: ../../policies/systems/code-repository.yaml
 
   agent_logging:
     enabled: true
