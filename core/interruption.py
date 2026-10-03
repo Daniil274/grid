@@ -39,6 +39,11 @@ from core.steering import Steering
 INTERRUPTED_TYPE = "agent_interrupted"
 #: ``metadata["type"]`` of the stored user entry of a Continue without text.
 CONTINUATION_TYPE = "continuation"
+#: ``metadata["type"]`` of the display-only marker a chat thread shows where its
+#: context was compacted. It lives only in the visible conversation log - the
+#: model's session never sees it - and is not part of the dialogue: an
+#: interruption before it is still the one Continue resumes.
+COMPACTED_TYPE = "context_compacted"
 #: What a Continue without text stores as the user's message.
 CONTINUE_TEXT = "Continue."
 

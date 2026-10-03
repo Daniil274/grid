@@ -75,17 +75,27 @@ function actionButton(label, path, onClick, extraClass = "") {
  * @param {(answer: {id: string, text: string}) => void} [options.onReport] assistant
  *   messages only: report a problem with this answer for review
  * @param {() => void} [options.onContinue] resumes an interrupted turn
- * @param {"continuation"|null} [options.kind] a Continue: a marker, not a bubble
+ * @param {"continuation"|"compaction"|null} [options.kind] a marker, not a bubble
+ * @param {?{tokens_before: ?number, tokens_after: ?number}} [options.compaction]
+ *   token counts for a compaction marker
  * @param {string[]} [options.images] data URLs of attached images
  */
 export function createMessage({
   role, content = "", author = "", timestamp, onEdit, onSpeak, onReport, onContinue, onSwitchVersion,
-  kind = null, images = [], messageId = null, versions = null,
+  kind = null, compaction = null, images = [], messageId = null, versions = null,
 }) {
   if (kind === "continuation") return createContinuationMarker({ timestamp });
+  if (kind === "compaction") return createCompactionMarker({ timestamp, compaction });
   const isAssistant = role === "assistant";
   const id = `msg-${(sequence += 1)}`;
   const body = h("div.msg__body");
+  // Markdown images are rebuilt on every paint, so the zoom toggle is caught on
+  // the stable container: a workspace image expands in place when clicked.
+  body.addEventListener("click", (event) => {
+    if (event.target?.classList?.contains("msg__inlineImage")) {
+      event.target.classList.toggle("is-expanded");
+    }
+  });
   const reasoning = isAssistant ? createReasoningPanel() : null;
 
   let text = content;
@@ -388,4 +398,62 @@ function createContinuationMarker({ timestamp }) {
     versions: null,
     images: [],
   };
+}
+
+/**
+ * A display-only marker where the thread's context was compacted.
+ *
+ * Compaction rewrites the agent session, not this visible log, so without a
+ * marker the thread would silently skip a stretch of history. The counts are
+ * approximate and omitted when missing.
+ */
+function createCompactionMarker({ timestamp, compaction }) {
+  const id = `msg-${(sequence += 1)}`;
+  const before = Number(compaction?.tokens_before);
+  const after = Number(compaction?.tokens_after);
+  const counts = Number.isFinite(before) && Number.isFinite(after)
+    ? ` · ~${compactCount(before)} → ~${compactCount(after)} tokens`
+    : "";
+  const root = h(
+    "article.msg.msg--marker.msg--compaction",
+    { id, dataset: { role: "marker" } },
+    h(
+      "span.msg__marker",
+      {},
+      icon(ICONS.compact, { size: 12 }),
+      "Context compacted",
+      counts,
+      timestamp ? ` · ${clock(timestamp)}` : "",
+    ),
+  );
+  return {
+    el: root,
+    id,
+    role: "marker",
+    kind: "compaction",
+    reasoning: null,
+    text: "",
+    resumable: false,
+    setSpeechState() {},
+    setAuthor() {},
+    setText() {},
+    appendText() {},
+    setWaiting() {},
+    setNotice() {},
+    setFailed() {},
+    setInterrupted() {},
+    retireContinue() {},
+    addImage() {},
+    adopt() {},
+    messageId: null,
+    versions: null,
+    images: [],
+  };
+}
+
+/** Round a token count to a short, human-scale label (1.2k, 34k, 1.1M). */
+function compactCount(value) {
+  if (value < 1000) return String(value);
+  if (value < 1000000) return `${Math.round(value / 100) / 10}k`;
+  return `${Math.round(value / 100000) / 10}M`;
 }

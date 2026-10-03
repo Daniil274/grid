@@ -140,6 +140,7 @@ export function createTranscript({
           content: message.content,
           timestamp: message.timestamp,
           kind: message.kind,
+          compaction: message.compaction,
           images: message.images,
           messageId: message.id,
           versions: message.versions,
@@ -185,9 +186,11 @@ export function createTranscript({
       return [...messages.values()].reverse().find((handle) => handle.versions)?.versions ?? null;
     },
 
-    /** Whether the newest message is an interruption Continue can resume. */
+    /** Whether the newest message is an interruption Continue can resume;
+     * a compaction marker after it does not end the dialogue. */
     resumable() {
-      return this.last()?.resumable === true;
+      const turns = [...messages.values()].filter((handle) => handle.kind !== "compaction");
+      return turns.at(-1)?.resumable === true;
     },
 
     /** Insert a message just before *anchor* - a message the user sent mid-turn. */

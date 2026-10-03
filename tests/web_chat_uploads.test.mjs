@@ -28,16 +28,16 @@ function composer(uploads = { enabled: true, max_file_mb: 25, max_files: 10 }) {
   return { ...nodes, sent, drop, store };
 }
 
-test("a server restart preserves the unsent draft and blocks sending until ready", () => {
+for (const blockingState of ["restartPending", "compacting"]) test(`${blockingState} preserves the unsent draft and blocks sending until ready`, () => {
   const ui = composer();
   ui.input.value = "keep this draft";
-  ui.store.set({ restartPending: true, resumable: true });
+  ui.store.set({ [blockingState]: true, resumable: true });
   assert.equal(ui.sendButton.disabled, true);
   assert.equal(ui.continueButton.disabled, true);
   ui.sendButton.click();
   assert.equal(ui.input.value, "keep this draft");
   assert.deepEqual(ui.sent, []);
-  ui.store.set({ restartPending: false });
+  ui.store.set({ [blockingState]: false });
   assert.equal(ui.sendButton.disabled, false);
   ui.sendButton.click();
   assert.equal(ui.sent[0][0], "keep this draft");

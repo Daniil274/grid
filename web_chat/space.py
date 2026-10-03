@@ -66,7 +66,16 @@ reply so the chat shows it as a download:
 The link target is `/api/workspace/files/` followed by the file's path
 relative to the workspace root - the same path file tools report. Keep the
 link text human-readable and link each file once. Only link files that
-exist in the workspace; never use this prefix for anything else.""",
+exist in the workspace; never use this prefix for anything else.
+
+To show a picture in the reply rather than linking it, use markdown image
+syntax with the same path and add `?inline=1`, which tells the chat to render
+the file instead of downloading it:
+
+![bench.png](/api/workspace/files/bench.png?inline=1)
+
+Only PNG, JPEG, GIF and WebP pictures render this way; every other file is a
+download link. Write the path in full - a bare file name shows as plain text.""",
 )
 
 

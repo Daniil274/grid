@@ -42,6 +42,8 @@ const store = createStore({
   // The conversation the open branch belongs to: the rail's row.
   rootId: null,
   streaming: false,
+  compacting: false,
+  hasAgentContext: false,
   // The first Stop was sent; the agent is finishing its step.
   stopping: false,
   // The conversation ends with a turn that stopped early and can be continued.
@@ -278,6 +280,15 @@ async function boot() {
   $("#toggle-rail").addEventListener("click", openRail);
   $("#sidebar-scrim").addEventListener("click", closeRail);
   $("#open-settings").addEventListener("click", () => settings.open());
+  $("#compact-context").addEventListener("click", async () => {
+    try {
+      const result = await chat.compactContext();
+      const count = (value) => Number(value).toLocaleString();
+      toast(`Context compacted: ≈${count(result.tokens_before)} → ${count(result.tokens_after)} tokens.`, { tone: "success", timeout: 6000 });
+    } catch (error) {
+      toast(error.message, { tone: "error" });
+    }
+  });
   $("#open-usage").addEventListener("click", (event) => {
     if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
     const usageWindow = window.open("/usage", "grid-usage", "popup,width=1280,height=900,resizable=yes,scrollbars=yes");
@@ -382,10 +393,13 @@ async function boot() {
   document.addEventListener("grid:turn-settled", refreshAccountUsage);
   void refreshAccountUsage();
 
-  store.subscribe(({ workspacePath, isolated, streaming, restartPending, serverUnavailable }) => {
-    const label = serverUnavailable ? "Reconnecting to server…" : restartPending ? "Server restarting · waiting for saved steps" : streaming ? "Working" : isolated ? "Container isolated" : "Local runtime";
+  store.subscribe(({ workspacePath, isolated, streaming, compacting, hasAgentContext, contextId, restartPending, serverUnavailable }) => {
+    const label = serverUnavailable ? "Reconnecting to server…" : restartPending ? "Server restarting · waiting for saved steps" : compacting ? "Compacting context…" : streaming ? "Working" : isolated ? "Container isolated" : "Local runtime";
     $("#runtime-status").textContent = label;
-    $("#runtime-status").dataset.state = streaming ? "busy" : "ready";
+    $("#runtime-status").dataset.state = streaming || compacting ? "busy" : "ready";
+    $("#compact-context").disabled = !contextId || !hasAgentContext || streaming || compacting || Boolean(restartPending);
+    $("#compact-context").setAttribute("aria-busy", String(compacting));
+    $("#compact-context .compactLabel").textContent = compacting ? "Compacting…" : "Compact context";
     $("#workspace-pill").textContent = workspacePath;
     $("#workspace-pill").hidden = !workspacePath;
   });

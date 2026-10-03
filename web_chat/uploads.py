@@ -9,6 +9,7 @@ same way - a document an agent wrote, for instance.
 
     POST /api/workspace/uploads         multipart ``files`` -> [{path, name, bytes, type, url}]
     GET  /api/workspace/files/{path}    one file of the workspace, as an attachment
+                                        (``?inline=1``: a raster image, inline)
 
 The workspace is also the agents' - in a container, their commands can put a
 link anywhere in it. The server runs outside that container, often as root,
@@ -38,6 +39,27 @@ UPLOADS_DIR = "uploads"
 CHUNK = 1024 * 1024
 #: Multipart framing around the files, allowed on top of their bytes.
 OVERHEAD_BYTES = 64 * 1024
+
+
+#: Raster image magic bytes we are willing to serve inline, and their types.
+#: SVG is deliberately absent: it is a scriptable document, not a picture, and
+#: would run in the chat page's own origin.
+IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def image_media_type(head: bytes) -> str | None:
+    """The media type of a raster image by its magic bytes, or ``None``."""
+    for signature, media_type in IMAGE_SIGNATURES:
+        if head.startswith(signature):
+            return media_type
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 class UploadError(ValueError):
@@ -309,12 +331,17 @@ def register_upload_routes(
 
     @api.get("/api/workspace/files/{path:path}")
     async def download(
-        path: str, space: Any = Depends(current_space)
+        path: str, inline: bool = False, space: Any = Depends(current_space)
     ) -> StreamingResponse:
         try:
             fd, name, size = open_in_workspace(Path(space.workspace_path), path)
         except UploadError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
+
+        # ``?inline=1`` shows a picture inside the chat's own page. Only a real
+        # raster image qualifies - not an SVG, which is a scriptable document
+        # rather than a picture; anything else stays a forced attachment.
+        media_type = image_media_type(os.pread(fd, 12, 0)) if inline else None
 
         def chunks():
             with handle:
@@ -326,18 +353,22 @@ def register_upload_routes(
                     remaining -= len(block)
                     yield block
 
-        # Always an attachment: a workspace file is never rendered as a page of this site.
+        # A non-image is always an attachment: a workspace file is never
+        # rendered as a page of this site.
         from urllib.parse import quote
 
         handle = os.fdopen(fd, "rb")
         return StreamingResponse(
             chunks(),
-            media_type="application/octet-stream",
+            media_type=media_type or "application/octet-stream",
             headers={
                 # The agent can still truncate or rewrite this open inode.
                 # StreamingResponse must not promise the old size as its
                 # Content-Length, and a growing file must not stream forever.
-                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
+                "Content-Disposition": (
+                    f"{'inline' if media_type else 'attachment'}; "
+                    f"filename*=UTF-8''{quote(name)}"
+                ),
                 "Cache-Control": "no-store",
             },
             background=BackgroundTask(handle.close),

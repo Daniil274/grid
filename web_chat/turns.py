@@ -46,6 +46,10 @@ class TurnBoard:
     def is_claimed(self, context_id: str) -> bool:
         return context_id in self._claimed
 
+    def is_busy(self, context_id: str) -> bool:
+        """A turn runs in the conversation, or an operation (a compaction) holds it."""
+        return self.is_claimed(context_id) or self.is_running(context_id)
+
     @property
     def claimed_count(self) -> int:
         """Conversations with a turn on: the user's turns running now."""

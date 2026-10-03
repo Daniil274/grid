@@ -14,6 +14,7 @@ import uuid
 from utils.logger import Logger
 
 from core.interruption import (
+    COMPACTED_TYPE,
     CallLedger,
     Interruption,
     StopReason,
@@ -60,9 +61,10 @@ def with_message_id(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _last_turn_message(conversation: List[ContextMessage]) -> Optional[ContextMessage]:
-    """The newest message that is part of the dialogue, not a sub-agent report."""
+    """The newest message that is part of the dialogue, not a sub-agent report
+    or a compaction marker."""
     for message in reversed(conversation):
-        if not is_tool_result(message):
+        if not is_tool_result(message) and (message.metadata or {}).get("type") != COMPACTED_TYPE:
             return message
     return None
 

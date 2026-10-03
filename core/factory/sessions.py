@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, Optional
 
-from core.compact import compact_conversation, get_auto_compact_threshold
+from core.compact import COMPACTED_TYPE, compact_conversation, get_auto_compact_threshold
 from core.context_budget import request_tokens, session_transcript
 
 logger = logging.getLogger("grid.agent_factory")
@@ -106,8 +106,9 @@ class SessionUpkeep:
         threshold (core.context_budget) and compaction has not failed
         ``compact.auto.max_consecutive_failures`` times in a row. The compaction
         model reads the session - messages, tool calls and their results - and
-        the session is replaced by its summary. The stored chat users see is not
-        touched. Returns ``{"tokens_before", "tokens_after"}``, or None when
+        the session is replaced by its summary. The stored chat users see keeps
+        every message; it only gains a display-only marker (COMPACTED_TYPE).
+        Returns ``{"tokens_before", "tokens_after"}``, or None when
         nothing was compacted; a failure is logged, never raised.
         """
         compact_cfg = self.compact_config
@@ -165,4 +166,19 @@ class SessionUpkeep:
         self._bump_session_epoch(context_id, agent_key)
         tokens_after = request_tokens(summary)
         logger.info("Compacted the session of %s: ~%d -> ~%d tokens", agent_key, tokens_before, tokens_after)
+        # The chat keeps its own visible log beside the agent session, so a
+        # compaction would otherwise leave no trace in the thread. Drop a
+        # display-only marker into it: it never reaches the model, but the chat
+        # shows where the context was rewritten. ``append_message_to`` returns
+        # False for contexts that are not chat conversations, which is fine.
+        self.context_manager.append_message_to(
+            context_id,
+            "assistant",
+            "",
+            metadata={
+                "type": COMPACTED_TYPE,
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_after,
+            },
+        )
         return {"tokens_before": tokens_before, "tokens_after": tokens_after}

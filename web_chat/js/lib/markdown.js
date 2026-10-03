@@ -50,12 +50,47 @@ function safeHref(raw) {
   return SAFE_HREF.test(href) ? href : null;
 }
 
+/** Where the backend serves workspace files; a raster image there renders inline. */
+const WORKSPACE_FILES = "/api/workspace/files/";
+
+/**
+ * The src of an image we are willing to render, or null.
+ *
+ * Only a workspace file qualifies - written as ``/api/workspace/files/<path>``
+ * or as a bare path relative to the workspace root. A remote URL is refused:
+ * the browser would fetch it on its own, which lets text the model has read
+ * (a prompt injection) smuggle chat data out in the URL. Paths with ``..``,
+ * a query or a fragment are refused too, so the src cannot leave the files
+ * route. Workspace images carry ``?inline=1`` so the download route answers
+ * with the file's own media type; the backend still serves only a raster
+ * image inline. Anything else stays literal markdown.
+ */
+function safeImageSrc(raw) {
+  const src = raw.trim();
+  if (!src || src.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(src)) return null;
+  const query = src.indexOf("?");
+  const path = query === -1 ? src : src.slice(0, query);
+  const rest = query === -1 ? "" : src.slice(query);
+  // The author may have written the flag already - the system prompt suggests
+  // it - and nothing else is allowed after the path.
+  if (rest && rest !== "?inline=1") return null;
+  if (/%2e|%5c/i.test(path) || path.includes("#") || path.includes("\\") || path.split("/").some((part) => part === ".." || part === ".")) return null;
+  const full = path.startsWith(WORKSPACE_FILES) ? path : path.startsWith("/") ? null : WORKSPACE_FILES + path;
+  return full && full.length > WORKSPACE_FILES.length ? `${full}?inline=1` : null;
+}
+
 /** Inline spans. Code is lifted out first so emphasis never runs inside it. */
 function inline(escaped) {
   const codeSpans = [];
   let text = escaped.replace(/`([^`\n]+)`/g, (_, code) => `${MARK}${codeSpans.push(code) - 1}${MARK}`);
 
   text = text
+    // Images come before links: the leading "!" must not be left behind by the
+    // link pass, and "![alt](src)" would otherwise match it as "[alt](src)".
+    .replace(/!\[([^\]\n]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (match, alt, href) => {
+      const src = safeImageSrc(href);
+      return src ? `<img class="msg__inlineImage" src="${src}" alt="${alt}" loading="lazy">` : match;
+    })
     .replace(/\[([^\]\n]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (match, label, href) => {
       const url = safeHref(href);
       return url ? `<a href="${url}" target="_blank" rel="noreferrer noopener">${label || url}</a>` : match;

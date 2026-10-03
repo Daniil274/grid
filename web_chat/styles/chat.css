@@ -505,6 +505,7 @@
 
 .composer__bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   align-items: center;
   justify-content: space-between;
@@ -517,10 +518,15 @@
 
 .composer__buttons {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-left: auto;
   gap: 8px;
 }
 
 @media (max-width: 720px) {
+  .composer__compact .compactLabel { display: none; }
+  .composer__compact { padding: 0 10px; }
   .chatScroll {
     padding: 18px 12px 4px;
   }
@@ -601,6 +607,21 @@
   gap: 6px;
   color: var(--text-3);
   font-size: 12px;
+}
+
+/* A compaction rewrote the context: a rule the eye can rest on. */
+.msg--compaction .msg__marker {
+  width: 100%;
+  justify-content: center;
+  gap: 8px;
+}
+
+.msg--compaction .msg__marker::before,
+.msg--compaction .msg__marker::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
 }
 
 /* -- attachments ------------------------------------------------------- */
@@ -726,6 +747,22 @@
 
 .msg__images[hidden] {
   display: none;
+}
+
+/* A picture embedded in the prose with markdown (![alt](src)). It sits inside
+   .msg__body, so it takes the column's width and zooms in place when clicked. */
+.msg__inlineImage {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: zoom-in;
+}
+
+.msg__inlineImage.is-expanded {
+  cursor: zoom-out;
 }
 
 /* -- editing and branches ----------------------------------------------- */

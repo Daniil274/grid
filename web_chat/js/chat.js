@@ -55,6 +55,7 @@ export class ChatController {
    *   being asked to; `images` are data URLs attached to the message.
    */
   async send(rawText, { spoken = false, images = [], delivery = null } = {}) {
+    if (this._store.get().compacting) return;
     const text = rawText?.trim() ?? "";
     if (!text && !images.length) return;
     if (this.isStreaming) {
@@ -69,6 +70,7 @@ export class ChatController {
 
   /** Send a waiting message right away. */
   async sendQueued(item) {
+    if (this._store.get().compacting) return;
     if (this.isStreaming) {
       this._connection?.queued("send_queued", item.id);
       return;
@@ -104,8 +106,30 @@ export class ChatController {
    * server runs it with the agent that stopped, from everything it had done.
    */
   async continueTurn() {
-    if (this.isStreaming || !this._store.get().contextId) return;
+    if (this.isStreaming || this._store.get().compacting || !this._store.get().contextId) return;
     await this._begin({ text: null, spoken: false, images: [] });
+  }
+
+  /** Compact the agent session; the visible transcript and draft stay intact. */
+  async compactContext() {
+    const { contextId, streaming, compacting, restartPending } = this._store.get();
+    if (!contextId) throw new Error("Open a conversation first.");
+    if (streaming) throw new Error("Stop the running turn before compacting.");
+    if (compacting) throw new Error("Context compaction is already in progress.");
+    if (restartPending) throw new Error("Wait for the server restart to finish.");
+    this._compactingId = contextId;
+    this._store.set({ compacting: true });
+    try {
+      const result = await api.compactConversation(contextId);
+      // Compaction leaves a display-only marker in the stored thread; pull the
+      // conversation back so it shows up right away rather than on the next turn.
+      await this._reconcile(contextId, { force: true });
+      return result;
+    } finally {
+      this._compactingId = null;
+      // Only the chat being compacted shows it; another one may be open by now.
+      if (this._store.get().contextId === contextId) this._store.set({ compacting: false });
+    }
   }
 
   /**
@@ -116,6 +140,7 @@ export class ChatController {
    */
   async editMessage({ id, text, images = [] }) {
     try {
+      if (this._store.get().compacting) throw new Error("Wait for context compaction to finish before editing.");
       if (this.isStreaming) await this._stopNow();
       const branch = await api.createBranch(this._store.get().contextId, id);
       await this.openConversation(branch.id);
@@ -186,7 +211,7 @@ export class ChatController {
       case "compact": {
         if (!contextId) return "Чат пуст.";
         try {
-          const result = await api.compactConversation(contextId);
+          const result = await this.compactContext();
           return `Контекст сжат: примерно ${result.tokens_before} → ${result.tokens_after} токенов.`;
         } catch (error) {
           return error.message;
@@ -316,7 +341,7 @@ export class ChatController {
     this._voice?.cleanup();
     const { systemKey, agentKey } = this._store.get();
     const conversation = await api.createConversation({ system_key: systemKey, agent_key: agentKey });
-    this._store.set({ contextId: conversation.id, rootId: conversation.id, resumable: false });
+    this._store.set({ contextId: conversation.id, rootId: conversation.id, resumable: false, hasAgentContext: false, compacting: false });
     this._transcript.clear();
     await this._refreshConversations();
   }
@@ -335,6 +360,8 @@ export class ChatController {
       rootId: payload.root ?? payload.id,
       systemKey: payload.metadata?.system_key ?? null,
       agentKey: payload.metadata?.agent_key ?? null,
+      hasAgentContext: Boolean(payload.metadata?.routed_agent),
+      compacting: this._compactingId === payload.id,
     });
     this._transcript.render(payload.messages);
     this._store.set({ queue: payload.pending ?? [] });
@@ -357,7 +384,7 @@ export class ChatController {
     await api.deleteConversation(contextId);
     if (contextId === this._store.get().contextId) {
       this._detach();
-      this._store.set({ contextId: null });
+      this._store.set({ contextId: null, hasAgentContext: false });
       this._transcript.clear();
     }
     await this._refreshConversations();
@@ -510,6 +537,7 @@ export class ChatController {
    */
   async _reconcile(contextId, { force = false } = {}) {
     if (contextId !== this._store.get().contextId) return;
+    if (!this._transcript) return;
     try {
       const payload = await api.getConversation(contextId);
       // Same messages on screen: only take their ids and versions, so an
@@ -517,7 +545,7 @@ export class ChatController {
       if (force || !this._transcript.adopt(payload.messages)) {
         this._transcript.render(payload.messages);
       }
-      this._store.set({ queue: payload.pending ?? [] });
+      this._store.set({ queue: payload.pending ?? [], hasAgentContext: Boolean(payload.metadata?.routed_agent) });
       this._syncResumable();
       // The queue started the next waiting message: follow that turn too.
       if (payload.active_turn && !this.isStreaming) await this._attachToRunningTurn(payload.id, payload.active_turn);

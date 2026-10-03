@@ -70,6 +70,56 @@ test("link targets are restricted to safe schemes", () => {
   assert.ok(dangerous.includes("[no]"));
 });
 
+test("a markdown image of a workspace file renders inline", () => {
+  const html = renderMarkdown("![bench.png](/api/workspace/files/bench.png)");
+  assert.ok(html.includes('<img class="msg__inlineImage"'));
+  assert.ok(html.includes('src="/api/workspace/files/bench.png?inline=1"'));
+  assert.ok(html.includes('alt="bench.png"'));
+});
+
+test("a bare image path is read as a workspace file", () => {
+  const html = renderMarkdown("![shot](uploads/shot.png)");
+  assert.ok(html.includes('src="/api/workspace/files/uploads/shot.png?inline=1"'));
+});
+
+test("an author-written inline flag is not doubled", () => {
+  const html = renderMarkdown("![bench.png](/api/workspace/files/bench.png?inline=1)");
+  assert.ok(html.includes('src="/api/workspace/files/bench.png?inline=1"'));
+  assert.ok(!html.includes("inline=1&inline=1"));
+});
+
+test("image sources are restricted to workspace files", () => {
+  const bad = [
+    "![x](https://example.com/a.png)",
+    "![x](http://example.com/a.png)",
+    "![x](//example.com/a.png)",
+    "![x](javascript:alert(1))",
+    "![x](data:image/png;base64,AAA)",
+    "![x](../../api/secret)",
+    "![x](/api/workspace/files/../../api/secret)",
+    "![x](a/%2e%2e/b.png)",
+    "![x](/api/other.png)",
+    "![x](a.png?evil=1)",
+    "![x](a.png#frag)",
+  ];
+  for (const source of bad) {
+    const html = renderMarkdown(source);
+    assert.ok(!html.includes("<img"), source);
+    // A refused remote image degrades to a plain link: nothing is fetched.
+    assert.ok(html.includes("![x]") || html.includes("<a "), source);
+  }
+});
+
+test("image file names with underscores survive emphasis", () => {
+  const html = renderMarkdown("![a](plots/my_file_name_v2.png)");
+  assert.ok(html.includes('src="/api/workspace/files/plots/my_file_name_v2.png?inline=1"'), html);
+});
+
+test("the leading bang of an image is not left for the link pass", () => {
+  const html = renderMarkdown("![a](b.png)");
+  assert.ok(!html.includes("<a "));
+});
+
 test("code spans cannot be spoofed by the sentinel appearing in the source", () => {
   const html = renderMarkdown("literal &#0;0&#0; next to `real code`");
   assert.ok(html.includes("&amp;#0;0&amp;#0;"));

@@ -12,6 +12,8 @@ Aligned with Claude Code's compact architecture:
 - prompts: LLM prompts for full compaction
 """
 
+from core.interruption import COMPACTED_TYPE  # noqa: F401  (re-exported)
+
 # Base types
 from .base import (
     CompactionResult,
@@ -95,6 +97,8 @@ from .compact_conversation import (
 
 
 __all__ = [
+    # Visible marker metadata type
+    "COMPACTED_TYPE",
     # Base
     "CompactionResult", "CompactionConfig", "CompactionStrategy",
     "CompactionStatus", "CompactionDirection", "TokenWarningState",

@@ -59,24 +59,24 @@ export function createComposer({
   const hasContent = () => Boolean(input.value.trim()) || attachments.length > 0;
   const pending = () => attachments.some((item) => item.pending);
 
-  const syncButtons = ({ streaming, stopping, resumable, restartPending }) => {
+  const syncButtons = ({ streaming, stopping, resumable, restartPending, compacting }) => {
     // While the agent works a message can still be sent: the chosen delivery
     // (or the decision model) says when it reaches the agent.
     sendButton.hidden = false;
-    deliverySelect.hidden = !streaming;
+    deliverySelect.hidden = !streaming || !input.value.trim();
     stopButton.hidden = !streaming;
     stopLabel.textContent = stopping ? "Stop now" : "Stop";
     stopButton.title = stopping
       ? "The agent is finishing its current step - click to stop it right now"
       : "Stop after the current step";
-    sendButton.disabled = restartPending || pending() || !hasContent();
-    continueButton.disabled = Boolean(restartPending);
+    sendButton.disabled = restartPending || compacting || pending() || !hasContent();
+    continueButton.disabled = Boolean(restartPending || compacting);
     continueButton.hidden = streaming || !resumable;
     attachButton.disabled = count("image") >= MAX_IMAGES && (!uploads().enabled || count("file") >= uploads().max_files);
     fileInput.setAttribute("accept", uploads().enabled ? "" : ACCEPTED_TYPES.join(","));
     attachButton.title = uploads().enabled ? "Attach files (or paste / drop them)" : "Attach images (or paste / drop them)";
     attachButton.setAttribute("aria-label", uploads().enabled ? "Attach files" : "Attach images");
-    input.setAttribute("aria-busy", String(streaming));
+    input.setAttribute("aria-busy", String(streaming || compacting));
   };
   const sync = () => syncButtons(store.get());
 
@@ -145,10 +145,10 @@ export function createComposer({
   };
 
   const submit = () => {
-    if (store.get().restartPending || pending() || !hasContent()) return;
+    if (store.get().restartPending || store.get().compacting || pending() || !hasContent()) return;
     const text = withFiles(input.value.trim(), attachments.filter((item) => item.kind === "file"));
     const images = attachments.filter((item) => item.kind === "image").map((item) => item.url);
-    const delivery = store.get().streaming && deliverySelect.value !== "auto" ? deliverySelect.value : null;
+    const delivery = store.get().streaming && !deliverySelect.hidden && deliverySelect.value !== "auto" ? deliverySelect.value : null;
     input.value = "";
     attachments = [];
     resize();

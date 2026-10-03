@@ -48,6 +48,7 @@ from web_chat.schemas import (
 from web_chat.security import OriginGuard, refusal
 from web_chat.space import IsolationUnavailable, UserSpace
 from web_chat.spaces import SpacePool
+from core.interruption import COMPACTED_TYPE
 from web_chat.trace import is_tool_result
 from web_chat.views import UNTITLED, agent_options, conversation_title, serialize_message, system_options
 
@@ -606,8 +607,8 @@ class WebChatServer:
         async def delete_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
             manager = space.context_manager()
             family = manager.family(context_id)
-            if any(space.turns.is_running(member) for member in family):
-                raise HTTPException(status_code=409, detail="Stop the running turn before deleting this chat")
+            if any(space.turns.is_busy(member) for member in family):
+                raise HTTPException(status_code=409, detail="Wait for the current operation before deleting this chat")
             # A conversation goes with all its branches.
             deleted = manager.delete_family(context_id)
             if not deleted:
@@ -626,8 +627,8 @@ class WebChatServer:
             manager = space.context_manager()
             if manager.conversation_view(context_id) is None:
                 raise HTTPException(status_code=404, detail="Conversation not found")
-            if space.turns.is_running(context_id):
-                raise HTTPException(status_code=409, detail="Stop the running turn before editing a message")
+            if space.turns.is_busy(context_id):
+                raise HTTPException(status_code=409, detail="Wait for the current operation before editing a message")
             metadata = manager.get_context_metadata(context_id)
             system = metadata.get("routed_system") or space.registry.default_key()
             factory = space.registry.factory(system)
@@ -646,14 +647,17 @@ class WebChatServer:
             manager = space.context_manager()
             if manager.conversation_view(context_id) is None:
                 raise HTTPException(status_code=404, detail="Conversation not found")
-            if space.turns.is_running(context_id):
-                raise HTTPException(status_code=409, detail="Stop the running turn before compacting")
             metadata = manager.get_context_metadata(context_id)
             agent = metadata.get("routed_agent")
             if not agent:
                 raise HTTPException(status_code=400, detail="No agent has worked in this chat yet")
             system = metadata.get("routed_system") or space.registry.default_key()
-            outcome = await space.registry.factory(system).compact_session(agent, context_id, force=True)
+            if not space.turns.claim(context_id):
+                raise HTTPException(status_code=409, detail="Wait for the running turn or compaction before compacting")
+            try:
+                outcome = await space.registry.factory(system).compact_session(agent, context_id, force=True)
+            finally:
+                space.turns.release(context_id)
             if outcome is None:
                 raise HTTPException(status_code=422, detail="Nothing was compacted: the context is empty or the summary failed")
             return JSONResponse({"id": context_id, **outcome})
@@ -680,11 +684,13 @@ class WebChatServer:
                 raise HTTPException(status_code=404, detail="Conversation not found")
             shown = [msg for msg in view["messages"] if not is_tool_result(msg)]
             pending = manager.pending_interruption(context_id) is not None
+            # A compaction marker after an interruption does not end the dialogue.
+            last_turn = max((i for i, msg in enumerate(shown) if (msg.metadata or {}).get("type") != COMPACTED_TYPE), default=-1)
             versions = manager.message_versions(context_id)
             messages = [
                 serialize_message(
                     msg,
-                    resumable=pending and index == len(shown) - 1,
+                    resumable=pending and index == last_turn,
                     versions=versions.get((msg.metadata or {}).get("message_id")),
                 )
                 for index, msg in enumerate(shown)

@@ -16,6 +16,7 @@ from agents import SQLiteSession
 
 from core.agent_factory import TOOL_CALL_CORRECTION, AgentFactory
 from core.config import Config
+from core.compact import COMPACTED_TYPE
 
 
 @pytest.fixture
@@ -285,6 +286,16 @@ async def test_a_session_past_the_threshold_is_summarized_and_the_chat_is_kept(f
     # The visible chat is not compacted: it only grows.
     chat_after = [m.content for m in factory.context_manager.conversation_snapshot()]
     assert chat_after[: len(chat_before)] == chat_before
+    # Where the session was rewritten, the chat gets a display-only marker so the
+    # thread does not silently skip a stretch of history.
+    markers = [
+        m
+        for m in factory.context_manager.conversation_snapshot()
+        if (m.metadata or {}).get("type") == COMPACTED_TYPE
+    ]
+    assert len(markers) == 1
+    assert markers[0].role == "assistant"
+    assert markers[0].metadata["tokens_before"] > markers[0].metadata["tokens_after"]
 
 
 async def test_a_session_within_the_threshold_is_left_alone(factory):

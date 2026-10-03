@@ -153,6 +153,28 @@ async def test_a_session_summarized_since_the_edit_point_is_not_cut(factory):
     assert [m.content for m in factory.context_manager.conversation_view(branch)["messages"]] == ["first", "One.\n\nContext ID: " + context_id]
 
 
+async def test_a_compaction_marker_does_not_hide_an_interruption_from_continue(factory):
+    from core.interruption import INTERRUPTED_TYPE, Interruption, StopReason
+
+    context_id = await three_turns(factory)
+    manager = factory.context_manager
+    record = Interruption(reason=StopReason.USER_STOP, task="third", agent="worker")
+    manager.append_message_to(
+        context_id, "assistant", "stopped", {"type": INTERRUPTED_TYPE, "interruption": record.to_dict()}
+    )
+    assert manager.pending_interruption(context_id) is not None
+
+    with patch("core.factory.sessions.compact_conversation", new=AsyncMock(return_value=summarized())), patch.object(
+        factory.models, "compact_client_and_model", return_value=(object(), "m")
+    ):
+        assert await factory.compact_session("worker", context_id, force=True)
+
+    last = manager.conversation_view(context_id)["messages"][-1]
+    assert last.metadata["type"] == "context_compacted"
+    assert manager.pending_interruption(context_id) is not None
+    assert manager.take_interruption(context_id) is not None
+
+
 # -- the web API ------------------------------------------------------------------
 
 

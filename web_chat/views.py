@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
+from core.compact import COMPACTED_TYPE
 from core.interruption import CONTINUATION_TYPE, interruption_of
 from core.tool_check import summarize
 from schemas.schemas import ImageContent
@@ -40,6 +41,8 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
     only on the one Continue can still resume. ``kind`` "continuation" is
     the user entry of a Continue, shown as a marker, not a bubble.
     ``images`` are the data URLs of the images the message carries.
+    ``compaction`` carries the token counts of the marker the thread shows
+    where its context was compacted (``kind`` "compaction").
     ``id`` is the message's stable id; ``versions`` lists the branches with
     other versions of an edited user message (ContextManager.message_versions).
     """
@@ -66,7 +69,18 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
         "content": content,
         "timestamp": getattr(msg, "timestamp", None),
         "trace": trace,
-        "kind": "continuation" if metadata.get("type") == CONTINUATION_TYPE else None,
+        "kind": (
+            "continuation"
+            if metadata.get("type") == CONTINUATION_TYPE
+            else "compaction"
+            if metadata.get("type") == COMPACTED_TYPE
+            else None
+        ),
+        "compaction": (
+            {"tokens_before": metadata.get("tokens_before"), "tokens_after": metadata.get("tokens_after")}
+            if metadata.get("type") == COMPACTED_TYPE
+            else None
+        ),
         "images": images,
         "interruption": (
             {**record.to_dict(), "resumable": resumable} if record is not None else None

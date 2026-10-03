@@ -73,6 +73,39 @@ def test_generated_documents_can_be_downloaded_too(upload_app):
     )
 
 
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+def test_an_image_is_downloaded_by_default_and_inline_with_the_flag(upload_app):
+    _, client, _, workspaces = upload_app
+    client.post("/api/workspace/uploads", files={"files": ("input.txt", b"input")})
+    (workspaces["alice"] / "bench.png").write_bytes(PNG)
+    url = "/api/workspace/files/bench.png"
+
+    attachment = client.get(url)
+    assert attachment.headers["content-disposition"].startswith("attachment;")
+    assert attachment.headers["content-type"] == "application/octet-stream"
+
+    inline = client.get(url, params={"inline": "1"})
+    assert inline.status_code == 200 and inline.content == PNG
+    assert inline.headers["content-type"] == "image/png"
+    assert inline.headers["content-disposition"].startswith("inline;")
+    assert inline.headers["cache-control"] == "no-store"
+
+
+def test_inline_never_serves_a_non_image(upload_app):
+    _, client, _, workspaces = upload_app
+    client.post("/api/workspace/uploads", files={"files": ("input.txt", b"input")})
+    (workspaces["alice"] / "notes.txt").write_bytes(b"just text")
+    (workspaces["alice"] / "vector.svg").write_bytes(
+        b"<svg xmlns='http://www.w3.org/2000/svg'><script/></svg>"
+    )
+    for name in ("notes.txt", "vector.svg"):
+        response = client.get(f"/api/workspace/files/{name}", params={"inline": "1"})
+        assert response.headers["content-disposition"].startswith("attachment;"), name
+        assert response.headers["content-type"] == "application/octet-stream", name
+
+
 def test_live_download_is_bounded_and_has_no_stale_content_length(upload_app, monkeypatch):
     from web_chat import uploads
 
