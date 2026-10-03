@@ -106,8 +106,9 @@ def resolve_agent_path(file_path: str, factory: Any) -> str:
 
     Agents pass paths relative to their working directory:
     - Without container: working_directory = absolute host path; agents use it directly.
-    - With container:    agent sees its working directory as "/" (root).
-                        All absolute paths are resolved relative to the host working_directory.
+    - With container:    the prompt names the workspace and relative paths. "/" and
+                        other absolute paths still resolve relative to the host
+                        working_directory, as do paths under CONTAINER_WORKDIR.
 
     Args:
         file_path: Path as supplied by the agent.

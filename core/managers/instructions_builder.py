@@ -9,6 +9,7 @@ from typing import List, Optional
 
 from core.config.prompt_sections import ModelContextAssembly, PromptSection
 from core.config.protocols import IConfig, IContextManager
+from utils.path_utils import CONTAINER_WORKDIR
 
 logger = logging.getLogger("grid.instructions_builder")
 
@@ -131,30 +132,31 @@ class InstructionsBuilder:
 
     def build_path_context(self, context_path: Optional[str] = None) -> str:
         """Build path context information for the agent."""
-        working_dir = "/" if self.container_id else self.config.get_working_directory()
-        config_dir = self.config.get_config_directory()
-
-        context_parts = [
-            "Path information:",
-            f"Working directory: {working_dir}",
-        ]
-
-        if not self.container_id:
-            context_parts.append(f"Configuration directory: {config_dir}")
+        if self.container_id:
+            # Not "/": an agent told its working directory is "/" asks for the
+            # filesystem root, and the action policy rightly refuses that.
+            context_parts = [
+                "Path information:",
+                f"Working directory: the workspace ({CONTAINER_WORKDIR} in the shell).",
+                "File tools take paths relative to it: `.` is the workspace itself, "
+                "`src/app.py` a file in it.",
+            ]
+        else:
+            context_parts = [
+                "Path information:",
+                f"Working directory: {self.config.get_working_directory()}",
+                f"Configuration directory: {self.config.get_config_directory()}",
+            ]
 
         if context_path:
             if self.container_id:
-                if os.path.isabs(context_path):
-                    host_wd = self.config.get_working_directory()
-                    if context_path.startswith(host_wd):
-                        rel_path = os.path.relpath(context_path, host_wd)
-                        absolute_path = (Path("/") / rel_path).as_posix()
-                        context_path = rel_path
-                    else:
-                        absolute_path = context_path.lstrip("/") or "/"
-                        context_path = absolute_path
+                host_wd = self.config.get_working_directory()
+                if os.path.isabs(context_path) and context_path.startswith(host_wd):
+                    context_path = os.path.relpath(context_path, host_wd)
                 else:
-                    absolute_path = (Path("/") / context_path).as_posix()
+                    context_path = context_path.lstrip("/") or "."
+                context_path = Path(context_path).as_posix()
+                absolute_path = (Path(CONTAINER_WORKDIR) / context_path).as_posix()
             else:
                 absolute_path = context_path
                 if hasattr(self.config, "get_absolute_path"):

@@ -330,6 +330,26 @@ class TestConfig:
             include_path_context=False,
         )
         assert any(s.key == "workspace_file_links" for s in assembly.sections)
+
+    def test_a_container_run_is_told_its_workspace_not_the_root(self, config_file):
+        """"/" read as the filesystem root sends an agent's first look where the policy refuses."""
+        from types import SimpleNamespace
+
+        from core.managers.instructions_builder import InstructionsBuilder
+
+        config = SimpleNamespace(get_working_directory=lambda: "/host/space", get_config_directory=lambda: "/host")
+        builder = InstructionsBuilder(config, context_manager=None, container_id="c1")
+
+        text = builder.build_path_context("/host/space/src/app.py")
+        assert "Working directory: /" not in text
+        assert "Working directory: the workspace (/workspace in the shell)." in text
+        assert "relative to it" in text
+        assert "Context path: src/app.py" in text
+        assert "Absolute context path: /workspace/src/app.py" in text
+        assert "/host" not in text
+
+        host = InstructionsBuilder(config, context_manager=None).build_path_context()
+        assert "Working directory: /host/space" in host and "Configuration directory: /host" in host
     def test_prompt_template_methods(self, config_file, sample_config):
         """Test prompt template methods."""
         # Add prompt templates to config
