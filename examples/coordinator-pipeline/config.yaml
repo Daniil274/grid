@@ -18,7 +18,7 @@ settings:
   allow_path_override: true
   # Added to the catalog's policy for this system's calls only.
   action_policy:
-    system: ../../policies/systems/code-repository.yaml
+    system_file: action-policy.yaml
 
   agent_logging:
     enabled: true

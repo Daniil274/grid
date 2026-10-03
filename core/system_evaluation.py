@@ -73,7 +73,7 @@ def validate_candidate(document: dict, root: Path) -> None:
     if settings.get("allow_path_override") is False:
         raise ValueError("Evaluation requires allow_path_override: true")
     policy = settings.get("action_policy") or {}
-    if isinstance(policy, str) or policy.get("policy_file") or policy.get("system"):
+    if isinstance(policy, str) or any(policy.get(key) for key in ("policy_file", "system", "system_file")):
         raise ValueError("Evaluation inherits server policy; external policy files are not supported")
     from tools.function_tools import tool_isolation
     from utils.tool_isolation import CONTAINER, WORKSPACE

@@ -1,7 +1,7 @@
-# Дополнение политики для систем, работающих в репозитории кода с локальным
-# трекером задач и контролем версий (examples/coder, examples/coordinator-pipeline).
-# Добавляется к общей политике (policies/action-policy.yaml) только при проверке
-# вызовов этих систем: settings.action_policy.system в их конфигах.
+# Дополнение политики для системы coder: локальный трекер задач и
+# контроль версий в репозитории кода. Добавляется к общей политике
+# (policies/action-policy.yaml) только при проверке вызовов этой системы:
+# settings.action_policy.system_file в её config.yaml.
 version: "code-repository-v1"
 
 action: >-

@@ -86,9 +86,11 @@ class Config:
             settings["action_policy"] = policy
         if not isinstance(policy, dict):
             return
-        if isinstance(policy.get("system"), str):
+        if policy.get("system_file"):
             # This system's addition to the base policy (ActionPolicySystem).
-            policy["system"] = self._read_policy_document(policy["system"])
+            if policy.get("system"):
+                raise ConfigError("Give a system policy inline or as system_file, not both")
+            policy["system"] = self._read_policy_document(str(policy["system_file"]))
         if not policy.get("policy_file"):
             return
         document = self._read_policy_document(str(policy["policy_file"]))
@@ -100,7 +102,7 @@ class Config:
             raise ConfigError("External action_policy must be a YAML mapping")
         if document.get("policy_file"):
             raise ConfigError("Nested action policy files are not supported")
-        if "system" in document:
+        if "system" in document or "system_file" in document:
             # A shared policy file serves many systems; each adds its own part.
             raise ConfigError("A system policy belongs to the system config, not to a policy file")
         settings["action_policy"] = self._merge_dicts(document, policy)
