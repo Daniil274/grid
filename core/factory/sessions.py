@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, Optional
 
-from core.compact import COMPACTED_TYPE, compact_conversation, get_auto_compact_threshold
+from core.compact import COMPACTED_TYPE, compact_conversation
 from core.context_budget import request_tokens, session_transcript
 
 logger = logging.getLogger("grid.agent_factory")
@@ -90,11 +90,10 @@ class SessionUpkeep:
         """
         context_id = context_id or self.get_active_context_id()
         items = await self._get_agent_session(agent_key, context_id).get_items()
-        window = self.models.context_window(agent_key)
         return {
             "tokens": request_tokens(items),
-            "window": window,
-            "threshold": get_auto_compact_threshold(window, self.compact_config),
+            "window": self.models.context_window(agent_key),
+            "threshold": self.models.compact_threshold(agent_key, self.compact_config),
         }
 
     async def compact_session(
@@ -121,7 +120,7 @@ class SessionUpkeep:
         tokens_before = request_tokens(items)
         window = self.models.context_window(agent_key)
         if not force:
-            if tokens_before <= get_auto_compact_threshold(window, compact_cfg):
+            if tokens_before <= self.models.compact_threshold(agent_key, compact_cfg):
                 return None
             if self._compact_tracking.consecutive_failures >= compact_cfg.auto.max_consecutive_failures:
                 logger.warning(

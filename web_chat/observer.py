@@ -34,6 +34,12 @@ from web_chat.tool_summaries import tool_subtitle, tool_title
 logger = logging.getLogger("grid.web_chat.observer")
 
 
+def _tokens(count: Any) -> str:
+    """~9.8k, ~812: an estimate, so rounded."""
+    value = int(count or 0)
+    return f"~{value / 1000:.1f}k" if value >= 1000 else f"~{value}"
+
+
 def _tool_display_name(info: dict[str, Any]) -> str:
     name = info.get("tool_name") or "tool"
     server = info.get("server_label")
@@ -97,6 +103,9 @@ class WebStreamObserver:
         # The ``agent`` step this observer's steps nest under; None at the top.
         self._parent_id: Optional[str] = None
         self._block: Optional[Step] = None
+        # The one step of this run that says how many tool outputs were left out.
+        self._cleared: Optional[Step] = None
+        self._cleared_count = 0
         # Calls the policy held in this turn, sub-agents included: one counter,
         # shared by the nested views (web_chat.system_activity).
         self._held = [0]
@@ -150,6 +159,31 @@ class WebStreamObserver:
         child._parent_id = block.id
         child._block = block
         return child
+
+    def handle_compaction(self, tokens_before: int, tokens_after: int) -> None:
+        """The agent's context was summarized (AgentFactory.compact_session)."""
+        step = self._recorder.open(
+            StepKind.COMPACT,
+            "Context compacted",
+            parent_id=self._parent_id,
+            subtitle=f"{_tokens(tokens_before)} → {_tokens(tokens_after)} tokens",
+        )
+        self._recorder.close(step)
+
+    def handle_outputs_cleared(self, count: int) -> None:
+        """Old tool outputs were left out of a request to fit the context
+        (core.context_budget): one step per run, with the largest count."""
+        if count <= self._cleared_count:
+            return
+        self._cleared_count = count
+        subtitle = f"{count} old tool output{'s' if count != 1 else ''} left out of the request"
+        if self._cleared is None:
+            self._cleared = self._recorder.open(
+                StepKind.COMPACT, "Context trimmed", parent_id=self._parent_id, subtitle=subtitle
+            )
+            self._recorder.close(self._cleared)
+        else:
+            self._recorder.update(self._cleared, subtitle=subtitle)
 
     def handle_generated_image(self, url: str) -> None:
         """An image the model generated (core.generated_images): show it now."""

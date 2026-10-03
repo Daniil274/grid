@@ -4,7 +4,7 @@ Auto compact for Grid.
 Mirrors Claude Code's autoCompact.ts:
 
 - getEffectiveContextWindowSize: context_window - MAX_OUTPUT_TOKENS_FOR_SUMMARY
-- getAutoCompactThreshold: effective_window - AUTOCOMPACT_BUFFER_TOKENS
+- getAutoCompactThreshold: effective_window - the model's answer - AUTOCOMPACT_BUFFER_TOKENS
 - calculateTokenWarningState: warning/error/blocking thresholds
 - isAutoCompactEnabled: env-var override check
 - shouldAutoCompact: token count check + recursion guard
@@ -104,16 +104,21 @@ def get_effective_context_window_size(
 def get_auto_compact_threshold(
     context_window: int,
     compact_cfg: "Optional[CompactConfig]" = None,
+    answer_tokens: int = 0,
 ) -> int:
     """
-    Token threshold for auto-compact = effective_window - buffer_tokens.
-    Read from config.yaml → compact.auto.buffer_tokens.
+    Token threshold for auto-compact = effective_window - answer_tokens - buffer_tokens.
+
+    *answer_tokens* is the model's ``max_tokens``: the room its answer takes in
+    the window. ``compact.auto.buffer_tokens`` covers only what the session's
+    estimate leaves out - instructions, tool schemas - and a margin, so one
+    value fits every model of a system, whatever its window and answer size.
     Supports env override CLAUDE_AUTOCOMPACT_PCT_OVERRIDE for testing.
     """
     auto = _auto_cfg(compact_cfg)
     effective = get_effective_context_window_size(context_window, compact_cfg)
     buffer = auto.buffer_tokens if auto is not None else AUTOCOMPACT_BUFFER_TOKENS
-    threshold = effective - buffer
+    threshold = effective - max(0, answer_tokens) - buffer
 
     pct_override = os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")
     if pct_override:

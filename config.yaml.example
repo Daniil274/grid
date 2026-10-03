@@ -448,7 +448,7 @@ compact:
   # Auto-compact trigger - automatic compaction on threshold
   auto:
     enabled: true
-    buffer_tokens: 13000           # Tokens to keep as buffer before limit
+    buffer_tokens: 13000           # Instructions, tool schemas and a margin; the model's max_tokens is reserved apart
     warning_buffer_tokens: 20000   # Tokens for warning threshold
     error_buffer_tokens: 20000
     manual_buffer_tokens: 3000

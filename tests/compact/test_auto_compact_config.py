@@ -63,7 +63,8 @@ def _raw(path):
 
 @pytest.mark.parametrize("path", EXAMPLES, ids=lambda path: path.parent.name)
 def test_every_example_keeps_room_for_the_answer(path):
-    """Compaction starts early enough that a request and its answer fit the window."""
+    """Compaction starts early enough that a request and its answer fit the window,
+    and late enough that it does not run after nearly every turn."""
     raw = _raw(path)
     assert "compact" not in (raw.get("settings") or {}), "compact belongs at the top level"
     compact_cfg = CompactConfig(**raw.get("compact", {}))
@@ -73,11 +74,11 @@ def test_every_example_keeps_room_for_the_answer(path):
         keys = agent["model"] if isinstance(agent["model"], list) else [agent["model"]]
         for key in keys:
             model = ModelConfig(**models[key])
-            threshold = get_auto_compact_threshold(model.context_window, compact_cfg)
-            assert threshold + model.max_tokens + SCHEMA_MARGIN_TOKENS <= model.context_window, (
-                f"{agent_key}/{key}: compacts at {threshold}, answers up to {model.max_tokens}, "
+            threshold = get_auto_compact_threshold(model.context_window, compact_cfg, model.max_tokens)
+            summary = f"{agent_key}/{key}: compacts at {threshold}, answers up to {model.max_tokens}, " \
                 f"window {model.context_window}"
-            )
+            assert threshold + model.max_tokens + SCHEMA_MARGIN_TOKENS <= model.context_window, summary
+            assert threshold >= model.context_window // 3, summary
 
 
 @pytest.mark.parametrize("path", EXAMPLES, ids=lambda path: path.parent.name)
@@ -108,4 +109,37 @@ def test_the_routing_catalog_is_the_base_a_system_refines():
     assert layered_compact(catalog, config()).auto.buffer_tokens == 10000
     assert layered_compact(None, system).auto.buffer_tokens == CompactConfig().auto.buffer_tokens
     catalog_raw = _raw(Path("routing.yaml"))
-    assert get_auto_compact_threshold(40000, CompactConfig(**catalog_raw["compact"])) == 26000
+    # 40k window - 4k summary reserve - 8k answer - 4k buffer
+    assert get_auto_compact_threshold(40000, CompactConfig(**catalog_raw["compact"]), 8000) == 24000
+
+
+def test_the_threshold_leaves_room_for_the_models_answer():
+    compact_cfg = CompactConfig(auto={"buffer_tokens": 4000, "max_output_tokens_for_summary": 4000})
+    # 40k window - 4k summary reserve - 8k answer - 4k buffer
+    assert get_auto_compact_threshold(40000, compact_cfg, 8000) == 24000
+    # One buffer fits a model with long answers too: the answer is reserved apart.
+    assert get_auto_compact_threshold(120000, compact_cfg, 32000) == 80000
+
+
+def test_an_agent_threshold_uses_its_model_and_warns_when_too_low(caplog):
+    from types import SimpleNamespace
+
+    from core.factory.models import ModelProvider
+
+    model = SimpleNamespace(context_window=40000, max_tokens=8192)
+    config = SimpleNamespace(
+        get_agent=lambda key: SimpleNamespace(primary_model="m"),
+        get_model=lambda key: model,
+    )
+    models = ModelProvider(config, None, None)
+    fitting = CompactConfig(auto={"buffer_tokens": 4000, "max_output_tokens_for_summary": 4000})
+    assert models.compact_threshold("builder", fitting) == 40000 - 4000 - 8192 - 4000
+    assert not caplog.records
+
+    # A buffer sized for a far larger window compacts after nearly every turn.
+    oversized = CompactConfig(auto={"buffer_tokens": 32000, "max_output_tokens_for_summary": 4000})
+    with caplog.at_level("WARNING", logger="grid.agent_factory"):
+        models.compact_threshold("builder", oversized)
+        models.compact_threshold("builder", oversized)
+    warnings = [r for r in caplog.records if "compacts its context" in r.getMessage()]
+    assert len(warnings) == 1
