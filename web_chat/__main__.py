@@ -36,6 +36,10 @@ if sys.platform == "win32":
 USER_ID = re.compile(r"[0-9a-f]{32}")
 #: A space nobody used for this long is unloaded; it loads again on the next request.
 IDLE_SPACE_SECONDS = 30 * 60
+#: Set in a server the first process started on Windows (reexecute).
+SUPERVISED = "GRID_WEB_CHAT_SUPERVISED"
+#: How such a server asks to be started again (EX_TEMPFAIL).
+RESTART_EXIT = 75
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -153,9 +157,30 @@ def main() -> None:
     if not runtime.started:
         raise SystemExit(3)  # Preserve uvicorn.run's startup-failure exit status.
     if restart_requested:
-        # Lifespan shutdown closed SQLite/MCP/container resources first. Re-exec
-        # loads the new code with the same interpreter, arguments and service PID.
-        os.execv(sys.executable, [sys.executable, "-m", "web_chat", *sys.argv[1:]])
+        # Lifespan shutdown closed SQLite/MCP/container resources first.
+        reexecute()
+
+
+def reexecute() -> None:
+    """Start the server again on the new code: same interpreter, arguments and PID.
+
+    POSIX replaces this process. Windows has no such call - ``os.execv`` starts
+    a new process and ends this one, so the console, service or parent that
+    started the server loses it. There the first process stays and starts the
+    server anew for each restart; a server it started asks it to by exiting
+    with RESTART_EXIT.
+    """
+    command = [sys.executable, "-m", "web_chat", *sys.argv[1:]]
+    if os.environ.get(SUPERVISED):
+        raise SystemExit(RESTART_EXIT)
+    if os.name == "posix":
+        os.execv(sys.executable, command)
+    import subprocess
+
+    environment = {**os.environ, SUPERVISED: "1"}
+    while (code := subprocess.call(command, env=environment)) == RESTART_EXIT:
+        pass
+    raise SystemExit(code)
 
 
 def single_user_options(deployment, args: argparse.Namespace) -> dict:

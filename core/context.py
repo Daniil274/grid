@@ -1604,9 +1604,12 @@ class ContextManager:
             )
             self.persist_path.parent.mkdir(parents=True, exist_ok=True)
             partial = self.persist_path.with_name(self.persist_path.name + ".tmp")
-            partial.write_text(document, encoding="utf-8")
-            if strict:
-                with partial.open("rb") as saved:
+            with partial.open("w", encoding="utf-8") as saved:
+                saved.write(document)
+                if strict:
+                    # Synced through the handle that wrote it: Windows refuses
+                    # to flush a file opened only for reading.
+                    saved.flush()
                     os.fsync(saved.fileno())
             os.replace(partial, self.persist_path)
             if strict and os.name == "posix":

@@ -66,6 +66,9 @@ def test_cli_restart_reexecutes_and_preserves_sign_in(tmp_path):
                 assert after["recovery_errors"] == 0
                 assert dict(client.cookies) == cookies
         finally:
+            if os.name == "nt":
+                # The restarted server is a child of the first process there.
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True)
             process.terminate()
             try:
                 process.wait(timeout=10)
