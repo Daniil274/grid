@@ -154,6 +154,12 @@ class AgentTurn:
             SteerMessage(item["id"], item["text"], list(item.get("images") or []), delivered, undelivered),
         )
 
+    def withdraw(self, item_id: str) -> bool:
+        """Take back a message handed by :meth:`steer` that the agent has not read."""
+        if self._factory is None or not hasattr(self._factory, "withdraw_steer"):
+            return False
+        return self._factory.withdraw_steer(self._session.context_id, item_id)
+
     @property
     def elapsed_ms(self) -> int:
         return int((time.monotonic() - self._started) * 1000)
@@ -677,6 +683,11 @@ class ChatSession:
         active = self._turns.running(self.context_id)
         if action == "send_queued" and active is None:
             await self._start_queued(queue, item)
+            return
+        if item.get("state") == "steering" and active is not None and not active[0].withdraw(item["id"]):
+            # The agent is reading it right now: it is delivered, not dropped,
+            # and leaves the queue as delivered.
+            await active[0].announce({"type": "queue", "items": queue.public()}, also_to=self)
             return
         queue.remove(item["id"])
         if action == "send_queued":

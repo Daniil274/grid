@@ -61,6 +61,16 @@ class Steering:
         pending, self._pending = self._pending, []
         return pending
 
+    def withdraw(self, message_id: str) -> bool:
+        """Take back a message no model call has read yet - the user cancelled it.
+
+        False when it is no longer pending: already read, or never added.
+        """
+        kept = [message for message in self._pending if message.message_id != message_id]
+        found = len(kept) != len(self._pending)
+        self._pending = kept
+        return found
+
     def hand_back(self) -> None:
         """The turn is over: give every message still pending to its sender."""
         for message in self.undelivered():
