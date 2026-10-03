@@ -197,8 +197,13 @@ class ActionValidator:
         self._client: httpx.AsyncClient | None = None
 
     @classmethod
-    def from_config(cls, root_config, *, transport=None):
-        policy = root_config.config.settings.action_policy
+    def from_config(cls, root_config, *, policy=None, transport=None):
+        """Validators on ``root_config``'s models, asking ``policy``'s questions.
+
+        ``policy`` defaults to the config's own; a factory passes the base policy
+        with its system's part added (ActionPolicyConfig.with_system).
+        """
+        policy = policy or root_config.config.settings.action_policy
         config = policy.validator
         if not config.model:
             raise ConfigError(

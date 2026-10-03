@@ -17,9 +17,11 @@ settings:
   config_directory: "."
   allow_path_override: true
   # Standalone coder runs use the same reusable policy as the autorouter.
-  # When routed, routing.yaml remains the authoritative policy source.
+  # When routed, routing.yaml remains the authoritative policy source; the
+  # system part is added to whichever base governs, for this system only.
   action_policy:
     policy_file: ../../policies/action-policy.yaml
+    system: ../../policies/systems/code-repository.yaml
     mode: "enforce"
     validator:
       model: [policy-validator-jev, policy-validator-mercury]

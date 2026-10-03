@@ -14,6 +14,7 @@ from typing import Any, Optional
 from core.action_policy import ActionGate, ActionRunState, ActionValidator
 from core.config.config import Config
 from core.sdk_patches import tool_error_output
+from utils.exceptions import ConfigError
 
 logger = logging.getLogger("grid.agent_factory")
 
@@ -32,15 +33,25 @@ class PolicyWiring:
 
         The routing config wins when it enables a policy, so a routed system is
         mediated by the host's policy and validator model without repeating them
-        in every system config. Unknown validator model keys fail here.
+        in every system config. Whichever base governs, this system's own
+        ``action_policy.system`` is added to it, and to no other system's.
+        Unknown validator model keys fail here.
         """
+        system = getattr(self.config.config.settings.action_policy, "system", None)
         for candidate in (policy_config, self.config):
             if candidate is None:
                 continue
-            policy = getattr(candidate.config.settings, "action_policy", None)
-            if policy is None or policy.mode == "off":
+            base = getattr(candidate.config.settings, "action_policy", None)
+            if base is None or base.mode == "off":
                 continue
-            gate = ActionGate(policy, validator=ActionValidator.from_config(candidate))
+            try:
+                policy = base.with_system(system)
+            except ValueError as exc:
+                raise ConfigError(f"settings.action_policy.system: {exc}") from exc
+            gate = ActionGate(
+                policy,
+                validator=ActionValidator.from_config(candidate, policy=policy),
+            )
             logger.info(
                 "Action policy enabled: mode=%s version=%s kinds=%s chain=%s",
                 policy.mode,

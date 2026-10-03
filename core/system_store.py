@@ -242,7 +242,7 @@ def relocate_config(document: Dict[str, Any], source_dir: Path, target_dir: Path
 
     Relative paths in a config resolve against its own directory. A copy keeps
     reaching what the original reached: the project tools, the config directory,
-    the logs, the action policy file and the files an MCP command names. The
+    the logs, the action policy files and the files an MCP command names. The
     skills are copied beside the new config instead (:meth:`SystemStore.create`),
     since a system reads them from there and nowhere else. The working
     directory is left as it is: a system works in its own directory or, in the
@@ -266,8 +266,10 @@ def relocate_config(document: Dict[str, Any], source_dir: Path, target_dir: Path
         policy = settings.get("action_policy")
         if isinstance(policy, str):
             settings["action_policy"] = moved(policy)
-        elif isinstance(policy, dict) and policy.get("policy_file"):
-            policy["policy_file"] = moved(policy["policy_file"])
+        elif isinstance(policy, dict):
+            for field in ("policy_file", "system"):
+                if isinstance(policy.get(field), str):
+                    policy[field] = moved(policy[field])
     for tool in (document.get("tools") or {}).values():
         command = tool.get("server_command") if isinstance(tool, dict) else None
         if isinstance(command, list):
@@ -422,7 +424,7 @@ class BuilderAccess:
             raise StoreError("Private systems use shared tools or tool packages; project_tools imports are not allowed.")
         if not settings.allow_path_override or settings.config_directory != "." or settings.logs_directory is not None:
             raise StoreError("Private systems keep allow_path_override: true, config_directory: . and the server's logs.")
-        if settings.action_policy.policy_file or document.get("routing"):
+        if settings.action_policy.policy_file or settings.action_policy.system or document.get("routing"):
             raise StoreError("Private systems inherit the server's policy and routing; do not reference other config files.")
         allowed_providers = self.providers()
         for name, provider in (document.get("providers") or {}).items():

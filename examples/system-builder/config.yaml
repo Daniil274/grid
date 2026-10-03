@@ -15,6 +15,9 @@ settings:
   max_tool_output_tokens: 16000
   working_directory: .
   allow_path_override: true
+  # Added to the catalog's policy for this system's calls only.
+  action_policy:
+    system: ../../policies/systems/system-builder.yaml
   agent_logging:
     enabled: true
     level: full
