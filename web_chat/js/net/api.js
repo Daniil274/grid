@@ -39,8 +39,9 @@ export const api = {
     for (const file of files) body.append("files", file);
     return request("/api/workspace/uploads", { method: "POST", body });
   },
-  listConversations: () => request("/api/chat/conversations"),
-  getConversation: (id) => request(`/api/chat/conversations/${encodeURIComponent(id)}`),
+  listConversations: () => request("/api/chat/conversations", { cache: "no-store" }),
+  getConversation: (id, signal) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}`, { cache: "no-store", signal }),
   createConversation: (selection) => request("/api/chat/conversations", json("POST", selection)),
   renameConversation: (id, title) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}`, json("PATCH", { title })),

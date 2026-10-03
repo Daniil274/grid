@@ -187,7 +187,8 @@ class WebChatServer:
                     self._mutations -= int(mutation)
             for name, value in SECURITY_HEADERS.items():
                 response.headers.setdefault(name, value)
-            if request.url.path in {"/api/server/status", "/api/admin/server"}:
+            if request.url.path.startswith("/api/"):
+                # Live state: a cached answer shows a chat as it was.
                 response.headers["Cache-Control"] = "no-store"
             return response
 

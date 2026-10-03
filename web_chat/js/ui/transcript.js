@@ -111,7 +111,21 @@ export function createTranscript({
     if (empty) container.append(emptyState);
   };
 
+  // Shown only when a load takes long enough to notice; a quick one never flickers.
+  let loadingTimer = null;
+
   return {
+    /** A chat is being fetched: what is on screen is not it yet. */
+    setLoading(loading) {
+      clearTimeout(loadingTimer);
+      container.setAttribute("aria-busy", String(loading));
+      if (!loading) {
+        container.classList.remove("is-loading");
+        return;
+      }
+      loadingTimer = setTimeout(() => container.classList.add("is-loading"), 120);
+    },
+
     /** @returns the message handle, so the caller can stream into it. */
     add(options) {
       setEmpty(false);

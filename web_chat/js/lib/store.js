@@ -3,8 +3,9 @@
  *
  * The app has one source of truth for cross-cutting state (agents,
  * conversations, which turn is streaming) and views subscribe to it. No
- * framework, no diffing - views are cheap enough to re-render wholesale, and
- * keeping the update path explicit makes the data flow readable.
+ * framework, no diffing: a view re-renders wholesale, but only when one of the
+ * keys it reads changed (`watch`) - a list of hundreds of chats must not be
+ * rebuilt because a turn started streaming.
  */
 export function createStore(initial) {
   let state = { ...initial };
@@ -28,6 +29,20 @@ export function createStore(initial) {
       listeners.add(listener);
       listener(state);
       return () => listeners.delete(listener);
+    },
+
+    /**
+     * Like `subscribe`, but called only when one of *keys* changed.
+     * @param {string[]} keys
+     * @returns {() => void} unsubscribe
+     */
+    watch(keys, listener) {
+      let seen = null;
+      return this.subscribe((current) => {
+        if (seen && keys.every((key) => seen[key] === current[key])) return;
+        seen = current;
+        listener(current);
+      });
     },
   };
 }

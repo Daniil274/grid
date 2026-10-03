@@ -120,3 +120,13 @@ def test_an_ordinary_message_is_not_a_compaction_marker():
     view = serialize_message(message)
     assert view["kind"] is None
     assert view["compaction"] is None
+
+
+async def test_api_answers_are_never_cached_by_the_browser(compact_server):
+    # A cached conversation showed a chat as it was before its last turn.
+    server, _, _ = compact_server
+    async with api_client(server) as client:
+        for path in ("/api/chat/conversations", "/api/chat/conversations/ctx"):
+            response = await client.get(path)
+            assert response.status_code == 200, path
+            assert response.headers["cache-control"] == "no-store", path

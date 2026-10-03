@@ -1,0 +1,66 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { ChatController } from "../web_chat/js/chat.js";
+import { createStore } from "../web_chat/js/lib/store.js";
+import { api } from "../web_chat/js/net/api.js";
+
+/** A transcript that records what was drawn and whether it said "loading". */
+function fakeTranscript() {
+  return {
+    rendered: [],
+    loading: [],
+    render(messages) { this.rendered.push(messages[0]?.content); },
+    setLoading(value) { this.loading.push(value); },
+    adopt: () => false,
+    resumable: () => false,
+  };
+}
+
+/** getConversation answers only when the test says so, in any order. */
+function deferredApi() {
+  const pending = new Map();
+  api.getConversation = (id, signal) =>
+    new Promise((resolve, reject) => {
+      pending.set(id, (content) => resolve({ id, messages: [{ content }], metadata: {}, pending: [] }));
+      signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    });
+  return pending;
+}
+
+test("the chat picked last is the one drawn, whatever answers first", async () => {
+  const original = api.getConversation;
+  const answer = deferredApi();
+  try {
+    const store = createStore({ contextId: null, systems: [], conversations: [] });
+    const transcript = fakeTranscript();
+    const chat = new ChatController({ store, transcript });
+    const first = chat.openConversation("a");
+    // The pick shows at once: the row is selected before the chat arrives.
+    assert.equal(store.get().contextId, "a");
+    const second = chat.openConversation("b");
+    answer.get("b")("chat b");
+    await second;
+    answer.get("a")?.("chat a"); // aborted, or late: never drawn
+    await first;
+
+    assert.equal(store.get().contextId, "b");
+    assert.deepEqual(transcript.rendered, ["chat b"]);
+    assert.equal(transcript.loading.at(-1), false);
+  } finally { api.getConversation = original; }
+});
+
+test("a reconcile that lands after the reader moved on leaves the new chat alone", async () => {
+  const original = api.getConversation;
+  const answer = deferredApi();
+  try {
+    const store = createStore({ contextId: "a", systems: [], conversations: [] });
+    const transcript = fakeTranscript();
+    const chat = new ChatController({ store, transcript });
+    const reconcile = chat._reconcile("a", { force: true });
+    store.set({ contextId: "b" });
+    answer.get("a")("old chat a");
+    await reconcile;
+
+    assert.deepEqual(transcript.rendered, []);
+  } finally { api.getConversation = original; }
+});

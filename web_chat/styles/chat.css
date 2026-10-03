@@ -7,6 +7,28 @@
   overflow-x: hidden;
 }
 
+/* A chat is loading: the previous one fades and a bar runs along the top. */
+.chatScroll.is-loading > * {
+  opacity: 0.35;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.chatScroll.is-loading {
+  background:
+    linear-gradient(90deg, transparent, var(--accent), transparent) top left / 40% 2px no-repeat;
+  animation: chatLoading 1s linear infinite;
+}
+
+@keyframes chatLoading {
+  from { background-position: -40% 0; }
+  to { background-position: 140% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chatScroll.is-loading { animation: none; background-position: 50% 0; }
+}
+
 /* -- welcome -------------------------------------------------------------- */
 .welcome {
   display: grid;

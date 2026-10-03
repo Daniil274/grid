@@ -30,6 +30,29 @@ export class ChatController {
     this._activeTurn = null;
     // Agents whose tool problems were already announced on this page.
     this._warnedAgents = new Set();
+    // The chat being loaded: a newer pick aborts it, and a late answer for a
+    // chat no longer on screen is dropped instead of drawn over the new one.
+    this._loading = null;
+  }
+
+  /**
+   * Fetch a conversation for *contextId*; null when another load or chat took
+   * over meanwhile. A pick aborts the load before it (`supersede`).
+   */
+  async _fetchConversation(contextId, { supersede = false } = {}) {
+    if (supersede) this._loading?.abort();
+    const load = new AbortController();
+    if (supersede) this._loading = load;
+    try {
+      const payload = await api.getConversation(contextId, load.signal);
+      const current = this._store.get().contextId === contextId && (!supersede || this._loading === load);
+      return current ? payload : null;
+    } catch (error) {
+      if (load.signal.aborted) return null;
+      throw error;
+    } finally {
+      if (this._loading === load) this._loading = null;
+    }
   }
 
   get isStreaming() {
@@ -353,7 +376,19 @@ export class ChatController {
     // server and is replayed when the chat is opened again.
     this._detach();
     this._voice?.cleanup();
-    const payload = await api.getConversation(contextId);
+    // The pick shows at once: the row is selected and the transcript says it
+    // is loading, rather than the old chat staying on screen meanwhile.
+    this._store.set({ contextId, rootId: contextId });
+    this._transcript.setLoading(true);
+    let payload;
+    try {
+      payload = await this._fetchConversation(contextId, { supersede: true });
+    } catch (error) {
+      if (this._store.get().contextId === contextId) this._transcript.setLoading(false);
+      throw error;
+    }
+    if (!payload) return; // another chat was picked meanwhile
+    this._transcript.setLoading(false);
     // A conversation remembers what was pinned when it ran, including "nothing".
     this._store.set({
       contextId: payload.id,
@@ -362,9 +397,9 @@ export class ChatController {
       agentKey: payload.metadata?.agent_key ?? null,
       hasAgentContext: Boolean(payload.metadata?.routed_agent),
       compacting: this._compactingId === payload.id,
+      queue: payload.pending ?? [],
     });
     this._transcript.render(payload.messages);
-    this._store.set({ queue: payload.pending ?? [] });
     this._syncResumable();
     // The agent kept working while the page was away: pick the turn back up.
     if (payload.active_turn) await this._attachToRunningTurn(payload.id, payload.active_turn);
@@ -539,7 +574,9 @@ export class ChatController {
     if (contextId !== this._store.get().contextId) return;
     if (!this._transcript) return;
     try {
-      const payload = await api.getConversation(contextId);
+      // Null when the reader moved to another chat while it loaded.
+      const payload = await this._fetchConversation(contextId);
+      if (!payload) return;
       // Same messages on screen: only take their ids and versions, so an
       // expanded reasoning panel stays as it is.
       if (force || !this._transcript.adopt(payload.messages)) {
