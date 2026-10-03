@@ -693,3 +693,11 @@ class TestSchemaIntegration:
         
         assert restored_config.settings.debug is True
         assert restored_config.providers["test"].name == "test"
+
+
+def test_a_model_answer_must_fit_its_window():
+    from schemas.schemas import ModelConfig
+
+    assert ModelConfig(name="m", provider="p", max_tokens=131072, context_window=1_000_000).max_tokens == 131072
+    with pytest.raises(ValidationError):
+        ModelConfig(name="m", provider="p", max_tokens=40000, context_window=40000)

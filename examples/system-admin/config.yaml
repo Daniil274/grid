@@ -73,8 +73,8 @@ models:
     name: "~z-ai/glm-latest"
     provider: openrouter
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 128000
+    context_window: 262144
     description: "Latest GLM via OpenRouter"
     streaming_enabled: true
     preserve_reasoning_content: true
@@ -85,8 +85,8 @@ models:
     name: "openai/gpt-6-sol"
     provider: openrouter
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 128000
+    context_window: 1050000
     description: "GPT-6 SOL via OpenRouter"
     streaming_enabled: true
     preserve_reasoning_content: true

@@ -91,8 +91,8 @@ models:
     name: minimax/minimax-m3
     provider: openrouter
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 65536
+    context_window: 262144
     description: "Primary planning model for video workflow coordination"
     streaming_enabled: true
     preserve_reasoning_content: true
@@ -101,8 +101,8 @@ models:
     name: glm-5.3-flash
     provider: opencode
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 131072
+    context_window: 1000000
     description: "Fast worker model for bounded video subtasks"
     streaming_enabled: true
     preserve_reasoning_content: true
