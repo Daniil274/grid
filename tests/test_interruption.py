@@ -206,6 +206,21 @@ async def test_a_cancelled_turn_records_the_call_it_was_running(factory):
     assert record.in_flight == [{"tool": "click", "arguments": '{"x": 10, "y": 20}'}]
 
 
+async def test_tool_calls_lost_in_the_stream_are_reported_and_not_resent(factory):
+    from core.factory.turns import LOST_TOOL_CALLS
+
+    context_id = factory.context_manager.start_new_context()
+    runner = StreamingRunner(FakeStream([called("c1")], final_output=""))
+    with patch("agents.Runner", runner):
+        answer = await factory.run_agent("worker", "Look", context_id=context_id, stream=True, stream_observer=OBSERVER)
+
+    assert LOST_TOOL_CALLS in answer
+    assert len(runner.calls) == 1
+    record = last_record(factory, context_id)
+    assert record.reason is StopReason.ERROR
+    assert record.in_flight == []  # the calls never ran
+
+
 # -- resuming ----------------------------------------------------------------
 
 

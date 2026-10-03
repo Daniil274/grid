@@ -16,6 +16,7 @@ from agents.model_settings import Reasoning
 from openai import AsyncOpenAI
 
 from core.model_access import ModelAccess
+from core.responses_model import StreamedOutputResponsesModel
 from core.vision_model import VisionChatCompletionsModel
 
 logger = logging.getLogger("grid.agent_factory")
@@ -114,6 +115,8 @@ class ModelProvider:
             # A ChatGPT plan takes no output cap and never stores the response (preview limits).
             max_tokens=None if plan_usage else max_tokens,
             store=False if plan_usage else None,
+            # An unstored reasoning item can be sent back only with its encrypted content.
+            response_include=["reasoning.encrypted_content"] if plan_usage else None,
             reasoning=sdk_reasoning,
             extra_body=extra_body or None,
             parallel_tool_calls=parallel_tool_calls,
@@ -156,9 +159,7 @@ class ModelProvider:
         # (OpenCode Go muse-spark) serve a model only over /responses.
         if use_responses:
             try:
-                from agents import OpenAIResponsesModel  # type: ignore
-
-                model = OpenAIResponsesModel(
+                model = StreamedOutputResponsesModel(
                     model=model_config.name, openai_client=client
                 )
             except Exception as e:

@@ -74,6 +74,13 @@ TOOL_CALL_CORRECTION = """Your last answer wrote tool calls as text, for example
 Text like that runs nothing. Call the tools themselves, then answer.
 Repeat the last step that way."""
 
+# A provider's stream showed tool calls its final response did not contain, so
+# none of them ran. A rerun of the same request would lose them again.
+LOST_TOOL_CALLS = (
+    "the provider's stream showed tool calls that its final response did not contain; "
+    "none of them ran"
+)
+
 # Input of an attempt rerun after an overflowing session was summarized: the
 # summary already holds the request and what was done for it.
 OVERFLOW_RETRY_NOTE = (
@@ -411,8 +418,10 @@ class TurnRunner:
         control = run_ctx.run_control
         fragments: List[str] = []
         result: Any = None
+        streamed_calls = 0
 
         def record_tool_event(event: Any) -> None:
+            nonlocal streamed_calls
             if not isinstance(event, RunItemStreamEvent):
                 return
             if event.name not in ("tool_called", "tool_output"):
@@ -420,6 +429,7 @@ class TurnRunner:
             info = tool_event_info(event.item)
             tool_name = info.get("tool_name") or "tool"
             if event.name == "tool_called":
+                streamed_calls += 1
                 progress.ledger.called(info.get("call_id"), tool_name, info.get("arguments"))
             else:
                 progress.ledger.returned(info.get("call_id"), tool_name)
@@ -496,6 +506,10 @@ class TurnRunner:
             # Narration before a tool call is not a completed result. Keep the
             # legacy text-stream fallback only for runs without tool actions.
             has_tools = any(getattr(item, "type", "") == "tool_call_item" for item in items)
+            if streamed_calls and not has_tools:
+                # The calls never ran: the response the SDK received lacks them.
+                progress.ledger.forget_open()
+                raise TurnStopped(StopReason.ERROR, LOST_TOOL_CALLS)
             if has_tools or not "".join(fragments).strip():
                 raise TurnStopped(StopReason.ERROR, "Model returned no final written report")
         return self._final_text(result, fragments), result
