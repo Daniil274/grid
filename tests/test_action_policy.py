@@ -1352,9 +1352,21 @@ models:
 agents:
   assistant: {{name: Assistant, model: m, tools: []}}
 """
-    config_path.write_text(body.format(policy="system: part.yaml"), encoding="utf-8")
+    config_path.write_text(body.format(policy="system_file: part.yaml"), encoding="utf-8")
     system = Config(str(config_path)).config.settings.action_policy.system
     assert (system.version, system.action) == ("part-v1", "Its tracker is in scope.")
+
+    # Saved configs are checked as raw YAML, before any file is read.
+    from schemas import GridConfig
+    import yaml
+
+    GridConfig(**yaml.safe_load(config_path.read_text(encoding="utf-8")))
+
+    config_path.write_text(
+        body.format(policy="system_file: part.yaml\n    system: {version: inline}"), encoding="utf-8"
+    )
+    with pytest.raises(ConfigError):
+        Config(str(config_path))
 
     # A shared policy file serves many systems and carries no system's part.
     (tmp_path / "shared.yaml").write_text("version: s\nsystem: {version: x}\n", encoding="utf-8")

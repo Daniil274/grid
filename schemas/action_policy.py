@@ -147,9 +147,10 @@ class ActionPolicyConfig(BaseModel):
     max_attempts_per_turn: int = Field(default=1000, ge=1)
     max_denials_per_run: int = Field(default=3, ge=1)
     validator: ActionValidatorConfig = Field(default_factory=ActionValidatorConfig)
-    # This system's addition to whichever base policy governs it. A string in
-    # the YAML is a file resolved relative to the system config.
+    # This system's addition to whichever base policy governs it: inline, or
+    # read from system_file, resolved relative to the system config.
     system: ActionPolicySystem | None = None
+    system_file: str | None = None
 
     def with_system(self, system: "ActionPolicySystem | None") -> "ActionPolicyConfig":
         """This policy as the base, with one system's rules and guidance added.

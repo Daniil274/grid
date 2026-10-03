@@ -1,6 +1,6 @@
-# Дополнение политики для системы builder (examples/system-builder).
-# Добавляется к общей политике (policies/action-policy.yaml) только при проверке
-# вызовов этой системы: settings.action_policy.system в её конфиге.
+# Дополнение политики для системы builder. Добавляется к общей политике
+# (policies/action-policy.yaml) только при проверке вызовов этой системы:
+# settings.action_policy.system_file в её config.yaml.
 version: "builder-v1"
 
 action: >-

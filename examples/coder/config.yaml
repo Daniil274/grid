@@ -21,7 +21,7 @@ settings:
   # system part is added to whichever base governs, for this system only.
   action_policy:
     policy_file: ../../policies/action-policy.yaml
-    system: ../../policies/systems/code-repository.yaml
+    system_file: action-policy.yaml
     mode: "enforce"
     validator:
       model: [policy-validator-jev, policy-validator-mercury]

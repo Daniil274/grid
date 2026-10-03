@@ -267,7 +267,7 @@ def relocate_config(document: Dict[str, Any], source_dir: Path, target_dir: Path
         if isinstance(policy, str):
             settings["action_policy"] = moved(policy)
         elif isinstance(policy, dict):
-            for field in ("policy_file", "system"):
+            for field in ("policy_file", "system_file"):
                 if isinstance(policy.get(field), str):
                     policy[field] = moved(policy[field])
     for tool in (document.get("tools") or {}).values():
@@ -424,7 +424,8 @@ class BuilderAccess:
             raise StoreError("Private systems use shared tools or tool packages; project_tools imports are not allowed.")
         if not settings.allow_path_override or settings.config_directory != "." or settings.logs_directory is not None:
             raise StoreError("Private systems keep allow_path_override: true, config_directory: . and the server's logs.")
-        if settings.action_policy.policy_file or settings.action_policy.system or document.get("routing"):
+        policy = settings.action_policy
+        if policy.policy_file or policy.system or policy.system_file or document.get("routing"):
             raise StoreError("Private systems inherit the server's policy and routing; do not reference other config files.")
         allowed_providers = self.providers()
         for name, provider in (document.get("providers") or {}).items():

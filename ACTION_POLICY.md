@@ -113,13 +113,13 @@ Each factory takes a snapshot at construction: restart after changing it.
 Guidance that holds for one system only - its stores, its task tracker, its
 version control - belongs to that system, not to the shared policy: written
 there, it would also steer the judgment of every other system's calls. A system
-config adds it with `settings.action_policy.system`, a mapping or a YAML file
-resolved relative to the config:
+config adds it with `settings.action_policy.system`, inline, or with
+`system_file`, a YAML file resolved relative to the config:
 
 ```yaml
 settings:
   action_policy:
-    system: ../../policies/systems/system-builder.yaml
+    system_file: action-policy.yaml   # beside this config.yaml
 ```
 
 ```yaml
@@ -134,10 +134,10 @@ chain: >-        # appended to the base chain instructions
 It is added to whichever base governs the system - the routing policy, or the
 system's own when the routing policy is off - and to no other system. The base
 keeps its mode, validator, criteria and budgets; the audit version becomes
-`<base>+<system>`. A shared policy file cannot carry a `system` part, and
+`<base>+<system>`. A shared policy file cannot carry a system part, and
 private systems (built by users or evaluated as candidates) cannot set one: they
-run under the server's policy as it is. This repository's parts live in
-`policies/systems/`.
+run under the server's policy as it is. A system keeps its part in its own
+directory, as `action-policy.yaml` beside its config.
 
 | Mode | Run budgets | Verdict |
 | --- | --- | --- |
