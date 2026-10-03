@@ -112,6 +112,18 @@ models:
     preserve_reasoning_content: false
     use_responses_api: true
     request_timeout: 300
+
+  glm-latest:
+    name: "glm-5.3"
+    provider: "opencode"
+    temperature: 0.2
+    max_tokens: 131072
+    context_window: 1000000
+    description: "Latest GLM via OpenCode (currently GLM-5.3)"
+    streaming_enabled: true
+    preserve_reasoning_content: true
+    reasoning:
+      effort: "high"
 tools:
   builder_compare:
     type: function
@@ -153,7 +165,7 @@ tools:
 agents:
   builder:
     name: System builder
-    model: muse-spark-1.3-contributor
+    model: glm-latest
     description: >-
       Creates new Grid systems for this server from a description of what they
       should do: designs their agents, writes their configs, prompts and skills,
