@@ -154,10 +154,14 @@ def test_an_explicit_choice_overrides_the_configs_flag(monkeypatch):
 def _chowns(monkeypatch, euid):
     monkeypatch.setattr(module.os, "geteuid", lambda: euid, raising=False)
     calls = []
-    monkeypatch.setattr(module.os, "lchown", lambda path, uid, gid: calls.append((path, uid, gid)))
+    monkeypatch.setattr(
+        module.os, "lchown", lambda path, uid, gid: calls.append((path, uid, gid)), raising=False
+    )
     return calls
 
 
+# Ownership exists only on POSIX: a Windows server has neither root nor chown.
+@pytest.mark.skipif(not hasattr(module.os, "geteuid"), reason="a POSIX server's file ownership")
 def test_a_server_running_as_root_gives_the_workspace_to_the_containers_user(manager, tmp_path, monkeypatch):
     # The server makes the workspace, so it is root's: the container's user
     # could not write its own workspace.

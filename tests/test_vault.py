@@ -129,8 +129,9 @@ def test_a_file_store_keeps_sealed_rows_owner_only_and_works_as_a_vault_store(tm
     vault = Vault(FileCredentialStore(path), Cipher.local_file(tmp_path / "data" / "secrets.key"))
     vault.put_api_key("me", "openai", "sk-aaaaaaaaaaaaaaaa")
     assert "aaaaaaaa" not in path.read_text()
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
-    assert stat.S_IMODE(os.stat(tmp_path / "data" / "secrets.key").st_mode) == 0o600
+    if os.name == "posix":  # Windows keeps no owner-only mode bits; its ACLs decide
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        assert stat.S_IMODE(os.stat(tmp_path / "data" / "secrets.key").st_mode) == 0o600
     reopened = Vault(FileCredentialStore(path), Cipher.local_file(tmp_path / "data" / "secrets.key"))
     import asyncio
 
