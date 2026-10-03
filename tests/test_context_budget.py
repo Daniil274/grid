@@ -76,9 +76,13 @@ def test_within_budget_the_same_list_is_returned():
 
 def test_the_filter_follows_the_compact_config():
     enabled = CompactConfig(micro={"enabled": True, "preserve_last_n": 1, "compactable_tools": ["perceive"]})
-    apply = context_budget_filter(10_000, enabled)
+    heard = []
+    apply = context_budget_filter(10_000, enabled, on_cleared=heard.append)
     sent = apply(steps(40), "instructions")
     assert request_tokens(sent, "instructions") < request_tokens(steps(40), "instructions")
+    assert heard and heard[0] == sum(1 for before, after in zip(steps(40), sent) if before != after)
+    assert context_budget_filter(10**9, enabled, on_cleared=heard.append)(steps(2), None) == steps(2)
+    assert len(heard) == 1  # nothing left out, nothing heard
     assert context_budget_filter(10_000, CompactConfig(micro={"enabled": False})) is None
     assert context_budget_filter(10_000, CompactConfig(enabled=False)) is None
 

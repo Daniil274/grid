@@ -6,7 +6,8 @@ stored chat (``context.json``) is only the text users see, a small part of it, s
 every size here is measured on session items.
 
 Grid keeps a request inside the window at two points, both driven by the
-system's ``compact`` config and the model's ``context_window``:
+system's ``compact`` config and the model's ``context_window`` and ``max_tokens``
+(the threshold leaves room for the answer: ``ModelProvider.compact_threshold``):
 
 1. Before each model call (:func:`context_budget_filter`, a
    ``RunConfig.call_model_input_filter``): when the request would pass the
@@ -30,7 +31,6 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Iterable, List, Optional, Set
 
-from core.compact.auto_compact import get_auto_compact_threshold
 from core.compact.base import CompactMessage
 
 CHARS_PER_TOKEN = 4
@@ -128,27 +128,34 @@ def clear_old_tool_outputs(
 
 
 def context_budget_filter(
-    context_window: int, compact_cfg: Any
+    budget: int, compact_cfg: Any, on_cleared: Optional[Callable[[int], None]] = None
 ) -> Optional[Callable[[List[Any], Optional[str]], List[Any]]]:
-    """The per-call clearing step for a model with *context_window*, or None when off.
+    """The per-call clearing step for a request of at most *budget* tokens - the
+    agent's auto-compact threshold - or None when off.
+
+    *on_cleared* hears how many tool outputs a request left out, when any.
 
     Returns ``apply(items, instructions) -> items``; the factory chains it after
     the image budget in its ``call_model_input_filter``.
     """
     if compact_cfg is None or not compact_cfg.enabled or not compact_cfg.micro.enabled:
         return None
-    budget = get_auto_compact_threshold(context_window, compact_cfg)
     micro = compact_cfg.micro
     tools = set(micro.compactable_tools) if micro.compactable_tools else None
 
     def apply(items: List[Any], instructions: Optional[str]) -> List[Any]:
-        return clear_old_tool_outputs(
+        result = clear_old_tool_outputs(
             items,
             budget=budget,
             keep_last=micro.preserve_last_n,
             tools=tools,
             instructions=instructions,
         )
+        if on_cleared is not None and result is not items:
+            cleared = sum(1 for before, after in zip(items, result) if before is not after)
+            if cleared:
+                on_cleared(cleared)
+        return result
 
     return apply
 

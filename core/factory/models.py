@@ -15,6 +15,7 @@ from agents import ModelSettings
 from agents.model_settings import Reasoning
 from openai import AsyncOpenAI
 
+from core.compact import get_auto_compact_threshold
 from core.model_access import ModelAccess
 from core.responses_model import StreamedOutputResponsesModel
 from core.vision_model import VisionChatCompletionsModel
@@ -35,6 +36,8 @@ class ModelProvider:
         self.compact_config = compact_config
         # Responses API warnings already logged, so each is logged once.
         self._responses_warning_keys: set[str] = set()
+        # Agents whose compaction threshold was already reported as too low.
+        self._low_threshold_warned: set[Optional[str]] = set()
 
     def is_allowed(self, model_key: str) -> bool:
         """Whether settings.allowed_models permits *model_key*; no list allows every model."""
@@ -211,3 +214,30 @@ class ModelProvider:
             return self.config.get_model(self.config.get_agent(agent_key).primary_model).context_window
         except Exception:
             return DEFAULT_CONTEXT_WINDOW
+
+    def answer_tokens(self, agent_key: Optional[str]) -> int:
+        """How much of the window *agent_key*'s model may fill with one answer."""
+        try:
+            return self.config.get_model(self.config.get_agent(agent_key).primary_model).max_tokens
+        except Exception:
+            return 0
+
+    def compact_threshold(self, agent_key: Optional[str], compact_cfg: Any) -> int:
+        """Session tokens past which *agent_key*'s context is compacted.
+
+        A threshold under a quarter of the window compacts nearly every turn:
+        ``compact.auto.buffer_tokens`` is then too large for this model, and
+        that is logged once per agent.
+        """
+        window = self.context_window(agent_key)
+        threshold = get_auto_compact_threshold(window, compact_cfg, self.answer_tokens(agent_key))
+        if threshold < window // 4 and agent_key not in self._low_threshold_warned:
+            self._low_threshold_warned.add(agent_key)
+            logger.warning(
+                "Agent %s compacts its context at %d of %d tokens: lower compact.auto.buffer_tokens "
+                "(it covers instructions and tool schemas; the model's max_tokens is reserved apart)",
+                agent_key,
+                threshold,
+                window,
+            )
+        return threshold

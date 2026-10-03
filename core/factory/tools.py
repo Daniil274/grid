@@ -669,7 +669,7 @@ class ToolAssembly:
                     context=sub_run_ctx,
                     session=session,
                     max_turns=runner_max_turns(self.config.get_max_turns(agent_key)),
-                    run_config=self._run_config(agent_key),
+                    run_config=self._run_config(agent_key, observer=sub_observer),
                 )
                 control = sub_run_ctx.run_control
                 if control is not None:

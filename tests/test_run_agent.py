@@ -274,10 +274,12 @@ async def test_a_session_past_the_threshold_is_summarized_and_the_chat_is_kept(f
 
     compact = AsyncMock(return_value=summarized())
     runner = ScriptedRunner("Continued.")
+    shown = []
+    observer = SimpleNamespace(handle_compaction=lambda before, after: shown.append((before, after)))
     with use(runner), patch("core.factory.sessions.compact_conversation", new=compact), patch.object(
         factory.models, "compact_client_and_model", return_value=(object(), "m")
     ):
-        await factory.run_agent("worker", "Go on", context_id=context_id)
+        await factory.run_agent("worker", "Go on", context_id=context_id, stream_observer=observer)
 
     transcript = compact.await_args.kwargs["messages"]
     assert any("[Result of file_read:" in m.get_text() for m in transcript)
@@ -296,6 +298,8 @@ async def test_a_session_past_the_threshold_is_summarized_and_the_chat_is_kept(f
     assert len(markers) == 1
     assert markers[0].role == "assistant"
     assert markers[0].metadata["tokens_before"] > markers[0].metadata["tokens_after"]
+    # The running turn shows it too, not only the thread once reloaded.
+    assert shown == [(markers[0].metadata["tokens_before"], markers[0].metadata["tokens_after"])]
 
 
 async def test_a_session_within_the_threshold_is_left_alone(factory):

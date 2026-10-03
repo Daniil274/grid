@@ -132,6 +132,7 @@ class TurnRunner:
         *,
         steering: Optional[Steering] = None,
         session: Optional[SQLiteSession] = None,
+        observer: Any = None,
     ) -> RunConfig:
         """What every model call of a run of *agent_key* passes through.
 
@@ -139,11 +140,14 @@ class TurnRunner:
         only for the top-level run of a turn, which passes its ``steering`` and
         ``session``), then the image budget (core.image_window), then the
         context budget (core.context_budget): old compactable tool outputs are
-        cleared from the request once it would pass the auto-compact threshold.
+        cleared from the request once it would pass the auto-compact threshold,
+        and *observer* is told so.
         """
         max_images = self.config.config.settings.image_processing.max_images_per_request
         clear_outputs = context_budget_filter(
-            self.models.context_window(agent_key), self.compact_config
+            self.models.compact_threshold(agent_key, self.compact_config),
+            self.compact_config,
+            on_cleared=getattr(observer, "handle_outputs_cleared", None),
         )
 
         def budget(items: List[Any], instructions: Optional[str]) -> ModelInputData:
@@ -161,6 +165,16 @@ class TurnRunner:
                 return budget(items, data.model_data.instructions)
 
         return RunConfig(call_model_input_filter=apply)
+
+    @staticmethod
+    def _report_compaction(observer: Any, compacted: Optional[Dict[str, int]]) -> None:
+        """Show a compaction in the running turn; the stored marker shows it later."""
+        handle = getattr(observer, "handle_compaction", None)
+        if compacted and handle is not None:
+            try:
+                handle(compacted["tokens_before"], compacted["tokens_after"])
+            except Exception:
+                logger.exception("Stream observer failed to show a compaction")
 
     @staticmethod
     def _final_text(result: Any, fragments: List[str]) -> str:
@@ -458,7 +472,9 @@ class TurnRunner:
                         context=run_ctx,
                         max_turns=runner_max_turns(max_turns),
                         session=session,
-                        run_config=self._run_config(agent_key, steering=steering, session=session),
+                        run_config=self._run_config(
+                            agent_key, steering=steering, session=session, observer=observer
+                        ),
                     )
                     if control is not None:
                         control.attach(result)
@@ -480,7 +496,7 @@ class TurnRunner:
                         context=run_ctx,
                         max_turns=runner_max_turns(max_turns),
                         session=session,
-                        run_config=self._run_config(agent_key),
+                        run_config=self._run_config(agent_key, observer=observer),
                     )
         except TimeoutError:
             if timeout <= 0 or not deadline.expired():
@@ -573,7 +589,9 @@ class TurnRunner:
                         # Whether the failed attempt stored the request: then
                         # the summary holds it, else it is sent again.
                         stored_request = await self._session_mark(session) != session_mark
-                        if await self.compact_session(agent_key, run_ctx.context_id, force=True):
+                        compacted = await self.compact_session(agent_key, run_ctx.context_id, force=True)
+                        if compacted:
+                            self._report_compaction(observer, compacted)
                             progress.ledger.forget_open()
                             if stored_request:
                                 run_input = OVERFLOW_RETRY_NOTE
@@ -968,7 +986,7 @@ class TurnRunner:
             # message, tool call and tool result, images included.
             session = self._get_agent_session(agent_key, active_context_id)
             # Past the threshold, the session is summarized before the turn adds to it.
-            await self.compact_session(agent_key, active_context_id)
+            self._report_compaction(observer, await self.compact_session(agent_key, active_context_id))
             # Where this turn starts in the agent's session: a branch forked at
             # this turn's message copies the session up to here (fork_conversation).
             session_mark = {

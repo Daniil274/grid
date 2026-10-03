@@ -55,6 +55,7 @@ class StepKind(str, Enum):
     AGENT = "agent"  # a sub-agent run; its steps nest under it
     MCP = "mcp"
     MESSAGE = "message"  # narration the agent wrote between its actions
+    COMPACT = "compact"  # the context was summarized or old tool outputs left out
     ERROR = "error"
 
 

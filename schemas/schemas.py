@@ -667,7 +667,12 @@ class CompactMicroConfig(BaseModel):
 class CompactAutoConfig(BaseModel):
     """Configuration for automatic compaction trigger."""
     enabled: bool = True
-    buffer_tokens: int = Field(default=13000, ge=1000, description="Token buffer before auto-compact threshold")
+    buffer_tokens: int = Field(
+        default=13000,
+        ge=1000,
+        description="Tokens kept free beside the model's answer (its max_tokens, reserved apart): "
+        "instructions, tool schemas and a margin",
+    )
     warning_buffer_tokens: int = Field(default=20000, ge=1000, description="Buffer before warning threshold")
     error_buffer_tokens: int = Field(default=20000, ge=1000, description="Buffer before error threshold")
     manual_buffer_tokens: int = Field(default=3000, ge=100, description="Buffer before hard lock (manual compact)")

@@ -561,3 +561,22 @@ def test_usage_callback_fires_and_its_errors_never_break_accounting():
     recorder.record_usage(SimpleNamespace(input_tokens=1, output_tokens=2))
     assert recorder.tokens_in == 1
     assert recorder.tokens_out == 2
+
+
+def test_a_compaction_shows_in_the_running_turn():
+    harness = Harness()
+    harness.observer.handle_compaction(9767, 808)
+    [step] = harness.steps()
+    assert step["kind"] == "compact" and step["status"] == "done"
+    assert step["title"] == "Context compacted"
+    assert step["subtitle"] == "~9.8k → ~808 tokens"
+
+
+def test_left_out_tool_outputs_are_one_step_with_the_largest_count():
+    harness = Harness()
+    harness.observer.handle_outputs_cleared(2)
+    harness.observer.handle_outputs_cleared(5)
+    harness.observer.handle_outputs_cleared(3)
+    [step] = harness.steps()
+    assert step["kind"] == "compact" and step["title"] == "Context trimmed"
+    assert step["subtitle"] == "5 old tool outputs left out of the request"

@@ -32,16 +32,18 @@ settings:
 
 # Context compaction for every routed system (core/context_budget.py): the base
 # each system's own `compact` section refines field by field. A system names
-# its compactable tools there; one without a section runs on this base. With a
-# 40k window and 8k answers, requests stay under 26k (40k - 4k summary reserve -
-# 10k buffer).
+# its compactable tools there; one without a section runs on this base. The
+# threshold leaves room for the model's answer (its max_tokens) on top of
+# buffer_tokens, which covers instructions and tool schemas: with a 40k window
+# and 8k answers, sessions are compacted past ~24k (40k - 4k summary reserve -
+# 8k answer - 4k buffer).
 compact:
   enabled: true
   summary_max_output_tokens: 4000
   auto:
     enabled: true
     max_output_tokens_for_summary: 4000
-    buffer_tokens: 10000
+    buffer_tokens: 4000
     max_consecutive_failures: 3
   micro:
     enabled: true

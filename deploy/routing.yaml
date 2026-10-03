@@ -37,7 +37,7 @@ compact:
   auto:
     enabled: true
     max_output_tokens_for_summary: 4000
-    buffer_tokens: 10000
+    buffer_tokens: 4000
     max_consecutive_failures: 3
   micro:
     enabled: true
