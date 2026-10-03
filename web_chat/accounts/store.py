@@ -222,6 +222,10 @@ class AccountStore:
         return self._write("DELETE FROM sessions WHERE expires_at <= ?", now)
 
     # -- usage -------------------------------------------------------------------
+    def usage_history(self) -> list[dict]:
+        """Daily totals for the one-time analytics baseline; no account secrets."""
+        return [dict(row) for row in self._all("SELECT user_id, day, tokens_in, tokens_out FROM usage")]
+
     def turns_on(self, user_id: str, day: str) -> int:
         row = self._one("SELECT turns FROM usage WHERE user_id = ? AND day = ?", user_id, day)
         return row[0] if row else 0

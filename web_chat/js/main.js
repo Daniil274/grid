@@ -13,6 +13,7 @@ import { api } from "./net/api.js";
 import { tokens } from "./lib/format.js";
 import { ChatController } from "./chat.js";
 import { AccountsDrawer } from "./accounts/admin.js";
+import { monitorServer } from "./net/server-monitor.js";
 import { PasswordDrawer } from "./accounts/password.js";
 import { PersonalAgentsDrawer } from "./agents/drawer.js";
 import { SettingsDrawer } from "./settings/drawer.js";
@@ -252,6 +253,8 @@ async function boot() {
       backdrop: $("#admin-backdrop"),
       closeButton: $("#admin-close"),
       refreshButton: $("#admin-refresh"),
+      restartButton: $("#admin-restart"),
+      serverStatus: $("#admin-server-status"),
       reviews: $("#admin-reviews"),
       users: $("#admin-users"),
       invites: $("#admin-invites"),
@@ -275,6 +278,15 @@ async function boot() {
   $("#toggle-rail").addEventListener("click", openRail);
   $("#sidebar-scrim").addEventListener("click", closeRail);
   $("#open-settings").addEventListener("click", () => settings.open());
+  $("#open-usage").addEventListener("click", (event) => {
+    if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    const usageWindow = window.open("/usage", "grid-usage", "popup,width=1280,height=900,resizable=yes,scrollbars=yes");
+    if (usageWindow) {
+      usageWindow.opener = null;
+      usageWindow.focus();
+      event.preventDefault();
+    }
+  });
   $("#open-agents").addEventListener("click", () => {
     closeRail();
     personalAgents.open();
@@ -370,8 +382,8 @@ async function boot() {
   document.addEventListener("grid:turn-settled", refreshAccountUsage);
   void refreshAccountUsage();
 
-  store.subscribe(({ workspacePath, isolated, streaming }) => {
-    const label = streaming ? "Working" : isolated ? "Container isolated" : "Local runtime";
+  store.subscribe(({ workspacePath, isolated, streaming, restartPending, serverUnavailable }) => {
+    const label = serverUnavailable ? "Reconnecting to server…" : restartPending ? "Server restarting · waiting for saved steps" : streaming ? "Working" : isolated ? "Container isolated" : "Local runtime";
     $("#runtime-status").textContent = label;
     $("#runtime-status").dataset.state = streaming ? "busy" : "ready";
     $("#workspace-pill").textContent = workspacePath;
@@ -379,6 +391,16 @@ async function boot() {
   });
 
   await reloadRuntime();
+  document.addEventListener("grid:server-status", ({ detail }) => {
+    store.set({ restartPending: ["preparing", "restarting"].includes(detail.phase), serverUnavailable: false });
+  });
+  const stopMonitoring = monitorServer({
+    read: () => store.get().user?.role === "admin" ? api.adminServer() : api.serverStatus(),
+    onStatus: (detail) => document.dispatchEvent(new CustomEvent("grid:server-status", { detail })),
+    onRestart: () => chat.reconnectAfterRestart(),
+    onUnavailable: () => store.set({ restartPending: true, serverUnavailable: true }),
+  });
+  window.addEventListener("pagehide", stopMonitoring, { once: true });
   // "Open in chat" on the systems page: a new chat with that system pinned.
   const params = new URLSearchParams(location.search);
   const pinned = params.get("system");

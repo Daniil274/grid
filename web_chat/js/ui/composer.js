@@ -59,7 +59,7 @@ export function createComposer({
   const hasContent = () => Boolean(input.value.trim()) || attachments.length > 0;
   const pending = () => attachments.some((item) => item.pending);
 
-  const syncButtons = ({ streaming, stopping, resumable }) => {
+  const syncButtons = ({ streaming, stopping, resumable, restartPending }) => {
     // While the agent works a message can still be sent: the chosen delivery
     // (or the decision model) says when it reaches the agent.
     sendButton.hidden = false;
@@ -69,7 +69,8 @@ export function createComposer({
     stopButton.title = stopping
       ? "The agent is finishing its current step - click to stop it right now"
       : "Stop after the current step";
-    sendButton.disabled = pending() || !hasContent();
+    sendButton.disabled = restartPending || pending() || !hasContent();
+    continueButton.disabled = Boolean(restartPending);
     continueButton.hidden = streaming || !resumable;
     attachButton.disabled = count("image") >= MAX_IMAGES && (!uploads().enabled || count("file") >= uploads().max_files);
     fileInput.setAttribute("accept", uploads().enabled ? "" : ACCEPTED_TYPES.join(","));
@@ -144,7 +145,7 @@ export function createComposer({
   };
 
   const submit = () => {
-    if (pending() || !hasContent()) return;
+    if (store.get().restartPending || pending() || !hasContent()) return;
     const text = withFiles(input.value.trim(), attachments.filter((item) => item.kind === "file"));
     const images = attachments.filter((item) => item.kind === "image").map((item) => item.url);
     const delivery = store.get().streaming && deliverySelect.value !== "auto" ? deliverySelect.value : null;

@@ -25,6 +25,7 @@ export class AccountsDrawer {
     this.nodes = nodes;
     this.currentUser = currentUser;
     this._bind();
+    document.addEventListener("grid:server-status", (event) => this._renderServer(event.detail));
   }
 
   async open() {
@@ -47,6 +48,7 @@ export class AccountsDrawer {
       event.preventDefault();
       this._createInvite(new FormData(inviteForm));
     });
+    this.nodes.restartButton.addEventListener("click", () => this._restart());
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && drawer.classList.contains("is-open")) this.close();
     });
@@ -69,11 +71,34 @@ export class AccountsDrawer {
   }
 
   async _load() {
-    const [reviews, users, invites] = await Promise.all([api.reviews(), api.adminUsers(), api.adminInvites()]);
+    const [reviews, users, invites, server] = await Promise.all([api.reviews(), api.adminUsers(), api.adminInvites(), api.adminServer()]);
     const names = new Map(users.map((user) => [user.id, user.username]));
     this._renderReviews(reviews);
     this._renderUsers(users);
     this._renderInvites(invites, names);
+    this._renderServer(server);
+  }
+
+  _renderServer(server) {
+    const pending = ["preparing", "restarting"].includes(server.phase);
+    this.nodes.restartButton.disabled = !server.enabled || pending;
+    this.nodes.serverStatus.textContent = server.error || (server.recovery_errors
+      ? "Some requests could not resume. Check the affected chats and the server log."
+      : server.phase === "preparing" ? `Saving progress. Waiting for ${server.active_turns ?? 0} active request(s) and background work…`
+      : server.phase === "restarting" ? "Restarting. Requests will resume automatically…"
+      : server.enabled ? "Ready. Chats and sign-in sessions are preserved." : "Restart is unavailable in this server launch mode.");
+  }
+
+  async _restart() {
+    if (!window.confirm("Restart the server? Active requests will save their current step and continue after restart.")) return;
+    this.nodes.restartButton.disabled = true;
+    try {
+      const server = await api.restartServer();
+      document.dispatchEvent(new CustomEvent("grid:server-status", { detail: server }));
+    } catch (error) {
+      this.nodes.serverStatus.textContent = error.message;
+      this.nodes.restartButton.disabled = false;
+    }
   }
 
   _renderReviews(reviews) {

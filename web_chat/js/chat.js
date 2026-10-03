@@ -36,6 +36,13 @@ export class ChatController {
     return this._store.get().streaming;
   }
 
+  async reconnectAfterRestart() {
+    const contextId = this._store.get().contextId;
+    if (this._activeTurn) this._settle(this._activeTurn);
+    if (contextId) await this._reconcile(contextId, { force: true });
+    await this._refreshConversations();
+  }
+
   /** Text streamed so far for the turn in flight - the voice layer reads it. */
   get currentAnswer() {
     return this._activeTurn?.message.text ?? "";

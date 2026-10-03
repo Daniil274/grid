@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Usage · Grid</title>
+  <link rel="stylesheet" href="/static/styles/tokens.css">
+  <link rel="stylesheet" href="/static/styles/base.css">
+  <link rel="stylesheet" href="/static/styles/usage.css">
+</head>
+<body class="usagePage">
+  <main class="usageShell">
+    <header class="usageHeader">
+      <div><a href="/" class="usageBrand">GRID / ANALYTICS</a><h1>Usage</h1><p>Token activity across your models.</p></div>
+      <div class="usageActions"><label><input id="auto-refresh" type="checkbox" checked> Live · 30s</label><button id="refresh" class="btn btn--ghost">Refresh</button><button id="theme" class="btn btn--ghost">Theme</button></div>
+    </header>
+    <form id="filters" class="usageFilters">
+      <label>Period<select id="period"><option value="today">Today</option><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option><option value="all">All time</option><option value="custom">Custom range</option></select></label>
+      <label>From · UTC<input id="start" type="date" required></label>
+      <label>To · UTC<input id="end" type="date" required></label>
+      <label class="usageModelFilter">Model<select id="model"><option value="">All models</option></select></label>
+      <label>Group by<select id="bucket"><option value="auto">Automatic</option><option value="hour">Hour</option><option value="day">Day</option><option value="week">Week</option></select></label>
+      <label id="scope-label" hidden>Scope<select id="scope"><option value="me">My usage</option><option value="all">Whole server</option></select></label>
+      <button class="btn btn--primary" type="submit">Apply</button>
+    </form>
+    <div id="status" role="status" aria-live="polite">Loading usage…</div>
+    <section class="usageMetrics" id="metrics" aria-label="Token totals"></section>
+    <section class="usagePanel">
+      <div class="usagePanelHead"><div><h2>Tokens over time</h2><p id="range-caption">All dates in UTC</p></div><div class="usageLegend"><span class="inputDot">Input</span><span class="outputDot">Output</span></div></div>
+      <div id="timeline" class="usageTimeline" aria-label="Tokens by time"></div>
+      <p id="timeline-detail" class="usageChartDetail">Hover or focus a bar for exact totals.</p>
+    </section>
+    <div class="usageBottom">
+      <section class="usagePanel"><div class="usagePanelHead"><div><h2>Model distribution</h2><p>Choose a model to filter the report.</p></div><button class="btn btn--ghost" id="clear-model">All models</button></div><div id="models-chart"></div></section>
+      <section class="usagePanel usageTablePanel"><div class="usagePanelHead"><div><h2>Model breakdown</h2><p id="response-caption">Reported model responses</p></div><select id="sort" aria-label="Sort models"><option value="total_tokens">Sort: total tokens</option><option value="tokens_in">Sort: input</option><option value="tokens_out">Sort: output</option><option value="responses">Sort: responses</option></select></div><div class="usageTableScroll"><table><thead><tr><th>Model / provider</th><th>Total</th><th>Input</th><th>Output</th><th>Cached input</th><th>Reasoning output</th><th>Responses</th></tr></thead><tbody id="model-rows"></tbody></table></div></section>
+    </div>
+    <footer class="usageFooter"><div><p id="coverage"></p><p>Counts come from streamed agent responses, including nested agents. Calls outside those streams and providers without token usage are excluded. Cached input and reasoning output are included in input and output totals.</p></div><div class="usageActions"><button id="export-models" class="btn btn--ghost" disabled>Export models CSV</button><button id="export-time" class="btn btn--ghost" disabled>Export timeline CSV</button></div></footer>
+  </main>
+  <script type="module" src="/static/js/usage/page.js"></script>
+</body>
+</html>

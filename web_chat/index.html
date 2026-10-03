@@ -43,6 +43,7 @@
       </div>
 
       <div class="rail__foot">
+        <a class="btn btn--ghost" id="open-usage" href="/usage" target="grid-usage" rel="noopener" data-icon="timeline">Usage</a>
         <button class="btn btn--ghost" id="open-agents" type="button" data-icon="agent" hidden>My agents</button>
         <a class="btn btn--ghost" id="open-systems" href="/systems" data-icon="mcp" hidden>Systems</a>
         <a class="btn btn--ghost" id="open-reviews" href="/admin/review" data-icon="inspect" hidden>Reviews</a>
@@ -150,6 +151,14 @@
       </header>
       <div class="drawer__body">
         <div class="pane">
+          <section class="card">
+            <div class="card__head">
+              <h3>Server</h3>
+              <button class="btn btn--ghost btn--xs" id="admin-restart" type="button" disabled>Restart server</button>
+            </div>
+            <p class="field__hint">Active requests finish their current step, save their progress and continue automatically after restart.</p>
+            <p class="field__hint" id="admin-server-status" role="status" aria-live="polite"></p>
+          </section>
           <section class="card">
             <div class="card__head">
               <h3>Pending actions</h3>

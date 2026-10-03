@@ -73,6 +73,10 @@ class TurnBoard:
     def is_running(self, context_id: str) -> bool:
         return self.running(context_id) is not None
 
+    def running_turns(self) -> list[tuple[str, Any, asyncio.Task]]:
+        """Snapshot the turns that must reach a checkpoint before restart."""
+        return [(key, turn, task) for key, (turn, task) in self._turns.items() if not task.done()]
+
     # -- background work -------------------------------------------------------
     def spawn(self, coroutine: Coroutine[Any, Any, Any], name: str = "chat-background") -> asyncio.Task:
         """Run *coroutine* beside the command loop, owned here until it ends."""

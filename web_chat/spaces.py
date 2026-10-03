@@ -62,6 +62,12 @@ class SpacePool:
         # that user's space happen under it, so they never overlap, while other
         # users' spaces are built at the same time.
         self._locks: Dict[str, asyncio.Lock] = {}
+        self.restart_pending = False
+
+    def pause_for_restart(self, pending: bool) -> None:
+        self.restart_pending = pending
+        for space in self.live():
+            space.restart_pending = pending
 
     @asynccontextmanager
     async def use(self, user_id: str) -> AsyncIterator[UserSpace]:
@@ -79,12 +85,13 @@ class SpacePool:
     async def _lease(self, user_id: str) -> _Entry:
         async with self._lock(user_id):
             entry = self._entries.get(user_id)
-            if entry is not None and entry.stale and entry.free:
+            if entry is not None and entry.stale and entry.free and not self.restart_pending:
                 await self._retire(user_id)
                 entry = None
             if entry is None:
                 # Building reads files and may start a container: off the loop.
                 space = await asyncio.to_thread(self._build, user_id)
+                space.restart_pending = self.restart_pending
                 entry = self._entries[user_id] = _Entry(space)
             entry.leases += 1
             entry.last_used = time.monotonic()
@@ -101,6 +108,8 @@ class SpacePool:
 
     async def sweep(self) -> int:
         """Retire the free spaces that are stale or unused for too long; how many."""
+        if self.restart_pending:
+            return 0
         retired = 0
         for user_id in list(self._entries):
             async with self._lock(user_id):

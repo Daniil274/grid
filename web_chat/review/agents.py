@@ -106,6 +106,10 @@ class ReviewAgents:
         turn = self._turns.get(review_id)
         return turn is not None and not turn.done()
 
+    @property
+    def busy(self) -> bool:
+        return self._asking.locked() or any(not task.done() for task in self._turns.values())
+
     async def ask(self, review_id: str, message: Optional[str] = None) -> None:
         """Start a turn of *review_id*'s analysis; the first by default asks for the review.
 

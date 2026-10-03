@@ -53,7 +53,7 @@ def _delta_text(event: Any) -> tuple[Optional[str], Optional[str]]:
     data = getattr(event, "data", None)
     if not data:
         return None, None
-    data_type = getattr(data, "type", None)
+    data_type = field_of(data, "type")
     if isinstance(data, dict):
         return data.get("content") or data.get("delta") or data.get("text"), data_type
     for attr in ("delta", "content", "text"):
@@ -74,11 +74,13 @@ class WebStreamObserver:
         reset_answer: Optional[Callable[[], None]] = None,
         emit_image: Optional[Callable[[str], None]] = None,
         agent_label: str = "",
+        on_usage: Optional[Callable[[Any, str, Optional[str]], None]] = None,
     ) -> None:
         self._recorder = recorder
         self._emit_token = emit_token
         self._reset_answer = reset_answer
         self._emit_image = emit_image
+        self._on_usage = on_usage
         # Text streamed since the last action. If another action follows, it was
         # narration ("let me check the diff"), not the answer, and moves to the trace.
         self._narration = ""
@@ -115,7 +117,7 @@ class WebStreamObserver:
         the caller receives, never the user-facing answer.
         """
         child = WebStreamObserver(
-            self._recorder, emit_token=lambda _text: None, agent_label=agent_label
+            self._recorder, emit_token=lambda _text: None, agent_label=agent_label, on_usage=self._on_usage
         )
         child._calls_by_id = self._calls_by_id
         child._calls_in_order = self._calls_in_order
@@ -260,7 +262,7 @@ class WebStreamObserver:
 
         try:
             if isinstance(event, RawResponsesStreamEvent):
-                return self._on_raw_event(event)
+                return self._on_raw_event(event, agent_key)
             if isinstance(event, RunItemStreamEvent):
                 self._on_item_event(event, agent_key)
         except Exception:  # never let a rendering bug abort a run
@@ -268,7 +270,7 @@ class WebStreamObserver:
         return None
 
     # -- raw token stream --------------------------------------------------
-    def _on_raw_event(self, event: Any) -> Optional[str]:
+    def _on_raw_event(self, event: Any, agent_key: Optional[str] = None) -> Optional[str]:
         text, data_type = _delta_text(event)
         if data_type in REASONING_DELTA_EVENTS:
             # Forward whitespace too: paragraph breaks are part of the thinking.
@@ -280,9 +282,10 @@ class WebStreamObserver:
             # the usage rides the completed response, and the open reasoning
             # step is the one those tokens belong to.
             data = getattr(event, "data", None)
-            usage = getattr(data, "usage", None) or getattr(
-                getattr(data, "response", None), "usage", None
-            )
+            response = field_of(data, "response")
+            usage = field_of(data, "usage") or field_of(response, "usage")
+            if usage is not None and self._on_usage is not None:
+                self._on_usage(usage, str(field_of(response, "model") or ""), agent_key)
             self._recorder.record_usage(usage, parent_id=self._parent_id)
             self._recorder.end_reasoning(parent_id=self._parent_id)
         if not is_output_delta(data_type):

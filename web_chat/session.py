@@ -41,6 +41,7 @@ from typing import Any, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 
 from core.interruption import INTERRUPTED_TYPE, is_resumable
+from core.run_stream import field_of
 from core.steering import SteerMessage
 from core.tool_check import summarize
 from web_chat.attachments import AttachmentError, agent_message, normalize_images
@@ -85,6 +86,8 @@ class AgentTurn:
         self._factory: Any = None  # set once the turn knows where it runs
         self._resolution: Optional[Resolution] = None
         self._stop_requested = False
+        self.restart_paused = False
+        self.user_stopped = False
         #: How the turn ended: "answered", "interrupted", "error" or "stopped".
         self.outcome: Optional[str] = None
         self._answer_tail = ""  # the agent's latest words, for delivery decisions
@@ -96,12 +99,45 @@ class AgentTurn:
         self._recorder = TraceRecorder(self._queue.put_nowait, on_usage=self._check_token_budget)
         #: Whether the turn was already stopped for passing its token budget.
         self._budget_hit = False
+        self._usage_sequence = 0
         self._observer = WebStreamObserver(
             self._recorder,
             emit_token=self._token,
             reset_answer=lambda: self._queue.put_nowait({"type": "answer_reset"}),
             emit_image=lambda url: self._queue.put_nowait({"type": "image", "url": url}),
+            on_usage=self._capture_model_usage,
         )
+
+    def _capture_model_usage(self, usage: Any, model: str, agent_key: Optional[str]) -> None:
+        store = getattr(self._session.space, "usage", None)
+        if store is None:
+            return
+        provider = ""
+        resolution = self._resolution
+        if resolution is not None:
+            try:
+                agent = resolution.config.get_agent(agent_key or resolution.agent)
+                candidates = [resolution.config.get_model(key) for key in agent.model_keys()]
+                if model:
+                    matches = [candidate for candidate in candidates if candidate.name == model]
+                    providers = {candidate.provider for candidate in matches}
+                    provider = next(iter(providers)) if len(providers) == 1 else ""
+                elif len(candidates) == 1:
+                    model, provider = candidates[0].name, candidates[0].provider
+            except Exception:  # a missing config must not hide reported usage
+                pass
+        self._usage_sequence += 1
+        try:
+            store.record(
+                event_id=f"{self.run_id}:{self._usage_sequence}", user_id=self._session.space.user_id,
+                model=model, provider=provider,
+                tokens_in=int(field_of(usage, "input_tokens", "prompt_tokens") or 0),
+                tokens_out=int(field_of(usage, "output_tokens", "completion_tokens") or 0),
+                cached_in=int(field_of(field_of(usage, "input_tokens_details", "prompt_tokens_details"), "cached_tokens") or 0),
+                reasoning_out=int(field_of(field_of(usage, "output_tokens_details", "completion_tokens_details"), "reasoning_tokens") or 0),
+            )
+        except Exception:
+            logger.exception("Recording model token usage failed")
 
     @property
     def message(self) -> str:
@@ -183,6 +219,14 @@ class AgentTurn:
             return False
         self._stop_requested = True
         return self._factory.request_stop(self._session.context_id)
+
+    def pause_for_restart(self) -> None:
+        """Retry while preparing; never cancel a model response or a tool call."""
+        if self._stop_requested or self.user_stopped or self._factory is None:
+            return
+        if self._factory.request_stop(self._session.context_id):
+            self._stop_requested = True
+            self.restart_paused = True
 
     def _check_token_budget(self, tokens_in: int, tokens_out: int) -> None:
         """Stop this turn at the next step once it passed its token budget.
@@ -547,6 +591,11 @@ class ChatSession:
         if payload.get("action") == "attach":
             await self._attach()
             return
+        if getattr(self.space, "restart_pending", False):
+            await self.send({"type": "error", "content": "Server restart in progress. Please send this message again when it is ready."})
+            if not self._turns.is_claimed(self.context_id):
+                await self.send({"type": "done"})
+            return
         if payload.get("action") == "continue":
             await self._start(None, payload.get("system_key"), payload.get("agent_key"))
             return
@@ -652,7 +701,7 @@ class ChatSession:
         The queue moves on when the turn answered, or when it was stopped for a
         ``now`` message. After a Stop, a timeout or a failure the messages wait.
         """
-        if self._turns.is_claimed(self.context_id):
+        if getattr(self.space, "restart_pending", False) or self._turns.is_claimed(self.context_id):
             return
         queue = MessageQueue(self.manager, self.context_id)
         item = queue.next_queued()
@@ -692,6 +741,11 @@ class ChatSession:
             await self.send({"type": "done", "stopped": True})
             return
         turn, task = active
+        if turn.restart_paused and not turn.user_stopped and not now:
+            turn.user_stopped = True
+            await turn.announce({"type": "stopping"})
+            return
+        turn.user_stopped = True
         if not now and turn.request_stop():
             await turn.announce({"type": "stopping"})
             return
@@ -705,12 +759,17 @@ class ChatSession:
         *,
         images: list[str] | tuple[str, ...] = (),
         edit_of: Optional[str] = None,
+        restart_resume: bool = False,
     ) -> bool:
         """Start a turn; ``message`` None continues the interrupted one.
         Whether it started; a refusal was sent to the socket.
 
         ``edit_of`` marks the message as a new version of an edited one, sent
         into the branch made for it (POST .../branches)."""
+        if getattr(self.space, "restart_pending", False):
+            await self.send({"type": "error", "content": "Server restart in progress. Please try again shortly."})
+            await self.send({"type": "done"})
+            return False
         if self._turns.is_claimed(self.context_id):
             await self.send({"type": "busy", "content": "This conversation already has an active turn."})
             return False
@@ -726,7 +785,8 @@ class ChatSession:
             await self.send({"type": "done"})
             return False
         # Admitting counts the turn for the day: only a request that will run.
-        refusal = self.space.admit_turn()
+        # Continuing an already admitted turn must not charge a second daily turn.
+        refusal = None if restart_resume and message is None else self.space.admit_turn()
         if refusal is not None:
             await self.send({"type": "error", "content": refusal})
             await self.send({"type": "done"})

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import re
 import secrets
 import sys
@@ -139,7 +140,22 @@ def main() -> None:
     options = multi_user_options(deployment, args) if args.accounts else single_user_options(deployment, args)
     print(f"Open http://{args.host}:{args.port}/")
     proxy = {"forwarded_allow_ips": args.forwarded_allow_ips} if args.forwarded_allow_ips else {}
-    uvicorn.run(create_app(deployment, **options), host=args.host, port=args.port, **proxy)
+    restart_requested = False
+
+    def restart() -> None:
+        nonlocal restart_requested
+        restart_requested = True
+        runtime.should_exit = True
+
+    app = create_app(deployment, **options, restart_callback=restart)
+    runtime = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, **proxy))
+    runtime.run()
+    if not runtime.started:
+        raise SystemExit(3)  # Preserve uvicorn.run's startup-failure exit status.
+    if restart_requested:
+        # Lifespan shutdown closed SQLite/MCP/container resources first. Re-exec
+        # loads the new code with the same interpreter, arguments and service PID.
+        os.execv(sys.executable, [sys.executable, "-m", "web_chat", *sys.argv[1:]])
 
 
 def single_user_options(deployment, args: argparse.Namespace) -> dict:
@@ -148,25 +164,29 @@ def single_user_options(deployment, args: argparse.Namespace) -> dict:
     from web_chat.spaces import SpacePool
 
     from web_chat.system_activity import SystemActivity
+    from web_chat.usage import UsageStore
 
     action_review_token = secrets.token_urlsafe(32)
     print(f"Working directory: {deployment.config.get_working_directory()}")
     print(f"Action review token: {action_review_token}")
     records = Path(deployment.config.get_logs_directory())
     activity = SystemActivity(records / "system_activity.json")
+    usage = UsageStore(records / "usage.db")
     return {
         # The one user owns the server: they test the drafts.
         "spaces": (
             pool := SpacePool(
                 lambda user_id: UserSpace(
-                    deployment, user_id=user_id, activity=activity, admin=True,
+                    deployment, user_id=user_id, activity=activity, usage=usage, admin=True,
                     # What the system builder makes shows in every space once it is free.
                     on_systems_changed=lambda: pool.invalidate(),
                 )
             )
         ),
         "activity": activity,
+        "usage": usage,
         "submissions_dir": records / "system_submissions",
+        "restart_path": records / "server_restart.json",
         "identify": single_user(args.user_id),
         "action_review_token": action_review_token,
         "warm_user": args.user_id,
@@ -195,9 +215,12 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
                 "--trusted-users if every user may run commands on this machine."
             )
     from web_chat.system_activity import SystemActivity
+    from web_chat.usage import UsageStore
 
     data_dir = args.data_dir.expanduser().resolve()
     accounts = open_accounts(data_dir)
+    usage = UsageStore(data_dir / "usage.db")
+    usage.import_legacy(accounts.usage_history())
     users_dir = data_dir / "users"
     activity = SystemActivity(data_dir / "systems" / "activity.json")
 
@@ -211,6 +234,7 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
             require_isolation=not args.trusted_users,
             turn_counter=accounts,
             activity=activity,
+            usage=usage,
             # Drafts, admins-only systems and the system builder are for admins;
             # a role change applies when the space is next built.
             admin=bool((user := accounts.user(user_id)) and user.is_admin),
@@ -228,7 +252,9 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
         "warm_user": None,
         "reviews": open_reviews(deployment, data_dir / "reviews"),
         "activity": activity,
+        "usage": usage,
         "submissions_dir": data_dir / "systems" / "submissions",
+        "restart_path": data_dir / "server_restart.json",
     }
 
 

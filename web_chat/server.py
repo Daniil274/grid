@@ -23,9 +23,10 @@ import asyncio
 import hmac
 import logging
 from contextlib import asynccontextmanager, suppress
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Literal, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, WebSocket, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -56,6 +57,7 @@ INDEX_HTML = ROOT / "index.html"
 LOGIN_HTML = ROOT / "login.html"
 REVIEW_HTML = ROOT / "review.html"
 SYSTEMS_HTML = ROOT / "systems.html"
+USAGE_HTML = ROOT / "usage.html"
 
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
@@ -107,6 +109,9 @@ class WebChatServer:
         reviews: Optional[Any] = None,
         activity: Optional[Any] = None,
         submissions_dir: Optional[Path] = None,
+        restart_path: Optional[Path] = None,
+        restart_callback: Optional[Callable[[], None]] = None,
+        usage: Optional[Any] = None,
     ) -> None:
         """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
         accounts; without it ``identify`` decides, by default the single local
@@ -128,6 +133,24 @@ class WebChatServer:
         self._warm_user = warm_user
         self._sweeper: Optional[asyncio.Task] = None
         self.reviews = reviews
+        from web_chat.usage import UsageStore
+
+        self.usage = usage if usage is not None else UsageStore()
+        self._mutations = 0
+        from web_chat.restart import ServerRestart
+
+        def other_work() -> bool:
+            agents = self.reviews.agents if self.reviews is not None else None
+            return self._mutations > 0 or bool(agents is not None and agents.busy)
+
+        def may_resume(user_id: str) -> bool:
+            return self.auth is None or any(
+                account.user.id == user_id and not account.disabled for account in self.auth.accounts.accounts()
+            )
+
+        self.restart = ServerRestart(
+            spaces, restart_path, restart_callback, other_work=other_work, may_resume=may_resume,
+        )
         from web_chat.system_activity import SystemActivity
         from web_chat.system_hub import SubmissionStore, SystemHub
 
@@ -145,9 +168,22 @@ class WebChatServer:
 
         @self.app.middleware("http")
         async def security_headers(request: Request, call_next):
-            response = await call_next(request)
+            mutation = request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"}
+            maintenance_action = request.url.path == "/api/admin/server/restart" or (
+                self.restart.phase == "preparing" and request.url.path.startswith("/api/action-policy/reviews/")
+            )
+            if mutation and self.restart.pending and not maintenance_action:
+                response = JSONResponse({"detail": "Server restart in progress. Please try again shortly."}, status_code=503)
+            else:
+                self._mutations += int(mutation)
+                try:
+                    response = await call_next(request)
+                finally:
+                    self._mutations -= int(mutation)
             for name, value in SECURITY_HEADERS.items():
                 response.headers.setdefault(name, value)
+            if request.url.path in {"/api/server/status", "/api/admin/server"}:
+                response.headers["Cache-Control"] = "no-store"
             return response
 
         self._mount_static()
@@ -231,16 +267,19 @@ class WebChatServer:
                 space.schedule_warmup()
         self._sweeper = asyncio.get_running_loop().create_task(self._sweep_forever(), name="space-sweeper")
         try:
+            await self.restart.recover()
             yield
         finally:
             self._sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await self._sweeper
+            await self.restart.close()
             await self.spaces.close()
             if self.voice is not None:
                 self.voice.close()
             if self.reviews is not None and self.reviews.agents is not None:
                 await self.reviews.agents.close()
+            self.usage.close()
 
     async def _sweep_forever(self) -> None:
         """Periodic upkeep: idle spaces go, and with accounts, dead sessions."""
@@ -358,6 +397,12 @@ class WebChatServer:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(SYSTEMS_HTML)
 
+        @app.get("/usage", response_class=HTMLResponse)
+        async def usage_page(request: Request) -> Any:
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(USAGE_HTML)
+
         if self.reviews is not None:
 
             @app.get("/admin/review", response_class=HTMLResponse)
@@ -384,6 +429,50 @@ class WebChatServer:
     def _register_routes(self, api: APIRouter) -> None:
         current_user, current_space = self.current_user, self.current_space
         admin = admins_only(current_user)
+
+        @api.get("/api/usage")
+        async def token_usage(
+            start: Optional[date] = None, end: Optional[date] = None,
+            bucket: Literal["auto", "hour", "day", "week"] = "auto", model: Optional[str] = None,
+            scope: Literal["me", "all"] = "me", user: User = Depends(current_user),
+        ) -> JSONResponse:
+            if scope == "all" and not user.is_admin:
+                raise HTTPException(status_code=403, detail="Only admins may view server-wide usage.")
+            today = datetime.now(timezone.utc).date()
+            chosen = None
+            try:
+                if model is not None:
+                    import json
+
+                    chosen = json.loads(model)
+                    if not isinstance(chosen, list) or len(chosen) != 2 or not all(isinstance(value, str) for value in chosen):
+                        raise ValueError("Invalid model filter")
+                report = self.usage.report(
+                    user_id=None if scope == "all" else user.id, start=start or today - timedelta(days=6),
+                    end=end or today, bucket=bucket, model=tuple(chosen) if chosen is not None else None,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse({**report, "scope": scope, "can_view_all": user.is_admin}, headers={"Cache-Control": "no-store"})
+
+        @api.get("/api/server/status")
+        async def server_status() -> dict:
+            # Every signed-in browser can reconnect without seeing other users' work.
+            return {"instance_id": self.restart.instance_id, "phase": self.restart.phase}
+
+        @api.get("/api/admin/server", dependencies=[Depends(admin)])
+        async def admin_server_status() -> dict:
+            return self.restart.status()
+
+        @api.post("/api/admin/server/restart", dependencies=[Depends(admin)])
+        async def restart_server() -> JSONResponse:
+            try:
+                return JSONResponse(self.restart.request(), status_code=202)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except OSError as exc:
+                logger.exception("Restart checkpoint is not writable")
+                raise HTTPException(status_code=503, detail="Cannot save the restart checkpoint; server was not stopped.") from exc
 
         @api.get("/api/chat/bootstrap")
         async def bootstrap(

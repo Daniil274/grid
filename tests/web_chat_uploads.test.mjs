@@ -21,11 +21,27 @@ function composer(uploads = { enabled: true, max_file_mb: 25, max_files: 10 }) {
   label.nodeType = Node.TEXT_NODE;
   nodes.stopButton.append(label);
   const sent = [];
-  createComposer({ ...nodes, store: createStore({ streaming: false, uploads }),
+  const store = createStore({ streaming: false, uploads });
+  createComposer({ ...nodes, store,
     onSend: (...args) => sent.push(args), onStop: () => {}, onContinue: () => {} });
   const drop = (files) => root.listeners.drop[0]({ dataTransfer: { files }, preventDefault() {} });
-  return { ...nodes, sent, drop };
+  return { ...nodes, sent, drop, store };
 }
+
+test("a server restart preserves the unsent draft and blocks sending until ready", () => {
+  const ui = composer();
+  ui.input.value = "keep this draft";
+  ui.store.set({ restartPending: true, resumable: true });
+  assert.equal(ui.sendButton.disabled, true);
+  assert.equal(ui.continueButton.disabled, true);
+  ui.sendButton.click();
+  assert.equal(ui.input.value, "keep this draft");
+  assert.deepEqual(ui.sent, []);
+  ui.store.set({ restartPending: false });
+  assert.equal(ui.sendButton.disabled, false);
+  ui.sendButton.click();
+  assert.equal(ui.sent[0][0], "keep this draft");
+});
 
 test("uploaded files wait for the server and use its actual name and path in the message", async () => {
   const originalFetch = globalThis.fetch;

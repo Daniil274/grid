@@ -172,6 +172,9 @@ class Accounts:
         """Add a finished turn's tokens (input and output) to the user's day."""
         self._store.add_tokens(user_id, self._today(), tokens_in, tokens_out)
 
+    def usage_history(self) -> list[dict]:
+        return self._store.usage_history()
+
     def tokens_today(self, user_id: str) -> int:
         return self._store.tokens_on(user_id, self._today())
 

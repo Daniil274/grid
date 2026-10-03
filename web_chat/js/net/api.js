@@ -30,6 +30,9 @@ const json = (method, body) => ({
 });
 
 export const api = {
+  serverStatus: () => request("/api/server/status", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
+  adminServer: () => request("/api/admin/server", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
+  restartServer: () => request("/api/admin/server/restart", { method: "POST" }),
   bootstrap: () => request("/api/chat/bootstrap"),
   uploadFiles: (files) => {
     const body = new FormData();
@@ -86,6 +89,7 @@ export const api = {
   changePassword: (current, next) => request("/api/auth/password", json("POST", { current, new: next })),
   /** The signed-in user's own use of this server: today's and all-time turns and tokens. */
   usage: () => request("/api/auth/usage"),
+  usageReport: (query, options = {}) => request(`/api/usage?${new URLSearchParams(query)}`, { ...options, cache: "no-store" }),
   adminUsers: () => request("/api/admin/users"),
   reviews: () => request("/api/action-policy/reviews"),
   resolveReview: (id, decision) =>

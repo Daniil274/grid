@@ -1574,7 +1574,7 @@ class ContextManager:
             default=str,
         )
 
-    def _save_to_file(self) -> None:
+    def _save_to_file(self, *, strict: bool = False) -> None:
         """Write every context to the persistence file, atomically.
 
         The active context is re-encoded; the others reuse the JSON cached when
@@ -1582,6 +1582,8 @@ class ContextManager:
         file is replaced in one step: a crash leaves the previous version.
         """
         if self.read_only or not self.persist_path:
+            if strict:
+                raise RuntimeError("Conversation persistence is required for restart")
             return
         self._mark_changed(self._current_context_id)
         try:
@@ -1601,14 +1603,25 @@ class ContextManager:
             self.persist_path.parent.mkdir(parents=True, exist_ok=True)
             partial = self.persist_path.with_name(self.persist_path.name + ".tmp")
             partial.write_text(document, encoding="utf-8")
+            if strict:
+                with partial.open("rb") as saved:
+                    os.fsync(saved.fileno())
             os.replace(partial, self.persist_path)
+            if strict and os.name == "posix":
+                fd = os.open(self.persist_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
         except Exception as e:
+            if strict:
+                raise
             logger.error(f"Failed to save context to {self.persist_path}: {e}")
 
-    def save(self) -> None:
+    def save(self, *, strict: bool = False) -> None:
         """Persist the current state now."""
         with safe_lock(self._lock, timeout=5.0):
-            self._save_to_file()
+            self._save_to_file(strict=strict)
 
     def _load_from_file(self, auto_activate: bool = True, normalize_and_save: bool = True) -> None:
         """

@@ -126,6 +126,7 @@ class UserSpace:
         require_isolation: bool = False,
         turn_counter: Optional[TurnCounter] = None,
         activity: Optional[SystemActivity] = None,
+        usage: Optional[Any] = None,
         admin: bool = False,
         on_systems_changed: Optional[Callable[[], None]] = None,
     ) -> None:
@@ -152,6 +153,7 @@ class UserSpace:
         self.require_isolation = require_isolation
         self.turns = TurnBoard()
         self.activity = activity
+        self.usage = usage
         self.admin = admin
         self.on_systems_changed = on_systems_changed
         self.limits = (
