@@ -157,3 +157,24 @@ def agent_workspace(tmp_path):
     )
     with factory_path_context(factory):
         yield tmp_path
+
+
+def link(path, target, *, directory=False):
+    """Make *path* a link to *target*, as an agent in a container could.
+
+    Windows grants symbolic links only to administrators and developer mode;
+    a directory then gets a junction - the link any user can make there - and
+    a file link, which has no such stand-in, skips the test.
+    """
+    from pathlib import Path
+
+    try:
+        Path(path).symlink_to(target, target_is_directory=directory)
+    except OSError:
+        if os.name != "nt":
+            raise
+        if not directory:
+            pytest.skip("symbolic links to files need privileges on this Windows")
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(path))

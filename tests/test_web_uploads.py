@@ -10,6 +10,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from schemas.schemas import UploadsPolicy
+from tests.conftest import link
 from web_chat.uploads import (
     UploadError,
     open_in_workspace,
@@ -276,19 +277,21 @@ def test_symlinks_and_special_files_never_expose_the_host(upload_app, tmp_path):
     workspace = workspaces["alice"]
     secret = tmp_path / "secret.txt"
     secret.write_text("secret")
-    (workspace / "link.txt").symlink_to(secret)
-    (workspace / "directory").symlink_to(tmp_path, target_is_directory=True)
-    os.mkfifo(workspace / "pipe")
-    for path in [
-        "link.txt",
-        "directory/secret.txt",
-        "pipe",
-        "uploads",
-        "../secret.txt",
-    ]:
+    link(workspace / "directory", tmp_path, directory=True)
+    refused = ["directory/secret.txt", "uploads", "../secret.txt"]
+    try:
+        (workspace / "link.txt").symlink_to(secret)
+        refused.append("link.txt")
+    except OSError:
+        if os.name != "nt":  # Windows grants file links only with privileges
+            raise
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(workspace / "pipe")
+        refused.append("pipe")
+    for path in refused:
         with pytest.raises(UploadError):
             open_in_workspace(workspace, path)
-    assert client.get("/api/workspace/files/link.txt").status_code == 404
+    assert client.get("/api/workspace/files/directory/secret.txt").status_code == 404
 
 
 def test_upload_directory_cannot_be_a_symlink(upload_app, tmp_path):
@@ -297,7 +300,7 @@ def test_upload_directory_cannot_be_a_symlink(upload_app, tmp_path):
     workspace.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    (workspace / "uploads").symlink_to(outside, target_is_directory=True)
+    link(workspace / "uploads", outside, directory=True)
     response = client.post(
         "/api/workspace/uploads", files={"files": ("escape.txt", b"no")}
     )
