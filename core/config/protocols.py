@@ -207,8 +207,11 @@ class IConfig(Protocol):
         """Get maximum history size."""
         ...
 
-    def get_max_turns(self) -> int:
-        """Get maximum turns for agent execution."""
+    def get_max_turns(self, agent_key: Optional[str] = None) -> int:
+        """Maximum turns per run; 0 means no limit.
+
+        A per-agent ``max_turns`` wins over ``settings.max_turns``.
+        """
         ...
 
     def get_agent_timeout(self, agent_key: Optional[str] = None) -> int:

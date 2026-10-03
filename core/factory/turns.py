@@ -38,6 +38,7 @@ from core.factory.run_context import (
     RunProgress,
     TurnStopped,
     get_runner,
+    runner_max_turns,
     with_images,
 )
 from core.generated_images import ImageCollector, collecting, generated_so_far
@@ -222,7 +223,7 @@ class TurnRunner:
                     input=input_message,
                     context=run_ctx,
                     session=session,
-                    max_turns=self.config.get_max_turns(),
+                    max_turns=runner_max_turns(self.config.get_max_turns(agent_label)),
                     run_config=self._run_config(None),
                 )
                 try:
@@ -406,7 +407,7 @@ class TurnRunner:
         propagate for _run_with_retries to judge.
         """
         timeout = self.config.get_agent_timeout(agent_key)
-        max_turns = self.config.get_max_turns()
+        max_turns = self.config.get_max_turns(agent_key)
         control = run_ctx.run_control
         fragments: List[str] = []
         result: Any = None
@@ -445,7 +446,7 @@ class TurnRunner:
                         agent,
                         run_input,
                         context=run_ctx,
-                        max_turns=max_turns,
+                        max_turns=runner_max_turns(max_turns),
                         session=session,
                         run_config=self._run_config(agent_key, steering=steering, session=session),
                     )
@@ -467,7 +468,7 @@ class TurnRunner:
                         agent,
                         run_input,
                         context=run_ctx,
-                        max_turns=max_turns,
+                        max_turns=runner_max_turns(max_turns),
                         session=session,
                         run_config=self._run_config(agent_key),
                     )

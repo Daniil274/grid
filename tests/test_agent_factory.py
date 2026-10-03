@@ -508,3 +508,15 @@ class TestAgentFactory:
         
         # Should still clear caches despite exception
         assert len(factory._agent_sessions) == 0
+
+
+def test_runner_max_turns_zero_means_no_limit():
+    """0 is handed to the SDK runner as an infinite budget, not a literal 0."""
+    import math
+
+    from core.factory.run_context import runner_max_turns
+
+    assert runner_max_turns(0) == math.inf
+    assert runner_max_turns(5) == 5
+    # An infinite bound never trips the SDK's `current_turn > max_turns` check.
+    assert not (10_000 > runner_max_turns(0))

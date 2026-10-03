@@ -273,6 +273,32 @@ class TestConfig:
         assert config.get_agent_timeout("patient_agent") == 0
         assert config.get_agent_timeout() == config.config.settings.agent_timeout
 
+    def test_max_turns_resolution(self, config_file, sample_config):
+        """A per-agent max_turns wins over settings; 0 means no limit."""
+        config = Config(str(config_file))
+
+        # No per-agent override: settings win.
+        assert config.get_max_turns() == config.config.settings.max_turns
+        assert config.get_max_turns("nonexistent_agent") == config.config.settings.max_turns
+
+        # A per-agent override applies to that agent alone; 0 removes the limit.
+        sample_config["agents"]["patient_agent"] = {
+            "name": "Patient Agent",
+            "model": "gpt-4",
+            "tools": ["file_read"],
+            "base_prompt": "test_prompt",
+            "description": "Waits for its workers",
+            "max_turns": 0,
+        }
+        modified_config_file = config_file.parent / "max_turns_config.yaml"
+        with open(modified_config_file, 'w') as f:
+            yaml.dump(sample_config, f)
+
+        config = Config(str(modified_config_file))
+        assert config.get_max_turns("patient_agent") == 0
+        assert config.get_max_turns() == config.config.settings.max_turns
+        assert config.config.settings.max_turns == 5
+
     def test_platform_prompt_sections(self, config_file, sample_config):
         """A deployment can append prompt sections shown to every agent."""
         from unittest.mock import Mock

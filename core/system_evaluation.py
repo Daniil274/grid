@@ -162,7 +162,10 @@ async def run_scenario(access, snapshot: Path, scenario, *, token_limit: int, ca
                 if code:
                     raise ValueError("Cannot isolate sandbox network: " + err[-1000:])
                 config.config.settings.logs_directory = str(folder / "logs")
-                config.config.settings.max_turns = min(config.config.settings.max_turns, 50)
+                # Evaluation stays bounded even when the system asks for no
+                # limit (max_turns == 0), so the cap must win over "no limit".
+                budget = config.config.settings.max_turns
+                config.config.settings.max_turns = min(budget, 50) if budget > 0 else 50
                 factory = AgentFactory(
                     config=config, working_directory=str(workspace), container_id=name,
                     confine_tools=True, policy_config=access.catalog or access.base_config,

@@ -7,6 +7,7 @@ container, the policy state and the run's stop control.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
@@ -65,6 +66,14 @@ def with_images(text: str, images: List[str]) -> Union[str, List[Any]]:
         TextContent(type="text", text=text),
         *(ImageContent(type="image_url", image_url=ImageUrl(url=url)) for url in images),
     ]
+
+# The Agents SDK runner requires a numeric turn budget, so "no limit" (a
+# configured 0) becomes an infinite bound: every finite turn stays below it.
+UNLIMITED_TURNS = math.inf
+
+def runner_max_turns(configured: int) -> float:
+    """Turn budget to hand the SDK runner; 0 means no limit."""
+    return configured if configured > 0 else UNLIMITED_TURNS
 
 class TurnStopped(Exception):
     """A run that ended before its answer without failing: timeout, turn limit,

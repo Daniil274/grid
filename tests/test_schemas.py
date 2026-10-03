@@ -363,9 +363,11 @@ class TestSettings:
         with pytest.raises(ValidationError):
             Settings(max_history=1001)
         
-        # Invalid max_turns
+        # max_turns=0 is valid: it removes the turn limit.
+        assert Settings(max_turns=0).max_turns == 0
+
         with pytest.raises(ValidationError):
-            Settings(max_turns=0)
+            Settings(max_turns=-1)
         
         with pytest.raises(ValidationError):
             Settings(max_turns=301)

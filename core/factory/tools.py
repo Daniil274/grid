@@ -24,7 +24,7 @@ from agents.exceptions import (
 )
 
 from core.action_policy import delegated_state
-from core.factory.run_context import GridRunContext, get_runner
+from core.factory.run_context import GridRunContext, get_runner, runner_max_turns
 from core.interruption import StopRequested
 from core.run_stream import interrupted_run_report, run_output_text
 from schemas import AgentConfig, AgentExecution
@@ -668,7 +668,7 @@ class ToolAssembly:
                     input=enhanced_input,
                     context=sub_run_ctx,
                     session=session,
-                    max_turns=self.config.get_max_turns(),
+                    max_turns=runner_max_turns(self.config.get_max_turns(agent_key)),
                     run_config=self._run_config(agent_key),
                 )
                 control = sub_run_ctx.run_control

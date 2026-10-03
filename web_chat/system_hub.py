@@ -308,6 +308,7 @@ def blank_config(base: Config) -> str:
                 "model": model,
                 "description": "Coordinate execution and independent review of the user's task.",
                 "timeout": 0,  # No agent timeout: the coordinator must not be cut off mid-orchestration.
+                "max_turns": 0,  # No turn limit for the same reason.
                 "tools": ["call_worker", "call_reviewer"],
                 "custom_prompt": "Delegate execution to call_worker with inputs and acceptance criteria. "
                                  "Send the result and original criteria to call_reviewer. Return findings to "

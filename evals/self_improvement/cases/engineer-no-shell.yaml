@@ -11,8 +11,8 @@ request: |
   выполнять команды, хотя раньше выполнял. Разберись и почини.
 sabotage:
   - file: examples/coder/config.yaml
-    find: "name: \"Engineer\"\n    model: glm-latest\n    mcp_enabled: true\n    system_skills:\n      - beads\n      - codegraph\n    tools:\n      - bash_tool\n      - file_read"
-    replace: "name: \"Engineer\"\n    model: glm-latest\n    mcp_enabled: true\n    system_skills:\n      - beads\n      - codegraph\n    tools:\n      - file_read"
+    find: "name: \"Engineer\"\n    model: deepseek-flash-latest\n    # The engineer coordinates subagents, so it must not be cut off\n    # mid-orchestration: 0 disables its execution timeout and turn limit.\n    timeout: 0\n    max_turns: 0\n    mcp_enabled: true\n    system_skills:\n      - beads\n      - codegraph\n    tools:\n      - bash_tool\n      - file_read"
+    replace: "name: \"Engineer\"\n    model: deepseek-flash-latest\n    # The engineer coordinates subagents, so it must not be cut off\n    # mid-orchestration: 0 disables its execution timeout and turn limit.\n    timeout: 0\n    max_turns: 0\n    mcp_enabled: true\n    system_skills:\n      - beads\n      - codegraph\n    tools:\n      - file_read"
 locus:
   - file: examples/coder/config.yaml
     yaml_path: agents.engineer.tools

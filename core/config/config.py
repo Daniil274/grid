@@ -530,8 +530,16 @@ class Config:
         """Get maximum history size."""
         return self.config.settings.max_history
     
-    def get_max_turns(self) -> int:
-        """Get maximum turns limit for agents."""
+    def get_max_turns(self, agent_key: Optional[str] = None) -> int:
+        """Maximum turns per run; 0 means no limit.
+
+        A per-agent ``max_turns`` wins over ``settings.max_turns`` so a
+        coordinating agent can outlast the system-wide turn budget.
+        """
+        if agent_key is not None:
+            agent = self.config.agents.get(agent_key)
+            if agent is not None and agent.max_turns is not None:
+                return agent.max_turns
         return self.config.settings.max_turns
 
     def get_agent_timeout(self, agent_key: Optional[str] = None) -> int:

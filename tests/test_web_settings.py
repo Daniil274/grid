@@ -174,7 +174,7 @@ def test_an_invalid_config_is_not_written(catalog: Path) -> None:
     deployment = Deployment(routing_path=str(catalog))
     before = (catalog.parent / "writer" / "config.yaml").read_text(encoding="utf-8")
     config = deployment.config_dict("writer")
-    config["settings"]["max_turns"] = 0
+    config["settings"]["max_turns"] = -1
 
     with pytest.raises(ValueError):
         deployment.save_structured_config(config, "writer")

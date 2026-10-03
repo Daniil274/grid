@@ -129,6 +129,16 @@ class AgentConfig(BaseModel):
             "Unset falls back to settings.agent_timeout."
         ),
     )
+    max_turns: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=300,
+        description=(
+            "Turn limit for this agent alone; 0 removes the limit so a "
+            "coordinating agent cannot be cut off mid-orchestration. Unset "
+            "falls back to settings.max_turns."
+        ),
+    )
 
     @field_validator("model")
     @classmethod
@@ -211,7 +221,8 @@ class Settings(BaseModel):
     action_policy: ActionPolicyConfig = Field(default_factory=ActionPolicyConfig)
     default_agent: str = "assistant"
     max_history: int = Field(default=15, ge=1, le=1000)
-    max_turns: int = Field(default=10, ge=1, le=300)
+    # 0 removes the turn limit; per-agent `max_turns` overrides it.
+    max_turns: int = Field(default=10, ge=0, le=300)
     # 0 disables the agent execution timeout; per-agent `timeout` overrides it.
     agent_timeout: int = Field(default=300, ge=0, le=1800)
     debug: bool = False
