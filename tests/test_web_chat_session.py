@@ -714,3 +714,81 @@ async def test_the_decision_model_chooses_when_the_user_did_not():
     await wait_for(lambda: seen == ["build it", "stop, wrong branch"])
     await socket.incoming.put(None)
     await session
+
+
+def _completed_usage(tokens_in: int, tokens_out: int):
+    """A ``response.completed`` stream event carrying the model's usage."""
+    from agents import RawResponsesStreamEvent
+
+    usage = SimpleNamespace(input_tokens=tokens_in, output_tokens=tokens_out)
+    return RawResponsesStreamEvent(
+        data=SimpleNamespace(type='response.completed', response=SimpleNamespace(usage=usage))
+    )
+
+
+async def _drain_until(socket, kind):
+    events = []
+    async with asyncio.timeout(2):
+        while True:
+            value = await socket.outgoing.get()
+            events.append(value)
+            if value['type'] == kind:
+                return events
+
+
+@pytest.mark.asyncio
+async def test_a_turn_past_its_token_budget_stops_and_is_counted():
+    stopped, recorded = [], []
+
+    async def run(**kwargs):
+        kwargs['stream_observer'].handle_event(_completed_usage(80, 40))
+        return 'the answer'
+
+    space = space_for(run, request_stop=lambda context_id: stopped.append(context_id) or True)
+    space.limits = SimpleNamespace(token_budget=lambda: 100)
+    space.record_usage = lambda tokens_in, tokens_out: recorded.append((tokens_in, tokens_out))
+    socket = Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
+    await socket.incoming.put('{"message":"hello"}')
+
+    events = await _drain_until(socket, 'done')
+    done = events[-1]
+    steps = [event['step'] for event in events if event['type'] == 'step']
+
+    # The turn flagged the budget and asked the factory to stop it.
+    assert stopped == ['ctx']
+    assert any(
+        step['kind'] == 'error' and step['title'] == 'Token budget exceeded'
+        for step in steps
+    )
+    # 80 + 40 = 120 > 100: the tokens are counted even as the turn stops.
+    assert recorded == [(80, 40)]
+    assert done['tokens_in'] == 80 and done['tokens_out'] == 40
+
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_a_turn_inside_its_token_budget_runs_to_the_end():
+    stopped, recorded = [], []
+
+    async def run(**kwargs):
+        kwargs['stream_observer'].handle_event(_completed_usage(40, 30))
+        return 'the answer'
+
+    space = space_for(run, request_stop=lambda context_id: stopped.append(context_id) or True)
+    space.limits = SimpleNamespace(token_budget=lambda: 100)
+    space.record_usage = lambda tokens_in, tokens_out: recorded.append((tokens_in, tokens_out))
+    socket = Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
+    await socket.incoming.put('{"message":"hello"}')
+
+    done = await socket.event('done')
+
+    assert stopped == []
+    assert recorded == [(40, 30)]
+    assert done['tokens_in'] == 40 and done['tokens_out'] == 30
+
+    await socket.incoming.put(None)
+    await session

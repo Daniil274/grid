@@ -64,6 +64,11 @@ MIGRATIONS: tuple[str, ...] = (
         PRIMARY KEY (user_id, day)
     );
     """,
+    # 3: tokens spent per user and UTC day, for the token budgets.
+    """
+    ALTER TABLE usage ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE usage ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0;
+    """,
 )
 
 
@@ -236,6 +241,49 @@ class AccountStore:
                 user_id, day,
             )
             return True
+
+    def add_tokens(self, user_id: str, day: str, tokens_in: int, tokens_out: int) -> None:
+        """Add a finished turn's tokens to the user's day."""
+        self._write(
+            "INSERT INTO usage (user_id, day, turns, tokens_in, tokens_out) VALUES (?, ?, 0, ?, ?) "
+            "ON CONFLICT (user_id, day) DO UPDATE SET "
+            "tokens_in = tokens_in + excluded.tokens_in, tokens_out = tokens_out + excluded.tokens_out",
+            user_id, day, tokens_in, tokens_out,
+        )
+
+    def tokens_on(self, user_id: str, day: str) -> int:
+        """The tokens (input plus output) the user spent on *day*."""
+        row = self._one(
+            "SELECT tokens_in + tokens_out AS tokens FROM usage WHERE user_id = ? AND day = ?",
+            user_id, day,
+        )
+        return row["tokens"] if row else 0
+
+    def tokens_by_user(self, day: str) -> dict[str, int]:
+        """Every user's tokens (input plus output) spent on *day*."""
+        return {
+            row["user_id"]: row["tokens"]
+            for row in self._all(
+                "SELECT user_id, tokens_in + tokens_out AS tokens FROM usage WHERE day = ?", day
+            )
+        }
+
+    def usage_totals(self, user_id: str) -> tuple[int, int, int]:
+        """The user's all-time turns, prompt tokens and completion tokens."""
+        row = self._one(
+            "SELECT COALESCE(SUM(turns), 0) AS turns, COALESCE(SUM(tokens_in), 0) AS tokens_in, "
+            "COALESCE(SUM(tokens_out), 0) AS tokens_out FROM usage WHERE user_id = ?",
+            user_id,
+        )
+        return (row["turns"], row["tokens_in"], row["tokens_out"])
+
+    def usage_on(self, user_id: str, day: str) -> tuple[int, int, int]:
+        """The user's *day*: (turns, prompt tokens, completion tokens)."""
+        row = self._one(
+            "SELECT turns, tokens_in, tokens_out FROM usage WHERE user_id = ? AND day = ?",
+            user_id, day,
+        )
+        return (row["turns"], row["tokens_in"], row["tokens_out"]) if row else (0, 0, 0)
 
     # -- invites -----------------------------------------------------------------
     def add_invite(self, invite: InviteRecord, code_hash: str) -> None:

@@ -178,6 +178,30 @@ def test_an_admin_invites_and_disables_users(server, accounts):
     assert root.patch(f"/api/admin/users/{root.get('/api/auth/me').json()['id']}", json={"disabled": True}).status_code == 400
 
 
+def test_a_user_reads_their_own_token_usage(server, accounts):
+    alice_user = accounts.create_user("alice", PASSWORD)
+    alice = signed_in(server, "alice")
+    accounts.count_turn(alice_user.id, 10)
+    accounts.count_tokens(alice_user.id, 300, 200)
+
+    usage = alice.get("/api/auth/usage").json()
+
+    assert usage["today"] == {"turns": 1, "tokens_in": 300, "tokens_out": 200}
+    assert usage["total"] == {"turns": 1, "tokens_in": 300, "tokens_out": 200}
+
+
+def test_the_admin_sees_each_users_tokens_of_the_day(server, accounts):
+    accounts.create_user("root", PASSWORD, role="admin")
+    alice_user = accounts.create_user("alice", PASSWORD)
+    root = signed_in(server, "root")
+    accounts.count_turn(alice_user.id, 10)
+    accounts.count_tokens(alice_user.id, 40, 60)
+
+    listed = {user["username"]: user for user in root.get("/api/admin/users").json()}
+    assert listed["alice"]["turns_today"] == 1
+    assert listed["alice"]["tokens_today"] == 100
+
+
 def test_a_password_change_keeps_this_session_and_ends_the_others(server, accounts):
     accounts.create_user("alice", PASSWORD)
     here, elsewhere = signed_in(server, "alice"), signed_in(server, "alice")

@@ -67,12 +67,29 @@
 
 .rail__account {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
   padding: 8px 12px 8px 16px;
   border-top: 1px solid var(--line);
   color: var(--text-2);
   font-size: 13px;
+}
+
+/* The signed-in user's own use of this server, under the name: today's
+   turns and tokens, all-time after them. Empty until the first refresh. */
+.rail__accountUsage {
+  flex-basis: 100%;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail__accountUsage:empty {
+  display: none;
 }
 
 .rail__accountName {

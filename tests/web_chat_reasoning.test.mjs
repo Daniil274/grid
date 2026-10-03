@@ -133,3 +133,41 @@ test("traces stored before blocks existed still render flat", () => {
 
   assert.deepEqual(titles(topList(panel)), ["Agent", "general-purpose › bash_tool"]);
 });
+
+test("a step shows the tokens its own model responses spent", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("s1", { kind: "reasoning", title: "Thinking", tokens_in: 1200, tokens_out: 300 }),
+    step("s2", { title: "read_file", tokens_in: 100, tokens_out: 0 }),
+  ]);
+
+  const [thinking, read] = rows(topList(panel));
+  assert.equal(thinking.find("step__usage").textContent, "↑1.2k ↓300");
+  // An output-only step hides the arrow it has nothing for.
+  assert.equal(read.find("step__usage").textContent, "↑100");
+});
+
+test("a step that reported no tokens shows no usage", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([step("s1", { title: "read_file" })]);
+
+  assert.equal(rows(topList(panel))[0].find("step__usage").textContent, "");
+});
+
+test("the headline totals the tokens the turn spent", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("s1", { kind: "reasoning", title: "Thinking", tokens_in: 1000, tokens_out: 200 }),
+    step("s2", { kind: "message", title: "Answer", tokens_in: 500, tokens_out: 100 }),
+  ]);
+
+  assert.match(panel.el.find("reasoning__timer").textContent, /↑1\.5k ↓300/);
+});
+
+test("the server's own turn total is used when the steps didn't report one", () => {
+  const panel = createReasoningPanel();
+  panel.upsert(step("s1", { kind: "reasoning", title: "Thinking", status: "running", duration_ms: null }));
+  panel.finish(900, true, { tokensIn: 4200, tokensOut: 800 });
+
+  assert.match(panel.el.find("reasoning__timer").textContent, /↑4\.2k ↓800/);
+});

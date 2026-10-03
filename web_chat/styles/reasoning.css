@@ -212,6 +212,20 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The tokens a step's model responses spent, prompt up, completion down.
+   Quiet like timing: a number that's there when asked for, not a badge. */
+.step__usage {
+  flex-shrink: 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.step__usage:empty {
+  display: none;
+}
+
 .step__chevron {
   display: flex;
   flex-shrink: 0;

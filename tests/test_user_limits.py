@@ -34,13 +34,21 @@ def accounts(tmp_path, clock):
 
 
 class Counter:
-    def __init__(self, allow=True):
-        self.allow, self.counted = allow, 0
+    def __init__(self, allow=True, tokens=0):
+        self.allow, self.counted, self.tokens = allow, 0, tokens
+        self.recorded: list[tuple[int, int]] = []
 
     def count_turn(self, user_id, limit):
         if self.allow:
             self.counted += 1
         return self.allow
+
+    def count_tokens(self, user_id, tokens_in, tokens_out):
+        self.tokens += tokens_in + tokens_out
+        self.recorded.append((tokens_in, tokens_out))
+
+    def tokens_today(self, user_id):
+        return self.tokens
 
 
 # -- the rules -------------------------------------------------------------------
@@ -59,6 +67,30 @@ def test_a_turn_past_the_daily_limit_is_refused():
     limits = TurnLimits("u", lambda: UserLimitsPolicy(turns_per_day=5), Counter(allow=False))
 
     assert "today's 5 turns" in limits.admit(running=0)
+
+
+def test_a_turn_past_the_daily_token_limit_is_refused():
+    counter = Counter(tokens=900)
+    limits = TurnLimits("u", lambda: UserLimitsPolicy(tokens_per_day=1000), counter)
+
+    assert limits.admit(running=0) is None
+    counter.tokens = 1000
+    assert "1,000 tokens" in limits.admit(running=0)
+
+
+def test_without_a_daily_token_limit_tokens_are_not_consulted():
+    counter = Counter(tokens=10**9)
+    limits = TurnLimits("u", lambda: UserLimitsPolicy(), counter)
+
+    assert limits.admit(running=0) is None
+
+
+def test_the_per_turn_token_budget_is_exposed():
+    limits = TurnLimits("u", lambda: UserLimitsPolicy(max_tokens_per_turn=4096), Counter())
+    assert limits.token_budget() == 4096
+
+    limits = TurnLimits("u", lambda: UserLimitsPolicy(), Counter())
+    assert limits.token_budget() is None
 
 
 def test_the_policy_is_read_at_every_turn():
@@ -89,6 +121,40 @@ def test_the_count_starts_again_on_the_next_utc_day(accounts, clock):
     clock.now += 24 * 3600
 
     assert accounts.count_turn(user.id, 1)
+
+
+def test_tokens_are_accumulated_across_the_day(accounts):
+    user = accounts.create_user("alice", "correct horse battery")
+
+    accounts.count_tokens(user.id, 400, 200)
+    accounts.count_tokens(user.id, 300, 100)
+    accounts.count_tokens(user.id, 80, 20)
+    assert accounts.tokens_today(user.id) == 1100
+    assert accounts.accounts()[0].tokens_today == 1100
+
+
+def test_token_usage_is_reported_per_day_and_all_time(accounts, clock):
+    user = accounts.create_user("alice", "correct horse battery")
+    accounts.count_turn(user.id, 10)
+    accounts.count_tokens(user.id, 300, 200)
+
+    clock.now += 24 * 3600
+    accounts.count_turn(user.id, 10)
+    accounts.count_tokens(user.id, 40, 10)
+
+    today = accounts.usage_today(user.id)
+    assert today["tokens_in"] == 40 and today["tokens_out"] == 10
+    assert today["turns"] == 1
+    total = accounts.usage_totals(user.id)
+    assert total == {"turns": 2, "tokens_in": 340, "tokens_out": 210}
+
+
+def test_without_a_daily_token_limit_tokens_are_still_counted(accounts):
+    user = accounts.create_user("alice", "correct horse battery")
+
+    for _ in range(3):
+        accounts.count_tokens(user.id, 10, 5)
+    assert accounts.tokens_today(user.id) == 45
 
 
 def test_without_a_daily_limit_turns_are_still_counted(accounts):

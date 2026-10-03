@@ -84,6 +84,8 @@ export const api = {
     ),
   signOut: () => request("/api/auth/logout", { method: "POST" }),
   changePassword: (current, next) => request("/api/auth/password", json("POST", { current, new: next })),
+  /** The signed-in user's own use of this server: today's and all-time turns and tokens. */
+  usage: () => request("/api/auth/usage"),
   adminUsers: () => request("/api/admin/users"),
   reviews: () => request("/api/action-policy/reviews"),
   resolveReview: (id, decision) =>

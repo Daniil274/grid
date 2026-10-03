@@ -83,6 +83,7 @@ class Account:
     disabled: bool
     created_at: float
     turns_today: int = 0
+    tokens_today: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -92,6 +93,7 @@ class Account:
             "disabled": self.disabled,
             "created_at": self.created_at,
             "turns_today": self.turns_today,
+            "tokens_today": self.tokens_today,
         }
 
 
@@ -149,8 +151,13 @@ class Accounts:
         return self._store.count_users() > 0
 
     def accounts(self) -> list[Account]:
-        turns = self._store.turns_by_user(self._today())
-        return [Account(r.user, r.disabled, r.created_at, turns.get(r.user.id, 0)) for r in self._store.users()]
+        day = self._today()
+        turns = self._store.turns_by_user(day)
+        tokens = self._store.tokens_by_user(day)
+        return [
+            Account(r.user, r.disabled, r.created_at, turns.get(r.user.id, 0), tokens.get(r.user.id, 0))
+            for r in self._store.users()
+        ]
 
     # -- usage ---------------------------------------------------------------------
     def count_turn(self, user_id: str, limit: Optional[int]) -> bool:
@@ -160,6 +167,23 @@ class Accounts:
 
     def turns_today(self, user_id: str) -> int:
         return self._store.turns_on(user_id, self._today())
+
+    def count_tokens(self, user_id: str, tokens_in: int, tokens_out: int) -> None:
+        """Add a finished turn's tokens (input and output) to the user's day."""
+        self._store.add_tokens(user_id, self._today(), tokens_in, tokens_out)
+
+    def tokens_today(self, user_id: str) -> int:
+        return self._store.tokens_on(user_id, self._today())
+
+    def usage_today(self, user_id: str) -> dict[str, int]:
+        """The user's day so far: turns started and tokens spent (input, output)."""
+        turns, tokens_in, tokens_out = self._store.usage_on(user_id, self._today())
+        return {"turns": turns, "tokens_in": tokens_in, "tokens_out": tokens_out}
+
+    def usage_totals(self, user_id: str) -> dict[str, int]:
+        """The user's all-time turns started and tokens spent (input, output)."""
+        turns, tokens_in, tokens_out = self._store.usage_totals(user_id)
+        return {"turns": turns, "tokens_in": tokens_in, "tokens_out": tokens_out}
 
     def _today(self) -> str:
         return datetime.fromtimestamp(self._clock(), timezone.utc).date().isoformat()

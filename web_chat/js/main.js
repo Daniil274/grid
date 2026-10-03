@@ -10,6 +10,7 @@
 import { $, $$, h, icon } from "./lib/dom.js";
 import { createStore } from "./lib/store.js";
 import { api } from "./net/api.js";
+import { tokens } from "./lib/format.js";
 import { ChatController } from "./chat.js";
 import { AccountsDrawer } from "./accounts/admin.js";
 import { PasswordDrawer } from "./accounts/password.js";
@@ -346,6 +347,28 @@ async function boot() {
     // The timeline is the operator's local tool (grid-timeline), not the site's.
     $("#open-timeline").hidden = accounts;
   });
+
+  // The user's own use of this server - today's turns and tokens under the
+  // account name, all-time behind them - refreshed as each turn settles.
+  const accountUsage = $("#account-usage");
+  const accountUsageText = (usage) => {
+    const spent = (day) => (day?.tokens_in ?? 0) + (day?.tokens_out ?? 0);
+    const today = usage?.today ?? {};
+    const total = usage?.total ?? {};
+    const line = [`Today: ${today.turns ?? 0} turns · ${tokens(spent(today)) || "0"} tokens`];
+    if (spent(total) > 0) line.push(`${tokens(spent(total))} all-time`);
+    return line.join(" · ");
+  };
+  const refreshAccountUsage = async () => {
+    if (!store.get().accounts) return;
+    try {
+      accountUsage.textContent = accountUsageText(await api.usage());
+    } catch {
+      accountUsage.textContent = ""; // signed out, or the server said no
+    }
+  };
+  document.addEventListener("grid:turn-settled", refreshAccountUsage);
+  void refreshAccountUsage();
 
   store.subscribe(({ workspacePath, isolated, streaming }) => {
     const label = streaming ? "Working" : isolated ? "Container isolated" : "Local runtime";

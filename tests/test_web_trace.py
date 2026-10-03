@@ -487,3 +487,77 @@ def test_malformed_arguments_fall_back_to_flat_json():
     assert step["title"] == "Read file"
     # Formatter dropped the caption; the old summarize-based subtitle remains.
     assert step["subtitle"] == "not json"
+
+
+def completed(input_tokens: int, output_tokens: int) -> RawResponsesStreamEvent:
+    """A ``response.completed`` raw event carrying the model's usage report."""
+
+    usage = SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
+    return RawResponsesStreamEvent(
+        data=SimpleNamespace(type="response.completed", response=SimpleNamespace(usage=usage))
+    )
+
+
+def test_usage_lands_on_the_thinking_step_of_its_own_response():
+    harness = Harness()
+    harness.feed(
+        raw("response.reasoning_text.delta", "Let me check."),
+        completed(120, 30),
+    )
+
+    reasoning = [
+        step for step in harness.steps() if step["kind"] == StepKind.REASONING.value
+    ]
+    assert len(reasoning) == 1
+    assert reasoning[0]["tokens_in"] == 120
+    assert reasoning[0]["tokens_out"] == 30
+    # The same totals roll up to the turn.
+    assert harness.recorder.tokens_in == 120
+    assert harness.recorder.tokens_out == 30
+
+
+def test_usage_without_an_open_step_waits_for_the_next_one():
+    harness = Harness()
+    # A tool-calling model reports usage before its calls arrive, when no
+    # reasoning step is open: the tokens wait for the tool step that follows.
+    harness.feed(completed(10, 5), tool_called("read_file", "call-1", '{"path": "a.py"}'))
+
+    step = harness.steps()[0]
+    assert step["kind"] == StepKind.TOOL.value
+    assert step["tokens_in"] == 10
+    assert step["tokens_out"] == 5
+
+
+def test_usage_accepts_prompt_and_completion_aliases():
+    harness = Harness()
+    usage = SimpleNamespace(prompt_tokens=7, completion_tokens=3)
+    harness.recorder.record_usage(usage)
+
+    assert harness.recorder.tokens_in == 7
+    assert harness.recorder.tokens_out == 3
+
+
+def test_missing_usage_is_a_no_op():
+    harness = Harness()
+    harness.recorder.record_usage(None)
+    harness.recorder.record_usage(SimpleNamespace())
+
+    assert harness.recorder.tokens_in == 0
+    assert harness.recorder.tokens_out == 0
+    assert harness.steps() == []
+
+
+def test_usage_callback_fires_and_its_errors_never_break_accounting():
+    seen: list[tuple[int, int]] = []
+    recorder = TraceRecorder(lambda event: None, on_usage=lambda tin, tout: seen.append((tin, tout)))
+    recorder.record_usage(SimpleNamespace(input_tokens=3, output_tokens=4))
+    assert seen == [(3, 4)]
+
+    def boom(tokens_in: int, tokens_out: int) -> None:
+        raise RuntimeError("budget check blew up")
+
+    recorder = TraceRecorder(lambda event: None, on_usage=boom)
+    # A raising on_usage (e.g. a budget check) must not lose the count.
+    recorder.record_usage(SimpleNamespace(input_tokens=1, output_tokens=2))
+    assert recorder.tokens_in == 1
+    assert recorder.tokens_out == 2

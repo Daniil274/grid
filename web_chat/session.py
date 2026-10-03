@@ -93,7 +93,9 @@ class AgentTurn:
         self._log: list[dict[str, Any]] = []
         self._subscribers: set["ChatSession"] = {session}
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._recorder = TraceRecorder(self._queue.put_nowait)
+        self._recorder = TraceRecorder(self._queue.put_nowait, on_usage=self._check_token_budget)
+        #: Whether the turn was already stopped for passing its token budget.
+        self._budget_hit = False
         self._observer = WebStreamObserver(
             self._recorder,
             emit_token=self._token,
@@ -182,6 +184,35 @@ class AgentTurn:
         self._stop_requested = True
         return self._factory.request_stop(self._session.context_id)
 
+    def _check_token_budget(self, tokens_in: int, tokens_out: int) -> None:
+        """Stop this turn at the next step once it passed its token budget.
+
+        The recorder calls this after every model response with the turn's
+        tokens so far (web_chat.trace); the budget is the user_limits
+        ``max_tokens_per_turn``.
+        """
+        budget = self._token_budget()
+        if budget is None or self._budget_hit or tokens_in + tokens_out <= budget:
+            return
+        self._budget_hit = True
+        self._recorder.note(
+            StepKind.ERROR,
+            "Token budget exceeded",
+            subtitle=f"{tokens_in + tokens_out:,} tokens spent of the {budget:,} allowed for one turn",
+            body=(
+                "The turn stops at the next step; the work done so far stays. "
+                "Continue with a narrower request, or ask to raise "
+                "user_limits.max_tokens_per_turn."
+            ),
+            tone="warn",
+        )
+        self.request_stop()
+
+    def _token_budget(self) -> Optional[int]:
+        limits = getattr(self._session.space, "limits", None)
+        token_budget = getattr(limits, "token_budget", None)
+        return token_budget() if callable(token_budget) else None
+
     async def announce(self, event: dict[str, Any], *, also_to: Optional["ChatSession"] = None) -> None:
         """Send an event from outside the producer, to every viewer.
 
@@ -212,6 +243,7 @@ class AgentTurn:
                 if await self._announce_interruption() and self.outcome != "stopped":
                     self.outcome = "interrupted"
             self._record_activity()
+            self._record_usage()
             # Release before "done": the client may submit its next turn at once.
             self._session.release()
             with suppress(WebSocketDisconnect, RuntimeError, OSError):
@@ -219,6 +251,8 @@ class AgentTurn:
                     "type": "done",
                     "stopped": stopped,
                     "duration_ms": self._recorder.elapsed_ms,
+                    "tokens_in": self._recorder.tokens_in,
+                    "tokens_out": self._recorder.tokens_out,
                 })
 
     # -- producer ----------------------------------------------------------
@@ -433,6 +467,16 @@ class AgentTurn:
             )
         except Exception:
             logger.exception("Recording the turn's activity failed")
+
+    def _record_usage(self) -> None:
+        """Add the turn's tokens to the user's day (web_chat.limits)."""
+        record = getattr(self._session.space, "record_usage", None)
+        if record is None:
+            return
+        try:
+            record(self._recorder.tokens_in, self._recorder.tokens_out)
+        except Exception:
+            logger.exception("Recording the turn's token usage failed")
 
     def _persist_trace(self) -> None:
         # Only onto this turn's answer: a stopped turn stored none, and the other

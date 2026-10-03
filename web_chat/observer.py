@@ -276,6 +276,14 @@ class WebStreamObserver:
                 self._recorder.reasoning_delta(text, parent_id=self._parent_id)
             return None
         if data_type == "response.completed":
+            # Count this response's tokens before its thinking step closes:
+            # the usage rides the completed response, and the open reasoning
+            # step is the one those tokens belong to.
+            data = getattr(event, "data", None)
+            usage = getattr(data, "usage", None) or getattr(
+                getattr(data, "response", None), "usage", None
+            )
+            self._recorder.record_usage(usage, parent_id=self._parent_id)
             self._recorder.end_reasoning(parent_id=self._parent_id)
         if not is_output_delta(data_type):
             # Tool call arguments stream as deltas of their own; they belong to

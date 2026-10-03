@@ -12,6 +12,7 @@
 import { h, replace } from "../lib/dom.js";
 import { api } from "../net/api.js";
 import { copyText } from "../ui/toast.js";
+import { tokens } from "../lib/format.js";
 
 const when = (seconds) => new Date(seconds * 1000).toLocaleString();
 
@@ -119,7 +120,7 @@ export class AccountsDrawer {
       h(
         "table.adminTable",
         {},
-        h("thead", {}, h("tr", {}, ["User", "Role", "State", "Turns today", ""].map((title) => h("th", { text: title })))),
+        h("thead", {}, h("tr", {}, ["User", "Role", "State", "Turns today", "Tokens today", ""].map((title) => h("th", { text: title })))),
         h(
           "tbody",
           {},
@@ -132,6 +133,7 @@ export class AccountsDrawer {
               h("td", { text: user.role }),
               h("td", { text: user.disabled ? "disabled" : "active" }),
               h("td", { text: String(user.turns_today ?? 0) }),
+              h("td", { text: tokens(user.tokens_today ?? 0) || "0" }),
               h(
                 "td.adminTable__actions",
                 {},

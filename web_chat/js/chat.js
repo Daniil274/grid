@@ -454,14 +454,14 @@ export class ChatController {
         turn.failed = true;
         message.setFailed(content);
       })
-      .on("done", ({ duration_ms: durationMs, stopped, detached }) => {
+      .on("done", ({ duration_ms: durationMs, stopped, detached, tokens_in: tokensIn, tokens_out: tokensOut }) => {
         if (detached) {
           // The turn finished before we could attach: show what was stored.
           turn.detached = true;
           this._settle(turn);
           return;
         }
-        message.reasoning.finish(durationMs, this._transcript.isFollowing());
+        message.reasoning.finish(durationMs, this._transcript.isFollowing(), { tokensIn: tokensIn ?? 0, tokensOut: tokensOut ?? 0 });
         this._settle(turn);
         if (!turn.failed && !stopped && !message.text) {
           // The run ended on tool calls with no closing message. The trace above
@@ -487,6 +487,8 @@ export class ChatController {
     this._connection = null;
     this._activeTurn = null;
     turn.onSettled?.();
+    // The user's own counts may have moved; the page refreshes its badge.
+    document.dispatchEvent(new CustomEvent("grid:turn-settled"));
     this._syncResumable();
     void this._refreshConversations();
     // A failed turn stores no answer, so reconciling would re-render the

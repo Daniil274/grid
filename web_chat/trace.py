@@ -36,6 +36,7 @@ from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlparse
 
 from core.context import is_tool_result  # noqa: F401 - part of this module's API
+from core.run_stream import field_of
 
 #: Longest tool payload kept in a step; the UI shows the head and says so.
 DETAIL_LIMIT = 4000
@@ -97,6 +98,8 @@ class Step:
     policy: Optional[dict[str, Any]] = None
     parent_id: Optional[str] = None  # the ``agent`` step this one runs under
     tool: str = ""  # the tool a ``tool`` or ``agent`` step called, as titled
+    tokens_in: int = 0  # prompt tokens of the model responses this step spent
+    tokens_out: int = 0  # completion tokens of the model responses this step spent
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -114,6 +117,8 @@ class Step:
             "policy": self.policy,
             "parent_id": self.parent_id,
             "tool": self.tool,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
         }
 
 
@@ -209,23 +214,46 @@ class TraceRecorder:
         emit: Callable[[dict[str, Any]], None],
         *,
         clock: Callable[[], float] = time.monotonic,
+        on_usage: Optional[Callable[[int, int], None]] = None,
     ) -> None:
         self._emit = emit
         self._clock = clock
+        self._on_usage = on_usage
         self._origin = clock()
         self._ids = itertools.count(1)
         self._steps: dict[str, Step] = {}
         # One live thinking step per agent: a sub-agent thinks alongside its
         # caller (and its siblings), keyed by the ``agent`` step it runs under.
         self._open_reasoning: dict[Optional[str], Step] = {}
+        # Tokens of a completed response that named no step yet, waiting for
+        # the step its response opens next (a model's tool calls stream as
+        # items right after its response completes).
+        self._pending_usage: dict[Optional[str], tuple[int, int]] = {}
+        self._tokens_in = 0
+        self._tokens_out = 0
 
     @property
     def elapsed_ms(self) -> int:
         return int((self._clock() - self._origin) * 1000)
 
+    @property
+    def tokens_in(self) -> int:
+        """The turn's prompt tokens so far."""
+        return self._tokens_in
+
+    @property
+    def tokens_out(self) -> int:
+        """The turn's completion tokens so far."""
+        return self._tokens_out
+
     # -- step lifecycle ----------------------------------------------------
     def open(self, kind: StepKind, title: str, **fields: Any) -> Step:
         """Announce a step that is still in flight."""
+        parent_id = fields.get("parent_id")
+        pending = self._pending_usage.pop(parent_id, None)
+        if pending:
+            fields["tokens_in"] = fields.get("tokens_in", 0) + pending[0]
+            fields["tokens_out"] = fields.get("tokens_out", 0) + pending[1]
         step = Step(
             id=f"s{next(self._ids)}",
             kind=kind,
@@ -274,6 +302,39 @@ class TraceRecorder:
             self._open_reasoning[parent_id] = step
         step.body += delta
         self._emit({"type": "reasoning", "id": step.id, "delta": delta})
+
+    def record_usage(self, usage: Any, *, parent_id: Optional[str] = None) -> None:
+        """Count one model response's tokens: the turn's total, always, and the
+        step that response lived in, when it has one to name.
+
+        ``usage`` is the completed response's usage object (or dict). The
+        tokens go to that parent's open reasoning step - thinking streams
+        before the response completes - or, when the response opened none, to
+        the step that opens next under the same parent: a response's tool
+        calls stream as items right after it completes. A response that opens
+        no step at all (the final answer) stays in the turn's total, which the
+        ``done`` frame carries.
+        """
+        tokens_in = int(field_of(usage, "input_tokens", "prompt_tokens") or 0)
+        tokens_out = int(field_of(usage, "output_tokens", "completion_tokens") or 0)
+        if not tokens_in and not tokens_out:
+            return
+        self._tokens_in += tokens_in
+        self._tokens_out += tokens_out
+        if self._on_usage is not None:
+            try:
+                self._on_usage(self._tokens_in, self._tokens_out)
+            except Exception:  # noqa: BLE001 - accounting must never break a run
+                pass
+        step = self._open_reasoning.get(parent_id)
+        if step is not None:
+            step.tokens_in += tokens_in
+            step.tokens_out += tokens_out
+            return
+        held = self._pending_usage.get(parent_id)
+        self._pending_usage[parent_id] = (
+            (held[0] + tokens_in, held[1] + tokens_out) if held else (tokens_in, tokens_out)
+        )
 
     def end_reasoning(self, *, parent_id: Optional[str] = None) -> None:
         """Close an agent's live reasoning step, if any: the agent moved on."""

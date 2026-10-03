@@ -157,6 +157,8 @@ class UserSpace:
         self.limits = (
             TurnLimits(user_id, lambda: deployment.user_limits, turn_counter) if turn_counter is not None else None
         )
+        #: The accounts service this space counts its user's use through.
+        self.turn_counter = turn_counter
 
         self._lock = asyncio.Lock()
         self._prepared: set[tuple[str, str]] = set()
@@ -470,6 +472,15 @@ class UserSpace:
         if self.limits is None:
             return None
         return self.limits.admit(self.turns.claimed_count)
+
+    def record_usage(self, tokens_in: int, tokens_out: int) -> None:
+        """Add a finished turn's tokens to the user's day (web_chat.limits)."""
+        if self.turn_counter is None or not (tokens_in or tokens_out):
+            return
+        try:
+            self.turn_counter.count_tokens(self.user_id, tokens_in, tokens_out)
+        except Exception:
+            logger.exception("Adding the user's token usage for the day failed")
 
     # -- personal agents -----------------------------------------------------
     def change_personal_agents(self, edit: Callable[[PersonalAgents], T]) -> T:

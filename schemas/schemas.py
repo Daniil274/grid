@@ -337,6 +337,16 @@ class UserLimitsPolicy(BaseModel):
     turns_per_day: Optional[int] = Field(
         default=None, ge=1, description="Turns one user may start per UTC day; None for no daily limit"
     )
+    tokens_per_day: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Model tokens (input plus output) one user's turns may spend per UTC day; None for no limit",
+    )
+    max_tokens_per_turn: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Model tokens (input plus output) one turn may spend; a turn past it stops at its next step",
+    )
 
 
 class ReviewPolicy(BaseModel):

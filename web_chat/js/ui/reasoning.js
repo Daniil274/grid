@@ -23,10 +23,18 @@
  */
 
 import { h, icon, replace } from "../lib/dom.js";
-import { duration, plural } from "../lib/format.js";
+import { duration, plural, tokens } from "../lib/format.js";
 import { renderMarkdown } from "../lib/markdown.js";
 import { ICONS } from "./icons.js";
 import { copyText } from "./toast.js";
+
+/** The tokens a step spent, prompt first, completion second; "" when none. */
+const usageText = (tokensIn, tokensOut) => {
+  const parts = [];
+  if (tokensIn > 0) parts.push(`↑${tokens(tokensIn)}`);
+  if (tokensOut > 0) parts.push(`↓${tokens(tokensOut)}`);
+  return parts.join(" ");
+};
 
 /** Steps whose body is prose the reader should see without clicking. */
 const INLINE_BODY_KINDS = new Set(["reasoning", "message"]);
@@ -83,6 +91,7 @@ function stepHead(step) {
     title: h("span.step__title", { text: step.title }),
     subtitle: h("span.step__subtitle"),
     policy: h("span.step__policy", { hidden: true }),
+    usage: h("span.step__usage"),
     timing: h("span.step__timing"),
   };
   parts.head = h(
@@ -91,10 +100,16 @@ function stepHead(step) {
     parts.glyph,
     h("span.step__label", {}, parts.title, parts.subtitle),
     parts.policy,
+    parts.usage,
     parts.timing,
     h("span.step__chevron", {}, icon(ICONS.chevron, { size: 14 })),
   );
   return parts;
+}
+
+/** The tokens a step's model responses spent, when it spent any. */
+function applyUsage(usage, next) {
+  usage.textContent = usageText(next.tokens_in, next.tokens_out);
 }
 
 function applyPolicy(policy, next) {
@@ -128,7 +143,7 @@ function disclosure(root, head) {
  */
 function createStepRow(step) {
   const inlineBody = INLINE_BODY_KINDS.has(step.kind);
-  const { head, title, subtitle, policy, timing } = stepHead(step);
+  const { head, title, subtitle, policy, usage, timing } = stepHead(step);
   const detail = h("div.step__detail");
   const refs = h("div.step__refsSlot");
   const body = inlineBody ? h("div.step__prose") : null;
@@ -156,6 +171,7 @@ function createStepRow(step) {
     // Reasoning has no summary until it lands; a running call keeps its arguments.
     subtitle.textContent = inlineBody && next.status === "running" ? "" : next.subtitle || "";
     applyPolicy(policy, next);
+    applyUsage(usage, next);
     timing.textContent = next.duration_ms == null ? "" : duration(next.duration_ms);
     replace(refs, refsRow(next.refs));
     if (body && next.status !== "running") {
@@ -216,7 +232,7 @@ function taskText(detail) {
  * @param {() => number} turnStart - when the turn began, for a live duration.
  */
 function createAgentRow(step, turnStart) {
-  const { head, title, subtitle, policy, timing } = stepHead(step);
+  const { head, title, subtitle, policy, usage, timing } = stepHead(step);
   const timeline = createTimeline(h("ol.agent__steps"));
   const task = h("div.agent__task");
   const report = h("div.agent__report");
@@ -248,6 +264,7 @@ function createAgentRow(step, turnStart) {
     root.dataset.tone = next.tone || "neutral";
     title.textContent = next.title;
     applyPolicy(policy, next);
+    applyUsage(usage, next);
     if (next.duration_ms != null) timing.textContent = duration(next.duration_ms);
     replace(refs, refsRow(next.refs));
     const asked = taskText(next.detail);
@@ -308,6 +325,7 @@ export function createReasoningPanel() {
   let ticker = null;
   let pinnedOpen = false; // the reader opened or closed it; stop auto-managing
   let totalMs = null;
+  let totalUsage = null; // the turn's tokens (input, output), when it reported them
 
   const setExpanded = (expanded) => {
     root.classList.toggle("is-expanded", expanded);
@@ -332,7 +350,10 @@ export function createReasoningPanel() {
     const count = top.size;
     if (!count) return;
     headline.textContent = totalMs == null ? plural(count, "step") : `Worked for ${duration(totalMs)}`;
-    timer.textContent = totalMs == null ? "" : `· ${plural(count, "step")}`;
+    const trailing = [];
+    if (totalMs != null) trailing.push(`· ${plural(count, "step")}`);
+    if (totalUsage) trailing.push(`· ${usageText(totalUsage.tokensIn, totalUsage.tokensOut)}`);
+    timer.textContent = trailing.join(" ");
   };
 
   /** The block a step belongs in: its sub-agent's, or the top when unknown. */
@@ -357,6 +378,7 @@ export function createReasoningPanel() {
       running = true;
       startedAt = Date.now() - elapsedMs;
       totalMs = null;
+      totalUsage = null;
       pinnedOpen = false;
       root.hidden = false;
       root.dataset.state = "running";
@@ -405,12 +427,14 @@ export function createReasoningPanel() {
 
     /** The turn ended: settle the headline and step back out of the way.
      * Idempotent - both `done` and the socket closing settle the same turn. */
-    finish(durationMs, autoCollapse = true) {
+    finish(durationMs, autoCollapse = true, usage = null) {
       if (!running && totalMs != null) return;
       running = false;
       clearInterval(ticker);
       ticker = null;
       totalMs = durationMs ?? Date.now() - startedAt;
+      // The server's own count of the turn's tokens, when it said them.
+      if (usage && (usage.tokensIn || usage.tokensOut)) totalUsage = usage;
       root.dataset.state = "idle";
       root.hidden = index.size === 0;
       for (const { row } of index.values()) row.settle();
@@ -423,7 +447,14 @@ export function createReasoningPanel() {
       if (!steps?.length) return;
       for (const step of steps) this.upsert(step);
       // The last step listed may be a short one inside a block that ran on.
-      this.finish(Math.max(...steps.map((step) => (step.at_ms ?? 0) + (step.duration_ms ?? 0))));
+      // A block's children are counted inside it, not beside it.
+      const ids = new Set(steps.map((step) => step.id));
+      const outermost = steps.filter((step) => !step.parent_id || !ids.has(step.parent_id));
+      const spent = (key) => outermost.reduce((total, step) => total + (Number(step[key]) || 0), 0);
+      this.finish(Math.max(...steps.map((step) => (step.at_ms ?? 0) + (step.duration_ms ?? 0))), true, {
+        tokensIn: spent("tokens_in"),
+        tokensOut: spent("tokens_out"),
+      });
       setExpanded(false);
     },
   };

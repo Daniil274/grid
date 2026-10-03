@@ -11,6 +11,7 @@ Routes::
     POST /api/auth/register   {invite, username, password}  -> sets the cookie
     POST /api/auth/logout                                    -> clears it
     GET  /api/auth/me
+    GET  /api/auth/usage
     POST /api/auth/password   {current, new}
 
     GET    /api/admin/users              (admins)
@@ -74,6 +75,14 @@ class InviteRequest(BaseModel):
 
 def user_payload(user: User) -> dict[str, Any]:
     return {"id": user.id, "username": user.username, "role": user.role}
+
+
+def usage_payload(accounts: Accounts, user: User) -> dict[str, Any]:
+    """The user's own use of this server: today's and all-time turns and tokens."""
+    return {
+        "today": accounts.usage_today(user.id),
+        "total": accounts.usage_totals(user.id),
+    }
 
 
 class SessionAuth:
@@ -192,7 +201,12 @@ class SessionAuth:
 
         @signed_in.get("/me")
         async def me(user: User = Depends(current_user)) -> JSONResponse:
-            return JSONResponse(user_payload(user))
+            return JSONResponse({**user_payload(user), "usage": usage_payload(self.accounts, user)})
+
+        @signed_in.get("/usage")
+        async def usage(user: User = Depends(current_user)) -> JSONResponse:
+            """The signed-in user's own stats; refreshed by the client after every turn."""
+            return JSONResponse(usage_payload(self.accounts, user))
 
         @signed_in.post("/password")
         async def change_password(
