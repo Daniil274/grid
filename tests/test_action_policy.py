@@ -213,6 +213,24 @@ async def test_denied_call_is_blocked_and_reported_to_the_agent():
     ]
 
 
+async def test_a_denied_call_keeps_the_agent_working_on_the_task():
+    # "Do not work around the policy" alone made agents stop using tools at all.
+    gate, _, _, ctx = setup_gate(("deny", "deny"))
+    blocked = json.loads(await call(gate, ctx))
+    assert blocked["run_stopped"] is False
+    step = blocked["next_step"]
+    assert "outside the user's task" in step
+    assert "Do not repeat it" in step
+    assert "judged on their own" in step and "go on with the work the task needs" in step
+
+
+async def test_a_stopped_run_is_told_no_tool_will_run():
+    gate, _, _, ctx = setup_gate(("deny", "allow"), max_denials_per_run=1)
+    blocked = json.loads(await call(gate, ctx))
+    assert blocked["run_stopped"] is True
+    assert "no further tool calls will run" in blocked["next_step"]
+
+
 async def test_chain_verdict_alone_holds_the_call_for_the_host():
     # The call itself passed; a deny of the run's history cannot be undone by
     # the agent, so it is held for review instead of refusing the turn.

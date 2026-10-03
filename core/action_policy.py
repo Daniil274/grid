@@ -311,6 +311,39 @@ def _objected(verdicts: dict | None) -> tuple[str, ...]:
     return tuple(name for name, value in (verdicts or {}).items() if value != "allow")
 
 
+#: What every blocked call that leaves the run going tells the agent. Probing
+#: the gate - the same target by another tool, path or wording - reads as
+#: drift to the chain check; ordinary work on the task does not, and an agent
+#: told only "do not work around the policy" stops doing that work too.
+_KEEP_WORKING = (
+    "Do not repeat it or reach the same target another way: another tool, path "
+    "or wording for it is the same attempt. Your other calls are judged on their "
+    "own, so go on with the work the task needs and name the blocked step in "
+    "your final report."
+)
+
+
+def _next_step_after_block(halted: bool, verdicts: dict | None) -> str:
+    """What the agent should do after a blocked call, from why it was blocked."""
+    if halted:
+        return (
+            "This call did not run, and the run has used up its blocked calls: "
+            "no further tool calls will run. Write your final report from what "
+            "you have and name the blocked steps."
+        )
+    verdicts = verdicts or {}
+    if verdicts.get("action") == "allow" and verdicts.get("chain") != "allow":
+        return (
+            "This call itself was judged within the task; the policy questions "
+            "the run's earlier actions, so other calls in this run may be held "
+            "the same way until the host reviews them. Finish what you can "
+            "without tool calls and name the blocked steps in your final report."
+        )
+    if verdicts.get("action") not in (None, "allow"):
+        return "This call did not run: the policy judged it outside the user's task. " + _KEEP_WORKING
+    return "This call did not run. " + _KEEP_WORKING
+
+
 def merge(verdicts: dict) -> str:
     """The strictest verdict wins; a call executes only when nothing objects."""
     values = set(verdicts.values())
@@ -600,13 +633,7 @@ class ActionGate:
             "status": "blocked",
             "rule": rule,
             "run_stopped": run.halted,
-            # Probing the gate reads as drift to the chain check and blocks the
-            # rest of the run, so the agent is told to go on with the task.
-            "next_step": (
-                "Do not probe or work around the policy. Continue with the other "
-                "steps the task needs, and name the blocked step in your final "
-                "report; review requires the host."
-            ),
+            "next_step": _next_step_after_block(run.halted, verdicts),
         }
         if approval_id is not None:
             payload["approval_id"] = approval_id
@@ -616,15 +643,6 @@ class ActionGate:
             # keeps issuing calls that are blocked for the same reason.
             payload["verdicts"] = dict(verdicts)
             payload["objected"] = list(_objected(verdicts))
-            if verdicts.get("action") == "allow" and verdicts.get("chain") != "allow":
-                payload["next_step"] = (
-                    "This call itself was judged within the task; the policy "
-                    "questions the run's earlier actions, so other calls in this "
-                    "run may be held the same way until the host reviews them. "
-                    "Do not probe or work around the policy. Finish what you "
-                    "can without tool calls and name the blocked steps in your "
-                    "final report."
-                )
         if rule == "policy_unavailable":
             payload["infrastructure_error"] = True
             payload["next_step"] = (
