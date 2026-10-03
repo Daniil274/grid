@@ -146,6 +146,33 @@ async def test_an_empty_answer_says_so(factory):
     assert factory.context_manager.pending_interruption(factory.context_manager.get_current_context_id())
 
 
+def cut_off(output_tokens):
+    """A run whose last response filled its output budget with thinking."""
+    async def reply():
+        usage = SimpleNamespace(output_tokens=output_tokens)
+        return SimpleNamespace(final_output="", new_items=[], raw_responses=[SimpleNamespace(usage=usage)])
+
+    return reply
+
+
+async def test_an_answer_spent_on_thinking_names_the_limit(factory):
+    limit = factory.config.get_model("m").max_tokens
+    runner = ScriptedRunner(cut_off(limit), cut_off(limit))
+    with use(runner):
+        answer = await factory.run_agent("worker", "Design the system")
+
+    assert len(runner.calls) == 2  # retried once, like any missing answer
+    assert f"answer budget (max_tokens {limit}) on reasoning" in answer
+    assert "raise the model's max_tokens or lower its reasoning effort" in answer
+
+
+async def test_a_short_empty_answer_is_not_called_a_spent_budget(factory):
+    with use(ScriptedRunner(cut_off(12), cut_off(12))):
+        answer = await factory.run_agent("worker", "Go")
+    assert "Model returned no final written report" in answer
+    assert "answer budget" not in answer
+
+
 async def test_empty_answer_recovers_in_same_session(factory):
     runner = ScriptedRunner("", "Verified result.")
     with use(runner):
