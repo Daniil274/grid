@@ -50,7 +50,7 @@ class ModelConfig(BaseModel):
     provider: str
     policy_api: Literal["decisions", "chat"] = "decisions"
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=4000, ge=1, le=100000)
+    max_tokens: int = Field(default=4000, ge=1, le=1_000_000)
     context_window: int = Field(
         default=128000, ge=1024,
         description="Model context window size in tokens. Used for auto-compact."
@@ -91,6 +91,15 @@ class ModelConfig(BaseModel):
     Moonshot AI (kimi) that enable thinking by default and reject requests where
     reasoning_content is missing from the conversation history.
     """
+
+    @model_validator(mode="after")
+    def _answer_fits_the_window(self) -> "ModelConfig":
+        # The answer shares the window with the request (core.compact reserves it).
+        if self.max_tokens >= self.context_window:
+            raise ValueError(
+                f"max_tokens ({self.max_tokens}) must be below context_window ({self.context_window})"
+            )
+        return self
 
 
 class ToolConfig(BaseModel):

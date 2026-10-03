@@ -94,8 +94,8 @@ models:
     name: "~z-ai/glm-latest"
     provider: "openrouter"
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 128000
+    context_window: 262144
     description: "Latest GLM via OpenRouter (currently GLM-5.3)"
     streaming_enabled: true
     preserve_reasoning_content: true
@@ -106,8 +106,8 @@ models:
     name: "deepseek-v4.1-flash"
     provider: "opencode"
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 384000
+    context_window: 1000000
     description: "DeepSeek V4.1 Flash via OpenCode Go"
     streaming_enabled: true
     preserve_reasoning_content: true
@@ -118,8 +118,8 @@ models:
     name: "glm-5.3-flash"
     provider: "opencode"
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 131072
+    context_window: 1000000
     description: "GLM 5.3 Flash via OpenCode Go"
     streaming_enabled: true
     preserve_reasoning_content: true
@@ -131,8 +131,8 @@ models:
     name: x-ai/grok-4.7
     provider: openrouter
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 128000
+    context_window: 500000
     description: "Grok 4.7"
     streaming_enabled: true
     preserve_reasoning_content: true
@@ -141,14 +141,14 @@ models:
     name: openai/gpt-6.1-sol
     provider: openrouter
     use_responses_api: false
-    max_tokens: 8196
-    context_window: 128000
+    max_tokens: 128000
+    context_window: 1050000
     temperature: 0.5
   claude-sonnet-5.5:
     name: anthropic/claude-sonnet-5.5
     provider: openrouter
-    context_window: 128000
-    max_tokens: 8196
+    context_window: 1000000
+    max_tokens: 128000
     temperature: 0.5
 tools:
   beads_init:

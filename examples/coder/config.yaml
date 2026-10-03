@@ -111,6 +111,7 @@ providers:
 models:
   policy-validator-jev:
     name: "typesafe/jev-1.13"
+    context_window: 32000
     provider: "openrouter"
     temperature: 0
     max_tokens: 1024
@@ -121,6 +122,7 @@ models:
 
   policy-validator-mercury:
     name: "inception/mercury-decide:free"
+    context_window: 32768
     provider: "openrouter"
     temperature: 0
     max_tokens: 1024
@@ -133,8 +135,8 @@ models:
     name: "glm-5.3"
     provider: "opencode"
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 131072
+    context_window: 1000000
     description: "Latest GLM via OpenCode (currently GLM-5.3)"
     streaming_enabled: true
     preserve_reasoning_content: true
@@ -145,8 +147,8 @@ models:
     name: "deepseek-v4.1-flash"
     provider: "opencode"
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 384000
+    context_window: 1000000
     description: "DeepSeek V4.1 Flash via OpenCode Go"
     streaming_enabled: true
     preserve_reasoning_content: true
@@ -157,8 +159,8 @@ models:
     name: "glm-5.3-flash"
     provider: "opencode"
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 131072
+    context_window: 1000000
     description: "GLM 5.3 Flash via OpenCode Go"
     streaming_enabled: true
     preserve_reasoning_content: true
@@ -169,8 +171,8 @@ models:
     name: "x-ai/grok-4.7"
     provider: "openrouter"
     temperature: 0.2
-    max_tokens: 8192
-    context_window: 40000
+    max_tokens: 128000
+    context_window: 500000
     description: "Grok 4.7 via OpenRouter"
     streaming_enabled: true
     preserve_reasoning_content: true
