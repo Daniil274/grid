@@ -81,6 +81,19 @@ LOST_TOOL_CALLS = (
     "none of them ran"
 )
 
+def last_output_tokens(result: Any) -> int:
+    """Output tokens of the run's last model response; 0 when unknown."""
+    responses = getattr(result, "raw_responses", None) or []
+    usage = getattr(responses[-1], "usage", None) if responses else None
+    return int(getattr(usage, "output_tokens", 0) or 0)
+
+
+# A run that ended without an answer; rerun once (TurnRunner._run_attempt).
+NO_REPORT = "Model returned no final written report"
+# The same, when the last response filled the model's max_tokens: it spent its
+# answer budget thinking. The detail names the limit, so it starts like this.
+ANSWER_CUT_OFF = "the model spent its whole answer budget"
+
 # Input of an attempt rerun after an overflowing session was summarized: the
 # summary already holds the request and what was done for it.
 OVERFLOW_RETRY_NOTE = (
@@ -387,15 +400,15 @@ class TurnRunner:
                             stream=stream, observer=observer, progress=progress,
                         )
                     except TurnStopped as stop:
-                        recoverable = stop.reason == StopReason.ERROR and stop.detail in {
+                        recoverable = stop.reason == StopReason.ERROR and (stop.detail.startswith(ANSWER_CUT_OFF) or stop.detail in {
                             "ModelBehaviorError: Model did not produce a final response!",
-                            "Model returned no final written report",
-                        }
+                            NO_REPORT,
+                        })
                         if not recoverable or recovery or session is None:
                             raise
                         if run_ctx.run_control is not None and run_ctx.run_control.stop_requested:
                             raise TurnStopped(StopReason.USER_STOP) from None
-                        logger.warning("Agent %s: recovering missing model result once", agent_key)
+                        logger.warning("Agent %s: recovering missing model result once (%s)", agent_key, stop.detail)
                         run_input = Interruption(
                             reason=StopReason.ERROR, task="", agent=agent_key,
                             detail=stop.detail, in_flight=progress.ledger.in_flight,
@@ -527,7 +540,14 @@ class TurnRunner:
                 progress.ledger.forget_open()
                 raise TurnStopped(StopReason.ERROR, LOST_TOOL_CALLS)
             if has_tools or not "".join(fragments).strip():
-                raise TurnStopped(StopReason.ERROR, "Model returned no final written report")
+                limit = self.models.answer_tokens(agent_key)
+                if limit and last_output_tokens(result) >= limit:
+                    raise TurnStopped(
+                        StopReason.ERROR,
+                        f"{ANSWER_CUT_OFF} (max_tokens {limit}) on reasoning and wrote nothing; "
+                        "raise the model's max_tokens or lower its reasoning effort",
+                    )
+                raise TurnStopped(StopReason.ERROR, NO_REPORT)
         return self._final_text(result, fragments), result
 
     async def _run_with_retries(
