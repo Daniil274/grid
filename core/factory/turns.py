@@ -49,6 +49,7 @@ from core.interruption import (
     Interruption,
     RunControl,
     StopReason,
+    cancel_reason,
     completed_names,
 )
 from core.run_stream import (
@@ -1137,7 +1138,7 @@ class TurnRunner:
                 )
             Logger("agent_factory").log_verbose(f"FULL RESPONSE: {agent_key}", output)
             return output, active_context_id, answered
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancelled:
             # The hard Stop, or the process shutting down: the task is cancelled
             # wherever it was. Record it and let the cancellation go on.
             if stored:
@@ -1145,7 +1146,7 @@ class TurnRunner:
                     context_id=active_context_id,
                     agent_key=agent_key,
                     task=task,
-                    reason=StopReason.USER_STOP,
+                    reason=cancel_reason(cancelled),
                     detail="",
                     progress=progress,
                     turn_id=turn_id,
