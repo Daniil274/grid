@@ -21,6 +21,12 @@ from web_chat.session import ChatSession
 
 logger = logging.getLogger("grid.web_chat.restart")
 
+# A turn only starts honoring pause_for_restart() once its run control
+# registers (core.factory.turns), which can lag behind tool/MCP setup. Past
+# this many seconds of a turn never reaching that point, refuse the restart
+# instead of waiting on it forever.
+PREPARE_TIMEOUT_S = 120.0
+
 
 class SilentSocket:
     """A restored turn runs without a browser; a later socket can attach."""
@@ -92,7 +98,11 @@ class ServerRestart:
     async def _prepare(self) -> None:
         captured: dict[tuple[str, str], tuple[Any, Any]] = {}
         try:
-            # No timeout cancellation: a tool may already be changing external state.
+            # No cancellation of a running turn: a tool may already be changing
+            # external state. A turn that never reaches pause_for_restart()
+            # (stuck before its run control registers) still must not hang the
+            # restart forever, so the wait itself is bounded.
+            deadline = asyncio.get_running_loop().time() + PREPARE_TIMEOUT_S
             while True:
                 for space in self.spaces.live():
                     for context_id, turn, _ in space.turns.running_turns():
@@ -100,6 +110,11 @@ class ServerRestart:
                         turn.pause_for_restart()
                 if all(space.idle for space in self.spaces.live()) and not self.other_work():
                     break
+                if asyncio.get_running_loop().time() >= deadline:
+                    stuck = ", ".join(f"{user_id}:{context_id}" for user_id, context_id in captured)
+                    raise RuntimeError(
+                        f"Timed out waiting for running turns to pause ({stuck or 'unknown'})."
+                    )
                 await asyncio.sleep(0.1)
 
             rows = []
