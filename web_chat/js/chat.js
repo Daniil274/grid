@@ -424,7 +424,7 @@ export class ChatController {
     }
     await this._refreshConversations();
     const next = this._store.get().conversations[0];
-    if (!this._store.get().contextId && next) await this.openConversation(next.id);
+    if (!this._store.get().contextId && next) await this.openConversation(next.open_id ?? next.id);
   }
 
   async renameConversation(contextId, title) {

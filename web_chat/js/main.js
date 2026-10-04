@@ -444,7 +444,7 @@ async function boot() {
     // "Describe it to the builder": the request waits in the composer, to read and send.
     if (params.get("prompt")) composer.setValue(params.get("prompt"));
   } else if (latest) {
-    await chat.openConversation(latest.id);
+    await chat.openConversation(latest.open_id ?? latest.id);
   }
 
   // The report button under answers shows only when the server takes reports.

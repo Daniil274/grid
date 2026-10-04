@@ -64,3 +64,26 @@ test("a reconcile that lands after the reader moved on leaves the new chat alone
     assert.deepEqual(transcript.rendered, []);
   } finally { api.getConversation = original; }
 });
+
+test("after a delete the next chat opens on the branch last worked on", async () => {
+  const originals = { get: api.getConversation, remove: api.deleteConversation };
+  const answer = deferredApi();
+  try {
+    const store = createStore({ contextId: "gone", systems: [], conversations: [] });
+    const chat = new ChatController({
+      store,
+      transcript: { ...fakeTranscript(), clear() {} },
+      onConversationsChanged: async () => store.set({ conversations: [{ id: "root", open_id: "branch" }] }),
+    });
+    api.deleteConversation = async () => ({});
+    const removed = chat.deleteConversation("gone");
+    await new Promise((resolve) => setTimeout(resolve));
+    answer.get("branch")("the branch");
+    await removed;
+
+    assert.equal(store.get().contextId, "branch");
+  } finally {
+    api.getConversation = originals.get;
+    api.deleteConversation = originals.remove;
+  }
+});
