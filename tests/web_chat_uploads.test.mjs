@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { installFakeDom } from "./fake_dom.mjs";
 import { createStore } from "../web_chat/js/lib/store.js";
 import { createComposer } from "../web_chat/js/ui/composer.js";
-import { fileSize, withFiles } from "../web_chat/js/lib/files.js";
+import { fileSize, splitFiles, withFiles } from "../web_chat/js/lib/files.js";
+import { createMessage } from "../web_chat/js/ui/message.js";
 import { renderMarkdown } from "../web_chat/js/lib/markdown.js";
 
 installFakeDom();
@@ -104,4 +105,27 @@ test("links survive saved message rendering and cannot inject HTML", () => {
   assert.equal(withFiles("hello", []), "hello");
   assert.equal(fileSize(12), "12 B");
   assert.equal(fileSize(1024), "1.0 KB");
+});
+
+const report = { name: 'отчёт "Q3" [final].docx', path: 'uploads/отчёт "Q3" [final].docx',
+  url: "/api/workspace/files/uploads/%D0%BE%D1%82%D1%87%D1%91%D1%82%20%22Q3%22%20%5Bfinal%5D.docx" };
+
+test("the files block reads back as the files it was written from", () => {
+  assert.deepEqual(splitFiles(withFiles("Convert to PDF", [report])), { text: "Convert to PDF", files: [report] });
+  assert.deepEqual(splitFiles(withFiles("", [report])), { text: "", files: [report] });
+  assert.deepEqual(splitFiles("just words"), { text: "just words", files: [] });
+});
+
+test("only a block of workspace downloads is taken for files", () => {
+  const typed = 'Look:' + String.fromCharCode(10, 10) + 'Attached files:' + String.fromCharCode(10)
+    + '- [x](https://example.com/x) — workspace path: "x"';
+  assert.deepEqual(splitFiles(typed), { text: typed, files: [] });
+});
+
+test("a user's files show as tiles, not as text", () => {
+  const message = createMessage({ role: "user", content: withFiles("Convert to PDF", [report]), messageId: "u1" });
+  const tile = message.el.find("msgFile");
+  assert.equal(tile.getAttribute?.("href") ?? tile.href, report.url);
+  assert.ok(!message.el.find("msg__body").innerHTML.includes("Attached files"));
+  assert.equal(message.text, withFiles("Convert to PDF", [report])); // the agent still reads the path
 });
