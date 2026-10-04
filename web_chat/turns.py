@@ -21,6 +21,8 @@ import logging
 from contextlib import suppress
 from typing import Any, Coroutine, Optional
 
+from core.interruption import SHUTDOWN
+
 logger = logging.getLogger("grid.web_chat.turns")
 
 
@@ -104,7 +106,8 @@ class TurnBoard:
         """Cancel every turn and background task and wait for them to end."""
         tasks = [task for _, task in self._turns.values()] + list(self._background)
         for task in tasks:
-            task.cancel()
+            # Not the user's Stop: the turns record that the runtime went down.
+            task.cancel(SHUTDOWN)
         for task in tasks:
             # A turn reports its own failure; background failures are logged
             # by _finished. Closing only waits for them to end.

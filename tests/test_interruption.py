@@ -206,6 +206,29 @@ async def test_a_cancelled_turn_records_the_call_it_was_running(factory):
     assert record.in_flight == [{"tool": "click", "arguments": '{"x": 10, "y": 20}'}]
 
 
+async def test_a_turn_cancelled_by_shutdown_is_not_blamed_on_the_user(factory):
+    from core.interruption import SHUTDOWN
+
+    context_id = factory.context_manager.start_new_context()
+    at_tool = asyncio.Event()
+
+    async def tool_hangs():
+        at_tool.set()
+        await hang()
+
+    stream = FakeStream([called("c1"), tool_hangs])
+    with patch("agents.Runner", StreamingRunner(stream)):
+        turn = asyncio.create_task(
+            factory.run_agent("worker", "Click", context_id=context_id, stream=True, stream_observer=OBSERVER)
+        )
+        await at_tool.wait()
+        turn.cancel(SHUTDOWN)
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+
+    assert last_record(factory, context_id).reason is StopReason.CRASH
+
+
 async def test_tool_calls_lost_in_the_stream_are_reported_and_not_resent(factory):
     from core.factory.turns import LOST_TOOL_CALLS
 
