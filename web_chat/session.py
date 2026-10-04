@@ -272,14 +272,16 @@ class AgentTurn:
         with tracking(self._spend):
             producer = asyncio.create_task(self._produce())
         stopped = False
+        cause: tuple[Any, ...] = ()
         try:
             await self._consume()
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancelled:
             stopped = True
             self.outcome = "stopped"
+            cause = cancelled.args  # the producer records why (core.interruption.SHUTDOWN)
         finally:
             if not producer.done():
-                producer.cancel()
+                producer.cancel(*cause)
             with suppress(asyncio.CancelledError):
                 await producer
             self._persist_trace()
@@ -742,6 +744,7 @@ class ChatSession:
         await active[0].attach(self)
 
     async def _stop(self, *, now: bool = False) -> None:
+        logger.info("Stop requested from the chat for %s (now=%s)", self.context_id, now)
         active = self._turns.running(self.context_id)
         if active is None:
             await self.send({"type": "done", "stopped": True})

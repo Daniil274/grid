@@ -64,6 +64,16 @@ class StopReason(str, Enum):
     CRASH = "crash"
 
 
+#: The message of a task cancellation that is the runtime going down, not the
+#: user's Stop: ``task.cancel(SHUTDOWN)``. A bare cancel is the user's hard Stop.
+SHUTDOWN = "grid:shutdown"
+
+
+def cancel_reason(cancelled: BaseException) -> StopReason:
+    """Why a turn's task was cancelled: :data:`SHUTDOWN` or the user's Stop."""
+    return StopReason.CRASH if SHUTDOWN in cancelled.args else StopReason.USER_STOP
+
+
 _REASON_TEXT = {
     StopReason.USER_STOP: "it was stopped by the user",
     StopReason.TIMEOUT: "it ran out of time",

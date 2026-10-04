@@ -8,6 +8,8 @@ per system/agent/context pair when a system namespace is supplied.
 import asyncio
 import hashlib
 import logging
+import sqlite3
+import threading
 from typing import Callable, Dict, Optional, Tuple
 from agents import SQLiteSession
 
@@ -23,6 +25,38 @@ def agent_session_id(agent_key: str, context_id: str, namespace: Optional[str] =
         system_id = hashlib.sha256(namespace.encode("utf-8")).hexdigest()[:16]
         return f"system_{system_id}_agent_{agent_key}_{context_id}"
     return f"agent_{agent_key}_{context_id}"
+
+
+class FileSQLiteSession(SQLiteSession):
+    """A file-backed SDK session whose close() releases the file.
+
+    The SDK opens one connection per thread - every ``asyncio.to_thread``
+    worker that touches the session gets its own - and its close() reaches
+    only the caller's. The others keep the database open for as long as the
+    worker threads live; on Windows the file then cannot be deleted. This
+    session remembers each connection it opened and closes them all.
+    """
+
+    def __init__(self, session_id: str, db_path: str) -> None:
+        self._opened: list[sqlite3.Connection] = []
+        self._opened_lock = threading.Lock()
+        super().__init__(session_id=session_id, db_path=db_path)
+
+    def _get_connection(self) -> sqlite3.Connection:
+        fresh = not hasattr(self._local, "connection")
+        connection = super()._get_connection()
+        if fresh:
+            with self._opened_lock:
+                self._opened.append(connection)
+        return connection
+
+    def close(self) -> None:
+        with self._opened_lock:
+            opened, self._opened = self._opened, []
+            # A later use opens new connections instead of the closed ones.
+            self._local = threading.local()
+        for connection in opened:
+            connection.close()
 
 
 class SessionManager:

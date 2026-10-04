@@ -39,6 +39,7 @@ from core.factory.tools import ToolAssembly
 from core.factory.turns import TOOL_CALL_CORRECTION, TurnRunner
 from core.fallback_model import FallbackModel, ModelCandidate
 from core.interruption import RunControl
+from core.managers.session_manager import FileSQLiteSession
 from core.model_access import ModelAccess, ModelNotInPlan
 from core.run_stream import ConsoleStreamObserver, StreamObserver
 from core.tracing.config import ImmediateTraceProcessor, get_tracing_config
@@ -222,7 +223,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
 
     def _create_persistent_sqlite_session(self, session_id: str) -> SQLiteSession:
         """Create a file-backed SDK session so history survives process restarts."""
-        return SQLiteSession(session_id=session_id, db_path=self._agent_session_db_path)
+        return FileSQLiteSession(session_id, self._agent_session_db_path)
 
 
     def _logs_directory_path(self) -> Path:

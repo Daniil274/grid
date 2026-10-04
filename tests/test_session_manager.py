@@ -49,3 +49,30 @@ def test_same_agent_and_conversation_are_isolated_by_system(tmp_path):
     assert agent_session_id("writer", "conversation", "system-a") != agent_session_id(
         "writer", "conversation", "system-b"
     )
+
+
+def test_file_session_close_releases_every_thread_connection(tmp_path):
+    """Worker threads open their own connections; close() must release them
+    all, or the file stays locked (Windows cannot delete it then)."""
+    import asyncio
+    import os
+
+    from core.managers.session_manager import FileSQLiteSession
+
+    path = tmp_path / "sessions.db"
+
+    async def scenario():
+        session = FileSQLiteSession("s", str(path))
+        await session.add_items([{"role": "user", "content": "hi"}])
+        await asyncio.gather(*[
+            asyncio.to_thread(lambda: session._get_connection().execute("select 1").fetchall())
+            for _ in range(4)
+        ])
+        session.close()
+        # Usable again after close: new connections, not the closed ones.
+        assert len(await session.get_items()) == 1
+        session.close()
+
+    asyncio.run(scenario())
+    for name in os.listdir(tmp_path):
+        os.remove(tmp_path / name)

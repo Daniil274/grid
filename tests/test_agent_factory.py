@@ -144,7 +144,7 @@ class TestAgentFactory:
         config = Config(str(config_file))
         factory = AgentFactory(config)
         
-        with patch('core.agent_factory.SQLiteSession') as mock_session_class:
+        with patch('core.agent_factory.FileSQLiteSession') as mock_session_class:
             mock_session = Mock()
             mock_session_class.return_value = mock_session
             
@@ -153,8 +153,7 @@ class TestAgentFactory:
             assert session is mock_session
             assert ("test_agent", "test_context") in factory._agent_sessions
             mock_session_class.assert_called_once_with(
-                session_id="agent_test_agent_test_context",
-                db_path=factory._agent_session_db_path,
+                "agent_test_agent_test_context", factory._agent_session_db_path
             )
     
     def test_get_agent_session_reuses_existing(self, config_file):
@@ -163,7 +162,7 @@ class TestAgentFactory:
         factory = AgentFactory(config)
         
         # First call
-        with patch('core.agent_factory.SQLiteSession') as mock_session_class:
+        with patch('core.agent_factory.FileSQLiteSession') as mock_session_class:
             mock_session = Mock()
             mock_session_class.return_value = mock_session
             
