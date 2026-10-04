@@ -7,6 +7,7 @@
  */
 
 import { $$, h, icon, onFrame } from "../lib/dom.js";
+import { splitFiles, withFiles } from "../lib/files.js";
 import { clock } from "../lib/format.js";
 import { renderMarkdown } from "../lib/markdown.js";
 import { ICONS } from "./icons.js";
@@ -99,6 +100,9 @@ export function createMessage({
   const reasoning = isAssistant ? createReasoningPanel() : null;
 
   let text = content;
+  // A user's uploaded files close their text (lib/files.js): shown as files,
+  // kept in the text the agent reads, and put back when the text is edited.
+  const ownWords = () => (role === "user" ? splitFiles(text) : { text, files: [] });
   let interruptBox = null;
   let resumable = false;
   let storedId = messageId;
@@ -112,7 +116,7 @@ export function createMessage({
   const actions = h(
     "div.msg__actions",
     {},
-    actionButton("Copy message", ICONS.copy, () => copyText(text, "Message copied")),
+    actionButton("Copy message", ICONS.copy, () => copyText(ownWords().text, "Message copied")),
     role === "user" && onEdit ? actionButton("Edit (starts a new branch)", ICONS.edit, () => startEdit()) : null,
     speakButton,
     isAssistant && onReport
@@ -146,19 +150,26 @@ export function createMessage({
   // images follow its answer.
   const gallery = h("div.msg__images", { hidden: !images?.length });
   for (const url of images ?? []) gallery.append(renderImage(url));
+  const fileList = h("div.msg__files", { hidden: true });
   const root = h(
     "article.msg",
     { id, dataset: { role } },
     h("div.msg__meta", {}, authorNode, timestamp ? h("span.msg__time", { text: clock(timestamp) }) : null, switcher),
     reasoning?.el,
     isAssistant ? null : gallery,
+    isAssistant ? null : fileList,
     body,
     isAssistant ? gallery : null,
     actions,
   );
 
   const paint = () => {
-    body.innerHTML = renderMarkdown(text);
+    const { text: words, files } = ownWords();
+    if (!isAssistant) {
+      fileList.replaceChildren(...files.map(renderFile));
+      fileList.hidden = !files.length;
+    }
+    body.innerHTML = renderMarkdown(words);
     decorateCode(body);
     // Workspace-file links the agent emits (/api/workspace/files/<path>)
     // download on click; nothing extra is needed here.
@@ -185,15 +196,16 @@ export function createMessage({
     }
     editing = true;
     root.classList.add("is-editing");
-    const input = h("textarea.msg__editor", { rows: Math.min(12, text.split("\n").length + 1), "aria-label": "Edit message" });
-    input.value = text;
+    const { text: words, files } = ownWords();
+    const input = h("textarea.msg__editor", { rows: Math.min(12, words.split("\n").length + 1), "aria-label": "Edit message" });
+    input.value = words;
     const finish = (save) => {
       const next = input.value.trim();
       editing = false;
       root.classList.remove("is-editing");
       paint();
-      if (save && next && next !== text.trim()) {
-        onEdit({ id: storedId, text: next, images: [...gallery.querySelectorAll("img")].map((node) => node.src) });
+      if (save && (next || files.length) && next !== words.trim()) {
+        onEdit({ id: storedId, text: withFiles(next, files), images: [...gallery.querySelectorAll("img")].map((node) => node.src) });
       }
     };
     input.addEventListener("keydown", (event) => {
@@ -359,6 +371,19 @@ export function createMessage({
 }
 
 /** One image of a message; a click shows it at full width and back. */
+/** An uploaded file: its icon, name and type; a click downloads it. */
+function renderFile({ name, url }) {
+  const extension = name.includes(".") ? name.split(".").pop().toUpperCase() : "File";
+  return h(
+    "a.msgFile",
+    { href: url, download: name, title: `Download ${name}` },
+    icon(ICONS.file, { size: 22 }),
+    h("span.msgFile__info", {},
+      h("span.msgFile__name", { text: name }),
+      h("span.msgFile__type", { text: extension })),
+  );
+}
+
 function renderImage(url) {
   return h("img.msg__image", {
     src: url,
