@@ -249,6 +249,11 @@
   color: var(--bubble-text);
 }
 
+/* Files sent without a word: the tiles alone, no empty bubble. */
+.msg[data-role="user"] .msg__body:empty {
+  display: none;
+}
+
 .msg[data-role="user"] .msg__body a {
   color: inherit;
   text-decoration: underline;
@@ -769,6 +774,59 @@
 
 .msg__images[hidden] {
   display: none;
+}
+
+/* Files the user uploaded with the message: a row of download tiles. */
+.msg__files {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: min(88%, 620px);
+}
+
+.msg__files[hidden] {
+  display: none;
+}
+
+.msgFile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(260px, 100%);
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text-2);
+  text-decoration: none;
+}
+
+.msgFile:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.msgFile > .icon {
+  flex-shrink: 0;
+}
+
+.msgFile__info {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.msgFile__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.msgFile__type {
+  color: var(--text-3);
+  font-size: 11px;
 }
 
 /* A picture embedded in the prose with markdown (![alt](src)). It sits inside
