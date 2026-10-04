@@ -11,6 +11,17 @@ from agents.models.interface import Model
 
 logger = logging.getLogger("grid.models.fallback")
 
+# Lifecycle events a stream always opens with; buffered but never "content".
+_LIFECYCLE_EVENT_TYPES = frozenset({"response.created", "response.in_progress"})
+# A provider can report failure as an in-stream event instead of raising; before
+# any real content has been yielded, that must still fall back to the next
+# candidate rather than being forwarded as committed content.
+_FAILURE_EVENT_TYPES = frozenset({"response.failed", "response.incomplete"})
+
+
+class _StreamFailure(Exception):
+    """An in-stream provider failure event, raised before anything committed."""
+
 
 class AllModelsFailedError(RuntimeError):
     """Raised after every configured model failed the same request."""
@@ -83,8 +94,11 @@ class FallbackModel(Model):
                     *call_args, **call_kwargs
                 ):
                     if not committed:
+                        event_type = getattr(event, "type", None)
+                        if event_type in _FAILURE_EVENT_TYPES:
+                            raise _StreamFailure(event_type)
                         events.append(event)
-                        if getattr(event, "type", None) in {"response.created", "response.in_progress"}:
+                        if event_type in _LIFECYCLE_EVENT_TYPES:
                             continue
                         committed = True
                         for initial in events:
@@ -92,6 +106,15 @@ class FallbackModel(Model):
                         events.clear()
                     else:
                         yield event
+            except _StreamFailure as failure:
+                errors.append(f"{candidate.key}: {failure}")
+                logger.warning(
+                    "Model '%s' reported %s%s",
+                    candidate.key,
+                    failure,
+                    "; trying next fallback" if index + 1 < len(self.candidates) else "",
+                )
+                continue
             except Exception as exc:
                 if committed:
                     raise
