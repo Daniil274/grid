@@ -62,7 +62,7 @@ class TurnLimits:
         self,
         user_id: str,
         policy: Callable[[], UserLimitsPolicy],
-        counter: TurnCounter,
+        counter: Optional[TurnCounter] = None,
         spend: Optional[SpendReader] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -84,7 +84,11 @@ class TurnLimits:
                 f"You have {running} turn(s) running, the most this server allows at once. "
                 "Wait for one to finish, or stop it."
             )
-        if policy.tokens_per_day is not None and self._counter.tokens_today(self._user_id) >= policy.tokens_per_day:
+        if (
+            self._counter is not None
+            and policy.tokens_per_day is not None
+            and self._counter.tokens_today(self._user_id) >= policy.tokens_per_day
+        ):
             return (
                 f"You have used today's {policy.tokens_per_day:,} tokens. "
                 "The count starts again at 00:00 UTC."
@@ -92,7 +96,7 @@ class TurnLimits:
         refusal = self._over_budget(policy)
         if refusal is not None:
             return refusal
-        if not self._counter.count_turn(self._user_id, policy.turns_per_day):
+        if self._counter is not None and not self._counter.count_turn(self._user_id, policy.turns_per_day):
             return f"You have used today's {policy.turns_per_day} turns. The count starts again at 00:00 UTC."
         return None
 
@@ -106,7 +110,10 @@ class TurnLimits:
         ):
             if limit is None:
                 continue
-            budget = to_micro(limit) or 0
+            # limit is gt=0: a validly configured budget must never collapse to
+            # 0 micro-dollars from rounding, which would read as "no spend
+            # allowed" and lock the user out before they spent anything.
+            budget = to_micro(limit) or 1
             spent = self._spend.spent_micro(self._user_id, since)
             if spent >= budget:
                 return (
