@@ -153,7 +153,7 @@ class AgentConfig(BaseModel):
     timeout: Optional[int] = Field(
         default=None,
         ge=0,
-        le=1800,
+        le=7200,
         description=(
             "Execution timeout in seconds for this agent alone; 0 disables the "
             "timeout so a coordinating agent cannot be cut off mid-orchestration. "
