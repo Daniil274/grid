@@ -80,13 +80,11 @@ class WebStreamObserver:
         reset_answer: Optional[Callable[[], None]] = None,
         emit_image: Optional[Callable[[str], None]] = None,
         agent_label: str = "",
-        on_usage: Optional[Callable[[Any, str, Optional[str]], None]] = None,
     ) -> None:
         self._recorder = recorder
         self._emit_token = emit_token
         self._reset_answer = reset_answer
         self._emit_image = emit_image
-        self._on_usage = on_usage
         # Text streamed since the last action. If another action follows, it was
         # narration ("let me check the diff"), not the answer, and moves to the trace.
         self._narration = ""
@@ -126,7 +124,7 @@ class WebStreamObserver:
         the caller receives, never the user-facing answer.
         """
         child = WebStreamObserver(
-            self._recorder, emit_token=lambda _text: None, agent_label=agent_label, on_usage=self._on_usage
+            self._recorder, emit_token=lambda _text: None, agent_label=agent_label
         )
         child._calls_by_id = self._calls_by_id
         child._calls_in_order = self._calls_in_order
@@ -318,8 +316,6 @@ class WebStreamObserver:
             data = getattr(event, "data", None)
             response = field_of(data, "response")
             usage = field_of(data, "usage") or field_of(response, "usage")
-            if usage is not None and self._on_usage is not None:
-                self._on_usage(usage, str(field_of(response, "model") or ""), agent_key)
             self._recorder.record_usage(usage, parent_id=self._parent_id)
             self._recorder.end_reasoning(parent_id=self._parent_id)
         if not is_output_delta(data_type):
