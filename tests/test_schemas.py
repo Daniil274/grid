@@ -380,7 +380,7 @@ class TestSettings:
             Settings(agent_timeout=-1)
 
         with pytest.raises(ValidationError):
-            Settings(agent_timeout=2000)
+            Settings(agent_timeout=7201)
 
 
 class TestGridConfig:
