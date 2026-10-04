@@ -10,7 +10,7 @@ settings:
   default_agent: builder
   max_history: 100
   max_turns: 200
-  agent_timeout: 1800
+  agent_timeout: 7200
   mcp_enabled: true
   max_tool_output_tokens: 16000
   working_directory: .

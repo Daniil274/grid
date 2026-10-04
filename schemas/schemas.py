@@ -255,7 +255,7 @@ class Settings(BaseModel):
     # 0 removes the turn limit; per-agent `max_turns` overrides it.
     max_turns: int = Field(default=10, ge=0, le=300)
     # 0 disables the agent execution timeout; per-agent `timeout` overrides it.
-    agent_timeout: int = Field(default=300, ge=0, le=1800)
+    agent_timeout: int = Field(default=300, ge=0, le=7200)
     debug: bool = False
     mcp_enabled: bool = False
     project_tools: Optional[ProjectToolsConfig] = Field(default=None)
