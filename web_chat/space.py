@@ -178,9 +178,10 @@ class UserSpace:
         self.on_systems_changed = on_systems_changed
         self.entitlement = entitlement
         policy = (lambda: entitlement().limits) if entitlement is not None else (lambda: deployment.user_limits)
+        spend = usage if hasattr(usage, "spent_micro") else None
         self.limits = (
-            TurnLimits(user_id, policy, turn_counter, spend=usage if hasattr(usage, "spent_micro") else None)
-            if turn_counter is not None
+            TurnLimits(user_id, policy, turn_counter, spend=spend)
+            if turn_counter is not None or spend is not None
             else None
         )
         #: Credentials in and spend out of every model call this space's agents make.
