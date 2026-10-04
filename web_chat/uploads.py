@@ -216,37 +216,40 @@ def _free_name(existing: set[str], name: str) -> str:
 
 
 async def save_upload(
-    workspace: Path, upload: UploadFile, *, max_bytes: int, quota_bytes: int
+    workspace: Path, upload: UploadFile, uploads: Uploads, *, max_bytes: int, quota_bytes: int
 ) -> dict[str, Any]:
-    """Write one uploaded file into ``uploads/``; what it became."""
-    workspace = Path(workspace).resolve()
-    with Uploads(workspace) as uploads:
-        room = quota_bytes - uploads.used_bytes()
-        name = _free_name(uploads.names(), safe_name(upload.filename or "file"))
-        fd = uploads.create(name)
-        written = 0
+    """Write one uploaded file into ``uploads/``; what it became.
+
+    *uploads* is the batch's already-open directory handle: opening a second
+    one per file would redo the Windows plain-directory safety check (and its
+    TOCTOU window) once per file instead of once for the whole batch.
+    """
+    room = quota_bytes - uploads.used_bytes()
+    name = _free_name(uploads.names(), safe_name(upload.filename or "file"))
+    fd = uploads.create(name)
+    written = 0
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            while chunk := await upload.read(CHUNK):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise UploadError(
+                        f"{name} is larger than {max_bytes // (1024 * 1024)} MB."
+                    )
+                if written > room:
+                    raise UploadError(
+                        "Your uploads are full: delete some files of uploads/ first."
+                    )
+                handle.write(chunk)
+            if _server_is_root():
+                uid, gid = _owner(workspace)
+                os.fchown(handle.fileno(), uid, gid)
+    except BaseException:
         try:
-            with os.fdopen(fd, "wb") as handle:
-                while chunk := await upload.read(CHUNK):
-                    written += len(chunk)
-                    if written > max_bytes:
-                        raise UploadError(
-                            f"{name} is larger than {max_bytes // (1024 * 1024)} MB."
-                        )
-                    if written > room:
-                        raise UploadError(
-                            "Your uploads are full: delete some files of uploads/ first."
-                        )
-                    handle.write(chunk)
-                if _server_is_root():
-                    uid, gid = _owner(workspace)
-                    os.fchown(handle.fileno(), uid, gid)
-        except BaseException:
-            try:
-                uploads.unlink(name)
-            except OSError:
-                pass
-            raise
+            uploads.unlink(name)
+        except OSError:
+            pass
+        raise
     path = f"{UPLOADS_DIR}/{name}"
     return {
         "path": path,
@@ -398,6 +401,7 @@ def register_upload_routes(
                                 await save_upload(
                                     workspace,
                                     item,
+                                    uploads,
                                     max_bytes=max_bytes,
                                     quota_bytes=limits.quota_mb * 1024 * 1024,
                                 )
