@@ -227,9 +227,12 @@ class TraceRecorder:
         # caller (and its siblings), keyed by the ``agent`` step it runs under.
         self._open_reasoning: dict[Optional[str], Step] = {}
         # Tokens of a completed response that named no step yet, waiting for
-        # the step its response opens next (a model's tool calls stream as
-        # items right after its response completes).
-        self._pending_usage: dict[Optional[str], tuple[int, int]] = {}
+        # the step(s) its response opens next (a model's tool calls - one or,
+        # with parallel_tool_calls, several - stream as items right after its
+        # response completes). Every step opened before the next response's
+        # usage arrives sees this same amount: parallel calls from one
+        # response all spent it together, so none should read as free.
+        self._pending_usage: dict[Optional[str], tuple[int, int, bool]] = {}
         self._tokens_in = 0
         self._tokens_out = 0
 
@@ -251,10 +254,11 @@ class TraceRecorder:
     def open(self, kind: StepKind, title: str, **fields: Any) -> Step:
         """Announce a step that is still in flight."""
         parent_id = fields.get("parent_id")
-        pending = self._pending_usage.pop(parent_id, None)
+        pending = self._pending_usage.get(parent_id)
         if pending:
             fields["tokens_in"] = fields.get("tokens_in", 0) + pending[0]
             fields["tokens_out"] = fields.get("tokens_out", 0) + pending[1]
+            self._pending_usage[parent_id] = (pending[0], pending[1], True)
         step = Step(
             id=f"s{next(self._ids)}",
             kind=kind,
@@ -333,9 +337,14 @@ class TraceRecorder:
             step.tokens_out += tokens_out
             return
         held = self._pending_usage.get(parent_id)
-        self._pending_usage[parent_id] = (
-            (held[0] + tokens_in, held[1] + tokens_out) if held else (tokens_in, tokens_out)
-        )
+        # A bucket no step has claimed yet still belongs to an earlier response
+        # with no step of its own (e.g. a reasoning-only round): add to it.
+        # Once claimed, this response is a new one: start a fresh bucket
+        # instead of stacking onto tokens already shown on earlier steps.
+        if held and not held[2]:
+            self._pending_usage[parent_id] = (held[0] + tokens_in, held[1] + tokens_out, False)
+        else:
+            self._pending_usage[parent_id] = (tokens_in, tokens_out, False)
 
     def end_reasoning(self, *, parent_id: Optional[str] = None) -> None:
         """Close an agent's live reasoning step, if any: the agent moved on."""
