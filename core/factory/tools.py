@@ -48,34 +48,64 @@ class ToolAssembly:
     and TurnRunner.
     """
 
+    def _mcp_server_for_tool_name(self, name: str) -> Optional[str]:
+        """The MCP server key behind a tool name such as ``codegraph_explore``.
+
+        Models name the tools they see (``<server>_<tool>``), while a dynamic
+        agent's tool list takes config keys; the longest matching key wins.
+        """
+        tools = getattr(getattr(self.config, "config", None), "tools", None) or {}
+        servers = [
+            key for key, cfg in tools.items()
+            if getattr(cfg, "type", None) == "mcp" and name.startswith(f"{key}_")
+        ]
+        return max(servers, key=len) if servers else None
+
     async def _resolve_tools_for_names(
         self, tool_names: List[str]
-    ) -> tuple[List[Any], List[str]]:
+    ) -> tuple[List[Any], List[str], List[str]]:
         """
         Resolve a mixed list of tool keys (function/agent/mcp from config) into:
         - tools: SDK tool instances (function tools + agent tools)
         - mcp_server_names: MCP tool keys (servers) to attach to agent
+        - missing: requested names the agent will not have
+
+        Tool lists of dynamic agents are written by models: a name that is
+        neither a config key nor a tool of a configured MCP server is left out,
+        and reported back so the caller does not count on it.
         """
         function_tools: List[str] = []
         agent_tools: List[str] = []
         mcp_tools: List[str] = []
+        missing: List[str] = []
 
         for tool_key in tool_names:
             try:
                 tool_cfg = self.config.get_tool(tool_key)
-                if tool_cfg.type == "function":
-                    function_tools.append(tool_key)
-                elif tool_cfg.type == "agent":
-                    agent_tools.append(tool_key)
-                elif tool_cfg.type == "mcp":
-                    mcp_tools.append(tool_key)
             except ConfigError:
-                # Tool lists of dynamic agents are written by models: an unknown
-                # name is dropped, not fatal, but it must be visible.
+                server = self._mcp_server_for_tool_name(tool_key)
+                if server is not None:
+                    if server not in mcp_tools:
+                        mcp_tools.append(server)
+                    continue
                 logger.warning("Unknown tool '%s' requested for a dynamic agent; skipped", tool_key)
+                missing.append(tool_key)
                 continue
+            if tool_cfg.type == "function":
+                function_tools.append(tool_key)
+            elif tool_cfg.type == "agent":
+                agent_tools.append(tool_key)
+            elif tool_cfg.type == "mcp":
+                if tool_key not in mcp_tools:
+                    mcp_tools.append(tool_key)
 
-        resolved: List[Any] = self._resolve_function_tools(function_tools)
+        resolved: List[Any] = []
+        for tool_key in function_tools:
+            found = self._resolve_function_tools([tool_key])
+            if found:
+                resolved.extend(found)
+            else:
+                missing.append(tool_key)
 
         if agent_tools:
             try:
@@ -85,8 +115,9 @@ class ToolAssembly:
                 )
             except Exception as exc:
                 logger.debug("Failed to resolve agent tools: %s", exc, exc_info=exc)
+                missing.extend(agent_tools)
 
-        return resolved, mcp_tools
+        return resolved, mcp_tools, missing
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:

@@ -210,6 +210,28 @@ async def _committee_vote(factory: Any, *, model_key: str, goal: str, draft: str
     return accept_count > reject_count, judges
 
 
+def _executor_fallback_models(
+    factory: Any, raw_ctx: Any, configured: Optional[List[str]]
+) -> List[str]:
+    """Models an executor falls back to when its own fails a request.
+
+    The orchestrate tool's FALLBACK_MODELS when configured; otherwise the
+    calling agent's own models, which are known to work for this system. A
+    revoked login on the default executor model then costs one failed request
+    instead of the whole delegated step.
+    """
+    if configured:
+        return list(configured)
+    agent_key = getattr(raw_ctx, "agent_id", None)
+    if not isinstance(agent_key, str) or not agent_key:
+        return []
+    try:
+        keys = factory.config.get_agent(agent_key).model_keys()
+    except Exception:
+        return []
+    return [key for key in keys if isinstance(key, str)] if isinstance(keys, (list, tuple)) else []
+
+
 @function_tool
 async def orchestrate(
     context: RunContextWrapper,
@@ -280,12 +302,14 @@ async def orchestrate(
 
     # Try to get the model from the orchestrate tool config if not passed explicitly
     default_model_key = None
+    configured_fallbacks: Optional[List[str]] = None
     try:
         tool_cfg = factory.config.get_tool("orchestrate")
         if tool_cfg.env_vars:
             default_model_key = _coerce_optional_str(tool_cfg.env_vars.get("DEFAULT_MODEL"))
             if default_model_key and default_model_key.strip().lower() == "default":
                 default_model_key = None
+            configured_fallbacks = _coerce_tool_list(tool_cfg.env_vars.get("FALLBACK_MODELS"))
     except Exception:
         pass
 
@@ -305,6 +329,9 @@ async def orchestrate(
 
     resolved_model_key = factory.resolve_model_key(requested_model_key)
     coerced_executor_tools = _coerce_tool_list(executor_tools)
+    fallback_model_keys = _executor_fallback_models(
+        factory, raw_ctx, configured_fallbacks
+    )
 
     # Parse init_tools JSON (optional context-gathering tools)
     parsed_init_tools = None
@@ -339,6 +366,7 @@ async def orchestrate(
         init_tools=parsed_init_tools,
         system_skills=coerced_system_skills,
         action_state=action_state,
+        fallback_model_keys=fallback_model_keys,
     )
 
     # The executor reports into the caller's view (the web trace, not the
@@ -365,6 +393,8 @@ async def orchestrate(
                 stream_observer=observer,
                 action_state=action_state,
                 action_depth=action_depth,
+                user_id=ctx_user_id,
+                run_control=getattr(raw_ctx, "run_control", None),
             )
 
         draft = await registry.run_serialized_step(
@@ -412,14 +442,27 @@ async def orchestrate(
             except Exception:
                 logger.debug("orchestrate: failed to settle the trace", exc_info=True)
 
+    # The tools the executor really had: a name the factory could not resolve
+    # (a typo, a tool of an MCP server that did not start) is reported, so the
+    # caller does not brief the next agent to use it. The task is not echoed:
+    # the caller wrote it, and repeating it only fills the caller's context.
+    reported_missing = getattr(executor, "_grid_missing_tools", None)
+    missing_tools = list(reported_missing) if isinstance(reported_missing, (list, tuple)) else []
     result = {
-        "task": task,
         "context_id": active_context_id,
         "model_key": resolved_model_key,
-        "executor_tools": coerced_executor_tools,
+        "executor_tools": [
+            name for name in (coerced_executor_tools or []) if name not in missing_tools
+        ],
         "final": _extract_text(draft),
         "pipeline_id": pipeline_id
     }
+    if missing_tools:
+        result["missing_tools"] = missing_tools
+        result["missing_tools_note"] = (
+            "The executor did not have these tools: they are not tool keys of this "
+            "system or their server is unavailable. Do not ask agents to use them."
+        )
     result_json = json.dumps(result, ensure_ascii=False, indent=2)
     logger.info(
         f"orchestrate: COMPLETE  | model={resolved_model_key} | "

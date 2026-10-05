@@ -10,9 +10,11 @@ import pytest
 from core.agent_factory import AgentFactory
 from core.config import Config
 from core.config.prompt_sections import PromptSection
+from core.credentials import CredentialError
 from core.factory.failures import is_retriable
 from core.factory.models import ModelProvider
 from core.fallback_model import AllModelsFailedError, FallbackModel
+from core.model_access import ModelAccess
 from utils.exceptions import AgentError
 
 
@@ -285,6 +287,47 @@ class TestAgentFactory:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing_first", [False, True])
+    async def test_create_agent_skips_models_without_credentials(self, config_file, missing_first):
+        """An optional ChatGPT login must not block an available API model."""
+        config = Config(str(config_file))
+        config.config.providers["chatgpt"] = config.get_provider("openai").model_copy(
+            update={"name": "chatgpt", "auth": "chatgpt"}
+        )
+        config.config.models["plan-model"] = config.get_model("gpt-4").model_copy(
+            update={"name": "plan-model", "provider": "chatgpt"}
+        )
+        keys = ["plan-model", "gpt-4"] if missing_first else ["gpt-4", "plan-model"]
+        config.config.agents["test_agent"].model = keys
+        source = Mock()
+        source.available.side_effect = lambda provider: provider.auth != "chatgpt"
+        factory = AgentFactory(
+            config, str(config_file.parent), model_access=ModelAccess(source)
+        )
+        available_model = Mock()
+        with patch('core.factory.models.VisionChatCompletionsModel', return_value=available_model), \
+             patch('core.agent_factory.Agent') as agent_class, \
+             patch.object(factory, '_get_agent_tools', return_value=[], new_callable=AsyncMock), \
+             patch.object(factory, '_build_agent_instructions', return_value="Test instructions"):
+            agent_class.return_value = Mock()
+            await factory.create_agent("test_agent")
+
+        assert agent_class.call_args.kwargs["model"] is available_model
+        assert agent_class.call_args.kwargs["model_settings"].store is None
+        assert factory._agent_cache["test_agent"]._grid_model_key == "gpt-4"
+
+    @pytest.mark.asyncio
+    async def test_create_agent_reports_when_no_model_has_credentials(self, config_file):
+        config = Config(str(config_file))
+        source = Mock()
+        source.available.return_value = False
+        factory = AgentFactory(config, model_access=ModelAccess(source))
+
+        with pytest.raises(AgentError, match="No credential for provider 'openai'") as error:
+            await factory.create_agent("test_agent")
+        assert isinstance(error.value.__cause__, CredentialError)
+
+    @pytest.mark.asyncio
     async def test_create_dynamic_agent_passes_model_config_flags(self, config_file):
         """Dynamic agents must apply the same VisionChatCompletionsModel flags as create_agent."""
         config = Config(str(config_file))
@@ -297,7 +340,7 @@ class TestAgentFactory:
              patch('core.factory.models.VisionChatCompletionsModel') as mock_model, \
              patch('core.agent_factory.Agent') as mock_agent_class, \
              patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
-             patch.object(factory, '_resolve_tools_for_names', return_value=([], []), new_callable=AsyncMock), \
+             patch.object(factory, '_resolve_tools_for_names', return_value=([], [], []), new_callable=AsyncMock), \
              patch.object(factory, '_build_dynamic_agent_instructions', return_value="instr"), \
              patch.object(factory.models, 'is_allowed', return_value=True):
 
@@ -312,6 +355,39 @@ class TestAgentFactory:
 
             mock_model.assert_called_once()
             assert mock_model.call_args.kwargs["preserve_reasoning_content"] is True
+
+    @pytest.mark.asyncio
+    async def test_create_dynamic_agent_falls_back_past_a_model_without_login(self, config_file):
+        """An executor whose default model lost its login runs on the caller's next model."""
+        config = Config(str(config_file))
+        factory = AgentFactory(config)
+        primary, fallback = Mock(name="primary"), Mock(name="fallback")
+
+        def sdk_model(key):
+            if key == "broken":
+                raise CredentialError("No credential for provider 'zai'")
+            return (primary if key == "gpt-4" else fallback), config.get_model("gpt-4")
+
+        with patch('core.agent_factory.Agent') as mock_agent_class, \
+             patch.object(factory, '_resolve_tools_for_names', return_value=([], [], []), new_callable=AsyncMock), \
+             patch.object(factory, '_build_dynamic_agent_instructions', return_value="instr"), \
+             patch.object(factory, 'resolve_model_key', side_effect=lambda key: key), \
+             patch.object(factory.models, 'is_allowed', return_value=True), \
+             patch.object(factory.models, 'sdk_model', side_effect=sdk_model):
+            mock_agent_class.return_value = Mock()
+
+            await factory.create_dynamic_agent(
+                name="dyn-test", instructions="x", model_key="broken",
+                fallback_model_keys=["gpt-4", "gpt-4", "other"],
+            )
+            model = mock_agent_class.call_args.kwargs["model"]
+            assert isinstance(model, FallbackModel)
+            assert [c.key for c in model.candidates] == ["gpt-4", "other"]
+
+            await factory.create_dynamic_agent(
+                name="dyn-test", instructions="x", model_key="gpt-4",
+            )
+            assert mock_agent_class.call_args.kwargs["model"] is primary
     
     @pytest.mark.asyncio
     async def test_create_agent_with_force_reload(self, config_file):

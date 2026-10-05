@@ -141,6 +141,7 @@ def main() -> None:
     print(f"Catalog: {deployment.routing_path if deployment.catalog else 'none'}")
     print(f"Config: {deployment.config_path}")
 
+    record_policy_decisions(Path(deployment.config.get_logs_directory()))
     options = multi_user_options(deployment, args) if args.accounts else single_user_options(deployment, args)
     print(f"Open http://{args.host}:{args.port}/")
     proxy = {"forwarded_allow_ips": args.forwarded_allow_ips} if args.forwarded_allow_ips else {}
@@ -181,6 +182,26 @@ def reexecute() -> None:
     while (code := subprocess.call(command, env=environment)) == RESTART_EXIT:
         pass
     raise SystemExit(code)
+
+
+def record_policy_decisions(logs_dir: Path) -> None:
+    """Keep the action policy's decisions in ``action_policy.log``.
+
+    The server logs to its console only; a call the policy blocked could then
+    be explained only while that console was open. The events hold the tool,
+    the verdict of each question and the rule - never arguments or output.
+    """
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        logs_dir / "action_policy.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    policy_logger = logging.getLogger("grid.action_policy")
+    policy_logger.setLevel(logging.INFO)
+    policy_logger.addHandler(handler)
 
 
 def single_user_options(deployment, args: argparse.Namespace) -> dict:
