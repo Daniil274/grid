@@ -20,6 +20,8 @@ from core.run_stream import (
     is_output_delta,
     tool_event_info,
 )
+from web_chat.payload import normalize_payload
+from web_chat.tool_summaries import tool_subtitle, tool_title
 from web_chat.trace import (
     Step,
     StepKind,
@@ -29,7 +31,6 @@ from web_chat.trace import (
     context_refs,
     summarize,
 )
-from web_chat.tool_summaries import tool_subtitle, tool_title
 
 logger = logging.getLogger("grid.web_chat.observer")
 
@@ -199,7 +200,8 @@ class WebStreamObserver:
         if block is None or block.status is not StepStatus.RUNNING:
             return
         if error:
-            self._recorder.close(block, status=StepStatus.ERROR, body=error)
+            self._recorder.close(block, status=StepStatus.ERROR, body=error,
+                                 result_payload=normalize_payload(error))
         else:
             self._recorder.close(block)
 
@@ -374,6 +376,7 @@ class WebStreamObserver:
         name = _tool_display_name(info)
         # Human heading/caption; fall back to the raw name and argument blob.
         title = tool_title(tool_name, info.get("server_label")) or name
+        block = self._calls_by_id.get(call_id) if call_id else None
         subtitle = tool_subtitle(tool_name, arguments)
         if subtitle is None:
             subtitle = clip(summarize(arguments, 160).replace("\n", " "), 120)
@@ -382,9 +385,10 @@ class WebStreamObserver:
             "tool": name,
             "subtitle": subtitle,
             "detail": summarize(arguments),
+            "input_payload": normalize_payload(arguments, role="input", tool=tool_name,
+                                               markdown=bool(block and block.kind is StepKind.AGENT)),
             "refs": context_refs(arguments),
         }
-        block = self._calls_by_id.get(call_id) if call_id else None
         if block is not None and block.kind is StepKind.AGENT:
             # The sub-agent already opened this call's block; add what it was asked.
             self._recorder.update(block, **fields)
@@ -407,7 +411,18 @@ class WebStreamObserver:
     def _on_tool_output(self, item: Any, agent_key: Optional[str]) -> None:
         info = tool_event_info(item)
         step = self._take_pending_call(info.get("call_id"))
-        output = summarize(info.get("output"))
+        value = info.get("output")
+        output = summarize(value)
+        tool_name = self._tool_names.get(step.id, "") if step else str(info.get("tool_name") or "")
+        result_payload = normalize_payload(
+            value, tool=tool_name,
+            markdown=bool(step and step.kind is StepKind.AGENT) or tool_name in {"Agent", "WebSpider"}
+        )
+        status = (
+            StepStatus.ERROR
+            if result_payload.get("is_error")
+            else StepStatus.DONE
+        )
         if step is None:
             # Output without a matching call (resumed run, auto-run tool): still
             # worth showing, just without a duration.
@@ -417,10 +432,11 @@ class WebStreamObserver:
                 or name
             )
             self._recorder.note(
-                StepKind.TOOL, title, tool=name, body=output, parent_id=self._parent_id
+                StepKind.TOOL, title, tool=name, body=output,
+                result_payload=result_payload, status=status, parent_id=self._parent_id
             )
             return
-        self._recorder.close(step, body=output)
+        self._recorder.close(step, body=output, result_payload=result_payload, status=status)
 
     def _on_handoff_requested(self, item: Any, agent_key: Optional[str]) -> None:
         target = field_of(getattr(item, "raw_item", None), "name") or "agent"
@@ -456,6 +472,7 @@ class WebStreamObserver:
             f"Connected to {server}",
             subtitle=f"{len(names)} tools available",
             body="\n".join(names),
+            result_payload=normalize_payload(names),
             parent_id=self._parent_id,
         )
 

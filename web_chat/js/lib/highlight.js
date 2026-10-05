@@ -56,19 +56,43 @@ function wrap(cls, line) {
   return line ? `<span class="${cls}">${line}</span>` : line;
 }
 
-/** One escaped diff line to an escaped span (meta/added/removed/hunk). */
-function diffLine(line) {
+/** One escaped diff line to an escaped span (meta/added/removed/hunk).
+ * `---`/`+++` are file headers only as a pair: inside a hunk a removed line
+ * such as `-- sql comment` also starts with `---` once the marker is added. */
+function diffLine(line, next = "", prev = "") {
   if (line.startsWith("@@")) return wrap("dl--hunk", line);
+  if (line.startsWith("--- ")) return wrap(next.startsWith("+++ ") ? "dl--meta" : "dl--del", line);
+  if (line.startsWith("+++ ")) return wrap(prev.startsWith("--- ") ? "dl--meta" : "dl--add", line);
   if (DIFF_HEAD.test(line) || line.startsWith("index ")) return wrap("dl--meta", line);
   if (line.startsWith("+")) return wrap("dl--add", line);
   if (line.startsWith("-")) return wrap("dl--del", line);
   if (line.startsWith("&gt;")) return wrap("dl--context", line);
   if (line.startsWith("&lt;")) return wrap("dl--del", line);
-  return line;
+  return wrap("dl--context", line);
 }
 
+
+/** A diff as markup. Every line is a block span and lines join with no
+ * separators: the newline text nodes between blocks used to render inside
+ * `pre` as an extra empty line, double-spacing whole diffs. Context lines
+ * get a span of their own so the joining works uniformly. */
 function highlightDiff(raw) {
-  return escapeHtml(raw).split("\n").map(diffLine).join("\n");
+  const lines = escapeHtml(raw).split("\n");
+  return lines.map((line, i) => diffLine(line, lines[i + 1], lines[i - 1])).join("");
+}
+
+/** Added and removed line counts of a unified diff (headers excluded). */
+export function diffStats(text) {
+  const lines = String(text ?? "").split("\n");
+  let add = 0;
+  let del = 0;
+  lines.forEach((line, i) => {
+    if (line.startsWith("--- ") && (lines[i + 1] ?? "").startsWith("+++ ")) return;
+    if (line.startsWith("+++ ") && (lines[i - 1] ?? "").startsWith("--- ")) return;
+    if (line.startsWith("+")) add++;
+    else if (line.startsWith("-")) del++;
+  });
+  return { add, del };
 }
 
 /**
