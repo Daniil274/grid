@@ -134,6 +134,8 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
 
         self.config = config or Config()
         self.container_id = container_id
+        self._system_access_broker = None
+        self._system_access_key = None
         self._logs_directory = Path(logs_directory) if logs_directory else None
         self.confine_tools = confine_tools
         # core.system_store.BuilderAccess, set by an admin's web chat space: the
@@ -214,6 +216,23 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
         self._pipeline_registry = PipelineRegistry()
         logger.info("PipelineRegistry initialized")
 
+    def bind_system_access(self, broker: Any, system_key: str) -> None:
+        """Host-only binding to the registry of this user space."""
+        if self._system_access_broker is broker and self._system_access_key == system_key:
+            return
+        self._system_access_broker = broker
+        self._system_access_key = system_key
+        self._agent_cache.clear()
+        self._tool_cache.clear()
+
+    def _system_access_tools(self, agent_key: str | None) -> list[Any]:
+        if self._system_access_broker is None or agent_key is None:
+            return []
+        broker = self._system_access_broker
+        if not broker.is_key_agent(self._system_access_key, agent_key):
+            # Only the system's key agent is given the cross-system tools.
+            return []
+        return broker.tools(self, self._system_access_key)
 
     def _build_agent_session_db_path(self) -> str:
         """Return durable SQLite path for agent sessions."""

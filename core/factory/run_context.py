@@ -130,6 +130,9 @@ class GridRunContext:
     action_depth: int = (
         0  # Context-local delegation depth (safe across parallel branches)
     )
+    system_access_active: bool = (
+        False  # A cross-system task cannot re-delegate its authority
+    )
     stream_observer: Optional[Any] = (
         None  # The run's own observer, so sub-agents report into the same view
     )
