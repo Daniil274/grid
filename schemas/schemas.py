@@ -129,6 +129,15 @@ class AgentConfig(BaseModel):
     name: str
     model: Union[str, List[str]]
     tools: List[str] = Field(default_factory=list)
+    key_agent: bool = Field(
+        default=True,
+        description=(
+            "Whether this agent acts as its system's key agent: it is given the "
+            "cross-system tools to see the user's other systems and to delegate "
+            "tasks to their key agents. The system's default agent is its key "
+            "agent; set false to keep an agent to its own system."
+        ),
+    )
     base_prompt: str = "base"
     custom_prompt: Optional[str] = None
     system_skills: List[str] = Field(default_factory=list)
