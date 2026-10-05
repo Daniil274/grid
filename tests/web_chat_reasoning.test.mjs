@@ -191,3 +191,25 @@ test("a closed step builds its thinking and payloads only when opened", () => {
   assert.match(thinking.find("step__prose").innerHTML, /<strong>long<\/strong> plan/);
   assert.deepEqual(panel.el.findAll("payload__label").map((label) => label.textContent), ["Input", "Result"]);
 });
+
+test("typed tool payloads render JSON safely and preserve empty typed results", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([step("s1", {
+    input_payload: { version: 1, parts: [{ kind: "json", data: { ok: true, n: 0 } }], raw_text: '{"ok":true,"n":0}' },
+    result_payload: { version: 1, parts: [], raw_text: "" },
+  })]);
+  const row = rows(topList(panel))[0];
+  row.find("step__head").click();
+  assert.deepEqual(panel.el.findAll("payload__label").map((label) => label.textContent), ["Input", "Result"]);
+  assert.match(row.find("payload__typed").textContent, /"ok": true/);
+  assert.equal(row.find("payload__typed").innerHTML.includes("<script>"), false);
+});
+
+test("typed markdown is rendered through the markdown renderer and truncation is visible", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([step("s1", { result_payload: { version: 1, parts: [{ kind: "markdown", data: "**safe** <script>bad</script>" }], raw_text: "raw", truncated: true, original_size: 40000 } })]);
+  const row = rows(topList(panel))[0];
+  row.find("step__head").click();
+  assert.match(row.find("payload__body--prose").innerHTML, /<strong>safe<\/strong>/);
+  assert.equal(row.find("payload__notice").textContent, "Truncated · original 40000 bytes");
+});

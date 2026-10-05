@@ -422,8 +422,8 @@ test("diff fences classify added, removed, hunk and header lines", () => {
   assert.ok(html.includes('<span class="dl--hunk">@@ -1 +1 @@</span>'));
   assert.ok(html.includes('<span class="dl--del">-old line</span>'));
   assert.ok(html.includes('<span class="dl--add">+new line</span>'));
-  // Context lines are emitted verbatim, without a span.
-  assert.ok(html.includes("\n context line</code>"));
+  // Context lines are block spans too, so the diff stays single-spaced.
+  assert.ok(html.includes('<span class="dl--context"> context line</span></code>'));
 });
 
 test("a diff is recognised even without a language tag", () => {

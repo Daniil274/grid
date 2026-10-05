@@ -141,6 +141,19 @@
 .step[data-kind="tool"] > .step__head .step__icon { color: var(--text-2); }
 .step[data-kind="handoff"] > .step__head .step__icon { color: var(--warn); }
 .step[data-kind="agent"] > .step__head .step__icon { color: var(--accent); }
+
+/* Tool family colour. `--step-accent` is the one custom property every surface
+   of the row reads, so the icon, the title and the payload's accent bar always
+   agree on what kind of work this is. */
+.step[data-family="read"]   { --step-accent: var(--tool-read); }
+.step[data-family="search"] { --step-accent: var(--tool-search); }
+.step[data-family="write"]  { --step-accent: var(--tool-write); }
+.step[data-family="edit"]   { --step-accent: var(--tool-edit); }
+.step[data-family="delete"] { --step-accent: var(--tool-delete); }
+.step[data-family="shell"]  { --step-accent: var(--tool-shell); }
+.step[data-family="web"]    { --step-accent: var(--tool-web); }
+.step[data-family="task"]   { --step-accent: var(--tool-task); }
+.step[data-family="agent"]  { --step-accent: var(--tool-agent); }
 .step[data-tone="warn"] > .step__head .step__icon { color: var(--warn); }
 .step[data-kind="error"]:not([data-tone="warn"]) > .step__head .step__icon,
 .step[data-status="error"] > .step__head .step__icon {
@@ -152,6 +165,15 @@
   border-color: var(--accent-line);
   color: var(--accent);
   animation: pulse 1.4s ease-in-out infinite;
+}
+
+.step:not([data-family=""]):not([data-status="error"]) > .step__head .step__icon { color: var(--step-accent); }
+.step:not([data-family=""]):not([data-status="error"]) > .step__head .step__title { color: var(--step-accent); }
+.step:not([data-family=""]) > .step__detail .payload:not([data-error="true"]) {
+  border-left: 2px solid var(--step-accent);
+}
+.step:not([data-family=""]) > .step__detail .payload:not([data-error="true"]) .payload__label {
+  color: var(--step-accent);
 }
 
 .step__label {
@@ -419,3 +441,62 @@ a.refChip:hover {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.payload__typed { min-width: 0; }
+.payload__part { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.payload__part strong { display: block; margin-bottom: 4px; color: var(--text-3); font-size: 11px; }
+.payload__part .payload__body { padding: 0; }
+.payload__code--diff { border-left: 2px solid var(--accent-line); }
+.payload__image { display: block; max-width: 100%; max-height: 320px; object-fit: contain; }
+.payload__source { padding: 2px 6px; border: 0; background: transparent; color: var(--text-2); font-size: 11px; cursor: pointer; }
+.payload__notice { display: block; padding: 4px 10px; color: var(--text-3); }
+.payload__raw[hidden] { display: none; }
+
+/* Content-aware previews share one compact card across all tools. */
+.payload__bar { gap: 8px; flex-wrap: wrap; }
+.payload__format { flex: 1; color: var(--text-3); font-size: 11px; }
+.payload__typed { max-height: 440px; overflow: auto; }
+.payload__typed[hidden] { display: none; }
+.payload__part:last-child { border-bottom: 0; }
+.payload__partHead { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: var(--text-3); font-size: 11px; overflow-wrap: anywhere; }
+.payload__type { text-align: right; }
+.payload__field { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; min-width: 0; }
+.payload__key { flex-shrink: 0; max-width: 45%; overflow-wrap: anywhere; color: var(--text-3); }
+.payload__value, .payload__key { font-family: var(--font-mono, monospace); font-size: 12px; }
+.payload__value { white-space: pre-wrap; overflow-wrap: anywhere; }
+.payload__value[data-type="boolean"], .payload__value[data-type="number"] { color: var(--accent); }
+.payload__value[data-type="null"], .payload__summary, .payload__empty { color: var(--text-3); }
+.payload__branch { flex: 1; min-width: 0; }
+.payload__branch > summary { cursor: pointer; color: var(--text-2); font-size: 12px; }
+.payload__branch > .payload__fields { padding-left: 12px; border-left: 1px solid var(--line); }
+.payload__tableWrap { overflow: auto; }
+.payload__table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.payload__table th, .payload__table td { padding: 5px 8px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); max-width: 320px; overflow-wrap: anywhere; }
+.payload__table th { color: var(--text-3); font-weight: 500; }
+.payload__resource { display: block; overflow-wrap: anywhere; }
+.payload__source:hover, .payload__source[aria-pressed="true"] { color: var(--accent); background: var(--bg-inset); border-radius: var(--radius-xs); }
+.payload__source:focus-visible, .payload__branch > summary:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+.payload__empty { display: block; padding: 10px 12px; }
+
+/* Tone inside one part: the request's old text reads as removed work, its new
+   text as added, and stderr as an error stream - all before reading a word. */
+.payload__part[data-tone="diff"] { padding: 6px 12px; }
+
+.payload__part[data-tone="add"], .payload__part[data-tone="diff"] { background: var(--diff-add-bg); }
+.payload__part[data-tone="del"] { background: var(--diff-del-bg); }
+.payload__part[data-tone="error"] { background: var(--danger-soft); }
+.payload__part[data-tone="shell"] .payload__partHead span:first-child::before {
+  content: "$ ";
+  color: var(--text-3);
+}
+
+/* Diff stats (+adds / −dels) sit where the format label otherwise is. */
+.payload__stats { display: inline-flex; gap: 8px; font-family: var(--font-mono); font-weight: 600; }
+.payload__stat--add { color: var(--ok); }
+.payload__stat--del { color: var(--danger); }
+
+/* JSON previews read from the code palette, not from UI accents: strings the
+   way strings look everywhere else in the app, keys muted. */
+.payload__value[data-type="string"] { color: var(--code-str); }
+.payload__value[data-type="number"] { color: var(--code-num); }
+.payload__value[data-type="boolean"] { color: var(--code-kw); }

@@ -26,7 +26,8 @@ import { h, icon, replace } from "../lib/dom.js";
 import { duration, plural, tokens } from "../lib/format.js";
 import { renderMarkdown } from "../lib/markdown.js";
 import { ICONS } from "./icons.js";
-import { copyText } from "./toast.js";
+import { toolFamily } from "../lib/languages.js";
+import { renderPayload } from "./tool-payload.js";
 
 /** The tokens a step spent, prompt first, completion second; "" when none. */
 const usageText = (tokensIn, tokensOut) => {
@@ -41,6 +42,14 @@ const INLINE_BODY_KINDS = new Set(["reasoning", "message"]);
 const MAX_VISIBLE_REFS = 6;
 
 const stepIcon = (kind) => ICONS[kind] ?? ICONS.prepare;
+
+/** An icon per tool family: one glance says what kind of work the step runs,
+ * before its label, payload or colour say the same thing again in text. */
+const FAMILY_ICONS = {
+  read: "file", write: "edit", edit: "edit", delete: "trash",
+  search: "search", web: "url", agent: "users", task: "timeline", shell: "tool",
+};
+const familyIcon = (step) => ICONS[FAMILY_ICONS[toolFamily(step.tool)] ?? ""] ?? stepIcon(step.kind);
 
 function refChip(ref) {
   const label = h("span", { text: ref.label });
@@ -62,32 +71,10 @@ function refsRow(refs) {
   return h("div.step__refs", {}, visible);
 }
 
-/** A labelled, copyable payload block; `markdown` renders prose instead of raw text. */
-function payload(label, text, { markdown = false } = {}) {
-  if (!text) return null;
-  return h(
-    "div.payload",
-    {},
-    h(
-      "div.payload__bar",
-      {},
-      h("span.payload__label", { text: label }),
-      h("button.iconBtn.iconBtn--xs", {
-        type: "button",
-        title: `Copy ${label.toLowerCase()}`,
-        on: { click: () => copyText(text, `${label} copied`) },
-      }, icon(ICONS.copy, { size: 13 })),
-    ),
-    markdown
-      ? h("div.payload__body.payload__body--prose", { html: renderMarkdown(text) })
-      : h("pre.payload__body", {}, h("code", { text })),
-  );
-}
-
 /** The parts every row shares: icon, title, subtitle, policy badge, timing. */
 function stepHead(step) {
   const parts = {
-    glyph: h("span.step__icon", {}, icon(stepIcon(step.kind), { size: 14 })),
+    glyph: h("span.step__icon", {}, icon(familyIcon(step), { size: 14 })),
     title: h("span.step__title", { text: step.title }),
     subtitle: h("span.step__subtitle"),
     policy: h("span.step__policy", { hidden: true }),
@@ -99,8 +86,8 @@ function stepHead(step) {
     { type: "button", "aria-expanded": "false" },
     parts.glyph,
     h("span.step__label", {}, parts.title, parts.subtitle),
-    parts.policy,
     parts.usage,
+    parts.policy,
     parts.timing,
     h("span.step__chevron", {}, icon(ICONS.chevron, { size: 14 })),
   );
@@ -151,12 +138,13 @@ function disclosure(root, head, onOpen = null) {
  */
 function createStepRow(step) {
   const inlineBody = INLINE_BODY_KINDS.has(step.kind);
-  const { head, title, subtitle, policy, usage, timing } = stepHead(step);
+  const { head, title, subtitle, policy, usage, timing, glyph } = stepHead(step);
   const detail = h("div.step__detail");
   const refs = h("div.step__refsSlot");
   const body = inlineBody ? h("div.step__prose") : null;
   let latest = step;
   let stale = true;
+  const payloadState = { input: {}, result: {} };
 
   /** Build the hidden part from the latest step; once per change, only when open. */
   const fill = () => {
@@ -167,10 +155,16 @@ function createStepRow(step) {
       body.classList.remove("is-streaming");
       body.innerHTML = renderMarkdown(latest.body);
     }
-    replace(detail, [payload("Input", latest.detail), inlineBody ? null : payload("Result", latest.body)].filter(Boolean));
+    replace(detail, [
+      renderPayload("Input", latest.input_payload, latest.detail, { state: payloadState.input, tool: latest.tool }),
+      inlineBody ? null : renderPayload(latest.status === "error" ? "Error" : "Result", latest.result_payload, latest.body, { state: payloadState.result, tool: latest.tool, markdown: latest.kind === "agent" }),
+    ].filter(Boolean));
   };
 
-  const root = h("li.step", { dataset: { kind: step.kind, status: step.status, tone: step.tone || "neutral" } }, head, refs, body, detail);
+  const root = h("li.step", { dataset: {
+    kind: step.kind, status: step.status, tone: step.tone || "neutral",
+    family: toolFamily(step.tool),
+  } }, head, refs, body, detail);
   const { suggest } = disclosure(root, head, fill);
 
   /** Thinking stays open while it streams and folds away once it lands. */
@@ -189,6 +183,11 @@ function createStepRow(step) {
   const update = (next) => {
     root.dataset.status = next.status;
     root.dataset.tone = next.tone || "neutral";
+    root.dataset.family = toolFamily(next.tool);
+    // The icon follows the family: a call that reveals its tool retrofits
+    // the glyph in place rather than rebuilding the head.
+    const path = familyIcon(next);
+    if (glyph.dataset.path !== path) { glyph.dataset.path = path; replace(glyph, icon(path, { size: 14 })); }
     title.textContent = next.title;
     // Reasoning has no summary until it lands; a running call keeps its arguments.
     subtitle.textContent = inlineBody && next.status === "running" ? "" : next.subtitle || "";
@@ -199,7 +198,7 @@ function createStepRow(step) {
     latest = next;
     stale = true;
     if (root.classList.contains("is-open")) fill();
-    const hasBlocks = Boolean(next.detail) || Boolean(!inlineBody && next.body);
+    const hasBlocks = Boolean(next.detail || next.input_payload) || Boolean(!inlineBody && (next.body || next.result_payload));
     root.classList.toggle("has-detail", hasBlocks || Boolean(inlineBody && (next.status === "running" || next.body)));
     if (inlineBody) suggest(next.status === "running");
   };
@@ -266,13 +265,14 @@ function createAgentRow(step, turnStart) {
   );
   let current = step;
   let stale = true;
+  const payloadState = { input: {}, result: {} };
   /** The task and the report, built from the latest step when the block is open. */
   const fill = () => {
     if (!stale) return;
     stale = false;
     const asked = taskText(current.detail);
-    replace(task, payload("Task", asked, { markdown: asked !== current.detail }));
-    replace(report, payload(current.status === "error" ? "Error" : "Report", current.body, { markdown: current.status !== "error" }));
+    replace(task, renderPayload("Task", current.input_payload, asked, { markdown: asked !== current.detail, state: payloadState.input }));
+    replace(report, renderPayload(current.status === "error" ? "Error" : "Report", current.result_payload, current.body, { markdown: current.status !== "error", state: payloadState.result }));
   };
   const { suggest } = disclosure(root, head, fill);
 

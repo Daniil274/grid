@@ -82,7 +82,7 @@ class Step:
     """One entry in a turn's timeline.
 
     ``detail`` holds the input (tool arguments), ``body`` the result or the
-    reasoning text. Both are plain text; the client decides how to reveal them.
+    reasoning text. Typed payloads are additive; these strings serve old clients.
     """
 
     id: str
@@ -101,6 +101,8 @@ class Step:
     tool: str = ""  # the tool a ``tool`` or ``agent`` step called, as titled
     tokens_in: int = 0  # prompt tokens of the model responses this step spent
     tokens_out: int = 0  # completion tokens of the model responses this step spent
+    input_payload: dict[str, Any] | None = None
+    result_payload: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -120,6 +122,8 @@ class Step:
             "tool": self.tool,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
+            "input_payload": self.input_payload,
+            "result_payload": self.result_payload,
         }
 
 
