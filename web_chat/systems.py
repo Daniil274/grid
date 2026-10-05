@@ -143,6 +143,17 @@ class SystemRegistry:
         self._extras: Dict[str, ExtraSystem] = {}
         self._extra_configs: Dict[str, Config] = {}
         self.refresh_extras()
+        # One trusted resolver per user space. The broker checks visible keys
+        # before config(), which otherwise falls back to the base system.
+        from core.system_access import SystemAccessBroker
+
+        self._system_access = SystemAccessBroker(
+            keys=self.keys,
+            config=self.config,
+            factory=self.factory,
+            agents=self.agents,
+            default_agent=lambda key: self.config(key).get_default_agent(),
+        )
 
     # -- the space's own systems ---------------------------------------------
     def refresh_extras(self) -> None:
@@ -273,6 +284,9 @@ class SystemRegistry:
                 if build_for_key is not None
                 else self._build_factory(config)
             )
+            bind = getattr(self._factories[system_key], "bind_system_access", None)
+            if callable(bind):
+                bind(self._system_access, system_key)
         return self._factories[system_key]
 
     def agents(self, system_key: str) -> Dict[str, Any]:

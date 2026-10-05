@@ -270,7 +270,7 @@ class ToolAssembly:
         self, agent_config: AgentConfig, agent_key: Optional[str] = None
     ) -> List[Any]:
         """Get all tools for agent with caching."""
-        cache_key = f"{agent_config.name}:{hash(tuple(agent_config.tools))}"
+        cache_key = f"{agent_key}:{agent_config.name}:{hash(tuple(agent_config.tools))}"
 
         if cache_key in self._tool_cache:
             return self._tool_cache[cache_key]
@@ -317,6 +317,9 @@ class ToolAssembly:
                 logger.error(
                     "Failed to create agent tools %s: %s", agent_tools, e, exc_info=e
                 )
+
+        # Caller-specific closures must not be shared between agent keys.
+        tools.extend(self._system_access_tools(agent_key))
 
         # Cache tools
         self._tool_cache[cache_key] = tools
@@ -616,6 +619,10 @@ class ToolAssembly:
             )
             sub_run_ctx = GridRunContext(
                 factory=self,
+                agent_id=agent_key,
+                system_access_active=getattr(
+                    getattr(context, "context", None), "system_access_active", False
+                ),
                 context_id=sub_context_id,
                 session=session,
                 action_state=delegated_state(
