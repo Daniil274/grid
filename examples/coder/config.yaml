@@ -207,6 +207,20 @@ models:
     context_window: 1050000
     use_responses_api: true
     request_timeout: 300
+  sonnet-5-5:
+    name: anthropic/claude-sonnet-5.5
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 32000
+    context_window: 256000
+    request_timeout: 300
+  deepseek-v4-pro:
+    name: ~deepseek/deepseek-pro-latest
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 32000
+    context_window: 258000
+    request_timeout: 300
 tools:
   bash_tool:
     type: "function"
@@ -359,8 +373,9 @@ agents:
     model:
     # The engineer coordinates subagents, so it must not be cut off
     # mid-orchestration: 0 disables its execution timeout and turn limit.
-      - gpt-6.1-sol
+      - glm-flash
       - glm-latest
+      - gpt-6.1-sol
     timeout: 0
     max_turns: 0
     mcp_enabled: true
@@ -375,12 +390,19 @@ agents:
       - file_append
       - glob_tool
       - grep_tool
-      - codegraph
       - web_fetch
       - web_search
       - notebook_read
       - notebook_edit
       - notebook_create
+      - beads_init
+      - beads_ready
+      - beads_list
+      - beads_create
+      - beads_show
+      - beads_update
+      - beads_close
+      - codegraph
       - general_purpose
       - web_spider
     description: "Main assistant and the default: conversation, general questions and explanations from its own knowledge, and all software engineering in a repository (implement features, fix bugs and failing tests, refactor, review code, run shell commands, tests and git, explore the codebase)."
@@ -444,8 +466,8 @@ agents:
   general_purpose:
     name: "General-purpose"
     model:
-      - gpt-6-luna
       - deepseek-flash-latest
+      - gpt-6-luna
     mcp_enabled: true
     system_skills:
       - beads
@@ -501,8 +523,8 @@ agents:
   web_spider:
     name: "WebSpider"
     model:
-      - gpt-6-luna
       - glm-flash
+      - gpt-6-luna
     system_skills:
       - beads
       - web_spider_research_skill
