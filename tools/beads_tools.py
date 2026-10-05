@@ -43,10 +43,21 @@ def _get_isolation_image(context: Any) -> str:
     return os.environ.get("GRID_ISOLATION_IMAGE") or os.environ.get("GRID_AGENT_IMAGE") or "grid-agent:latest"
 
 def _get_container_id(context: Any) -> Optional[str]:
-    """Extract container_id from context."""
-    if hasattr(context, 'context') and hasattr(context.context, 'container_id'):
-        return context.context.container_id
-    return None
+    """The container the run's commands go to: the run's own, else its factory's.
+
+    Every agent of a factory must reach the same tracker. A run context that
+    lacks the container (an older caller) would otherwise send bd to the host,
+    where a different bd build opens the same mounted database.
+    """
+    container_id = getattr(getattr(context, "context", None), "container_id", None)
+    if container_id:
+        return container_id
+    factory = getattr(getattr(context, "context", None), "factory", None)
+    if factory is None:
+        from utils.path_utils import get_current_factory
+
+        factory = get_current_factory()
+    return getattr(factory, "container_id", None)
 
 # Container path for workspace (Docker forbids bind to "/"). Agent sees root as "/".
 _CONTAINER_ROOT = "/workspace"

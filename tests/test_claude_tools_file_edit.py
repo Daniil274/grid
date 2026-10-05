@@ -90,3 +90,72 @@ def test_apply_unified_patch_supports_sequential_hunks_with_offset():
     updated = module._apply_unified_patch(original, patch)
 
     assert updated == "a\nb\nx\nc\nd\ny\n"
+
+
+SETTINGS_SOURCE = (
+    "    loadingLabel = new QLabel(QStringLiteral(\"Loading...\"), this);\n"
+    "    loadingLabel->setGeometry(0, 0, sizeWidgets.width(), rectTitile.top());\n"
+    "    loadingLabel->raise();\n"
+)
+
+
+def test_apply_patch_accepts_begin_patch_envelope_with_bare_hunk():
+    """The format GPT models write by habit: located by context alone."""
+    module = _load_module()
+    patch = (
+        "*** Begin Patch\n"
+        "*** Update File: /workspace/View/SettingsWidgetsMK1.cpp\n"
+        "@@\n"
+        "-    loadingLabel->setGeometry(0, 0, sizeWidgets.width(), rectTitile.top());\n"
+        "+    loadingLabel->setGeometry(3, 3, 474, 194);\n"
+        "*** End Patch"
+    )
+
+    updated = module._apply_unified_patch(SETTINGS_SOURCE, patch)
+
+    assert "setGeometry(3, 3, 474, 194)" in updated
+    assert "rectTitile.top()" not in updated
+    assert updated.endswith("loadingLabel->raise();\n")
+
+
+def test_apply_patch_bare_hunk_uses_anchor_and_trimmed_blank_context():
+    module = _load_module()
+    original = "def a():\n    return 1\n\ndef b():\n    return 1\n"
+    patch = (
+        "@@ def b():\n"
+        "-    return 1\n"
+        "+    return 2\n"
+    )
+
+    updated = module._apply_unified_patch(original, patch)
+
+    assert updated == "def a():\n    return 1\n\ndef b():\n    return 2\n"
+
+
+def test_apply_patch_refuses_ambiguous_bare_hunk():
+    module = _load_module()
+    original = "x = 1\ny\nx = 1\n"
+    patch = "@@\n-x = 1\n+x = 2\n"
+
+    try:
+        module._apply_unified_patch(original, patch)
+    except module._PatchApplyError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Ambiguous patch unexpectedly applied")
+
+    assert "ambiguous" in message
+    assert "lines 1, 3" in message
+
+
+def test_apply_patch_error_explains_expected_format():
+    module = _load_module()
+
+    try:
+        module._apply_unified_patch("a\n", "replace a with b\n")
+    except module._PatchApplyError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Patch unexpectedly applied")
+
+    assert "Expected format" in message

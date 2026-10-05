@@ -172,11 +172,8 @@ class BackgroundAgentSupervisor:
                 model_key=run.model,
                 tool_names=list(run.tools),
             )
-            resolved_tool_names = {
-                str(getattr(tool, "name", "") or getattr(tool, "__name__", ""))
-                for tool in (getattr(worker, "tools", None) or [])
-            }
-            missing = [name for name in run.tools if name not in resolved_tool_names]
+            reported = getattr(worker, "_grid_missing_tools", None)
+            missing = list(reported) if isinstance(reported, (list, tuple)) else []
             if missing:
                 raise RuntimeError(
                     "AgentFactory did not resolve requested tools: "

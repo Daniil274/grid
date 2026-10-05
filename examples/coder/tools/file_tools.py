@@ -28,6 +28,10 @@ class _Hunk:
     new_start: int
     new_count: int
     lines: list[tuple[str, str]]
+    # A hunk without line numbers ("@@" or "@@ <anchor line>", the
+    # *** Begin Patch format) is placed by its context alone.
+    numbered: bool = True
+    anchor: Optional[str] = None
 
     @property
     def old_span(self) -> int:
@@ -38,19 +42,37 @@ class _PatchApplyError(Exception):
     """Raised when a unified diff cannot be applied safely."""
 
 
+_PATCH_FORMAT_HINT = (
+    "Expected format: optional '--- a/file' / '+++ b/file', then hunks that start "
+    "with '@@ -start,count +start,count @@' (or a bare '@@' located by its context), "
+    "each line prefixed with ' ' (context), '-' (removed) or '+' (added)."
+)
+
+# Envelope lines of the "*** Begin Patch" format; the hunks inside are diffs.
+_ENVELOPE_PREFIXES = ("*** Begin Patch", "*** End Patch", "*** Update File:", "*** End of File")
+
+
 def _split_file_content(text: str) -> tuple[list[str], bool]:
     """Return file lines without terminators and whether the file ends with LF."""
     return text.splitlines(), text.endswith("\n")
 
 
 def _parse_unified_diff(patch_content: str) -> list[_Hunk]:
-    """Parse unified diff content into hunk objects."""
+    """Parse a unified diff, or the "*** Begin Patch" format, into hunks."""
     patch_lines = patch_content.splitlines()
     hunks: list[_Hunk] = []
     i = 0
 
     while i < len(patch_lines):
         line = patch_lines[i]
+        if line.startswith(("*** Add File:", "*** Delete File:", "*** Move to:")):
+            raise _PatchApplyError(
+                f"❌ file_edit changes one existing file: use file_write to create "
+                f"a file instead of '{line.strip()}'"
+            )
+        if line.startswith(_ENVELOPE_PREFIXES):
+            i += 1
+            continue
         if line.startswith("---") or line.startswith("+++"):
             i += 1
             continue
@@ -59,16 +81,21 @@ def _parse_unified_diff(patch_content: str) -> list[_Hunk]:
             if not line.strip():
                 i += 1
                 continue
-            raise _PatchApplyError(f"❌ Expected hunk header, found: {line}")
+            raise _PatchApplyError(f"❌ Expected hunk header, found: {line}\n{_PATCH_FORMAT_HINT}")
 
         match = _HUNK_HEADER_RE.match(line)
-        if not match:
-            raise _PatchApplyError(f"❌ Invalid hunk header: {line}")
-
-        old_start = int(match.group(1)) - 1
-        old_count = int(match.group(2)) if match.group(2) is not None else 1
-        new_start = int(match.group(3)) - 1
-        new_count = int(match.group(4)) if match.group(4) is not None else 1
+        if match:
+            old_start = int(match.group(1)) - 1
+            old_count = int(match.group(2)) if match.group(2) is not None else 1
+            new_start = int(match.group(3)) - 1
+            new_count = int(match.group(4)) if match.group(4) is not None else 1
+            numbered, anchor = True, None
+        elif line.lstrip("@").strip().startswith("-") and re.match(r"@@\s*-\d", line):
+            raise _PatchApplyError(f"❌ Invalid hunk header: {line}\n{_PATCH_FORMAT_HINT}")
+        else:
+            old_start = old_count = new_start = new_count = 0
+            numbered = False
+            anchor = line[2:].strip().removesuffix("@@").strip() or None
         i += 1
 
         hunk_lines: list[tuple[str, str]] = []
@@ -76,17 +103,26 @@ def _parse_unified_diff(patch_content: str) -> list[_Hunk]:
             current = patch_lines[i]
             if current.startswith("@@") or current.startswith("---") or current.startswith("+++"):
                 break
+            if current.startswith(_ENVELOPE_PREFIXES):
+                break
             if current == r"\ No newline at end of file":
                 i += 1
                 continue
             if not current:
-                raise _PatchApplyError("❌ Empty line in hunk without ' ', '+' or '-' prefix")
+                # An empty context line whose leading space was trimmed.
+                hunk_lines.append((" ", ""))
+                i += 1
+                continue
 
             prefix = current[0]
             if prefix not in (" ", "+", "-"):
-                raise _PatchApplyError(f"❌ Invalid patch line: {current}")
+                raise _PatchApplyError(f"❌ Invalid patch line: {current}\n{_PATCH_FORMAT_HINT}")
             hunk_lines.append((prefix, current[1:]))
             i += 1
+
+        # Trailing blank lines are separators between hunks, not context.
+        while hunk_lines and hunk_lines[-1] == (" ", "") and not numbered:
+            hunk_lines.pop()
 
         hunks.append(
             _Hunk(
@@ -95,11 +131,13 @@ def _parse_unified_diff(patch_content: str) -> list[_Hunk]:
                 new_start=max(0, new_start),
                 new_count=new_count,
                 lines=hunk_lines,
+                numbered=numbered,
+                anchor=anchor,
             )
         )
 
     if not hunks:
-        raise _PatchApplyError("❌ Patch contains no hunk blocks")
+        raise _PatchApplyError(f"❌ Patch contains no hunk blocks\n{_PATCH_FORMAT_HINT}")
 
     return hunks
 
@@ -172,20 +210,71 @@ def _find_hunk_start(lines: list[str], hunk: _Hunk, expected_start: int) -> int:
     )
 
 
+def _find_unnumbered_hunk_start(lines: list[str], hunk: _Hunk, search_from: int) -> int:
+    """Place a hunk without line numbers: its old side must match exactly once.
+
+    The search starts after the previous hunk, and after the anchor line when
+    the header names one ("@@ def name"). Two matches are refused rather than
+    guessed: editing the wrong copy of a repeated block is worse than failing.
+    """
+    old_side = [content for kind, content in hunk.lines if kind in (" ", "-")]
+    if not old_side:
+        raise _PatchApplyError(
+            "❌ A hunk without line numbers needs context or removed lines to locate it"
+        )
+    begin = search_from
+    if hunk.anchor:
+        anchored = [
+            index for index in range(search_from, len(lines))
+            if lines[index].strip() == hunk.anchor.strip()
+        ]
+        if anchored:
+            begin = anchored[0]
+    span = len(old_side)
+    matches = [
+        start for start in range(begin, len(lines) - span + 1)
+        if lines[start:start + span] == old_side
+    ]
+    if not matches and begin != 0:
+        matches = [
+            start for start in range(0, len(lines) - span + 1)
+            if lines[start:start + span] == old_side
+        ]
+    if not matches:
+        # Whitespace drift is the usual cause; report the first line that differs.
+        raise _PatchApplyError(
+            f"❌ Patch context not found: no place in the file matches the hunk's "
+            f"context/removed lines starting with '{old_side[0]}'. Re-read the file "
+            f"and copy the lines exactly."
+        )
+    if len(matches) > 1:
+        raise _PatchApplyError(
+            f"❌ Patch context is ambiguous: it matches {len(matches)} places "
+            f"(lines {', '.join(str(m + 1) for m in matches[:5])}). Add more context "
+            f"lines or use '@@ -start,count +start,count @@' with line numbers."
+        )
+    return matches[0]
+
+
 def _apply_unified_patch(original: str, patch_content: str) -> str:
     """Apply unified diff content to the original text."""
     hunks = _parse_unified_diff(patch_content)
     result_lines, had_trailing_newline = _split_file_content(original)
     current_offset = 0
+    search_from = 0
 
     for hunk in hunks:
-        expected_start = hunk.old_start + current_offset
-        start = _find_hunk_start(result_lines, hunk, expected_start)
+        if hunk.numbered:
+            expected_start = hunk.old_start + current_offset
+            start = _find_hunk_start(result_lines, hunk, expected_start)
+        else:
+            start = _find_unnumbered_hunk_start(result_lines, hunk, search_from)
         replacement = [content for kind, content in hunk.lines if kind in (" ", "+")]
         old_span = hunk.old_span
 
         result_lines = result_lines[:start] + replacement + result_lines[start + old_span:]
         current_offset += len(replacement) - old_span
+        search_from = start + len(replacement)
 
     updated = "\n".join(result_lines)
     if had_trailing_newline and result_lines:
@@ -367,6 +456,10 @@ def file_edit(
          context line
         -removed line
         +added line
+
+    A hunk header may also be a bare "@@" (or "@@ <anchor line>"): the hunk is
+    then located by its context lines, which must match exactly one place.
+    The "*** Begin Patch / *** Update File / *** End Patch" envelope is accepted.
 
     Args:
         filepath:      Path to the file

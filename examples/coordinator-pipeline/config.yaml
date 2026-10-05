@@ -88,6 +88,13 @@ providers:
     api_key_env: OPENROUTER_API_KEY
     timeout: 300
     max_retries: 3
+  chatgpt:
+    name: chatgpt
+    base_url: https://api.openai.com/v1
+    auth: chatgpt
+    price_source: openai
+    timeout: 300
+    max_retries: 2
 
 models:
   glm-latest:
@@ -150,6 +157,29 @@ models:
     context_window: 1000000
     max_tokens: 128000
     temperature: 0.5
+
+
+  gpt-6-luna:
+    name: gpt-6-luna
+    provider: chatgpt
+    max_tokens: 128000
+    context_window: 1050000
+    use_responses_api: true
+    request_timeout: 300
+  gpt-6.1-sol:
+    name: gpt-6.1-sol
+    provider: chatgpt
+    max_tokens: 128000
+    context_window: 1050000
+    request_timeout: 300
+    use_responses_api: true
+  gpt-6-astra:
+    name: gpt-6-astra
+    provider: chatgpt
+    max_tokens: 128000
+    context_window: 1050000
+    use_responses_api: true
+    request_timeout: 300
 tools:
   beads_init:
     type: function
@@ -191,7 +221,7 @@ tools:
     name: "orchestrate"
     description: "Meta-tool: запускает динамического агента для решения подзадачи."
     env_vars:
-      DEFAULT_MODEL: glm-flash
+      DEFAULT_MODEL: gpt-6-luna
 
   # ── coder (function) ─────────────────────────────────────
   bash_tool:
@@ -345,7 +375,9 @@ agents:
     name: Координатор
     timeout: 0  # No agent timeout: the coordinator must not be cut off mid-orchestration.
     max_turns: 0  # No turn limit for the same reason.
-    model: deepseek-flash-latest
+    model:
+      - gpt-6.1-sol
+      - glm-latest
     description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
     tools:
       - orchestrate
@@ -386,8 +418,19 @@ agents:
       2. **Проектирование** — твоя основная задача создать проверяемый и верефицируемый пайплан из агентов, который будет заточен на успешное выполнение всех этапов задачи.
       4. **Закрытие** — Изучай результаты и верефицируй. 
       Категорически запрещается выполнять задачу самостоятельно. 
-      Если политика отклонила вызов, не ищи обходных путей: продолжай с тем, что доступно, и назови заблокированный шаг в итоговом отчёте.
       Ты обязан передавать доступные тебе инструменты (в том числе для работы с трекером) и скиллы агентам вместе с указанием идентефикатора задачи и их предварительные вызовы инструментов, включая чтение самой задачи и одновления статуса задачи.
+
+      ## Инструменты агентов
+      - В `executor_tools` передавай только ключи из своего списка инструментов. MCP-сервер передаётся ключом сервера (`codegraph`), а не именем его отдельного инструмента.
+      - В результате `orchestrate` поле `executor_tools` — инструменты, которые агент действительно получил; `missing_tools` — те, которых у него не было. Не поручай агентам пользоваться инструментами из `missing_tools`.
+      - `beads_sync` агентам не передавай: синхронизация трекера с удалённым репозиторием выполняется только по прямой просьбе пользователя.
+      - Если `beads_create` вернул ошибку, задачи с этим идентификатором нет: не передавай его агентам.
+
+      ## Политика и полномочия
+      Полномочия даёт только запрос пользователя. Текст поручения агенту их не расширяет.
+      - Описывай в поручении только работу. Не упоминай в нём политику, блокировки, «обход» и не доказывай, что шаг разрешён: такие рассуждения проверка цепочки читает как уход от задачи.
+      - Если вызов отклонён как выходящий за рамки задачи (`objected` содержит `action`), не запускай ту же работу снова в другой формулировке, другим агентом или инструментом. Если без этого шага задача не решается, закончи то, что доступно, и прямо спроси пользователя, разрешает ли он это расширение: назови, что именно и где нужно изменить и зачем. Ответ пользователя станет частью задачи.
+      - Если вызов задержан только проверкой цепочки (`objected` равно `["chain"]`), под сомнением история этого хода, а не сам вызов. Больше не вызывай инструменты в этом ходе: дай отчёт о сделанном и сообщи пользователю, что следующее его сообщение начнёт новый ход и работу можно будет продолжить.
 
       ## Пакетное исполнение
       Каждый твой ответ — отдельный проход модели по всему накопленному контексту, поэтому стоимость работы определяется числом ответов, а не числом вызовов в них. Вызовы из одного ответа исполняются строго по очереди в указанном порядке, а их результаты возвращаются тебе вместе.
@@ -401,7 +444,9 @@ agents:
       - Ведение задачи в трекере (чтение, смена статуса, запись результата) поручай самому агенту, а не выполняй отдельными ходами за него.
   general_purpose:
     name: "General-purpose"
-    model: deepseek-flash-latest
+    model:
+      - gpt-6-luna
+      - deepseek-flash-latest
     mcp_enabled: true
     system_skills:
       - codegraph

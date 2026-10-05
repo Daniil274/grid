@@ -1,3 +1,7 @@
+import sys
+
+import pytest
+
 from core.managers.project_tools_loader import ProjectToolsLoader
 
 
@@ -88,3 +92,56 @@ def test_added_tools_never_replace_the_loaders_own(tmp_path):
 
     assert loader.get_tool("greet")() == "own"
     assert loader.get_tool("wave")() == "wave"
+
+
+@pytest.mark.parametrize("error_type", ["SystemExit", "ImportError"])
+def test_failed_import_is_reported_and_retried_without_partial_tools(tmp_path, error_type):
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    broken_path = tools_dir / "unavailable.py"
+    broken_path.write_text(
+        "TOOL_REQUIREMENTS = {'partial_tool': 'Windows desktop required'}\n"
+        "TOOL_ISOLATION = {'partial_tool': 'host'}\n"
+        "def partial_tool():\n"
+        "    return 'must not be exposed'\n"
+        f"raise {error_type}('desktop dependency unavailable')\n",
+        encoding="utf-8",
+    )
+    (tools_dir / "healthy.py").write_text(
+        "def healthy_tool():\n    return 'ok'\n", encoding="utf-8"
+    )
+    loader = ProjectToolsLoader(str(tmp_path), "./tools")
+
+    for _ in range(2):
+        loaded = loader.load_project_tools()
+        assert loaded["healthy_tool"]() == "ok"
+        assert "partial_tool" not in loaded
+        assert loader.load_errors["unavailable.py"] == (
+            f"{error_type}: desktop dependency unavailable"
+        )
+        assert loader.requirements["partial_tool"] == "Windows desktop required"
+        assert loader.isolation["partial_tool"] == "host"
+        assert "unavailable" not in loader._module_cache
+        assert not any(
+            getattr(module, "__file__", None) == str(broken_path)
+            for module in tuple(sys.modules.values())
+        )
+
+    broken_path.write_text("def partial_tool():\n    return 'repaired'\n", encoding="utf-8")
+    loaded = loader.load_project_tools()
+    assert loaded["partial_tool"]() == "repaired"
+    assert "unavailable.py" not in loader.load_errors
+
+
+def test_project_tools_loader_does_not_swallow_keyboard_interrupt(tmp_path):
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    interrupted_path = tools_dir / "interrupted.py"
+    interrupted_path.write_text("raise KeyboardInterrupt()\n", encoding="utf-8")
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            ProjectToolsLoader(str(tmp_path), "./tools").load_project_tools()
+    finally:
+        for name, module in tuple(sys.modules.items()):
+            if getattr(module, "__file__", None) == str(interrupted_path):
+                del sys.modules[name]

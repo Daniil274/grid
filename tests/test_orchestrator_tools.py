@@ -246,3 +246,59 @@ async def test_orchestrate_executor_reports_into_the_callers_trace_under_its_tas
     # Its init_tools are judged under the same state, not refused as taskless.
     created = factory.create_dynamic_agent.await_args.kwargs
     assert created["action_state"] is kwargs["action_state"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_reports_tools_the_executor_did_not_get():
+    factory = Mock()
+    factory.get_active_context_id = Mock(return_value="ctx-12345678")
+    factory.config = Mock()
+    factory.config.get_tool.side_effect = Exception("Not found")
+    factory.resolve_model_key = Mock(return_value="gpt-4")
+    fake_agent = Mock()
+    fake_agent.name = "fake_agent"
+    fake_agent._grid_missing_tools = ["codegraf_explore"]
+    factory.create_dynamic_agent = AsyncMock(return_value=fake_agent)
+    factory.run_agent_object_simple = AsyncMock(return_value="DRAFT")
+
+    ctx = Mock()
+    ctx.context = Mock(factory=factory, user_id="user-123", run_control="stop-handle")
+
+    tool = ORCHESTRATOR_TOOLS["orchestrate"]
+    out = json.loads(
+        await tool.on_invoke_tool(
+            ctx,
+            input='{"task": "goal", "executor_tools": ["file_read", "codegraf_explore"]}',
+        )
+    )
+
+    assert out["executor_tools"] == ["file_read"]
+    assert out["missing_tools"] == ["codegraf_explore"]
+    assert "task" not in out
+    # The executor acts for the same user and is reached by the user's Stop.
+    kwargs = factory.run_agent_object_simple.await_args.kwargs
+    assert kwargs["user_id"] == "user-123"
+    assert kwargs["run_control"] == "stop-handle"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_gives_the_executor_the_callers_models_as_fallbacks():
+    factory = Mock()
+    factory.get_active_context_id = Mock(return_value="ctx-12345678")
+    factory.config = Mock()
+    factory.config.get_tool.side_effect = Exception("Not found")
+    factory.config.get_agent.return_value = Mock(model_keys=Mock(return_value=["gpt-6.1-sol", "glm-latest"]))
+    factory.resolve_model_key = Mock(return_value="glm-flash")
+    fake_agent = Mock()
+    fake_agent.name = "fake_agent"
+    factory.create_dynamic_agent = AsyncMock(return_value=fake_agent)
+    factory.run_agent_object_simple = AsyncMock(return_value="DRAFT")
+
+    ctx = Mock()
+    ctx.context = Mock(factory=factory, user_id="user-123", agent_id="coordinator")
+
+    await ORCHESTRATOR_TOOLS["orchestrate"].on_invoke_tool(ctx, input='{"task": "goal"}')
+
+    factory.config.get_agent.assert_called_with("coordinator")
+    kwargs = factory.create_dynamic_agent.await_args.kwargs
+    assert kwargs["fallback_model_keys"] == ["gpt-6.1-sol", "glm-latest"]

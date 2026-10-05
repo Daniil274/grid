@@ -207,13 +207,6 @@ models:
     context_window: 1050000
     use_responses_api: true
     request_timeout: 300
-  sonnet-5-5:
-    name: anthropic/claude-sonnet-5.5
-    provider: openrouter
-    temperature: 0.5
-    max_tokens: 32000
-    context_window: 256000
-    request_timeout: 300
   deepseek-v4-pro:
     name: ~deepseek/deepseek-pro-latest
     provider: openrouter
@@ -373,9 +366,8 @@ agents:
     model:
     # The engineer coordinates subagents, so it must not be cut off
     # mid-orchestration: 0 disables its execution timeout and turn limit.
-      - glm-flash
-      - glm-latest
       - gpt-6.1-sol
+      - glm-latest
     timeout: 0
     max_turns: 0
     mcp_enabled: true
@@ -523,8 +515,8 @@ agents:
   web_spider:
     name: "WebSpider"
     model:
-      - glm-flash
       - gpt-6-luna
+      - glm-flash
     system_skills:
       - beads
       - web_spider_research_skill
