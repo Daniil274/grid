@@ -378,6 +378,54 @@ agents:
     assert caller_seen == [("tool_called", "executor-123")]
     assert seen == []
 
+    # A dynamic agent works in the factory's container, for the caller's user:
+    # tools that read the run (beads) must not fall back to the host.
+    captured = {}
+
+    class CapturingRunner:
+        @staticmethod
+        def run_streamed(**kwargs):
+            captured.update(kwargs)
+            return DummyStream(events=[], final_output="done")
+
+    monkeypatch.setattr(agents, "Runner", CapturingRunner)
+    factory.container_id = "container-1"
+    await factory.run_agent_object_simple(
+        SimpleNamespace(name="executor-123"), "task", user_id="u-1", run_control="stop"
+    )
+    run_ctx = captured["context"]
+    assert run_ctx.container_id == "container-1"
+    assert run_ctx.user_id == "u-1"
+    assert run_ctx.run_control == "stop"
+
+
+    # An empty answer after tool calls is asked for once, in the same session.
+    from agents.exceptions import ModelBehaviorError
+
+    inputs = []
+
+    class RecordingRunner:
+        @staticmethod
+        def run_streamed(**kwargs):
+            inputs.append(kwargs["input"])
+            return DummyStream(events=[], final_output="report")
+
+    calls = {"n": 0}
+    original_consume = factory._consume_stream
+
+    async def flaky_consume(result, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ModelBehaviorError("Model did not produce a final response!")
+        return await original_consume(result, **kwargs)
+
+    monkeypatch.setattr(agents, "Runner", RecordingRunner)
+    monkeypatch.setattr(factory, "_consume_stream", flaky_consume)
+    result = await factory.run_agent_object_simple(SimpleNamespace(name="executor-9"), "task")
+
+    assert result == "report"
+    assert inputs[0] == "task" and "final report" in inputs[1]
+
 
 @pytest.mark.asyncio
 async def test_sub_agent_runs_under_a_delegated_policy_state(tmp_path, monkeypatch):

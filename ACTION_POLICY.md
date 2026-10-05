@@ -303,7 +303,9 @@ data. Use these fields to compare outage rates, recovery rates and p95/p99
 latency before adjusting budgets. Arguments, tool output, file contents and provider error
 bodies are never logged. Grid's ordinary conversation and tool logs have their
 own settings and may contain all of that; configure retention for both. The
-in-memory decision buffer is bounded and is not storage.
+in-memory decision buffer is bounded and is not storage. The web chat server
+also writes these lines to `action_policy.log` in its logs directory (rotated at
+10 MB, three files kept), so a block can be explained after the console is gone.
 
 Webchat renders the check as a compact badge inside the corresponding action
 row: green for allow, amber for review and red for deny or an unavailable

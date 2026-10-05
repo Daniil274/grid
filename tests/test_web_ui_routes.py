@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from schemas.schemas import UploadsPolicy
@@ -181,6 +182,85 @@ def test_web_chat_index_and_bootstrap_are_available():
     assert bootstrap_response.status_code == 200
     assert bootstrap_response.json()["default_system"] == "test_system"
     assert bootstrap_response.json()["voice"] is False
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_survives_optional_tool_system_exit(tmp_path, sample_config):
+    """Listing a catalog must not exit when a desktop dependency calls sys.exit."""
+    from copy import deepcopy
+
+    import yaml
+    from httpx import ASGITransport, AsyncClient
+
+    from core.config import Config
+    from core.managers.project_tools_loader import get_project_loader, set_project_loader
+    from web_chat.systems import SystemRegistry
+
+    base_path = tmp_path / "base.yaml"
+    base_path.write_text(yaml.safe_dump(sample_config), encoding="utf-8")
+    desktop = deepcopy(sample_config)
+    desktop["settings"]["project_tools"] = {"enabled": True, "tools_directory": "./tools"}
+    desktop["agents"]["test_agent"]["tools"].append("desktop_tool")
+    desktop["tools"]["desktop_tool"] = {"type": "function", "description": "Desktop tool"}
+    desktop_path = tmp_path / "desktop.yaml"
+    desktop_path.write_text(yaml.safe_dump(desktop), encoding="utf-8")
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "desktop_tool.py").write_text(
+        "from utils.tool_requirements import Requires\n"
+        "TOOL_REQUIREMENTS = {'desktop_tool': Requires(platform='win32', hint='Run on Windows')}\n"
+        "raise SystemExit('Tkinter is unavailable')\n",
+        encoding="utf-8",
+    )
+    catalog_data = deepcopy(sample_config)
+    catalog_data["routing"] = {
+        "model": "gpt-4",
+        "default_system": "engineering",
+        "systems": {
+            "engineering": {"config": "base.yaml", "description": "Coding"},
+            "desktop": {"config": "desktop.yaml", "description": "Windows desktop"},
+        },
+    }
+    catalog_path = tmp_path / "routing.yaml"
+    catalog_path.write_text(yaml.safe_dump(catalog_data), encoding="utf-8")
+    previous_loader = get_project_loader()
+    try:
+        space = _DummySpace()
+        space.registry = SystemRegistry(
+            base_config=Config(str(base_path)),
+            catalog=Config(str(catalog_path)),
+            build_factory=lambda config: None,
+            working_directory=str(tmp_path),
+        )
+        server = _server(space)
+
+        async def current_space():
+            return space
+
+        # This test covers config loading during bootstrap, not the pool's
+        # threaded workspace/container construction.
+        server.app.dependency_overrides[server.current_space] = current_space
+        async with AsyncClient(
+            transport=ASGITransport(app=server.app),
+            base_url="http://testserver",
+            headers=SAME_SITE,
+        ) as client:
+            for _ in range(2):
+                response = await client.get("/api/chat/bootstrap")
+                assert response.status_code == 200
+                systems = {system["key"]: system for system in response.json()["systems"]}
+                assert systems["engineering"]["agents"]
+                assert systems["desktop"]["error"] == ""
+                [agent] = systems["desktop"]["agents"]
+                [issue] = agent["issues"]["items"]
+                assert issue["tool"] == "desktop_tool"
+                assert issue["kind"] == "environment"
+            assert (await client.get("/api/server/status")).status_code == 200
+        loader = space.registry.config("desktop").project_tools_loader
+        assert loader.load_errors["desktop_tool.py"] == "SystemExit: Tkinter is unavailable"
+        assert not loader.has_tool("desktop_tool")
+    finally:
+        set_project_loader(previous_loader)
 
 
 def test_a_single_user_server_closes_its_voice_when_it_stops():

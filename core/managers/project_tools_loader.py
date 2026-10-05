@@ -105,6 +105,7 @@ class ProjectToolsLoader:
             file_path: Path to module file
         """
         module = None
+        imported_module_name = None
         try:
             # Create the full module name for import.
             # Project tools may live outside config_dir, for example shared
@@ -148,6 +149,7 @@ class ProjectToolsLoader:
                             return
                         module = importlib.util.module_from_spec(spec)
                         sys.modules[full_module_name] = module
+                        imported_module_name = full_module_name
                         spec.loader.exec_module(module)
             else:
                 spec = importlib.util.spec_from_file_location(full_module_name, file_path)
@@ -157,6 +159,7 @@ class ProjectToolsLoader:
 
                 module = importlib.util.module_from_spec(spec)
                 sys.modules[full_module_name] = module
+                imported_module_name = full_module_name
                 spec.loader.exec_module(module)
 
             self._module_cache[module_name] = module
@@ -189,9 +192,15 @@ class ProjectToolsLoader:
                     tools_found += 1
                     logger.debug(f"  Found tool: {name}")
 
+            self.load_errors.pop(file_path.name, None)
             logger.info(f"Module {module_name}: loaded {tools_found} tools")
 
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
+            # Optional dependencies may call sys.exit() at import time (e.g.
+            # mouseinfo without Tk). They must not terminate the host server.
+            # Never reuse a partially executed module on the next load attempt.
+            if imported_module_name is not None and sys.modules.get(imported_module_name) is module:
+                del sys.modules[imported_module_name]
             self.load_errors[file_path.name] = f"{type(exc).__name__}: {exc}"
             # Requirements declared before the failing import still explain it,
             # e.g. "works only on Windows" instead of "No module named 'win32gui'".

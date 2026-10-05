@@ -67,6 +67,18 @@ from utils.path_utils import reset_current_factory, set_current_factory
 
 logger = logging.getLogger("grid.agent_factory")
 
+# Messages of other agents an agent is shown when it takes the conversation back.
+_MISSED_MESSAGE_CHARS = 6000
+_MISSED_EXCHANGE_CHARS = 16000
+
+# Sent to a dynamic agent whose model stopped without an answer after its tool
+# calls: its session holds what it did.
+_MISSING_FINAL_ANSWER = (
+    "Your previous response ended without a final answer. Use the saved tool "
+    "results; do not repeat completed actions. Finish the remaining work and "
+    "write a concrete final report."
+)
+
 
 # Sent after an answer that wrote tool calls as text instead of calling tools.
 TOOL_CALL_CORRECTION = """Your last answer wrote tool calls as text, for example:
@@ -214,6 +226,8 @@ class TurnRunner:
         stream_observer: Optional[Any] = None,
         action_state: Optional[Any] = None,
         action_depth: int = 0,
+        user_id: Optional[str] = None,
+        run_control: Optional[Any] = None,
     ) -> str:
         """Run an Agent instance in its own session and return its answer text.
 
@@ -229,6 +243,9 @@ class TurnRunner:
         (see ``core.action_policy.delegated_state``). Without it the run is its own
         task: the input message becomes the trusted instruction, which is right
         only for callers that speak for the user (background workers, the CLI).
+
+        ``user_id`` and ``run_control`` come from the caller's run: the agent acts
+        for the same user, and the user's Stop reaches it too.
         """
         observer = stream_observer or self._stream_observer
         agent_label = getattr(agent, "name", None) or "dynamic-agent"
@@ -242,14 +259,20 @@ class TurnRunner:
             factory=self,
             context_id=context_id,
             session=session,
+            user_id=user_id,
+            # Tools that run commands in the user's container (beads) read it
+            # from the run; without it they would run on the host instead.
+            container_id=self.container_id,
             pipeline_id=pipeline_id,
             action_state=action_state,
             action_depth=action_depth,
+            run_control=run_control,
             # Agents this one delegates to report into the same view.
             stream_observer=stream_observer,
         )
 
         attempt = 0
+        recovered = False
         set_current_factory(self)
         try:
             while True:
@@ -269,6 +292,20 @@ class TurnRunner:
                         action_state=action_state,
                     )
                 except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
+                    if (
+                        not recovered
+                        and session is not None
+                        and isinstance(exc, ModelBehaviorError)
+                        and "did not produce a final response" in str(exc)
+                        and not getattr(run_control, "stop_requested", False)
+                    ):
+                        # An empty answer after tool calls, as in a top-level
+                        # turn: the session keeps the tool results, so ask once
+                        # for the report instead of losing the step.
+                        recovered = True
+                        logger.warning("Agent %s: recovering a missing final answer once", agent_label)
+                        input_message = _MISSING_FINAL_ANSWER
+                        continue
                     # Not transient: retrying would repeat the work. The caller
                     # gets what the agent did so far.
                     logger.warning("Agent %s stopped: %s: %s", agent_label, type(exc).__name__, exc)
@@ -350,6 +387,45 @@ class TurnRunner:
             Logger("agent_factory").log_verbose(f"FULL PROMPT STARTUP: {agent_key}", instructions)
             self._logged_agents.add(agent_key)
         return instructions
+
+    def _missed_exchange(self, context_id: str, agent_key: str) -> str:
+        """What other agents and the user said here after this agent's last turn.
+
+        A conversation can pass between agents (and systems): each keeps its
+        own session, so an agent coming back would answer without what was
+        said meanwhile - and act on "go on" without knowing what it refers to.
+        Newest messages are kept when the exchange is long.
+        """
+        snapshot = self.context_manager.get_context_messages(
+            context_id, limit=200, preview_limit=_MISSED_MESSAGE_CHARS, include_full=True
+        )
+        messages = (snapshot or {}).get("messages") or []
+        last_own = None
+        for index, item in enumerate(messages):
+            if (item.get("metadata") or {}).get("agent") == agent_key:
+                last_own = index
+        if last_own is None:
+            return ""
+        lines: List[str] = []
+        for item in messages[last_own + 1:]:
+            other = (item.get("metadata") or {}).get("agent")
+            if not other or other == agent_key:
+                continue
+            content = item.get("content")
+            text = content if isinstance(content, str) else item.get("preview") or ""
+            text = text.strip()
+            if len(text) > _MISSED_MESSAGE_CHARS:
+                text = text[:_MISSED_MESSAGE_CHARS] + " [...]"
+            speaker = f"User (to {other})" if item.get("role") == "user" else f"Agent {other}"
+            lines.append(f"{speaker}:\n{text}")
+        while lines and sum(len(line) for line in lines) > _MISSED_EXCHANGE_CHARS:
+            lines.pop(0)
+        if not lines:
+            return ""
+        return (
+            "[Meanwhile in this conversation - you did not see these messages; "
+            "the user talked to another agent:]\n\n" + "\n\n".join(lines)
+        )
 
     def _add_user_message(
         self,
@@ -1036,8 +1112,13 @@ class TurnRunner:
                 if resumed is not None
                 else agent_input.items
             )
-            if preamble and isinstance(run_input, str):
-                run_input = f"{preamble}\n\n[Current user request]\n\n{run_input}"
+            # Messages other agents exchanged with the user since this agent's
+            # last turn: its session never saw them (an agent new to the
+            # conversation gets the whole transcript in its instructions).
+            missed = "" if include_transcript else self._missed_exchange(active_context_id, agent_key)
+            notes = "\n\n".join(part for part in (preamble, missed) if part)
+            if notes and isinstance(run_input, str):
+                run_input = f"{notes}\n\n[Current user request]\n\n{run_input}"
             if message is None:
                 self.context_manager.append_message_to(
                     active_context_id,

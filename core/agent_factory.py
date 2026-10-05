@@ -22,6 +22,7 @@ from core import sdk_patches
 from core.application.agent_runtime_support import AgentRuntimeSupport
 from core.compact import AutoCompactTrackingState
 from core.config.config import Config
+from core.credentials import CredentialError
 from core.context import ContextManager
 from core.factory.auto_run import AutoRunTools
 from core.factory.journal import RunJournal
@@ -334,13 +335,15 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             agent_config = self.config.get_agent(agent_key)
             model_keys = agent_config.model_keys()
             candidates: list[ModelCandidate] = []
-            not_in_plan: list[ModelNotInPlan] = []
+            unavailable: list[AgentError] = []
             for model_key in model_keys:
                 try:
                     sdk_model, candidate_config = self.models.sdk_model(model_key)
-                except ModelNotInPlan as refusal:
-                    # A fallback the plan excludes is skipped; the agent runs on the rest.
-                    not_in_plan.append(refusal)
+                except (ModelNotInPlan, CredentialError) as refusal:
+                    # A fallback excluded by the plan or missing its own login
+                    # must not prevent the available models from running.
+                    unavailable.append(refusal)
+                    logger.info("Skipping unavailable model %s: %s", model_key, refusal)
                     continue
                 candidates.append(
                     ModelCandidate(
@@ -352,8 +355,8 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                     )
                 )
             if not candidates:
-                raise not_in_plan[0]
-            model_config = self.config.get_model(agent_config.primary_model)
+                raise unavailable[0]
+            model_config = self.config.get_model(candidates[0].key)
             model = (
                 candidates[0].model
                 if len(candidates) == 1
@@ -398,7 +401,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                 mcp_servers=mcp_servers_list,
             )
             setattr(agent, "_grid_agent_key", agent_key)
-            setattr(agent, "_grid_model_key", agent_config.primary_model)
+            setattr(agent, "_grid_model_key", candidates[0].key)
             setattr(agent, "_grid_model_keys", model_keys)
             # Auto-run tools (beads_init, beads_ready, etc.) run only once per user/agent
             # in run_agent() when handling the first request — see _initialized_agents.
@@ -424,6 +427,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
         init_tools: Optional[List[Dict[str, Any]]] = None,
         system_skills: Optional[List[str]] = None,
         action_state: Optional[Any] = None,
+        fallback_model_keys: Optional[List[str]] = None,
     ) -> Agent:
         """
         Create an ad-hoc Agent instance not backed by config.yaml.
@@ -431,6 +435,9 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
         This is the core building block for orchestration/meta-agent patterns.
         ``action_state`` is the policy state the agent will run under; its
         ``init_tools`` are judged under it too, since an agent wrote them.
+        ``fallback_model_keys`` are tried in order when the model fails a
+        request (a revoked login, an outage); only allowed models with a login
+        are kept.
         """
         resolved_model_key = self.resolve_model_key(model_key)
 
@@ -475,12 +482,40 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             f"✅ MODEL VALIDATION PASSED: Agent '{name}' using model '{resolved_model_key}'"
         )
 
-        # The same model, client and flags create_agent gives a configured agent.
-        model, model_cfg = self.models.sdk_model(resolved_model_key)
+        # The same model, client and flags create_agent gives a configured agent,
+        # with the caller's fallbacks behind it as in create_agent.
+        candidates: List[ModelCandidate] = []
+        unavailable: List[Exception] = []
+        model_cfg = None
+        for candidate_key in dict.fromkeys([resolved_model_key, *(fallback_model_keys or [])]):
+            try:
+                if candidate_key != resolved_model_key:
+                    candidate_key = self.resolve_model_key(candidate_key)
+                    if candidate_key in {c.key for c in candidates} or not self.models.is_allowed(candidate_key):
+                        continue
+                candidate_model, candidate_cfg = self.models.sdk_model(candidate_key)
+            except (ModelNotInPlan, CredentialError, ConfigError) as refusal:
+                unavailable.append(refusal)
+                logger.info("Skipping unavailable model %s for '%s': %s", candidate_key, name, refusal)
+                continue
+            if model_cfg is None:
+                model_cfg = candidate_cfg
+            candidates.append(
+                ModelCandidate(
+                    key=candidate_key,
+                    model=candidate_model,
+                    settings=self.models.settings(candidate_cfg),
+                )
+            )
+        if not candidates:
+            raise unavailable[0]
+        resolved_model_key = candidates[0].key
+        model = candidates[0].model if len(candidates) == 1 else FallbackModel(candidates)
 
         tools: List[Any] = []
         mcp_servers_list: List[Any] = []
         effective_tool_names = tool_names or []
+        missing_tool_names: List[str] = []
 
         # Gather all tool names (including MCP)
         all_tool_names = list(effective_tool_names)
@@ -488,7 +523,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             all_tool_names.extend(mcp_tool_names)
 
         if effective_tool_names:
-            tools, inferred_mcp = await self._resolve_tools_for_names(
+            tools, inferred_mcp, missing_tool_names = await self._resolve_tools_for_names(
                 effective_tool_names
             )
             if inferred_mcp:
@@ -500,10 +535,27 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                     if mcp_name not in all_tool_names:
                         all_tool_names.append(mcp_name)
 
+        unavailable_servers: List[str] = []
         if mcp_tool_names:
             # Only if enabled (globally or per caller)
             if self.config.is_mcp_enabled():
-                mcp_servers_list = await self.mcp.for_tools(mcp_tool_names)
+                for server_name in mcp_tool_names:
+                    connected = await self.mcp.for_tools([server_name])
+                    if connected:
+                        mcp_servers_list.extend(connected)
+                    else:
+                        unavailable_servers.append(server_name)
+            else:
+                unavailable_servers = list(mcp_tool_names)
+        if unavailable_servers:
+            # A requested MCP tool is missing when its server did not start.
+            for requested in effective_tool_names:
+                server = (
+                    requested if requested in unavailable_servers
+                    else self._mcp_server_for_tool_name(requested)
+                )
+                if server in unavailable_servers and requested not in missing_tool_names:
+                    missing_tool_names.append(requested)
 
         # Add prompt_addition from tool configuration to instructions
         enhanced_instructions = self._build_dynamic_agent_instructions(
@@ -562,6 +614,8 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             mcp_servers=mcp_servers_list,
         )
         setattr(agent, "_grid_model_key", resolved_model_key)
+        # Requested tools the agent did not get: its caller reports them back.
+        setattr(agent, "_grid_missing_tools", missing_tool_names)
         return agent
 
     def _load_system_skill(self, skill_name: str) -> Optional[str]:
