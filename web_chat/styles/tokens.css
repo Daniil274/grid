@@ -44,8 +44,23 @@
   --code-str: #9ae6b4;
   --code-num: var(--warn);
   --code-com: var(--text-3);
+  --code-fn: #8ec2f2;
+  --code-type: #d3a6f5;
+  --code-punct: #8f97ab;
   --diff-add-bg: rgb(67 207 149 / 8%);
   --diff-del-bg: rgb(255 125 125 / 8%);
+
+  /* Tool-family accents. A row's work gets one glanceable hue instead of the
+   * everything-indigo default; the palette keeps text contrast on both themes. */
+  --tool-read: #6d9bff;
+  --tool-search: #35c3d6;
+  --tool-write: #58c46b;
+  --tool-edit: var(--warn);
+  --tool-delete: var(--danger);
+  --tool-shell: #7ec06e;
+  --tool-web: #e58bc0;
+  --tool-task: #b691f5;
+  --tool-agent: var(--accent);
 
   --radius-xs: 6px;
   --radius-sm: 10px;
@@ -102,8 +117,21 @@
     --code-str: #166534;
     --code-num: #92610a;
     --code-com: var(--text-3);
+    --code-fn: #1e66ab;
+    --code-type: #a557d6;
+    --code-punct: #59607a;
     --diff-add-bg: rgb(18 160 106 / 9%);
     --diff-del-bg: rgb(214 69 69 / 9%);
+
+    --tool-read: #1d4ed8;
+    --tool-search: #0e8599;
+    --tool-write: #157a4d;
+    --tool-edit: #b7791f;
+    --tool-delete: #d64545;
+    --tool-shell: #2e7d32;
+    --tool-web: #b83a8c;
+    --tool-task: #7c4dbe;
+    --tool-agent: #4f46e5;
 
     --shadow-1: 0 1px 2px rgb(20 26 44 / 8%);
     --shadow-2: 0 18px 44px rgb(20 26 44 / 14%);
@@ -146,8 +174,21 @@
   --code-str: #166534;
   --code-num: #92610a;
   --code-com: var(--text-3);
+  --code-fn: #1e66ab;
+  --code-type: #a557d6;
+  --code-punct: #59607a;
   --diff-add-bg: rgb(18 160 106 / 9%);
   --diff-del-bg: rgb(214 69 69 / 9%);
+
+  --tool-read: #1d4ed8;
+  --tool-search: #0e8599;
+  --tool-write: #157a4d;
+  --tool-edit: #b7791f;
+  --tool-delete: #d64545;
+  --tool-shell: #2e7d32;
+  --tool-web: #b83a8c;
+  --tool-task: #7c4dbe;
+  --tool-agent: #4f46e5;
 
   --shadow-1: 0 1px 2px rgb(20 26 44 / 8%);
   --shadow-2: 0 18px 44px rgb(20 26 44 / 14%);

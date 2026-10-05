@@ -417,8 +417,10 @@
 .hljs-string, .hljs-regexp, .hljs-selector-attr, .hljs-attr,
 .hljs-attribute, .hljs-template-variable { color: var(--code-str); }
 .hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link { color: var(--code-num); }
-.hljs-title, .hljs-title.function_, .hljs-title.class_,
-.hljs-built_in, .hljs-type { color: var(--code-kw); }
+.hljs-title, .hljs-title.function_, .hljs-built_in { color: var(--code-fn); }
+.hljs-title.class_, .hljs-type, .hljs-meta { color: var(--code-type); }
+.hljs-variable, .hljs-property, .hljs-params { color: var(--text); }
+.hljs-punctuation, .hljs-operator, .hljs-selector-pseudo, .hljs-selector-attr { color: var(--code-punct); }
 
 /* Diff colouring: block spans so the tint spans the full line width. */
 .dl--add {
@@ -441,6 +443,11 @@
 .dl--meta {
   display: block;
   color: var(--text-3);
+}
+
+.dl--context {
+  display: block;
+  color: var(--text-2);
 }
 
 .tableScroll {
