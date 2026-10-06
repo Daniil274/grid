@@ -332,3 +332,12 @@ TOOL_ISOLATION = {
     "notebook_edit": _WORKSPACE,
     "notebook_create": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects), for the action policy
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "notebook_read": _effects.read("filepath"),
+    "notebook_edit": _effects.write("filepath"),
+    "notebook_create": _effects.write("filepath"),
+}

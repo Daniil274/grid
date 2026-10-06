@@ -262,3 +262,10 @@ from utils.tool_isolation import CONTAINER as _CONTAINER  # noqa: E402
 TOOL_ISOLATION = {
     "git_log": _CONTAINER,
 }
+
+# What these tools do (utils.tool_effects), for the action policy
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "git_log": _effects.read(),
+}

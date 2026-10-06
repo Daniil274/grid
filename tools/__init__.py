@@ -16,12 +16,14 @@ from .function_tools import (  # noqa: E402 - after install()
     get_all_tools,
     get_tools_by_names,
     resolve_tool,
+    tool_effect,
     tool_isolation,
 )
 
 __all__ = [
     "get_tools_by_names",
     "resolve_tool",
+    "tool_effect",
     "tool_isolation",
     "get_all_tools",
     "AVAILABLE_TOOLS",

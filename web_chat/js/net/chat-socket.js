@@ -7,7 +7,7 @@
  * caller registers, so no component has to parse raw frames.
  */
 
-/** @typedef {"token"|"step"|"step_removed"|"reasoning"|"routed"|"tool_issues"|"final_output"|"answer_reset"|"attached"|"stopping"|"interrupted"|"image"|"delivery"|"queue"|"steered"|"error"|"busy"|"done"} ChatEventType */
+/** @typedef {"token"|"step"|"step_removed"|"reasoning"|"routed"|"tool_issues"|"final_output"|"answer_reset"|"attached"|"stopping"|"interrupted"|"image"|"delivery"|"queue"|"steered"|"error"|"busy"|"done"|"policy_filter"|"policy_review"} ChatEventType */
 
 export class ChatConnection {
   /**
@@ -48,7 +48,8 @@ export class ChatConnection {
 
   /**
    * @param {string} message
-   * @param {{system_key: ?string, agent_key: ?string}} selection nulls mean `auto`
+   * @param {{system_key: ?string, agent_key: ?string, policy_filter?: string}} selection
+   *   nulls mean `auto`; `policy_filter` is the policy switch
    * @param {string[]} [images] data URLs attached to the message
    * @param {?string} [editOf] the slot of the message this one is a new version of
    * @param {?string} [delivery] while the agent works: "now", "next_step",
@@ -80,6 +81,16 @@ export class ChatConnection {
   /** Resume the interrupted turn the conversation ends with. */
   resume() {
     this._post({ action: "continue" });
+  }
+
+  /** Run this conversation under policy filter *filter*, its running turn too. */
+  policyFilter(filter) {
+    this._post({ action: "policy_filter", filter });
+  }
+
+  /** Allow or decline a call the policy holds for the user; `remember` allows the tool for the turn. */
+  answerReview(approvalId, { approve, remember = false }) {
+    this._post({ action: "policy_review", approval_id: approvalId, approve, remember });
   }
 
   /** Follow the conversation's running turn: the server replays it, then streams live. */

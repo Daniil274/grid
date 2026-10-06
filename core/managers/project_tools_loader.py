@@ -42,6 +42,8 @@ class ProjectToolsLoader:
         self.load_errors: Dict[str, str] = {}
         #: Where each tool acts (module ``TOOL_ISOLATION``, utils.tool_isolation).
         self.isolation: Dict[str, str] = {}
+        #: What each tool does (module ``TOOL_EFFECTS``, utils.tool_effects).
+        self.effects: Dict[str, Any] = {}
         #: What each tool needs from the environment (module ``TOOL_REQUIREMENTS``).
         self.requirements: Dict[str, Any] = {}
 
@@ -165,6 +167,7 @@ class ProjectToolsLoader:
             self._module_cache[module_name] = module
             self.requirements.update(getattr(module, "TOOL_REQUIREMENTS", None) or {})
             self.isolation.update(getattr(module, "TOOL_ISOLATION", None) or {})
+            self.effects.update(getattr(module, "TOOL_EFFECTS", None) or {})
 
             # Extract tool functions
             tools_found = 0
@@ -206,6 +209,7 @@ class ProjectToolsLoader:
             # e.g. "works only on Windows" instead of "No module named 'win32gui'".
             self.requirements.update(getattr(module, "TOOL_REQUIREMENTS", None) or {})
             self.isolation.update(getattr(module, "TOOL_ISOLATION", None) or {})
+            self.effects.update(getattr(module, "TOOL_EFFECTS", None) or {})
             logger.error(f"Error loading module {module_name}: {exc}", exc_info=True)
 
     def get_tool(self, tool_name: str) -> Optional[Any]:

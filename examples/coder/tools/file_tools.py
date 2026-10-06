@@ -506,3 +506,13 @@ TOOL_ISOLATION = {
     "file_append": _WORKSPACE,
     "file_edit": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects), for the action policy
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "file_read": _effects.read("filepath"),
+    "file_write": _effects.write("filepath"),
+    "file_append": _effects.write("filepath"),
+    "file_edit": _effects.write("filepath"),
+}
