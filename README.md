@@ -385,7 +385,7 @@ Grid способен читать и изменять файлы, выполн�
 - [Режим Grid workers для Codex](CODEX_WORKERS.md)
 - [Справочник параметров конфигурации](config.yaml.example)
 - [Перезапуск сервера и восстановление активных запросов](docs/server-restart.md)
-- Системы: [context-review](examples/context-review/README.md), [engineering](examples/coder/README.md), [pipeline](examples/coordinator-pipeline/README.md), [video](examples/video-editor/README.md), [desktop](examples/windows-computer-use/README.md), [system-admin](examples/system-admin/README.md), [voice-assistant](examples/voice-assistant/README.md)
+- Системы: [context-review](examples/context-review/README.md), [engineering](examples/coder/README.md), [video](examples/video-editor/README.md), [desktop](examples/windows-computer-use/README.md), [system-admin](examples/system-admin/README.md), [voice-assistant](examples/voice-assistant/README.md)
 - Выкладка сайта с аккаунтами: [systemd](deploy/grid-web-chat.service), [Caddy](deploy/Caddyfile)
 - [Статистика токенов: окно Usage, графики и экспорт CSV](docs/usage.md)
 - [Пути и границы изоляции пользователей](docs/audits/2026-09-28-isolation-paths.md)
