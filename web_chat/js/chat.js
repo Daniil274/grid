@@ -33,6 +33,7 @@ export class ChatController {
     // The chat being loaded: a newer pick aborts it, and a late answer for a
     // chat no longer on screen is dropped instead of drawn over the new one.
     this._loading = null;
+    this._loadGeneration = 0;
   }
 
   /**
@@ -48,7 +49,8 @@ export class ChatController {
       const current = this._store.get().contextId === contextId && (!supersede || this._loading === load);
       return current ? payload : null;
     } catch (error) {
-      if (load.signal.aborted) return null;
+      if (load.signal.aborted && error?.name === "AbortError") return null;
+      if (supersede && (this._loading !== load || this._store.get().contextId !== contextId)) return null;
       throw error;
     } finally {
       if (this._loading === load) this._loading = null;
@@ -396,6 +398,7 @@ export class ChatController {
   /** Load a stored conversation, including its reasoning traces. */
   async openConversation(contextId) {
     if (!contextId) return;
+    const generation = ++this._loadGeneration;
     // Leaving a chat mid-turn only stops watching it: the turn runs on the
     // server and is replayed when the chat is opened again.
     this._detach();
@@ -408,7 +411,7 @@ export class ChatController {
     try {
       payload = await this._fetchConversation(contextId, { supersede: true });
     } catch (error) {
-      if (this._store.get().contextId === contextId) {
+      if (generation === this._loadGeneration && this._store.get().contextId === contextId) {
         this._transcript.setLoading(false);
         this._transcript.clear();
         this._store.set({ resumable: false });
