@@ -408,7 +408,11 @@ export class ChatController {
     try {
       payload = await this._fetchConversation(contextId, { supersede: true });
     } catch (error) {
-      if (this._store.get().contextId === contextId) this._transcript.setLoading(false);
+      if (this._store.get().contextId === contextId) {
+        this._transcript.setLoading(false);
+        this._transcript.clear();
+        this._store.set({ resumable: false });
+      }
       throw error;
     }
     if (!payload) return; // another chat was picked meanwhile
