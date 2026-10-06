@@ -163,13 +163,18 @@ export class ChatController {
    * @param {{id: string, text: string, images: string[]}} edited
    */
   async editMessage({ id, text, images = [] }) {
+    const intent = ++this._navigationIntent;
     try {
       if (this._store.get().compacting) throw new Error("Wait for context compaction to finish before editing.");
       if (this.isStreaming) await this._stopNow();
+      if (intent !== this._navigationIntent) return;
       const branch = await api.createBranch(this._store.get().contextId, id);
-      await this.openConversation(branch.id);
+      if (intent !== this._navigationIntent) return;
+      await this.openConversation(branch.id, intent);
+      if (intent !== this._navigationIntent) return;
       await this._begin({ text, spoken: false, images, editOf: branch.edit_of });
     } catch (error) {
+      if (intent !== this._navigationIntent) return;
       toast(error.message, { tone: "error" });
     }
   }
@@ -388,11 +393,12 @@ export class ChatController {
 
   /** Start a fresh conversation and clear the transcript. */
   async startConversation() {
-    ++this._navigationIntent;
+    const intent = ++this._navigationIntent;
     this._detach();
     this._voice?.cleanup();
     const { systemKey, agentKey } = this._store.get();
     const conversation = await api.createConversation({ system_key: systemKey, agent_key: agentKey });
+    if (intent !== this._navigationIntent) return;
     this._store.set({ contextId: conversation.id, rootId: conversation.id, resumable: false, hasAgentContext: false, compacting: false });
     this._transcript.clear();
     await this._refreshConversations();
