@@ -82,3 +82,44 @@ test("new open invalidates stale switch rejection", async () => {
     assert.equal(env.store.get().contextId, "Y");
   } finally { api.activateBranch = old.activate; api.getConversation = old.get; }
 });
+
+test("starting a chat invalidates a pending switch activation", async () => {
+  const old = { activate: api.activateBranch, create: api.createConversation, get: api.getConversation };
+  const env = setup(), activation = deferred(), creation = deferred();
+  api.activateBranch = () => activation.promise;
+  api.createConversation = () => creation.promise;
+  try {
+    const switching = env.chat.switchVersion("X");
+    const starting = env.chat.startConversation();
+    creation.resolve({ id: "new-chat" }); await starting;
+    activation.resolve({}); await switching;
+    assert.equal(env.store.get().contextId, "new-chat");
+    assert.deepEqual(env.transcript.rendered, []);
+  } finally { api.activateBranch = old.activate; api.createConversation = old.create; api.getConversation = old.get; }
+});
+
+test("a newer open wins while startConversation is waiting for its API", async () => {
+  const old = { create: api.createConversation, get: api.getConversation };
+  const env = setup(), creation = deferred(); api.createConversation = () => creation.promise;
+  try {
+    const starting = env.chat.startConversation();
+    const opening = env.chat.openConversation("Y");
+    env.loads.get("Y").resolve(env.payload("Y")); await opening;
+    creation.resolve({ id: "late-new-chat" }); await starting;
+    assert.equal(env.store.get().contextId, "Y");
+    assert.deepEqual(env.transcript.rendered, ["Y"]);
+  } finally { api.createConversation = old.create; api.getConversation = old.get; }
+});
+
+test("a newer open quietly supersedes an edit branch API failure", async () => {
+  const old = { create: api.createBranch, get: api.getConversation };
+  const env = setup(), branch = deferred(); api.createBranch = () => branch.promise;
+  try {
+    const editing = env.chat.editMessage({ id: "message", text: "edited" });
+    const opening = env.chat.openConversation("Y");
+    env.loads.get("Y").resolve(env.payload("Y")); await opening;
+    branch.reject(new Error("obsolete edit failure")); await editing;
+    assert.equal(env.store.get().contextId, "Y");
+    assert.deepEqual(env.transcript.rendered, ["Y"]);
+  } finally { api.createBranch = old.create; api.getConversation = old.get; }
+});
