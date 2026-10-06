@@ -52,7 +52,7 @@ async def test_a_tool_error_does_not_stop_the_run(error):
 
     assert state.stopped is False
     assert state.denials == 0  # a failure is not a policy denial
-    assert state.chain[-1]["outcome"] == "failed"
+    assert state.history[-1]["outcome"] == "failed"
     assert (await call(gate, ctx)).startswith("ran:")
 
 
@@ -67,7 +67,7 @@ async def test_a_failed_call_stays_in_the_trajectory_the_validator_sees():
     await call(gate, ctx)
 
     packet = validator.evaluate.await_args.args[0]
-    assert [e["tool"] for e in packet["untrusted_chain"]["executed"]] == ["deploy"]
+    assert [e["tool"] for e in packet["untrusted_history"]["executed"]] == ["deploy"]
 
 
 async def test_cancellation_still_stops_the_run():

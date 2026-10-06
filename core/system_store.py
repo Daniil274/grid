@@ -102,6 +102,13 @@ def store_for_catalog(catalog: Any) -> Optional["SystemStore"]:
     return SystemStore(path.resolve())
 
 
+#: Action-policy settings that decide what runs unjudged: an operator's only.
+_OPERATOR_POLICY_FIELDS = frozenset({
+    "filters", "default_filter", "approvals", "tool_effects", "secret_paths",
+    "protected_paths", "untrusted_paths", "readonly_commands",
+})
+
+
 def check_key(key: str) -> str:
     if not KEY_PATTERN.fullmatch(key or ""):
         raise StoreError(
@@ -427,6 +434,9 @@ class BuilderAccess:
         policy = settings.action_policy
         if policy.policy_file or policy.system or policy.system_file or document.get("routing"):
             raise StoreError("Private systems inherit the server's policy and routing; do not reference other config files.")
+        # What tools may do unjudged, and what is protected, is the operator's to say.
+        if policy.model_fields_set & _OPERATOR_POLICY_FIELDS:
+            raise StoreError("Private systems inherit the server's policy filters, protected paths and tool effects.")
         allowed_providers = self.providers()
         for name, provider in (document.get("providers") or {}).items():
             if name not in allowed_providers or provider != allowed_providers[name]:

@@ -49,7 +49,7 @@ class FakeFactory:
         self._system_access_broker = broker
         self._system_access_key = key
 
-    def _wrap_tool_with_policy(self, tool, name, kind):
+    def _wrap_tool_with_policy(self, tool, name, kind, effect=None):
         return tool
 
     async def create_agent(self, key):

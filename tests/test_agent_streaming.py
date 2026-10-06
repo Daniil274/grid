@@ -491,6 +491,6 @@ agents:
     # The caller's task and trajectory; its request is context, not authority.
     assert state.parent is caller
     assert state.task == "Review the diff"
-    assert state.chain is caller.chain
+    assert state.history is caller.history
     assert state.delegation == {"tool": "call_test_agent", "request": "Check core/"}
     assert started["context"].action_depth == 1

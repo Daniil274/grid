@@ -355,3 +355,8 @@ TOOL_ISOLATION = {
     "pipeline_task": _WORKSPACE,
     "pipeline_wait": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects): they start and steer agents, whose calls are judged
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {name: _effects.DELEGATE for name in TOOL_ISOLATION}

@@ -223,6 +223,29 @@
   color: var(--danger);
 }
 
+/* A call held for the user's permission: the answer sits under its row. */
+.step__approval {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 6px 28px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+
+.step__approval[hidden] {
+  display: none;
+}
+
+.step__approvalNote {
+  flex: 1 1 160px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
 /* Timing and chevron are fixed-width columns, so the policy badges before
    them line up on one right edge whatever the duration or detail. */
 .step__timing {

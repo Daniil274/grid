@@ -86,7 +86,7 @@ class PolicyRunner:
         self.routes = [Route(validator) for validator in validators]
         self._slots = asyncio.Semaphore(config.max_concurrency)
 
-    async def evaluate(self, packet: dict, *, chain: bool) -> Judgment:
+    async def evaluate(self, packet: dict) -> Judgment:
         result = Judgment()
         started = time.monotonic()
         acquired = False
@@ -96,9 +96,7 @@ class PolicyRunner:
             async with self._slots:
                 acquired = True
                 result.queue_ms = round((time.monotonic() - started) * 1000, 3)
-                await self._judge(
-                    packet, chain, result, started + self.config.timeout_seconds
-                )
+                await self._judge(packet, result, started + self.config.timeout_seconds)
 
         try:
             # Includes queue, backoff, Retry-After and every provider request.
@@ -111,13 +109,11 @@ class PolicyRunner:
             )
         return result
 
-    async def _judge(
-        self, packet: dict, chain: bool, result: Judgment, deadline: float
-    ):
+    async def _judge(self, packet: dict, result: Judgment, deadline: float):
         counts = [0] * len(self.routes)
         disabled = set()
         next_try = [0.0] * len(self.routes)
-        expected = {"action", "chain"} if chain else {"action"}
+        expected = {"action"}
         while len(result.attempts) < self.config.max_attempts:
             now = time.monotonic()
             candidates = [
@@ -165,7 +161,7 @@ class PolicyRunner:
                     attempts_left = 1
                 attempt_budget = max(0, deadline - started) / attempts_left
                 answer = await asyncio.wait_for(
-                    route.validator.evaluate(packet, chain=chain),
+                    route.validator.evaluate(packet),
                     timeout=attempt_budget,
                 )
                 if not isinstance(answer, dict) or set(answer) != expected:

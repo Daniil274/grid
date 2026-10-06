@@ -252,9 +252,9 @@ class TurnRunner:
         context_id = context_id or self.context_manager.get_current_context_id()
         session = self._get_agent_session(agent_label, context_id)
         if action_state is None:
-            action_state = self._action_state(self._policy_task(input_message, context_id))
-            if action_state is not None and hasattr(observer, "handle_policy_event"):
-                action_state.policy_event = observer.handle_policy_event
+            action_state = self._action_state(
+                self._policy_task(input_message, context_id), context_id=context_id, observer=observer
+            )
         run_ctx = GridRunContext(
             factory=self,
             context_id=context_id,
@@ -883,6 +883,10 @@ class TurnRunner:
         if control is None:
             return False
         control.request_stop()
+        # A call held for the user's answer would keep the step from ending.
+        state = control.action_state
+        if self.action_gate is not None and isinstance(state, ActionRunState):
+            self.action_gate.cancel_reviews(state.run_id)
         return True
 
     async def _run_turn_with_corrections(
@@ -1046,10 +1050,10 @@ class TurnRunner:
             # not only a context-free follow-up such as "commit" or "continue".
             # Continue is judged against the request it continues.
             action_state = self._action_state(
-                self._policy_task(message if message is not None else interrupted.task, active_context_id)
+                self._policy_task(message if message is not None else interrupted.task, active_context_id),
+                context_id=active_context_id,
+                observer=observer,
             )
-            if action_state is not None and hasattr(observer, "handle_policy_event"):
-                action_state.policy_event = observer.handle_policy_event
             session_log = self._record_invocation(agent_key, active_context_id, user_id, shown_message)
             user_id = user_id or self.context_manager.get_metadata("user_id")
 

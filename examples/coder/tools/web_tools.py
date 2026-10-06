@@ -526,3 +526,11 @@ TOOL_ISOLATION = {
     "web_fetch": _WORKSPACE,
     "web_search": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects): a request out, and outside content back
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "web_fetch": _effects.egress(untrusted=True),
+    "web_search": _effects.egress(untrusted=True),
+}

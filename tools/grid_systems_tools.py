@@ -154,3 +154,12 @@ GRID_SYSTEMS_TOOLS: Dict[str, Any] = {
     "grid_systems_catalog": grid_systems_catalog,
     "grid_check_system": grid_check_system,
 }
+
+
+# What these tools do (utils.tool_effects), for the action policy
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "grid_systems_catalog": _effects.read(),
+    "grid_check_system": _effects.read(),
+}

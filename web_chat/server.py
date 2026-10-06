@@ -531,6 +531,8 @@ class WebChatServer:
                     # Where the workspace lives on the server: for admins only.
                     "workspace_path": str(space.workspace_path) if user.is_admin else "",
                     "isolation_enabled": bool(space.container_id),
+                    # The policy switch: its filters and the default; null when off.
+                    "policy": space.policy_filters(),
                 }
             )
 

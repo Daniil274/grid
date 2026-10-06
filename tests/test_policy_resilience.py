@@ -21,7 +21,7 @@ from schemas.action_policy import (
     ActionValidatorConfig,
 )
 
-ALLOW = {"action": "allow", "chain": "allow"}
+ALLOW = {"action": "allow"}
 
 
 def settings(**kwargs):
@@ -89,7 +89,7 @@ async def test_shadow_outages_do_not_exhaust_denials():
 async def test_permanent_http_failures_are_not_retried(status):
     primary = validator(side_effect=http_error(status))
     runner = PolicyRunner(settings(), [primary])
-    result = await runner.evaluate({}, chain=True)
+    result = await runner.evaluate({})
     assert not result.verdicts
     primary.evaluate.assert_awaited_once()
 
@@ -97,16 +97,16 @@ async def test_permanent_http_failures_are_not_retried(status):
 @pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
 async def test_transient_http_failures_can_recover(status):
     primary = validator(side_effect=[http_error(status), ALLOW])
-    result = await PolicyRunner(settings(), [primary]).evaluate({}, chain=True)
+    result = await PolicyRunner(settings(), [primary]).evaluate({})
     assert result.verdicts == ALLOW
     assert result.failures == [f"http_{status}"]
 
 
 @pytest.mark.parametrize("choice", ["allow", "deny", "review"])
 async def test_valid_decision_never_uses_the_reserve(choice):
-    primary = validator(return_value={"action": choice, "chain": "allow"})
+    primary = validator(return_value={"action": choice})
     reserve = validator("reserve")
-    result = await PolicyRunner(settings(), [primary, reserve]).evaluate({}, chain=True)
+    result = await PolicyRunner(settings(), [primary, reserve]).evaluate({})
     assert result.verdicts["action"] == choice
     primary.evaluate.assert_awaited_once()
     reserve.evaluate.assert_not_awaited()
@@ -117,20 +117,19 @@ async def test_valid_decision_never_uses_the_reserve(choice):
 )
 async def test_reserve_gets_identical_context_only_after_a_failure(error):
     primary = validator(side_effect=error)
-    reserve = validator("reserve", return_value={"action": "review", "chain": "allow"})
+    reserve = validator("reserve", return_value={"action": "review"})
     packet = {"trusted_task": "Inspect", "untrusted_action": {"tool": "inspect"}}
     result = await PolicyRunner(settings(), [primary, reserve]).evaluate(
-        packet, chain=True
-    )
+        packet)
     assert result.verdicts["action"] == "review"
     assert result.model == "reserve"
-    primary.evaluate.assert_awaited_once_with(packet, chain=True)
-    reserve.evaluate.assert_awaited_once_with(packet, chain=True)
+    primary.evaluate.assert_awaited_once_with(packet)
+    reserve.evaluate.assert_awaited_once_with(packet)
     assert [event["route"] for event in result.attempts] == ["primary", "reserve"]
 
 
 async def test_incomplete_answer_cannot_authorize_a_tool():
-    primary = validator(return_value={"action": "allow"})
+    primary = validator(return_value={})
     gate, run, ctx = gate_context(primary)
     invoke = AsyncMock()
     assert json.loads(await call(gate, ctx, invoke))["rule"] == "policy_unavailable"
@@ -139,17 +138,16 @@ async def test_incomplete_answer_cannot_authorize_a_tool():
     assert check["validator_failures"] == ["invalid_answer", "invalid_answer"]
 
 
-async def test_action_only_is_valid_when_chain_is_disabled():
+async def test_an_action_verdict_is_a_complete_answer():
     primary = validator(return_value={"action": "allow"})
-    result = await PolicyRunner(settings(), [primary]).evaluate({}, chain=False)
+    result = await PolicyRunner(settings(), [primary]).evaluate({})
     assert result.verdicts == {"action": "allow"}
 
 
 async def test_retry_after_exceeding_budget_does_not_send_an_early_retry():
     primary = validator(side_effect=http_error(429, **{"Retry-After": "10"}))
     result = await PolicyRunner(settings(timeout_seconds=0.04), [primary]).evaluate(
-        {}, chain=True
-    )
+        {})
     assert not result.verdicts
     assert result.failures == ["http_429", "budget_timeout"]
     primary.evaluate.assert_awaited_once()
@@ -159,8 +157,8 @@ async def test_retry_after_allows_immediate_independent_fallback():
     primary = validator(side_effect=http_error(429, **{"Retry-After": "10"}))
     reserve = validator("reserve")
     runner = PolicyRunner(settings(timeout_seconds=0.1), [primary, reserve])
-    assert (await runner.evaluate({}, chain=True)).verdicts == ALLOW
-    assert (await runner.evaluate({}, chain=True)).verdicts == ALLOW
+    assert (await runner.evaluate({})).verdicts == ALLOW
+    assert (await runner.evaluate({})).verdicts == ALLOW
     primary.evaluate.assert_awaited_once()  # Cooldown survives across judgments.
     assert reserve.evaluate.await_count == 2
 
@@ -172,7 +170,7 @@ async def test_slow_primary_cannot_spend_the_reserves_time_budget():
     primary = validator(side_effect=stalled)
     reserve = validator("reserve")
     runner = PolicyRunner(settings(timeout_seconds=0.1), [primary, reserve])
-    result = await runner.evaluate({}, chain=True)
+    result = await runner.evaluate({})
     assert result.verdicts == ALLOW and result.failures == ["timeout"]
     assert [e["outcome"] for e in result.attempts] == ["timeout", "answered"]
     reserve.evaluate.assert_awaited_once()
@@ -187,13 +185,13 @@ async def test_open_primary_does_not_halve_the_reserves_budget():
 
     reserve = validator("reserve", side_effect=answer)
     runner = PolicyRunner(settings(timeout_seconds=0.22), [primary, reserve])
-    assert (await runner.evaluate({}, chain=True)).verdicts == ALLOW
-    assert (await runner.evaluate({}, chain=True)).verdicts == ALLOW
+    assert (await runner.evaluate({})).verdicts == ALLOW
+    assert (await runner.evaluate({})).verdicts == ALLOW
     primary.evaluate.assert_awaited_once()
 
 
 async def test_exhausted_reserve_does_not_execute_and_cannot_consume_approval():
-    primary = validator(return_value={"action": "review", "chain": "allow"})
+    primary = validator(return_value={"action": "review"})
     reserve = validator("reserve", side_effect=http_error(503))
     primary.fallbacks = [reserve]
     gate, run, ctx = gate_context(primary)
@@ -244,7 +242,7 @@ async def test_backoff_is_applied_before_retry(monkeypatch):
     primary = validator(side_effect=[http_error(503), ALLOW])
     result = await PolicyRunner(
         settings(retry_backoff_seconds=0.2), [primary]
-    ).evaluate({}, chain=True)
+    ).evaluate({})
     assert result.verdicts == ALLOW
     assert len(delays) == 1 and 0.1 <= delays[0] <= 0.2
 
@@ -258,8 +256,8 @@ async def test_circuit_skips_broken_route_then_allows_one_recovery_probe(monkeyp
     runner = PolicyRunner(
         settings(circuit_failure_threshold=1, circuit_cooldown_seconds=5), [primary]
     )
-    assert not (await runner.evaluate({}, chain=True)).verdicts
-    assert not (await runner.evaluate({}, chain=True)).verdicts
+    assert not (await runner.evaluate({})).verdicts
+    assert not (await runner.evaluate({})).verdicts
     primary.evaluate.assert_awaited_once()
     tick[0] += 5
     entered, release = asyncio.Event(), asyncio.Event()
@@ -270,13 +268,13 @@ async def test_circuit_skips_broken_route_then_allows_one_recovery_probe(monkeyp
         return ALLOW
 
     primary.evaluate.side_effect = recover
-    pending = asyncio.create_task(runner.evaluate({}, chain=True))
+    pending = asyncio.create_task(runner.evaluate({}))
     await asyncio.wait_for(entered.wait(), 1)
-    assert not (await runner.evaluate({}, chain=True)).verdicts
+    assert not (await runner.evaluate({})).verdicts
     assert primary.evaluate.await_count == 2
     release.set()
     assert (await pending).verdicts == ALLOW
-    assert (await runner.evaluate({}, chain=True)).verdicts == ALLOW
+    assert (await runner.evaluate({})).verdicts == ALLOW
 
 
 async def test_concurrency_is_bounded():
@@ -293,7 +291,7 @@ async def test_concurrency_is_bounded():
     runner = PolicyRunner(
         settings(max_concurrency=2), [validator(side_effect=evaluate)]
     )
-    results = await asyncio.gather(*(runner.evaluate({}, chain=True) for _ in range(8)))
+    results = await asyncio.gather(*(runner.evaluate({}) for _ in range(8)))
     assert peak == 2 and all(r.verdicts == ALLOW for r in results)
     assert any(r.queue_ms > 0 for r in results)
 
@@ -315,12 +313,12 @@ async def test_older_inflight_success_does_not_clear_newer_outage():
         settings(max_attempts=1, circuit_failure_threshold=1),
         [validator(side_effect=overlapping)],
     )
-    older = asyncio.create_task(runner.evaluate({}, chain=True))
+    older = asyncio.create_task(runner.evaluate({}))
     await asyncio.wait_for(entered.wait(), 1)
-    assert not (await runner.evaluate({}, chain=True)).verdicts
+    assert not (await runner.evaluate({})).verdicts
     release.set()
     assert (await older).verdicts == ALLOW
-    assert not (await runner.evaluate({}, chain=True)).verdicts
+    assert not (await runner.evaluate({})).verdicts
     assert calls == 2
 
 
@@ -328,7 +326,7 @@ async def test_queue_wait_uses_the_total_budget():
     primary = validator()
     runner = PolicyRunner(settings(max_concurrency=1, timeout_seconds=0.03), [primary])
     async with runner._slots:
-        result = await runner.evaluate({}, chain=True)
+        result = await runner.evaluate({})
     assert result.failures == ["queue_timeout"]
     assert result.queue_ms >= 20 and not result.attempts
     primary.evaluate.assert_not_awaited()
@@ -384,7 +382,7 @@ async def test_http_client_is_reused_and_closed_even_with_injected_proxy():
     def respond(request):
         seen.append(request)
         return httpx.Response(
-            200, json={"answers": {"action": choice, "chain": choice}}
+            200, json={"answers": {"action": choice}}
         )
 
     primary = ActionValidator(
@@ -392,7 +390,7 @@ async def test_http_client_is_reused_and_closed_even_with_injected_proxy():
         DecisionsModel(
             "https://policy.test", "test", "primary", proxy="http://127.0.0.1:1"
         ),
-        ActionPolicyPrompts(action=question, chain=question),
+        ActionPolicyPrompts(action=question),
         transport=httpx.MockTransport(respond),
     )
     gate, _, ctx = gate_context(primary)
@@ -452,7 +450,7 @@ async def test_reserve_decisions_transport_blocks_and_both_clients_are_closed():
         instructions="Decide",
         criteria={"allow": "Yes", "deny": "No", "review": "Ask"},
     )
-    prompts = ActionPolicyPrompts(action=question, chain=question)
+    prompts = ActionPolicyPrompts(action=question)
     config = settings(fallback_models=("reserve",))
     seen = []
     deny = {
@@ -466,7 +464,7 @@ async def test_reserve_decisions_transport_blocks_and_both_clients_are_closed():
         seen.append((request.url.host, json.loads(request.content)))
         if request.url.host == "primary.test":
             return httpx.Response(503)
-        return httpx.Response(200, json={"answers": {"action": deny, "chain": deny}})
+        return httpx.Response(200, json={"answers": {"action": deny}})
 
     primary = ActionValidator(
         config,
@@ -516,7 +514,7 @@ async def test_model_list_is_tried_in_order_until_one_answers():
         validator("third"),
     ]
     runner = PolicyRunner(settings(model=["first", "second", "third"]), routes)
-    judgment = await runner.evaluate({}, chain=True)
+    judgment = await runner.evaluate({})
     assert judgment.verdicts == ALLOW and judgment.model == "third"
     assert [event["route"] for event in judgment.attempts] == [
         "first",
@@ -525,7 +523,7 @@ async def test_model_list_is_tried_in_order_until_one_answers():
     ]
     # The next check starts from the first model again.
     routes[0].evaluate.side_effect = None
-    judgment = await runner.evaluate({}, chain=True)
+    judgment = await runner.evaluate({})
     assert [event["route"] for event in judgment.attempts] == ["first"]
 
 

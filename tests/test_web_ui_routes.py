@@ -109,6 +109,9 @@ class _DummySpace:
     def pending_action_reviews(self):
         return list(self._reviews)
 
+    def policy_filters(self):
+        return {"default": "balanced", "approvals": "user", "filters": [{"key": "balanced", "label": "Balanced", "description": ""}]}
+
     def resolve_action_review(self, approval_id: str, *, approve: bool):
         if approval_id != "review-1":
             return False
@@ -182,6 +185,7 @@ def test_web_chat_index_and_bootstrap_are_available():
     assert bootstrap_response.status_code == 200
     assert bootstrap_response.json()["default_system"] == "test_system"
     assert bootstrap_response.json()["voice"] is False
+    assert bootstrap_response.json()["policy"]["default"] == "balanced"
 
 
 @pytest.mark.asyncio

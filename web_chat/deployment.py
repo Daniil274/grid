@@ -184,6 +184,18 @@ class Deployment:
         """
         return self.catalog
 
+    @property
+    def action_policy(self) -> Optional[Any]:
+        """The action policy the chat's turns run under, or None when it is off:
+        the catalog's when enabled, else the single system's. Its filters are the
+        user's switch; a system's own part never adds filters."""
+        for config in (self.catalog, self.config):
+            policy = getattr(getattr(config, "config", None), "settings", None)
+            policy = getattr(policy, "action_policy", None)
+            if policy is not None and policy.mode != "off":
+                return policy
+        return None
+
     # -- voice ---------------------------------------------------------------
     def voice_source(self) -> Tuple[Path, Config]:
         """The file that holds the voice settings, and its Config for model keys.

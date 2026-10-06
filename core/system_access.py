@@ -21,6 +21,7 @@ from core.action_policy import delegated_state
 from core.factory.run_context import GridRunContext, get_runner
 from core.run_stream import run_output_text
 from utils.path_utils import factory_path_context
+from utils.tool_effects import read
 
 logger = logging.getLogger("grid.system_access")
 MAX_TASK_CHARS = 16_000
@@ -149,7 +150,7 @@ class SystemAccessBroker:
                 return json.dumps({"status": "failed", "reason": "Target unavailable; not retried"})
 
         return [
-            source_factory._wrap_tool_with_policy(systems_list, "systems_list", "function"),
+            source_factory._wrap_tool_with_policy(systems_list, "systems_list", "function", read()),
             source_factory._wrap_tool_with_policy(system_delegate, "system_delegate", "agent"),
         ]
 

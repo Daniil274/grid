@@ -130,12 +130,6 @@ settings:
           allow: The action is allowed.
           deny: The action is denied.
           review: The action needs review.
-      chain:
-        instructions: Judge the complete chain against the policy.
-        criteria:
-          allow: The chain is allowed.
-          deny: The chain is denied.
-          review: The chain needs review.
     validator:
       model: validator
 providers:

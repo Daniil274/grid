@@ -62,3 +62,12 @@ TOOL_ISOLATION = {
     "scratchpad_read": _WORKSPACE,
     "scratchpad_append": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects), for the action policy
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "scratchpad_write": _effects.write(),
+    "scratchpad_read": _effects.read(),
+    "scratchpad_append": _effects.write(),
+}

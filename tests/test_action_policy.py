@@ -19,7 +19,6 @@ from core.action_policy import (
     ActionGate,
     ActionRunState,
     ActionValidator,
-    merge,
 )
 from schemas.action_policy import ActionPolicyConfig, ActionValidatorConfig
 
@@ -55,11 +54,14 @@ def response_answers(**answers):
     return {"answers": {key: value for key, value in answers.items()}}
 
 
-def setup_gate(verdicts=("allow", "allow"), task=TASK, **settings):
-    """A gate with a stubbed validator and a live run state."""
-    action, chain = verdicts
+def setup_gate(verdict="allow", task=TASK, **settings):
+    """A gate with a stubbed validator and a live run state.
+
+    The calls below name tools that declare no effect, so the default filter
+    sends each of them to the validator.
+    """
     validator = SimpleNamespace(
-        evaluate=AsyncMock(return_value={"action": action, "chain": chain})
+        evaluate=AsyncMock(return_value={"action": verdict})
     )
     gate = ActionGate(
         ActionPolicyConfig(mode="enforce", **settings), validator=validator
@@ -92,9 +94,11 @@ async def test_allowed_call_executes_and_audits_without_arguments(caplog):
         "arguments": {"command": "pytest -q --secret=abc"},
         "tool_metadata": {},
     }
+    assert packet["host_facts"]["effect"] == "unknown"
+    assert packet["trusted_policy"]["filter"]["name"] == "balanced"
     audit = [r.getMessage() for r in caplog.records]
     assert audit and all("secret" not in line for line in audit)
-    assert [(e["tool"], e["outcome"]) for e in state.chain] == [
+    assert [(e["tool"], e["outcome"]) for e in state.history] == [
         ("bash_tool", "executed")
     ]
 
@@ -103,8 +107,7 @@ async def test_allowed_call_executes_and_audits_without_arguments(caplog):
     "tool,kind,args",
     [
         ("bash_tool", "function", {"command": "rm -rf /"}),
-        ("call_coordinator", "agent", {"input": "do the whole project"}),
-        ("codegraph_search", "mcp", {"query": "AgentFactory"}),
+        ("remote_search", "mcp", {"query": "AgentFactory"}),
         ("project_specific_tool", "function", {"anything": [1, 2, 3]}),
     ],
 )
@@ -117,6 +120,15 @@ async def test_every_configured_kind_is_checked(tool, kind, args):
     assert packet["untrusted_action"]["arguments"] == args
 
 
+async def test_delegation_runs_and_its_agent_is_judged_call_by_call():
+    """Starting an agent has no effect of its own: what it does is judged."""
+    gate, validator, state, ctx = setup_gate("deny")
+    assert (await call(gate, ctx, tool="call_coordinator", kind="agent")).startswith("ran:")
+    validator.evaluate.assert_not_awaited()
+    check = next(e for e in state.events if e["rule"] == "policy_check")
+    assert (check["effect"], check["source"]) == ("delegate", "filter")
+
+
 async def test_kinds_not_configured_run_unchecked():
     gate, validator, state, ctx = setup_gate(kinds=("function",))
     assert (
@@ -124,16 +136,16 @@ async def test_kinds_not_configured_run_unchecked():
         == 'ran:{"command": "pytest -q"}'
     )
     validator.evaluate.assert_not_awaited()
-    assert not state.chain
+    assert not state.history
 
 
 async def test_operator_configured_call_runs_unjudged_and_is_audited(caplog):
-    gate, validator, state, ctx = setup_gate(("deny", "deny"))
+    gate, validator, state, ctx = setup_gate("deny")
     ctx.operator_configured = True
     with caplog.at_level("INFO", logger="grid.action_policy"):
         assert await call(gate, ctx) == 'ran:{"command": "pytest -q"}'
     validator.evaluate.assert_not_awaited()
-    assert not state.chain
+    assert not state.history
     assert state.attempts == state.denials == 0
     [event] = state.events
     assert event["decision"] == "executed"
@@ -166,7 +178,7 @@ def auto_run_factory(gate):
 
 async def test_auto_run_tools_are_not_judged_against_the_user_task():
     """Setup steps from the config are not something the user asked for."""
-    gate, validator, state, ctx = setup_gate(("deny", "deny"))
+    gate, validator, state, ctx = setup_gate("deny")
     factory, tool, agent_config = auto_run_factory(gate)
     info, complete = await factory._execute_auto_run_tools(
         "agent", agent_config, [tool], ".", ctx.context
@@ -189,7 +201,7 @@ async def test_init_tools_are_judged_and_a_block_is_not_injected():
     """init_tools are written by an agent: gated, and a refusal is not context."""
     from core.agent_factory import GridRunContext
 
-    gate, validator, state, _ = setup_gate(("deny", "deny"))
+    gate, validator, state, _ = setup_gate("deny")
     factory, tool, _ = auto_run_factory(gate)
     factory.container_id = None
     factory.config = SimpleNamespace(get_working_directory=lambda: ".")
@@ -203,94 +215,57 @@ async def test_init_tools_are_judged_and_a_block_is_not_injected():
 
 
 async def test_denied_call_is_blocked_and_reported_to_the_agent():
-    gate, _, state, ctx = setup_gate(("deny", "allow"))
+    gate, _, state, ctx = setup_gate("deny")
     blocked = json.loads(await call(gate, ctx))
     assert blocked["status"] == "blocked"
     assert blocked["rule"] == "policy_deny"
     assert state.denials == 1
-    assert [(e["tool"], e["outcome"]) for e in state.chain] == [
+    assert [(e["tool"], e["outcome"]) for e in state.history] == [
         ("bash_tool", "blocked")
     ]
 
 
 async def test_a_denied_call_keeps_the_agent_working_on_the_task():
     # "Do not work around the policy" alone made agents stop using tools at all.
-    gate, _, _, ctx = setup_gate(("deny", "deny"))
+    gate, _, _, ctx = setup_gate("deny")
     blocked = json.loads(await call(gate, ctx))
     assert blocked["run_stopped"] is False
     step = blocked["next_step"]
-    assert "outside the user's task" in step
+    assert "harmful or not authorized" in step
     assert "Do not repeat it" in step
     assert "judged on their own" in step and "go on with the work the task needs" in step
 
 
 async def test_a_stopped_run_is_told_no_tool_will_run():
-    gate, _, _, ctx = setup_gate(("deny", "allow"), max_denials_per_run=1)
+    gate, _, _, ctx = setup_gate("deny", max_denials_per_run=1)
     blocked = json.loads(await call(gate, ctx))
     assert blocked["run_stopped"] is True
     assert "no further tool calls will run" in blocked["next_step"]
 
 
-async def test_chain_verdict_alone_holds_the_call_for_the_host():
-    # The call itself passed; a deny of the run's history cannot be undone by
-    # the agent, so it is held for review instead of refusing the turn.
-    gate, _, state, ctx = setup_gate(("allow", "deny"))
-    blocked = json.loads(await call(gate, ctx))
-    assert blocked["rule"] == "policy_review"
-    assert blocked["approval_id"]
-    assert blocked["verdicts"] == {"action": "allow", "chain": "deny"}
-    assert blocked["objected"] == ["chain"]
-    assert "earlier actions" in blocked["next_step"]
-    assert gate.pending_reviews()[0]["objected"] == ["chain"]
-    # Unlike an ordinary review it spends the denial budget: a run that keeps
-    # drifting still stops.
-    assert state.denials == 1
-
-    assert gate.resolve_review(blocked["approval_id"], approve=True) is True
-    assert (await call(gate, ctx)).startswith("ran:")
-
-
-async def test_a_run_held_for_its_chain_again_and_again_stops():
-    gate, _, state, ctx = setup_gate(("allow", "deny"), max_denials_per_run=2)
-    await call(gate, ctx)
-    assert json.loads(await call(gate, ctx))["run_stopped"] is True
-    assert json.loads(await call(gate, ctx))["rule"] == "run_stopped"
-
-
 async def test_an_ordinary_review_spends_no_denial_budget():
-    gate, _, state, ctx = setup_gate(("review", "allow"))
+    gate, _, state, ctx = setup_gate("review")
     blocked = json.loads(await call(gate, ctx))
     assert blocked["rule"] == "policy_review"
     assert state.denials == 0
-    assert gate.pending_reviews()[0]["objected"] == ["action"]
+    assert gate.pending_reviews()[0]["reasons"] == ["unknown: judge"]
 
 
-@pytest.mark.parametrize("action", ["deny", "review"])
-async def test_chain_deny_stays_a_deny_when_the_call_itself_is_in_doubt(action):
-    gate, _, state, ctx = setup_gate((action, "deny"))
+async def test_blocked_result_carries_the_verdict():
+    gate, _, _, ctx = setup_gate("deny")
     blocked = json.loads(await call(gate, ctx))
-    assert blocked["rule"] == "policy_deny"
-    assert "approval_id" not in blocked
-    assert blocked["objected"] == ["action", "chain"]
-    assert state.denials == 1
-
-
-async def test_blocked_result_names_the_question_that_objected():
-    gate, _, _, ctx = setup_gate(("deny", "allow"))
-    blocked = json.loads(await call(gate, ctx))
-    assert blocked["verdicts"] == {"action": "deny", "chain": "allow"}
-    assert blocked["objected"] == ["action"]
+    assert blocked["verdicts"] == {"action": "deny"}
 
 
 async def test_repeated_denials_stop_the_run():
-    gate, _, state, ctx = setup_gate(("deny", "deny"), max_denials_per_run=2)
+    gate, _, state, ctx = setup_gate("deny", max_denials_per_run=2)
     await call(gate, ctx)
     assert json.loads(await call(gate, ctx))["run_stopped"] is True
     assert json.loads(await call(gate, ctx))["rule"] == "run_stopped"
 
 
 async def test_shadow_records_the_verdict_and_keeps_running(caplog):
-    gate, _, state, ctx = setup_gate(("deny", "deny"))
+    gate, _, state, ctx = setup_gate("deny")
     gate.config = gate.config.model_copy(update={"mode": "shadow"})
     with caplog.at_level("INFO", logger="grid.action_policy"):
         assert (await call(gate, ctx)).startswith("ran:")
@@ -301,7 +276,7 @@ async def test_shadow_records_the_verdict_and_keeps_running(caplog):
 
 
 async def test_shadow_counts_denials_and_stops_after_the_budgeted_call():
-    gate, _, state, ctx = setup_gate(("deny", "deny"), max_denials_per_run=2)
+    gate, _, state, ctx = setup_gate("deny", max_denials_per_run=2)
     gate.config = gate.config.model_copy(update={"mode": "shadow"})
 
     assert (await call(gate, ctx)).startswith("ran:")
@@ -325,8 +300,8 @@ async def test_reasoning_is_isolated_between_run_states():
     await call(gate, second_ctx)
     second_packet = validator.evaluate.call_args.args[0]
 
-    assert first_packet["untrusted_chain"]["reasoning_tail"] == first.reasoning_text
-    assert second_packet["untrusted_chain"]["reasoning_tail"] == second.reasoning_text
+    assert first_packet["untrusted_history"]["reasoning_tail"] == first.reasoning_text
+    assert second_packet["untrusted_history"]["reasoning_tail"] == second.reasoning_text
 
 
 async def test_validator_outage_fails_closed_in_enforce():
@@ -379,12 +354,12 @@ async def test_sensitive_and_large_arguments_are_projected_before_validation():
     assert arguments["content"] == "ordinary file content"
     assert arguments["query"]["redacted"] is True
     assert arguments["nested"]["api-key"]["redacted"] is True
-    assert state.chain[0]["arguments"] == arguments
-    assert "top-secret" not in json.dumps(state.chain[0])
+    assert state.history[0]["arguments"] == arguments
+    assert "top-secret" not in json.dumps(state.history[0])
 
 
 async def test_review_can_be_approved_once_for_the_exact_action():
-    gate, validator, state, ctx = setup_gate(("review", "allow"))
+    gate, validator, state, ctx = setup_gate("review")
     args = {"command": "pytest -q"}
     blocked = json.loads(await call(gate, ctx, args=args))
     approval_id = blocked["approval_id"]
@@ -407,7 +382,7 @@ async def test_review_can_be_approved_once_for_the_exact_action():
 
 
 async def test_approval_does_not_apply_to_a_different_action():
-    gate, _, _, ctx = setup_gate(("review", "allow"))
+    gate, _, _, ctx = setup_gate("review")
     blocked = json.loads(await call(gate, ctx, args={"command": "safe"}))
     assert gate.resolve_review(blocked["approval_id"], approve=True) is True
 
@@ -417,12 +392,12 @@ async def test_approval_does_not_apply_to_a_different_action():
     assert different["approval_id"] != blocked["approval_id"]
 
 
-async def test_reviewed_attempt_does_not_poison_the_next_chain_decision():
+async def test_reviewed_attempt_does_not_poison_the_next_decision():
     validator = SimpleNamespace(
         evaluate=AsyncMock(
             side_effect=[
-                {"action": "review", "chain": "allow"},
-                {"action": "allow", "chain": "allow"},
+                {"action": "review"},
+                {"action": "allow"},
             ]
         )
     )
@@ -438,13 +413,13 @@ async def test_reviewed_attempt_does_not_poison_the_next_chain_decision():
     assert blocked["rule"] == "policy_review"
     assert allowed.startswith("ran:")
     second_packet = validator.evaluate.await_args_list[1].args[0]
-    assert second_packet["untrusted_chain"]["executed"] == []
+    assert second_packet["untrusted_history"]["executed"] == []
     assert "recent_decisions" not in second_packet["run"]
-    assert [event["outcome"] for event in state.chain] == ["blocked", "executed"]
+    assert [event["outcome"] for event in state.history] == ["blocked", "executed"]
 
 
 async def test_denied_review_cannot_be_reused():
-    gate, _, _, ctx = setup_gate(("review", "allow"))
+    gate, _, _, ctx = setup_gate("review")
     blocked = json.loads(await call(gate, ctx))
 
     assert gate.resolve_review(blocked["approval_id"], approve=False) is True
@@ -479,7 +454,7 @@ def test_tool_metadata_is_forwarded_without_classifying_it():
 
 
 async def test_arbitrary_tool_behavior_is_always_left_to_the_policy_classifier():
-    gate, validator, _, ctx = setup_gate(("deny", "allow"))
+    gate, validator, _, ctx = setup_gate("deny")
 
     blocked = json.loads(await call(gate, ctx, tool="frobnicate_everything"))
 
@@ -507,7 +482,7 @@ async def test_delegation_depth_is_enforced_before_validation():
     )
 
     assert blocked["rule"] == "delegation_depth"
-    assert validator.evaluate.await_count == 1
+    validator.evaluate.assert_not_awaited()
 
 
 async def test_action_hash_binds_tool_kind_and_arguments():
@@ -519,33 +494,33 @@ async def test_action_hash_binds_tool_kind_and_arguments():
     assert decisions[0]["action_sha256"] != decisions[1]["action_sha256"]
 
 
-async def test_chain_carries_earlier_calls_and_the_agent_reasoning():
+async def test_history_carries_earlier_calls_and_the_agent_reasoning():
     gate, validator, state, ctx = setup_gate()
     state.reasoning = lambda: "The user asked for a report; I will read the log first."
     await call(gate, ctx, tool="file_read", args={"filepath": "log.txt"})
     await call(gate, ctx, tool="bash_tool", args={"command": "pytest -q"})
-    chain = validator.evaluate.call_args.args[0]["untrusted_chain"]
-    assert [entry["tool"] for entry in chain["executed"]] == ["file_read"]
-    assert chain["reasoning_tail"].endswith("read the log first.")
+    history = validator.evaluate.call_args.args[0]["untrusted_history"]
+    assert [entry["tool"] for entry in history["executed"]] == ["file_read"]
+    assert history["reasoning_tail"].endswith("read the log first.")
 
 
-async def test_chain_window_follows_the_configured_budget():
-    gate, validator, state, ctx = setup_gate(max_chain_events=2)
+async def test_history_window_follows_the_configured_budget():
+    gate, validator, state, ctx = setup_gate(max_history_events=2)
     for index in range(4):
         await call(gate, ctx, args={"command": f"step-{index}"})
-    chain = validator.evaluate.call_args.args[0]["untrusted_chain"]
-    assert len(chain["executed"]) == 2
-    assert chain["dropped_earlier_calls"] == 1
-    assert chain["executed"][-1]["arguments"] == {"command": "step-2"}
+    history = validator.evaluate.call_args.args[0]["untrusted_history"]
+    assert len(history["executed"]) == 2
+    assert history["dropped_earlier_calls"] == 1
+    assert history["executed"][-1]["arguments"] == {"command": "step-2"}
 
 
-async def test_chain_bytes_budget_drops_oldest_entries():
-    gate, validator, state, ctx = setup_gate(max_chain_bytes=200)
+async def test_history_bytes_budget_drops_oldest_entries():
+    gate, validator, state, ctx = setup_gate(max_history_bytes=200)
     for index in range(5):
         await call(gate, ctx, args={"command": "x" * 60 + str(index)})
-    chain = validator.evaluate.call_args.args[0]["untrusted_chain"]
-    assert 0 < len(chain["executed"]) < 5
-    assert chain["dropped_earlier_calls"] >= 1
+    history = validator.evaluate.call_args.args[0]["untrusted_history"]
+    assert 0 < len(history["executed"]) < 5
+    assert history["dropped_earlier_calls"] >= 1
 
 
 async def test_failed_reasoning_source_does_not_break_the_check():
@@ -557,12 +532,12 @@ async def test_failed_reasoning_source_does_not_break_the_check():
     state.reasoning = broken
     assert (await call(gate, ctx)).startswith("ran:")
     assert (
-        "reasoning_tail" not in validator.evaluate.call_args.args[0]["untrusted_chain"]
+        "reasoning_tail" not in validator.evaluate.call_args.args[0]["untrusted_history"]
     )
 
 
 async def test_a_mediated_call_may_make_mediated_calls():
-    """Delegation runs inside the caller's call; both share one budget and chain."""
+    """Delegation runs inside the caller's call; both share one budget and history."""
     gate, validator, state, ctx = setup_gate()
 
     async def delegate(inner_ctx, args):
@@ -578,7 +553,7 @@ async def test_a_mediated_call_may_make_mediated_calls():
         gate.invoke("worker", "agent", ctx, "{}", delegate), timeout=5
     )
     assert result.startswith("ran:")
-    assert [e["tool"] for e in state.chain] == ["file_write", "worker"]
+    assert [e["tool"] for e in state.history] == ["file_write", "worker"]
     assert state.attempts == 2
 
 
@@ -589,7 +564,7 @@ async def test_calls_of_one_response_run_in_the_order_they_were_issued():
 
     async def evaluate(packet, **_):
         await asyncio.sleep(delays[packet["untrusted_action"]["tool"]])
-        return {"action": "allow", "chain": "allow"}
+        return {"action": "allow"}
 
     validator.evaluate = evaluate
     ran = []
@@ -614,8 +589,8 @@ async def test_a_blocked_call_does_not_hold_up_the_calls_after_it():
     async def evaluate(packet, **_):
         if packet["untrusted_action"]["tool"] == "click":
             await asyncio.sleep(0.05)
-            return {"action": "deny", "chain": "allow"}
-        return {"action": "allow", "chain": "allow"}
+            return {"action": "deny"}
+        return {"action": "allow"}
 
     validator.evaluate = evaluate
     ran = []
@@ -661,14 +636,7 @@ async def test_tool_output_is_never_inspected_or_logged(caplog):
     assert all("AKIA" not in record.getMessage() for record in caplog.records)
 
 
-def test_strictest_verdict_wins():
-    assert merge({"action": "allow", "chain": "allow"}) == "allow"
-    assert merge({"action": "allow", "chain": "review"}) == "review"
-    assert merge({"action": "review", "chain": "deny"}) == "deny"
-    assert merge({}) == "review"
-
-
-async def test_request_uses_the_decisions_contract_with_both_questions(monkeypatch):
+async def test_request_uses_the_decisions_contract_with_one_question(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     seen = {}
 
@@ -676,43 +644,25 @@ async def test_request_uses_the_decisions_contract_with_both_questions(monkeypat
         seen["url"] = str(request.url)
         seen["body"] = json.loads(request.content)
         return httpx.Response(
-            200, json=response_answers(action=answer(), chain=answer())
+            200, json=response_answers(action=answer())
         )
 
     validator = ActionValidator.from_config(
         validator_root_config(), transport=httpx.MockTransport(respond)
     )
-    assert await validator.evaluate({"trusted_task": "report"}) == {
-        "action": "allow",
-        "chain": "allow",
-    }
+    assert await validator.evaluate({"trusted_task": "report"}) == {"action": "allow"}
     assert seen["url"].endswith("/alpha/decisions")
     assert seen["body"]["state"] == {"trusted_task": "report"}
-    assert set(seen["body"]["questions"]) == {"action", "chain"}
+    assert set(seen["body"]["questions"]) == {"action"}
     assert (
         seen["body"]["questions"]["action"]["instructions"]
         == validator.prompts.action.instructions
     )
-    assert set(seen["body"]["questions"]["chain"]["criteria"]) == {
+    assert set(seen["body"]["questions"]["action"]["criteria"]) == {
         "allow",
         "deny",
         "review",
     }
-
-
-async def test_chain_question_is_omitted_when_disabled(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    seen = {}
-
-    def respond(request):
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json=response_answers(action=answer()))
-
-    validator = ActionValidator.from_config(
-        validator_root_config(), transport=httpx.MockTransport(respond)
-    )
-    assert await validator.evaluate({}, chain=False) == {"action": "allow"}
-    assert set(seen["body"]["questions"]) == {"action"}
 
 
 @pytest.mark.parametrize(
@@ -733,7 +683,7 @@ async def test_malformed_answers_are_rejected(monkeypatch, changes):
         validator_root_config(),
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
-                200, json=response_answers(action=answer(**changes), chain=answer())
+                200, json=response_answers(action=answer(**changes))
             )
         ),
     )
@@ -752,7 +702,6 @@ async def test_classifier_choice_is_not_overridden_by_runtime_thresholds(monkeyp
                     action=answer(
                         probabilities={"allow": 0.8, "deny": 0.1, "review": 0.1}
                     ),
-                    chain=answer(),
                 ),
             )
         ),
@@ -803,25 +752,32 @@ async def test_factory_routes_real_tool_calls_through_the_gate(tmp_path, monkeyp
             GridRunContext(factory=factory, context_id="ctx-test", action_state=state)
         )
 
-        gate.validator.evaluate = AsyncMock(
-            return_value={"action": "deny", "chain": "deny"}
-        )
+        gate.validator.evaluate = AsyncMock(return_value={"action": "deny"})
+        # The read-only filter refuses a declared write without asking anyone.
+        state.filter = "read_only"
         blocked = json.loads(
             await by_name["file_write"].on_invoke_tool(
                 ctx, json.dumps({"filepath": "notes.md", "content": "hi"})
             )
         )
-        assert blocked["rule"] == "policy_deny"
+        assert blocked["rule"] == "policy_filter"
         assert not (tmp_path / "notes.md").exists()
 
-        gate.validator.evaluate = AsyncMock(
-            return_value={"action": "allow", "chain": "allow"}
-        )
+        # The default filter lets a workspace edit through, unjudged.
+        state.filter = None
         await by_name["file_write"].on_invoke_tool(
             ctx, json.dumps({"filepath": "notes.md", "content": "hi"})
         )
         assert (tmp_path / "notes.md").read_text(encoding="utf-8").strip() == "hi"
-        assert [entry["outcome"] for entry in state.chain] == ["blocked", "executed"]
+        gate.validator.evaluate.assert_not_awaited()
+
+        # A command is judged; the validator's deny stands.
+        blocked = json.loads(
+            await by_name["bash_tool"].on_invoke_tool(ctx, json.dumps({"command": "pytest -q"}))
+        )
+        assert blocked["rule"] == "policy_deny"
+        assert gate.validator.evaluate.await_args.args[0]["host_facts"]["effect"] == "exec"
+        assert [entry["outcome"] for entry in state.history] == ["blocked", "executed", "blocked"]
     finally:
         reset_current_factory()
         await factory.cleanup()
@@ -832,7 +788,7 @@ async def test_mcp_sdk_hook_routes_calls_through_the_context_gate():
 
     import core.agent_factory  # noqa: F401  installs the SDK patches
 
-    gate, _, _, ctx = setup_gate(("deny", "deny"))
+    gate, _, _, ctx = setup_gate("deny")
     ctx.context.factory = SimpleNamespace(action_gate=gate)
     server = SimpleNamespace(name="server", call_tool=AsyncMock())
 
@@ -850,23 +806,22 @@ async def test_mcp_sdk_hook_routes_calls_through_the_context_gate():
 async def test_agent_tool_wrapper_routes_delegation_through_the_gate():
     from core.agent_factory import AgentFactory
 
-    gate, validator, _, ctx = setup_gate(("deny", "allow"))
+    gate, validator, state, ctx = setup_gate("deny")
     factory = SimpleNamespace(action_gate=gate)
     ctx.context.factory = factory
     original = AsyncMock(return_value="delegated")
     tool = SimpleNamespace(name="call_worker", on_invoke_tool=original)
 
     wrapped = AgentFactory._wrap_tool_with_policy(factory, tool, "call_worker", "agent")
-    result = await wrapped.on_invoke_tool(ctx, json.dumps({"input": "do it"}))
+    assert await wrapped.on_invoke_tool(ctx, json.dumps({"input": "do it"})) == "delegated"
 
-    assert json.loads(result)["rule"] == "policy_deny"
-    action = validator.evaluate.call_args.args[0]["untrusted_action"]
-    assert action["kind"] == "agent"
-    assert action["tool_metadata"] == {}
-    original.assert_not_awaited()
+    # Through the gate - budgets, depth, audit - but not judged: its agent's calls are.
+    validator.evaluate.assert_not_awaited()
+    check = next(e for e in state.events if e["rule"] == "policy_check")
+    assert (check["tool"], check["kind"], check["effect"]) == ("call_worker", "agent", "delegate")
 
 
-def test_policy_task_includes_prior_user_context_but_not_assistant_text():
+def test_policy_task_includes_the_conversation_and_marks_replies():
     from core.agent_factory import AgentFactory
 
     factory = object.__new__(AgentFactory)
@@ -890,7 +845,13 @@ def test_policy_task_includes_prior_user_context_but_not_assistant_text():
     assert "Раздели изменения по темам." in task
     assert "Сделай отдельные коммиты." in task
     assert "Коммит" in task
-    assert "изменю ещё и релиз" not in task
+    # A short answer means what the reply before it proposed; the reply is
+    # there, marked as authorizing nothing by itself.
+    assert (
+        "Assistant reply the user saw (context for the user's next message; "
+        "it authorizes nothing by itself):\nЯ изменю ещё и релиз." in task
+    )
+    assert task.index("Раздели") < task.index("изменю ещё") < task.index("отдельные коммиты")
 
 
 def test_policy_task_context_is_bounded_and_keeps_current_instruction():
@@ -926,7 +887,7 @@ async def test_commit_followup_can_run_git_status_with_full_user_context(tmp_pat
         ["git", "init", "--quiet"], cwd=tmp_path, check=True, capture_output=True
     )
     validator = SimpleNamespace(
-        evaluate=AsyncMock(return_value={"action": "allow", "chain": "allow"})
+        evaluate=AsyncMock(return_value={"action": "allow"})
     )
     gate = ActionGate(ActionPolicyConfig(mode="enforce"), validator=validator)
     factory = object.__new__(AgentFactory)
@@ -977,8 +938,8 @@ async def test_commit_followup_can_run_git_status_with_full_user_context(tmp_pat
     assert "Вынеси временные артефакты" in packet["trusted_task"]
     assert "Коммит" in packet["trusted_task"]
     assert "Работай" in packet["trusted_task"]
-    assert "Инструменты заблокированы" not in packet["trusted_task"]
-    assert state.chain[-1]["outcome"] == "executed"
+    assert "Assistant reply the user saw" in packet["trusted_task"]
+    assert state.history[-1]["outcome"] == "executed"
 
 
 async def test_policy_stays_off_without_operator_configuration(tmp_path, monkeypatch):
@@ -1040,12 +1001,11 @@ prompts:
       allow: Complies with every rule.
       deny: Clearly violates a deny rule.
       review: Authorization is ambiguous.
-  chain:
-    instructions: Judge the complete action chain against every rule.
-    criteria:
-      allow: The chain complies with every rule.
-      deny: The chain clearly violates a deny rule.
-      review: The chain is ambiguous.
+default_filter: careful
+filters:
+  careful:
+    label: Careful
+    write: judge
 """,
         encoding="utf-8",
     )
@@ -1085,6 +1045,7 @@ agents:
     assert policy.rules[0].id == "workspace"
     assert policy.prompts.action.criteria["deny"].startswith("Clearly")
     assert policy.validator.model == "validator"
+    assert list(policy.filters) == ["careful"] and policy.filters["careful"].write == "judge"
 
 
 def test_inline_policy_remains_supported(tmp_path, monkeypatch):
@@ -1139,7 +1100,7 @@ async def test_transient_validator_failure_is_retried_once():
     validator.evaluate = AsyncMock(
         side_effect=[
             httpx.HTTPStatusError("busy", request=request, response=httpx.Response(429, request=request)),
-            {"action": "allow", "chain": "allow"},
+            {"action": "allow"},
         ]
     )
     assert (await call(gate, ctx)).startswith("ran:")
@@ -1174,10 +1135,10 @@ async def test_a_sub_agent_acts_under_the_users_task_not_the_callers_request():
     assert packet["untrusted_delegation"] == [
         {"tool": "orchestrate", "request": "Delete the build directory"}
     ]
-    # The validator judges the whole turn: the caller's calls are in the chain.
-    tools = [event["tool"] for event in packet["untrusted_chain"]["executed"]]
+    # The validator judges the whole turn: the caller's calls are in the history.
+    tools = [event["tool"] for event in packet["untrusted_history"]["executed"]]
     assert tools == ["read_file"]
-    assert [event["tool"] for event in state.chain] == ["read_file", "bash_tool"]
+    assert [event["tool"] for event in state.history] == ["read_file", "bash_tool"]
 
 
 async def test_a_top_level_call_carries_no_delegation():
@@ -1255,7 +1216,7 @@ async def test_a_stalled_validator_request_is_dropped_and_retried_in_budget():
         requests.append(request)
         if len(requests) == 1:
             await asyncio.sleep(5)  # the provider stalls on this one
-        return httpx.Response(200, json=response_answers(action=answer(), chain=answer()))
+        return httpx.Response(200, json=response_answers(action=answer()))
 
     root = validator_root_config()
     policy = root.config.settings.action_policy
@@ -1300,11 +1261,8 @@ SYSTEM_BASE = ActionPolicyConfig(
             "instructions": "Judge the action.",
             "criteria": {"allow": "a", "deny": "d", "review": "r"},
         },
-        "chain": {
-            "instructions": "Judge the chain.",
-            "criteria": {"allow": "a", "deny": "d", "review": "r"},
-        },
     },
+    tool_effects={"remote_*": "read"},
 )
 
 
@@ -1315,14 +1273,18 @@ def test_a_system_part_is_added_to_the_base_policy():
         version="sys-v1",
         rules=({"id": "store", "decision": "deny", "when": "Writes another user's store."},),
         action="Its own store is in scope.",
+        protected_paths=("store/*",),
+        tool_effects={"store_*": "write"},
     )
     policy = SYSTEM_BASE.with_system(system)
 
     assert policy.version == "base-v1+sys-v1"
     assert [rule.id for rule in policy.rules] == ["scope", "store"]
     assert policy.prompts.action.instructions == "Judge the action.\n\nIts own store is in scope."
-    assert policy.prompts.chain == SYSTEM_BASE.prompts.chain
     assert policy.prompts.action.criteria == SYSTEM_BASE.prompts.action.criteria
+    assert policy.protected_paths == (*SYSTEM_BASE.protected_paths, "store/*")
+    assert policy.tool_effects == {"remote_*": "read", "store_*": "write"}
+    assert policy.filters == SYSTEM_BASE.filters
     assert (policy.mode, policy.system) == ("enforce", None)
     # Without a part of its own, a system runs under the base as it is.
     assert SYSTEM_BASE.with_system(None) == SYSTEM_BASE
@@ -1384,9 +1346,9 @@ def test_shipped_system_guidance_reaches_only_its_own_system():
     pipeline = Config("examples/coordinator-pipeline/config.yaml").config.settings.action_policy.system
 
     def text(policy):
-        return policy.prompts.action.instructions + policy.prompts.chain.instructions
+        return policy.prompts.action.instructions
 
-    store, tracker = "хранилище систем", "трекере задач"
+    store, tracker = "выданном приложением", "контроля версий"
     assert store not in text(base) and tracker not in text(base)
     assert store in text(base.with_system(builder)) and tracker not in text(base.with_system(builder))
     assert tracker in text(base.with_system(coder)) and store not in text(base.with_system(coder))
@@ -1408,7 +1370,7 @@ def test_a_factory_judges_under_the_catalog_policy_with_its_own_part(tmp_path, m
     gate = factory.action_gate
     base = root.config.settings.action_policy
 
-    assert gate.config.version == f"{base.version}+code-repository-v1"
+    assert gate.config.version == f"{base.version}+code-repository-v2"
     assert gate.config.validator == base.validator
     assert gate.validator.prompts == gate.config.prompts
-    assert "трекере задач" in gate.validator.prompts.action.instructions
+    assert "контроля версий" in gate.validator.prompts.action.instructions

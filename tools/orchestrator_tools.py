@@ -487,3 +487,10 @@ from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
 TOOL_ISOLATION = {
     "orchestrate": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects): the agents it starts are judged call by call
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "orchestrate": _effects.DELEGATE,
+}

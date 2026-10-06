@@ -122,6 +122,8 @@
           <div class="composer__bar">
             <span class="composer__hint"><kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line</span>
             <div class="composer__buttons">
+              <label class="visuallyHidden" for="policy-filter">Policy filter</label>
+              <select class="composer__delivery composer__policy" id="policy-filter" hidden></select>
               <input id="composer-files" type="file" multiple hidden>
               <button class="iconBtn" id="attach" type="button" title="Attach files (or paste / drop them)" aria-label="Attach files" data-icon="attach"></button>
               <button class="btn btn--ghost composer__compact" id="compact-context" type="button" data-icon="compact" title="Summarize the agent context to free token space. Chat history stays visible." aria-label="Compact context" disabled><span class="compactLabel">Compact context</span></button>

@@ -129,3 +129,10 @@ from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
 TOOL_ISOLATION = {
     "crop_image": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects), for the action policy
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "crop_image": _effects.read("image_path"),
+}

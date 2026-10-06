@@ -80,6 +80,8 @@ function stepHead(step) {
     policy: h("span.step__policy", { hidden: true }),
     usage: h("span.step__usage"),
     timing: h("span.step__timing"),
+    // A call held for the user's permission: Allow / Decline, outside the head button.
+    approval: h("div.step__approval", { hidden: true }),
   };
   parts.head = h(
     "button.step__head",
@@ -104,6 +106,41 @@ function applyPolicy(policy, next) {
   policy.textContent = next.policy?.label || "";
   policy.title = next.policy?.title || "";
   policy.dataset.decision = next.policy?.decision || "";
+}
+
+/**
+ * The answer a held call waits for (core/action_policy.py): shown while the
+ * badge carries an approval id, gone once the server reports the outcome.
+ */
+function applyApproval(node, next) {
+  const pending = next.policy?.approval_id;
+  if (!pending) {
+    if (!node.hidden) {
+      node.hidden = true;
+      replace(node);
+      delete node.dataset.approvalId;
+    }
+    return;
+  }
+  if (node.dataset.approvalId === pending) return;
+  node.dataset.approvalId = pending;
+  node.hidden = false;
+  const why = next.policy.title || "";
+  if (next.policy.approvals === "operator") {
+    replace(node, h("span.step__approvalNote", { text: "An operator decides on this call.", title: why }));
+    return;
+  }
+  const answer = (approve, remember = false) => () => {
+    for (const button of node.querySelectorAll("button")) button.disabled = true;
+    document.dispatchEvent(new CustomEvent("policy-review", { detail: { approvalId: pending, approve, remember } }));
+  };
+  replace(
+    node,
+    h("span.step__approvalNote", { text: "The policy asks before this call.", title: why }),
+    h("button.btn.btn--primary.btn--xs", { type: "button", on: { click: answer(true) } }, "Allow"),
+    h("button.btn.btn--ghost.btn--xs", { type: "button", title: "Allow this tool for the rest of this turn", on: { click: answer(true, true) } }, "Allow for this turn"),
+    h("button.btn.btn--ghost.btn--xs", { type: "button", on: { click: answer(false) } }, "Decline"),
+  );
 }
 
 /**
@@ -138,7 +175,7 @@ function disclosure(root, head, onOpen = null) {
  */
 function createStepRow(step) {
   const inlineBody = INLINE_BODY_KINDS.has(step.kind);
-  const { head, title, subtitle, policy, usage, timing, glyph } = stepHead(step);
+  const { head, title, subtitle, policy, usage, timing, glyph, approval } = stepHead(step);
   const detail = h("div.step__detail");
   const refs = h("div.step__refsSlot");
   const body = inlineBody ? h("div.step__prose") : null;
@@ -164,7 +201,7 @@ function createStepRow(step) {
   const root = h("li.step", { dataset: {
     kind: step.kind, status: step.status, tone: step.tone || "neutral",
     family: toolFamily(step.tool),
-  } }, head, refs, body, detail);
+  } }, head, approval, refs, body, detail);
   const { suggest } = disclosure(root, head, fill);
 
   /** Thinking stays open while it streams and folds away once it lands. */
@@ -192,6 +229,7 @@ function createStepRow(step) {
     // Reasoning has no summary until it lands; a running call keeps its arguments.
     subtitle.textContent = inlineBody && next.status === "running" ? "" : next.subtitle || "";
     applyPolicy(policy, next);
+    applyApproval(approval, next);
     applyUsage(usage, next);
     timing.textContent = next.duration_ms == null ? "" : duration(next.duration_ms);
     replace(refs, refsRow(next.refs));
@@ -251,7 +289,7 @@ function taskText(detail) {
  * @param {() => number} turnStart - when the turn began, for a live duration.
  */
 function createAgentRow(step, turnStart) {
-  const { head, title, subtitle, policy, usage, timing } = stepHead(step);
+  const { head, title, subtitle, policy, usage, timing, approval } = stepHead(step);
   const timeline = createTimeline(h("ol.agent__steps"));
   const task = h("div.agent__task");
   const report = h("div.agent__report");
@@ -260,6 +298,7 @@ function createAgentRow(step, turnStart) {
     "li.step.has-detail",
     { dataset: { kind: "agent", status: step.status, tone: step.tone || "neutral" } },
     head,
+    approval,
     refs,
     h("div.step__agent", {}, task, timeline.list, report),
   );
@@ -293,6 +332,7 @@ function createAgentRow(step, turnStart) {
     root.dataset.tone = next.tone || "neutral";
     title.textContent = next.title;
     applyPolicy(policy, next);
+    applyApproval(approval, next);
     applyUsage(usage, next);
     if (next.duration_ms != null) timing.textContent = duration(next.duration_ms);
     replace(refs, refsRow(next.refs));

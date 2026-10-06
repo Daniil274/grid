@@ -303,3 +303,13 @@ TOOL_ISOLATION = {
     "todo_delete": _WORKSPACE,
     "todo_clear": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects), for the action policy
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "todo_write": _effects.write(),
+    "todo_list": _effects.read(),
+    "todo_delete": _effects.write(),
+    "todo_clear": _effects.write(),
+}

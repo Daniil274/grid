@@ -224,3 +224,20 @@ CONTROL_TOOLS = {
     "control_tasks": control_tasks,
     "control_take_task": control_take_task,
 }
+
+
+# What these tools do (utils.tool_effects): experiments live in the workshop;
+# a submitted candidate is evaluated, and only a person promotes it.
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "control_begin": _effects.write(),
+    "control_diff": _effects.read(),
+    "control_revert": _effects.write(),
+    "control_scenarios": _effects.read(),
+    "control_status": _effects.read(),
+    "control_submit": _effects.write(),
+    "control_take_task": _effects.write(),
+    "control_tasks": _effects.read(),
+    "control_trial": _effects.EXEC_ANY,
+}

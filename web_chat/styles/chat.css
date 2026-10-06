@@ -978,3 +978,8 @@
 .composer__delivery[hidden] {
   display: none;
 }
+
+/* The policy switch (ui/policy-switch.js): always there, quieter than the delivery menu. */
+.composer__policy {
+  max-width: 130px;
+}

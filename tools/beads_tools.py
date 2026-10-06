@@ -903,3 +903,21 @@ TOOL_ISOLATION = {
     "beads_sync": _CONTAINER,
     "beads_update": _CONTAINER,
 }
+
+# What these tools do (utils.tool_effects): the tracker is the workspace's own
+# state; sync pulls and pushes the remote repository.
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "beads_close": _effects.write(),
+    "beads_create": _effects.write(),
+    "beads_dep": _effects.write(),
+    "beads_init": _effects.write(),
+    "beads_list": _effects.read(),
+    "beads_log_append": _effects.write(),
+    "beads_log_read": _effects.read(),
+    "beads_ready": _effects.read(),
+    "beads_show": _effects.read(),
+    "beads_sync": _effects.EXTERNAL_ANY,
+    "beads_update": _effects.write(),
+}
