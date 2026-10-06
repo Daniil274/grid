@@ -201,6 +201,21 @@ async def test_a_refresh_that_fails_for_other_reasons_is_an_error_not_a_lost_log
 
 
 @pytest.mark.asyncio
+async def test_a_refused_sign_in_code_says_why_and_is_not_an_outage(caplog):
+    server = OpenAI()
+    flow = ChatGPTLogin("host", transport=httpx.MockTransport(server), clock=lambda: NOW)
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(flow.begin("u1", chatgpt.loopback_redirect(8000))).query))
+    server.token_status, server.token_reply = 400, {
+        "error": "invalid_grant", "error_description": "Authorization code has already been used",
+    }
+    with pytest.raises(ChatGPTError) as refused:
+        await flow.complete("u1", state=query["state"], code="c", issued_client_id=CLIENT)
+    assert "already been used" in str(refused.value)
+    assert "not available right now" not in str(refused.value)
+    assert "already been used" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_disconnecting_revokes_the_refresh_token_and_never_fails():
     server = OpenAI()
     flow, state, _ = await signed_in(server)

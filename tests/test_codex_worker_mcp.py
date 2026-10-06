@@ -45,8 +45,10 @@ class FakeFactory:
             tools=[SimpleNamespace(name=tool_name) for tool_name in tool_names]
         )
 
-    async def run_agent_object_simple(self, worker, task, *, context_id):
+    async def run_agent_object_simple(self, worker, task, *, context_id, timeout=None):
         del worker, context_id
+        # The run's own timeout_seconds bounds it, never agent_timeout.
+        assert timeout == 0
         self.started.set()
         if task == "never finish":
             await asyncio.Event().wait()
