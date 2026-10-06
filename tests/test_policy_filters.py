@@ -104,6 +104,28 @@ def test_windows_secret_basename_and_command_path_filters():
     assert ".env" in command_paths(r"cat C:\Users\me\.env")
 
 
+def test_real_locator_factory_rejects_foreign_windows_paths_and_preserves_workspace_paths(tmp_path):
+    factory = SimpleNamespace(config=SimpleNamespace(get_working_directory=lambda: str(tmp_path)), container_id=None)
+    locate = ActionGate._locator(SimpleNamespace(factory=factory))
+    if __import__("os").name != "nt":
+        assert locate(r"C:\private\file") is None
+        assert locate("C:relative-file") is None
+        assert locate(r"\\server\share\private") is None
+    assert locate("../escape") is None
+    assert locate(str(tmp_path / "inside.txt")) == "inside.txt"
+    assert locate("inside.txt") == "inside.txt"
+
+
+@pytest.mark.parametrize("path", [r"C:\Users\me\.env", "/home/me/.env"])
+def test_real_locator_does_not_hide_secret_basename_review(tmp_path, path):
+    factory = SimpleNamespace(config=SimpleNamespace(get_working_directory=lambda: str(tmp_path)), container_id=None)
+    locate = ActionGate._locator(SimpleNamespace(factory=factory))
+    routing = route_call(POLICY, POLICY.filter("balanced")[1], read("filepath"),
+                         {"filepath": path}, (), locate)
+    assert routing.route == "review"
+    assert any(reason.startswith("secret: ") for reason in routing.reasons)
+
+
 @pytest.mark.parametrize(
     "effect,arguments,expected",
     [
