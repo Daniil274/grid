@@ -51,6 +51,40 @@ def test_the_balanced_filter_runs_ordinary_work_and_judges_the_rest(effect, argu
     assert route(effect, arguments).route == expected
 
 
+@pytest.mark.parametrize("filter_name,expected", [("balanced", "judge"), ("read_only", "deny"), ("trusted", "judge")])
+def test_readonly_shell_external_paths_use_selected_external_route(filter_name, expected):
+    import posixpath
+
+    root = "/workspace/project"
+
+    def fake_locator(raw):
+        normalized = posixpath.normpath(raw.replace("\\", "/"))
+        if normalized == root or normalized.startswith(root + "/"):
+            return normalized[len(root):].lstrip("/")
+        if not posixpath.isabs(normalized) and not normalized.startswith("../"):
+            return normalized
+        return None
+
+    _, selected = POLICY.filter(filter_name)
+    routing = route_call(POLICY, selected, run("command"), {"command": "cat /etc/shadow"}, (), fake_locator)
+    assert routing.effect == "external"
+    assert routing.route == expected
+
+
+def test_readonly_shell_keeps_absolute_workspace_reads_and_secret_review():
+    import posixpath
+
+    root = "/workspace/project"
+    locate = lambda raw: posixpath.normpath(raw).removeprefix(root + "/")
+    _, selected = POLICY.filter("balanced")
+    workspace = route_call(POLICY, selected, run("command"), {"command": "cat /workspace/project/src/a.py"}, (), locate)
+    secret = route_call(POLICY, selected, run("command"), {"command": "cat /home/example/.ssh/id_rsa"}, (), lambda _: None)
+    traversal = route_call(POLICY, selected, run("command"), {"command": "cat /workspace/project/../../etc/shadow"}, (), lambda _: None)
+    assert workspace.effect == "read" and workspace.route == "allow"
+    assert secret.route == "review" and any(reason.startswith("secret: ") for reason in secret.reasons)
+    assert traversal.effect == "external" and traversal.route == "judge"
+
+
 @pytest.mark.parametrize(
     "effect,arguments,expected",
     [
