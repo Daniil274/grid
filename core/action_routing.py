@@ -216,7 +216,17 @@ def route_call(
             kind = READ
             reasons.append("read-only command")
         raw_paths.extend(command_paths(command))
-    paths = [locate(raw) or _normalized(raw) for raw in raw_paths]
+    located = [(raw, locate(raw)) for raw in raw_paths]
+    paths = [path if path is not None else _normalized(raw) for raw, path in located]
+    # A read-only shell command can read outside the agent workspace. Treat
+    # absolute/traversal paths the locator cannot contain as external effects;
+    # this is policy routing, not a filesystem sandbox.
+    if kind == READ and any(
+        path is None
+        and (posixpath.isabs(_normalized(raw)) or ".." in _normalized(raw).split("/"))
+        for raw, path in located
+    ):
+        kind = EXTERNAL
 
     route = "allow" if kind == DELEGATE_KIND else getattr(selected, kind)
     reasons.insert(0, f"{kind}: {route}")
