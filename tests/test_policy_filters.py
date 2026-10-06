@@ -85,6 +85,25 @@ def test_readonly_shell_keeps_absolute_workspace_reads_and_secret_review():
     assert traversal.effect == "external" and traversal.route == "judge"
 
 
+@pytest.mark.parametrize("path", [r"C:\private\file", "C:/private/file", r"\\server\share\private", "C:relative-file"])
+def test_unresolved_windows_absolute_and_drive_relative_paths_use_external_filter(path):
+    routing = route_call(POLICY, POLICY.filter("balanced")[1], run("command"),
+                         {"command": f'cat "{path}"'}, (), lambda _: None)
+    assert routing.effect == "external"
+
+
+def test_windows_workspace_alias_is_kept_when_locator_proves_containment():
+    _, selected = POLICY.filter("balanced")
+    routing = route_call(POLICY, selected, run("command"), {"command": r"cat C:\work\src\a.py"}, (),
+                         lambda raw: "src/a.py" if raw.casefold().replace("/", "\\") == r"c:\work\src\a.py" else None)
+    assert routing.effect == "read" and routing.route == "allow"
+
+
+def test_windows_secret_basename_and_command_path_filters():
+    assert matches(r"C:\Users\me\.env", [".env"])
+    assert ".env" in command_paths(r"cat C:\Users\me\.env")
+
+
 @pytest.mark.parametrize(
     "effect,arguments,expected",
     [

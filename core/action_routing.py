@@ -15,6 +15,7 @@ same route, so the routing is tested and explained without a model.
 from __future__ import annotations
 
 import fnmatch
+import ntpath
 import posixpath
 import shlex
 from dataclasses import dataclass
@@ -83,7 +84,7 @@ def matches(path: str, patterns: Iterable[str]) -> bool:
     """Whether workspace path *path* matches a glob: ``*`` also crosses
     directories, and a pattern without ``/`` matches the file name anywhere."""
     path = path.casefold()
-    name = posixpath.basename(path)
+    name = ntpath.basename(path.replace("/", "\\")) if "\\" in path else posixpath.basename(path)
     for pattern in patterns:
         pattern = pattern.casefold()
         if fnmatch.fnmatchcase(path, pattern):
@@ -186,6 +187,20 @@ def _normalized(raw: str) -> str:
     return raw.replace("\\", "/").strip().strip("'\"")
 
 
+def _is_external_path(raw: str) -> bool:
+    """Classify lexical absolute/traversal paths; shell tokenization is intentionally approximate.
+
+    POSIX and Windows path forms are recognized, but this is not a parser for
+    every platform's shell quoting, variable expansion, or command grammar.
+    """
+    normalized = _normalized(raw)
+    windows = ntpath.splitdrive(raw.strip().strip("'\""))[0]
+    # A drive-relative form (C:foo) is ambiguous outside its originating shell;
+    # conservatively route it externally rather than treating it as workspace-relative.
+    foreign_root = bool(windows) or ntpath.isabs(raw.strip().strip("'\""))
+    return foreign_root or posixpath.isabs(normalized) or ".." in normalized.split("/")
+
+
 def route_call(
     policy: ActionPolicyConfig,
     selected: ActionPolicyFilter,
@@ -221,11 +236,7 @@ def route_call(
     # A read-only shell command can read outside the agent workspace. Treat
     # absolute/traversal paths the locator cannot contain as external effects;
     # this is policy routing, not a filesystem sandbox.
-    if kind == READ and any(
-        path is None
-        and (posixpath.isabs(_normalized(raw)) or ".." in _normalized(raw).split("/"))
-        for raw, path in located
-    ):
+    if kind == READ and any(path is None and _is_external_path(raw) for raw, path in located):
         kind = EXTERNAL
 
     route = "allow" if kind == DELEGATE_KIND else getattr(selected, kind)
