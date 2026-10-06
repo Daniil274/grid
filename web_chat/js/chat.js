@@ -33,6 +33,7 @@ export class ChatController {
     // The chat being loaded: a newer pick aborts it, and a late answer for a
     // chat no longer on screen is dropped instead of drawn over the new one.
     this._loading = null;
+    this._navigationIntent = 0;
   }
 
   /**
@@ -272,12 +273,14 @@ export class ChatController {
   /** Open another version of an edited message: its branch becomes the active one. */
   async switchVersion(contextId) {
     if (!contextId || contextId === this._store.get().contextId) return;
+    const intent = ++this._navigationIntent;
     try {
       await api.activateBranch(contextId);
-      await this.openConversation(contextId);
-      void this._refreshConversations();
+      if (intent !== this._navigationIntent) return;
+      await this.openConversation(contextId, intent);
+      if (intent === this._navigationIntent) void this._refreshConversations();
     } catch (error) {
-      toast(error.message, { tone: "error" });
+      if (intent === this._navigationIntent) toast(error.message, { tone: "error" });
     }
   }
 
@@ -384,6 +387,7 @@ export class ChatController {
 
   /** Start a fresh conversation and clear the transcript. */
   async startConversation() {
+    ++this._navigationIntent;
     this._detach();
     this._voice?.cleanup();
     const { systemKey, agentKey } = this._store.get();
@@ -394,8 +398,9 @@ export class ChatController {
   }
 
   /** Load a stored conversation, including its reasoning traces. */
-  async openConversation(contextId) {
+  async openConversation(contextId, intent = null) {
     if (!contextId) return;
+    if (intent === null) intent = ++this._navigationIntent;
     // Leaving a chat mid-turn only stops watching it: the turn runs on the
     // server and is replayed when the chat is opened again.
     this._detach();
@@ -411,7 +416,7 @@ export class ChatController {
       if (this._store.get().contextId === contextId) this._transcript.setLoading(false);
       throw error;
     }
-    if (!payload) return; // another chat was picked meanwhile
+    if (!payload || intent !== this._navigationIntent) return; // another navigation took over
     this._transcript.setLoading(false);
     // A conversation remembers what was pinned when it ran, including "nothing".
     this._store.set({
@@ -440,7 +445,9 @@ export class ChatController {
 
   /** Forget a chat; if it is the one on screen, move to the newest other one. */
   async deleteConversation(contextId) {
+    const intent = ++this._navigationIntent;
     await api.deleteConversation(contextId);
+    if (intent !== this._navigationIntent) return;
     if (contextId === this._store.get().contextId) {
       this._detach();
       this._store.set({ contextId: null, hasAgentContext: false });
@@ -448,7 +455,7 @@ export class ChatController {
     }
     await this._refreshConversations();
     const next = this._store.get().conversations[0];
-    if (!this._store.get().contextId && next) await this.openConversation(next.open_id ?? next.id);
+    if (intent === this._navigationIntent && !this._store.get().contextId && next) await this.openConversation(next.open_id ?? next.id);
   }
 
   async renameConversation(contextId, title) {
