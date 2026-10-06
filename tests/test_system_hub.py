@@ -464,6 +464,12 @@ def test_a_private_builder_system_is_frozen_and_imported_as_admin_draft(deployme
                         if key in deployment.config.config.models}
     text = yaml.safe_dump(config)
     access.validate(text, "private-team")
+    # What runs unjudged is the operator's to say, never a private system's.
+    for setting in ({"tool_effects": {"remote_*": "read"}}, {"filters": {"open": {"label": "Open", "exec": "allow"}}, "default_filter": "open"}):
+        loose = yaml.safe_load(text)
+        loose["settings"]["action_policy"] = setting
+        with pytest.raises(StoreError, match="inherit the server's policy filters"):
+            access.validate(yaml.safe_dump(loose), "private-team")
     source.create(manifest("private-team"), text)
     directory = source.directory("private-team")
 

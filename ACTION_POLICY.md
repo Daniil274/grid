@@ -1,15 +1,15 @@
 # Action policy
 
-An opt-in gate between an agent and the calls it makes. Every mediated call —
-a function tool, delegation to another agent, an MCP tool — is judged against
-the operator's declared rules before it runs, together with the chain of calls
-and the reasoning that led to it.
+An opt-in gate between an agent and the calls it makes. Every mediated call - a
+function tool, delegation to another agent, an MCP tool - is routed before it
+runs. Most calls are decided from facts, without a model: what the tool
+declares it does, which paths it names, what the turn has already taken in,
+and the filter the user picked in the chat. The rest goes to the operator's
+policy model, which answers one question: would this call cause harm the user
+did not agree to? Whether a call is *needed* for the task is the agent's
+decision, not the policy's.
 
-The gate sends each proposed action to a semantic policy classifier. Both
-the rules and the complete action/chain classifier prompts belong to the policy
-YAML. The runtime has no hard-coded action taxonomy and does not infer policy
-from tool names; individual tools do not need policy entries. It is **not an OS
-sandbox**.
+It is **not an OS sandbox**.
 
 ## Enable
 
@@ -19,341 +19,222 @@ already lives:
 ```yaml
 settings:
   action_policy:
-    mode: shadow            # off | shadow | enforce
+    mode: enforce           # off | shadow | enforce
     policy_file: policies/action-policy.yaml
     validator:
-      model: router         # key from this config's models registry
-      timeout_seconds: 10
-```
-
-Policies may instead live in a reusable YAML file. The reference is resolved
-relative to the config that contains it; inline values override the external
-document:
-
-```yaml
-settings:
-  action_policy:
-    policy_file: policies/action-policy.yaml
-    mode: enforce
-    validator:
-      model: router
+      model: policy         # key from this config's models registry
+      timeout_seconds: 22
 ```
 
 The external file may contain the `action_policy` mapping directly, below an
-`action_policy:` key, or below `settings.action_policy`. See
-`action-policy.yaml.example`. This repository's shared runtime policy is
+`action_policy:` key, or below `settings.action_policy`; inline values override
+it. See `action-policy.yaml.example`. This repository's shared policy is
 `policies/action-policy.yaml`. Nested policy-file references are rejected.
 
-`validator.model` and `validator.fallback_models` reference the existing model
-registry. `validator.model` may also be a list of keys in order of preference:
-the first is always tried first, the second only when the first is unavailable
-(an error, a timeout or an open circuit), then the third, and so on; every new
-check starts from the first again. Without an explicit `max_attempts` there is
-one attempt per listed model (at least two).
+A policy enabled in the routing config governs every system the router picks.
+A system config may carry its own `settings.action_policy`, used when the
+routing policy is off. Each factory takes a snapshot at construction: restart
+after changing it.
 
-```yaml
-validator:
-  model: [policy, policy_reserve, policy_chat]
-```
-
- Each model selects its policy adapter with `policy_api: decisions`
-(the default) or `policy_api: chat`. Unknown keys fail at factory construction.
-Every route uses the same operator policy, questions and projected evidence.
-
-The shipped `routing.yaml` uses OpenRouter `typesafe/jev-1.13` for both
-routing and policy validation (`OPENROUTER_API_KEY`), with no chat fallback.
-A valid deny/review is final. Custom configurations can explicitly enable a
-Chat Completions reserve, for example:
-
-```yaml
-settings:
-  action_policy:
-    validator:
-      model: policy
-      fallback_models: [policy_chat]
-      max_attempts: 2
-      timeout_seconds: 15
-providers:
-  opencode-go:
-    name: opencode-go
-    base_url: https://opencode.ai/zen/go/v1
-    api_key_env: OPENCODE_API_KEY
-models:
-  policy_chat:
-    name: glm-5.3-flash
-    provider: opencode-go
-    policy_api: chat
-    request_timeout: 9
-    max_tokens: 512
-    reasoning: {enabled: false}
-```
-
-The chat adapter sends trusted task/policy and operator question criteria in a
-system message; tool arguments, metadata, reasoning and delegation remain in
-a separate JSON evidence message. It has no tools and receives no conversation
-or tool output. It requests strict `json_schema` output, temperature zero and
-the model's configured token limit. A provider must support this request shape;
-there is no silent downgrade to a weaker format after a provider error.
-
-The response is exactly `{"action":"allow","chain":"review"}` (example values),
-with only the configured questions and allow/deny/review values. Chat does not
-invent probabilities. Local validation rejects duplicate or extra keys,
-missing verdicts, markdown, refusals, tool calls, non-string values and any
-completion whose finish reason is not `stop`. Reasoning content is never used
-as an answer. Invalid responses stay fail-closed. Connections, deadlines,
-circuits and concurrency limits are shared with the Decisions recovery path.
-
-A policy enabled in the routing config governs every system the router picks, so
-one policy and one validator model cover all systems. A system config may carry
-its own `settings.action_policy`, which is used when the routing policy is off.
-Each factory takes a snapshot at construction: restart after changing it.
-
-### System policy
-
-Guidance that holds for one system only - its stores, its task tracker, its
-version control - belongs to that system, not to the shared policy: written
-there, it would also steer the judgment of every other system's calls. A system
-config adds it with `settings.action_policy.system`, inline, or with
-`system_file`, a YAML file resolved relative to the config:
-
-```yaml
-settings:
-  action_policy:
-    system_file: action-policy.yaml   # beside this config.yaml
-```
-
-```yaml
-version: builder-v1
-rules: []        # extra rules; ids must differ from the base policy's
-action: >-       # appended to the base action instructions
-  ...
-chain: >-        # appended to the base chain instructions
-  ...
-```
-
-It is added to whichever base governs the system - the routing policy, or the
-system's own when the routing policy is off - and to no other system. The base
-keeps its mode, validator, criteria and budgets; the audit version becomes
-`<base>+<system>`. A shared policy file cannot carry a system part, and
-private systems (built by users or evaluated as candidates) cannot set one: they
-run under the server's policy as it is. A system keeps its part in its own
-directory, as `action-policy.yaml` beside its config.
-
-| Mode | Run budgets | Verdict |
+| Mode | Run budgets | Decision |
 | --- | --- | --- |
-| `off` (default) | not applied | not requested |
+| `off` (default) | not applied | not made |
 | `shadow` | applied | recorded; the call still runs |
 | `enforce` | applied | only `allow` executes |
 
-`shadow` is not a no-op: attempt and denial budgets still stop a run, and a call
-made outside a trusted task is still refused. Run it first on disposable data to
-see what the validator would have blocked.
+## How a call is routed
 
-## What is checked
+### What tools declare
 
-The classifier receives the task, the operator-authored structured rules, the
-proposed tool name, kind, complete projected arguments, registered description,
-input schema and MCP annotations. Metadata is evidence, not authority. The
-classifier infers the action's actual behavior from that complete context rather
-than matching names against a built-in vocabulary.
+A tool module declares what each of its tools does in `TOOL_EFFECTS`, beside
+its `TOOL_ISOLATION` (`utils/tool_effects.py`):
 
-Two generic runtime invariants remain deterministic: malformed/oversized calls
-and calls beyond the configured delegation depth are rejected before a model
-request. These are execution budgets, not semantic action classifications.
+```python
+from utils import tool_effects as _effects
 
-Two questions go to the model in one request:
+TOOL_EFFECTS = {
+    "file_read": _effects.read("filepath"),       # reads the workspace path in `filepath`
+    "file_write": _effects.write("filepath"),     # changes it
+    "bash_tool": _effects.run("command"),         # runs the shell command in `command`
+    "web_fetch": _effects.egress(untrusted=True), # reaches out; brings outside content back
+    "orchestrate": _effects.DELEGATE,             # starts an agent, whose calls are judged
+}
+```
 
-- **action** — may this specific call execute, given the task and the rules?
-- **chain** — is the run so far, with this call, still doing the task within the
-  rules, or has it drifted, started following instructions found in data, or
-  assembled a violation step by step? Disable with `check_chain: false`.
+| Effect | Means |
+| --- | --- |
+| `read` | looks at the workspace or its own stores; changes nothing |
+| `write` | changes the workspace or the user's own stores |
+| `exec` | runs code or commands |
+| `egress` | sends a request out (fetch, search) |
+| `external` | acts outside: publishes, pushes, sends, deploys, spends |
+| `delegate` | starts or steers another agent |
 
-The strictest verdict wins: a call runs only when both configured questions
-return `allow`. One exception narrows a deny to `review`: when the call itself
-passes (`action` is `allow`) and only `chain` denies. Past calls
-cannot be undone and the chain is shared with sub-agents, so a hard deny there
-would refuse every later call of the turn on one judgment of history; the host
-decides instead. The call is still blocked in `enforce` and never runs without
-approval. For Decisions responses, the runtime validates the probability payload for
-consistency but does not replace the declared choice with a numeric threshold;
-uncertainty must be expressed as `review` by the policy prompt itself.
+A tool that declares nothing still works: it is `unknown`, and the usual
+filters send it to the policy model. An agent called as a tool is `delegate`.
+Tools that cannot declare in code - MCP tools above all - get an effect from
+the operator by name: `tool_effects: {"codegraph_*": read}`. Private user
+systems cannot set any of this: their tools are MCP packages, judged unless the
+operator declared them, and their configs may not carry policy filters,
+protected paths or tool effects.
 
-The request carries the host-supplied task, rules, an untrusted metadata and
-argument projection of the proposed call, recent calls, the current run's own
-reasoning tail and counters. Sensitive fields and oversized string values are
-replaced by type/size/hash metadata before entering either the validator packet
-or chain. It does not carry the conversation or tool output. Oversized complete
-actions are rejected; the chain window is trimmed oldest-first to its declared
-budget and says how many entries it dropped.
+### Filters: the user's switch
 
-## Scope
+The chat shows a switch beside the message box. Each setting is a filter the
+operator declares: a route per effect.
 
-`kinds` lists what the gate mediates. A kind left out runs unchecked.
+```yaml
+default_filter: balanced
+filters:
+  balanced:
+    label: Balanced
+    description: Reads, workspace edits and delegation run; commands and outside actions are judged.
+    read: allow
+    write: allow
+    exec: judge
+    egress: allow
+    external: judge
+    unknown: judge
+    protected: review
+    follow_flows: true
+```
 
-- **function** — every function tool an agent receives, project tools included.
-  The wrapper is applied where tools are resolved, so it covers agents from
-  config and dynamic agents created for background workers.
-- **agent** — a call to another agent as a tool. A delegated agent continues the
-  caller's task, chain and budgets, so a nested call is judged with the whole
-  trajectory behind it.
-- **mcp** — MCP tool invocations, through the same gate as function tools.
+Routes, from least to most strict: `allow` (runs), `judge` (the policy model
+decides), `review` (waits for a person), `deny` (refused). Delegation always
+runs; the agent it starts is routed call by call under the same filter.
 
-Handoffs, the SDK's own control flow, memory and session writes, compaction and
-anything the host itself does are outside the gate.
+The shipped policy offers **Read only** (no changes at all), **Strict**
+(every change and command judged), **Balanced** (the default: ordinary work
+runs, commands and unknown tools are judged) and **Trusted** (everything runs;
+only outside actions and protected files are judged). The choice stays in the
+user's browser, travels with every message, and moving the switch while the
+agent works applies to that turn at once. A conversation keeps the filter it
+last ran under.
 
-A call arriving without a trusted task is refused. The `init_tools` that
-`orchestrate` passes to a dynamic agent run under the same delegated state as
-the agent itself, so they are judged like its other calls; a refused one is not
-injected into the agent's instructions.
+### Facts that tighten a route
 
-`auto_run_tools` are not judged. Their tool and arguments come from the
-operator's config, not from a model, so asking whether the user requested them
-would deny every setup step. They are audited with rule `operator_config`, stay
-out of the agent's chain, and are still refused once the run is stopped. A
-refused one is not injected into the prompt, and a one-time tool is tried again
-on the next run.
+- **Read-only commands.** An `exec` call whose command is on
+  `readonly_commands` - `git status/diff/log/show`, `ls`, `cat`, `grep`, `rg`,
+  `sed -n`, `find` without `-exec`/`-delete`, and so on - is a `read`. The
+  check is conservative: a redirection that writes, a substitution, an option
+  the list excludes or a command that cannot be split keeps it `exec`.
+- **Secrets.** A call naming a path on `secret_paths` (`.env`, keys,
+  credentials) takes the filter's `protected` route, whatever its effect.
+- **Authority.** Changing a path on `protected_paths` - the policy, system
+  configs, CI, git internals - takes the `protected` route; reading it does not.
+- **Flows** (`follow_flows`). A run that took in outside content (an
+  `untrusted` tool, a file under `untrusted_paths` such as uploads) has its
+  changes and commands judged; a run that read a secret has what leaves the
+  machine judged. Flows belong to the whole turn, sub-agents included, and come
+  only from calls that ran.
+
+A stricter route is never loosened: a write refused by Read only stays refused
+on a protected path.
+
+## What the policy model sees
+
+Only calls routed to `judge`. The packet carries:
+
+- `trusted_task`: the conversation - the user's messages, and between them the
+  assistant replies the user saw, each marked as authorizing nothing by
+  itself. A short answer such as "yes, go ahead" means what the reply before it
+  proposed.
+- `trusted_policy`: the rules and the user's filter (name, label, description).
+- `untrusted_action`: tool, kind, projected arguments, registered metadata.
+- `host_facts`: the declared effect, why the call was judged, and what the turn
+  took in so far - established by the host, not by an agent.
+- `untrusted_history`: the run's recent executed calls and reasoning tail.
+- `untrusted_delegation`: what callers asked their sub-agents, outermost first.
+
+Sensitive fields and oversized values are replaced by type/size/hash metadata.
+Tool output is never sent. The model answers `allow`, `deny` or `review` for a
+single question, `action`. Each model selects its adapter with
+`policy_api: decisions` (default) or `policy_api: chat`; the chat adapter puts
+the trusted part in its system message and the rest in a separate evidence
+message, and accepts exactly `{"action": "allow"}`-shaped JSON.
+
+## Held calls
+
+A call routed to `review`, or judged `review`, waits for a person.
+
+- **In the chat.** While someone watches the turn (the web chat), the call
+  waits there: its row shows *Allow*, *Allow for this turn* and *Decline*, and
+  the gate continues the same call once answered - no retry by the agent.
+  *Allow for this turn* lets that tool through for the rest of the turn.
+  Nobody answering within `review_ttl_seconds` refuses it (`review_timeout`);
+  Stop refuses what waits. An unavailable validator asks too, instead of
+  failing the call.
+- **Who answers.** With `approvals: user`, the user answers in the chat of the
+  conversation the call came from, and only there. With
+  `approvals: operator`, only the host review API (`GET/POST
+  /api/action-policy/reviews`, admins on a server with accounts, the launcher's
+  token otherwise) answers; the user sees that the call waits.
+- **Without anyone watching** (CLI, background runs) the call is refused with
+  an `approval_id`; an approval lets the retry of that exact call through once.
 
 ## Result of a block
 
-The agent receives a JSON `blocked` result naming the rule; a validator
-verdict also carries `verdicts` and `objected`, the questions that did not
-allow the call, so the agent can tell an out-of-scope call from a run whose
-history is in question. The webchat badge names them too (`Policy: review ·
-chain`). It is told to go on
-with the rest of the task and report the blocked step, not to probe the policy:
-probing reads as drift to the chain check and would block the rest of the run.
-Denials are counted; reaching `max_denials_per_run` stops the run. Neither pending
-review nor validator unavailability spends this denial budget in `enforce`.
-`review` blocks in `enforce` and returns an opaque `approval_id`. The trusted
-host may approve it once; approval is bound to the run id and the hash of the
-exact tool, kind and original arguments, expires after `review_ttl_seconds`, and
-is consumed by the retry. It cannot override `deny`.
-
-The web runtime exposes the host endpoints `GET /api/action-policy/reviews` and
-`POST /api/action-policy/reviews/{approval_id}`. On a one-user server both
-require the random `X-Grid-Action-Review-Token` printed by the web-chat
-launcher; the token is not given to the agent. On a server with accounts
-(`--accounts`) admins resolve reviews - in the Accounts panel - for every
-user's agents; the user whose agent asked cannot, since the policy is the
-operator's. Embedders can call `pending_action_reviews()` and
-`resolve_action_review()` directly instead.
-
-A validator timeout, a transport error, a malformed answer or a nonfinite
-probability all become `unavailable`, which blocks in `enforce`. This is an
-infrastructure failure, not a policy denial: the result includes
-`infrastructure_error: true`, explains that the action did not execute, and does
-not increment denials or stop the run in either mode. Total call-attempt budgets
-still apply, so an agent cannot retry indefinitely. In `shadow`, the call still
-executes as with other advisory verdicts. Host approval cannot bypass an outage.
+The agent receives a JSON `blocked` result naming the rule - `policy_filter`
+(the user's filter does not allow it), `policy_deny`, `declined`,
+`review_timeout`, `policy_review`, `policy_unavailable`, or a budget rule - and
+is told to go on with the rest of the task and name the blocked step, never to
+reach the same target another way. Denials are counted; reaching
+`max_denials_per_run` stops the run. A held call nobody answered and an
+unavailable validator spend no denials.
 
 ## Validator availability
 
 ```yaml
 validator:
-  model: policy
-  fallback_models: [policy_chat] # model with policy_api: chat
-  timeout_seconds: 15      # queue + all requests + backoff + Retry-After
-  max_attempts: 2          # total requests, across every route
+  model: [policy, policy_reserve]  # tried in order, the next only when one is unavailable
+  timeout_seconds: 15              # queue + all requests + backoff + Retry-After
+  max_attempts: 2
   retry_backoff_seconds: 0.25
-  max_concurrency: 4       # concurrent judgments per gate/factory
+  max_concurrency: 4
   circuit_failure_threshold: 3
   circuit_cooldown_seconds: 15
 ```
 
-A valid `allow`, `deny` or `review` ends the judgment. The reserve is used only
-after a technical failure, never to search for a more permissive verdict.
-Untried available routes take precedence over repeats of a failed route.
-`max_attempts` must be large enough to cover all configured routes.
-
-Timeouts, transport errors, malformed answers and HTTP 408/429/500/502/503/504
-may be retried. Other errors (including authentication and configuration HTTP
-errors) are not retried on the same route in that judgment; a configured reserve
-may still be used. Retries use exponential backoff with jitter. `Retry-After`
-on 429/503 is honored in seconds or HTTP-date form and persists across calls
-to that route. A cooldown that exceeds the remaining budget never causes an
-early retry; an available independent reserve can still answer immediately.
-
-Set `request_timeout` on each model entry to bound its requests. Each attempt
-is additionally capped to the remaining total budget divided by remaining
-attempts, reserving time for recovery. When preceding routes are known down,
-the reserve can use the remaining budget up to its own request timeout.
-Queueing and backoff spend that same budget. Give policy its own model entry
-so routing keeps its provider timeout.
-
-After the configured number of consecutive failures, a route is skipped for
-the circuit cooldown; non-retryable errors open the circuit immediately. Once
-the cooldown expires, only one recovery probe is allowed at a time. If all
-circuits are open, the gate reports unavailable without sending requests.
-The concurrency limit, cooldowns and circuits belong to one factory, not to a
-provider-wide distributed quota. Clients reuse connections and are closed by
-`AgentFactory.cleanup()`; direct users of `ActionValidator` or `ActionGate`
-must call `aclose()` on the same event loop after in-flight checks finish.
+A valid verdict ends the judgment; a reserve is used only after a technical
+failure, never to look for a more permissive answer. Timeouts, transport
+errors, malformed answers and HTTP 408/429/500/502/503/504 may be retried;
+`Retry-After` is honored. After repeated failures a route's circuit opens for
+the cooldown. Set `request_timeout` on each model entry to bound its requests.
 
 ## Audit
 
-The `grid.action_policy` logger emits one JSON `ACTION_POLICY` line per decision:
-run id, tool, kind, action hash, policy version, mode, decision, rule and the
-per-question verdicts. Availability metrics include total `latency_ms`,
-`queue_ms`, `packet_bytes`, the successful `validator_model`, and
-`validator_attempts` with route key, model, duration and outcome per request.
-`validator_failures` distinguishes HTTP statuses, invalid answers, request
-timeouts, total budget exhaustion, queue timeouts and unavailable routes.
-Exception messages are omitted because even parsing errors can contain private
-data. Use these fields to compare outage rates, recovery rates and p95/p99
-latency before adjusting budgets. Arguments, tool output, file contents and provider error
-bodies are never logged. Grid's ordinary conversation and tool logs have their
-own settings and may contain all of that; configure retention for both. The
-in-memory decision buffer is bounded and is not storage. The web chat server
-also writes these lines to `action_policy.log` in its logs directory (rotated at
-10 MB, three files kept), so a block can be explained after the console is gone.
+The `grid.action_policy` logger emits one JSON `ACTION_POLICY` line per
+decision: run id, tool, kind, action hash, policy version, mode, decision,
+rule, and how it was reached - `effect`, `route`, `filter`, `reasons`, and
+`source` (`filter`, `validator`, `user`, `user_grant`, `host_approval`,
+`no_answer`), plus validator latency and failures for judged calls. Arguments,
+tool output, file contents and provider error bodies are never logged. The web
+chat shows each decision as a badge on its action row.
 
-Webchat renders the check as a compact badge inside the corresponding action
-row: green for allow, amber for review and red for deny or an unavailable
-validator. Its tooltip shows the decision source and latency; the policy UI
-never repeats the action arguments.
+`scripts/replay_policy.py` replays the calls stored in chat traces through the
+routing under any filter and prints where they would go - run it before
+changing filters, protected paths or declarations.
 
 ## Limits
 
-This gate is a judgment layer, not containment. Opaque commands and side effects
-hidden inside a tool implementation cannot be reliably inspected. Misleading
-tool metadata, incomplete arguments, or a permitted tool that does more than
-advertised can escape the intent of the policy. In `shadow`, verdicts remain
-advisory until a run budget stops further calls.
-
-Side effects are not verified after execution: the gate reports what it allowed,
-not what happened. Tool implementations, plugins, hooks and the host stay inside
-the trust boundary.
-
-For real containment, run the agent against an OS-isolated executor with bounded
-filesystem, process and network capabilities, and treat this policy as the layer
-that decides intent, not the layer that enforces the blast radius.
-
-Before enforcing in production, label representative task and call sequences and
-measure false allows, false denials, outages and added latency — including
-prompt injection and multi-step violations, which is what `check_chain` exists
-for. Every checked call normally costs one classifier request; recovery can use
-up to `max_attempts`. `shadow` uses the same validation path as `enforce`.
+This gate is a judgment layer, not containment. A tool that does more than it
+declares, or a command whose script does what its words do not say, can escape
+the intent of the policy. Side effects are not verified after execution.
+Tool implementations, plugins, hooks and the host stay inside the trust
+boundary. For real containment run agents in an OS-isolated executor with
+bounded filesystem, process and network access, and treat this policy as the
+layer that decides intent.
 
 ## Verification
 
 ```powershell
-.venv/Scripts/python.exe -m pytest tests/test_action_policy.py tests/test_policy_resilience.py tests/test_chat_policy.py
+.venv/Scripts/python.exe -m pytest tests/test_action_policy.py tests/test_policy_filters.py tests/test_policy_resilience.py tests/test_chat_policy.py tests/test_web_policy_switch.py
 ```
 
-The suite covers the gate contract, the chain window, nested mediated calls,
-fail-closed behavior, the Decisions request shape and the factory wiring on the
-real `examples/coder` tool set. Decisions are mocked; no provider key or network
-request is needed. The tests make no claim about live model accuracy.
-
-For an opt-in live smoke check with synthetic scenarios only, run:
+Decisions are mocked; no provider key or network request is needed. The tests
+make no claim about live model accuracy. For an opt-in live smoke check with
+synthetic scenarios (billable API calls):
 
 ```powershell
 .venv/Scripts/python.exe scripts/check_policy_fallback.py --live
 ```
-
-It loads `.env`, uses the configured provider APIs (which may charge for calls),
-and checks allowed reads/edits, injection, exfiltration, ambiguous recipients
-and cumulative limits. The invoked tool is always a no-op. Only verdicts and
-delivery metadata are printed; credentials, provider bodies and reasoning are
-not. This small smoke check is not a substitute for a representative security
-evaluation before changing models or policy rules.

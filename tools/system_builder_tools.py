@@ -591,3 +591,22 @@ SYSTEM_BUILDER_TOOLS: Dict[str, Any] = {
 
 #: They act on the created systems only, and refuse without an admin's access.
 TOOL_ISOLATION = {name: SYSTEMS for name in SYSTEM_BUILDER_TOOLS}
+
+# What these tools do (utils.tool_effects): the created systems are the user's own
+# store; evaluating and testing run their agents and tools.
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "builder_catalog": _effects.read(),
+    "builder_check": _effects.read(),
+    "builder_compare": _effects.read(),
+    "builder_create": _effects.write(),
+    "builder_delete": _effects.write(),
+    "builder_describe": _effects.read(),
+    "builder_evaluate": _effects.EXEC_ANY,
+    "builder_fork": _effects.write(),
+    "builder_read": _effects.read(),
+    "builder_test_tools": _effects.EXEC_ANY,
+    "builder_tool_set": _effects.write(),
+    "builder_write": _effects.write(),
+}

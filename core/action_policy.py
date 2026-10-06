@@ -1,8 +1,15 @@
-"""Policy-driven semantic gate for agent-mediated calls.
+"""Policy gate for agent-mediated calls.
 
-The operator owns both rules and classifier prompts in YAML. The runtime makes
-no guesses from tool names and has no inventory of action types. Fail-closed in
-``enforce``. Not an OS sandbox.
+Every mediated call is routed before it runs (core.action_routing): what the
+tool declares it does, the paths it names and what its run has taken in decide,
+under the filter the user picked, whether it runs, goes to the operator's
+policy model, waits for the user, or is refused. Only the judged rest costs a
+model request, and the question that model answers is about harm, not about
+whether the agent needed the call.
+
+A call held for review waits in the chat it came from while someone can answer
+there (``ActionRunState.interactive``); otherwise it is refused with an
+approval id the host can resolve. Fail-closed in ``enforce``. Not an OS sandbox.
 """
 
 import asyncio
@@ -15,16 +22,19 @@ import time
 from collections import deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator, Optional
 from uuid import uuid4
 
 import httpx
 
+from core.action_routing import Routing, effect_of, route_call
 from core.decisions import DecisionsModel
 from core.chat_policy import ChatPolicyModel
 from core.policy_resilience import PolicyRunner
 from schemas.action_policy import ActionPolicyConfig, ActionValidatorConfig
 from utils.exceptions import ConfigError
+from utils.path_utils import _sandbox_root, resolve_agent_path
 
 logger = logging.getLogger("grid.action_policy")
 
@@ -37,13 +47,14 @@ _EXECUTING: ContextVar[tuple] = ContextVar("grid_action_policy_executing", defau
 
 @dataclass
 class ActionRunState:
-    """One trusted task and the chain of calls made under it.
+    """One trusted task and the calls made under it.
 
     Never constructed from tool arguments. A sub-agent runs under a delegated
-    state (:meth:`delegate`): the same trusted task, trajectory, event log and
-    lock as its caller - so the validator judges the whole turn, and text the
-    caller wrote for the sub-agent never becomes a user instruction - with an
-    attempt budget of its own inside the turn's total.
+    state (:meth:`delegate`): the same trusted task, history, event log and
+    lock as its caller - so text the caller wrote for the sub-agent never
+    becomes a user instruction - with an attempt budget of its own inside the
+    turn's total. What belongs to the whole turn lives on the root: the user's
+    filter, the facts its calls collected and the answers the user gave.
     """
 
     task: str
@@ -52,7 +63,7 @@ class ActionRunState:
     denials: int = 0
     stopped: bool = False
     events: deque = field(default_factory=lambda: deque(maxlen=20))
-    chain: deque = field(default_factory=lambda: deque(maxlen=200))
+    history: deque = field(default_factory=lambda: deque(maxlen=200))
     # Reasoning belongs to this run. A compatibility callback is retained for
     # callers that supply their own per-run source, but factories should append
     # directly to ``reasoning_text`` so concurrent runs cannot see each other.
@@ -64,8 +75,19 @@ class ActionRunState:
     # asked for. The request explains the purpose; it grants no authority.
     parent: Optional["ActionRunState"] = None
     delegation: Optional[dict] = None
-    # Calls made in the whole turn, delegated runs included; kept on the root.
+    # The rest is the turn's, read and written on the root.
+    # Calls made in the whole turn, delegated runs included.
     turn_attempts: int = 0
+    # The user's filter (ActionPolicyConfig.filters); None is the default one.
+    filter: Optional[str] = None
+    # Someone watches the turn live and can answer a held call there.
+    interactive: bool = False
+    # The conversation the turn belongs to: an answer from its chat only.
+    context_id: Optional[str] = None
+    # What the turn's calls took in (core.action_routing SECRET, UNTRUSTED).
+    flows: list = field(default_factory=list)
+    # Tools the user allowed for the rest of the turn.
+    grants: set = field(default_factory=set)
     # Completes when the latest call issued in this run, and every call before
     # it, is finished. See take_turn.
     order_tail: Optional[asyncio.Future] = None
@@ -115,13 +137,17 @@ class ActionRunState:
         """Stopped itself, or inside a run that was stopped."""
         return any(state.stopped for state in self.lineage())
 
+    @property
+    def flow_kinds(self) -> set:
+        return {flow["fact"] for flow in self.root.flows}
+
     def delegate(self, tool: str, request: Any) -> "ActionRunState":
         """A state for a sub-agent this run starts through ``tool``."""
         return ActionRunState(
             task=self.task,
             run_id=self.run_id,
             events=self.events,
-            chain=self.chain,
+            history=self.history,
             policy_event=self.policy_event,
             lock=self.lock,
             parent=self,
@@ -153,7 +179,7 @@ def is_policy_block(result: Any) -> bool:
 
 
 class PolicyDenied(Exception):
-    """An operator rule blocked a call."""
+    """An operator rule, the user's filter or the user blocked a call."""
 
     def __init__(
         self,
@@ -176,9 +202,10 @@ class PendingApproval:
     kind: str
     created_at: float
     expires_at: float
-    # The questions that did not allow the call: "chain" alone tells the host
-    # that the call itself passed and the run's history is what is in question.
-    objected: tuple[str, ...] = ()
+    # The conversation it came from: the user answers it there only.
+    context_id: Optional[str] = None
+    # Why it is held, argument-free (core.action_routing Routing.reasons).
+    reasons: tuple[str, ...] = ()
 
 
 class ActionValidator:
@@ -198,7 +225,7 @@ class ActionValidator:
 
     @classmethod
     def from_config(cls, root_config, *, policy=None, transport=None):
-        """Validators on ``root_config``'s models, asking ``policy``'s questions.
+        """Validators on ``root_config``'s models, asking ``policy``'s question.
 
         ``policy`` defaults to the config's own; a factory passes the base policy
         with its system's part added (ActionPolicyConfig.with_system).
@@ -209,15 +236,12 @@ class ActionValidator:
             raise ConfigError(
                 "settings.action_policy.validator.model must reference a key from models"
             )
-        for name in ("action", "chain"):
-            question = getattr(policy.prompts, name)
-            if not question.instructions.strip() or set(question.criteria) != set(
-                VERDICTS
-            ):
-                raise ConfigError(
-                    f"settings.action_policy.prompts.{name} must define instructions "
-                    "and allow/deny/review criteria"
-                )
+        question = policy.prompts.action
+        if not question.instructions.strip() or set(question.criteria) != set(VERDICTS):
+            raise ConfigError(
+                "settings.action_policy.prompts.action must define instructions "
+                "and allow/deny/review criteria"
+            )
 
         def build(key, route_config):
             chat = root_config.get_model(key).policy_api == "chat"
@@ -239,23 +263,15 @@ class ActionValidator:
         primary.fallbacks = reserves
         return primary
 
-    def questions(self, chain: bool) -> dict:
+    def questions(self) -> dict:
         action = self.prompts.action
-        questions = {
+        return {
             "action": {
                 "type": "choice",
                 "instructions": action.instructions,
                 "criteria": dict(action.criteria),
             }
         }
-        if chain:
-            chain_prompt = self.prompts.chain
-            questions["chain"] = {
-                "type": "choice",
-                "instructions": chain_prompt.instructions,
-                "criteria": dict(chain_prompt.criteria),
-            }
-        return questions
 
     def _verdict(self, answer: Any) -> str:
         if not isinstance(answer, dict) or answer.get("type") != "choice":
@@ -277,9 +293,9 @@ class ActionValidator:
             raise ValueError("Inconsistent choice")
         return choice
 
-    async def evaluate(self, state: dict, *, chain: bool = True) -> dict:
-        """Return a verdict per question; a missing or malformed answer raises."""
-        questions = self.questions(chain)
+    async def evaluate(self, state: dict) -> dict:
+        """Return the verdict per question; a missing or malformed answer raises."""
+        questions = self.questions()
         # One request may take the model's request timeout, never the whole
         # budget: a stalled request is dropped and the gate tries again.
         timeout = min(self.config.timeout_seconds, self.model.timeout)
@@ -303,7 +319,7 @@ class ActionValidator:
 
 
 class ChatActionValidator(ActionValidator):
-    """Same questions and lifetime, with direct verdicts instead of probabilities."""
+    """Same question and lifetime, with a direct verdict instead of probabilities."""
 
     def _verdict(self, answer: Any) -> str:
         if not isinstance(answer, str) or answer not in VERDICTS:
@@ -311,15 +327,9 @@ class ChatActionValidator(ActionValidator):
         return answer
 
 
-def _objected(verdicts: dict | None) -> tuple[str, ...]:
-    """The questions whose verdict was not ``allow``, in question order."""
-    return tuple(name for name, value in (verdicts or {}).items() if value != "allow")
-
-
-#: What every blocked call that leaves the run going tells the agent. Probing
-#: the gate - the same target by another tool, path or wording - reads as
-#: drift to the chain check; ordinary work on the task does not, and an agent
-#: told only "do not work around the policy" stops doing that work too.
+#: What a blocked call that leaves the run going tells the agent. Probing the
+#: gate - the same target by another tool, path or wording - is what the user
+#: would have to answer again; ordinary work on the task is not.
 _KEEP_WORKING = (
     "Do not repeat it or reach the same target another way: another tool, path "
     "or wording for it is the same attempt. Your other calls are judged on their "
@@ -328,7 +338,7 @@ _KEEP_WORKING = (
 )
 
 
-def _next_step_after_block(halted: bool, verdicts: dict | None) -> str:
+def _next_step_after_block(halted: bool, rule: str, label: str = "") -> str:
     """What the agent should do after a blocked call, from why it was blocked."""
     if halted:
         return (
@@ -336,27 +346,29 @@ def _next_step_after_block(halted: bool, verdicts: dict | None) -> str:
             "no further tool calls will run. Write your final report from what "
             "you have and name the blocked steps."
         )
-    verdicts = verdicts or {}
-    if verdicts.get("action") == "allow" and verdicts.get("chain") != "allow":
+    if rule == "policy_filter":
         return (
-            "This call itself was judged within the task; the policy questions "
-            "the run's earlier actions, so other calls in this run may be held "
-            "the same way until the host reviews them. Finish what you can "
-            "without tool calls and name the blocked steps in your final report."
+            f"This call did not run: the user's policy filter ({label}) does not "
+            "allow this kind of action. " + _KEEP_WORKING + " Say which step needs "
+            "another filter; the user can switch it and ask again."
         )
-    if verdicts.get("action") not in (None, "allow"):
-        return "This call did not run: the policy judged it outside the user's task. " + _KEEP_WORKING
+    if rule == "declined":
+        return "The user (or the operator) declined this call. " + _KEEP_WORKING
+    if rule == "review_timeout":
+        return (
+            "This call did not run: it waited for the user's permission and "
+            "nobody answered in time. " + _KEEP_WORKING
+        )
+    if rule == "policy_review":
+        return (
+            "This call is held for approval and did not run. " + _KEEP_WORKING
+        )
+    if rule == "policy_deny":
+        return (
+            "This call did not run: the policy judged it harmful or not "
+            "authorized by the user. " + _KEEP_WORKING
+        )
     return "This call did not run. " + _KEEP_WORKING
-
-
-def merge(verdicts: dict) -> str:
-    """The strictest verdict wins; a call executes only when nothing objects."""
-    values = set(verdicts.values())
-    if "deny" in values:
-        return "deny"
-    if "review" in values or not values:
-        return "review"
-    return "allow"
 
 
 class ActionGate:
@@ -369,6 +381,8 @@ class ActionGate:
         )
         self._reviews: dict[str, PendingApproval] = {}
         self._approved: dict[tuple[str, str], float] = {}
+        # Held calls someone can answer live: the answer, and the run it grants to.
+        self._waiters: dict[str, tuple[asyncio.Future, ActionRunState]] = {}
         self._review_lock = threading.Lock()
 
     async def aclose(self):
@@ -382,6 +396,18 @@ class ActionGate:
     def mediates(self, kind: str) -> bool:
         return self.enabled and kind in self.config.kinds
 
+    def filters(self) -> dict:
+        """The user's switch, argument-free: every filter and the default one."""
+        return {
+            "default": self.config.default_filter,
+            "approvals": self.config.approvals,
+            "filters": [
+                {"key": key, "label": item.label, "description": item.description}
+                for key, item in self.config.filters.items()
+            ],
+        }
+
+    # -- reviews -------------------------------------------------------------
     def _prune_reviews(self, now: float) -> None:
         self._reviews = {
             key: review
@@ -398,7 +424,7 @@ class ActionGate:
         tool: str,
         kind: str,
         digest: str,
-        verdicts: dict | None = None,
+        reasons: tuple[str, ...] = (),
     ) -> str:
         now = time.time()
         with self._review_lock:
@@ -418,7 +444,8 @@ class ActionGate:
                 kind=kind,
                 created_at=now,
                 expires_at=now + self.config.review_ttl_seconds,
-                objected=_objected(verdicts),
+                context_id=run.root.context_id,
+                reasons=tuple(reasons),
             )
             return approval_id
 
@@ -436,26 +463,59 @@ class ActionGate:
                     "kind": item.kind,
                     "created_at": item.created_at,
                     "expires_at": item.expires_at,
-                    "objected": list(item.objected),
+                    "context_id": item.context_id,
+                    "reasons": list(item.reasons),
+                    "waiting": item.approval_id in self._waiters,
                 }
                 for item in sorted(
                     self._reviews.values(), key=lambda review: review.created_at
                 )
             ]
 
-    def resolve_review(self, approval_id: str, *, approve: bool) -> bool:
-        """Resolve a pending review; approval is one-shot and action-bound."""
+    def resolve_review(
+        self,
+        approval_id: str,
+        *,
+        approve: bool,
+        remember: bool = False,
+        context_id: Optional[str] = None,
+    ) -> bool:
+        """Answer a held call: approval is one-shot and bound to the action.
+
+        A call waiting in its chat runs (or is refused) at once; ``remember``
+        also allows that tool for the rest of the turn. Otherwise an approval
+        lets the agent's retry of the exact same call through. ``context_id``
+        limits the answer to a review from that conversation.
+        """
         now = time.time()
         with self._review_lock:
             self._prune_reviews(now)
-            review = self._reviews.pop(approval_id, None)
-            if review is None:
+            review = self._reviews.get(approval_id)
+            if review is None or (context_id is not None and review.context_id != context_id):
                 return False
-            if approve:
-                self._approved[(review.run_id, review.action_sha256)] = (
-                    review.expires_at
-                )
-            return True
+            del self._reviews[approval_id]
+            waiter = self._waiters.pop(approval_id, None)
+            if waiter is None:
+                if approve:
+                    self._approved[(review.run_id, review.action_sha256)] = review.expires_at
+                return True
+        future, run = waiter
+        if approve and remember:
+            run.root.grants.add(review.tool)
+
+        def answer():
+            if not future.done():
+                future.set_result(approve)
+
+        future.get_loop().call_soon_threadsafe(answer)
+        return True
+
+    def cancel_reviews(self, run_id: str) -> int:
+        """Refuse every call of run *run_id* still waiting for an answer: its
+        turn is stopping. Returns how many there were."""
+        with self._review_lock:
+            ids = [key for key, review in self._reviews.items() if review.run_id == run_id]
+        return sum(self.resolve_review(key, approve=False) for key in ids)
 
     def _consume_approval(self, run_id: str, digest: str) -> bool:
         now = time.time()
@@ -463,6 +523,7 @@ class ActionGate:
             self._prune_reviews(now)
             return self._approved.pop((run_id, digest), None) is not None
 
+    # -- the packet the policy model sees --------------------------------------
     @staticmethod
     def _as_data(raw: Any) -> Any:
         """Tool input as data for the packet, whatever shape the model produced."""
@@ -563,27 +624,24 @@ class ActionGate:
             request = state.delegation.get("request")
             if isinstance(request, str):
                 limit = self.config.max_argument_value_bytes
-                encoded = request.encode("utf-8", "ignore")
+                encoded = request.encode("utf-8")
                 if len(encoded) > limit:
                     request = encoded[:limit].decode("utf-8", "ignore") + " [truncated]"
             requests.append({"tool": state.delegation.get("tool"), "request": request})
         return requests
 
-    def _chain(self, run: ActionRunState) -> dict:
-        # Only actions that actually ran belong to the execution trajectory.
-        # Feeding blocked/reviewed attempts back into the semantic chain makes
-        # one uncertain verdict self-reinforcing: the next check sees the old
-        # review and repeats it even though no side effect occurred. A call that
-        # failed while running did run and may have had effects, so it stays.
-        executed_chain = [
+    def _history(self, run: ActionRunState) -> dict:
+        # Only calls that ran belong to what the run did: a blocked attempt had
+        # no effect. A call that failed while running may have had one.
+        ran = [
             event
-            for event in run.chain
+            for event in run.history
             if event.get("outcome") in ("executed", "failed")
         ]
-        window = executed_chain[-self.config.max_chain_events :]
-        executed = self._fit(window, self.config.max_chain_bytes)
+        window = ran[-self.config.max_history_events :]
+        executed = self._fit(window, self.config.max_history_bytes)
         block: dict = {"executed": executed}
-        dropped = len(executed_chain) - len(executed)
+        dropped = len(ran) - len(executed)
         if dropped > 0:
             block["dropped_earlier_calls"] = dropped
         reasoning = run.reasoning_text
@@ -593,12 +651,64 @@ class ActionGate:
             except Exception:
                 reasoning = ""
         if reasoning and self.config.max_reasoning_bytes:
-            tail = reasoning.encode("utf-8", "ignore")[
-                -self.config.max_reasoning_bytes :
-            ]
+            tail = reasoning.encode("utf-8")[-self.config.max_reasoning_bytes :]
             block["reasoning_tail"] = tail.decode("utf-8", "ignore")
         return block
 
+    def _packet(self, run, tool_name, kind, arguments, descriptor, routing, filter_name) -> dict:
+        selected = self.config.filters[filter_name]
+        packet = {
+            "trusted_task": run.task,
+            "trusted_policy": {
+                "version": self.config.version,
+                "rules": [rule.model_dump() for rule in self.config.rules],
+                "filter": {
+                    "name": filter_name,
+                    "label": selected.label,
+                    "description": selected.description,
+                },
+            },
+            "untrusted_action": {
+                "kind": kind,
+                "tool": tool_name,
+                "arguments": arguments,
+                "tool_metadata": descriptor or {},
+            },
+            # Established by the host from declared effects, not by any agent.
+            "host_facts": {
+                "effect": routing.effect,
+                "why_judged": list(routing.reasons),
+                "run_took_in": [dict(flow) for flow in run.root.flows[-10:]],
+            },
+            "untrusted_history": self._history(run),
+            "run": {"attempt": run.attempts, "denials": run.denials},
+        }
+        delegation = self._delegation(run)
+        if delegation:
+            packet["untrusted_delegation"] = delegation
+        return packet
+
+    @staticmethod
+    def _locator(raw_ctx: Any) -> Callable[[str], Optional[str]]:
+        """Turns an argument path into a workspace path, as the tools resolve it."""
+        factory = getattr(raw_ctx, "factory", None)
+        try:
+            root = _sandbox_root(factory)
+        except Exception:
+            root = None
+
+        def locate(raw: str) -> Optional[str]:
+            if root is None:
+                return None
+            try:
+                resolved = Path(resolve_agent_path(raw, factory))
+                return resolved.relative_to(root).as_posix()
+            except Exception:
+                return None
+
+        return locate
+
+    # -- audit ---------------------------------------------------------------
     def _record(self, run, tool, kind, digest, decision, rule, **extra):
         event = {
             "run_id": run.run_id,
@@ -621,33 +731,31 @@ class ActionGate:
         logger.info("ACTION_POLICY %s", json.dumps(event, ensure_ascii=True))
 
     def _deny(self, run, tool, kind, digest, rule, approval_id=None, verdicts=None):
-        # Neither pending review nor an infrastructure outage is a violation.
-        # Attempt budgets still bound repeated calls. A review held only for
-        # the chain's deny still counts: a run that keeps drifting must stop.
-        held_for_chain = rule == "policy_review" and (verdicts or {}).get("chain") == "deny"
-        if rule not in ("policy_review", "policy_unavailable") or held_for_chain:
+        # Neither a pending review, a request nobody answered nor an
+        # infrastructure outage is a violation. Attempt budgets still bound
+        # repeated calls.
+        if rule not in ("policy_review", "policy_unavailable", "review_timeout"):
             run.denials += 1
             if run.denials >= self.config.max_denials_per_run:
                 run.stopped = True
-        run.chain.append(
+        run.history.append(
             {"kind": kind, "tool": tool, "outcome": "blocked", "rule": rule}
         )
         decision = "unavailable" if rule == "policy_unavailable" else "deny"
         self._record(run, tool, kind, digest, decision, rule)
+        filter_name, selected = self.config.filter(run.root.filter)
         payload = {
             "status": "blocked",
             "rule": rule,
             "run_stopped": run.halted,
-            "next_step": _next_step_after_block(run.halted, verdicts),
+            "next_step": _next_step_after_block(run.halted, rule, selected.label),
         }
         if approval_id is not None:
             payload["approval_id"] = approval_id
         if verdicts:
-            # Which question objected: without it the agent cannot tell a call
-            # that is out of scope from a run whose history is in question, and
-            # keeps issuing calls that are blocked for the same reason.
             payload["verdicts"] = dict(verdicts)
-            payload["objected"] = list(_objected(verdicts))
+        if rule == "policy_filter":
+            payload["filter"] = filter_name
         if rule == "policy_unavailable":
             payload["infrastructure_error"] = True
             payload["next_step"] = (
@@ -659,13 +767,14 @@ class ActionGate:
             )
         return json.dumps(payload)
 
+    # -- calls ---------------------------------------------------------------
     async def _operator_call(self, run, tool_name, kind, ctx, raw_args, invoke):
         """Run a call the operator configured, such as an agent's auto_run_tools.
 
         Its tool and arguments come from host configuration, not from a model,
         so there is no proposed action to judge against the user's task: asking
         whether the user requested it would deny every setup step. It is audited,
-        stays out of the agent's chain, and a stopped run still refuses it.
+        stays out of the agent's history, and a stopped run still refuses it.
         """
         if not isinstance(run, ActionRunState):
             run = ActionRunState(task="")
@@ -700,8 +809,12 @@ class ActionGate:
         raw_args: Any,
         invoke: Callable[[Any, Any], Awaitable[Any]],
         descriptor: dict | None = None,
+        effect: Any = None,
     ):
-        """Judge one call, then run it. ``invoke`` receives the original input."""
+        """Route one call, then run it. ``invoke`` receives the original input.
+
+        ``effect`` is what the tool declares it does (utils.tool_effects).
+        """
         if not self.mediates(kind):
             return await invoke(ctx, raw_args)
         raw_ctx = getattr(ctx, "context", None)
@@ -719,33 +832,74 @@ class ActionGate:
                 "unparsed",
                 "missing_trusted_task",
             )
+        call = (tool_name, kind, ctx, raw_args, invoke, descriptor, effect)
         if any(active is run for active in _EXECUTING.get()):
-            return await self._mediated_call(
-                run, tool_name, kind, ctx, raw_args, invoke, descriptor, None
-            )
+            return await self._mediated_call(run, *call, None)
         previous, own = run.take_turn()
         try:
-            return await self._mediated_call(
-                run, tool_name, kind, ctx, raw_args, invoke, descriptor, previous
-            )
+            return await self._mediated_call(run, *call, previous)
         finally:
             run.pass_turn(previous, own)
 
+    async def _judge(self, packet: dict) -> tuple[str, dict]:
+        """The policy model's verdict on a call, with how it was reached."""
+        started = time.monotonic()
+        judgment = await self._runner.evaluate(packet)
+        verdict = judgment.verdicts.get("action") if judgment.verdicts else None
+        meta = {
+            "source": "validator",
+            "latency_ms": round((time.monotonic() - started) * 1000, 3),
+            "validator_model": judgment.model,
+            "validator_attempts": judgment.attempts,
+            "queue_ms": judgment.queue_ms,
+            "packet_bytes": len(json.dumps(packet, ensure_ascii=False).encode("utf-8")),
+        }
+        if judgment.failures:
+            meta["validator_failures"] = judgment.failures
+            if verdict is None:
+                logger.warning(
+                    "Action-policy validator unavailable for %s: %s",
+                    packet["untrusted_action"]["tool"],
+                    "; ".join(judgment.failures),
+                )
+        return verdict or "unavailable", meta
+
+    async def _ask(self, run, tool_name, kind, digest, routing, decision_meta, call_meta) -> Optional[bool]:
+        """Hold the call until the user answers in the chat; None when nobody does."""
+        approval_id = self._request_review(run, tool_name, kind, digest, routing.reasons)
+        future = asyncio.get_running_loop().create_future()
+        with self._review_lock:
+            self._waiters[approval_id] = (future, run)
+        async with run.lock:
+            self._record(
+                run, tool_name, kind, digest, "review", "policy_check",
+                awaiting=True, approval_id=approval_id, approvals=self.config.approvals,
+                **decision_meta, **call_meta,
+            )
+        try:
+            return await asyncio.wait_for(future, timeout=self.config.review_ttl_seconds)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            with self._review_lock:
+                self._waiters.pop(approval_id, None)
+                self._reviews.pop(approval_id, None)
+
     async def _mediated_call(
-        self, run, tool_name, kind, ctx, raw_args, invoke, descriptor, previous
+        self, run, tool_name, kind, ctx, raw_args, invoke, descriptor, effect, previous
     ):
-        """Judge one call alongside its siblings, then run it in its turn."""
+        """Route one call alongside its siblings, then run it in its turn."""
         raw_ctx = getattr(ctx, "context", None)
         digest = "unparsed"
-        # Parallel calls to one tool are judged concurrently; the call id lets an
+        # Parallel calls to one tool are routed concurrently; the call id lets an
         # event sink attach each verdict to the exact call it belongs to.
         call_id = getattr(ctx, "tool_call_id", None)
         call_meta = {"call_id": call_id} if isinstance(call_id, str) and call_id else {}
+        root = run.root
         try:
             async with run.lock:
                 if run.halted:
                     raise PolicyDenied("run_stopped")
-                root = run.root
                 run.attempts += 1
                 root.turn_attempts += 1
                 if run.attempts > self.config.max_attempts_per_run:
@@ -765,13 +919,11 @@ class ActionGate:
                 if not isinstance(run.task, str) or not run.task.strip():
                     raise PolicyDenied("missing_trusted_task")
                 arguments = self._as_data(raw_args)
-                canonical_action = {
-                    "kind": kind,
-                    "tool": tool_name,
-                    "arguments": arguments,
-                }
                 serialized = json.dumps(
-                    canonical_action, sort_keys=True, ensure_ascii=True, default=str
+                    {"kind": kind, "tool": tool_name, "arguments": arguments},
+                    sort_keys=True,
+                    ensure_ascii=True,
+                    default=str,
                 )
                 digest = hashlib.sha256(serialized.encode()).hexdigest()
                 if len(serialized.encode()) > self.config.max_action_bytes:
@@ -788,100 +940,80 @@ class ActionGate:
                     for field in self.config.sensitive_fields
                 }
                 projected_arguments = self._project(arguments, sensitive_fields)
-                packet = {
-                    "trusted_task": run.task,
-                    "trusted_policy": {
-                        "version": self.config.version,
-                        "rules": [rule.model_dump() for rule in self.config.rules],
-                    },
-                    "untrusted_action": {
-                        "kind": kind,
-                        "tool": tool_name,
-                        "arguments": projected_arguments,
-                        "tool_metadata": descriptor or {},
-                    },
-                    "untrusted_chain": self._chain(run),
-                    **(
-                        {"untrusted_delegation": delegation}
-                        if (delegation := self._delegation(run))
-                        else {}
-                    ),
-                    "run": {
-                        "attempt": run.attempts,
-                        "denials": run.denials,
-                    },
-                }
-            # Judged outside the lock: a mediated call may itself make mediated calls.
-            validator_started = time.monotonic()
-            judgment = await self._runner.evaluate(
-                packet, chain=self.config.check_chain
-            )
-            failures = judgment.failures
-            verdicts = judgment.verdicts or {"action": "unavailable"}
-            verdict = merge(verdicts) if judgment.verdicts else "unavailable"
-            if verdict == "deny" and verdicts.get("chain") == "deny" and all(
-                value == "allow" for name, value in verdicts.items() if name != "chain"
-            ):
-                # The call itself passed; only the trajectory is in question.
-                # A call the action question doubts too stays denied: there the
-                # history is what makes a doubtful call a violation.
-                # Past calls cannot be undone, so a hard deny here would refuse
-                # every later call of the turn - the chain is shared with
-                # sub-agents - on the strength of one uncertain judgment of
-                # history. The host decides instead: still blocked in enforce,
-                # never allowed without approval.
-                verdict = "review"
-            decision_meta = {
-                "source": "validator",
-                "latency_ms": round((time.monotonic() - validator_started) * 1000, 3),
-                "validator_model": judgment.model,
-                "validator_attempts": judgment.attempts,
-                "queue_ms": judgment.queue_ms,
-                "packet_bytes": len(
-                    json.dumps(packet, ensure_ascii=False).encode("utf-8")
-                ),
-            }
-            if failures:
-                decision_meta["validator_failures"] = failures
-                if verdict == "unavailable":
-                    logger.warning(
-                        "Action-policy validator unavailable for %s: %s",
-                        tool_name,
-                        "; ".join(failures),
-                    )
-            if verdict == "review" and self._consume_approval(run.run_id, digest):
-                verdicts = {**verdicts, "host_approval": "allow"}
-                verdict = "allow"
-            stop_after_shadow_call = False
-            async with run.lock:
-                self._record(
-                    run,
-                    tool_name,
-                    kind,
-                    digest,
-                    verdict,
-                    "policy_check",
-                    **verdicts,
-                    **decision_meta,
-                    **call_meta,
+                filter_name, selected = self.config.filter(root.filter)
+                routing: Routing = route_call(
+                    self.config,
+                    selected,
+                    effect_of(self.config, tool_name, kind, effect),
+                    arguments,
+                    run.flow_kinds,
+                    self._locator(raw_ctx),
                 )
-                if run.halted:
-                    raise PolicyDenied("run_stopped")
-                if verdict != "allow" and self.config.mode == "enforce":
-                    approval_id = (
-                        self._request_review(run, tool_name, kind, digest, verdicts)
-                        if verdict == "review"
-                        else None
+                packet = (
+                    self._packet(
+                        run, tool_name, kind, projected_arguments, descriptor, routing, filter_name
                     )
-                    raise PolicyDenied("policy_" + verdict, approval_id, verdicts)
-                if (
-                    verdict not in ("allow", "unavailable")
-                    and self.config.mode == "shadow"
-                ):
-                    run.denials += 1
-                    stop_after_shadow_call = (
-                        run.denials >= self.config.max_denials_per_run
+                    if routing.route == "judge"
+                    else None
+                )
+            route_meta = {
+                "effect": routing.effect,
+                "route": routing.route,
+                "filter": filter_name,
+                "reasons": list(routing.reasons),
+            }
+            if packet is not None:
+                # Judged outside the lock: a mediated call may itself make mediated calls.
+                verdict, decision_meta = await self._judge(packet)
+            else:
+                verdict, decision_meta = routing.route, {"source": "filter"}
+            decision_meta = {**route_meta, **decision_meta}
+            if verdict in ("review", "unavailable"):
+                if tool_name in root.grants:
+                    verdict, decision_meta["source"] = "allow", "user_grant"
+                elif verdict == "review" and self._consume_approval(run.run_id, digest):
+                    verdict, decision_meta["source"] = "allow", "host_approval"
+            ask = (
+                verdict in ("review", "unavailable")
+                and self.config.mode == "enforce"
+                and root.interactive
+            )
+            stop_after_shadow_call = False
+            if not ask:
+                async with run.lock:
+                    self._record(
+                        run, tool_name, kind, digest, verdict, "policy_check",
+                        **decision_meta, **call_meta,
                     )
+                    if run.halted:
+                        raise PolicyDenied("run_stopped")
+                    if verdict != "allow" and self.config.mode == "enforce":
+                        if decision_meta["source"] == "filter" and verdict == "deny":
+                            raise PolicyDenied("policy_filter")
+                        approval_id = (
+                            self._request_review(run, tool_name, kind, digest, routing.reasons)
+                            if verdict == "review"
+                            else None
+                        )
+                        raise PolicyDenied("policy_" + verdict, approval_id, {"action": verdict})
+                    if verdict not in ("allow", "unavailable") and self.config.mode == "shadow":
+                        run.denials += 1
+                        stop_after_shadow_call = run.denials >= self.config.max_denials_per_run
+            else:
+                answer = await self._ask(
+                    run, tool_name, kind, digest, routing, decision_meta, call_meta
+                )
+                async with run.lock:
+                    self._record(
+                        run, tool_name, kind, digest,
+                        "allow" if answer else "deny", "policy_check",
+                        **route_meta, source="user" if answer is not None else "no_answer",
+                        **call_meta,
+                    )
+                    if not answer:
+                        raise PolicyDenied("declined" if answer is False else "review_timeout")
+                    if run.halted:
+                        raise PolicyDenied("run_stopped")
         except PolicyDenied as exc:
             async with run.lock:
                 return self._deny(
@@ -898,7 +1030,7 @@ class ActionGate:
                 return self._deny(run, tool_name, kind, digest, "invalid_call")
 
         if previous is not None:
-            # Judged concurrently, executed in the order the model issued them.
+            # Routed concurrently, executed in the order the model issued them.
             await asyncio.shield(previous)
             if run.halted:
                 async with run.lock:
@@ -907,20 +1039,19 @@ class ActionGate:
         # Executed outside the judgment: a tool's own error is neither a policy
         # denial nor a reason to stop the run - the agent sees it and goes on.
         # Only an interruption (cancellation, shutdown) stops the run.
+        entry = {
+            "kind": kind,
+            "tool": tool_name,
+            "arguments": projected_arguments,
+            "effect": routing.effect,
+        }
         executing = _EXECUTING.set((*_EXECUTING.get(), run))
         try:
             result = await invoke(ctx, raw_args)
         except Exception:
             async with run.lock:
-                run.chain.append(
-                    {
-                        "kind": kind,
-                        "tool": tool_name,
-                        "arguments": projected_arguments,
-                        "outcome": "failed",
-                        "verdict": verdict,
-                    }
-                )
+                run.history.append({**entry, "outcome": "failed"})
+                self._take_in(run, tool_name, routing)
                 self._record(
                     run, tool_name, kind, digest, "failed", "execution_error", **call_meta
                 )
@@ -937,15 +1068,8 @@ class ActionGate:
         async with run.lock:
             if stop_after_shadow_call:
                 run.stopped = True
-            run.chain.append(
-                {
-                    "kind": kind,
-                    "tool": tool_name,
-                    "arguments": projected_arguments,
-                    "outcome": "executed",
-                    "verdict": verdict,
-                }
-            )
+            run.history.append({**entry, "outcome": "executed"})
+            self._take_in(run, tool_name, routing)
             self._record(
                 run,
                 tool_name,
@@ -956,3 +1080,10 @@ class ActionGate:
                 **call_meta,
             )
         return result
+
+    @staticmethod
+    def _take_in(run: ActionRunState, tool_name: str, routing: Routing) -> None:
+        """Remember what a call that ran took into the turn."""
+        root = run.root
+        for fact in routing.flows:
+            root.flows.append({"fact": fact, "tool": tool_name, "call": root.turn_attempts})

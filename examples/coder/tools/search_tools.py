@@ -417,3 +417,11 @@ TOOL_ISOLATION = {
     "glob_tool": _WORKSPACE,
     "grep_tool": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects), for the action policy
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "glob_tool": _effects.read("directory"),
+    "grep_tool": _effects.read("directory"),
+}

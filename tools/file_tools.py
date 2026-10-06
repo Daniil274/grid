@@ -402,3 +402,18 @@ TOOL_ISOLATION = {
     "file_search": _WORKSPACE,
     "file_write": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects), for the action policy
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "file_append": _effects.write("filepath"),
+    "file_content_search": _effects.read("filepath"),
+    "file_delete": _effects.write("filepath"),
+    "file_edit_patch": _effects.write("filepath"),
+    "file_list": _effects.read("directory"),
+    "file_read": _effects.read("filepath"),
+    "file_replace": _effects.write("filepath"),
+    "file_search": _effects.read("directory"),
+    "file_write": _effects.write("filepath"),
+}

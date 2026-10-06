@@ -20,6 +20,7 @@ import { PersonalAgentsDrawer } from "./agents/drawer.js";
 import { SettingsDrawer } from "./settings/drawer.js";
 import { createRoutePicker } from "./ui/route-picker.js";
 import { createComposer } from "./ui/composer.js";
+import { createPolicySwitch } from "./ui/policy-switch.js";
 import { createQueueTray } from "./ui/queue.js";
 import { createConversationList } from "./ui/sidebar.js";
 import { SpeechPlayer, synthesizeSentence } from "./ui/speech.js";
@@ -62,6 +63,10 @@ const store = createStore({
   voice: false,
   reviews: false,
   uploads: { enabled: false, max_file_mb: 25, max_files: 10 },
+  // The action policy's filters ({default, approvals, filters}); null when off.
+  policy: null,
+  // The filter the user picked (ui/policy-switch.js).
+  policyFilter: null,
 });
 
 /** Icon-only buttons declare their glyph in markup; fill them in one pass. */
@@ -167,6 +172,17 @@ async function boot() {
     onSend: (text, images, delivery) => chat.send(text, { images, delivery }),
     onStop: () => chat.stop(),
     onContinue: () => chat.continueTurn(),
+  });
+
+  createPolicySwitch({
+    select: $("#policy-filter"),
+    store,
+    onChange: (filter) => chat.setPolicyFilter(filter),
+  });
+  // A call held for the user's permission, from its row in the trace (ui/reasoning.js).
+  document.addEventListener("policy-review", (event) => {
+    const { approvalId, approve, remember } = event.detail;
+    chat.answerReview(approvalId, { approve, remember });
   });
 
   createQueueTray({
@@ -371,6 +387,7 @@ async function boot() {
       voice: Boolean(bootstrap.voice),
       reviews: Boolean(bootstrap.reviews),
       uploads: bootstrap.uploads ?? { enabled: false, max_file_mb: 25, max_files: 10 },
+      policy: bootstrap.policy ?? null,
     });
     await refreshConversations();
   }

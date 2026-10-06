@@ -70,6 +70,17 @@ def _delta_text(event: Any) -> tuple[Optional[str], Optional[str]]:
     return None, data_type
 
 
+#: Who decided a call, as the policy badge says it (core.action_policy sources).
+_POLICY_SOURCES = {
+    "filter": "decided by the filter",
+    "validator": "policy model",
+    "user": "your answer",
+    "user_grant": "allowed for this turn",
+    "host_approval": "approved",
+    "no_answer": "no answer in time",
+}
+
+
 class WebStreamObserver:
     """Feed a :class:`TraceRecorder` and an answer-token sink from one stream."""
 
@@ -205,64 +216,74 @@ class WebStreamObserver:
         else:
             self._recorder.close(block)
 
+    #: The web chat shows a held call with buttons: the gate may wait for them.
+    accepts_approvals = True
+
     def handle_policy_event(self, event: dict[str, Any]) -> None:
-        """Attach an argument-free policy badge to the matching action row."""
+        """Attach an argument-free policy badge to the matching action row.
+
+        A call held for the user carries its approval id, so the row offers
+        Allow and Decline; the gate's next event for the call replaces it.
+        """
         if event.get("rule") != "policy_check":
             return
         decision = str(event.get("decision") or "unavailable")
         if decision not in {"allow", "review", "deny", "unavailable"}:
             return
-        mode = str(event.get("mode") or "")
-        shadow = mode == "shadow"
-        if decision != "allow" and not shadow:
+        shadow = event.get("mode") == "shadow"
+        source = str(event.get("source") or "")
+        awaiting = bool(event.get("awaiting")) and isinstance(event.get("approval_id"), str)
+        if decision != "allow" and not shadow and not awaiting:
             self._held[0] += 1
         tone = {
             "allow": "positive",
             "review": "warning",
             "deny": "critical",
             "unavailable": "critical",
-        }.get(decision, "neutral")
-        source = "Decisions validator"
+        }[decision]
+        title_parts = [str(event.get("tool") or "tool")]
+        if event.get("filter"):
+            title_parts.append(f"filter: {event['filter']}")
+        reasons = event.get("reasons")
+        if isinstance(reasons, list) and reasons:
+            title_parts.append(", ".join(str(reason) for reason in reasons))
+        title_parts.append(_POLICY_SOURCES.get(source, source or "policy"))
         latency = event.get("latency_ms")
-        subtitle_parts = [str(event.get("tool") or "tool"), source]
-        subtitle_parts.extend(
-            f"{name}: {event[name]}"
-            for name in ("action", "chain")
-            if event.get(name) in {"allow", "deny", "review", "unavailable"}
-        )
-        if isinstance(latency, (int, float)):
-            subtitle_parts.append(f"{latency:g} ms")
+        if source == "validator" and isinstance(latency, (int, float)):
+            title_parts.append(f"{latency:g} ms")
         failures = event.get("validator_failures")
         if isinstance(failures, list) and failures:
             label_reason = "; ".join(str(item) for item in failures[-2:])
-            subtitle_parts.append(
+            title_parts.append(
                 f"validator {'retried' if decision != 'unavailable' else 'failed'}: {label_reason}"
             )
         tool = str(event.get("tool") or "")
-        label = {
-            "allow": "Policy ✓",
-            "review": "Policy: review",
-            "deny": "Policy: deny",
-            "unavailable": "Policy unavailable",
-        }[decision]
-        objected = [
-            name
-            for name in ("action", "chain")
-            if event.get(name) in {"deny", "review", "unavailable"}
-        ]
-        if decision in {"review", "deny"} and objected:
-            # "chain" means the call itself passed and the run's history did not.
-            label += " · " + ", ".join(objected)
+        if awaiting:
+            label = "Waiting for you" if event.get("approvals") != "operator" else "Waiting for the operator"
+        elif source == "user":
+            label = "Allowed by you" if decision == "allow" else "Declined by you"
+        elif source == "no_answer":
+            label = "Not answered"
+        elif source == "filter" and decision == "deny":
+            label = "Blocked by filter"
+        else:
+            label = {
+                "allow": "Policy ✓",
+                "review": "Policy: review",
+                "deny": "Policy: deny",
+                "unavailable": "Policy unavailable",
+            }[decision]
         if shadow and decision != "allow":
             label += " · shadow"
-        badge = {
-            "tone": tone,
-            "policy": {
-                "decision": decision,
-                "label": label,
-                "title": " · ".join(subtitle_parts),
-            },
+        policy: dict[str, Any] = {
+            "decision": decision,
+            "label": label,
+            "title": " · ".join(title_parts),
         }
+        if awaiting:
+            policy["approval_id"] = event["approval_id"]
+            policy["approvals"] = event.get("approvals") or "user"
+        badge = {"tone": tone, "policy": policy}
         call_id = event.get("call_id")
         if isinstance(call_id, str) and call_id:
             # Parallel calls finish validation in any order, so only the id

@@ -115,7 +115,7 @@ export class AccountsDrawer {
         ? h(
             "table.adminTable",
             {},
-            h("thead", {}, h("tr", {}, ["User", "Tool", "Held by", "Asked", "Expires", ""].map((title) => h("th", { text: title })))),
+            h("thead", {}, h("tr", {}, ["User", "Tool", "Why", "Asked", "Expires", ""].map((title) => h("th", { text: title })))),
             h(
               "tbody",
               {},
@@ -125,8 +125,8 @@ export class AccountsDrawer {
                   {},
                   h("td", { text: review.username }),
                   h("td", {}, h("code", { text: review.tool })),
-                  // "chain" alone: the call itself passed, the run's earlier actions did not.
-                  h("td", { text: (review.objected || []).join(", ") || "—" }),
+                  // Why the policy held it: the filter's route and what it matched.
+                  h("td", { text: (review.reasons || []).join(", ") || "—" }),
                   h("td", { text: when(review.created_at) }),
                   h("td", { text: when(review.expires_at) }),
                   h(

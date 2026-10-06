@@ -34,6 +34,7 @@ from core.agent_factory import AgentFactory
 from core.config import Config
 from core.config.prompt_sections import PromptSection
 from core.context import ContextManager
+from core.factory.policy import POLICY_FILTER_KEY
 from core.managers.container_manager import ContainerManager
 from core.model_access import ModelAccess
 from core.system_store import BuilderAccess, SystemStore
@@ -580,6 +581,50 @@ class UserSpace:
             if gate is not None and gate.resolve_review(approval_id, approve=approve):
                 return True
         return False
+
+    def answer_action_review(
+        self, context_id: str, approval_id: str, *, approve: bool, remember: bool = False
+    ) -> bool:
+        """The user's answer, from the chat of *context_id*, to a call held there.
+
+        Only where the policy lets users answer (``approvals: user``), and only
+        for a review that came from this conversation. Reaches no agent tool:
+        the chat socket is the user's.
+        """
+        for factory in self.registry.built_factories().values():
+            gate = getattr(factory, "action_gate", None)
+            if gate is None or gate.config.approvals != "user":
+                continue
+            if gate.resolve_review(approval_id, approve=approve, remember=remember, context_id=context_id):
+                return True
+        return False
+
+    def policy_filters(self) -> Optional[dict[str, Any]]:
+        """The user's policy switch - every filter and the default - or None when
+        the chat runs without an action policy."""
+        policy = self.deployment.action_policy
+        if policy is None:
+            return None
+        return {
+            "default": policy.default_filter,
+            "approvals": policy.approvals,
+            "filters": [
+                {"key": key, "label": item.label, "description": item.description}
+                for key, item in policy.filters.items()
+            ],
+        }
+
+    def set_policy_filter(self, context_id: str, name: str) -> bool:
+        """Run conversation *context_id* under filter *name* from now on, its
+        running turn included. False for a filter the policy does not offer."""
+        policy = self.deployment.action_policy
+        if policy is None or name not in policy.filters:
+            return False
+        self.conversations.update_context_metadata(context_id, {POLICY_FILTER_KEY: name})
+        for factory in self.registry.built_factories().values():
+            if getattr(factory, "action_gate", None) is not None:
+                factory.set_policy_filter(context_id, name)
+        return True
 
     # -- lifecycle -----------------------------------------------------------
     @property

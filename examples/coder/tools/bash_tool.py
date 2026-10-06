@@ -236,3 +236,10 @@ from utils.tool_isolation import CONTAINER as _CONTAINER  # noqa: E402
 TOOL_ISOLATION = {
     "bash_tool": _CONTAINER,
 }
+
+# What these tools do (utils.tool_effects): the shell command is in `command`
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "bash_tool": _effects.run("command", "working_dir"),
+}

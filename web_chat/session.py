@@ -594,6 +594,12 @@ class ChatSession:
         if payload.get("action") == "attach":
             await self._attach()
             return
+        if payload.get("action") == "policy_filter":
+            await self._set_policy_filter(payload.get("filter"))
+            return
+        if payload.get("action") == "policy_review":
+            await self._answer_review(payload)
+            return
         if getattr(self.space, "restart_pending", False):
             await self.send({"type": "error", "content": "Server restart in progress. Please send this message again when it is ready."})
             if not self._turns.is_claimed(self.context_id):
@@ -611,6 +617,9 @@ class ChatSession:
         attached = payload.get("images")
         if not text and not attached:
             return
+        if isinstance(payload.get("policy_filter"), str):
+            # The switch as the user left it: the turn this message starts runs under it.
+            self.space.set_policy_filter(self.context_id, payload["policy_filter"])
         try:
             # Decoding and re-encoding is CPU work: off the loop, so Stop and
             # the other commands stay responsive.
@@ -630,6 +639,22 @@ class ChatSession:
         await self._start(
             text, payload.get("system_key"), payload.get("agent_key"), images=images, edit_of=edit_of
         )
+
+    async def _set_policy_filter(self, name: Any) -> None:
+        """The user moved the policy switch: this conversation and its running turn follow."""
+        ok = isinstance(name, str) and self.space.set_policy_filter(self.context_id, name)
+        await self.send({"type": "policy_filter", "filter": name if ok else None, "ok": bool(ok)})
+
+    async def _answer_review(self, payload: dict[str, Any]) -> None:
+        """The user allowed or declined a call held in this conversation."""
+        approval_id = payload.get("approval_id")
+        ok = isinstance(approval_id, str) and self.space.answer_action_review(
+            self.context_id,
+            approval_id,
+            approve=payload.get("approve") is True,
+            remember=payload.get("remember") is True,
+        )
+        await self.send({"type": "policy_review", "approval_id": approval_id, "ok": bool(ok)})
 
     def _background(self, coroutine: Any) -> None:
         """Run *coroutine* beside the command loop, owned by the space."""

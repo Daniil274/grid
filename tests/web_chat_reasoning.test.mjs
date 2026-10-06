@@ -213,3 +213,33 @@ test("typed markdown is rendered through the markdown renderer and truncation is
   assert.match(row.find("payload__body--prose").innerHTML, /<strong>safe<\/strong>/);
   assert.equal(row.find("payload__notice").textContent, "Truncated · original 40000 bytes");
 });
+
+test("a call held for the user offers Allow and Decline until the answer lands", () => {
+  const answers = [];
+  document.dispatchEvent = (event) => answers.push(event.detail);
+  const panel = createReasoningPanel();
+  const held = { decision: "review", label: "Waiting for you", title: "file_write · secret: .env", approval_id: "a1", approvals: "user" };
+  panel.upsert(step("s1", { title: "file_write", status: "running", duration_ms: null, policy: held }));
+
+  const approval = topList(panel).find("step__approval");
+  assert.equal(approval.hidden, false);
+  const buttons = approval.querySelectorAll("button");
+  assert.deepEqual(buttons.map((button) => button.textContent), ["Allow", "Allow for this turn", "Decline"]);
+  buttons[1].click();
+  assert.deepEqual(answers, [{ approvalId: "a1", approve: true, remember: true }]);
+  assert.ok(buttons.every((button) => button.disabled));
+
+  // The server's next event for the call replaces the badge: the buttons go.
+  panel.upsert(step("s1", { title: "file_write", policy: { decision: "allow", label: "Allowed by you", title: "" } }));
+  assert.equal(approval.hidden, true);
+  assert.equal(approval.querySelectorAll("button").length, 0);
+});
+
+test("a call held for the operator shows no buttons to the user", () => {
+  const panel = createReasoningPanel();
+  const held = { decision: "review", label: "Waiting for the operator", title: "", approval_id: "a2", approvals: "operator" };
+  panel.upsert(step("s1", { title: "deploy", status: "running", duration_ms: null, policy: held }));
+  const approval = topList(panel).find("step__approval");
+  assert.equal(approval.hidden, false);
+  assert.equal(approval.querySelectorAll("button").length, 0);
+});

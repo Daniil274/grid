@@ -171,8 +171,42 @@ def test_policy_decision_is_attached_to_action_without_extra_row():
     assert step["title"] == "file_delete"
     assert step["tone"] == "warning"
     assert step["policy"]["decision"] == "review"
-    assert step["policy"]["label"] == "Policy: review · action"
+    assert step["policy"]["label"] == "Policy: review"
     assert "file_delete" in step["policy"]["title"]
+    assert "approval_id" not in step["policy"]
+
+
+def test_a_call_held_for_the_user_carries_its_approval_and_is_replaced_by_the_answer():
+    harness = Harness()
+    harness.feed(tool_called("file_write", "call-1", '{"filepath": ".env"}'))
+    held = {
+        "rule": "policy_check",
+        "decision": "review",
+        "mode": "enforce",
+        "tool": "file_write",
+        "call_id": "call-1",
+        "source": "filter",
+        "filter": "balanced",
+        "reasons": ["write: allow", "secret: .env"],
+        "awaiting": True,
+        "approval_id": "approval-1",
+        "approvals": "user",
+    }
+    harness.observer.handle_policy_event(held)
+
+    policy = harness.steps()[0]["policy"]
+    assert policy["label"] == "Waiting for you"
+    assert policy["approval_id"] == "approval-1" and policy["approvals"] == "user"
+    assert "secret: .env" in policy["title"] and "filter: balanced" in policy["title"]
+    assert harness.observer.policy_blocks == 0
+
+    harness.observer.handle_policy_event(
+        {**held, "decision": "deny", "source": "user", "awaiting": False, "approval_id": None}
+    )
+    policy = harness.steps()[0]["policy"]
+    assert policy["label"] == "Declined by you"
+    assert "approval_id" not in policy
+    assert harness.observer.policy_blocks == 1
 
 
 def test_policy_execution_audit_does_not_create_a_duplicate_step():

@@ -10,11 +10,18 @@ import importlib
 import pkgutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from .file_tools import FILE_TOOLS, TOOL_ISOLATION as _FILE_ISOLATION, get_file_tools
-from .git_tools import GIT_TOOLS, TOOL_ISOLATION as _GIT_ISOLATION, TOOL_REQUIREMENTS as _GIT_REQUIREMENTS, get_git_tools
+from .file_tools import FILE_TOOLS, TOOL_EFFECTS as _FILE_EFFECTS, TOOL_ISOLATION as _FILE_ISOLATION, get_file_tools
+from .git_tools import (
+    GIT_TOOLS,
+    TOOL_EFFECTS as _GIT_EFFECTS,
+    TOOL_ISOLATION as _GIT_ISOLATION,
+    TOOL_REQUIREMENTS as _GIT_REQUIREMENTS,
+    get_git_tools,
+)
 
 _eager_requirements: Dict[str, Any] = dict(_GIT_REQUIREMENTS)
 _eager_isolation: Dict[str, str] = {**_FILE_ISOLATION, **_GIT_ISOLATION}
+_eager_effects: Dict[str, Any] = {**_FILE_EFFECTS, **_GIT_EFFECTS}
 
 # ============================================================================
 # AUTO-DISCOVERY: find all *_tools.py in this package (tools/)
@@ -47,6 +54,7 @@ _loaded_modules: Dict[str, Dict] = {}  # {mod_path: tool_dict}
 _load_errors: Dict[str, str] = {}  # {mod_path: "ErrorType: message"}
 _requirements: Dict[str, Any] = {}  # {tool_name: Requires}
 _isolation: Dict[str, str] = {}  # {tool_name: where it acts (utils.tool_isolation)}
+_effects: Dict[str, Any] = {}  # {tool_name: what it does (utils.tool_effects)}
 _all_loaded = False
 
 
@@ -58,6 +66,7 @@ def _load_module(mod_path: str) -> Dict:
             _loaded_modules[mod_path] = getattr(mod, dict_attr, {})
             _requirements.update(getattr(mod, "TOOL_REQUIREMENTS", None) or {})
             _isolation.update(getattr(mod, "TOOL_ISOLATION", None) or {})
+            _effects.update(getattr(mod, "TOOL_EFFECTS", None) or {})
         except Exception as exc:
             _loaded_modules[mod_path] = {}
             _load_errors[mod_path] = f"{type(exc).__name__}: {exc}"
@@ -90,6 +99,19 @@ def tool_isolation(name: str, project_loader: Optional[Any] = None) -> Optional[
         return _eager_isolation[lookup]
     _load_all_modules()
     return _isolation.get(lookup)
+
+
+def tool_effect(name: str, project_loader: Optional[Any] = None) -> Optional[Any]:
+    """What tool *name* does (utils.tool_effects.Effect), as the tool itself
+    resolves: a project tool of *project_loader* first, then a shared tool.
+    None when the tool declares nothing."""
+    if project_loader is not None and project_loader.has_tool(name):
+        return project_loader.effects.get(name)
+    lookup = TOOL_ALIASES.get(name, name)
+    if lookup in _eager_effects:
+        return _eager_effects[lookup]
+    _load_all_modules()
+    return _effects.get(lookup)
 
 
 def _load_all_modules() -> None:

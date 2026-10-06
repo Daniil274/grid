@@ -125,3 +125,10 @@ from utils.tool_isolation import WORKSPACE as _WORKSPACE  # noqa: E402
 TOOL_ISOLATION = {
     "propose_change": _WORKSPACE,
 }
+
+# What these tools do (utils.tool_effects), for the action policy
+from utils import tool_effects as _effects  # noqa: E402
+
+TOOL_EFFECTS = {
+    "propose_change": _effects.write(),
+}

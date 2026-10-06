@@ -84,8 +84,7 @@ export class ChatController {
     if (this.isStreaming) {
       // The agent is working: the server delivers the message now, at the
       // agent's next step or after the turn; `delivery` null lets it decide.
-      const { systemKey, agentKey } = this._store.get();
-      this._connection?.send(text, { system_key: systemKey, agent_key: agentKey }, images, null, delivery);
+      this._connection?.send(text, this._selection(), images, null, delivery);
       return;
     }
     await this._begin({ text, spoken, images });
@@ -324,13 +323,38 @@ export class ChatController {
     try {
       this._connection = await ChatConnection.open(contextId);
       this._bind(this._connection, turn);
-      if (text === null) this._connection.resume();
-      else this._connection.send(text, { system_key: systemKey, agent_key: agentKey }, images, editOf);
+      if (text === null) {
+        // Continue has no message to carry the switch: it goes first.
+        const { policyFilter } = this._store.get();
+        if (policyFilter) this._connection.policyFilter(policyFilter);
+        this._connection.resume();
+      } else this._connection.send(text, this._selection(), images, editOf);
     } catch (error) {
       turn.failed = true;
       message.setFailed(error.message);
       this._settle(turn);
     }
+  }
+
+  /** Where the next message runs, and under which policy filter. */
+  _selection() {
+    const { systemKey, agentKey, policyFilter } = this._store.get();
+    return { system_key: systemKey, agent_key: agentKey, ...(policyFilter ? { policy_filter: policyFilter } : {}) };
+  }
+
+  /** The policy switch moved: the next turns, and the one running now, follow it. */
+  setPolicyFilter(filter) {
+    this._store.set({ policyFilter: filter });
+    this._connection?.policyFilter(filter);
+  }
+
+  /** Answer a call the policy holds in this chat for the user's permission. */
+  answerReview(approvalId, { approve, remember = false }) {
+    if (!this._connection) {
+      toast("This request is no longer waiting for an answer.", { tone: "error" });
+      return;
+    }
+    this._connection.answerReview(approvalId, { approve, remember });
   }
 
   /**
@@ -483,6 +507,9 @@ export class ChatController {
         toast(decidedBy === "user" ? how : `${how} (decided: ${decidedBy})`, { timeout: 4000 });
       })
       .on("queue", ({ items }) => this._store.set({ queue: items }))
+      .on("policy_review", ({ ok }) => {
+        if (!ok) toast("This request is no longer waiting for an answer.", { tone: "error" });
+      })
       .on("steered", ({ text, images }) => {
         this._transcript.addBefore(message, { role: "user", content: text, images: images ?? [], timestamp: Date.now() });
       })
