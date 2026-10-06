@@ -71,18 +71,18 @@ async def test_orchestrate_accepts_executor_tools_as_json_string():
     tool = ORCHESTRATOR_TOOLS["orchestrate"]
     out = await tool.on_invoke_tool(
         ctx,
-        input='{"task": "goal", "executor_tools": ["filesystem","git","terminal"], "model_key": "None"}'
+        input='{"task": "goal", "executor_tools": ["filesystem","git","terminal"]}'
     )
     assert "DRAFT" in out
 
 
 @pytest.mark.asyncio
-async def test_orchestrate_uses_tool_default_model_when_model_key_omitted():
+async def test_orchestrate_runs_the_executor_on_the_tools_first_model():
     factory = Mock()
     factory.get_active_context_id = Mock(return_value="ctx-12345678")
     factory.config = Mock()
     factory.config.get_tool.return_value = SimpleNamespace(
-        env_vars={"DEFAULT_MODEL": "worker-model"}
+        models=["worker-model"]
     )
     factory.resolve_model_key = Mock(side_effect=lambda key: key or "coordinator-model")
     fake_agent = Mock()
@@ -101,22 +101,20 @@ async def test_orchestrate_uses_tool_default_model_when_model_key_omitted():
     assert factory.create_dynamic_agent.await_args.kwargs["model_key"] == "worker-model"
 
 
+def test_orchestrate_does_not_let_the_caller_pick_the_model():
+    schema = ORCHESTRATOR_TOOLS["orchestrate"].params_json_schema
+    assert "model_key" not in schema["properties"]
+    assert schema["additionalProperties"] is False
+
+
 @pytest.mark.asyncio
-async def test_orchestrate_falls_back_to_tool_default_for_unknown_model_key():
+async def test_orchestrate_ignores_a_model_key_from_the_caller():
     factory = Mock()
     factory.get_active_context_id = Mock(return_value="ctx-12345678")
     factory.config = Mock()
     factory.config.get_tool.return_value = SimpleNamespace(
-        env_vars={"DEFAULT_MODEL": "worker-model"}
+        models=["worker-model"]
     )
-
-    def get_model(key):
-        if key == "worker-model":
-            return SimpleNamespace()
-        raise Exception("unknown model")
-
-    factory.config.get_model.side_effect = get_model
-    factory.config.get_agent.side_effect = Exception("unknown agent")
     factory.resolve_model_key = Mock(side_effect=lambda key: key or "coordinator-model")
     fake_agent = Mock()
     fake_agent.name = "fake_agent"
@@ -129,12 +127,12 @@ async def test_orchestrate_falls_back_to_tool_default_for_unknown_model_key():
     tool = ORCHESTRATOR_TOOLS["orchestrate"]
     out = await tool.on_invoke_tool(
         ctx,
-        input='{"task": "goal", "model_key": "stale-model"}',
+        input='{"task": "goal", "model_key": "expensive-model"}',
     )
 
-    assert "DRAFT" in out
-    factory.create_dynamic_agent.assert_awaited_once()
+    factory.resolve_model_key.assert_called_once_with("worker-model")
     assert factory.create_dynamic_agent.await_args.kwargs["model_key"] == "worker-model"
+    assert '"model_key": "worker-model"' in out
 
 
 @pytest.mark.asyncio
@@ -282,7 +280,7 @@ async def test_orchestrate_reports_tools_the_executor_did_not_get():
 
 
 @pytest.mark.asyncio
-async def test_orchestrate_gives_the_executor_the_callers_models_as_fallbacks():
+async def test_orchestrate_does_not_give_the_executor_the_callers_models():
     factory = Mock()
     factory.get_active_context_id = Mock(return_value="ctx-12345678")
     factory.config = Mock()
@@ -299,6 +297,83 @@ async def test_orchestrate_gives_the_executor_the_callers_models_as_fallbacks():
 
     await ORCHESTRATOR_TOOLS["orchestrate"].on_invoke_tool(ctx, input='{"task": "goal"}')
 
-    factory.config.get_agent.assert_called_with("coordinator")
-    kwargs = factory.create_dynamic_agent.await_args.kwargs
-    assert kwargs["fallback_model_keys"] == ["gpt-6.1-sol", "glm-latest"]
+    assert factory.create_dynamic_agent.await_args.kwargs["fallback_model_keys"] == []
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_falls_back_only_to_the_tools_other_models():
+    factory = Mock()
+    factory.get_active_context_id = Mock(return_value="ctx-12345678")
+    factory.config = Mock()
+    factory.config.get_tool.return_value = SimpleNamespace(
+        models=["worker-model", "spare-a", "spare-b"]
+    )
+    factory.resolve_model_key = Mock(side_effect=lambda key: key)
+    fake_agent = Mock()
+    fake_agent.name = "fake_agent"
+    factory.create_dynamic_agent = AsyncMock(return_value=fake_agent)
+    factory.run_agent_object_simple = AsyncMock(return_value="DRAFT")
+
+    ctx = Mock()
+    ctx.context = Mock(factory=factory, user_id="user-123", agent_id="coordinator")
+
+    await ORCHESTRATOR_TOOLS["orchestrate"].on_invoke_tool(ctx, input='{"task": "goal"}')
+
+    assert factory.create_dynamic_agent.await_args.kwargs["fallback_model_keys"] == ["spare-a", "spare-b"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_reports_the_model_the_executor_runs_on():
+    factory = Mock()
+    factory.get_active_context_id = Mock(return_value="ctx-12345678")
+    factory.config = Mock()
+    factory.config.get_tool.return_value = SimpleNamespace(
+        models=["worker-model", "spare"]
+    )
+    factory.resolve_model_key = Mock(side_effect=lambda key: key)
+    fake_agent = Mock()
+    fake_agent.name = "fake_agent"
+    # worker-model had no login, so the factory built the executor on the spare.
+    fake_agent._grid_model_key = "spare"
+    fake_agent._grid_missing_tools = []
+    factory.create_dynamic_agent = AsyncMock(return_value=fake_agent)
+    factory.run_agent_object_simple = AsyncMock(return_value="DRAFT")
+
+    ctx = Mock()
+    ctx.context = Mock(factory=factory, user_id="user-123")
+
+    out = json.loads(await ORCHESTRATOR_TOOLS["orchestrate"].on_invoke_tool(ctx, input='{"task": "goal"}'))
+
+    assert out["model_key"] == "spare"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_refuses_a_model_the_config_does_not_have():
+    factory = Mock()
+    factory.get_active_context_id = Mock(return_value="ctx-12345678")
+    factory.config = Mock()
+    factory.config.get_tool.return_value = SimpleNamespace(models=["worker-model", "typo-model"])
+
+    def get_model(key):
+        if key == "worker-model":
+            return SimpleNamespace()
+        raise Exception("unknown model")
+
+    factory.config.get_model.side_effect = get_model
+    factory.create_dynamic_agent = AsyncMock()
+
+    ctx = Mock()
+    ctx.context = Mock(factory=factory, user_id="user-123")
+
+    out = await ORCHESTRATOR_TOOLS["orchestrate"].on_invoke_tool(ctx, input='{"task": "goal"}')
+
+    assert "typo-model" in out
+    factory.create_dynamic_agent.assert_not_awaited()
+
+
+def test_tool_config_takes_the_orchestrate_models_as_a_list_or_one_key():
+    from schemas.schemas import ToolConfig
+
+    assert ToolConfig(type="function", models=["a", "b"]).models == ["a", "b"]
+    assert ToolConfig(type="function", models="a").models == "a"
+    assert ToolConfig(type="function").models is None

@@ -363,6 +363,9 @@ class AgentTurn:
             self._recorder.fail(str(exc))
             self._queue.put_nowait({"type": "error", "content": str(exc)})
         finally:
+            drop = getattr(self._observer, "drop_unwritten_calls", None)
+            if drop is not None:
+                drop()
             self._queue.put_nowait({"type": _FINISHED})
 
     def _warn_about_tools(self, resolution: Resolution, label: str) -> None:

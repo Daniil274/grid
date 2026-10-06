@@ -25,6 +25,7 @@ from openai import (
 )
 
 from core.fallback_model import AllModelsFailedError
+from core.bounded_model import ModelRequestLimit
 
 logger = logging.getLogger("grid.agent_factory")
 
@@ -84,7 +85,7 @@ def is_transient_message(message: str) -> bool:
 
 def is_retriable(exc: BaseException) -> bool:
     """Whether a failed model call is worth another attempt."""
-    if isinstance(exc, AllModelsFailedError):
+    if isinstance(exc, (AllModelsFailedError, ModelRequestLimit)):
         return False
     if isinstance(exc, _TRANSIENT_ERRORS):
         return True

@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+
+from core.bounded_model import BoundedModel
 from agents.models.interface import ModelTracing
 
 from core import model_access
@@ -99,6 +101,8 @@ async def test_a_plan_model_is_signed_with_the_users_token_and_asks_for_what_the
     model, model_config = models.sdk_model("gpt")
     settings = models.settings(model_config)
     assert settings.max_tokens is None and settings.store is False
+    # The request carries no cap, so max_tokens is kept on this side.
+    assert isinstance(model, BoundedModel) and model.max_output_tokens == 4000
 
     events = [
         event
@@ -136,3 +140,18 @@ def test_a_keyed_provider_is_unchanged_and_a_plan_provider_refuses_the_environme
 
     with pytest.raises(CredentialError, match="ChatGPT"):
         models.sdk_model("gpt")  # unmanaged: no signed-in user, and never an API key for it
+
+
+def test_a_response_timeout_bounds_a_keyed_model_and_none_leaves_it_bare(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(CONFIG)
+    config = Config(str(path))
+    models = ModelProvider(config, SimpleNamespace(access=ModelAccess()), None)
+
+    bare, _ = models.sdk_model("other")
+    assert not isinstance(bare, BoundedModel)
+
+    config.get_model("other").response_timeout = 600
+    bounded, _ = models.sdk_model("other")
+    assert isinstance(bounded, BoundedModel)
+    assert (bounded.timeout, bounded.max_output_tokens) == (600, None)  # the provider caps the output

@@ -228,6 +228,7 @@ class TurnRunner:
         action_depth: int = 0,
         user_id: Optional[str] = None,
         run_control: Optional[Any] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         """Run an Agent instance in its own session and return its answer text.
 
@@ -246,6 +247,10 @@ class TurnRunner:
 
         ``user_id`` and ``run_control`` come from the caller's run: the agent acts
         for the same user, and the user's Stop reaches it too.
+
+        ``timeout`` bounds the whole run in seconds; past it the caller gets
+        what the agent did so far. None is ``settings.agent_timeout``, as for a
+        turn; 0 is no limit, for a caller that keeps a deadline of its own.
         """
         observer = stream_observer or self._stream_observer
         agent_label = getattr(agent, "name", None) or "dynamic-agent"
@@ -273,58 +278,73 @@ class TurnRunner:
 
         attempt = 0
         recovered = False
+        result: Any = None
+        # settings.agent_timeout bounds the whole run, as it bounds a turn: a
+        # model that never finishes its answer must not hold the caller forever.
+        if timeout is None:
+            timeout = self.config.get_agent_timeout(agent_label)
+        deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
         set_current_factory(self)
         try:
-            while True:
-                result = get_runner().run_streamed(
-                    starting_agent=agent,
-                    input=input_message,
-                    context=run_ctx,
-                    session=session,
-                    max_turns=runner_max_turns(self.config.get_max_turns(agent_label)),
-                    run_config=self._run_config(None),
-                )
-                try:
-                    fragments = await self._consume_stream(
-                        result,
-                        observer=observer,
-                        agent_key=agent_label,
-                        action_state=action_state,
+            async with deadline:
+                while True:
+                    result = get_runner().run_streamed(
+                        starting_agent=agent,
+                        input=input_message,
+                        context=run_ctx,
+                        session=session,
+                        max_turns=runner_max_turns(self.config.get_max_turns(agent_label)),
+                        run_config=self._run_config(None),
                     )
-                except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
-                    if (
-                        not recovered
-                        and session is not None
-                        and isinstance(exc, ModelBehaviorError)
-                        and "did not produce a final response" in str(exc)
-                        and not getattr(run_control, "stop_requested", False)
-                    ):
-                        # An empty answer after tool calls, as in a top-level
-                        # turn: the session keeps the tool results, so ask once
-                        # for the report instead of losing the step.
-                        recovered = True
-                        logger.warning("Agent %s: recovering a missing final answer once", agent_label)
-                        input_message = _MISSING_FINAL_ANSWER
+                    try:
+                        fragments = await self._consume_stream(
+                            result,
+                            observer=observer,
+                            agent_key=agent_label,
+                            action_state=action_state,
+                        )
+                    except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
+                        if (
+                            not recovered
+                            and session is not None
+                            and isinstance(exc, ModelBehaviorError)
+                            and "did not produce a final response" in str(exc)
+                            and not getattr(run_control, "stop_requested", False)
+                        ):
+                            # An empty answer after tool calls, as in a top-level
+                            # turn: the session keeps the tool results, so ask once
+                            # for the report instead of losing the step.
+                            recovered = True
+                            logger.warning("Agent %s: recovering a missing final answer once", agent_label)
+                            input_message = _MISSING_FINAL_ANSWER
+                            continue
+                        # Not transient: retrying would repeat the work. The caller
+                        # gets what the agent did so far.
+                        logger.warning("Agent %s stopped: %s: %s", agent_label, type(exc).__name__, exc)
+                        return interrupted_run_report(result, f"Agent {agent_label}", exc)
+                    except Exception as exc:
+                        if not is_retriable(exc):
+                            raise
+                        attempt += 1
+                        delay = retry_backoff_seconds(attempt)
+                        logger.warning(
+                            "Retriable failure of agent %s (attempt %d, retry in %.1fs): %s",
+                            agent_label,
+                            attempt,
+                            delay,
+                            exc,
+                        )
+                        await asyncio.sleep(delay)
                         continue
-                    # Not transient: retrying would repeat the work. The caller
-                    # gets what the agent did so far.
-                    logger.warning("Agent %s stopped: %s: %s", agent_label, type(exc).__name__, exc)
-                    return interrupted_run_report(result, f"Agent {agent_label}", exc)
-                except Exception as exc:
-                    if not is_retriable(exc):
-                        raise
-                    attempt += 1
-                    delay = retry_backoff_seconds(attempt)
-                    logger.warning(
-                        "Retriable failure of agent %s (attempt %d, retry in %.1fs): %s",
-                        agent_label,
-                        attempt,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                return self._final_text(result, fragments)
+                    return self._final_text(result, fragments)
+        except TimeoutError:
+            if timeout <= 0 or not deadline.expired():
+                raise
+            logger.warning("Agent %s stopped after %s s", agent_label, timeout)
+            return interrupted_run_report(
+                result, f"Agent {agent_label}",
+                TimeoutError(f"no answer within the agent timeout ({timeout:g} s)"),
+            )
         finally:
             reset_current_factory()
 

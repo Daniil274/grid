@@ -614,3 +614,64 @@ def test_left_out_tool_outputs_are_one_step_with_the_largest_count():
     [step] = harness.steps()
     assert step["kind"] == "compact" and step["title"] == "Context trimmed"
     assert step["subtitle"] == "5 old tool outputs left out of the request"
+
+
+def call_started(name: str, call_id: str, item_id: str) -> RawResponsesStreamEvent:
+    item = SimpleNamespace(type="function_call", id=item_id, call_id=call_id, name=name)
+    return RawResponsesStreamEvent(data=SimpleNamespace(type="response.output_item.added", item=item))
+
+
+def call_written(item_id: str, text: str) -> RawResponsesStreamEvent:
+    return RawResponsesStreamEvent(
+        data=SimpleNamespace(type="response.function_call_arguments.delta", item_id=item_id, delta=text)
+    )
+
+
+def test_a_call_shows_while_its_arguments_are_written_and_keeps_its_row():
+    harness = Harness()
+    harness.feed(call_started("file_write", "call-1", "fc_1"))
+    (writing,) = harness.steps()
+    assert writing["status"] == StepStatus.RUNNING.value
+    assert writing["subtitle"] == "writing the call…"
+
+    harness.feed(*[call_written("fc_1", "x" * 1000) for _ in range(5)])
+    (writing,) = harness.steps()
+    assert writing["subtitle"] == "writing the call: 4,000 characters so far"
+    assert harness.tokens == []  # arguments never reach the answer
+
+    harness.feed(
+        tool_called("file_write", "call-1", '{"filepath": "report.md", "content": "..."}'),
+        tool_output("call-1", "written"),
+    )
+    (step,) = harness.steps()
+    assert step["id"] == writing["id"]
+    assert step["status"] == StepStatus.DONE.value
+    assert step["body"] == "written"
+
+
+def test_a_call_whose_writing_never_finished_does_not_spin_forever():
+    harness = Harness()
+    child = harness.observer.nested("Executor", call_id="call-0")
+    child.handle_event(call_started("file_write", "call-1", "fc_1"))
+    child.handle_event(call_written("fc_1", "x" * 10))
+    child.finish(error="model 'm' generated more than its max_tokens")
+
+    block, writing = harness.steps()
+    assert block["status"] == StepStatus.ERROR.value
+    assert writing["status"] == StepStatus.ERROR.value
+    assert writing["parent_id"] == block["id"]
+
+
+def test_a_subagent_call_written_first_becomes_its_block():
+    harness = Harness()
+    harness.feed(call_started("orchestrate", "call-1", "fc_1"), call_written("fc_1", '{"task": "a"}'))
+    child = harness.observer.nested("Executor", call_id="call-1")
+    harness.feed(tool_called("orchestrate", "call-1", '{"task": "a"}'))
+    child.handle_event(tool_called("bash_tool", "call-2", '{"command": "ls"}'))
+    child.finish()
+    harness.feed(tool_output("call-1", "report"))
+
+    block, nested = harness.steps()
+    assert block["kind"] == StepKind.AGENT.value
+    assert block["body"] == "report"
+    assert nested["parent_id"] == block["id"]
