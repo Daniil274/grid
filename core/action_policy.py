@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import threading
 import time
 from collections import deque
@@ -701,8 +702,22 @@ class ActionGate:
             if root is None:
                 return None
             try:
-                resolved = Path(resolve_agent_path(raw, factory))
-                return resolved.relative_to(root).as_posix()
+                from utils.path_utils import CONTAINER_WORKDIR
+
+                value = raw.replace("\\", "/")
+                candidate = Path(value)
+                if candidate.is_absolute():
+                    # A container path is workspace-relative only for container runs.
+                    if getattr(factory, "container_id", None) and (
+                        value == CONTAINER_WORKDIR or value.startswith(CONTAINER_WORKDIR + "/")
+                    ):
+                        candidate = root / value[len(CONTAINER_WORKDIR):].lstrip("/")
+                    elif candidate != root and root not in candidate.parents:
+                        return None
+                else:
+                    candidate = root / candidate
+                normalized = Path(os.path.abspath(candidate))
+                return normalized.relative_to(root).as_posix()
             except Exception:
                 return None
 
