@@ -3,13 +3,13 @@ Git tools for agents: read-only commit history (git_log).
 """
 
 import subprocess
-import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from agents import function_tool, RunContextWrapper
 from utils.logger import Logger
 from utils.tool_requirements import Requires
 from utils.path_utils import (
+    container_path,
     display_agent_path_from_ctx,
     resolve_agent_path_from_ctx,
     sanitize_text_for_agent_from_ctx,
@@ -38,40 +38,10 @@ def log_tool_result(name_or_operation, *, result: str | None = None, error: str 
     else:
         pretty_logger.tool_result({"name": name_or_operation, "args": {}}, result=result, error=error)
 
-# Container path for workspace (Docker forbids bind to "/"). Agent sees root as "/".
-_CONTAINER_ROOT = "/workspace"
-
 def _map_path_to_container(path: Optional[str], context: Any) -> str:
-    """Map a host or agent path to the container path (agent root is "/", container uses _CONTAINER_ROOT)."""
-    if not path or path == "." or path == "/":
-        return _CONTAINER_ROOT
-
-    if path.startswith(_CONTAINER_ROOT + "/") or path == _CONTAINER_ROOT:
-        return path
-
-    # If it's an absolute host path (e.g. /home/user/grid), map to container root first (avoid /workspace/home/user/grid).
-    if os.path.isabs(path):
-        try:
-            if hasattr(context, 'context') and hasattr(context.context, 'factory'):
-                host_wd = context.context.factory.config.get_working_directory()
-                norm_path = os.path.normpath(path)
-                norm_host_wd = os.path.normpath(host_wd)
-                if norm_path.startswith(norm_host_wd):
-                    rel = os.path.relpath(norm_path, norm_host_wd)
-                    if rel == ".":
-                        return _CONTAINER_ROOT
-                    return (Path(_CONTAINER_ROOT) / rel).as_posix()
-        except Exception:
-            pass
-
-    # Agent may send paths as "/file" (root is "/")
-    if path.startswith("/"):
-        return (_CONTAINER_ROOT + path).replace("//", "/")
-
-    if not os.path.isabs(path):
-        return (Path(_CONTAINER_ROOT) / path).as_posix()
-
-    return _CONTAINER_ROOT
+    """The container path of a host path :func:`_resolve_git_directory` returned."""
+    factory = getattr(getattr(context, "context", None), "factory", None)
+    return container_path(path, factory)
 
 def _run_git_command(command: List[str], cwd: Optional[str] = None, container_id: Optional[str] = None, context: Any = None) -> Dict[str, Any]:
     """

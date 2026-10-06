@@ -269,7 +269,7 @@ tools:
     type: "function"
     description: "Загружает веб-страницу и конвертирует её в markdown."
     prompt_addition: |
-      `web_fetch(url, render_js=false, timeout=30)`
+      `web_fetch(url, timeout=30)`
       Используй для чтения документации и веб-страниц. Работает только с `http://` и `https://`.
 
   web_search:

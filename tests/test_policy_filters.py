@@ -101,7 +101,11 @@ def test_windows_workspace_alias_is_kept_when_locator_proves_containment():
 
 def test_windows_secret_basename_and_command_path_filters():
     assert matches(r"C:\Users\me\.env", [".env"])
-    assert ".env" in command_paths(r"cat C:\Users\me\.env")
+    # The path comes through whole - backslashes are not shell escapes on
+    # Windows - and its file name is what the secret glob matches.
+    paths = command_paths(r"cat C:\Users\me\.env")
+    assert r"C:\Users\me\.env" in paths
+    assert any(matches(path, [".env"]) for path in paths)
 
 
 def test_real_locator_factory_rejects_foreign_windows_paths_and_preserves_workspace_paths(tmp_path):

@@ -12,10 +12,12 @@ import json
 import os
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from agents import function_tool, RunContextWrapper
-from utils.path_utils import resolve_agent_path_from_ctx, sanitize_text_for_agent_from_ctx
+from pydantic import BaseModel, ConfigDict, Field
+from utils.path_utils import container_path, resolve_agent_path_from_ctx, sanitize_text_for_agent_from_ctx
 from utils.tool_requirements import Requires
 
 logger = logging.getLogger(__name__)
@@ -63,38 +65,9 @@ def _get_container_id(context: Any) -> Optional[str]:
 _CONTAINER_ROOT = "/workspace"
 
 def _map_path_to_container(path: Optional[str], context: Any) -> str:
-    """Map a host or agent path to the container path (agent root is "/", container uses _CONTAINER_ROOT)."""
-    if not path or path == "." or path == "/":
-        return _CONTAINER_ROOT
-
-    # If it's already the container path, return it
-    if path.startswith(_CONTAINER_ROOT + "/") or path == _CONTAINER_ROOT:
-        return path
-
-    # If it's an absolute host path (e.g. /home/user/grid), map it to container root or relative under it.
-    # Must run before the generic "path.startswith("/")" branch, otherwise host path becomes /workspace/home/user/grid.
-    if os.path.isabs(path):
-        try:
-            raw = getattr(context, "context", None)
-            factory = getattr(raw, "factory", None) if raw else None
-            if factory:
-                host_wd = factory.config.get_working_directory()
-                norm_path = os.path.normpath(path)
-                norm_host_wd = os.path.normpath(host_wd)
-                if norm_path.startswith(norm_host_wd):
-                    rel = os.path.relpath(norm_path, norm_host_wd)
-                    if rel == ".":
-                        return _CONTAINER_ROOT
-                    return (Path(_CONTAINER_ROOT) / rel).as_posix()
-        except Exception:
-            pass
-
-    # Agent may send paths as "/file" (root is "/") — only for paths that are not host absolutes
-    if path.startswith("/"):
-        return (_CONTAINER_ROOT + path).replace("//", "/")
-
-    # Relative path: assume relative to container root
-    return (Path(_CONTAINER_ROOT) / path).as_posix()
+    """The container path of a host path :func:`_resolve_directory` returned."""
+    factory = getattr(getattr(context, "context", None), "factory", None)
+    return container_path(path, factory)
 
 
 def _find_bd(container_id: Optional[str] = None) -> str:
@@ -537,11 +510,29 @@ async def beads_log_read(
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
 
+def _init_args(directory: str) -> List[str]:
+    """`bd init` that adds the tracker and nothing else to the user's project.
+
+    By default bd also writes AGENTS.md, CLAUDE.md and Claude/Codex/Cursor
+    settings and hooks, installs git hooks and stages its files in the user's
+    git index; the agents reach the tracker through these tools and need none
+    of that. --setup-exclude keeps .beads/ out of git through .git/info/exclude.
+    The issue prefix is the project's own name: in a container bd would take
+    it from the mount point ("workspace").
+    """
+    args = ["init", "--init-if-missing", "--non-interactive",
+            "--skip-agents", "--skip-hooks", "--setup-exclude"]
+    name = Path(directory).name
+    if name:
+        args += ["--prefix", name]  # bd normalizes it into a valid prefix
+    return args
+
+
 @function_tool
 async def beads_init(context: RunContextWrapper, directory: str = ".") -> str:
     """
     Initialize beads (bd) in the given directory. Idempotent: safe to call if already initialized.
-    Creates .beads/ and SQLite DB so beads_ready, beads_create, etc. work in this directory.
+    Creates .beads/ and its database so beads_ready, beads_create, etc. work in this directory.
 
     Args:
         directory: Path to the project directory (default: ".")
@@ -551,8 +542,8 @@ async def beads_init(context: RunContextWrapper, directory: str = ".") -> str:
     except ValueError as exc:
         return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
-    
-    res = await _bd(["init"], cwd=directory, container_id=container_id, context=context)
+
+    res = await _bd(_init_args(directory), cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         # "already a beads database" or similar is often success for idempotent init
         if "already" in (res.get("error") or "").lower() or "already" in (res.get("output") or "").lower():
@@ -757,6 +748,120 @@ async def beads_dep(
         return f"❌ Error managing dependency: {res['error'] or res['output']}"
     return res["output"]
 
+class PlanTask(BaseModel):
+    """One task of a plan, named by a key that the plan's dependencies use."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(description="Short name for this task in the plan, e.g. 'research-api'.")
+    title: str
+    description: str = Field(description="What to do: the brief the agent will get.")
+    acceptance: str = Field(default="", description="How to tell it is done.")
+    depends_on: List[str] = Field(
+        default_factory=list,
+        description="Keys of tasks of this plan, or ids of existing tasks, that must be done first.",
+    )
+    priority: int = Field(default=2, ge=0, le=4)
+
+
+def _graph_plan(tasks: List[PlanTask]) -> Dict[str, Any]:
+    """The plan as `bd create --graph` reads it; ValueError naming what is wrong.
+
+    bd checks the graph too (cycles above all); checking keys here first
+    names the mistake in the plan's own terms.
+    """
+    if not tasks:
+        raise ValueError("Give at least one task.")
+    keys = [task.key.strip() for task in tasks]
+    if any(not key for key in keys):
+        raise ValueError("Every task needs a key.")
+    duplicates = sorted({key for key in keys if keys.count(key) > 1})
+    if duplicates:
+        raise ValueError(f"Keys must be unique: {', '.join(duplicates)}.")
+    nodes, edges = [], []
+    for key, task in zip(keys, tasks):
+        node = {"key": key, "title": task.title, "description": task.description, "priority": task.priority}
+        if task.acceptance:
+            node["acceptance_criteria"] = task.acceptance
+        nodes.append(node)
+        for dependency in task.depends_on:
+            dependency = dependency.strip()
+            if dependency == key:
+                raise ValueError(f"Task '{key}' cannot depend on itself.")
+            # A key of this plan, else an existing task's id.
+            edges.append({"from_key": key, "to_key": dependency} if dependency in keys
+                         else {"from_key": key, "to_id": dependency})
+    return {"nodes": nodes, "edges": edges}
+
+
+def _bd_error(res: Dict[str, Any]) -> str:
+    """bd's own message: its --json error, else what it printed."""
+    data = res.get("data")
+    if isinstance(data, dict) and data.get("error"):
+        return str(data["error"])
+    output = res.get("output") or ""
+    try:
+        parsed = json.loads(output)
+        if isinstance(parsed, dict) and parsed.get("error"):
+            return str(parsed["error"])
+    except ValueError:
+        pass
+    return res.get("error") or output or "bd failed"
+
+
+@function_tool
+async def beads_plan(context: RunContextWrapper, tasks: List[PlanTask], directory: str = ".") -> str:
+    """
+    Create a whole plan in the tracker in one call: its tasks and the dependencies between them.
+
+    Each task has a key of your choosing; depends_on names the keys (or existing
+    task ids) that must be done before it. The plan is checked as a whole - unique
+    keys, known references, no cycles - and nothing is created when it is wrong.
+
+    Returns the id of every task by key, the tasks ready to start now (the first
+    wave) and, for the rest, which keys each waits for.
+
+    Args:
+        tasks: The plan's tasks
+        directory: Path to the project directory
+    """
+    try:
+        directory = _resolve_directory(context, directory)
+        plan = _graph_plan(tasks)
+    except ValueError as exc:
+        return json.dumps({"error": f"{exc} Nothing was created."}, ensure_ascii=False)
+    container_id = _get_container_id(context)
+
+    # bd reads a plan from a file; it lives beside the tracker, which the
+    # container sees too, for as long as the command runs.
+    beads_dir = Path(directory) / ".beads"
+    if not beads_dir.is_dir():
+        return json.dumps({"error": "No tracker here: call beads_init first. Nothing was created."})
+    plan_file = beads_dir / f"plan-{uuid.uuid4().hex[:8]}.json"
+    plan_file.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    try:
+        res = await _bd(["create", "--graph", f".beads/{plan_file.name}", "--json"],
+                        cwd=directory, container_id=container_id, context=context)
+    finally:
+        plan_file.unlink(missing_ok=True)
+    ids = (res.get("data") or {}).get("ids") if res["success"] else None
+    if not isinstance(ids, dict):
+        return json.dumps({"error": f"{_bd_error(res)}. Nothing was created."}, ensure_ascii=False)
+
+    ready = await _bd(["ready", "--json", "--brief", "--limit", "0"], cwd=directory, container_id=container_id, context=context)
+    ready_ids = {item.get("id") for item in (ready.get("data") or []) if isinstance(item, dict)}
+    # In the plan's order, as the caller wrote it.
+    ordered = {task.key.strip(): ids.get(task.key.strip()) for task in tasks}
+    waves = {"ready": [], "waiting": []}
+    for task in tasks:
+        key = task.key.strip()
+        if ordered[key] in ready_ids:
+            waves["ready"].append({"key": key, "id": ordered[key], "title": task.title})
+        else:
+            waves["waiting"].append({"key": key, "id": ordered[key], "waits_for": task.depends_on})
+    return json.dumps({"ids": ordered, **waves}, ensure_ascii=False, indent=2)
+
+
 @function_tool
 async def beads_list(
     context: RunContextWrapper,
@@ -867,7 +972,7 @@ _BD = Requires(check=_bd_problem, hint="Install beads (bd) or set BEADS_BD_PATH 
 # beads_log_append/beads_log_read only touch files under .beads/ and need nothing.
 TOOL_REQUIREMENTS = {name: _BD for name in (
     "beads_init", "beads_ready", "beads_list", "beads_create", "beads_show",
-    "beads_update", "beads_close", "beads_sync", "beads_dep",
+    "beads_update", "beads_close", "beads_sync", "beads_dep", "beads_plan",
 )}
 
 
@@ -881,6 +986,7 @@ BEADS_TOOLS = {
     "beads_close": beads_close,
     "beads_sync": beads_sync,
     "beads_dep": beads_dep,
+    "beads_plan": beads_plan,
     # Shared append-only log helpers (useful for games / chat streams)
     "beads_log_append": beads_log_append,
     "beads_log_read": beads_log_read,
@@ -898,6 +1004,7 @@ TOOL_ISOLATION = {
     "beads_list": _CONTAINER,
     "beads_log_append": _CONTAINER,
     "beads_log_read": _CONTAINER,
+    "beads_plan": _CONTAINER,
     "beads_ready": _CONTAINER,
     "beads_show": _CONTAINER,
     "beads_sync": _CONTAINER,
@@ -916,6 +1023,7 @@ TOOL_EFFECTS = {
     "beads_list": _effects.read(),
     "beads_log_append": _effects.write(),
     "beads_log_read": _effects.read(),
+    "beads_plan": _effects.write(),
     "beads_ready": _effects.read(),
     "beads_show": _effects.read(),
     "beads_sync": _effects.EXTERNAL_ANY,

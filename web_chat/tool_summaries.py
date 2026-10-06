@@ -153,6 +153,15 @@ def _orchestrate(a: dict) -> Optional[str]:
     return _text(task) if task else None
 
 
+def _parallel(a: dict) -> Optional[str]:
+    calls = a.get("calls")
+    if not isinstance(calls, list) or not calls:
+        return None
+    names = [str(call.get("tool")) for call in calls if isinstance(call, dict) and call.get("tool")]
+    counted = ", ".join(f"{name} ×{names.count(name)}" if names.count(name) > 1 else name for name in dict.fromkeys(names))
+    return f"{len(calls)} calls: {_text(counted)}"
+
+
 def _pipeline_task(a: dict) -> Optional[str]:
     goal = _val(a, "goal", "task")
     kind = _val(a, "kind")
@@ -239,6 +248,14 @@ def _beads_create(a: dict) -> Optional[str]:
     elif kind is not None:
         bits.append(f"({_text(kind)})")
     return " ".join(bits)
+
+
+def _beads_plan(a: dict) -> Optional[str]:
+    tasks = a.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return None
+    links = sum(len(task.get("depends_on") or []) for task in tasks if isinstance(task, dict))
+    return f"{len(tasks)} task(s), {links} dependency link(s)"
 
 
 def _beads_update(a: dict) -> Optional[str]:
@@ -440,6 +457,7 @@ TOOL_TITLES: dict[str, str] = {
     "git_log": "Git log",
     # orchestration / pipeline
     "orchestrate": "Delegate to agent",
+    "parallel": "Run in parallel",
     "pipeline_start": "Start pipeline",
     "pipeline_task": "Queue pipeline task",
     "pipeline_wait": "Wait for workers",
@@ -474,6 +492,7 @@ TOOL_TITLES: dict[str, str] = {
     "beads_close": "Close bead",
     "beads_sync": "Sync beads",
     "beads_dep": "Link bead dependency",
+    "beads_plan": "Create plan",
     "beads_list": "List beads",
     "beads_log_append": "Append to bead log",
     "beads_log_read": "Read bead log",
@@ -514,6 +533,7 @@ TOOL_SUBTITLES: dict[str, Callable[[dict[str, Any]], Optional[str]]] = {
     "pipeline_inspect": _no_subtitle,
     # orchestration / pipeline
     "orchestrate": _orchestrate,
+    "parallel": _parallel,
     "pipeline_start": _orchestrate,
     "pipeline_task": _pipeline_task,
     "pipeline_wait": _pipeline_wait,
@@ -547,6 +567,7 @@ TOOL_SUBTITLES: dict[str, Callable[[dict[str, Any]], Optional[str]]] = {
     "beads_close": _beads_close,
     "beads_sync": _list_files,
     "beads_dep": _beads_dep,
+    "beads_plan": _beads_plan,
     "beads_list": _beads_list,
     "beads_log_append": _beads_log_append,
     "beads_log_read": _beads_log_append,

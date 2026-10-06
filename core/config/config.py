@@ -491,8 +491,44 @@ class Config:
                     scope="static",
                 )
             )
+        if "orchestrate" in agent_config.tools:
+            catalog = self.executor_model_catalog()
+            if catalog:
+                sections.append(PromptSection(key="executor_models", content=catalog, scope="static"))
 
         return sections
+
+    def executor_model_catalog(self) -> Optional[str]:
+        """The executor models ``orchestrate`` may run on, for its caller to pick from.
+
+        Only with ``tools.orchestrate.model_choice``: the tiers in order, then
+        each model with what its config says of it. Drawn from the config, so
+        it never offers more than the operator set up.
+        """
+        try:
+            tool = self.get_tool("orchestrate")
+        except ConfigError:
+            return None
+        if not tool.model_choice:
+            return None
+        tiers = tool.tiers or {}
+        models = [tool.models] if isinstance(tool.models, str) else list(tool.models or [])
+        keys = list(dict.fromkeys([*models, *(key for tier in tiers.values() for key in tier)]))
+        if not keys:
+            return None
+        lines = ["\nExecutor models for `orchestrate` (`model` picks one; `tier` a list tried in order):"]
+        if models:
+            lines.append(f"- without tier or model: {' -> '.join(models)}")
+        lines.extend(f"- tier {name}: {' -> '.join(tier)}" for name, tier in tiers.items())
+        for key in keys:
+            model = self.config.models.get(key)
+            if model is None:
+                continue
+            facts = [model.description or model.name, f"context {model.context_window // 1000}k"]
+            if model.capabilities:
+                facts.append(", ".join(model.capabilities))
+            lines.append(f"- `{key}`: {' · '.join(facts)}")
+        return "\n".join(lines)
     
     def _legacy_build_agent_prompt(self, agent_key: str) -> str:
         """Build complete prompt for agent including tool descriptions."""

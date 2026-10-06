@@ -243,3 +243,44 @@ test("a call held for the operator shows no buttons to the user", () => {
   assert.equal(approval.hidden, false);
   assert.equal(approval.querySelectorAll("button").length, 0);
 });
+
+const planStep = (tasks, done) => step("p1", {
+  kind: "plan",
+  title: `Plan · ${done}/${tasks.length} done`,
+  plan: {
+    tasks,
+    total: tasks.length,
+    counts: tasks.reduce((counts, task) => ({ ...counts, [task.state]: (counts[task.state] ?? 0) + 1 }), {}),
+  },
+});
+
+test("the plan shows as its own card, kept up to date, outside the timeline", () => {
+  const panel = createReasoningPanel();
+  panel.upsert(step("s1", { title: "beads_plan" }));
+  panel.upsert(planStep([
+    { id: "p-1", title: "Research", state: "ready", waits_for: [] },
+    { id: "p-2", title: "Compare", state: "waiting", waits_for: ["research"] },
+  ], 0));
+  panel.upsert(planStep([
+    { id: "p-1", title: "Research", state: "closed", waits_for: [] },
+    { id: "p-2", title: "Compare", state: "in_progress", waits_for: [] },
+  ], 1));
+
+  assert.deepEqual(titles(topList(panel)), ["beads_plan"]);
+  const card = panel.planEl;
+  assert.equal(card.hidden, false);
+  assert.equal(card.find("planCard__heading").textContent, "Plan · 1/2 done");
+  assert.equal(card.find("planCard__summary").textContent, "1 in progress");
+  const tasks = card.findAll("planCard__task");
+  assert.deepEqual(tasks.map((task) => task.dataset.state), ["closed", "in_progress"]);
+});
+
+test("a stored plan is restored from the trace with the rest of the turn", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("s1", { title: "beads_plan" }),
+    planStep([{ id: "p-1", title: "Research", state: "waiting", waits_for: ["setup"] }], 0),
+  ]);
+  assert.deepEqual(titles(topList(panel)), ["beads_plan"]);
+  assert.match(panel.planEl.find("planCard__meta").textContent, /waits for setup/);
+});

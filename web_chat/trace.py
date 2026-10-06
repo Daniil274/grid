@@ -56,6 +56,7 @@ class StepKind(str, Enum):
     MCP = "mcp"
     MESSAGE = "message"  # narration the agent wrote between its actions
     COMPACT = "compact"  # the context was summarized or old tool outputs left out
+    PLAN = "plan"  # the tracker tasks of the conversation (web_chat.plan_board)
     ERROR = "error"
 
 
@@ -103,6 +104,7 @@ class Step:
     tokens_out: int = 0  # completion tokens of the model responses this step spent
     input_payload: dict[str, Any] | None = None
     result_payload: dict[str, Any] | None = None
+    plan: dict[str, Any] | None = None  # a ``plan`` step's tasks (web_chat.plan_board)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +126,7 @@ class Step:
             "tokens_out": self.tokens_out,
             "input_payload": self.input_payload,
             "result_payload": self.result_payload,
+            "plan": self.plan,
         }
 
 

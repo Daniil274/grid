@@ -122,6 +122,21 @@ def resolve_agent_path(file_path: str, factory: Any) -> str:
     return str(_resolve_inside_working_dir(file_path, working_dir, container_id))
 
 
+def container_path(host_path: str | None, factory: Any) -> str:
+    """The path in a run's container of a host path inside its working directory.
+
+    ``host_path`` is a path :func:`resolve_agent_path` returned (None is the
+    working directory). Both sides are compared resolved: the configured
+    working directory may differ from it in drive-letter case or links.
+    """
+    working_dir = _sandbox_root(factory)
+    candidate = Path(host_path).resolve() if host_path else working_dir
+    if not _is_within(working_dir, candidate):
+        raise ValueError("Path escapes working directory")
+    rel = candidate.relative_to(working_dir).as_posix()
+    return CONTAINER_WORKDIR if rel == "." else f"{CONTAINER_WORKDIR}/{rel}"
+
+
 def resolve_agent_path_from_ctx(file_path: str, ctx: Any) -> str:
     """
     Convenience wrapper: extract factory from RunContextWrapper and resolve path.
