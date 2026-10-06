@@ -363,11 +363,7 @@ tools:
 agents:
   engineer:
     name: "Engineer"
-    model:
-    # The engineer coordinates subagents, so it must not be cut off
-    # mid-orchestration: 0 disables its execution timeout and turn limit.
-      - gpt-6.1-sol
-      - glm-latest
+    model: gpt-6.1-sol
     timeout: 0
     max_turns: 0
     mcp_enabled: true
@@ -515,8 +511,8 @@ agents:
   web_spider:
     name: "WebSpider"
     model:
-      - gpt-6-luna
       - glm-flash
+      - gpt-6-luna
     system_skills:
       - beads
       - web_spider_research_skill
