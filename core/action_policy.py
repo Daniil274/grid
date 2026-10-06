@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -705,6 +706,14 @@ class ActionGate:
                 from utils.path_utils import CONTAINER_WORKDIR
 
                 value = raw.replace("\\", "/")
+                # A foreign Windows path must not be interpreted as a relative
+                # POSIX path under the workspace. Native Windows paths still
+                # pass through Path's absolute/containment checks below.
+                if os.name != "nt" and (
+                    re.match(r"^[A-Za-z]:", value)
+                    or value.startswith("//")
+                ):
+                    return None
                 candidate = Path(value)
                 if candidate.is_absolute():
                     # A container path is workspace-relative only for container runs.
