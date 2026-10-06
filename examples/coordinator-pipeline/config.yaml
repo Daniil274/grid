@@ -97,8 +97,12 @@ providers:
     max_retries: 2
 
 models:
+  # response_timeout: seconds one answer of a model may take, first byte to
+  # last event. A model that keeps generating never trips the provider's
+  # timeout (a pause between chunks), so this is what ends a runaway answer.
   glm-latest:
     name: "~z-ai/glm-latest"
+    response_timeout: 600
     provider: "openrouter"
     temperature: 0.2
     max_tokens: 128000
@@ -111,6 +115,7 @@ models:
 
   deepseek-flash-latest:
     name: "deepseek-v4.1-flash"
+    response_timeout: 600
     provider: "opencode"
     temperature: 0.2
     max_tokens: 384000
@@ -123,6 +128,7 @@ models:
 
   glm-flash:
     name: "glm-5.3-flash"
+    response_timeout: 600
     provider: "opencode"
     temperature: 0.2
     max_tokens: 131072
@@ -161,6 +167,7 @@ models:
 
   gpt-6-luna:
     name: gpt-6-luna
+    response_timeout: 600
     provider: chatgpt
     max_tokens: 128000
     context_window: 1050000
@@ -168,6 +175,7 @@ models:
     request_timeout: 300
   gpt-6.1-sol:
     name: gpt-6.1-sol
+    response_timeout: 600
     provider: chatgpt
     max_tokens: 128000
     context_window: 1050000
@@ -220,8 +228,10 @@ tools:
     type: "function"
     name: "orchestrate"
     description: "Meta-tool: запускает динамического агента для решения подзадачи."
-    env_vars:
-      DEFAULT_MODEL: gpt-6-luna
+    # Модели исполнителя по порядку: первая доступная, при сбое запроса — следующая.
+    models:
+      - gpt-6-luna
+      - glm-flash
 
   # ── coder (function) ─────────────────────────────────────
   bash_tool:

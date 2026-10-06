@@ -343,7 +343,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                     # A fallback excluded by the plan or missing its own login
                     # must not prevent the available models from running.
                     unavailable.append(refusal)
-                    logger.info("Skipping unavailable model %s: %s", model_key, refusal)
+                    logger.warning("Skipping unavailable model %s: %s", model_key, refusal)
                     continue
                 candidates.append(
                     ModelCandidate(
@@ -496,7 +496,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                 candidate_model, candidate_cfg = self.models.sdk_model(candidate_key)
             except (ModelNotInPlan, CredentialError, ConfigError) as refusal:
                 unavailable.append(refusal)
-                logger.info("Skipping unavailable model %s for '%s': %s", candidate_key, name, refusal)
+                logger.warning("Skipping unavailable model %s for '%s': %s", candidate_key, name, refusal)
                 continue
             if model_cfg is None:
                 model_cfg = candidate_cfg

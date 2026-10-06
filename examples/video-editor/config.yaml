@@ -112,8 +112,8 @@ tools:
     type: "function"
     name: "orchestrate"
     description: "Launch a dynamic subagent for a bounded video workflow task."
-    env_vars:
-      DEFAULT_MODEL: video-fast
+    models:
+      - video-fast
 
   list_files:
     type: "function"

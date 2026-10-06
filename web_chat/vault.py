@@ -285,7 +285,12 @@ class Vault:
             payload.pop("type", None)
             try:
                 found, renewed = await handler.credential(payload, self._clock())
-            except ReauthRequired:
+            except ReauthRequired as lost:
+                # Every model of this login stops working from here on: say so.
+                logger.warning(
+                    "The %s login of %s cannot be renewed and needs a new sign-in: %s",
+                    kind, user_id, lost or "no reason given",
+                )
                 self._store.set_credential_status(user_id, kind, NEEDS_REAUTH)
                 return None
             if renewed is not None:

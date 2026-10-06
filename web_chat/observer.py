@@ -119,6 +119,12 @@ class WebStreamObserver:
         # Calls the policy held in this turn, sub-agents included: one counter,
         # shared by the nested views (web_chat.system_activity).
         self._held = [0]
+        # Rows of tool calls the model is still writing, by the output item id
+        # its argument deltas name, with the characters written so far. A call
+        # with long arguments takes minutes to write; without its row the run
+        # looks stalled until the call is complete.
+        self._writing: dict[str, Step] = {}
+        self._written_chars: dict[str, int] = {}
 
     @property
     def policy_blocks(self) -> int:
@@ -207,6 +213,7 @@ class WebStreamObserver:
         this makes sure a failed or cancelled run does not spin forever.
         """
         self._recorder.end_reasoning(parent_id=self._parent_id)
+        self.drop_unwritten_calls()
         block = self._block
         if block is None or block.status is not StepStatus.RUNNING:
             return
@@ -324,9 +331,56 @@ class WebStreamObserver:
             logger.exception("Failed to process web stream event")
         return None
 
+    # -- tool calls being written -----------------------------------------
+    def _on_call_started(self, data: Any) -> None:
+        item = field_of(data, "item")
+        if field_of(item, "type") != "function_call":
+            return
+        item_id, call_id = field_of(item, "id"), field_of(item, "call_id")
+        if not item_id:
+            return
+        name = str(field_of(item, "name") or "")
+        step = self._recorder.open(
+            StepKind.TOOL, tool_title(name, None) or name or "Tool call",
+            parent_id=self._parent_id, tool=name, subtitle="writing the call…",
+        )
+        self._writing[item_id] = step
+        self._written_chars[item_id] = 0
+        self._tool_names[step.id] = name
+        if call_id:
+            # Its tool_called item, or a sub-agent's block, takes this row over.
+            self._calls_by_id[call_id] = step
+            self._calls_in_order.append(step)
+
+    def _on_call_written(self, data: Any, text: Optional[str]) -> None:
+        item_id = field_of(data, "item_id")
+        step = self._writing.get(item_id) if item_id else None
+        if step is None or not isinstance(text, str):
+            return
+        before = self._written_chars[item_id]
+        after = self._written_chars[item_id] = before + len(text)
+        # Every 2000 characters: often enough to show progress, rarely enough
+        # not to flood the trace with an update per token.
+        if before == 0 or after // 2000 != before // 2000:
+            self._recorder.update(step, subtitle=f"writing the call: {after:,} characters so far")
+
+    def drop_unwritten_calls(self, error: str = "The model stopped before it finished this call.") -> None:
+        """Settle the rows of calls whose writing never finished (the run ended)."""
+        for item_id, step in list(self._writing.items()):
+            del self._writing[item_id]
+            self._written_chars.pop(item_id, None)
+            if step.status is StepStatus.RUNNING and step.kind is StepKind.TOOL:
+                self._recorder.close(step, status=StepStatus.ERROR, body=error)
+
     # -- raw token stream --------------------------------------------------
     def _on_raw_event(self, event: Any, agent_key: Optional[str] = None) -> Optional[str]:
         text, data_type = _delta_text(event)
+        if data_type == "response.output_item.added":
+            self._on_call_started(getattr(event, "data", None))
+            return None
+        if data_type == "response.function_call_arguments.delta":
+            self._on_call_written(getattr(event, "data", None), text)
+            return None
         if data_type in REASONING_DELTA_EVENTS:
             # Forward whitespace too: paragraph breaks are part of the thinking.
             if isinstance(text, str) and text:
@@ -412,13 +466,18 @@ class WebStreamObserver:
         }
         if block is not None and block.kind is StepKind.AGENT:
             # The sub-agent already opened this call's block; add what it was asked.
+            self._forget_writing(block)
             self._recorder.update(block, **fields)
             self._tool_names[block.id] = str(info.get("tool_name") or "")
             return
-        step = self._recorder.open(
-            StepKind.TOOL, title, parent_id=self._parent_id, **fields
-        )
-        self._calls_in_order.append(step)
+        if block is not None and self._forget_writing(block):
+            # The row that showed the call while it was written becomes the call's.
+            step = self._recorder.update(block, title=title, **fields)
+        else:
+            step = self._recorder.open(
+                StepKind.TOOL, title, parent_id=self._parent_id, **fields
+            )
+            self._calls_in_order.append(step)
         self._tool_names[step.id] = tool_name
         badge = self._pending_by_call.pop(call_id, None) if call_id else None
         if badge is None:
@@ -496,6 +555,15 @@ class WebStreamObserver:
             result_payload=normalize_payload(names),
             parent_id=self._parent_id,
         )
+
+    def _forget_writing(self, step: Step) -> bool:
+        """Whether *step* was a row of a call being written; it no longer is."""
+        for item_id, writing in list(self._writing.items()):
+            if writing is step:
+                del self._writing[item_id]
+                self._written_chars.pop(item_id, None)
+                return True
+        return False
 
     def _take_pending_call(self, call_id: Optional[str]) -> Optional[Step]:
         """Match an output to its call, falling back to the oldest open call."""

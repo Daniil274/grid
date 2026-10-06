@@ -74,6 +74,13 @@ class ModelConfig(BaseModel):
     fresh attempt instead of waiting out a stalled one. Defaults to the
     provider's timeout.
     """
+    response_timeout: Optional[float] = Field(default=None, gt=0)
+    """Seconds one agent request to this model may take, from sending it to
+    the last streamed event. Past it the request is abandoned and fails (to
+    the next model of the agent, if any). The provider's timeout cannot do
+    this: it bounds the pause between two chunks, and a model that keeps
+    generating never pauses. Unset: no limit.
+    """
     modalities: Optional[List[Literal["text", "image"]]] = None
     """Output modalities to request, sent as ``modalities`` in the request body.
     ``[image, text]`` asks an image-generation model (OpenRouter
@@ -116,6 +123,16 @@ class ToolConfig(BaseModel):
     tool_package: Optional[str] = None
     env_vars: Optional[Dict[str, str]] = None
     add_working_directory: Optional[bool] = None
+
+    # For orchestrate
+    models: Optional[Union[str, List[str]]] = Field(
+        default=None,
+        description=(
+            "orchestrate: the model keys its executors run on, in order - the first "
+            "available one, then the next when a request fails. Unset: the default "
+            "agent's model."
+        ),
+    )
     
     # For agent tools
     target_agent: Optional[str] = None

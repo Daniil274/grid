@@ -15,6 +15,7 @@ from agents import ModelSettings
 from agents.model_settings import Reasoning
 from openai import AsyncOpenAI
 
+from core.bounded_model import BoundedModel
 from core.compact import get_auto_compact_threshold
 from core.model_access import ModelAccess
 from core.responses_model import StreamedOutputResponsesModel
@@ -188,6 +189,12 @@ class ModelProvider:
                     model_config, "preserve_reasoning_content", False
                 ),
             )
+        # A plan request carries no output cap (settings), so max_tokens is
+        # kept on this side; any other provider enforces it itself.
+        timeout = getattr(model_config, "response_timeout", None)
+        cap = getattr(model_config, "max_tokens", None) if self._uses_plan(model_config) else None
+        if timeout or cap:
+            model = BoundedModel(model, key=model_key, timeout=timeout, max_output_tokens=cap)
         return model, model_config
 
     def compact_client_and_model(

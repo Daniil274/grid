@@ -407,3 +407,27 @@ def test_the_model_whitelist_allows_only_listed_models(factory):
     factory.config.config.settings.allowed_models = ["m"]
     assert factory.models.is_allowed("m")
     assert not factory.models.is_allowed("other")
+
+
+async def test_a_dynamic_agent_stops_at_the_agent_timeout_and_reports_it(factory):
+    class Hanging:
+        new_items = []
+
+        async def stream_events(self):
+            await asyncio.Event().wait()
+            yield  # pragma: no cover
+
+    class HangingRunner:
+        calls = 0
+
+        @classmethod
+        def run_streamed(cls, **kwargs):
+            cls.calls += 1
+            return Hanging()
+
+    factory.config.get_agent_timeout = lambda agent_key=None: 0.05
+    with use(HangingRunner):
+        answer = await factory.run_agent_object_simple(SimpleNamespace(name="executor-1"), "task")
+
+    assert "no answer within the agent timeout (0.05 s)" in answer
+    assert HangingRunner.calls == 1

@@ -289,16 +289,30 @@ class ChatGPTLogin:
                 return response.json()
             except ValueError:
                 raise self._unavailable(refreshing, "OpenAI's answer was not readable") from None
-        error = ""
+        error = description = ""
         try:
-            error = str(response.json().get("error", ""))
+            answer = response.json()
+            error = str(answer.get("error", ""))
+            description = str(answer.get("error_description", "") or "")
         except (ValueError, AttributeError):
             pass
+        # OpenAI's own words for a refused grant: the codes alone do not say which of
+        # the code, the verifier, the redirect or the client it did not take.
+        answered = " ".join(part for part in (str(response.status_code), error) if part)
+        if description:
+            answered = f"{answered} ({description})"
+        logger.warning(
+            "ChatGPT token request (%s) refused: %s",
+            "refresh" if refreshing else "sign-in", answered,
+        )
         if refreshing and error in UNUSABLE_GRANT_ERRORS:
-            raise ReauthRequired()
+            raise ReauthRequired(f"OpenAI answered {answered}")
         if error == "invalid_client":
             raise ChatGPTError("OpenAI no longer accepts this app's registration. Sign in with ChatGPT again.")
-        raise self._unavailable(refreshing, f"OpenAI answered {response.status_code} {error}".strip())
+        if not refreshing and error in UNUSABLE_GRANT_ERRORS:
+            # Not an outage: this sign-in's code is spent, and only a new sign-in helps.
+            raise ChatGPTError(f"OpenAI did not accept the sign-in code: {answered}. Start the sign-in again.")
+        raise self._unavailable(refreshing, f"OpenAI answered {answered}")
 
     @staticmethod
     def _unavailable(refreshing: bool, why: str) -> Exception:

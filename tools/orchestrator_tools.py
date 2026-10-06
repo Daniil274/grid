@@ -104,21 +104,6 @@ def _sanitize_context_id(val: Any) -> Optional[str]:
     return None
 
 
-def _has_config_entry(factory: Any, getter_name: str, key: str) -> bool:
-    getter = getattr(getattr(factory, "config", None), getter_name, None)
-    if getter is None:
-        return False
-    try:
-        getter(key)
-        return True
-    except Exception:
-        return False
-
-
-def _is_known_model_or_agent(factory: Any, key: str) -> bool:
-    return _has_config_entry(factory, "get_model", key) or _has_config_entry(factory, "get_agent", key)
-
-
 def _coerce_tool_list(val: Any) -> Optional[List[str]]:
     """
     Accept:
@@ -210,26 +195,23 @@ async def _committee_vote(factory: Any, *, model_key: str, goal: str, draft: str
     return accept_count > reject_count, judges
 
 
-def _executor_fallback_models(
-    factory: Any, raw_ctx: Any, configured: Optional[List[str]]
-) -> List[str]:
-    """Models an executor falls back to when its own fails a request.
-
-    The orchestrate tool's FALLBACK_MODELS when configured; otherwise the
-    calling agent's own models, which are known to work for this system. A
-    revoked login on the default executor model then costs one failed request
-    instead of the whole delegated step.
-    """
-    if configured:
-        return list(configured)
-    agent_key = getattr(raw_ctx, "agent_id", None)
-    if not isinstance(agent_key, str) or not agent_key:
-        return []
+def _configured_models(factory: Any) -> List[str]:
+    """The orchestrate tool's ``models``, in order; empty when it names none."""
     try:
-        keys = factory.config.get_agent(agent_key).model_keys()
+        models = factory.config.get_tool("orchestrate").models
     except Exception:
         return []
-    return [key for key in keys if isinstance(key, str)] if isinstance(keys, (list, tuple)) else []
+    if not isinstance(models, (str, list)):
+        return []
+    return _coerce_tool_list(models) or []
+
+
+def _is_model(factory: Any, key: str) -> bool:
+    try:
+        factory.config.get_model(key)
+        return True
+    except Exception:
+        return False
 
 
 @function_tool
@@ -237,7 +219,6 @@ async def orchestrate(
     context: RunContextWrapper,
     task: str,
     agent_system_prompt: Optional[str] = None,
-    model_key: Optional[str] = None,
     executor_tools: Optional[Union[List[str], str]] = None,
     context_id: Optional[str] = None,
     init_tools: Optional[str] = None,
@@ -256,6 +237,10 @@ async def orchestrate(
       Example: '[{"name":"file_list","parameters":{"directory":"."}}]'
     - system_skills: List of system skill names to load from skills/ directory
       (next to config.yaml). Accepts a list or comma-separated string.
+
+    The executor's model is not the caller's choice: it runs on the first
+    available model of the tool's ``models`` and moves to the next one of them
+    when a request fails; without ``models``, on the default agent's model.
 
     Note: orchestrate calls of one conversation run one after another: each is
     a step of the conversation's serial pipeline (core.tracing.pipeline_registry).
@@ -292,46 +277,28 @@ async def orchestrate(
         raw_ctx.pipeline_id = pipeline_id
         raw_ctx.execution_mode = "serial_subtree"
 
-    logger.info(f"orchestrate: START | task_len={len(task)} | model_key={model_key} | pipeline_id={pipeline_id}")
+    logger.info(f"orchestrate: START | task_len={len(task)} | pipeline_id={pipeline_id}")
     verbose_logger.debug(
         f"\n{'='*80}\nORCHESTRATE START\n{'='*80}\n"
-        f"Task: {task}\nModel key: {model_key}\n"
+        f"Task: {task}\n"
         f"Agent system prompt: {agent_system_prompt[:500] if agent_system_prompt else 'None'}\n"
         f"Executor tools: {executor_tools}\n{'='*80}\n"
     )
 
-    # Try to get the model from the orchestrate tool config if not passed explicitly
-    default_model_key = None
-    configured_fallbacks: Optional[List[str]] = None
-    try:
-        tool_cfg = factory.config.get_tool("orchestrate")
-        if tool_cfg.env_vars:
-            default_model_key = _coerce_optional_str(tool_cfg.env_vars.get("DEFAULT_MODEL"))
-            if default_model_key and default_model_key.strip().lower() == "default":
-                default_model_key = None
-            configured_fallbacks = _coerce_tool_list(tool_cfg.env_vars.get("FALLBACK_MODELS"))
-    except Exception:
-        pass
-
-    effective_key = _coerce_optional_str(model_key)
-    # Treat "default" as "model from config" (DEFAULT_MODEL or default_agent), not as a model key
-    if effective_key and effective_key.strip().lower() == "default":
-        effective_key = None
-
-    requested_model_key = effective_key or default_model_key
-    if effective_key and not _is_known_model_or_agent(factory, effective_key):
-        logger.warning(
-            "orchestrate: unknown model_key '%s'; using orchestrate DEFAULT_MODEL '%s'",
-            effective_key,
-            default_model_key,
+    # The executor's models come from the orchestrate tool config only, in
+    # order: the caller's own models are not the executor's, so when none of
+    # these is available the step fails instead of moving on to another model.
+    model_keys = _configured_models(factory)
+    unknown = [key for key in model_keys if not _is_model(factory, key)]
+    if unknown:
+        # resolve_model_key would quietly put an unknown key on the default agent's model.
+        return (
+            f"❌ orchestrate: tools.orchestrate.models names models that are not in this "
+            f"system's config: {', '.join(unknown)}."
         )
-        requested_model_key = default_model_key
-
-    resolved_model_key = factory.resolve_model_key(requested_model_key)
+    resolved_model_key = factory.resolve_model_key(model_keys[0] if model_keys else None)
+    fallback_model_keys = model_keys[1:]
     coerced_executor_tools = _coerce_tool_list(executor_tools)
-    fallback_model_keys = _executor_fallback_models(
-        factory, raw_ctx, configured_fallbacks
-    )
 
     # Parse init_tools JSON (optional context-gathering tools)
     parsed_init_tools = None
@@ -441,6 +408,12 @@ async def orchestrate(
                 observer.finish(error=run_error)
             except Exception:
                 logger.debug("orchestrate: failed to settle the trace", exc_info=True)
+
+    # The model the executor was built on: the first available of the tool's
+    # models, not necessarily the first one listed.
+    executor_model_key = getattr(executor, "_grid_model_key", None)
+    if isinstance(executor_model_key, str) and executor_model_key:
+        resolved_model_key = executor_model_key
 
     # The tools the executor really had: a name the factory could not resolve
     # (a typo, a tool of an MCP server that did not start) is reported, so the

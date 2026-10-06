@@ -184,6 +184,8 @@ class BackgroundAgentSupervisor:
                 worker,
                 run.task_text,
                 context_id=f"ctx-{uuid.uuid4().hex[:12]}",
+                # Bounded by the run's own timeout_seconds (_execute), not agent_timeout.
+                timeout=0,
             )
             run.final_output = self._truncate(str(result or ""))
             run.status = AgentStatus.COMPLETED
