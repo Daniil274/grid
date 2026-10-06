@@ -6,6 +6,7 @@ web_search — web search through several engines via SearXNG (SEARXNG_URL, defa
 """
 
 import asyncio
+import io
 import ipaddress
 import os
 import re
@@ -57,8 +58,15 @@ try:
 except ImportError:
     HAS_TRAFILATURA = False
 
+try:
+    import pypdf
+    HAS_PYPDF = True
+except ImportError:
+    HAS_PYPDF = False
+
 
 MAX_CONTENT_LENGTH = 100_000
+MAX_DOWNLOAD_BYTES = 20_000_000
 DEFAULT_TIMEOUT = 30
 
 # Schemes that must never reach the network layer
@@ -134,6 +142,10 @@ def _is_public(addr: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
 MAX_REDIRECTS = 5
 CONNECT_ERROR: type = OSError  # replaced below when aiohttp is there
 
+
+class _InternalAddress(OSError):
+    """A host name resolves to an address off the public internet."""
+
 if HAS_AIOHTTP:
     from aiohttp.abc import AbstractResolver
     from aiohttp.resolver import DefaultResolver
@@ -152,7 +164,7 @@ if HAS_AIOHTTP:
             hosts = await self._resolver.resolve(host, port, family)
             for entry in hosts:
                 if not _is_public(ipaddress.ip_address(entry["host"])):
-                    raise OSError(f"Access to internal address is blocked: {host} resolves to {entry['host']}")
+                    raise _InternalAddress(f"Access to internal address is blocked: {host} resolves to {entry['host']}")
             return hosts
 
         async def close(self) -> None:
@@ -175,8 +187,24 @@ def _run_async(coro, timeout: float = DEFAULT_TIMEOUT + 10):
         return asyncio.run(coro)
 
 
+class _TooLarge(Exception):
+    """The response is larger than MAX_DOWNLOAD_BYTES."""
+
+
+async def _read_capped(response) -> bytes:
+    """The body, refused past MAX_DOWNLOAD_BYTES - also when Content-Length lies."""
+    if (response.content_length or 0) > MAX_DOWNLOAD_BYTES:
+        raise _TooLarge()
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        body += chunk
+        if len(body) > MAX_DOWNLOAD_BYTES:
+            raise _TooLarge()
+    return bytes(body)
+
+
 async def _fetch_url(url: str, timeout: int) -> tuple:
-    """Returns (status_code, content, error_message); only public addresses are reached."""
+    """Returns (status_code, text, error_message); only public addresses are reached."""
     if not HAS_AIOHTTP:
         return 0, "", "aiohttp is not installed. Install: pip install aiohttp"
 
@@ -190,12 +218,79 @@ async def _fetch_url(url: str, timeout: int) -> tuple:
                     if blocked:
                         return 0, "", f"Redirect refused: {blocked.lstrip('❌ ')}"
                     continue
-                ct = response.headers.get("Content-Type", "")
-                if "text/html" in ct or "text/plain" in ct:
-                    text = await response.text()
-                    return response.status, text, ""
-                return response.status, "", f"Unsupported Content-Type: {ct}"
+                if response.status != 200:
+                    return response.status, "", ""
+                try:
+                    body = await _read_capped(response)
+                except _TooLarge:
+                    return 0, "", f"The document is larger than {MAX_DOWNLOAD_BYTES // 1_000_000} MB"
+                text, error = _to_text(response.headers.get("Content-Type", ""), response.charset, body)
+                return (0 if error else 200), text, error
         return 0, "", f"More than {MAX_REDIRECTS} redirects"
+
+
+def _to_text(content_type: str, charset: Optional[str], body: bytes) -> tuple:
+    """(text, error) of a response body by its type: HTML as markdown, a PDF
+    as the text of its pages, other text, JSON and XML as they are."""
+    ct = content_type.lower()
+    if "application/pdf" in ct or body.startswith(b"%PDF-"):
+        return _pdf_text(body)
+    if not (ct.startswith("text/") or "json" in ct or "xml" in ct or not ct):
+        return "", f"Unsupported Content-Type: {ct} (web_fetch reads HTML, text, JSON, XML and PDF)"
+    text = body.decode(charset or "utf-8", errors="replace")
+    if "html" not in ct:
+        return text, ""
+    if not HAS_TRAFILATURA:
+        return "", "trafilatura is not installed. Install: pip install trafilatura"
+    extracted = trafilatura.extract(text, output_format="markdown", include_links=True)
+    if extracted is None:
+        return "", "Failed to extract content (page might be empty or built by JavaScript)."
+    return extracted, ""
+
+
+def _pdf_text(body: bytes) -> tuple:
+    """(content, error) of a PDF document: the text of its pages."""
+    if not HAS_PYPDF:
+        return "", "Reading PDF needs pypdf: pip install pypdf"
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(body))
+        pages = [(page.extract_text() or "").strip() for page in reader.pages]
+    except Exception as exc:
+        return "", f"Unreadable PDF: {_describe(exc)}"
+    text = "\n\n".join(f"[page {n}]\n{page}" for n, page in enumerate(pages, 1) if page)
+    if not text:
+        return "", "The PDF has no text layer (a scan?)"
+    return text, ""
+
+
+def _describe(exc: BaseException) -> str:
+    """An exception as a reason: its message, or its type when it has none
+    (asyncio's timeout has no message)."""
+    return str(exc).strip() or type(exc).__name__
+
+
+def _load_error(exc: BaseException, url: str, timeout: int) -> str:
+    """Why the page did not load, in words an agent can act on.
+
+    A timeout and an unreachable host are said as such: retrying the same URL
+    with a longer timeout rarely helps, the site is likely unreachable from
+    this server, and its content has to come from elsewhere.
+    """
+    host = urlparse(url).hostname or url
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return (f"❌ Timeout: {host} did not answer within {timeout} s. "
+                "The site is likely unreachable from this server; another source "
+                "will serve better than retrying.")
+    if isinstance(exc, CONNECT_ERROR):
+        # The resolver's refusal of an internal address arrives as a connect error.
+        reason = getattr(exc, "os_error", None) or exc
+        if isinstance(reason, _InternalAddress):
+            return f"❌ {reason}"
+        reason = _describe(reason)
+        return (f"❌ Cannot connect to {host}: {reason}. "
+                "The site is likely unreachable from this server; another source "
+                "will serve better than retrying.")
+    return f"❌ Load error ({type(exc).__name__}): {_describe(exc)}"
 
 
 def _truncate(content: str, max_len: int = MAX_CONTENT_LENGTH) -> str:
@@ -233,45 +328,34 @@ def _html_to_markdown(html: str) -> str:
 @function_tool
 def web_fetch(
     url: str,
-    render_js: bool = False,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> str:
     """
-    Loads a web page and converts it to markdown using Trafilatura.
+    Loads a web page or document and returns its text: HTML as markdown,
+    PDF as the text of its pages, plain text, JSON and XML as they are.
+    Pages are not rendered: content a page builds with JavaScript is not there.
 
     Args:
-        url:       URL to load
-        render_js: Ignored (kept for backwards compatibility)
-        timeout:   Timeout in seconds
+        url:     URL to load (http or https)
+        timeout: Timeout in seconds
 
     Returns:
-        Page content in markdown format
+        The content as text
     """
     err = _validate_url(url)
     if err:
         return err
 
-    if not HAS_TRAFILATURA:
-        return "❌ trafilatura is not installed. Install: pip install trafilatura"
-
     try:
         status, content, error = _run_async(_fetch_url(url, timeout), timeout=timeout + 10)
-    except CONNECT_ERROR as exc:
-        # The resolver's refusal of an internal address arrives as a connect error.
-        return f"❌ Load error: {exc.os_error}"
     except Exception as exc:
-        return f"❌ Load error: {exc}"
+        return _load_error(exc, url, timeout)
 
     if error:
         return f"❌ {error}"
     if status != 200:
         return f"❌ HTTP {status} when loading {url}"
-
-    result = trafilatura.extract(content, output_format="markdown", include_links=True)
-    if result is None:
-        return "❌ Failed to extract content (page might be empty or unsupported format)."
-    
-    return _truncate(f"Source: {url}\n\n{result}")
+    return _truncate(f"Source: {url}\n\n{content}")
 
 
 # ---------------------------------------------------------------------------

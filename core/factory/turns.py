@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from agents import Agent, RunConfig, RunItemStreamEvent, SQLiteSession
@@ -53,10 +54,15 @@ from core.interruption import (
     completed_names,
 )
 from core.run_stream import (
+    STOPPED_ERROR,
+    STOPPED_MAX_TURNS,
+    STOPPED_TIMEOUT,
+    RunOutcome,
     append_action_reasoning,
     interrupted_run_report,
     last_message_text,
     run_output_text,
+    run_usage,
     tool_event_info,
 )
 from core.steering import Steering, SteerMessage
@@ -77,6 +83,14 @@ _MISSING_FINAL_ANSWER = (
     "Your previous response ended without a final answer. Use the saved tool "
     "results; do not repeat completed actions. Finish the remaining work and "
     "write a concrete final report."
+)
+
+# Sent, with tools off, to a dynamic agent that used up its turns: the caller
+# gets its report rather than its last half-sentence.
+_TURN_LIMIT_REPORT = (
+    "You have used up your turn limit: no more tool calls. Write your report "
+    "now from the saved tool results: what you did, what you found (with the "
+    "sources and paths it rests on), and what is left undone."
 )
 
 
@@ -217,7 +231,12 @@ class TurnRunner:
             return streamed
         return str(run_output_text(result))
 
-    async def run_agent_object_simple(
+    async def run_agent_object_simple(self, agent: Any, input_message: str, **kwargs: Any) -> str:
+        """Run an Agent instance in its own session and return its answer text
+        (:meth:`run_agent_object`, keeping only the text)."""
+        return (await self.run_agent_object(agent, input_message, **kwargs)).text
+
+    async def run_agent_object(
         self,
         agent: Any,
         input_message: str,
@@ -229,8 +248,9 @@ class TurnRunner:
         user_id: Optional[str] = None,
         run_control: Optional[Any] = None,
         timeout: Optional[float] = None,
-    ) -> str:
-        """Run an Agent instance in its own session and return its answer text.
+        max_turns: Optional[int] = None,
+    ) -> RunOutcome:
+        """Run an Agent instance in its own session: its answer and what it took.
 
         Used for dynamic and background agents. The run has its own SDK session
         (agent name + context id) and never reads or changes the factory's
@@ -251,6 +271,7 @@ class TurnRunner:
         ``timeout`` bounds the whole run in seconds; past it the caller gets
         what the agent did so far. None is ``settings.agent_timeout``, as for a
         turn; 0 is no limit, for a caller that keeps a deadline of its own.
+        ``max_turns`` bounds its turns the same way; None is ``settings.max_turns``.
         """
         observer = stream_observer or self._stream_observer
         agent_label = getattr(agent, "name", None) or "dynamic-agent"
@@ -279,21 +300,32 @@ class TurnRunner:
         attempt = 0
         recovered = False
         result: Any = None
+        # What the attempts before the current one used: a retry starts a new
+        # SDK run, which counts from zero, so each attempt adds its predecessor.
+        spent = (0, 0, 0)
+
+        def used() -> tuple[int, int, int]:
+            calls, tokens_in, tokens_out = run_usage(result)
+            return spent[0] + calls, spent[1] + tokens_in, spent[2] + tokens_out
+
         # settings.agent_timeout bounds the whole run, as it bounds a turn: a
         # model that never finishes its answer must not hold the caller forever.
         if timeout is None:
             timeout = self.config.get_agent_timeout(agent_label)
+        if max_turns is None:
+            max_turns = self.config.get_max_turns(agent_label)
         deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
         set_current_factory(self)
         try:
             async with deadline:
                 while True:
+                    spent = used()
                     result = get_runner().run_streamed(
                         starting_agent=agent,
                         input=input_message,
                         context=run_ctx,
                         session=session,
-                        max_turns=runner_max_turns(self.config.get_max_turns(agent_label)),
+                        max_turns=runner_max_turns(max_turns),
                         run_config=self._run_config(None),
                     )
                     try:
@@ -321,7 +353,29 @@ class TurnRunner:
                         # Not transient: retrying would repeat the work. The caller
                         # gets what the agent did so far.
                         logger.warning("Agent %s stopped: %s: %s", agent_label, type(exc).__name__, exc)
-                        return interrupted_run_report(result, f"Agent {agent_label}", exc)
+                        if (
+                            isinstance(exc, MaxTurnsExceeded)
+                            and session is not None
+                            and not getattr(run_control, "stop_requested", False)
+                        ):
+                            # The turn limit ends a run between turns: its session
+                            # holds every result, so one answer more, without
+                            # tools, is the report the caller needs.
+                            report, report_run = await self._report_after_turn_limit(
+                                agent, run_ctx, session, observer, agent_label, action_state
+                            )
+                            if report:
+                                spent, result = used(), report_run
+                                return RunOutcome(
+                                    f"[Agent {agent_label} reached its turn limit; its report "
+                                    f"of the work so far:]\n{report}",
+                                    STOPPED_MAX_TURNS,
+                                    *used(),
+                                )
+                        stopped = STOPPED_MAX_TURNS if isinstance(exc, MaxTurnsExceeded) else STOPPED_ERROR
+                        return RunOutcome(
+                            interrupted_run_report(result, f"Agent {agent_label}", exc), stopped, *used()
+                        )
                     except Exception as exc:
                         if not is_retriable(exc):
                             raise
@@ -336,17 +390,46 @@ class TurnRunner:
                         )
                         await asyncio.sleep(delay)
                         continue
-                    return self._final_text(result, fragments)
+                    return RunOutcome(self._final_text(result, fragments), None, *used())
         except TimeoutError:
             if timeout <= 0 or not deadline.expired():
                 raise
             logger.warning("Agent %s stopped after %s s", agent_label, timeout)
-            return interrupted_run_report(
+            report = interrupted_run_report(
                 result, f"Agent {agent_label}",
                 TimeoutError(f"no answer within the agent timeout ({timeout:g} s)"),
             )
+            return RunOutcome(report, STOPPED_TIMEOUT, *used())
         finally:
             reset_current_factory()
+
+    async def _report_after_turn_limit(
+        self, agent: Any, run_ctx: Any, session: Any, observer: Any, agent_label: str, action_state: Any
+    ) -> Tuple[str, Any]:
+        """The report of a run that used up its turns: one answer with tools off.
+
+        Returns the report ("" when the model gave none) and the run, whose
+        usage counts toward the agent's. A failure here only means the caller
+        gets the plain summary of the stopped run.
+        """
+        reporter = agent.clone(model_settings=replace(agent.model_settings, tool_choice="none"))
+        result = get_runner().run_streamed(
+            starting_agent=reporter,
+            input=_TURN_LIMIT_REPORT,
+            context=run_ctx,
+            session=session,
+            max_turns=1,
+            run_config=self._run_config(None),
+        )
+        try:
+            await self._consume_stream(
+                result, observer=observer, agent_key=agent_label, action_state=action_state
+            )
+        except Exception as exc:
+            logger.warning("Agent %s wrote no report after its turn limit: %s", agent_label, exc)
+            return "", result
+        final = getattr(result, "final_output", None)
+        return (str(final).strip() if final is not None else ""), result
 
     def _open_context(self, context_id: Optional[str], use_active_context: bool) -> str:
         """The conversation this request belongs to: named, active, or new."""

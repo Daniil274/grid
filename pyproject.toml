@@ -52,6 +52,7 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
     "markdownify>=0.13.0",
     "trafilatura>=1.12.0",
+    "pypdf>=5",  # web_fetch reads PDF documents
     "nbformat>=5.10.0",
     "Pillow>=10.0.0",
 ]

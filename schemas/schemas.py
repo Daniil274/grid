@@ -133,7 +133,29 @@ class ToolConfig(BaseModel):
             "agent's model."
         ),
     )
-    
+    tiers: Optional[Dict[str, List[str]]] = Field(
+        default=None,
+        description=(
+            "orchestrate: named model lists a caller picks by name (`tier`) - "
+            "for example a cheap `fast` one for search and checks and a `strong` "
+            "one for design. Each runs like `models`: the first available model, "
+            "then the next. Without a tier, executors run on `models`."
+        ),
+    )
+    model_choice: bool = Field(
+        default=False,
+        description=(
+            "orchestrate: let the caller also pick one executor model by key (`model`) "
+            "from `models` and the tiers; the list of them, with what each is, is "
+            "added to the caller's instructions. Off: tiers only."
+        ),
+    )
+    max_parallel: int = Field(
+        default=4,
+        ge=1,
+        description="parallel: how many calls of one parallel call run at once.",
+    )
+
     # For agent tools
     target_agent: Optional[str] = None
     context_strategy: Optional[str] = None

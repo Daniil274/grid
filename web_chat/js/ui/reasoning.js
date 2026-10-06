@@ -28,6 +28,7 @@ import { renderMarkdown } from "../lib/markdown.js";
 import { ICONS } from "./icons.js";
 import { toolFamily } from "../lib/languages.js";
 import { renderPayload } from "./tool-payload.js";
+import { createPlanCard } from "./plan-card.js";
 
 /** The tokens a step spent, prompt first, completion second; "" when none. */
 const usageText = (tokensIn, tokensOut) => {
@@ -373,6 +374,9 @@ function createAgentRow(step, turnStart) {
  */
 export function createReasoningPanel() {
   const top = createTimeline(h("ol.reasoning__steps"));
+  // The plan is a step of the trace, but the reader follows it outside the
+  // panel, which folds away once the turn ends (ui/plan-card.js).
+  const plan = createPlanCard();
   // Every row at any depth, by step id, with the timeline that holds it.
   const index = new Map();
   const headline = h("span.reasoning__headline", { text: "Thinking" });
@@ -436,6 +440,7 @@ export function createReasoningPanel() {
 
   return {
     el: root,
+    planEl: plan.el,
 
     get isEmpty() {
       return index.size === 0;
@@ -457,6 +462,10 @@ export function createReasoningPanel() {
 
     /** Create or patch a step, addressed by `step.id`, inside its sub-agent's block. */
     upsert(step) {
+      if (step.kind === "plan") {
+        plan.update(step);
+        return;
+      }
       root.hidden = false;
       const existing = index.get(step.id);
       if (existing && (existing.row.kind === "agent") === (step.kind === "agent")) {
@@ -512,6 +521,8 @@ export function createReasoningPanel() {
 
     /** Render a stored trace from a reloaded conversation, collapsed. */
     hydrate(steps) {
+      for (const step of steps ?? []) if (step.kind === "plan") plan.update(step);
+      steps = steps?.filter((step) => step.kind !== "plan");
       if (!steps?.length) return;
       for (const step of steps) this.upsert(step);
       // The last step listed may be a short one inside a block that ran on.

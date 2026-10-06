@@ -21,6 +21,7 @@ from core.run_stream import (
     tool_event_info,
 )
 from web_chat.payload import normalize_payload
+from web_chat.plan_board import TRACKED_TOOLS, PlanBoard
 from web_chat.tool_summaries import tool_subtitle, tool_title
 from web_chat.trace import (
     Step,
@@ -92,6 +93,7 @@ class WebStreamObserver:
         reset_answer: Optional[Callable[[], None]] = None,
         emit_image: Optional[Callable[[str], None]] = None,
         agent_label: str = "",
+        plan: Optional[PlanBoard] = None,
     ) -> None:
         self._recorder = recorder
         self._emit_token = emit_token
@@ -119,6 +121,10 @@ class WebStreamObserver:
         # Calls the policy held in this turn, sub-agents included: one counter,
         # shared by the nested views (web_chat.system_activity).
         self._held = [0]
+        # The conversation's plan (web_chat.plan_board), fed by the tracker
+        # calls of this turn and of its sub-agents; the calls it waits on, by id.
+        self._plan = plan if plan is not None else PlanBoard(recorder)
+        self._plan_calls: dict[str, tuple[str, Any]] = {}
         # Rows of tool calls the model is still writing, by the output item id
         # its argument deltas name, with the characters written so far. A call
         # with long arguments takes minutes to write; without its row the run
@@ -150,6 +156,8 @@ class WebStreamObserver:
         child._pending_policies = self._pending_policies
         child._tool_names = self._tool_names
         child._held = self._held
+        child._plan = self._plan
+        child._plan_calls = self._plan_calls
         block = self._calls_by_id.get(call_id) if call_id else None
         if block is None and call_id is None:
             # Without an id, adopt the caller's call only when it is unambiguous.
@@ -469,6 +477,7 @@ class WebStreamObserver:
             self._forget_writing(block)
             self._recorder.update(block, **fields)
             self._tool_names[block.id] = str(info.get("tool_name") or "")
+            self._follow_plan(tool_name, arguments, call_id)
             return
         if block is not None and self._forget_writing(block):
             # The row that showed the call while it was written becomes the call's.
@@ -487,11 +496,23 @@ class WebStreamObserver:
             self._recorder.update(step, **badge)
         if call_id:
             self._calls_by_id[call_id] = step
+        self._follow_plan(tool_name, arguments, call_id)
+
+    def _follow_plan(self, tool_name: str, arguments: Any, call_id: Optional[str]) -> None:
+        """Hand a tracker call to the plan board; its result follows by call id."""
+        if tool_name not in TRACKED_TOOLS:
+            return
+        self._plan.called(tool_name, arguments)
+        if call_id:
+            self._plan_calls[call_id] = (tool_name, arguments)
 
     def _on_tool_output(self, item: Any, agent_key: Optional[str]) -> None:
         info = tool_event_info(item)
         step = self._take_pending_call(info.get("call_id"))
         value = info.get("output")
+        planned = self._plan_calls.pop(info.get("call_id"), None)
+        if planned is not None:
+            self._plan.finished(*planned, value)
         output = summarize(value)
         tool_name = self._tool_names.get(step.id, "") if step else str(info.get("tool_name") or "")
         result_payload = normalize_payload(
