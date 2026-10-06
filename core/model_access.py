@@ -11,9 +11,11 @@ managed, per user.
 
 from __future__ import annotations
 
+import contextvars
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 import httpx
 from openai import AsyncOpenAI
@@ -43,6 +45,43 @@ class SpendEvent:
 
 
 SpendSink = Callable[[SpendEvent], None]
+
+
+@dataclass
+class SpendTally:
+    """What the model calls made inside one :func:`tally_spend` scope cost."""
+
+    calls: int = 0
+    micro: int = 0
+    #: Calls on a subscription: priced as the API would, nothing billed.
+    subscription_calls: int = 0
+
+    def add(self, event: SpendEvent) -> None:
+        self.calls += 1
+        self.micro += event.cost.micro
+        self.subscription_calls += event.subscription
+
+
+_tallies: contextvars.ContextVar[tuple[SpendTally, ...]] = contextvars.ContextVar(
+    "_spend_tallies", default=()
+)
+
+
+@contextmanager
+def tally_spend() -> Iterator[SpendTally]:
+    """Count the spend of every model call made in this context from here on.
+
+    Tasks started inside inherit the scope - the agents and compactions a run
+    starts count toward it - and scopes nest: a call counts in each one open.
+    Only managed clients see their spend (ModelAccess.managed), so outside one
+    the tally stays empty.
+    """
+    tally = SpendTally()
+    token = _tallies.set((*_tallies.get(), tally))
+    try:
+        yield tally
+    finally:
+        _tallies.reset(token)
 #: Whether a model, by config key and by name, may be used: a plan's model list.
 ModelFilter = Callable[[str, str], bool]
 
@@ -174,9 +213,10 @@ class ModelAccess:
         if not (usage.total or cost.micro):
             return
         assert self._on_spend is not None
-        self._on_spend(
-            SpendEvent(provider_key or "", call.model, usage, cost, call.source, call.charged, call.subscription)
-        )
+        event = SpendEvent(provider_key or "", call.model, usage, cost, call.source, call.charged, call.subscription)
+        for tally in _tallies.get():
+            tally.add(event)
+        self._on_spend(event)
 
     def _price(self, config: Any, provider_key: Optional[str], provider: Any, model: str) -> Optional[Price]:
         for candidate in config.config.models.values():

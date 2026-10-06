@@ -47,6 +47,7 @@ from core.tool_check import summarize
 from web_chat.attachments import AttachmentError, agent_message, normalize_images
 from web_chat.delivery import DELIVERIES, MessageQueue, decide_delivery
 from web_chat.observer import WebStreamObserver
+from web_chat.plan_board import PlanBoard
 from web_chat.spend import TurnSpend, tracking
 from web_chat.systems import Resolution
 from web_chat.trace import StepKind, TraceRecorder, is_tool_result
@@ -109,7 +110,17 @@ class AgentTurn:
             emit_token=self._token,
             reset_answer=lambda: self._queue.put_nowait({"type": "answer_reset"}),
             emit_image=lambda url: self._queue.put_nowait({"type": "image", "url": url}),
+            plan=PlanBoard.continuing(self._recorder, self._stored_messages()),
         )
+
+    def _stored_messages(self) -> list[dict[str, Any]]:
+        """The conversation's recent messages, for the plan its last turns left."""
+        try:
+            snapshot = self._session.manager.get_context_messages(self._session.context_id, limit=40)
+        except Exception:
+            logger.debug("No stored messages to continue the plan from", exc_info=True)
+            return []
+        return list((snapshot or {}).get("messages") or [])
 
     @property
     def message(self) -> str:

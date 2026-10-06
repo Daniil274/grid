@@ -156,6 +156,7 @@ export function createMessage({
     { id, dataset: { role } },
     h("div.msg__meta", {}, authorNode, timestamp ? h("span.msg__time", { text: clock(timestamp) }) : null, switcher),
     reasoning?.el,
+    reasoning?.planEl,
     isAssistant ? null : gallery,
     isAssistant ? null : fileList,
     body,

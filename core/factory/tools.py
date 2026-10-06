@@ -29,6 +29,7 @@ from core.interruption import StopRequested
 from core.run_stream import interrupted_run_report, run_output_text
 from schemas import AgentConfig, AgentExecution
 from tools import resolve_tool, tool_isolation
+from tools.parallel_tools import DEFAULT_MAX_PARALLEL, PARALLEL, parallel_tool
 from utils.exceptions import ConfigError
 from utils.logger import Logger
 from utils.path_utils import reset_current_factory, set_current_factory
@@ -100,7 +101,10 @@ class ToolAssembly:
                     mcp_tools.append(tool_key)
 
         resolved: List[Any] = []
+        bind_parallel = PARALLEL in function_tools
         for tool_key in function_tools:
+            if tool_key == PARALLEL:
+                continue
             found = self._resolve_function_tools([tool_key])
             if found:
                 resolved.extend(found)
@@ -117,6 +121,8 @@ class ToolAssembly:
                 logger.debug("Failed to resolve agent tools: %s", exc, exc_info=exc)
                 missing.extend(agent_tools)
 
+        if bind_parallel:
+            resolved.append(self._parallel_tool(resolved))
         return resolved, mcp_tools, missing
 
     @staticmethod
@@ -218,12 +224,16 @@ class ToolAssembly:
         return registry, pipeline_id, active_context_id
 
     def _wrap_tool_with_output_limit(
-        self, tool: Any, tool_key: Optional[str] = None
+        self, tool: Any, tool_key: Optional[str] = None, limit_output: bool = True
     ) -> Any:
-        """Wraps FunctionTool with pipeline serialization and output limits."""
+        """Wraps FunctionTool with pipeline serialization and output limits.
+
+        ``limit_output`` False leaves the output whole: for a tool whose output
+        is made of other tools' outputs, each limited already.
+        """
         settings = self.config.config.settings
-        max_tokens = getattr(settings, "max_tool_output_tokens", None)
-        max_chars = getattr(settings, "max_tool_output", None)
+        max_tokens = getattr(settings, "max_tool_output_tokens", None) if limit_output else None
+        max_chars = getattr(settings, "max_tool_output", None) if limit_output else None
         if not hasattr(tool, "on_invoke_tool"):
             return tool
 
@@ -269,6 +279,20 @@ class ToolAssembly:
 
         tool.on_invoke_tool = limited_invoke
         return self._wrap_tool_with_policy(tool, tool_name, "function")
+
+    def _parallel_tool(self, siblings: List[Any]) -> Any:
+        """The ``parallel`` tool bound to an agent's own tools (tools.parallel_tools).
+
+        It runs as one serialized step, which its calls join, so they run side
+        by side; their outputs were limited one by one, so its own is not.
+        """
+        try:
+            max_parallel = self.config.get_tool(PARALLEL).max_parallel
+        except ConfigError:
+            max_parallel = DEFAULT_MAX_PARALLEL
+        return self._wrap_tool_with_output_limit(
+            parallel_tool(siblings, max_parallel=max_parallel), PARALLEL, limit_output=False
+        )
 
     def _resolve_function_tools(self, tool_keys: List[str]) -> List[Any]:
         """Each function tool by key, from this factory's own config: its project
@@ -331,7 +355,7 @@ class ToolAssembly:
                     exc_info=exc,
                 )
 
-        tools.extend(self._resolve_function_tools(function_tools))
+        tools.extend(self._resolve_function_tools([key for key in function_tools if key != PARALLEL]))
 
         # Add agent tools
         if agent_tools:
@@ -351,6 +375,8 @@ class ToolAssembly:
 
         # Caller-specific closures must not be shared between agent keys.
         tools.extend(self._system_access_tools(agent_key))
+        if PARALLEL in function_tools:
+            tools.append(self._parallel_tool(tools))
 
         # Cache tools
         self._tool_cache[cache_key] = tools

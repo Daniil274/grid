@@ -523,3 +523,131 @@ a.refChip:hover {
 .payload__value[data-type="string"] { color: var(--code-str); }
 .payload__value[data-type="number"] { color: var(--code-num); }
 .payload__value[data-type="boolean"] { color: var(--code-kw); }
+
+/* The plan card (ui/plan-card.js): the conversation's tracker tasks, above the answer. */
+.planCard {
+  margin: 8px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+
+.planCard[hidden] {
+  display: none;
+}
+
+.planCard__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.planCard__heading {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.planCard__summary {
+  flex: 1 1 auto;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.planCard__bar {
+  flex: 1 0 100%;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-3);
+  overflow: hidden;
+}
+
+.planCard__fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s var(--ease);
+}
+
+.planCard[data-complete="true"] .planCard__fill {
+  background: var(--ok);
+}
+
+.planCard__tasks {
+  margin: 0;
+  padding: 0 12px 8px;
+  list-style: none;
+}
+
+.planCard.is-collapsed .planCard__tasks {
+  display: none;
+}
+
+.planCard__task {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.planCard__mark {
+  color: var(--text-3);
+  text-align: center;
+}
+
+.planCard__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planCard__meta {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.planCard__task[data-state="closed"] .planCard__mark {
+  color: var(--ok);
+}
+
+.planCard__task[data-state="closed"] .planCard__title {
+  color: var(--text-3);
+  text-decoration: line-through;
+}
+
+.planCard__task[data-state="in_progress"] .planCard__mark {
+  color: var(--accent);
+}
+
+.planCard__task[data-state="in_progress"] .planCard__title {
+  font-weight: 600;
+}
+
+.planCard__task[data-state="blocked"] .planCard__mark {
+  color: var(--danger);
+}
+
+@media (max-width: 600px) {
+  .planCard__task {
+    grid-template-columns: 18px minmax(0, 1fr);
+  }
+
+  .planCard__meta {
+    grid-column: 2;
+    white-space: normal;
+  }
+}

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from utils.path_utils import display_agent_path, resolve_agent_path, sanitize_text_for_agent
+from utils.path_utils import container_path, display_agent_path, resolve_agent_path, sanitize_text_for_agent
 
 
 class _DummyConfig:
@@ -48,6 +48,22 @@ def test_container_shell_paths_resolve_to_the_workspace(tmp_path: Path):
     )
     assert display_agent_path("/workspace", factory) == "."
     assert display_agent_path("/workspace/grid", factory) == "grid"
+
+
+def test_container_path_maps_resolved_host_paths_into_the_workspace(tmp_path: Path):
+    # A configured working directory that differs from its resolved form only in
+    # spelling (drive-letter case on Windows, "..") still maps to /workspace,
+    # never to the host path, which `docker exec -w` rejects.
+    spelled = str(tmp_path / "sub" / "..")
+    if len(spelled) > 1 and spelled[1] == ":":
+        spelled = spelled[0].swapcase() + spelled[1:]
+    factory = _DummyFactory(spelled, container_id="container-1")
+
+    assert container_path(resolve_agent_path("/workspace", factory), factory) == "/workspace"
+    assert container_path(None, factory) == "/workspace"
+    assert container_path(resolve_agent_path("src/a", factory), factory) == "/workspace/src/a"
+    with pytest.raises(ValueError, match="escapes working directory"):
+        container_path(str(tmp_path.parent), factory)
 
 
 def test_container_workdir_prefix_is_matched_by_whole_name(tmp_path: Path):

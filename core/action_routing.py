@@ -96,9 +96,16 @@ def matches(path: str, patterns: Iterable[str]) -> bool:
 
 def _tokens(command: str) -> Optional[list[str]]:
     """The command split as a POSIX shell would, operators apart; None when it
-    cannot be split (an unclosed quote)."""
+    cannot be split (an unclosed quote).
+
+    A backslash is kept as written, not taken as an escape: on Windows the
+    shell is cmd.exe, where ``C:\\work\\a.py`` is a path. Kept, it can only add
+    a separator or leave a word unlike any read-only command - never make a
+    command look read-only that a POSIX shell would not run as one.
+    """
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.escape = ""
     try:
         return list(lexer)
     except ValueError:
