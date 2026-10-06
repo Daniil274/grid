@@ -198,7 +198,11 @@ async function boot() {
     store,
     onSelect: async (contextId) => {
       closeRail();
-      await chat.openConversation(contextId);
+      try {
+        await chat.openConversation(contextId);
+      } catch (error) {
+        toast(`Could not load chat: ${error.message}`, { tone: "error" });
+      }
     },
     onRename: async (contextId, title) => {
       try {
