@@ -34,15 +34,20 @@ export const api = {
   adminServer: () => request("/api/admin/server", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
   restartServer: () => request("/api/admin/server/restart", { method: "POST" }),
   bootstrap: () => request("/api/chat/bootstrap"),
-  uploadFiles: (files) => {
+  /** Into the workspace of chat `contextId` (a chat may work in a directory of its own). */
+  uploadFiles: (files, contextId) => {
     const body = new FormData();
     for (const file of files) body.append("files", file);
-    return request("/api/workspace/uploads", { method: "POST", body });
+    const scope = contextId ? `?context=${encodeURIComponent(contextId)}` : "";
+    return request(`/api/workspace/uploads${scope}`, { method: "POST", body });
   },
   listConversations: () => request("/api/chat/conversations", { cache: "no-store" }),
   getConversation: (id, signal) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}`, { cache: "no-store", signal }),
   createConversation: (selection) => request("/api/chat/conversations", json("POST", selection)),
+  /** The directory a chat works in, before its first message. */
+  setWorkspace: (id, path) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/workspace`, json("PUT", { path })),
   renameConversation: (id, title) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}`, json("PATCH", { title })),
   deleteConversation: (id) =>

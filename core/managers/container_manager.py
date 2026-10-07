@@ -35,10 +35,27 @@ CONTAINER_WORKDIR = "/workspace"
 #: The label naming the settings a container was made with (ContainerManager.profile).
 PROFILE_LABEL = "grid.isolation.profile"
 
+#: The Grid install this module belongs to: servers run from different copies
+#: (worktrees) never share a container, even for the same workspace.
+GRID_ROOT = Path(__file__).resolve().parents[2]
+
+
+def container_name(user_id: str, workspace: Path) -> str:
+    """The container of *user_id* working in *workspace* (a resolved host path).
+
+    The name tells workspaces apart: two servers - or two chats - working in
+    different directories each get their own container. A name of the user
+    alone made a second server, started with another ``--path``, find "its"
+    container mounting the wrong directory and recreate it, removing the
+    container the first server's tools were still running in.
+    """
+    digest = hashlib.sha256(f"{GRID_ROOT}\n{workspace}".encode()).hexdigest()[:12]
+    return f"grid-agent-{user_id}-{digest}"
+
 class ContainerManager:
     """
     Manages Docker containers for agent isolation.
-    Implements 'One Container per User' strategy.
+    Implements 'One Container per User and Workspace' strategy.
     """
 
     def __init__(self, config: Any, *, enabled: Optional[bool] = None):
@@ -94,14 +111,14 @@ class ContainerManager:
         if not self.enabled or not self.client:
             return None
 
-        container_name = f"grid-agent-{user_id}"
-        # One spelling of the host path for the mount and its check: a path
-        # spelled differently would recreate the container on every call.
+        # One spelling of the host path for the name, the mount and its check:
+        # a path spelled differently would recreate the container on every call.
         workspace = Path(workspace).resolve()
+        name = container_name(user_id, workspace)
         expected_host_path = str(workspace)
 
         try:
-            container = self.client.containers.get(container_name)
+            container = self.client.containers.get(name)
 
             # Check that the existing container mounts the correct host path.
             # Mounts cannot be changed on a running container — recreate if mismatched.
@@ -115,35 +132,35 @@ class ContainerManager:
             if current_host_path != expected_host_path or made_with != self.profile:
                 logger.warning(
                     "Container %s mounts '%s' with settings %s; expected '%s' with %s. Recreating.",
-                    container_name, current_host_path, made_with, expected_host_path, self.profile,
+                    name, current_host_path, made_with, expected_host_path, self.profile,
                 )
                 container.remove(force=True)
-                return self._create_container(user_id, container_name, workspace=workspace)
+                return self._create_container(user_id, name, workspace=workspace)
             if not self._runs_current_image(container):
-                logger.info("Container %s runs an older build of %s. Recreating.", container_name, self.image)
+                logger.info("Container %s runs an older build of %s. Recreating.", name, self.image)
                 container.remove(force=True)
-                return self._create_container(user_id, container_name, workspace=workspace)
+                return self._create_container(user_id, name, workspace=workspace)
 
             if container.status != "running":
                 container.start()
             return container
         except NotFound:
             # Create new container
-            return self._create_container(user_id, container_name, workspace=workspace)
+            return self._create_container(user_id, name, workspace=workspace)
         except Exception as e:
-            logger.error(f"Error getting container {container_name}: {e}")
+            logger.error(f"Error getting container {name}: {e}")
             return None
 
     def stop_container(self, user_id: str, container_id: str) -> None:
         """Stop this user's exact container when its space is retired.
 
-        Checking the ID prevents a late close from stopping a replacement
-        container that a newer space started under the same name.
+        Found by its ID, so a late close never stops a replacement container
+        that a newer space started under the same name.
         """
         if not self.enabled or not self.client:
             return
         try:
-            container = self.client.containers.get(f"grid-agent-{user_id}")
+            container = self.client.containers.get(container_id)
             if container.id == container_id and container.status == "running":
                 container.stop(timeout=5)
         except NotFound:

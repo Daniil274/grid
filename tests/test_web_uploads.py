@@ -306,3 +306,32 @@ def test_upload_directory_cannot_be_a_symlink(upload_app, tmp_path):
     )
     assert response.status_code == 400
     assert list(outside.iterdir()) == []
+
+
+def test_files_of_a_chat_working_in_its_own_directory_come_from_there(tmp_path):
+    # web_chat.space: a chat may work in a directory of its own; links carry its id.
+    home, project = tmp_path / "home", tmp_path / "project"
+    home.mkdir(), project.mkdir()
+    (home / "notes.txt").write_text("home")
+    (project / "notes.txt").write_text("project")
+    chats = {"chat-p": project}
+    space = SimpleNamespace(
+        workspace_path=home, conversation_workspace=lambda context: chats.get(context, home)
+    )
+
+    async def current_space():
+        return space
+
+    api = APIRouter()
+    register_upload_routes(api, current_space, lambda: UploadsPolicy(max_file_mb=1, max_files=3, quota_mb=2))
+    app = FastAPI()
+    app.include_router(api)
+    client = TestClient(app)
+
+    assert client.get("/api/workspace/files/notes.txt").text == "home"
+    assert client.get("/api/workspace/files/notes.txt", params={"context": "chat-p"}).text == "project"
+    uploaded = client.post(
+        "/api/workspace/uploads", params={"context": "chat-p"}, files=[("files", ("a.txt", b"x", "text/plain"))]
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    assert (project / uploaded.json()["files"][0]["path"]).read_bytes() == b"x"

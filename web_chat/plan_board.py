@@ -15,6 +15,7 @@ appears in a turn once one of its tasks changes or a plan is created.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Iterable, Optional
 
 from web_chat.trace import Step, StepKind, TraceRecorder
@@ -42,6 +43,20 @@ def _data(value: Any) -> Any:
         return json.loads(value)
     except ValueError:
         return None
+
+
+#: What ``bd create`` prints without ``--json`` - the text beads_create returns:
+#: "✓ Created issue: grid-a1b — Fix the build".
+_CREATED = re.compile(r"Created issue:\s+(?P<id>[\w.-]+)(?:\s+[—–-]\s+(?P<title>[^\n]+))?")
+
+
+def _created(output: Any) -> Optional[dict[str, Any]]:
+    """The id and title of the task a beads_create call made; None when it says none."""
+    result = _data(output)
+    if isinstance(result, dict):
+        return result if isinstance(result.get("id"), str) else None
+    match = _CREATED.search(output) if isinstance(output, str) else None
+    return {"id": match["id"], "title": (match["title"] or "").strip()} if match else None
 
 
 def _failed(output: Any) -> bool:
@@ -107,8 +122,8 @@ class PlanBoard:
         if tool == "beads_plan":
             changed = self._planned(args, _data(output))
         elif tool == "beads_create":
-            result = _data(output)
-            if isinstance(result, dict) and isinstance(result.get("id"), str):
+            result = _created(output)
+            if result is not None:
                 self._tasks[result["id"]] = {
                     "id": result["id"], "key": "", "title": result.get("title") or args.get("title") or result["id"],
                     "status": "open", "depends_on": [],

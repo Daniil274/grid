@@ -470,3 +470,73 @@ body:not([data-reviews="on"]) .msgAction--report {
 .proposal__result[data-tone="error"] {
   color: var(--danger);
 }
+
+/* The working directory of a chat (ui/workspace-dialog.js): drawn like the report dialog. */
+.workspaceDialog {
+  width: min(560px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.workspaceDialog::backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+
+.workspaceDialog__form {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+}
+
+.workspaceDialog__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.workspaceDialog__hint {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.workspaceDialog__path {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text);
+  font: 13px/1.4 var(--font-mono);
+}
+
+.workspaceDialog__path:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+
+.workspaceDialog__status {
+  min-height: 1em;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.workspaceDialog__status[data-tone="error"] {
+  color: var(--danger);
+}
+
+.workspaceDialog__status:empty {
+  display: none;
+}
+
+.workspaceDialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

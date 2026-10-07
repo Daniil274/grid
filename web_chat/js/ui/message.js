@@ -10,6 +10,7 @@ import { $$, h, icon, onFrame } from "../lib/dom.js";
 import { splitFiles, withFiles } from "../lib/files.js";
 import { clock } from "../lib/format.js";
 import { renderMarkdown } from "../lib/markdown.js";
+import { scopeWorkspaceLinks } from "../lib/workspace-links.js";
 import { ICONS } from "./icons.js";
 import { createReasoningPanel } from "./reasoning.js";
 import { copyText } from "./toast.js";
@@ -173,7 +174,9 @@ export function createMessage({
     body.innerHTML = renderMarkdown(words);
     decorateCode(body);
     // Workspace-file links the agent emits (/api/workspace/files/<path>)
-    // download on click; nothing extra is needed here.
+    // download on click, from the directory this chat works in.
+    scopeWorkspaceLinks(body);
+    if (!isAssistant) scopeWorkspaceLinks(fileList);
   };
   const paintSoon = onFrame(paint);
 

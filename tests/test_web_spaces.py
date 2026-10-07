@@ -41,6 +41,10 @@ class FakeSpace:
     def schedule_warmup(self) -> None:
         pass
 
+    async def registry_for(self, context_id):
+        """Every chat of the fake works in the space's one workspace."""
+        return self.registry
+
 
 def counting_pool(**options):
     built = []

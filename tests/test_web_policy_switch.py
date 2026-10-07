@@ -48,6 +48,7 @@ def space_with(gate, policy):
     space = object.__new__(UserSpace)
     factory = SimpleNamespace(action_gate=gate, set_policy_filter=Mock())
     space.registry = SimpleNamespace(built_factories=lambda: {"coder": factory})
+    space._chosen = {}
     space.deployment = SimpleNamespace(action_policy=policy)
     stored = {}
     space.conversations = SimpleNamespace(update_context_metadata=lambda cid, data: stored.update({cid: data}))

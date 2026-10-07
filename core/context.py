@@ -794,7 +794,7 @@ class ContextManager:
     #: Conversation settings a branch keeps from the context it is forked from.
     BRANCH_INHERITED = (
         "title", "title_locked", "created_by_web", "system_key", "agent_key",
-        "routed_system", "routed_agent", "session_epochs",
+        "routed_system", "routed_agent", "session_epochs", "workspace",
     )
 
     def branch_root(self, context_id: str) -> str:

@@ -326,9 +326,9 @@ class AgentTurn:
                 StepKind.PREPARE,
                 "Preparing the runtime",
                 subtitle=f"{resolution.system} · {resolution.agent}",
-                body=f"Workspace: {space.workspace_label}",
+                body=f"Workspace: {space.workspace_label_of(self._session.context_id)}",
             )
-            await space.warm_agent(resolution.agent, resolution.system)
+            await space.warm_agent(resolution.agent, resolution.system, context_id=self._session.context_id)
             self._recorder.close(step, title=f"Runtime ready · {label}")
 
             space.update_conversation_metadata(
@@ -382,7 +382,8 @@ class AgentTurn:
     def _warn_about_tools(self, resolution: Resolution, label: str) -> None:
         """Say which tools will fail before the agent starts; nothing is disabled."""
         try:
-            issues = self._session.space.registry.agent_issues(resolution.system, resolution.agent)
+            registry = self._session.space.registry_of(self._session.context_id)
+            issues = registry.agent_issues(resolution.system, resolution.agent)
         except Exception as exc:  # the check must never cost the turn
             logger.warning("Tool check failed for %s/%s: %s", resolution.system, resolution.agent, exc)
             return

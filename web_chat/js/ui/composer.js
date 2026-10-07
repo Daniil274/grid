@@ -131,7 +131,7 @@ export function createComposer({
       try {
         if (kind === "image") item.url = await imageToDataUrl(file);
         else {
-          const result = await api.uploadFiles([file]);
+          const result = await api.uploadFiles([file], store.get().contextId);
           Object.assign(item, result.files[0]);
         }
         item.pending = false;

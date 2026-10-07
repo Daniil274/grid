@@ -97,8 +97,22 @@ class _DummySpace:
     def schedule_warmup(self) -> None:
         return None
 
-    async def warm_agent(self, agent_key: str, system_key: str | None = None) -> None:
+    async def warm_agent(self, agent_key: str, system_key: str | None = None, *, context_id=None) -> None:
         return None
+
+    can_choose_workspace = False
+
+    def conversation_workspace(self, context_id):
+        return self.workspace_path
+
+    def workspace_label_of(self, context_id):
+        return str(self.workspace_path)
+
+    async def registry_for(self, context_id):
+        return self.registry
+
+    def registry_of(self, context_id):
+        return self.registry
 
     def context_manager(self):
         return self._context_manager
