@@ -64,7 +64,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--path",
         "-p",
         default=None,
-        help="Working directory of the single user (overrides config when allow_path_override is true)",
+        help="Working directory of the single user (default: the directory the server is started in; "
+        "overrides the config when allow_path_override is true)",
     )
     parser.add_argument(
         "--user-id",
@@ -136,7 +137,9 @@ def main() -> None:
     deployment = Deployment(
         config_path=args.config,
         routing_path=args.routing,
-        working_directory=None if args.accounts else args.path,
+        # The one user works where they started the server, not in a directory
+        # beside the config (examples/coder/workspace/...).
+        working_directory=None if args.accounts else (args.path or os.getcwd()),
     )
     print(f"Catalog: {deployment.routing_path if deployment.catalog else 'none'}")
     print(f"Config: {deployment.config_path}")

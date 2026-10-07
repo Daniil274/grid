@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.managers import container_manager as module
-from core.managers.container_manager import CONTAINER_WORKDIR, PROFILE_LABEL, ContainerManager
+from core.managers.container_manager import CONTAINER_WORKDIR, PROFILE_LABEL, ContainerManager, container_name
 from schemas.schemas import IsolationConfig
 
 
@@ -43,17 +43,20 @@ class FakeClient:
         self.containers = self
         self.images = SimpleNamespace(get=lambda name: SimpleNamespace(id=CURRENT_BUILD))
 
-    def get(self, name):
-        if name not in self.existing:
-            raise module.NotFound("missing")
-        return self.existing[name]
+    def get(self, name_or_id):
+        for container in self.existing.values():
+            if name_or_id in (container.name, container.id):
+                return container
+        raise module.NotFound("missing")
 
     def run(self, image, command=None, **kwargs):
         if command is not None:  # the question of which uid the image runs as
             self.probes.append((image, command, kwargs))
             return b"1000\n1000\n"
         self.runs.append((image, kwargs))
-        return FakeContainer(kwargs["name"], next(iter(kwargs["volumes"])), kwargs["labels"])
+        container = FakeContainer(kwargs["name"], next(iter(kwargs["volumes"])), kwargs["labels"])
+        self.existing[container.name] = container
+        return container
 
 
 @pytest.fixture
@@ -84,7 +87,8 @@ def test_a_container_is_limited_and_unprivileged_and_not_restarted_by_docker(man
 def test_a_container_made_with_other_settings_is_recreated(manager, tmp_path):
     manager, client = manager
     source = str(tmp_path.resolve())
-    old = client.existing["grid-agent-u1"] = FakeContainer("grid-agent-u1", source, labels={})
+    name = container_name("u1", tmp_path.resolve())
+    old = client.existing[name] = FakeContainer(name, source, labels={})
 
     manager.get_or_create_container("u1", workspace=tmp_path)
 
@@ -94,8 +98,9 @@ def test_a_container_made_with_other_settings_is_recreated(manager, tmp_path):
 def test_a_current_container_is_reused_and_started(manager, tmp_path):
     manager, client = manager
     source = str(tmp_path.resolve())
-    current = client.existing["grid-agent-u1"] = FakeContainer(
-        "grid-agent-u1", source, labels={PROFILE_LABEL: manager.profile}, status="exited"
+    name = container_name("u1", tmp_path.resolve())
+    current = client.existing[name] = FakeContainer(
+        name, source, labels={PROFILE_LABEL: manager.profile}, status="exited"
     )
 
     assert manager.get_or_create_container("u1", workspace=tmp_path) is current
@@ -104,8 +109,9 @@ def test_a_current_container_is_reused_and_started(manager, tmp_path):
 
 def test_retiring_a_space_stops_only_its_exact_container(manager, tmp_path):
     manager, client = manager
-    current = client.existing["grid-agent-u1"] = FakeContainer(
-        "grid-agent-u1", str(tmp_path), labels={PROFILE_LABEL: manager.profile}
+    name = container_name("u1", tmp_path.resolve())
+    current = client.existing[name] = FakeContainer(
+        name, str(tmp_path), labels={PROFILE_LABEL: manager.profile}
     )
     manager.stop_container("u1", "old-container-id")
     assert not current.stopped
@@ -116,13 +122,37 @@ def test_retiring_a_space_stops_only_its_exact_container(manager, tmp_path):
 def test_a_container_of_an_older_image_build_is_recreated(manager, tmp_path):
     manager, client = manager
     source = str(tmp_path.resolve())
-    old = client.existing["grid-agent-u1"] = FakeContainer(
-        "grid-agent-u1", source, labels={PROFILE_LABEL: manager.profile}, image="sha256:older"
+    name = container_name("u1", tmp_path.resolve())
+    old = client.existing[name] = FakeContainer(
+        name, source, labels={PROFILE_LABEL: manager.profile}, image="sha256:older"
     )
 
     manager.get_or_create_container("u1", workspace=tmp_path)
 
     assert old.removed and len(client.runs) == 1
+
+
+def test_servers_working_in_different_directories_keep_their_own_containers(manager, tmp_path):
+    # Two one-user servers (both "default_user") started with different --path:
+    # the second used to find the first's container, see the wrong mount and
+    # remove it - the first server's shell then answered "No such container".
+    manager, client = manager
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir(), second.mkdir()
+
+    one = manager.get_or_create_container("default_user", workspace=first)
+    other = manager.get_or_create_container("default_user", workspace=second)
+
+    assert one.name != other.name and not one.removed
+    assert manager.get_or_create_container("default_user", workspace=first) is one
+    assert len(client.runs) == 2
+
+
+def test_a_container_is_named_by_user_and_workspace(tmp_path):
+    assert container_name("u1", tmp_path) == container_name("u1", tmp_path)
+    assert container_name("u1", tmp_path) != container_name("u2", tmp_path)
+    assert container_name("u1", tmp_path) != container_name("u1", tmp_path / "x")
+    assert container_name("u1", tmp_path).startswith("grid-agent-u1-")
 
 
 def test_changing_a_limit_changes_the_profile(monkeypatch):

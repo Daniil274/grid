@@ -65,6 +65,7 @@ def space_for(run, *, request_stop=lambda context_id: False, continue_agent=None
     )
     return SimpleNamespace(
         context_manager=lambda: manager, workspace_path='.', workspace_label='.', user_id='test', admit_turn=lambda: None,
+        workspace_label_of=lambda context_id: '.', registry_of=lambda context_id: registry,
         factory=factory, warm_agent=AsyncMock(), resolve_turn=resolve_turn,
         update_conversation_metadata=lambda *a, **kw: None,
         registry=registry, turns=TurnBoard(), deployment=SimpleNamespace(),
@@ -100,7 +101,7 @@ async def test_stop_during_agent_warmup_and_next_turn():
     space, socket = space_for(run), Socket()
     started = asyncio.Event()
 
-    async def warm(agent_key, system_key=None):
+    async def warm(agent_key, system_key=None, *, context_id=None):
         started.set()
         await asyncio.Event().wait()
 

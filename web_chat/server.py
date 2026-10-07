@@ -40,13 +40,14 @@ from web_chat.schemas import (
     ActionReviewRequest,
     BranchRequest,
     ConversationCreateRequest,
+    WorkspaceRequest,
     ConversationRenameRequest,
     PrepareAgentRequest,
     SettingsStructuredUpdateRequest,
     SettingsYamlUpdateRequest,
 )
 from web_chat.security import OriginGuard, refusal
-from web_chat.space import IsolationUnavailable, UserSpace
+from web_chat.space import IsolationUnavailable, UserSpace, WorkspaceChoiceError
 from web_chat.spaces import SpacePool
 from core.interruption import COMPACTED_TYPE
 from web_chat.trace import is_tool_result
@@ -530,6 +531,8 @@ class WebChatServer:
                     "current_context_id": space.context_manager().get_current_context_id(),
                     # Where the workspace lives on the server: for admins only.
                     "workspace_path": str(space.workspace_path) if user.is_admin else "",
+                    # Whether a chat may work in a directory of its own (UserSpace.choose_workspace).
+                    "choose_workspace": space.can_choose_workspace,
                     "isolation_enabled": bool(space.container_id),
                     # The policy switch: its filters and the default; null when off.
                     "policy": space.policy_filters(),
@@ -592,6 +595,7 @@ class WebChatServer:
                         "agent_key": metadata.get("agent_key"),
                         "routed_system": metadata.get("routed_system"),
                         "routed_agent": metadata.get("routed_agent"),
+                        "workspace": metadata.get("workspace"),
                         "message_count": sum(
                             1 for msg in shown["messages"] if not is_tool_result(msg)
                         ),
@@ -611,7 +615,27 @@ class WebChatServer:
                 "agent_key": body.agent_key if body else None,
             }
             space.update_conversation_metadata(context_id, created_by_web=True, title=UNTITLED, **selection)
-            return JSONResponse({"id": context_id, **selection})
+            workspace = None
+            if body is not None and body.workspace:
+                try:
+                    workspace = str(space.choose_workspace(context_id, body.workspace))
+                except WorkspaceChoiceError as exc:
+                    space.context_manager().delete_family(context_id)
+                    raise HTTPException(status_code=400, detail=str(exc)) from None
+            return JSONResponse({"id": context_id, **selection, "workspace": workspace})
+
+        @api.put("/api/chat/conversations/{context_id}/workspace")
+        async def choose_workspace(
+            context_id: str, body: WorkspaceRequest, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """Have a chat work in another directory, before its first message."""
+            try:
+                workspace = space.choose_workspace(context_id, body.path)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="Conversation not found") from None
+            except WorkspaceChoiceError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            return JSONResponse({"id": context_id, "workspace": str(workspace)})
 
         @api.patch("/api/chat/conversations/{context_id}")
         async def rename_conversation(
@@ -654,8 +678,9 @@ class WebChatServer:
             if space.turns.is_busy(context_id):
                 raise HTTPException(status_code=409, detail="Wait for the current operation before editing a message")
             metadata = manager.get_context_metadata(context_id)
-            system = metadata.get("routed_system") or space.registry.default_key()
-            factory = space.registry.factory(system)
+            registry = await space.registry_for(context_id)
+            system = metadata.get("routed_system") or registry.default_key()
+            factory = registry.factory(system)
             try:
                 branch_id = await factory.fork_conversation(context_id, body.message_id)
             except KeyError:
@@ -675,11 +700,12 @@ class WebChatServer:
             agent = metadata.get("routed_agent")
             if not agent:
                 raise HTTPException(status_code=400, detail="No agent has worked in this chat yet")
-            system = metadata.get("routed_system") or space.registry.default_key()
+            registry = await space.registry_for(context_id)
+            system = metadata.get("routed_system") or registry.default_key()
             if not space.turns.claim(context_id):
                 raise HTTPException(status_code=409, detail="Wait for the running turn or compaction before compacting")
             try:
-                outcome = await space.registry.factory(system).compact_session(agent, context_id, force=True)
+                outcome = await registry.factory(system).compact_session(agent, context_id, force=True)
             finally:
                 space.turns.release(context_id)
             if outcome is None:
