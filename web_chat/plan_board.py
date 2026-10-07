@@ -10,6 +10,13 @@ a page that attaches late and is stored with the answer.
 A turn starts from the plan the conversation's last plan step left, so work on
 tasks planned earlier shows on the board of the turn that does it. The board
 appears in a turn once one of its tasks changes or a plan is created.
+
+Every task on the board carries the details the tracker holds for it: the
+brief (``description``) and how to tell it is done (``acceptance``) it was
+planned with, the ``notes`` its updates added, the ``close_reason`` its close
+gave and the ``report`` of the orchestrate run on it - what the run did and
+cost, and the text it answered with once it completed - each only when a call
+the trace saw actually brought it, else its honest missing state.
 """
 
 from __future__ import annotations
@@ -67,6 +74,73 @@ def _failed(output: Any) -> bool:
     return isinstance(data, dict) and bool(data.get("error"))
 
 
+# What a report of an orchestrate run keeps: what it did and what it cost, and
+# the answer of a run that completed - the plan step streams to every viewer
+# on every change.
+REPORT_FIELDS = ("status", "seconds", "model_calls", "tokens", "cost_usd", "model_key", "tier")
+
+#: What ``orchestrate`` answers for a run that finished on its own: a failed or
+#: timed-out one says why it stopped instead, with a partial text that is not
+#: its result.
+COMPLETED = "completed"
+
+
+def _report(output: Any) -> Optional[dict[str, Any]]:
+    """An orchestrate run's report as data; None when its result is not one.
+
+    The run's ``final`` text counts as its result only when the run completed:
+    the partial text a failed or timed-out run still hands is what it managed
+    before stopping, not an answer that could pose as one.
+    """
+    result = _data(output)
+    if not isinstance(result, dict):
+        return None
+    report = {name: result[name] for name in REPORT_FIELDS if name in result}
+    final = result.get("final")
+    if report.get("status") == COMPLETED and isinstance(final, str):
+        report["final"] = final
+    return report or None
+
+
+def _claimed(arguments: Any) -> list[str]:
+    """The task ids an orchestrate call claims through the init_tools it hands its agent."""
+    args = _data(arguments)
+    init_tools = _data(args.get("init_tools")) if isinstance(args, dict) else None
+    ids: list[str] = []
+    for call in init_tools if isinstance(init_tools, list) else []:
+        params = call.get("parameters") if isinstance(call, dict) else None
+        if not isinstance(params, dict) or call.get("name") != "beads_update":
+            continue
+        if params.get("claim") or params.get("status") == IN_PROGRESS:
+            bead_id = params.get("bead_id")
+            if isinstance(bead_id, str):
+                ids.append(bead_id)
+    return ids
+
+
+def _text(value: Any) -> str:
+    """A tracker text field as a string; empty when the call brought none."""
+    return value if isinstance(value, str) else ""
+
+
+def _details(source: dict[str, Any]) -> dict[str, Any]:
+    """The details a task carries, from a source that may hold none of them.
+
+    A source without a field (a task of an old plan step, a call whose
+    arguments bring none) leaves it at its honest missing state: empty texts,
+    ``None`` for a close reason or a report that was never seen.
+    """
+    close_reason = source.get("close_reason")
+    report = source.get("report")
+    return {
+        "description": _text(source.get("description")),
+        "acceptance": _text(source.get("acceptance")),
+        "notes": _text(source.get("notes")),
+        "close_reason": close_reason if isinstance(close_reason, str) and close_reason else None,
+        "report": report if isinstance(report, dict) else None,
+    }
+
+
 class PlanBoard:
     """The tasks a conversation planned, kept as the turn's ``plan`` step."""
 
@@ -83,6 +157,7 @@ class PlanBoard:
                     "title": task.get("title") or task["id"],
                     "status": task.get("status") if task.get("status") in (IN_PROGRESS, "blocked", CLOSED) else "open",
                     "depends_on": [dep for dep in task.get("depends_on") or [] if isinstance(dep, str)],
+                    **_details(task),
                 }
 
     @classmethod
@@ -100,21 +175,15 @@ class PlanBoard:
         """A call started: an agent launched on a task claims it."""
         if tool != "orchestrate":
             return
-        args = _data(arguments) or {}
-        init_tools = _data(args.get("init_tools")) if isinstance(args, dict) else None
         changed = False
-        for call in init_tools if isinstance(init_tools, list) else []:
-            params = call.get("parameters") if isinstance(call, dict) else None
-            if not isinstance(params, dict) or call.get("name") != "beads_update":
-                continue
-            if params.get("claim") or params.get("status") == IN_PROGRESS:
-                changed |= self._set(params.get("bead_id"), IN_PROGRESS)
+        for bead_id in _claimed(arguments):
+            changed |= self._set(bead_id, IN_PROGRESS)
         if changed:
             self._publish()
 
     def finished(self, tool: str, arguments: Any, output: Any) -> None:
         """A tracker call answered: the board takes in what it changed."""
-        if tool not in TRACKED_TOOLS or tool == "orchestrate" or _failed(output):
+        if tool not in TRACKED_TOOLS or _failed(output):
             return
         args = _data(arguments)
         args = args if isinstance(args, dict) else {}
@@ -127,13 +196,15 @@ class PlanBoard:
                 self._tasks[result["id"]] = {
                     "id": result["id"], "key": "", "title": result.get("title") or args.get("title") or result["id"],
                     "status": "open", "depends_on": [],
+                    **_details(args),
                 }
                 changed = True
         elif tool == "beads_update":
-            status = IN_PROGRESS if args.get("claim") else args.get("status")
-            changed = self._set(args.get("bead_id"), status)
+            changed = self._updated(args)
         elif tool == "beads_close":
-            changed = self._set(args.get("bead_id"), CLOSED)
+            changed = self._closed(args)
+        elif tool == "orchestrate":
+            changed = self._reported(arguments, output)
         elif tool == "beads_dep":
             task = self._tasks.get(args.get("child_id"))
             parent = args.get("parent_id")
@@ -162,7 +233,55 @@ class PlanBoard:
                 "status": "open",
                 # A key of this plan becomes its task's id; an id stays as it is.
                 "depends_on": [ids.get(dep, dep) for dep in task.get("depends_on") or []],
+                **_details(task),
             }
+        return True
+
+    def _updated(self, args: dict[str, Any]) -> bool:
+        """A beads_update that answered: the state it set and the details it wrote."""
+        task = self._tasks.get(args.get("bead_id")) if isinstance(args.get("bead_id"), str) else None
+        if task is None:
+            return False
+        status = IN_PROGRESS if args.get("claim") else args.get("status")
+        changed = self._set(args.get("bead_id"), status)
+        description = args.get("description")
+        if isinstance(description, str) and description:
+            # The tracker replaces the description a call brings; so does the board.
+            task["description"] = description
+            changed = True
+        notes = args.get("notes")
+        if isinstance(notes, str) and notes:
+            # Notes add to what earlier updates noted, as the tracker keeps them.
+            task["notes"] = f"{task['notes']}\n{notes}" if task["notes"] else notes
+            changed = True
+        return changed
+
+    def _closed(self, args: dict[str, Any]) -> bool:
+        """A beads_close that answered: the task is closed, with the reason given."""
+        task = self._tasks.get(args.get("bead_id")) if isinstance(args.get("bead_id"), str) else None
+        if task is None:
+            return False
+        reason = args.get("reason")
+        changed = False
+        if isinstance(reason, str) and reason and task["close_reason"] != reason:
+            task["close_reason"] = reason
+            changed = True
+        return self._set(args.get("bead_id"), CLOSED) or changed
+
+    def _reported(self, arguments: Any, output: Any) -> bool:
+        """An orchestrate that answered: its report lands on the one task its
+        init_tools claim by id - a run over several tasks has one common report
+        that is no single task's own, and lands on none of them. The free-text
+        task is never searched for one."""
+        report = _report(output)
+        claimed = set(_claimed(arguments))
+        if report is None or len(claimed) != 1:
+            return False
+        (bead_id,) = claimed
+        task = self._tasks.get(bead_id)
+        if task is None or task["report"] == report:
+            return False
+        task["report"] = report
         return True
 
     def _set(self, bead_id: Any, status: Any) -> bool:
@@ -183,7 +302,10 @@ class PlanBoard:
             if state == "open":
                 state = "waiting" if waits_for else "ready"
             tasks.append({
-                **{name: task[name] for name in ("id", "key", "title", "status", "depends_on")},
+                **{name: task[name] for name in (
+                    "id", "key", "title", "status", "depends_on",
+                    "description", "acceptance", "notes", "close_reason", "report",
+                )},
                 "state": state,
                 "waits_for": [titles.get(dep, dep) for dep in waits_for],
             })
