@@ -29,6 +29,8 @@ import { createThemeToggle } from "./ui/theme.js";
 import { copyText, toast } from "./ui/toast.js";
 import { createTranscript } from "./ui/transcript.js";
 import { openReportDialog } from "./ui/report-dialog.js";
+import { openWorkspaceDialog } from "./ui/workspace-dialog.js";
+import { setWorkspaceChat } from "./lib/workspace-links.js";
 import { createWelcomeSystems } from "./ui/welcome.js";
 
 const store = createStore({
@@ -53,6 +55,11 @@ const store = createStore({
   // Messages waiting for the agent (web_chat/delivery.py).
   queue: [],
   workspacePath: "",
+  // The directory chosen for the chat on screen; null is the server's workspace.
+  chatWorkspace: null,
+  // The chat has messages: its directory no longer changes (ui/workspace-dialog.js).
+  workspaceLocked: false,
+  chooseWorkspace: false,
   isolated: false,
   // The signed-in user ({id, username, role}); `accounts` is false on a one-user server.
   user: null,
@@ -365,7 +372,19 @@ async function boot() {
     chip.addEventListener("click", () => composer.setValue(chip.dataset.prompt));
   }
 
-  $("#workspace-pill").addEventListener("click", () => copyText(store.get().workspacePath, "Workspace path copied"));
+  const shownWorkspace = ({ chatWorkspace, workspacePath }) => chatWorkspace || workspacePath;
+  $("#workspace-pill").addEventListener("click", () => {
+    const state = store.get();
+    if (!state.chooseWorkspace) {
+      copyText(shownWorkspace(state), "Workspace path copied");
+      return;
+    }
+    openWorkspaceDialog({
+      current: shownWorkspace(state),
+      started: state.workspaceLocked,
+      choose: (path) => chat.chooseWorkspace(path),
+    });
+  });
 
   bindShortcuts({ composer, search: $("#chat-search") });
 
@@ -382,6 +401,7 @@ async function boot() {
       // leave only the agent on `auto`.
       systemKey: store.get().systemKey ?? single,
       workspacePath: bootstrap.workspace_path ?? "",
+      chooseWorkspace: Boolean(bootstrap.choose_workspace),
       isolated: Boolean(bootstrap.isolation_enabled),
       contextId: store.get().contextId ?? bootstrap.current_context_id ?? null,
       user: bootstrap.user ?? null,
@@ -432,15 +452,19 @@ async function boot() {
   document.addEventListener("grid:turn-settled", refreshAccountUsage);
   void refreshAccountUsage();
 
-  store.subscribe(({ workspacePath, isolated, streaming, compacting, hasAgentContext, contextId, restartPending, serverUnavailable }) => {
+  store.subscribe(({ workspacePath, chatWorkspace, chooseWorkspace, isolated, streaming, compacting, hasAgentContext, contextId, restartPending, serverUnavailable }) => {
     const label = serverUnavailable ? "Reconnecting to server…" : restartPending ? "Server restarting · waiting for saved steps" : compacting ? "Compacting context…" : streaming ? "Working" : isolated ? "Container isolated" : "Local runtime";
     $("#runtime-status").textContent = label;
     $("#runtime-status").dataset.state = streaming || compacting ? "busy" : "ready";
     $("#compact-context").disabled = !contextId || !hasAgentContext || streaming || compacting || Boolean(restartPending);
     $("#compact-context").setAttribute("aria-busy", String(compacting));
     $("#compact-context .compactLabel").textContent = compacting ? "Compacting…" : "Compact context";
-    $("#workspace-pill").textContent = workspacePath;
-    $("#workspace-pill").hidden = !workspacePath;
+    const workspace = chatWorkspace || workspacePath;
+    $("#workspace-pill").textContent = workspace;
+    $("#workspace-pill").hidden = !workspace;
+    $("#workspace-pill").title = chooseWorkspace ? "Working directory of this chat: choose another" : "Copy workspace path";
+    $("#workspace-pill").dataset.chosen = String(Boolean(chatWorkspace));
+    setWorkspaceChat(contextId);
   });
 
   await reloadRuntime();

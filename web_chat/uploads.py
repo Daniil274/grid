@@ -32,7 +32,7 @@ import stat
 import unicodedata
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -332,9 +332,14 @@ def register_upload_routes(
     # Serialize quota checks and filename allocation in each user's workspace.
     locks: dict[Path, asyncio.Lock] = {}
 
+    def workspace_of(space: Any, context: Optional[str]) -> Path:
+        """The workspace of chat *context*: a chat may work in a directory of its own."""
+        of_chat = getattr(space, "conversation_workspace", None)
+        return Path(of_chat(context) if of_chat is not None else space.workspace_path)
+
     @api.post("/api/workspace/uploads")
     async def upload(
-        request: Request, space: Any = Depends(current_space)
+        request: Request, context: Optional[str] = None, space: Any = Depends(current_space)
     ) -> JSONResponse:
         limits = policy()
         if not limits.enabled:
@@ -392,7 +397,7 @@ def register_upload_routes(
                 raise HTTPException(
                     status_code=400, detail="Use the files field for every upload."
                 )
-            workspace = Path(space.workspace_path).resolve()
+            workspace = workspace_of(space, context).resolve()
             async with locks.setdefault(workspace, asyncio.Lock()):
                 with Uploads(workspace) as uploads:
                     try:
@@ -423,10 +428,10 @@ def register_upload_routes(
 
     @api.get("/api/workspace/files/{path:path}")
     async def download(
-        path: str, inline: bool = False, space: Any = Depends(current_space)
+        path: str, inline: bool = False, context: Optional[str] = None, space: Any = Depends(current_space)
     ) -> StreamingResponse:
         try:
-            fd, name, size = open_in_workspace(Path(space.workspace_path), path)
+            fd, name, size = open_in_workspace(workspace_of(space, context), path)
         except UploadError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
 

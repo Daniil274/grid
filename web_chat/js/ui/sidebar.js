@@ -79,6 +79,10 @@ export function createConversationList({ container, searchInput, store, onSelect
         h("span", { text: conversation.routed_agent || conversation.agent_key || "auto" }),
         h("span", { text: "·" }),
         h("span", { text: plural(conversation.message_count || 0, "msg") }),
+        // A chat working in a directory of its own says which.
+        conversation.workspace
+          ? h("span.chatRow__dir", { text: `· ${conversation.workspace.split(/[\\/]/).filter(Boolean).pop()}`, title: conversation.workspace })
+          : null,
         h("span.chatRow__stamp", { text: shortStamp(conversation.updated_at) }),
       ),
     );

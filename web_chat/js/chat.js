@@ -329,6 +329,8 @@ export class ChatController {
     // stream would read aloud the steps the message itself discards.
     const turn = { message, contextId, failed: false, finalText: "", spoken };
     this._activeTurn = turn;
+    // The chat has a turn now: its working directory stays as it is.
+    this._store.set({ workspaceLocked: true });
     try {
       this._connection = await ChatConnection.open(contextId);
       this._bind(this._connection, turn);
@@ -399,8 +401,24 @@ export class ChatController {
     const { systemKey, agentKey } = this._store.get();
     const conversation = await api.createConversation({ system_key: systemKey, agent_key: agentKey });
     if (intent !== this._navigationIntent) return;
-    this._store.set({ contextId: conversation.id, rootId: conversation.id, resumable: false, hasAgentContext: false, compacting: false });
+    this._store.set({
+      contextId: conversation.id, rootId: conversation.id, resumable: false, hasAgentContext: false, compacting: false,
+      chatWorkspace: conversation.workspace ?? null, workspaceLocked: false,
+    });
     this._transcript.clear();
+    await this._refreshConversations();
+  }
+
+  /**
+   * Have the chat on screen work in directory `path`. A chat that already has
+   * messages keeps its directory: a new chat opens in `path` instead.
+   */
+  async chooseWorkspace(path) {
+    const { contextId, workspaceLocked } = this._store.get();
+    if (!contextId || workspaceLocked) await this.startConversation();
+    const id = this._store.get().contextId;
+    const result = await api.setWorkspace(id, path);
+    if (this._store.get().contextId === id) this._store.set({ chatWorkspace: result.workspace });
     await this._refreshConversations();
   }
 
@@ -436,6 +454,8 @@ export class ChatController {
       systemKey: payload.metadata?.system_key ?? null,
       agentKey: payload.metadata?.agent_key ?? null,
       hasAgentContext: Boolean(payload.metadata?.routed_agent),
+      chatWorkspace: payload.metadata?.workspace ?? null,
+      workspaceLocked: payload.messages.length > 0 || Boolean(payload.active_turn),
       compacting: this._compactingId === payload.id,
       queue: payload.pending ?? [],
     });

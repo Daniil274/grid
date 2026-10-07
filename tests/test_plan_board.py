@@ -109,3 +109,27 @@ def test_tasks_created_one_by_one_and_linked_join_the_plan():
     [step] = plan_steps(harness)
     verify = step["plan"]["tasks"][-1]
     assert (verify["id"], verify["state"], verify["waits_for"]) == ("p-4", "waiting", ["compare"])
+
+
+def test_tasks_created_by_beads_create_show_without_a_plan_call():
+    # beads_create returns what `bd create` prints, not JSON: a system that
+    # plans with it alone (engineering) still gets the board.
+    harness = Harness()
+    harness.feed(
+        tool_called("beads_create", "c1", json.dumps({"title": "Fix the build"})),
+        tool_output("c1", "✓ Created issue: grid-a1b — Fix the build\n  Priority: P1\n  Status: open\n"),
+        tool_called("beads_update", "c2", json.dumps({"bead_id": "grid-a1b", "claim": True})),
+        tool_output("c2", "✓ Updated issue: grid-a1b"),
+    )
+    [step] = plan_steps(harness)
+    [task] = step["plan"]["tasks"]
+    assert (task["id"], task["title"], task["state"]) == ("grid-a1b", "Fix the build", "in_progress")
+
+
+def test_a_beads_create_that_made_nothing_changes_nothing():
+    harness = Harness()
+    harness.feed(
+        tool_called("beads_create", "c1", json.dumps({"title": "X"})),
+        tool_output("c1", "❌ Error creating bead: Error response from daemon: No such container: 1a2b"),
+    )
+    assert plan_steps(harness) == []

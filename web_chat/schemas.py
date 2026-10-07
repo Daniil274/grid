@@ -35,10 +35,18 @@ class BranchRequest(BaseModel):
 
 
 class ConversationCreateRequest(BaseModel):
-    """``None`` on either key means the router decides per message."""
+    """``None`` on either key means the router decides per message; on
+    ``workspace``, the chat works in the space's own workspace."""
 
     system_key: Optional[str] = None
     agent_key: Optional[str] = None
+    workspace: Optional[str] = Field(default=None, max_length=4096)
+
+
+class WorkspaceRequest(BaseModel):
+    """The directory a chat works in, as a full path on the server."""
+
+    path: str = Field(min_length=1, max_length=4096)
 
 
 class ActionReviewRequest(BaseModel):

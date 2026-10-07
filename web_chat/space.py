@@ -12,7 +12,10 @@ space is what one user owns on top of them:
 - with a layout of its own, the user's personal agents (web_chat.personal_agents)
   and the systems built from them (web_chat.user_systems),
 - for an admin, the created systems still in draft, to test them by hand
-  (core.system_store).
+  (core.system_store),
+- on a one-user server, the working directories chosen for single chats
+  (:meth:`UserSpace.choose_workspace`): each has its own configs, factories
+  and container, so chats working in different directories never share one.
 
 Where the state lives is the space's :class:`SpaceLayout`. A server for one
 person keeps the layout it always had: conversations and sessions in the base
@@ -25,8 +28,9 @@ reach the records of their own conversations.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -51,6 +55,9 @@ from web_chat.turns import TurnBoard
 logger = logging.getLogger("grid.web_chat.space")
 
 T = TypeVar("T")
+
+#: The conversation metadata naming the working directory chosen for that chat.
+WORKSPACE_KEY = "workspace"
 
 
 # Taught to every agent in every system of a space: the chat renders a
@@ -127,6 +134,22 @@ class IsolationUnavailable(RuntimeError):
     """A space that must isolate its agents cannot start its container."""
 
 
+class WorkspaceChoiceError(ValueError):
+    """A chat cannot work in the directory asked for."""
+
+
+@dataclass
+class ChosenWorkspace:
+    """A working directory chosen for some chats, and what runs there: the
+    space's configs bound to it, its own container and its own factories."""
+
+    path: Path
+    config: Config
+    container_id: Optional[str]
+    manager: Optional[ContainerManager]
+    registry: "SystemRegistry" = field(init=False)
+
+
 class UserSpace:
     """Everything one user owns on a web chat server."""
 
@@ -191,7 +214,11 @@ class UserSpace:
         self.turn_counter = turn_counter
 
         self._lock = asyncio.Lock()
-        self._prepared: set[tuple[str, str]] = set()
+        # (workspace, system, agent) of the agents built ahead of a turn.
+        self._prepared: set[tuple[Path, str, str]] = set()
+        # The directories chosen for single chats, built on their first turn.
+        self._chosen: Dict[Path, ChosenWorkspace] = {}
+        self._choosing = asyncio.Lock()
         self._background: set[asyncio.Task] = set()
         self._warmup: Optional[asyncio.Task] = None
 
@@ -269,17 +296,7 @@ class UserSpace:
             SystemStore(self.layout.user_systems.parent / "built_systems")
             if self.layout is not None and not self.admin else None
         )
-        self.registry = SystemRegistry(
-            base_config=config,
-            catalog=self.deployment.catalog,
-            build_factory=self._build_factory,
-            build_factory_for_key=self._build_factory,
-            working_directory=self._configs_workdir,
-            customize=self.personal_agents.apply if self.personal_agents is not None else None,
-            confined=self.require_isolation,
-            extras=self._extra_systems,
-            admin=self.admin,
-        )
+        self.registry = self._registry(config, self._configs_workdir, container_id)
         self._prepared.clear()
 
         logger.info(
@@ -291,6 +308,21 @@ class UserSpace:
             ", ".join(self.registry.keys()),
         )
 
+    def _registry(self, config: Config, workdir: Optional[str], container_id: Optional[str]) -> SystemRegistry:
+        """The systems of the space, loaded with *workdir*, their tools in *container_id*."""
+        build = functools.partial(self._build_factory, container_id=container_id)
+        return SystemRegistry(
+            base_config=config,
+            catalog=self.deployment.catalog,
+            build_factory=build,
+            build_factory_for_key=build,
+            working_directory=workdir,
+            customize=self.personal_agents.apply if self.personal_agents is not None else None,
+            confined=self.require_isolation,
+            extras=functools.partial(self._extra_systems, workdir),
+            admin=self.admin,
+        )
+
     @property
     def _configs_workdir(self) -> Optional[str]:
         """The working directory the space's system configs are loaded with."""
@@ -300,8 +332,10 @@ class UserSpace:
         """A new load of a system's config as its file says, for this space."""
         return Config(str(self.deployment.system_config_path(system_key)), self._configs_workdir)
 
-    def _extra_systems(self) -> List[ExtraSystem]:
-        """The systems of this space beside the catalog's (SystemRegistry.refresh_extras)."""
+    def _extra_systems(self, workdir: Optional[str] = None) -> List[ExtraSystem]:
+        """The systems of this space beside the catalog's (SystemRegistry.refresh_extras),
+        loaded with *workdir* - the space's own when None."""
+        workdir = workdir if workdir is not None else self._configs_workdir
         extras: List[ExtraSystem] = []
         store = self.deployment.created_store
         if self.admin and store is not None:
@@ -315,7 +349,7 @@ class UserSpace:
                         name=manifest.name,
                         description=manifest.description,
                         config_path=path,
-                        load=lambda path=path: Config(str(path), self._configs_workdir),
+                        load=lambda path=path: Config(str(path), workdir),
                         routable=False,
                         badge="draft",
                         requires=tuple(manifest.requires),
@@ -374,8 +408,14 @@ class UserSpace:
         return Config(config_path, str(workspace.resolve()))
 
     def _start_container(self, config: Config, workspace: Path) -> Optional[str]:
-        manager = ContainerManager(config, enabled=True if self.require_isolation else None)
-        self._container_manager = manager
+        manager = self._container_manager = self._manager(config)
+        return self._container_in(manager, workspace)
+
+    def _manager(self, config: Config) -> ContainerManager:
+        return ContainerManager(config, enabled=True if self.require_isolation else None)
+
+    def _container_in(self, manager: ContainerManager, workspace: Path) -> Optional[str]:
+        """The ID of the user's container working in *workspace*; None without one."""
         if not manager.enabled:
             return None
         try:
@@ -388,8 +428,11 @@ class UserSpace:
             return container.id
         return None
 
-    def _build_factory(self, config: Config, system_key: Optional[str] = None) -> AgentFactory:
-        """One factory per system; history is shared so conversations survive routing.
+    def _build_factory(
+        self, config: Config, system_key: Optional[str] = None, *, container_id: Optional[str] = None
+    ) -> AgentFactory:
+        """One factory per system and workspace; history is shared so
+        conversations survive routing.
 
         Every factory carries access to the store this user may build in.
         """
@@ -397,7 +440,7 @@ class UserSpace:
             config=config,
             working_directory=config.get_working_directory(),
             context_manager=self.conversations,
-            container_id=self.container_id,
+            container_id=container_id,
             policy_config=self.deployment.policy_config,
             session_db_path=str(self.layout.agent_sessions) if self.layout else None,
             # Preserve the default system's historical session IDs. Other
@@ -456,6 +499,94 @@ class UserSpace:
         on a shared one, where it lives on the server is not the user's business."""
         return str(self.workspace_path) if self.layout is None else "your workspace"
 
+    # -- working directories of single chats ---------------------------------
+    @property
+    def can_choose_workspace(self) -> bool:
+        """Whether a chat may work in a directory of its own: only on a
+        one-user server - its user owns the machine - whose config lets the
+        working directory be overridden."""
+        return self.layout is None and bool(self.config.config.settings.allow_path_override)
+
+    def conversation_workspace(self, context_id: Optional[str]) -> Path:
+        """The directory the agents of chat *context_id* work in."""
+        if not context_id or not self.can_choose_workspace:
+            return self.workspace_path
+        chosen = self.conversations.get_context_metadata(context_id).get(WORKSPACE_KEY)
+        return Path(chosen) if chosen else self.workspace_path
+
+    def workspace_label_of(self, context_id: Optional[str]) -> str:
+        if self.layout is not None:
+            return self.workspace_label
+        return str(self.conversation_workspace(context_id))
+
+    def choose_workspace(self, context_id: str, path: str) -> Path:
+        """Have chat *context_id* work in directory *path* from its first turn on.
+
+        Only before the chat's first message: the agents' sessions and what
+        they said refer to the files of one directory. The space's own
+        workspace clears the choice. Returns the directory, resolved.
+        """
+        if not self.can_choose_workspace:
+            raise WorkspaceChoiceError(
+                "This server gives every chat the same workspace"
+                + (" (the config sets allow_path_override: false)." if self.layout is None else ".")
+            )
+        raw = (path or "").strip()
+        if not raw:
+            raise WorkspaceChoiceError("Name a directory.")
+        directory = Path(raw).expanduser()
+        if not directory.is_absolute():
+            raise WorkspaceChoiceError(f"Give the full path of the directory, not '{raw}'.")
+        directory = directory.resolve()
+        if not directory.is_dir():
+            raise WorkspaceChoiceError(f"No such directory: {directory}")
+        if directory == Path(directory.anchor):
+            raise WorkspaceChoiceError("The root of the file system cannot be a workspace.")
+        view = self.conversations.conversation_view(context_id)
+        if view is None:
+            raise KeyError(context_id)
+        if view["messages"] or self.turns.is_busy(context_id):
+            raise WorkspaceChoiceError("The working directory is chosen before the chat's first message.")
+        chosen = None if directory == self.workspace_path else str(directory)
+        self.conversations.update_context_metadata(context_id, {WORKSPACE_KEY: chosen})
+        return directory
+
+    async def registry_for(self, context_id: Optional[str]) -> SystemRegistry:
+        """The systems chat *context_id* runs on: the space's own, or those of
+        the directory chosen for it, built - container included - on first use."""
+        directory = self.conversation_workspace(context_id)
+        if directory == self.workspace_path:
+            return self.registry
+        async with self._choosing:
+            chosen = self._chosen.get(directory)
+            if chosen is None:
+                # Loading configs and starting a container block: off the loop.
+                chosen = await asyncio.to_thread(self._choose, directory)
+                self._chosen[directory] = chosen
+        return chosen.registry
+
+    def registry_of(self, context_id: Optional[str]) -> SystemRegistry:
+        """The systems chat *context_id* runs on, once :meth:`registry_for`
+        has built them; the space's own before."""
+        chosen = self._chosen.get(self.conversation_workspace(context_id))
+        return chosen.registry if chosen is not None else self.registry
+
+    def _choose(self, directory: Path) -> ChosenWorkspace:
+        config = Config(str(self.deployment.config_path), str(directory))
+        if Path(config.get_working_directory()).resolve() != directory:
+            raise WorkspaceChoiceError(f"The config does not let the agents work in {directory}.")
+        manager: Optional[ContainerManager] = None
+        container_id: Optional[str] = None
+        if self.require_isolation or isolation_enabled(config):
+            manager = self._manager(config)
+            container_id = self._container_in(manager, directory)
+            if self.require_isolation and container_id is None:
+                raise IsolationUnavailable(f"The container for {directory} could not be started.")
+        chosen = ChosenWorkspace(directory, config, container_id, manager)
+        chosen.registry = self._registry(config, str(directory), container_id)
+        logger.info("Workspace ready: user=%s workdir=%s container=%s", self.user_id, directory, container_id)
+        return chosen
+
     # -- systems -----------------------------------------------------------
     @property
     def factory(self) -> AgentFactory:
@@ -470,25 +601,32 @@ class UserSpace:
         agent_key: Optional[str] = None,
         context_id: Optional[str] = None,
     ) -> Resolution:
-        """Pick the system and agent for *message*; ``None`` means route it."""
+        """Pick the system and agent for *message*; ``None`` means route it.
+        The factory resolved works in the chat's directory."""
         previous = None
         if context_id:
             metadata = self.conversation_metadata(context_id)
             if metadata.get("routed_system") and metadata.get("routed_agent"):
                 previous = (metadata["routed_system"], metadata["routed_agent"])
-        return await self.registry.resolve(
+        registry = await self.registry_for(context_id)
+        return await registry.resolve(
             message, system_key=system_key, agent_key=agent_key, previous=previous
         )
 
-    async def warm_agent(self, agent_key: str, system_key: Optional[str] = None) -> None:
-        """Build an agent ahead of the first message that needs it."""
-        system = system_key or self.registry.default_key()
+    async def warm_agent(
+        self, agent_key: str, system_key: Optional[str] = None, *, context_id: Optional[str] = None
+    ) -> None:
+        """Build an agent ahead of the first message that needs it, for the
+        directory chat *context_id* works in."""
+        registry = await self.registry_for(context_id)
+        system = system_key or registry.default_key()
+        prepared = (self.conversation_workspace(context_id), system, agent_key)
         async with self._lock:
-            if (system, agent_key) in self._prepared:
+            if prepared in self._prepared:
                 return
-            await self.registry.factory(system).create_agent(agent_key)
-            self._prepared.add((system, agent_key))
-            logger.info("Prepared agent for %s: %s/%s", self.user_id, system, agent_key)
+            await registry.factory(system).create_agent(agent_key)
+            self._prepared.add(prepared)
+            logger.info("Prepared agent for %s: %s/%s in %s", self.user_id, system, agent_key, prepared[0])
 
     async def warm_default_agent(self) -> None:
         system = self.registry.default_key()
@@ -541,7 +679,7 @@ class UserSpace:
             for key in keys:
                 if system in factories:
                     factories[system].forget_agent(key)
-                self._prepared.discard((system, key))
+                self._prepared.discard((self.workspace_path, system, key))
         return result
 
     # -- user systems --------------------------------------------------------
@@ -558,13 +696,18 @@ class UserSpace:
         before = {system.key for system in self.registry.systems() if system.badge}
         self.registry.refresh_extras()
         after = {system.key for system in self.registry.systems() if system.badge}
-        self._prepared = {(system, agent) for system, agent in self._prepared if system not in before | after}
+        self._prepared = {prepared for prepared in self._prepared if prepared[1] not in before | after}
 
     # -- action reviews ----------------------------------------------------
+    def _built_factories(self) -> list[tuple[str, AgentFactory]]:
+        """(system, factory) of every factory built so far, in every workspace."""
+        registries = [self.registry, *(chosen.registry for chosen in self._chosen.values())]
+        return [item for registry in registries for item in registry.built_factories().items()]
+
     def pending_action_reviews(self) -> list[dict[str, Any]]:
         """Pending reviews from the factories that have handled a turn."""
         reviews: list[dict[str, Any]] = []
-        for system_key, factory in self.registry.built_factories().items():
+        for system_key, factory in self._built_factories():
             gate = getattr(factory, "action_gate", None)
             if gate is None:
                 continue
@@ -576,7 +719,7 @@ class UserSpace:
 
     def resolve_action_review(self, approval_id: str, *, approve: bool) -> bool:
         """Resolve an action review without exposing this capability to agents."""
-        for factory in self.registry.built_factories().values():
+        for _, factory in self._built_factories():
             gate = getattr(factory, "action_gate", None)
             if gate is not None and gate.resolve_review(approval_id, approve=approve):
                 return True
@@ -591,7 +734,7 @@ class UserSpace:
         for a review that came from this conversation. Reaches no agent tool:
         the chat socket is the user's.
         """
-        for factory in self.registry.built_factories().values():
+        for _, factory in self._built_factories():
             gate = getattr(factory, "action_gate", None)
             if gate is None or gate.config.approvals != "user":
                 continue
@@ -621,7 +764,7 @@ class UserSpace:
         if policy is None or name not in policy.filters:
             return False
         self.conversations.update_context_metadata(context_id, {POLICY_FILTER_KEY: name})
-        for factory in self.registry.built_factories().values():
+        for _, factory in self._built_factories():
             if getattr(factory, "action_gate", None) is not None:
                 factory.set_policy_filter(context_id, name)
         return True
@@ -640,6 +783,15 @@ class UserSpace:
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
+        for chosen in list(self._chosen.values()):
+            try:
+                await chosen.registry.close()
+            except Exception:
+                logger.exception("Closing the systems working in %s failed", chosen.path)
+            finally:
+                if chosen.manager is not None and chosen.container_id:
+                    await asyncio.to_thread(chosen.manager.stop_container, self.user_id, chosen.container_id)
+        self._chosen.clear()
         try:
             await self.registry.close()
         finally:
