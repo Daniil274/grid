@@ -49,6 +49,12 @@ class FakeNode {
     this.replaceChildren();
     if (value !== "") this.append(new FakeText(String(value)));
   }
+
+  /** Whether *node* is this node or one of its descendants. */
+  contains(node) {
+    for (let current = node; current; current = current.parentNode) if (current === this) return true;
+    return false;
+  }
 }
 
 class FakeText extends FakeNode {
@@ -119,6 +125,12 @@ class FakeElement extends FakeNode {
 
   click() {
     for (const fn of this.listeners.click ?? []) fn({ target: this });
+  }
+
+  /** Focus lands here, as far as these tests can see it. */
+  focus() {
+    this.focused = true;
+    document.activeElement = this;
   }
 
   set innerHTML(value) {
