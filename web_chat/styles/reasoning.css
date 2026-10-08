@@ -557,6 +557,60 @@ a.refChip:hover {
   font-weight: 600;
 }
 
+.planCard__chevron {
+  display: flex;
+  color: var(--text-3);
+  transform: rotate(90deg);
+  transition: transform 160ms var(--ease);
+}
+
+.planCard.is-collapsed .planCard__chevron {
+  transform: none;
+}
+
+.planCard__head:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: -2px;
+}
+
+/* This request / Whole plan: the scope the rows show. */
+.planCard__scopes {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 6px;
+}
+
+.planCard__scopes[hidden],
+.planCard.is-collapsed .planCard__scopes {
+  display: none;
+}
+
+.planCard__scope {
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.planCard__scope:hover {
+  background: var(--bg-3);
+}
+
+.planCard__scope[aria-selected="true"] {
+  border-color: var(--accent-line);
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.planCard__scope:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
 .planCard__summary {
   flex: 1 1 auto;
   color: var(--text-3);
