@@ -20,6 +20,7 @@ configs once nothing uses it.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 from contextlib import asynccontextmanager, suppress
@@ -29,7 +30,8 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Literal, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, WebSocket, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import HTTPConnection
 
@@ -51,7 +53,7 @@ from web_chat.space import IsolationUnavailable, UserSpace, WorkspaceChoiceError
 from web_chat.spaces import SpacePool
 from core.interruption import COMPACTED_TYPE
 from web_chat.trace import is_tool_result
-from web_chat.views import UNTITLED, agent_options, conversation_title, serialize_message, system_options
+from web_chat.views import UNTITLED, agent_options, conversation_title, serialize_message, slim_steps, system_options
 
 logger = logging.getLogger("grid.web_chat.server")
 ROOT = Path(__file__).resolve().parent
@@ -172,6 +174,8 @@ class WebChatServer:
         self.voice: Optional[Any] = None
 
         self.app = FastAPI(title="Grid Web Chat", docs_url=None, redoc_url=None, lifespan=self._lifespan)
+        # A long chat is megabytes of JSON; compressed it is a tenth of that.
+        self.app.add_middleware(GZipMiddleware, minimum_size=2048, compresslevel=5)
 
         @self.app.middleware("http")
         async def security_headers(request: Request, call_next):
@@ -189,8 +193,9 @@ class WebChatServer:
                     self._mutations -= int(mutation)
             for name, value in SECURITY_HEADERS.items():
                 response.headers.setdefault(name, value)
-            if request.url.path.startswith("/api/"):
-                # Live state: a cached answer shows a chat as it was.
+            if request.url.path.startswith("/api/") and "etag" not in response.headers:
+                # Live state: a cached answer shows a chat as it was. A route
+                # with an ETag revalidates instead (no-cache), every time.
                 response.headers["Cache-Control"] = "no-store"
             return response
 
@@ -788,7 +793,12 @@ class WebChatServer:
             return JSONResponse({"id": context_id, "root": manager.branch_root(context_id)})
 
         @api.get("/api/chat/conversations/{context_id}")
-        async def get_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
+        async def get_conversation(
+            context_id: str, request: Request, space: UserSpace = Depends(current_space)
+        ) -> Response:
+            """The chat as it renders: traces without their large payloads (each
+            such step is ``lazy``, its record at .../steps/{id}). The ETag lets
+            an unchanged chat answer 304 with no body."""
             manager = space.context_manager()
             active = space.turns.running(context_id)
             if active is None:
@@ -811,6 +821,8 @@ class WebChatServer:
                 )
                 for index, msg in enumerate(shown)
             ]
+            for message in messages:
+                message["trace"] = slim_steps(message.get("trace"))
             active_turn = (
                 {
                     "message": active[0].message,
@@ -820,7 +832,7 @@ class WebChatServer:
                 if active is not None
                 else None
             )
-            return JSONResponse({
+            body = JSONResponse({
                 "id": context_id,
                 "root": manager.branch_root(context_id),
                 "messages": messages,
@@ -828,7 +840,29 @@ class WebChatServer:
                 "pending": MessageQueue(manager, context_id).public(),
                 "metadata": view["metadata"],
                 "active_turn": active_turn,
-            })
+            }).body
+            etag = '"' + hashlib.sha1(body).hexdigest() + '"'
+            headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+            if etag in (request.headers.get("if-none-match") or ""):
+                return Response(status_code=304, headers=headers)
+            return Response(body, media_type="application/json", headers=headers)
+
+        @api.get("/api/chat/conversations/{context_id}/messages/{message_id}/steps/{step_id}")
+        async def conversation_step(
+            context_id: str, message_id: str, step_id: str, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """One trace step with everything it holds: what a lazy step left out."""
+            view = space.context_manager().conversation_view(context_id)
+            if view is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            for msg in view["messages"]:
+                metadata = msg.metadata or {}
+                if metadata.get("message_id") != message_id:
+                    continue
+                for step in serialize_message(msg)["trace"] or []:
+                    if isinstance(step, dict) and step.get("id") == step_id:
+                        return JSONResponse(step)
+            raise HTTPException(status_code=404, detail="Step not found")
 
         # The system configs are shared by every user: only admins see or edit them.
         @api.get("/api/settings", dependencies=[Depends(admin)])

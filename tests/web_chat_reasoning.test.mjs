@@ -285,6 +285,28 @@ test("a stored plan is restored from the trace with the rest of the turn", () =>
   assert.match(panel.planEl.find("planCard__meta").textContent, /waits for setup/);
 });
 
+test("a lazy step fetches its payloads the first time it is opened", async () => {
+  const panel = createReasoningPanel();
+  const asked = [];
+  const loadStep = async (id) => {
+    asked.push(id);
+    return step(id, { title: "read_file", detail: '{"path": "a.md"}', body: "file text" });
+  };
+  panel.hydrate([step("s1", { title: "read_file", detail: "", body: "", lazy: true })], { loadStep });
+  const [call] = rows(topList(panel));
+  assert.ok(call.classList.contains("has-detail"));
+  assert.deepEqual(asked, []); // nothing fetched while the step is closed
+
+  call.find("step__head").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(asked, ["s1"]);
+  assert.deepEqual(panel.el.findAll("payload__label").map((label) => label.textContent), ["Input", "Result"]);
+
+  call.find("step__head").click();
+  call.find("step__head").click();
+  assert.deepEqual(asked, ["s1"]); // fetched once
+});
+
 test("a stored answer's plan starts folded, and a saved plan never doubles it", () => {
   const panel = createReasoningPanel();
   const task = (id, turn) => ({ id, key: "", title: id, state: "ready", depends_on: [], turn });
