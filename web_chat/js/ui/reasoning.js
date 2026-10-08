@@ -174,7 +174,21 @@ function disclosure(root, head, onOpen = null) {
  * result - is built when it opens: a stored chat holds hundreds of steps,
  * some with tens of thousands of characters, and nearly all stay closed.
  */
-function createStepRow(step) {
+/**
+ * A stored step that left its payloads on the server (``lazy``): fetch its
+ * whole record the first time it is opened and show it through *apply*.
+ * False when there is no way to fetch it - what the step holds is shown.
+ */
+function loadOnOpen(load, step, apply, placeholder) {
+  if (!load) return false;
+  replace(placeholder, h("p.payload__empty", { text: "Loading…" }));
+  load(step.id)
+    .then((full) => apply({ ...step, ...full, lazy: false }))
+    .catch(() => replace(placeholder, h("p.payload__empty", { text: "Could not load this step's details." })));
+  return true;
+}
+
+function createStepRow(step, load = null) {
   const inlineBody = INLINE_BODY_KINDS.has(step.kind);
   const { head, title, subtitle, policy, usage, timing, glyph, approval } = stepHead(step);
   const detail = h("div.step__detail");
@@ -183,10 +197,12 @@ function createStepRow(step) {
   let latest = step;
   let stale = true;
   const payloadState = { input: {}, result: {} };
+  let loading = false;
 
   /** Build the hidden part from the latest step; once per change, only when open. */
   const fill = () => {
     if (!stale) return;
+    if (latest.lazy && !loading && (loading = loadOnOpen(load, latest, update, detail))) return;
     stale = false;
     // Streaming thinking is appended as it arrives; it is rendered once it lands.
     if (body && latest.status !== "running") {
@@ -237,7 +253,7 @@ function createStepRow(step) {
     latest = next;
     stale = true;
     if (root.classList.contains("is-open")) fill();
-    const hasBlocks = Boolean(next.detail || next.input_payload) || Boolean(!inlineBody && (next.body || next.result_payload));
+    const hasBlocks = Boolean(next.lazy || next.detail || next.input_payload) || Boolean(!inlineBody && (next.body || next.result_payload));
     root.classList.toggle("has-detail", hasBlocks || Boolean(inlineBody && (next.status === "running" || next.body)));
     if (inlineBody) suggest(next.status === "running");
   };
@@ -289,7 +305,7 @@ function taskText(detail) {
  *
  * @param {() => number} turnStart - when the turn began, for a live duration.
  */
-function createAgentRow(step, turnStart) {
+function createAgentRow(step, turnStart, load = null) {
   const { head, title, subtitle, policy, usage, timing, approval } = stepHead(step);
   const timeline = createTimeline(h("ol.agent__steps"));
   const task = h("div.agent__task");
@@ -306,9 +322,11 @@ function createAgentRow(step, turnStart) {
   let current = step;
   let stale = true;
   const payloadState = { input: {}, result: {} };
+  let loading = false;
   /** The task and the report, built from the latest step when the block is open. */
   const fill = () => {
     if (!stale) return;
+    if (current.lazy && !loading && (loading = loadOnOpen(load, current, update, report))) return;
     stale = false;
     const asked = taskText(current.detail);
     replace(task, renderPayload("Task", current.input_payload, asked, { markdown: asked !== current.detail, state: payloadState.input }));
@@ -436,7 +454,9 @@ export function createReasoningPanel() {
     for (let entry = index.get(index.get(id)?.parentId); entry; entry = index.get(entry.parentId)) yield entry.row;
   };
 
-  const makeRow = (step) => (step.kind === "agent" ? createAgentRow(step, () => startedAt) : createStepRow(step));
+  // Fetches a stored step's whole record (hydrate's ``loadStep``); null while live.
+  let stepLoader = null;
+  const makeRow = (step) => (step.kind === "agent" ? createAgentRow(step, () => startedAt, stepLoader) : createStepRow(step, stepLoader));
 
   return {
     el: root,
@@ -540,8 +560,12 @@ export function createReasoningPanel() {
       renderHeadline();
     },
 
-    /** Render a stored trace from a reloaded conversation, collapsed. */
-    hydrate(steps) {
+    /**
+     * Render a stored trace from a reloaded conversation, collapsed.
+     * `loadStep(id)` fetches the whole record of a step stored as ``lazy``.
+     */
+    hydrate(steps, { loadStep = null } = {}) {
+      stepLoader = loadStep;
       for (const step of steps ?? []) if (step.kind === "plan") plan.update(step);
       // A stored answer's plan starts folded; the transcript opens the newest.
       plan.setCollapsed(true);

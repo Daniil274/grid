@@ -563,7 +563,7 @@ export class ChatController {
       compacting: this._compactingId === payload.id,
       queue: payload.pending ?? [],
     });
-    this._transcript.render(payload.messages);
+    this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id) });
     this._syncResumable();
     // The saved plan of the chat, before any live plan step of a new turn.
     void this._showStoredPlan(payload.id);
@@ -753,7 +753,7 @@ export class ChatController {
       // Same messages on screen: only take their ids and versions, so an
       // expanded reasoning panel stays as it is.
       if (force || !this._transcript.adopt(payload.messages)) {
-        this._transcript.render(payload.messages);
+        this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id) });
       }
       this._store.set({ queue: payload.pending ?? [], hasAgentContext: Boolean(payload.metadata?.routed_agent) });
       this._transcript.refreshContinueInNewChat?.();
@@ -763,6 +763,11 @@ export class ChatController {
     } catch (error) {
       console.warn("Could not reconcile the conversation", error);
     }
+  }
+
+  /** Fetches a stored step that left its payloads on the server (``lazy``). */
+  _stepLoader(contextId) {
+    return (messageId, stepId) => api.conversationStep(contextId, messageId, stepId);
   }
 
   /** Offer Continue in the composer while the last turn can still be resumed. */
