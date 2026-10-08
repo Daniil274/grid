@@ -400,3 +400,38 @@ def test_the_details_a_plan_left_survive_latest_plan_and_a_continuing_board():
     board.finished("beads_close", {"bead_id": "p-9", "reason": "done"}, json.dumps({"id": "p-9"}))
     [restored] = events[-1]["step"]["plan"]["tasks"]
     assert (restored["priority"], restored["type"], restored["state"]) == (1, "bug", "closed")
+
+
+def test_each_task_says_whether_this_turn_touched_it():
+    first = Harness()
+    planned(first)
+    # The turn that planned it touched every task of the plan.
+    assert all(task["turn"] for task in plan_steps(first)[-1]["plan"]["tasks"])
+    stored = [{"role": "assistant", "metadata": {"trace": first.steps()}}]
+
+    events = []
+    board = PlanBoard.continuing(TraceRecorder(events.append), stored)
+    init = [{"name": "beads_update", "parameters": {"bead_id": "p-1", "claim": True}}]
+    board.called("orchestrate", json.dumps({"task": "research", "init_tools": json.dumps(init)}))
+    board.finished("beads_close", {"bead_id": "p-3", "reason": "read"}, json.dumps({"id": "p-3"}))
+
+    turn = {task["id"]: task["turn"] for task in events[-1]["step"]["plan"]["tasks"]}
+    # A continued plan starts with none of its tasks; this turn took two.
+    assert turn == {"p-1": True, "p-2": False, "p-3": True}
+
+
+def test_taking_up_a_task_already_in_progress_makes_it_this_turns():
+    first = Harness()
+    planned(first)
+    first.feed(
+        tool_called("beads_update", "c2", json.dumps({"bead_id": "p-1", "claim": True})),
+        tool_output("c2", json.dumps({"id": "p-1"})),
+    )
+    stored = [{"role": "assistant", "metadata": {"trace": first.steps()}}]
+
+    events = []
+    board = PlanBoard.continuing(TraceRecorder(events.append), stored)
+    board.finished("beads_update", {"bead_id": "p-1", "notes": ""}, json.dumps({"id": "p-1"}))
+    # Nothing about the task changed, but the board shows it as this turn's.
+    [task] = [task for task in events[-1]["step"]["plan"]["tasks"] if task["turn"]]
+    assert task["id"] == "p-1" and task["state"] == "in_progress"

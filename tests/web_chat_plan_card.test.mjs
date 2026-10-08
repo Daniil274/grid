@@ -380,3 +380,73 @@ test("removed opener falls back to the plan header, and empty plans dismiss the 
   assert.equal(dialog.dataset.open, "false");
   assert.equal(card.el.hidden, true);
 });
+/** The plan of TASKS() with this turn's tasks flagged, as plan_board marks them. */
+const turnPlan = (...turnIds) => planStep(TASKS().map((task) => ({ ...task, turn: turnIds.includes(task.id) })));
+const scopeTab = (card, name) => card.el.findAll("planCard__scope").find((tab) => tab.dataset.scope === name);
+
+test("the card opens on this request's tasks and switches to the whole plan", () => {
+  const card = createPlanCard();
+  card.update(turnPlan("bd-2", "bd-3"));
+
+  assert.equal(card.el.find("planCard__scopes").hidden, false);
+  assert.equal(card.el.find("planCard__heading").textContent, "This request · 0/2 done");
+  assert.deepEqual(card.el.findAll("planCard__title").map((t) => t.textContent), ["Compare providers", "Read the docs"]);
+  assert.equal(scopeTab(card, "turn").textContent, "This request · 2");
+  assert.equal(scopeTab(card, "turn").getAttribute("aria-selected"), "true");
+
+  scopeTab(card, "all").click();
+  assert.equal(card.el.find("planCard__heading").textContent, "Plan · 1/3 done");
+  assert.equal(card.el.findAll("planCard__task").length, 3);
+  assert.equal(scopeTab(card, "all").getAttribute("aria-selected"), "true");
+
+  // A live update keeps the scope the reader chose.
+  card.update(turnPlan("bd-2"));
+  assert.equal(card.el.findAll("planCard__task").length, 3);
+});
+
+test("the switch shows only when the request's share is a part of the plan", () => {
+  const card = createPlanCard();
+  card.update(turnPlan("bd-1", "bd-2", "bd-3")); // the turn that planned it all
+  assert.equal(card.el.find("planCard__scopes").hidden, true);
+  assert.equal(card.el.find("planCard__heading").textContent, "Plan · 1/3 done");
+  card.update(turnPlan()); // a turn that touched none
+  assert.equal(card.el.find("planCard__scopes").hidden, true);
+  assert.equal(card.el.findAll("planCard__task").length, 3);
+});
+
+test("a saved plan shows as the whole plan, never as one answer's request", () => {
+  const card = createPlanCard();
+  card.update(turnPlan("bd-2").plan, { scoped: false });
+  assert.equal(card.el.find("planCard__scopes").hidden, true);
+  assert.equal(card.el.findAll("planCard__task").length, 3);
+});
+
+test("previous and next walk the scope shown; a dependency may step outside it", () => {
+  const card = createPlanCard();
+  card.update(turnPlan("bd-2", "bd-3"));
+  const { dialog } = openRow(card, 0);
+  assert.equal(dialog.find("taskDialog__count").textContent, "1 of 2");
+
+  // Compare depends on Research, which this request did not touch.
+  dialog.find("taskDialog__depLink").click();
+  assert.equal(dialog.find("taskDialog__title").textContent, "Research providers");
+  assert.equal(dialog.find("taskDialog__count").textContent, "1 of 3");
+});
+
+test("the head folds the card, and the reader's choice outlives the automatic one", () => {
+  const card = createPlanCard();
+  card.update(turnPlan("bd-2"));
+  const head = card.el.find("planCard__head");
+  assert.equal(head.getAttribute("aria-expanded"), "true");
+
+  card.setCollapsed(true);
+  assert.ok(card.el.classList.contains("is-collapsed"));
+  assert.equal(head.getAttribute("aria-expanded"), "false");
+
+  head.click(); // the reader opens it
+  assert.equal(card.el.classList.contains("is-collapsed"), false);
+  card.setCollapsed(true); // a new turn would fold it: the reader's choice stands
+  assert.equal(card.el.classList.contains("is-collapsed"), false);
+  card.setCollapsed(true, { force: true });
+  assert.ok(card.el.classList.contains("is-collapsed"));
+});

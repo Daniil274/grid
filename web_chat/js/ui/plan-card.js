@@ -6,6 +6,14 @@
  * sits above the answer rather than inside the reasoning panel: the panel
  * folds away when the turn ends, the plan is what the reader follows.
  *
+ * A plan outlives the request that made it, so the card shows two scopes:
+ * "This request" - the tasks this turn planned, took, updated or closed (each
+ * task's `turn` flag, web_chat/plan_board.py) - and "Whole plan". It opens on
+ * the request's own share; the switch shows only when the two differ. The
+ * head folds the card to its progress line: an older answer's card starts
+ * folded, the newest one open, and once the reader folds or opens a card
+ * themselves it stays as they left it.
+ *
  * Every row opens the task's own dialog (a native `<dialog>`, docked to the
  * right edge on a wide screen, full-bleed on a phone). Its Task tab carries
  * what the tracker recorded - description, acceptance criteria, notes, close
@@ -30,7 +38,17 @@ const STATES = {
   blocked: { label: "Blocked", mark: "!" },
 };
 
+/** The card's two scopes: the request's own tasks, and every task of the plan. */
+const SCOPES = {
+  turn: { label: "This request", heading: "This request" },
+  all: { label: "Whole plan", heading: "Plan" },
+};
+
 let dialogSequence = 0;
+
+/** Each state's count among *tasks*. */
+const countStates = (tasks) =>
+  tasks.reduce((counts, task) => ({ ...counts, [task.state]: (counts[task.state] ?? 0) + 1 }), {});
 
 const usd = (amount) => (amount >= 1 ? `$${amount.toFixed(2)}` : `$${amount.toFixed(4)}`);
 
@@ -161,18 +179,40 @@ export function createPlanCard() {
   const title = h("span.planCard__heading", { text: "Plan" });
   const summary = h("span.planCard__summary");
   const bar = h("span.planCard__fill");
-  const list = h("ol.planCard__tasks");
+  const list = h("ol.planCard__tasks", { id: `${prefix}-tasks` });
   const toggle = h(
     "button.planCard__head",
-    { type: "button", "aria-expanded": "true" },
+    { type: "button", "aria-expanded": "true", "aria-controls": list.id, title: "Fold or open the plan" },
+    h("span.planCard__chevron", {}, icon(ICONS.chevron, { size: 12 })),
     title,
     summary,
     h("span.planCard__bar", {}, bar),
   );
-  const root = h("section.planCard", { hidden: true }, toggle, list);
+  const scopeTabs = Object.fromEntries(
+    Object.entries(SCOPES).map(([name, { label }]) => [
+      name,
+      h("button.planCard__scope", {
+        type: "button", role: "tab", "aria-selected": "false", "aria-controls": list.id,
+        dataset: { scope: name }, text: label,
+      }),
+    ]),
+  );
+  const scopes = h(
+    "div.planCard__scopes",
+    { role: "tablist", "aria-label": "Which tasks the plan shows", hidden: true },
+    scopeTabs.turn,
+    scopeTabs.all,
+  );
+  const root = h("section.planCard", { hidden: true }, toggle, scopes, list);
+
+  let collapsePinned = false; // the reader folded or opened it: leave it so
+  const setCollapsed = (collapsed) => {
+    root.classList.toggle("is-collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+  };
   toggle.addEventListener("click", () => {
-    const open = root.classList.toggle("is-collapsed") === false;
-    toggle.setAttribute("aria-expanded", String(open));
+    collapsePinned = true;
+    setCollapsed(!root.classList.contains("is-collapsed"));
   });
 
   // -- the task dialog -------------------------------------------------------
@@ -215,7 +255,10 @@ export function createPlanCard() {
   // belongs to; once open it renders in the top layer, above anything else.
   root.append(dialog);
 
-  let tasks = []; // the plan as it stands
+  let allTasks = []; // the plan as it stands
+  let tasks = []; // the tasks the chosen scope shows
+  let scope = "turn"; // which scope is shown, when the plan has both
+  let scopePinned = false; // the reader chose it: updates keep it
   let openId = null; // the task whose dialog is open; null while it is closed
   let openerId = null; // the row that opened it - focus returns there
   let openTab = "task"; // the tab the reader is on
@@ -265,9 +308,10 @@ export function createPlanCard() {
 
   /** Paint the dialog for the task it shows; keeps the tab and the scroll. */
   const renderDialog = (focus = false) => {
-    const index = tasks.findIndex((task) => task.id === openId);
+    const walk = walkable();
+    const index = walk.findIndex((task) => task.id === openId);
     if (index < 0) return;
-    const task = tasks[index];
+    const task = walk[index];
     const state = STATES[task.state] ?? STATES.ready;
     replace(stateBadge, h("span.planCard__mark", { text: state.mark, "aria-label": state.label }), h("span", { text: state.label }));
     stateBadge.dataset.state = task.state;
@@ -279,23 +323,29 @@ export function createPlanCard() {
         notes: task.notes, close_reason: task.close_reason, report: task.report,
         closed: task.state === "closed", depends_on: task.depends_on,
       },
-      tasks.filter((target) => (task.depends_on ?? []).some((dep) => dep === target.id || dep === target.key))
+      allTasks.filter((target) => (task.depends_on ?? []).some((dep) => dep === target.id || dep === target.key))
         .map(({ id, key, title, state }) => ({ id, key, title, state })),
     ]);
     if (signature !== contentSignature) {
       const active = document.activeElement;
       if (active && body.contains(active)) focus = true;
-      taskPanelEl = taskPanel(task, tasks, jumpTo, ids);
+      taskPanelEl = taskPanel(task, allTasks, jumpTo, ids);
       resultPanelEl = resultPanel(task, ids);
       replace(body, taskPanelEl, resultPanelEl);
       contentSignature = signature;
     }
     prevButton.disabled = index === 0;
-    nextButton.disabled = index === tasks.length - 1;
-    count.textContent = `${index + 1} of ${tasks.length}`;
+    nextButton.disabled = index === walk.length - 1;
+    count.textContent = `${index + 1} of ${walk.length}`;
     setTab(openTab, focus);
     body.scrollTop = scrollTop;
   };
+
+  /** The tasks Previous and Next walk: the shown scope's, or the whole plan
+   * once a dependency jumped to a task the scope does not show. */
+  function walkable() {
+    return tasks.some((task) => task.id === openId) ? tasks : allTasks;
+  }
 
   /** Open on Task; live updates never change the reader's tab. */
   const openTask = (task) => {
@@ -318,8 +368,9 @@ export function createPlanCard() {
   };
 
   const stepTo = (offset) => {
-    const index = tasks.findIndex((task) => task.id === openId);
-    const target = tasks[index + offset];
+    const walk = walkable();
+    const index = walk.findIndex((task) => task.id === openId);
+    const target = walk[index + offset];
     if (!target) return;
     openId = target.id;
     scrollTop = 0;
@@ -328,17 +379,93 @@ export function createPlanCard() {
   prevButton.addEventListener("click", () => stepTo(-1));
   nextButton.addEventListener("click", () => stepTo(1));
 
+  /** Paint the head and the rows for the chosen scope. */
+  const render = () => {
+    const turnTasks = allTasks.filter((task) => task.turn);
+    // Both scopes only when the request's share is a part of the plan.
+    const scoped = turnTasks.length > 0 && turnTasks.length < allTasks.length;
+    const shown = scoped ? scope : "all";
+    tasks = shown === "turn" ? turnTasks : allTasks;
+    scopes.hidden = !scoped;
+    root.dataset.scope = shown;
+    for (const [name, tab] of Object.entries(scopeTabs)) {
+      const selected = name === shown;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      const size = name === "turn" ? turnTasks.length : allTasks.length;
+      tab.textContent = `${SCOPES[name].label} · ${size}`;
+    }
+
+    const total = tasks.length;
+    const counts = countStates(tasks);
+    const done = counts.closed ?? 0;
+    title.textContent = `${SCOPES[shown].heading} · ${done}/${total} done`;
+    summary.textContent = Object.entries(STATES)
+      .filter(([state]) => state !== "closed" && counts[state])
+      .map(([state, { label }]) => `${counts[state]} ${label.toLowerCase()}`)
+      .join(" · ");
+    bar.style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
+    root.dataset.complete = String(total > 0 && done === total);
+
+    // The row the reader is focused on keeps focus across the rebuild.
+    const active = typeof document !== "undefined" ? document.activeElement : null;
+    const focusedId =
+      openId == null && active ? [...rows.entries()].find(([, button]) => button === active)?.[0] : null;
+    rows.clear();
+    replace(
+      list,
+      tasks.map((task) => {
+        const row = taskRow(task, openTask);
+        const button = row.querySelector("button");
+        if (button) rows.set(task.id, button);
+        return row;
+      }),
+    );
+    if (focusedId != null) (rows.get(focusedId) ?? toggle).focus?.();
+  };
+
+  const chooseScope = (name, focus = false) => {
+    scope = name;
+    scopePinned = true;
+    render();
+    if (focus) scopeTabs[name].focus?.();
+  };
+  for (const [name, tab] of Object.entries(scopeTabs)) {
+    tab.addEventListener("click", () => chooseScope(name));
+    tab.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+      event.preventDefault?.();
+      chooseScope(name === "turn" ? "all" : "turn", true);
+    });
+  }
+
   return {
     el: root,
+
+    /** Whether the card shows a plan at all. */
+    get hasPlan() {
+      return allTasks.length > 0;
+    },
+
+    /**
+     * Fold the card to its progress line, or open it. A card the reader
+     * folded or opened themselves stays as they left it unless *force*.
+     */
+    setCollapsed(collapsed, { force = false } = {}) {
+      if (collapsePinned && !force) return;
+      setCollapsed(collapsed);
+    },
 
     /**
      * Show a plan: either a `plan` step of the trace (`{plan}`) or the bare
      * plan the chat saved (`{tasks, counts, total}`), so a stored chat can
-     * draw its card before a new turn re-sends a live step.
+     * draw its card before a new turn re-sends a live step. `scoped: false`
+     * drops which turn touched what - a saved plan is no one answer's own.
      */
-    update(stepOrPlan) {
+    update(stepOrPlan, { scoped = true } = {}) {
       const plan = stepOrPlan?.plan ?? stepOrPlan;
       if (!plan?.tasks?.length) {
+        allTasks = [];
         tasks = [];
         rows.clear();
         replace(list);
@@ -347,36 +474,14 @@ export function createPlanCard() {
         return;
       }
       root.hidden = false;
-      const total = plan.total ?? plan.tasks.length;
-      const counts = plan.counts ?? {};
-      const done = counts.closed ?? 0;
-      title.textContent = `Plan · ${done}/${total} done`;
-      summary.textContent = Object.entries(STATES)
-        .filter(([state]) => state !== "closed" && counts[state])
-        .map(([state, { label }]) => `${counts[state]} ${label.toLowerCase()}`)
-        .join(" · ");
-      bar.style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
-      root.dataset.complete = String(total > 0 && done === total);
-      tasks = plan.tasks;
-      // The row the reader is focused on keeps focus across the rebuild.
-      const active = typeof document !== "undefined" ? document.activeElement : null;
-      const focusedId =
-        openId == null && active ? [...rows.entries()].find(([, button]) => button === active)?.[0] : null;
-      rows.clear();
-      replace(
-        list,
-        tasks.map((task) => {
-          const row = taskRow(task, openTask);
-          const button = row.querySelector("button");
-          if (button) rows.set(task.id, button);
-          return row;
-        }),
-      );
-      if (focusedId != null) (rows.get(focusedId) ?? toggle).focus?.();
+      allTasks = scoped ? plan.tasks : plan.tasks.map(({ turn, ...task }) => task);
+      // The request's own share first, until the reader picks a scope.
+      if (!scopePinned) scope = "turn";
+      render();
       // The dialog follows the plan while it is open: same task, same tab,
       // same place in it - and closed when the plan no longer knows the task.
       if (openId != null) {
-        if (tasks.some((task) => task.id === openId)) {
+        if (allTasks.some((task) => task.id === openId)) {
           scrollTop = body.scrollTop ?? 0;
           renderDialog();
         } else {

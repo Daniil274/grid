@@ -284,3 +284,26 @@ test("a stored plan is restored from the trace with the rest of the turn", () =>
   assert.deepEqual(titles(topList(panel)), ["beads_plan"]);
   assert.match(panel.planEl.find("planCard__meta").textContent, /waits for setup/);
 });
+
+test("a stored answer's plan starts folded, and a saved plan never doubles it", () => {
+  const panel = createReasoningPanel();
+  const task = (id, turn) => ({ id, key: "", title: id, state: "ready", depends_on: [], turn });
+  panel.hydrate([{ id: "p", kind: "plan", plan: { tasks: [task("a", true), task("b", false)], total: 2 } }]);
+  assert.equal(panel.hasPlan, true);
+  assert.ok(panel.planEl.classList.contains("is-collapsed"));
+
+  panel.setPlanCollapsed(false);
+  assert.equal(panel.planEl.classList.contains("is-collapsed"), false);
+  // The answer's own plan step stays: the saved plan is not drawn over it.
+  panel.applyStoredPlan({ tasks: [task("z", false)], total: 1 });
+  assert.equal(panel.planEl.findAll("planCard__task").length, 1);
+  assert.equal(panel.planEl.find("planCard__title").textContent, "a");
+});
+
+test("an answer without a plan step shows the saved plan open, as the whole plan", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([]);
+  panel.applyStoredPlan({ tasks: [{ id: "a", title: "a", state: "ready", turn: true }, { id: "b", title: "b", state: "ready" }], total: 2 });
+  assert.equal(panel.planEl.classList.contains("is-collapsed"), false);
+  assert.equal(panel.planEl.findAll("planCard__task").length, 2);
+});

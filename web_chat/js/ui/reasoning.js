@@ -442,9 +442,25 @@ export function createReasoningPanel() {
     el: root,
     planEl: plan.el,
 
-    /** Show the plan a stored chat saved, when no live plan step has arrived. */
+    /** Whether this answer shows a plan card. */
+    get hasPlan() {
+      return plan.hasPlan;
+    },
+
+    /** Fold the plan card, or open it (ui/plan-card.js: the reader's choice stands). */
+    setPlanCollapsed(collapsed) {
+      plan.setCollapsed(collapsed);
+    },
+
+    /**
+     * Show the plan a stored chat saved, when no plan step of this answer
+     * already shows one. A saved plan may be an older turn's, so it shows as
+     * the whole plan, never as this answer's request.
+     */
     applyStoredPlan(stored) {
-      plan.update(stored);
+      if (plan.hasPlan) return;
+      plan.update(stored, { scoped: false });
+      plan.setCollapsed(false);
     },
 
     get isEmpty() {
@@ -527,6 +543,8 @@ export function createReasoningPanel() {
     /** Render a stored trace from a reloaded conversation, collapsed. */
     hydrate(steps) {
       for (const step of steps ?? []) if (step.kind === "plan") plan.update(step);
+      // A stored answer's plan starts folded; the transcript opens the newest.
+      plan.setCollapsed(true);
       steps = steps?.filter((step) => step.kind !== "plan");
       if (!steps?.length) return;
       for (const step of steps) this.upsert(step);

@@ -264,6 +264,8 @@ export class ChatController {
     try {
       const plan = await api.conversationPlan(contextId);
       if (this._store.get().contextId !== contextId) return;
+      // A plan an answer on screen already shows needs no second card.
+      if (this._transcript.hasPlan()) return;
       this._transcript.lastAnswer()?.reasoning?.applyStoredPlan(plan);
     } catch {
       // The chat's stored plan is a convenience; the live plan still arrives.
@@ -400,6 +402,8 @@ export class ChatController {
     // Only the newest interruption can be continued, and only until now.
     this._transcript.retireContinue();
     this._store.set({ resumable: false });
+    // The earlier answers' plans fold away; this turn's card opens with its plan.
+    this._transcript.collapsePlans();
     if (text === null) this._transcript.add({ role: "user", kind: "continuation", timestamp: Date.now() });
     else this._transcript.add({ role: "user", content: text, images, timestamp: Date.now() });
     const message = this._transcript.add({

@@ -174,8 +174,20 @@ export function createTranscript({
         }
       }
       offersContinue();
+      // Every stored plan starts folded; the newest one is the one to follow.
+      [...messages.values()].reverse().find((handle) => handle.reasoning?.hasPlan)?.reasoning.setPlanCollapsed(false);
       setEmpty(stored.length === 0);
       scrollToBottom(true);
+    },
+
+    /** Whether any answer on screen shows a plan card. */
+    hasPlan() {
+      return [...messages.values()].some((handle) => handle.reasoning?.hasPlan);
+    },
+
+    /** Fold every plan card on screen: a new request's plan is the one to follow. */
+    collapsePlans() {
+      for (const handle of messages.values()) handle.reasoning?.setPlanCollapsed(true);
     },
 
     clear() {
