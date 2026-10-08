@@ -55,6 +55,12 @@ export const api = {
   /** Fork before a user message; the edited text then goes into the branch. */
   createBranch: (id, messageId) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/branches`, json("POST", { message_id: messageId })),
+  /** A new chat holding this one up to the end of the message's turn. */
+  forkConversation: (id, messageId) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/forks`, json("POST", { message_id: messageId })),
+  /** Delete a message from the chat and the agent's context; a request takes its turn along. */
+  deleteMessage: (id, messageId) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" }),
   compactConversation: (id) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/compact`, { method: "POST" }),
   activateBranch: (id) =>

@@ -3,7 +3,7 @@ Advanced context management for Grid agents with memory and persistence.
 """
 
 import os
-from typing import Callable, List, Dict, Optional, Any, Tuple, Union
+from typing import Callable, Iterable, List, Dict, Optional, Any, Tuple, Union
 from datetime import datetime
 from threading import Lock
 from contextlib import contextmanager
@@ -861,6 +861,60 @@ class ContextManager:
             self._mark_changed(branch_id)
             self._save_to_file()
             return branch_id, slot
+
+    def copy_context(self, context_id: str, end: int) -> str:
+        """A new conversation of its own holding *context_id*'s first *end* messages.
+
+        Unlike a branch it is not part of the original's family: the rail shows
+        it as a chat of its own, named after the original. Returns its id.
+        """
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                raise KeyError(f"Unknown conversation {context_id}")
+            source = bucket["metadata"]
+            copy_id = self._create_context()
+            target = self._contexts[copy_id]
+            target["conversation"] = [message.model_copy(deep=True) for message in bucket["conversation"][:end]]
+            target["metadata"] = {
+                **{key: copy.deepcopy(source[key]) for key in self.BRANCH_INHERITED if key in source},
+                "forked_from": context_id,
+            }
+            if source.get("title"):
+                target["metadata"]["title"] = f"{source['title']} (fork)"
+            self._mark_changed(copy_id)
+            self._save_to_file()
+            return copy_id
+
+    def remove_messages(self, context_id: str, message_ids: Iterable[str]) -> int:
+        """Delete the messages of *context_id* with these ids; how many went."""
+        doomed = set(message_ids)
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return 0
+            conversation = bucket["conversation"]
+            kept = [message for message in conversation if (message.metadata or {}).get("message_id") not in doomed]
+            removed = len(conversation) - len(kept)
+            if removed:
+                # In place: an active context exposes this very list.
+                conversation[:] = kept
+                self._mark_changed(context_id)
+                self._save_to_file()
+            return removed
+
+    def shift_session_marks(self, context_id: str, agent: str, epoch: int, after: int, delta: int) -> None:
+        """Move *agent*'s marks at item *after* or later by *delta*: its session lost items."""
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return
+            for message in bucket["conversation"]:
+                mark = (message.metadata or {}).get("session_mark") or {}
+                if mark.get("agent") == agent and int(mark.get("epoch", 0)) == epoch and mark.get("items", 0) >= after:
+                    message.metadata["session_mark"] = {**mark, "items": mark["items"] + delta}
+            self._mark_changed(context_id)
+            self._save_to_file()
 
     def set_active_branch(self, context_id: str) -> None:
         """Make *context_id* the branch its conversation opens with."""

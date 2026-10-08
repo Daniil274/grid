@@ -16,6 +16,7 @@ export const ICONS = {
   check: "M5 13l4 4L19 7",
   edit: "M4 20h4L20 8l-4-4L4 16z",
   trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
+  fork: "M6 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM18 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM12 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM6 7v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7M12 12v5",
   sliders: "M4 7h10M18 7h2M4 17h4M12 17h8M15 4v6M8 14v6",
   clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4",

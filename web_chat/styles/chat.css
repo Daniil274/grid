@@ -236,6 +236,11 @@
   color: var(--text);
 }
 
+.msgAction--delete:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 /* The user's own turn: a right-aligned bubble, so the thread scans as dialogue. */
 .msg[data-role="user"] {
   justify-items: end;

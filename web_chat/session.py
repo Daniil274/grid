@@ -303,7 +303,7 @@ class AgentTurn:
             self._record_activity()
             self._record_usage()
             # Release before "done": the client may submit its next turn at once.
-            self._session.release()
+            self._session.release(self)
             with suppress(WebSocketDisconnect, RuntimeError, OSError):
                 await self._emit({
                     "type": "done",
@@ -590,8 +590,8 @@ class ChatSession:
     def agent_label(self, system_key: str, agent_key: str) -> str:
         return self.space.registry.agent_label(system_key, agent_key)
 
-    def release(self) -> None:
-        self._turns.release(self.context_id)
+    def release(self, turn: "AgentTurn") -> None:
+        self._turns.release(self.context_id, turn)
 
     # -- commands ----------------------------------------------------------
     async def _dispatch(self, raw: str) -> None:
@@ -840,7 +840,6 @@ class ChatSession:
             await self.send({"type": "error", "content": refusal})
             await self.send({"type": "done"})
             return False
-        self._turns.claim(self.context_id)
         turn = AgentTurn(
             self,
             message,
@@ -849,11 +848,15 @@ class ChatSession:
             images=tuple(images),
             edit_of=edit_of,
         )
+        self._turns.claim(self.context_id, turn)
         task = asyncio.create_task(turn.run())
         self._turns.register(self.context_id, turn, task)
 
         def ended(_task: asyncio.Task) -> None:
             self._turns.forget(self.context_id, turn)
+            # run() releases in its finally; a task cancelled before its first
+            # step never gets there, and the chat must not stay busy for good.
+            self._turns.release(self.context_id, turn)
             self._background(self._advance_queue(turn))
 
         task.add_done_callback(ended)
@@ -861,6 +864,13 @@ class ChatSession:
 
     @staticmethod
     async def _cancel(task: asyncio.Task) -> None:
+        if task.done():
+            return
+        # A message and a Stop can arrive in one burst: the turn's task exists
+        # but has not taken its first step, and a cancel now would skip run()
+        # altogether - no interruption recorded, no "done" sent. One pass of
+        # the loop lets it start, so the cancel lands inside run().
+        await asyncio.sleep(0)
         if task.done():
             return
         task.cancel()

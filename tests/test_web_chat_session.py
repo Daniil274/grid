@@ -826,3 +826,33 @@ async def test_a_turn_inside_its_token_budget_runs_to_the_end():
 
     await socket.incoming.put(None)
     await session
+
+
+@pytest.mark.asyncio
+async def test_a_stop_in_the_same_burst_as_the_message_frees_the_chat():
+    """Message and Stops read before the turn's task took a step: the turn still
+    ends as stopped, and the chat takes the next message instead of "busy"."""
+    run = AsyncMock(return_value='Ready')
+    space, socket = space_for(run), Socket()
+    for frame in ('{"message":"first"}', '{"action":"stop"}', '{"action":"stop"}'):
+        socket.incoming.put_nowait(frame)
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
+    assert (await socket.event('done'))['stopped'] is True
+    assert not space.turns.is_claimed('ctx')
+    await socket.incoming.put('{"message":"second"}')
+    assert (await socket.event('final_output'))['content'] == 'Ready'
+    await socket.event('done')
+    await socket.incoming.put(None)
+    await session
+
+
+def test_a_late_release_never_frees_a_newer_claim():
+    board = TurnBoard()
+    first, second = object(), object()
+    assert board.claim('ctx', first)
+    board.release('ctx', first)
+    assert board.claim('ctx', second)
+    board.release('ctx', first)  # the old turn's cleanup, arriving late
+    assert board.is_claimed('ctx')
+    board.release('ctx', second)
+    assert not board.is_claimed('ctx')
