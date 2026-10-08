@@ -115,7 +115,7 @@ def _import_chats(accounts: Accounts, args: argparse.Namespace) -> int:
     import sqlite3
 
     from web_chat.deployment import Deployment
-    from web_chat.space import SpaceLayout, single_user_records
+    from web_chat.space import SpaceLayout, conversation_directory, single_user_records
 
     user = accounts.find_user(args.username)
     if user is None:
@@ -125,7 +125,7 @@ def _import_chats(accounts: Accounts, args: argparse.Namespace) -> int:
     if not conversations.exists():
         raise AccountError(f"No chats to import: {conversations} does not exist.")
     target = SpaceLayout.under(args.data_dir.expanduser().resolve() / "users" / user.id)
-    for existing in (target.conversations, target.agent_sessions):
+    for existing in (target.conversations, conversation_directory(target.conversations), target.agent_sessions):
         if existing.exists():
             raise AccountError(f"{user.username} already has records ({existing}); nothing was copied.")
 
