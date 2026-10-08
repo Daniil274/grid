@@ -89,10 +89,14 @@ function actionButton(label, path, onClick, extraClass = "") {
  * @param {?{tokens_before: ?number, tokens_after: ?number}} [options.compaction]
  *   token counts for a compaction marker
  * @param {string[]} [options.images] data URLs of attached images
+ * @param {?{turn_id: string, files: number}} [options.checkpoint] user messages only:
+ *   the turn changed files, and `onRestore` brings them back to before it
+ * @param {(checkpoint: {turn_id: string, files: number}) => void} [options.onRestore]
  */
 export function createMessage({
   role, content = "", author = "", timestamp, onEdit, onSpeak, onReport, onContinue, onSwitchVersion, onDelete, onFork,
-  onContinueInNewChat, kind = null, compaction = null, context = null, images = [], messageId = null, versions = null,
+  onContinueInNewChat, onRestore, kind = null, compaction = null, context = null, images = [], messageId = null, versions = null,
+  checkpoint = null,
 }) {
   if (kind === "continuation") return createContinuationMarker({ timestamp });
   if (kind === "compaction") return createCompactionMarker({ timestamp, compaction });
@@ -123,11 +127,29 @@ export function createMessage({
       ? actionButton(SPEECH_UI.idle.title, ICONS.volume, () => onSpeak(id), "msgAction--speak")
       : null;
 
+  // "Restore files": shown once the turn this message started changed files.
+  let currentCheckpoint = null;
+  const restoreButton = role === "user" && onRestore
+    ? actionButton("Restore files to before this message", ICONS.undo, () => currentCheckpoint && onRestore(currentCheckpoint))
+    : null;
+  const showCheckpoint = (next) => {
+    currentCheckpoint = next?.files ? next : null;
+    if (!restoreButton) return;
+    restoreButton.hidden = !currentCheckpoint;
+    if (currentCheckpoint) {
+      const label = `Restore files to before this message (${currentCheckpoint.files} changed since)`;
+      restoreButton.title = label;
+      restoreButton.setAttribute("aria-label", label);
+    }
+  };
+  showCheckpoint(checkpoint);
+
   const actions = h(
     "div.msg__actions",
     {},
     actionButton("Copy message", ICONS.copy, () => copyText(ownWords().text, "Message copied")),
     role === "user" && onEdit ? actionButton("Edit (starts a new branch)", ICONS.edit, () => startEdit()) : null,
+    restoreButton,
     speakButton,
     isAssistant && onReport
       ? actionButton("Report a problem with this answer", ICONS.inspect, () => startReport(), "msgAction--report")
@@ -311,9 +333,15 @@ export function createMessage({
     },
 
     /** Take the stored id and versions without re-rendering the message. */
-    adopt({ id: nextId, versions: nextVersions }) {
+    /** The turn this message started changed files: offer Restore. */
+    setCheckpoint(next) {
+      showCheckpoint(next);
+    },
+
+    adopt({ id: nextId, versions: nextVersions, checkpoint: nextCheckpoint }) {
       storedId = nextId ?? storedId;
       renderVersions(nextVersions);
+      showCheckpoint(nextCheckpoint ?? null);
     },
 
     /** Show an image the model generated, once. */

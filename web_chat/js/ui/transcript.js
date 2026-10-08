@@ -47,7 +47,7 @@ export function createScrollFollower(container) {
 
 export function createTranscript({
   container, emptyState, jumpButton, onEditMessage, onSpeakMessage, onReportMessage, onContinue, onSwitchVersion,
-  onDeleteMessage, onForkMessage, onContinueInNewChat,
+  onDeleteMessage, onForkMessage, onContinueInNewChat, onRestoreCheckpoint,
 }) {
   /** Live message handles by id - the speech player reports state by id. */
   const messages = new Map();
@@ -136,7 +136,7 @@ export function createTranscript({
     /** @returns the message handle, so the caller can stream into it. */
     add(options) {
       setEmpty(false);
-      const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage });
+      const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage, onRestore: onRestoreCheckpoint });
       messages.set(message.id, message);
       container.append(message.el);
       scrollToBottom(true);
@@ -168,6 +168,7 @@ export function createTranscript({
           images: message.images,
           messageId: message.id,
           versions: message.versions,
+          checkpoint: message.checkpoint ?? null,
         });
         handle.reasoning?.hydrate(message.trace, {
           loadStep: loadStep && message.id ? (stepId) => loadStep(message.id, stepId) : null,
@@ -206,7 +207,9 @@ export function createTranscript({
     adopt(stored) {
       const handles = [...messages.values()];
       if (handles.length !== stored.length) return false;
-      handles.forEach((handle, index) => handle.adopt({ id: stored[index].id, versions: stored[index].versions }));
+      handles.forEach((handle, index) => handle.adopt({
+        id: stored[index].id, versions: stored[index].versions, checkpoint: stored[index].checkpoint ?? null,
+      }));
       return true;
     },
 
@@ -234,7 +237,7 @@ export function createTranscript({
 
     /** Insert a message just before *anchor* - a message the user sent mid-turn. */
     addBefore(anchor, options) {
-      const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage });
+      const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage, onRestore: onRestoreCheckpoint });
       messages.set(message.id, message);
       container.insertBefore(message.el, anchor.el);
       offersContinue();
@@ -248,6 +251,17 @@ export function createTranscript({
 
     /** Recompute which answer offers "Continue in new chat" (the newest one). */
     refreshContinueInNewChat: offersContinue,
+
+    /** The user's message (or Continue) that started the turn *answer* answers. */
+    requestOf(answer) {
+      const handles = [...messages.values()];
+      for (let index = handles.indexOf(answer) - 1; index >= 0; index -= 1) {
+        if (handles[index].role === "user") return handles[index];
+        // A Continue started it: a marker, which offers nothing.
+        if (handles[index].role === "marker" && handles[index].kind !== "compaction") return null;
+      }
+      return null;
+    },
 
     /** The newest message handle, or null. */
     last() {

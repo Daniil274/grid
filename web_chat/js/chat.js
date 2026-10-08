@@ -210,6 +210,31 @@ export class ChatController {
     }
   }
 
+  /**
+   * Bring the workspace back to before the turn of a message: every file that
+   * turn or a later one changed - by any tool - as it was then.
+   * @param {{turn_id: string, files: number}} checkpoint
+   */
+  async restoreCheckpoint({ turn_id: turnId, files }) {
+    const { contextId, compacting } = this._store.get();
+    if (!contextId) return;
+    if (this.isStreaming || compacting) {
+      toast("Stop the running turn before restoring files.", { tone: "error" });
+      return;
+    }
+    const question = `Restore the workspace to before this message? Files changed by this turn (${files}) `
+      + "and by the turns after it go back to how they were; files created since are removed. The chat stays as it is.";
+    if (!window.confirm(question)) return;
+    try {
+      const { restored } = await api.restoreCheckpoint(contextId, turnId);
+      toast(restored.length ? `Restored ${restored.length} file(s).` : "Nothing to restore: the files are as they were.", {
+        tone: "success", timeout: 4000,
+      });
+    } catch (error) {
+      toast(error.message, { tone: "error" });
+    }
+  }
+
   /** Open a new chat that is this one up to the end of message *id*'s turn. */
   async forkAt(id) {
     const { contextId, compacting } = this._store.get();
@@ -644,6 +669,10 @@ export class ChatController {
         this._transcript.follow();
       })
       .on("routed", ({ agent_name: agentName }) => message.setAuthor(agentName))
+      // The turn changed files: its request now offers Restore.
+      .on("checkpoint", ({ turn_id: turnId, files }) => {
+        this._transcript.requestOf(message)?.setCheckpoint({ turn_id: turnId, files });
+      })
       // A message sent while the agent works: how it is delivered, the queue,
       // and - delivered at a step - its place in the thread.
       .on("delivery", ({ delivery, decided_by: decidedBy }) => {

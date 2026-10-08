@@ -84,6 +84,12 @@ export const api = {
   /** Delete a message from the chat and the agent's context; a request takes its turn along. */
   deleteMessage: (id, messageId) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" }),
+  /** Bring the chat's workspace back to before turn `turnId` (core.checkpoints). */
+  restoreCheckpoint: (id, turnId) =>
+    request(
+      `/api/chat/conversations/${encodeURIComponent(id)}/checkpoints/${encodeURIComponent(turnId)}/restore`,
+      { method: "POST" },
+    ),
   compactConversation: (id) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/compact`, { method: "POST" }),
   activateBranch: (id) =>
