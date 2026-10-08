@@ -148,6 +148,10 @@ def register_project_routes(api: APIRouter, current_space: Any) -> None:
                 elif context_id not in entry["chat_ids"]:
                     entry["chat_ids"].append(context_id)
         tasks = list(merged.values())
+        statuses = {task["id"]: task.get("status") for task in tasks}
+        for task in tasks:
+            # A snapshot from before plans carried states: derive it as bd's tasks do.
+            task.setdefault("state", _trace_state(task, statuses))
         # The tracker is the source of truth about a task's status; a task no
         # conversation's plan named never enters the project's board.
         known = await _bd_tasks(space)
@@ -165,6 +169,15 @@ def register_project_routes(api: APIRouter, current_space: Any) -> None:
             raise HTTPException(status_code=404, detail="Conversation not found") from None
         plan = latest_plan(_plan_messages(manager, context_id))
         return JSONResponse(plan or {"tasks": [], "counts": {state: 0 for state in STATES}, "total": 0})
+
+
+def _trace_state(task: Dict[str, Any], statuses: Dict[str, Any]) -> str:
+    """The board state of a planned task from its status and what it waits for."""
+    status = task.get("status") or "open"
+    if status == "open":
+        waits = [dep for dep in task.get("depends_on") or [] if statuses.get(dep, "open") != "closed"]
+        return "waiting" if waits else "ready"
+    return "waiting" if status == "deferred" else status
 
 
 def seed_project_context(space: Any, context_id: str, project_id: str) -> bool:

@@ -87,10 +87,20 @@ def test_create_shapes_the_command_from_the_body():
 
     assert response.status_code == 201 and response.json()["id"] == "p-9"
     args, cwd = bd.calls[0]
-    assert args[:5] == ["create", "Fix the build", "-p", "0", "-t"]
-    assert "bug" in args and "--description" in args and "make it green" in args
+    assert args[0] == "create" and args[-2:] == ["--", "Fix the build"]
+    assert "--priority=0" in args and "--type=bug" in args and "--description=make it green" in args
     # Only real ids become dependencies; an invalid one never reaches bd.
-    assert ["--deps", "p-1"] == args[args.index("--deps"):args.index("--deps") + 2]
+    assert "--deps=p-1" in args
+
+
+def test_a_title_or_value_that_looks_like_a_flag_stays_a_value():
+    bd = Bd({"success": True, "data": [issue("p-9", status="open")]})
+    client = TestClient(make_app(bd))
+    client.post("/api/tasks", json={"title": "--db=/elsewhere", "description": "-x"})
+    args, _ = bd.calls[0]
+    # The title follows "--"; every other value rides inside its own flag.
+    assert args[-2:] == ["--", "--db=/elsewhere"] and "--description=-x" in args
+    assert "--db=/elsewhere" not in args[:-1]
 
 
 def test_a_refused_write_is_400_with_bds_reason():
@@ -129,7 +139,7 @@ def test_close_carries_the_reason_and_reports_it():
     client = TestClient(make_app(bd))
     body = client.post("/api/tasks/p-1/close", json={"reason": "listed"}).json()
     assert body == {"ok": True, "id": "p-1", "close_reason": "listed"}
-    assert bd.calls[0][0] == ["close", "p-1", "--reason", "listed"]
+    assert bd.calls[0][0] == ["close", "p-1", "--reason=listed"]
 
 
 def test_a_dependency_add_names_the_child_and_the_parent():
@@ -156,7 +166,15 @@ def test_a_bad_task_id_never_reaches_bd():
     client = TestClient(make_app(bd))
     assert client.get("/api/tasks/%20..%2f").status_code in (400, 404)
     assert client.post("/api/tasks/not valid/close", json={"reason": "x"}).status_code == 400
+    # An id that would read as a flag never reaches bd either.
+    assert client.post("/api/tasks/--db/close", json={"reason": "x"}).status_code == 400
     assert bd.calls == []
+
+
+def test_a_child_task_id_is_a_task_id():
+    bd = Bd({"success": True, "output": "closed"})
+    client = TestClient(make_app(bd))
+    assert client.post("/api/tasks/p-1.2/close", json={"reason": "x"}).status_code == 200
 
 
 def test_every_route_needs_a_signed_in_user():
