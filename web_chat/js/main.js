@@ -42,6 +42,10 @@ const store = createStore({
   multiSystem: false,
   routingEnabled: false,
   conversations: [],
+  // Projects: a metadata layer over chats (web_chat/js/ui/sidebar.js).
+  projects: [],
+  // The project new chats are created in (`null` = no project).
+  activeProject: null,
   contextId: null,
   // The conversation the open branch belongs to: the rail's row.
   rootId: null,
@@ -89,6 +93,16 @@ async function refreshConversations() {
     store.set({ conversations: await api.listConversations() });
   } catch (error) {
     console.warn("Could not list conversations", error);
+  }
+}
+
+/** Projects live on the server; an older server without the routes leaves the rail plain. */
+async function refreshProjects() {
+  try {
+    const { projects } = await api.projects();
+    store.set({ projects: projects ?? [] });
+  } catch (error) {
+    console.warn("Could not list projects", error);
   }
 }
 
@@ -158,6 +172,7 @@ async function boot() {
       });
     },
     onContinue: () => chat.continueTurn(),
+    onContinueInNewChat: () => void chat.continueInNewChat(),
   });
 
   const chat = new ChatController({
@@ -204,6 +219,7 @@ async function boot() {
   createConversationList({
     container: $("#chat-list"),
     searchInput: $("#chat-search"),
+    modeToggle: $("#chat-modes"),
     store,
     onSelect: async (contextId) => {
       closeRail();
@@ -225,6 +241,24 @@ async function boot() {
         await chat.deleteConversation(contextId);
       } catch (error) {
         toast(error.message, { tone: "error" });
+      }
+    },
+    onMoveToProject: async (contextId, projectId) => {
+      try {
+        await api.setConversationProject(contextId, projectId);
+        await refreshConversations();
+      } catch (error) {
+        toast(`Could not move chat: ${error.message}`, { tone: "error" });
+      }
+    },
+    onCreateProject: async (title) => {
+      try {
+        const project = await api.createProject({ title });
+        await refreshProjects();
+        return project;
+      } catch (error) {
+        toast(`Could not create project: ${error.message}`, { tone: "error" });
+        return null;
       }
     },
   });
@@ -416,6 +450,7 @@ async function boot() {
       policy: bootstrap.policy ?? null,
     });
     await refreshConversations();
+    await refreshProjects();
   }
 
   // Who is signed in, on a server with accounts; the system configs are
@@ -483,6 +518,11 @@ async function boot() {
   // "Open in chat" on the systems page: a new chat with that system pinned.
   const params = new URLSearchParams(location.search);
   const pinned = params.get("system");
+  // ?project=<id> makes that project active: "New chat" starts in it.
+  const projectParam = params.get("project");
+  if (projectParam && store.get().projects.some((project) => project.id === projectParam)) {
+    store.set({ activeProject: projectParam });
+  }
   const [latest] = store.get().conversations;
   if (pinned && store.get().systems.some((system) => system.key === pinned)) {
     history.replaceState(null, "", "/");
@@ -490,6 +530,11 @@ async function boot() {
     await chat.startConversation();
     // "Describe it to the builder": the request waits in the composer, to read and send.
     if (params.get("prompt")) composer.setValue(params.get("prompt"));
+  } else if (params.get("conversation")) {
+    // /tasks links back with ?conversation=<id>: open that chat and clean the URL.
+    const conversationId = params.get("conversation");
+    history.replaceState(null, "", "/");
+    await chat.openConversation(conversationId);
   } else if (latest) {
     await chat.openConversation(latest.open_id ?? latest.id);
   }

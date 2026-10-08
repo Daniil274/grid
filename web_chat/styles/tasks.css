@@ -1,0 +1,133 @@
+/**
+ * The tracker page (web_chat/tasks.html): the board, the list and the task
+ * dialog. Same tokens and shell rhythm as the usage page; the task cards and
+ * the dialog borrow the plan card's look (styles/reasoning.css) so a task
+ * reads the same in the chat and here.
+ */
+
+.tasksPage { overflow: auto; height: auto; min-height: 100%; }
+.tasksShell { max-width: 1580px; margin: 0 auto; padding: 36px 40px; }
+.tasksHeader { display: flex; justify-content: space-between; gap: 24px; align-items: center; margin-bottom: 30px; }
+.tasksBrand { font-size: 11px; letter-spacing: .16em; color: var(--text-3); }
+.tasksHeader h1 { font-size: 38px; margin: 10px 0 6px; }
+.tasksHeader p { color: var(--text-3); font-size: 12px; }
+.tasksActions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.tasksActions label { font-size: 12px; color: var(--text-2); white-space: nowrap; }
+
+.tasksFilters { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; padding: 20px; background: var(--bg-1); border: 1px solid var(--line); border-radius: 12px; }
+.tasksFilters label { display: flex; flex-direction: column; gap: 6px; color: var(--text-3); font-size: 11px; }
+.tasksSearch { flex: 1; min-width: 200px; }
+.tasksViews { display: flex; gap: 6px; margin-left: auto; }
+.tasksPage input[type=search], .tasksPage select, .tasksPage input[type=text], .tasksPage textarea {
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; min-height: 36px;
+  padding: 6px 10px; font-size: 12px; color: var(--text); max-width: 100%; font-family: inherit;
+}
+.tasksPage textarea { min-height: 84px; resize: vertical; line-height: 1.5; }
+.tasksViews [aria-selected=true] { color: var(--accent); border-color: var(--accent-line); }
+
+#status { font-size: 12px; color: var(--text-3); min-height: 38px; padding: 10px 0; }
+#status[data-error=true] { color: var(--danger); }
+
+.tasksMetrics { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 12px; margin: 0 0 24px; }
+.tasksMetric { padding: 16px 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-1); }
+.tasksMetric span { color: var(--text-2); font-size: 11px; }
+.tasksMetric strong { display: block; font-size: clamp(19px,2.2vw,28px); margin: 6px 0 2px; font-variant-numeric: tabular-nums; letter-spacing: -.035em; }
+.tasksMetric small { display: block; font-size: 10px; color: var(--text-3); }
+
+/* -- the board ------------------------------------------------------------------ */
+.tasksBoard { display: grid; grid-template-columns: repeat(5, minmax(220px, 1fr)); gap: 14px; align-items: start; }
+.tasksColumn { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-1); }
+.tasksColumn[data-state=closed] { background: var(--bg-inset); }
+.tasksColumnHead { display: flex; justify-content: space-between; align-items: baseline; margin: 2px 4px 12px; }
+.tasksColumnHead h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+.tasksColumnHead span { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.tasksColumn ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.tasksCard { display: block; width: 100%; text-align: left; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--bg-2); padding: 10px 12px; cursor: pointer; color: var(--text); }
+.tasksCard:hover { border-color: var(--accent-line); }
+.tasksCard[data-state=closed] { opacity: .6; }
+.tasksCard[data-state=blocked] { border-color: rgb(255 125 125 / 35%); }
+.tasksCard__title { display: block; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.tasksCard__meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.tasksTag { font-size: 10px; color: var(--text-3); border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; }
+.tasksTag[data-kind=state] { color: var(--text-2); }
+.tasksTag[data-kind=priority="0"] { color: var(--danger); border-color: rgb(255 125 125 / 40%); }
+.tasksTag[data-kind=waits] { color: var(--warn); }
+
+/* -- the list -------------------------------------------------------------------- */
+.tasksListWrap { border: 1px solid var(--line); border-radius: 12px; background: var(--bg-1); padding: 6px 0 0; }
+.tasksTableScroll { overflow: auto; }
+.tasksTable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tasksTable th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-3);
+  padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.tasksTable td { padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tasksTable tr:last-child td { border-bottom: 0; }
+.tasksRow { display: contents; }
+.tasksRow > button { all: unset; cursor: pointer; display: flex; gap: 8px; align-items: baseline; }
+.tasksRow > button:hover .tasksRow__title { color: var(--accent-hover); }
+.tasksRow__title { font-weight: 500; overflow-wrap: anywhere; }
+.tasksRow__id { color: var(--text-3); font-size: 11px; }
+.tasksEmpty { text-align: center; color: var(--text-3); padding: 60px 20px; font-size: 13px; }
+
+/* -- the task dialog --------------------------------------------------------------- */
+.taskDialog { border: 1px solid var(--line-strong); border-radius: 14px; background: var(--bg-1); color: var(--text);
+  padding: 0; width: min(680px, calc(100vw - 32px)); max-height: min(86vh, 900px); }
+.taskDialog::backdrop { background: rgb(0 0 0 / 55%); }
+.taskDialog__head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 20px 0; }
+.taskDialog__badges { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.taskDialog__state { display: inline-flex; gap: 6px; align-items: center; font-size: 11px; color: var(--text-2);
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; }
+.taskDialog__id { font-size: 11px; color: var(--text-3); font-family: var(--font-mono, monospace); }
+.taskDialog__close { all: unset; cursor: pointer; color: var(--text-3); padding: 4px; }
+.taskDialog__close:hover { color: var(--text); }
+.taskDialog__title { font-size: 18px; margin: 10px 20px 4px; line-height: 1.4; overflow-wrap: anywhere; }
+.taskDialog__form { display: flex; flex-direction: column; gap: 14px; padding: 16px 20px 20px; overflow: auto; }
+.taskDialog__field { display: flex; flex-direction: column; gap: 6px; }
+.taskDialog__field > span { font-size: 11px; color: var(--text-3); }
+.taskDialog__grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.taskDialog__deps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.taskDialog__dep { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 12px; }
+.taskDialog__dep button { all: unset; cursor: pointer; color: var(--text-3); font-size: 11px; }
+.taskDialog__dep button:hover { color: var(--danger); }
+.taskDialog__add { display: flex; gap: 8px; }
+.taskDialog__add select { flex: 1; }
+.taskDialog__foot { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  border-top: 1px solid var(--line); padding: 14px 20px; }
+.taskDialog__footActions { display: flex; gap: 10px; flex-wrap: wrap; }
+.taskDialog__reason { display: flex; gap: 8px; flex: 1; min-width: 220px; }
+.taskDialog__missing { color: var(--text-3); font-size: 12px; margin: 0; }
+
+@media (max-width: 1100px) {
+  .tasksBoard { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .tasksMetrics { grid-template-columns: repeat(3, minmax(0,1fr)); }
+}
+@media (max-width: 720px) {
+  .tasksShell { padding: 24px 16px; }
+  .tasksBoard { grid-template-columns: 1fr; }
+  .tasksMetrics { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .taskDialog__grid { grid-template-columns: 1fr; }
+}
+
+/* -- the project filter and its chat chips ------------------------------- */
+/* A project view merges the chats' plans; each task keeps a chip back to the
+   chat whose turns planned it (/?conversation=<id> opens it). */
+.taskDialog__sources { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.tasksChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.tasksChip:hover { border-color: var(--accent-line); color: var(--text); }
+.tasksCard__chats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.tasksTag[data-kind=source] { text-transform: lowercase; letter-spacing: 0.02em; }

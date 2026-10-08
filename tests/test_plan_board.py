@@ -3,7 +3,7 @@
 import json
 
 from tests.test_web_trace import Harness, tool_called, tool_output
-from web_chat.plan_board import PlanBoard
+from web_chat.plan_board import PlanBoard, latest_plan
 from web_chat.trace import StepKind, TraceRecorder
 
 PLAN_ARGS = {
@@ -327,3 +327,76 @@ def test_a_beads_create_that_made_nothing_changes_nothing():
         tool_output("c1", "❌ Error creating bead: Error response from daemon: No such container: 1a2b"),
     )
     assert plan_steps(harness) == []
+
+
+def test_latest_plan_is_the_newest_plan_a_trace_holds():
+    # No messages, or none that planned anything: there is no plan to continue.
+    assert latest_plan([]) is None
+    assert latest_plan([{"role": "assistant", "metadata": {}}]) is None
+
+    older = {"role": "assistant", "metadata": {"trace": [
+        {"kind": "plan", "plan": {"tasks": [{"id": "old"}]}},
+    ]}}
+    newer = {"role": "assistant", "metadata": {"trace": [
+        {"kind": "plan", "plan": {"tasks": [{"id": "new"}]}},
+    ]}}
+    # The newest message's plan wins.
+    assert latest_plan([older, newer])["tasks"] == [{"id": "new"}]
+    # A later message without a plan does not hide the one before it.
+    assert latest_plan([older, {"role": "user", "metadata": {}}])["tasks"] == [{"id": "old"}]
+    # Within one message, the last plan step wins; other steps are ignored.
+    two = {"role": "assistant", "metadata": {"trace": [
+        {"kind": "plan", "plan": {"tasks": [{"id": "first"}]}},
+        {"kind": "message", "text": "x"},
+        {"kind": "plan", "plan": {"tasks": [{"id": "second"}]}},
+    ]}}
+    assert latest_plan([two])["tasks"] == [{"id": "second"}]
+    # A plan step without a plan body is nothing to continue.
+    assert latest_plan([{"role": "assistant", "metadata": {"trace": [{"kind": "plan"}]}}]) is None
+
+
+def test_a_plan_keeps_each_tasks_priority_in_the_snapshot():
+    harness = Harness()
+    harness.feed(
+        tool_called("beads_plan", "c1", json.dumps({"tasks": [
+            {"key": "a", "title": "A", "priority": 0},
+            {"key": "b", "title": "B"},
+        ]})),
+        tool_output("c1", json.dumps({"ids": {"a": "p-1", "b": "p-2"}, "ready": [], "waiting": []})),
+    )
+    [step] = plan_steps(harness)
+    first, second = step["plan"]["tasks"]
+    # A priority the plan brought lands on its task; none stays honestly missing.
+    assert first["priority"] == 0 and second["priority"] is None
+    # type is not part of a plan task: it stays at its missing state.
+    assert first["type"] is None
+
+
+def test_a_created_task_keeps_the_priority_and_type_it_was_given():
+    harness = Harness()
+    harness.feed(
+        tool_called("beads_create", "c1", json.dumps({"title": "Fix the build", "priority": 0, "type": "bug"})),
+        tool_output("c1", "✓ Created issue: grid-a1b — Fix the build\n  Priority: P0\n  Status: open\n"),
+    )
+    [step] = plan_steps(harness)
+    [task] = step["plan"]["tasks"]
+    assert (task["priority"], task["type"]) == (0, "bug")
+
+
+def test_the_details_a_plan_left_survive_latest_plan_and_a_continuing_board():
+    # What one turn stored, a later turn's board reads back through latest_plan.
+    harness = Harness()
+    harness.feed(
+        tool_called("beads_create", "c1", json.dumps({"title": "Fix", "priority": 1, "type": "bug"})),
+        tool_output("c1", json.dumps({"id": "p-9", "title": "Fix", "status": "open"})),
+    )
+    stored = [{"role": "assistant", "metadata": {"trace": harness.steps()}}]
+    plan = latest_plan(stored)
+    [task] = plan["tasks"]
+    assert (task["priority"], task["type"]) == (1, "bug")
+
+    events = []
+    board = PlanBoard.continuing(TraceRecorder(events.append), stored)
+    board.finished("beads_close", {"bead_id": "p-9", "reason": "done"}, json.dumps({"id": "p-9"}))
+    [restored] = events[-1]["step"]["plan"]["tasks"]
+    assert (restored["priority"], restored["type"], restored["state"]) == (1, "bug", "closed")

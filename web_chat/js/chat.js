@@ -231,6 +231,45 @@ export class ChatController {
     }
   }
 
+  /**
+   * Carry this chat's context into a new one and open it: the server seeds the
+   * new chat with the plan ("plan") or the tail ("tail") of the chat on screen.
+   */
+  async continueInNewChat(strategy = "plan") {
+    const { contextId, compacting } = this._store.get();
+    if (!contextId) return;
+    if (this.isStreaming || compacting) {
+      toast("Stop the running turn before continuing in a new chat.", { tone: "error" });
+      return;
+    }
+    const intent = ++this._navigationIntent;
+    try {
+      const next = await api.continueConversation(contextId, strategy);
+      if (intent !== this._navigationIntent) return;
+      await this.openConversation(next.id, intent, { keepSelection: true });
+      if (intent !== this._navigationIntent) return;
+      await this._refreshConversations();
+      toast("Continued in a new chat.", { tone: "success" });
+    } catch (error) {
+      if (intent === this._navigationIntent) toast(error.message, { tone: "error" });
+    }
+  }
+
+  /**
+   * Show the plan a chat's turns saved, when it opens again - so the card is
+   * not blank until the next turn re-sends a live plan step. Best effort: an
+   * older server without the route simply leaves the card as it was.
+   */
+  async _showStoredPlan(contextId) {
+    try {
+      const plan = await api.conversationPlan(contextId);
+      if (this._store.get().contextId !== contextId) return;
+      this._transcript.lastAnswer()?.reasoning?.applyStoredPlan(plan);
+    } catch {
+      // The chat's stored plan is a convenience; the live plan still arrives.
+    }
+  }
+
   /** What voice control needs to know about the chat (web_chat/voice_turns.py). */
   voiceState() {
     const versions = this._transcript.lastVersions();
@@ -450,8 +489,12 @@ export class ChatController {
     const intent = ++this._navigationIntent;
     this._detach();
     this._voice?.cleanup();
-    const { systemKey, agentKey } = this._store.get();
-    const conversation = await api.createConversation({ system_key: systemKey, agent_key: agentKey });
+    const { systemKey, agentKey, activeProject } = this._store.get();
+    const conversation = await api.createConversation({
+      system_key: systemKey,
+      agent_key: agentKey,
+      project_id: activeProject ?? null,
+    });
     if (intent !== this._navigationIntent) return;
     this._store.set({
       contextId: conversation.id, rootId: conversation.id, resumable: false, hasAgentContext: false, compacting: false,
@@ -518,6 +561,8 @@ export class ChatController {
     });
     this._transcript.render(payload.messages);
     this._syncResumable();
+    // The saved plan of the chat, before any live plan step of a new turn.
+    void this._showStoredPlan(payload.id);
     // The agent kept working while the page was away: pick the turn back up.
     if (payload.active_turn) await this._attachToRunningTurn(payload.id, payload.active_turn);
   }
@@ -680,6 +725,8 @@ export class ChatController {
     turn.onSettled?.();
     // The user's own counts may have moved; the page refreshes its badge.
     document.dispatchEvent(new CustomEvent("grid:turn-settled"));
+    // The newest answer now offers "Continue in new chat"; earlier ones do not.
+    this._transcript.refreshContinueInNewChat?.();
     this._syncResumable();
     void this._refreshConversations();
     // A failed turn stores no answer, so reconciling would re-render the
@@ -705,6 +752,7 @@ export class ChatController {
         this._transcript.render(payload.messages);
       }
       this._store.set({ queue: payload.pending ?? [], hasAgentContext: Boolean(payload.metadata?.routed_agent) });
+      this._transcript.refreshContinueInNewChat?.();
       this._syncResumable();
       // The queue started the next waiting message: follow that turn too.
       if (payload.active_turn && !this.isStreaming) await this._attachToRunningTurn(payload.id, payload.active_turn);

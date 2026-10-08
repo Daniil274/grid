@@ -988,3 +988,235 @@
 .composer__policy {
   max-width: 130px;
 }
+
+/* -- rail modes (Projects | By date) and the project tree ----------------- */
+.rail__modes {
+  display: flex;
+  gap: 4px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+
+.railModes__btn {
+  flex: 1;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.railModes__btn:hover {
+  color: var(--text);
+}
+
+.railModes__btn.is-active {
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.projectGroup {
+  margin-top: 10px;
+}
+
+.projectGroup__head {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  padding: 2px 4px 2px calc(4px + var(--depth, 0) * 12px);
+  border-radius: var(--radius-sm);
+}
+
+.projectGroup__head.is-active {
+  background: var(--accent-soft);
+}
+
+.projectGroup__chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-3);
+  transform: rotate(90deg);
+  transition: transform 120ms var(--ease);
+}
+
+.projectGroup__chevron:not(.is-open) {
+  transform: none;
+}
+
+.projectGroup__chevron:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.projectGroup__title {
+  display: flex;
+  flex: 1;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  padding: 5px 6px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  text-align: left;
+}
+
+.projectGroup__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projectGroup__count {
+  flex-shrink: 0;
+  color: var(--text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.projectGroup--none {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+/* -- move-to-project popover ---------------------------------------------- */
+.movePop {
+  position: absolute;
+  top: calc(100% - 2px);
+  right: 6px;
+  z-index: 20;
+  width: min(240px, calc(100vw - 40px));
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  box-shadow: var(--shadow-2);
+}
+
+.movePop__head {
+  padding: 2px 6px 6px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.movePop__list {
+  display: grid;
+  gap: 2px;
+  max-height: min(40vh, 260px);
+  overflow-y: auto;
+}
+
+.movePop__item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.movePop__item:hover {
+  background: var(--bg-3);
+}
+
+.movePop__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.movePop__createRow {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.movePop__new {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--bg-1);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.movePop__create {
+  flex-shrink: 0;
+  width: auto;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--bg-1);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.movePop__create:hover {
+  background: var(--bg-3);
+}
+
+/* -- carried context ---------------------------------------------------- */
+/* A seed message: the context a chat carried in from another chat or from its
+   project. Collapsed to one line; a click opens the copy the model was given.
+   Never editable - it is what the model read, not something the reader wrote. */
+.msg--context { max-width: var(--content-width); }
+
+.msg__contextHead {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--bg-inset, var(--bg-1));
+  color: var(--text-2);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.msg__contextHead:hover { border-color: var(--accent-line); color: var(--text); }
+.msg__contextLabel { font-weight: 600; }
+.msg__contextChevron { display: inline-flex; transition: transform 0.15s var(--ease); }
+.msg__contextChevron.is-open { transform: rotate(90deg); }
+
+.msg__contextBody {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-1);
+  font-size: 13px;
+}
+
+/* The newest answer offers to carry its context into a new chat. */
+.msg__newChat { display: flex; justify-content: flex-start; }
+.msg__continueNew { display: inline-flex; align-items: center; gap: 6px; }

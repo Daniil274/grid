@@ -442,6 +442,11 @@ export function createReasoningPanel() {
     el: root,
     planEl: plan.el,
 
+    /** Show the plan a stored chat saved, when no live plan step has arrived. */
+    applyStoredPlan(stored) {
+      plan.update(stored);
+    },
+
     get isEmpty() {
       return index.size === 0;
     },

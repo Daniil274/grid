@@ -46,6 +46,7 @@ from web_chat.deployment import Deployment, isolation_enabled
 from web_chat.entitlements import Entitlement, OwnCredentials, UserCredentials
 from web_chat.limits import TurnCounter, TurnLimits
 from web_chat.personal_agents import PersonalAgentError, PersonalAgents, PersonalAgentStore
+from web_chat.projects import ProjectStore
 from web_chat.spend import SpaceMeter
 from web_chat.system_activity import SystemActivity
 from web_chat.systems import ExtraSystem, Resolution, SystemRegistry
@@ -106,6 +107,8 @@ class SpaceLayout:
     logs: Path
     #: The user's own systems.
     user_systems: Path
+    #: The user's projects: the hierarchy over their conversations.
+    projects: Path
 
     @classmethod
     def under(cls, root: Path) -> "SpaceLayout":
@@ -117,6 +120,7 @@ class SpaceLayout:
             personal_agents=root / "agents.json",
             logs=root / "logs",
             user_systems=root / "systems.json",
+            projects=root / "projects.json",
         )
 
 
@@ -812,3 +816,38 @@ class UserSpace:
         self.conversations.update_context_metadata(
             context_id, {k: v for k, v in updates.items() if v is not None}
         )
+
+    # -- projects ---------------------------------------------------------
+    @property
+    def project_store(self) -> ProjectStore:
+        """The space's projects, loaded lazily so a build without projects pays nothing."""
+        store = getattr(self, "_project_store", None)
+        if store is None:
+            path = (
+                self.layout.projects
+                if self.layout is not None
+                else self.conversations_path.parent / "projects.json"
+            )
+            store = ProjectStore(path)
+            self._project_store = store
+        return store
+
+    def project_exists(self, project_id: Optional[str]) -> bool:
+        """Whether a project of the space has that id."""
+        if not project_id:
+            return False
+        return self.project_store.exists(project_id)
+
+    def conversations_by_project(self) -> Dict[Optional[str], List[str]]:
+        """The ids of every conversation, grouped by its ``project_id``.
+
+        A conversation without a project answers under the ``None`` key (the
+        rail's "no project"). This scans every context's metadata, so it is
+        ``O(n)`` in the number of conversations - fine at the sizes a space
+        holds; a ``updated_at``-bucket cache is a later, deliberate change.
+        """
+        grouped: Dict[Optional[str], List[str]] = {}
+        for view in self.conversations.conversation_views():
+            project_id = (view.get("metadata") or {}).get("project_id") or None
+            grouped.setdefault(project_id, []).append(view["id"])
+        return grouped
