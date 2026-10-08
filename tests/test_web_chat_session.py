@@ -856,3 +856,149 @@ def test_a_late_release_never_frees_a_newer_claim():
     assert board.is_claimed('ctx')
     board.release('ctx', second)
     assert not board.is_claimed('ctx')
+
+
+# -- the projects API -------------------------------------------------------------
+#
+# The projects routes mount on the real WebChatServer; the REST create/list
+# cases live here with them (this module otherwise drives the WebSocket
+# session). Everything is imported locally so the section stands on its own.
+
+
+@pytest.fixture
+def projects_space(tmp_path):
+    """A dummy space with a real ContextManager and a real ProjectStore."""
+    from core.context import ContextManager
+
+    from tests.test_web_ui_routes import _DummySpace
+    from web_chat.projects import ProjectStore
+
+    dummy = _DummySpace()
+    manager = ContextManager(persist_path=str(tmp_path / "conversations.json"))
+    dummy._context_manager = manager
+    dummy.conversations_path = tmp_path / "conversations.json"
+    store = ProjectStore(tmp_path / "projects.json")
+    dummy.project_store = store
+    dummy.project_exists = store.exists
+
+    def update(context_id, **updates):
+        manager.update_context_metadata(context_id, {k: v for k, v in updates.items() if v is not None})
+
+    def by_project():
+        grouped = {}
+        for view in manager.conversation_views():
+            project_id = (view.get("metadata") or {}).get("project_id") or None
+            grouped.setdefault(project_id, []).append(view["id"])
+        return grouped
+
+    dummy.update_conversation_metadata = update
+    dummy.conversations_by_project = by_project
+    return dummy
+
+
+@pytest.fixture
+def projects_client(projects_space):
+    from fastapi.testclient import TestClient
+
+    from tests.test_web_ui_routes import SAME_SITE, _server
+
+    return TestClient(_server(projects_space).app, headers=SAME_SITE)
+
+
+def test_create_list_and_patch_a_project(projects_client):
+    created = projects_client.post("/api/projects", json={"title": "  Grid  ", "description": "the app"})
+    assert created.status_code == 201
+    project = created.json()
+    assert project["title"] == "Grid" and project["parent_id"] is None and project["id"].startswith("prj-")
+
+    listed = projects_client.get("/api/projects").json()["projects"]
+    assert [item["id"] for item in listed] == [project["id"]]
+    assert listed[0]["chat_count"] == 0
+
+    child = projects_client.post("/api/projects", json={"title": "Chats", "parent_id": project["id"]}).json()
+    assert child["parent_id"] == project["id"]
+
+    patched = projects_client.patch(
+        f"/api/projects/{project['id']}", json={"notes": "shared context", "archived": True}
+    )
+    assert patched.status_code == 200
+    assert patched.json()["notes"] == "shared context" and patched.json()["archived"] is True
+
+    assert projects_client.patch("/api/projects/prj-ghost", json={"title": "x"}).status_code == 404
+
+
+def test_a_bad_parent_a_cycle_and_too_deep_are_refused(projects_client):
+    from web_chat.projects import MAX_DEPTH
+
+    assert projects_client.post("/api/projects", json={"title": "orphan", "parent_id": "prj-ghost"}).status_code == 400
+    a = projects_client.post("/api/projects", json={"title": "a"}).json()
+    b = projects_client.post("/api/projects", json={"title": "b", "parent_id": a["id"]}).json()
+    c = projects_client.post("/api/projects", json={"title": "c", "parent_id": b["id"]}).json()
+    assert MAX_DEPTH == 3
+    assert projects_client.post("/api/projects", json={"title": "d", "parent_id": c["id"]}).status_code == 400
+    assert projects_client.patch(f"/api/projects/{a['id']}", json={"parent_id": c["id"]}).status_code == 400
+    assert projects_client.patch(f"/api/projects/{a['id']}", json={"parent_id": a["id"]}).status_code == 400
+
+
+def test_a_chat_is_created_in_a_project_and_listed_with_it(projects_client):
+    project = projects_client.post("/api/projects", json={"title": "Grid"}).json()
+
+    created = projects_client.post("/api/chat/conversations", json={"project_id": project["id"]})
+    assert created.status_code == 200
+    assert created.json()["project_id"] == project["id"]
+
+    rows = projects_client.get("/api/chat/conversations").json()
+    assert len(rows) == 1 and rows[0]["project"] == project["id"]
+    assert projects_client.get("/api/projects").json()["projects"][0]["chat_count"] == 1
+
+
+def test_a_chat_cannot_be_created_in_an_unknown_project(projects_client):
+    assert projects_client.post("/api/chat/conversations", json={"project_id": "prj-ghost"}).status_code == 404
+    assert projects_client.get("/api/chat/conversations").json() == []
+
+
+def test_a_chat_moves_between_projects_and_can_be_detached(projects_client):
+    first = projects_client.post("/api/projects", json={"title": "one"}).json()
+    second = projects_client.post("/api/projects", json={"title": "two"}).json()
+    context_id = projects_client.post("/api/chat/conversations", json={"project_id": first["id"]}).json()["id"]
+
+    moved = projects_client.put(f"/api/chat/conversations/{context_id}/project", json={"project_id": second["id"]})
+    assert moved.status_code == 200 and moved.json()["project_id"] == second["id"]
+    counts = {item["id"]: item["chat_count"] for item in projects_client.get("/api/projects").json()["projects"]}
+    assert counts == {first["id"]: 0, second["id"]: 1}
+
+    detached = projects_client.put(f"/api/chat/conversations/{context_id}/project", json={"project_id": None})
+    assert detached.status_code == 200 and detached.json()["project_id"] is None
+    assert projects_client.get("/api/chat/conversations").json()[0]["project"] is None
+
+
+def test_setting_a_project_on_unknown_targets_is_404(projects_client):
+    project = projects_client.post("/api/projects", json={"title": "one"}).json()
+    context_id = projects_client.post("/api/chat/conversations", json={}).json()["id"]
+    assert (
+        projects_client.put(f"/api/chat/conversations/{context_id}/project", json={"project_id": "prj-ghost"}).status_code
+        == 404
+    )
+    assert (
+        projects_client.put("/api/chat/conversations/ctx-ghost/project", json={"project_id": project["id"]}).status_code
+        == 404
+    )
+
+
+def test_deleting_a_project_reparents_its_chats_and_children(projects_client):
+    root = projects_client.post("/api/projects", json={"title": "root"}).json()
+    middle = projects_client.post("/api/projects", json={"title": "middle", "parent_id": root["id"]}).json()
+    child = projects_client.post("/api/projects", json={"title": "child", "parent_id": middle["id"]}).json()
+    context_id = projects_client.post("/api/chat/conversations", json={"project_id": middle["id"]}).json()["id"]
+
+    deleted = projects_client.delete(f"/api/projects/{middle['id']}")
+    assert deleted.status_code == 200
+    assert deleted.json() == {"ok": True, "moved_chats": 1, "moved_projects": 1}
+
+    remaining = {item["id"]: item for item in projects_client.get("/api/projects").json()["projects"]}
+    assert middle["id"] not in remaining
+    assert remaining[child["id"]]["parent_id"] == root["id"]
+    assert projects_client.get("/api/chat/conversations").json()[0]["project"] == root["id"]
+    assert context_id  # the chat still exists, only its project changed
+
+    assert projects_client.delete("/api/projects/prj-ghost").status_code == 404

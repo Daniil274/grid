@@ -166,6 +166,16 @@ async def _bd(args: List[str], **kwargs: Any) -> Dict[str, Any]:
     return await asyncio.to_thread(_run_bd_command, args, **kwargs)
 
 
+async def run_bd(args: List[str], cwd: Optional[str] = None) -> Dict[str, Any]:
+    """One bd command on the host, for callers outside an agent run.
+
+    The web UI's tracker page (web_chat.tasks_api) uses this: the same command
+    shaping and JSON parsing as the agent tools, without a run's context or
+    container - the host's bd against the directory it is pointed at.
+    """
+    return await asyncio.to_thread(_run_bd_command, args, cwd=cwd)
+
+
 def _run_bd_command(args: List[str], cwd: Optional[str] = None, container_id: Optional[str] = None, context: Any = None) -> Dict[str, Any]:
     """
     Run a 'bd' command and return the result.

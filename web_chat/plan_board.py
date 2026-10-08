@@ -136,9 +136,26 @@ def _details(source: dict[str, Any]) -> dict[str, Any]:
         "description": _text(source.get("description")),
         "acceptance": _text(source.get("acceptance")),
         "notes": _text(source.get("notes")),
+        "priority": source.get("priority") if isinstance(source.get("priority"), int) else None,
+        "type": _text(source.get("type")) or None,
         "close_reason": close_reason if isinstance(close_reason, str) and close_reason else None,
         "report": report if isinstance(report, dict) else None,
     }
+
+
+def latest_plan(stored_messages: Iterable[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """The newest plan snapshot among *stored_messages*; None when there is none.
+
+    What a conversation's turns left in their messages' traces: the same plan
+    a new turn continues (``PlanBoard.continuing``) and the chat's plan API
+    (web_chat.server) answers with.
+    """
+    for message in reversed(list(stored_messages)):
+        trace = (message.get("metadata") or {}).get("trace") or []
+        plans = [step for step in trace if isinstance(step, dict) and step.get("kind") == StepKind.PLAN.value]
+        if plans:
+            return (plans[-1].get("plan") or {}) or None
+    return None
 
 
 class PlanBoard:
@@ -163,12 +180,8 @@ class PlanBoard:
     @classmethod
     def continuing(cls, recorder: TraceRecorder, stored_messages: Iterable[dict[str, Any]]) -> "PlanBoard":
         """A board that starts from the newest plan step among *stored_messages*."""
-        for message in reversed(list(stored_messages)):
-            trace = (message.get("metadata") or {}).get("trace") or []
-            plans = [step for step in trace if isinstance(step, dict) and step.get("kind") == StepKind.PLAN.value]
-            if plans:
-                return cls(recorder, (plans[-1].get("plan") or {}).get("tasks") or [])
-        return cls(recorder)
+        plan = latest_plan(stored_messages)
+        return cls(recorder, (plan or {}).get("tasks") or [])
 
     # -- what the trace saw ----------------------------------------------------
     def called(self, tool: str, arguments: Any) -> None:
@@ -304,7 +317,8 @@ class PlanBoard:
             tasks.append({
                 **{name: task[name] for name in (
                     "id", "key", "title", "status", "depends_on",
-                    "description", "acceptance", "notes", "close_reason", "report",
+                    "description", "acceptance", "notes", "priority", "type",
+                    "close_reason", "report",
                 )},
                 "state": state,
                 "waits_for": [titles.get(dep, dep) for dep in waits_for],

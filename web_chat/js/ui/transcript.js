@@ -47,11 +47,17 @@ export function createScrollFollower(container) {
 
 export function createTranscript({
   container, emptyState, jumpButton, onEditMessage, onSpeakMessage, onReportMessage, onContinue, onSwitchVersion,
-  onDeleteMessage, onForkMessage,
+  onDeleteMessage, onForkMessage, onContinueInNewChat,
 }) {
   /** Live message handles by id - the speech player reports state by id. */
   const messages = new Map();
   const scrollFollower = createScrollFollower(container);
+
+  /** Only the newest answer offers "Continue in new chat"; earlier ones hide it. */
+  const offersContinue = () => {
+    const last = [...messages.values()].reverse().find((handle) => handle.role === "assistant" && handle.text) ?? null;
+    for (const handle of messages.values()) handle.setContinueInNewChat?.(handle === last);
+  };
 
   const syncJumpButton = () => {
     const hasMessages = container.querySelector(".msg") !== null;
@@ -130,10 +136,11 @@ export function createTranscript({
     /** @returns the message handle, so the caller can stream into it. */
     add(options) {
       setEmpty(false);
-      const message = createMessage({ ...options, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage });
+      const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage });
       messages.set(message.id, message);
       container.append(message.el);
       scrollToBottom(true);
+      offersContinue();
       return message;
     },
 
@@ -156,6 +163,7 @@ export function createTranscript({
           timestamp: message.timestamp,
           kind: message.kind,
           compaction: message.compaction,
+          context: message.context ?? message.metadata ?? null,
           images: message.images,
           messageId: message.id,
           versions: message.versions,
@@ -165,6 +173,7 @@ export function createTranscript({
           handle.setInterrupted(message.interruption, { resumable: message.interruption.resumable });
         }
       }
+      offersContinue();
       setEmpty(stored.length === 0);
       scrollToBottom(true);
     },
@@ -210,9 +219,10 @@ export function createTranscript({
 
     /** Insert a message just before *anchor* - a message the user sent mid-turn. */
     addBefore(anchor, options) {
-      const message = createMessage({ ...options, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage });
+      const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage });
       messages.set(message.id, message);
       container.insertBefore(message.el, anchor.el);
+      offersContinue();
       return message;
     },
 
@@ -220,6 +230,9 @@ export function createTranscript({
     retireContinue() {
       for (const message of messages.values()) message.retireContinue();
     },
+
+    /** Recompute which answer offers "Continue in new chat" (the newest one). */
+    refreshContinueInNewChat: offersContinue,
 
     /** The newest message handle, or null. */
     last() {
