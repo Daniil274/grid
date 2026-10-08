@@ -58,3 +58,19 @@ def test_other_marker_kinds_do_not_become_context():
     view = serialize_message(message)
     assert view["kind"] is None
     assert view["context"] is None
+
+
+def test_a_long_trace_leaves_its_payloads_for_later():
+    from web_chat.views import LAZY_FIELD_BYTES, slim_steps
+
+    big = "x" * (LAZY_FIELD_BYTES + 1)
+    steps = [
+        {"id": "s1", "kind": "tool", "title": "read", "result_payload": {"parts": [big]}, "detail": "{}"},
+        {"id": "s2", "kind": "agent", "title": "coder", "detail": big, "body": "done"},
+        {"id": "s3", "kind": "tool", "title": "ls", "body": "a b"},
+    ]
+    slim = slim_steps(steps)
+    assert slim[0]["lazy"] and "result_payload" not in slim[0] and slim[0]["detail"] == "{}"
+    assert slim[1]["lazy"] and slim[1]["detail"] == big[:400] and slim[1]["body"] == "done"
+    assert slim[2] == steps[2]  # small: left as it was
+    assert "result_payload" in steps[0]  # the stored trace is untouched

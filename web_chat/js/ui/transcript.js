@@ -153,7 +153,8 @@ export function createTranscript({
     },
 
     /** Replace the whole transcript with a stored conversation. */
-    render(stored) {
+    /** `loadStep(messageId, stepId)` fetches a lazy trace step of a stored message. */
+    render(stored, { loadStep = null } = {}) {
       container.replaceChildren();
       messages.clear();
       for (const message of stored) {
@@ -168,7 +169,9 @@ export function createTranscript({
           messageId: message.id,
           versions: message.versions,
         });
-        handle.reasoning?.hydrate(message.trace);
+        handle.reasoning?.hydrate(message.trace, {
+          loadStep: loadStep && message.id ? (stepId) => loadStep(message.id, stepId) : null,
+        });
         if (message.interruption) {
           handle.setInterrupted(message.interruption, { resumable: message.interruption.resumable });
         }

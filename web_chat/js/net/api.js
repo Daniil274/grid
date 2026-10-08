@@ -42,8 +42,15 @@ export const api = {
     return request(`/api/workspace/uploads${scope}`, { method: "POST", body });
   },
   listConversations: () => request("/api/chat/conversations", { cache: "no-store" }),
+  // Revalidated every time: an unchanged chat answers 304 from its ETag.
   getConversation: (id, signal) =>
-    request(`/api/chat/conversations/${encodeURIComponent(id)}`, { cache: "no-store", signal }),
+    request(`/api/chat/conversations/${encodeURIComponent(id)}`, { cache: "no-cache", signal }),
+  /** A trace step with its payloads, which the conversation left out (``lazy``). */
+  conversationStep: (id, messageId, stepId) =>
+    request(
+      `/api/chat/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/steps/${encodeURIComponent(stepId)}`,
+      { cache: "no-cache" },
+    ),
   createConversation: (selection) => request("/api/chat/conversations", json("POST", selection)),
   /** Projects: a metadata layer over chats (title, parent, description). */
   projects: () => request("/api/projects", { cache: "no-store" }),
