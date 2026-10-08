@@ -23,7 +23,7 @@ import threading
 import time
 from collections import deque
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator, Optional
 from uuid import uuid4
@@ -39,6 +39,9 @@ from utils.exceptions import ConfigError
 from utils.path_utils import _sandbox_root, resolve_agent_path
 
 logger = logging.getLogger("grid.action_policy")
+
+#: Effects that change things: allowed freely only when the request asks for changes.
+CHANGE_EFFECTS = frozenset({"write", "exec"})
 
 VERDICTS = ("allow", "deny", "review")
 
@@ -90,6 +93,10 @@ class ActionRunState:
     flows: list = field(default_factory=list)
     # Tools the user allowed for the rest of the turn.
     grants: set = field(default_factory=set)
+    # Whether the request asks for changes at all, asked once per turn
+    # (ActionPolicy._asks_for_changes); None until the first change.
+    asks_for_changes: Optional[bool] = None
+    intent_check: Optional[asyncio.Future] = None
     # Completes when the latest call issued in this run, and every call before
     # it, is finished. See take_turn.
     order_tail: Optional[asyncio.Future] = None
@@ -865,6 +872,51 @@ class ActionGate:
         finally:
             run.pass_turn(previous, own)
 
+    async def _asks_for_changes(self, run: "ActionRunState", filter_name: str) -> bool:
+        """Whether the turn's request asks to make or change something.
+
+        Asked of the policy model once per turn, on its first change: a
+        request to think, propose, explain or review is answered without
+        editing the workspace. When the model cannot answer, the filter
+        decides as it always did.
+        """
+        root = run.root
+        if root.asks_for_changes is not None:
+            return root.asks_for_changes
+        if root.intent_check is None:
+            root.intent_check = asyncio.ensure_future(self._judge(self._intent_packet(root, filter_name)))
+        verdict, _ = await asyncio.shield(root.intent_check)
+        root.asks_for_changes = verdict != "deny"
+        if not root.asks_for_changes:
+            logger.info("Action policy: the request of run %s asks for no changes", root.run_id)
+        return root.asks_for_changes
+
+    def _intent_packet(self, root: "ActionRunState", filter_name: str) -> dict:
+        selected = self.config.filters[filter_name]
+        return {
+            "trusted_task": root.task,
+            "trusted_policy": {
+                "version": self.config.version,
+                "rules": [rule.model_dump() for rule in self.config.rules],
+                "filter": {"name": filter_name, "label": selected.label, "description": selected.description},
+            },
+            "untrusted_action": {
+                "kind": "function",
+                "tool": "change_workspace",
+                "arguments": {"what": "edit, create or delete files and run commands that change things"},
+                "tool_metadata": {
+                    "description": (
+                        "Asked by the host, not by an agent: does the user's request ask to make or "
+                        "change something? Allow when it asks to implement, fix, edit, create or run; "
+                        "deny when it only asks to think, design, propose, explain or review."
+                    ),
+                },
+            },
+            "host_facts": {"effect": "write", "why_judged": ["does the request ask for changes"], "run_took_in": []},
+            "untrusted_history": [],
+            "run": {"attempt": 0, "denials": 0},
+        }
+
     async def _judge(self, packet: dict) -> tuple[str, dict]:
         """The policy model's verdict on a call, with how it was reached."""
         started = time.monotonic()
@@ -980,6 +1032,18 @@ class ActionGate:
                     if routing.route == "judge"
                     else None
                 )
+            if (
+                routing.route == "allow"
+                and routing.effect in CHANGE_EFFECTS
+                and not await self._asks_for_changes(run, filter_name)
+            ):
+                # A request to think, propose or explain grants no changes: the
+                # filter's free pass becomes a judgment against the request.
+                routing = replace(routing, route="judge", reasons=(*routing.reasons, "the request asks for no changes"))
+                async with run.lock:
+                    packet = self._packet(
+                        run, tool_name, kind, projected_arguments, descriptor, routing, filter_name
+                    )
             route_meta = {
                 "effect": routing.effect,
                 "route": routing.route,

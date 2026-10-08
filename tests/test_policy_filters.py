@@ -280,12 +280,34 @@ async def invoke(gate, ctx, effect, args, tool="tool", invoke=ran):
     return await gate.invoke(tool, "function", ctx, json.dumps(args), invoke, effect=effect)
 
 
+def answers(*, changes, action):
+    """A validator that says whether the request asks for changes, and judges calls."""
+    return AsyncMock(side_effect=lambda packet: {
+        "action": changes if packet["untrusted_action"]["tool"] == "change_workspace" else action
+    })
+
+
 async def test_a_declared_workspace_edit_runs_without_the_validator():
-    gate, validator, state, ctx = gate_with("deny")
+    gate, validator, state, ctx = gate_with()
+    validator.evaluate = answers(changes="allow", action="deny")
     assert (await invoke(gate, ctx, write("filepath"), {"filepath": "a.py"})).startswith("ran:")
-    validator.evaluate.assert_not_awaited()
+    assert (await invoke(gate, ctx, write("filepath"), {"filepath": "b.py"})).startswith("ran:")
+    # Only the turn's one question - does the request ask for changes - reached it.
+    assert validator.evaluate.await_count == 1
     check = next(e for e in state.events if e["rule"] == "policy_check")
     assert (check["decision"], check["source"], check["effect"]) == ("allow", "filter", "write")
+
+
+async def test_a_request_to_think_has_its_edits_judged():
+    gate, validator, state, ctx = gate_with()
+    state.task = "Think about how to organize the projects; do not change anything yet"
+    validator.evaluate = answers(changes="deny", action="deny")
+    blocked = json.loads(await invoke(gate, ctx, write("filepath"), {"filepath": "a.py"}))
+    assert blocked["rule"] == "policy_deny"
+    judged = validator.evaluate.await_args_list[-1].args[0]
+    assert "the request asks for no changes" in judged["host_facts"]["why_judged"]
+    # A read still runs freely.
+    assert (await invoke(gate, ctx, read("filepath"), {"filepath": "a.py"})).startswith("ran:")
 
 
 async def test_the_filter_refuses_and_says_so():
