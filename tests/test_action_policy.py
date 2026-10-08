@@ -747,12 +747,15 @@ async def test_factory_routes_real_tool_calls_through_the_gate(tmp_path, monkeyp
             factory.config.get_agent(factory.config.get_default_agent())
         )
         by_name = {getattr(tool, "name", ""): tool for tool in tools}
-        state = factory._action_state("List the files of this project")
+        state = factory._action_state("Write notes.md, then list the files of this project")
         ctx = AutoRunToolContext(
             GridRunContext(factory=factory, context_id="ctx-test", action_state=state)
         )
 
-        gate.validator.evaluate = AsyncMock(return_value={"action": "deny"})
+        # The request asks for changes; every call the validator judges is refused.
+        gate.validator.evaluate = AsyncMock(side_effect=lambda packet: {
+            "action": "allow" if packet["untrusted_action"]["tool"] == "change_workspace" else "deny"
+        })
         # The read-only filter refuses a declared write without asking anyone.
         state.filter = "read_only"
         blocked = json.loads(
@@ -769,7 +772,7 @@ async def test_factory_routes_real_tool_calls_through_the_gate(tmp_path, monkeyp
             ctx, json.dumps({"filepath": "notes.md", "content": "hi"})
         )
         assert (tmp_path / "notes.md").read_text(encoding="utf-8").strip() == "hi"
-        gate.validator.evaluate.assert_not_awaited()
+        assert gate.validator.evaluate.await_count == 1  # only: does the request ask for changes
 
         # A command is judged; the validator's deny stands.
         blocked = json.loads(
