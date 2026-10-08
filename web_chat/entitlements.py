@@ -105,6 +105,8 @@ class OwnCredentials(Protocol):
 
     def has(self, user_id: str, kind: str) -> bool: ...
 
+    def status(self, user_id: str, kind: str) -> Optional[str]: ...
+
     async def credential(self, user_id: str, kind: str) -> Optional[Credential]: ...
 
 
@@ -155,6 +157,24 @@ class UserCredentials:
             variable = self._plans.pool(pool).get(getattr(provider, "api_key_env", None) or "")
             secret = (self._environ.get(variable) or None) if variable else None
         return Credential(secret, f"pool:{pool}") if secret else None
+
+    def problem(self, provider: object) -> Optional[str]:
+        """Why *provider* has no credential for this user, in words to act on; None if it has one."""
+        entitlement = self._entitlement()
+        if self.available(provider):
+            return None
+        is_plan = getattr(provider, "auth", "api_key") == "chatgpt"
+        kind = CHATGPT if is_plan else preset_for(getattr(provider, "base_url", ""))
+        status = getattr(self._own, "status", None)
+        if kind is not None and callable(status) and status(self._user_id, kind) not in (None, "ok"):
+            label = "ChatGPT sign-in" if is_plan else f"{kind} key"
+            return f"Your {label} has expired or was revoked. Reconnect it in Settings → Credentials."
+        if is_plan:
+            return "This model runs on your ChatGPT plan. Sign in with ChatGPT in Settings → Credentials."
+        return (
+            f"No credential for provider '{getattr(provider, 'name', '')}' on your plan "
+            f"({entitlement.label or entitlement.tier}). Add your own key in the settings, or ask an admin."
+        )
 
     # -- the CredentialSource protocol -------------------------------------------
     def available(self, provider: object) -> bool:
