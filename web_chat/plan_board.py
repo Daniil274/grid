@@ -9,7 +9,10 @@ a page that attaches late and is stored with the answer.
 
 A turn starts from the plan the conversation's last plan step left, so work on
 tasks planned earlier shows on the board of the turn that does it. The board
-appears in a turn once one of its tasks changes or a plan is created.
+appears in a turn once one of its tasks changes or a plan is created. Each task
+says whether this turn touched it (``turn``) - planned, created, claimed,
+updated, closed or reported on - so the card can show the request's own share
+of the plan beside the whole of it.
 
 Every task on the board carries the details the tracker holds for it: the
 brief (``description``) and how to tell it is done (``acceptance``) it was
@@ -166,6 +169,8 @@ class PlanBoard:
         self._step: Optional[Step] = None
         # By task id, in the order they were planned.
         self._tasks: dict[str, dict[str, Any]] = {}
+        # The tasks this turn touched; a continued plan starts with none.
+        self._turn: set[str] = set()
         for task in tasks:
             if isinstance(task, dict) and isinstance(task.get("id"), str):
                 self._tasks[task["id"]] = {
@@ -190,7 +195,8 @@ class PlanBoard:
             return
         changed = False
         for bead_id in _claimed(arguments):
-            changed |= self._set(bead_id, IN_PROGRESS)
+            # Taking up a task already in progress still makes it this turn's.
+            changed |= self._set(bead_id, IN_PROGRESS) | self._touch(bead_id)
         if changed:
             self._publish()
 
@@ -211,6 +217,7 @@ class PlanBoard:
                     "status": "open", "depends_on": [],
                     **_details(args),
                 }
+                self._touch(result["id"])
                 changed = True
         elif tool == "beads_update":
             changed = self._updated(args)
@@ -224,10 +231,10 @@ class PlanBoard:
             if task is not None and isinstance(parent, str):
                 if args.get("action") == "add" and parent not in task["depends_on"]:
                     task["depends_on"].append(parent)
-                    changed = True
+                    changed = self._touch(task["id"]) or True
                 elif args.get("action") == "remove" and parent in task["depends_on"]:
                     task["depends_on"].remove(parent)
-                    changed = True
+                    changed = self._touch(task["id"]) or True
         if changed:
             self._publish()
 
@@ -248,6 +255,7 @@ class PlanBoard:
                 "depends_on": [ids.get(dep, dep) for dep in task.get("depends_on") or []],
                 **_details(task),
             }
+            self._touch(ids[key])
         return True
 
     def _updated(self, args: dict[str, Any]) -> bool:
@@ -256,7 +264,7 @@ class PlanBoard:
         if task is None:
             return False
         status = IN_PROGRESS if args.get("claim") else args.get("status")
-        changed = self._set(args.get("bead_id"), status)
+        changed = self._set(args.get("bead_id"), status) | self._touch(task["id"])
         description = args.get("description")
         if isinstance(description, str) and description:
             # The tracker replaces the description a call brings; so does the board.
@@ -275,7 +283,7 @@ class PlanBoard:
         if task is None:
             return False
         reason = args.get("reason")
-        changed = False
+        changed = self._touch(task["id"])
         if isinstance(reason, str) and reason and task["close_reason"] != reason:
             task["close_reason"] = reason
             changed = True
@@ -293,8 +301,16 @@ class PlanBoard:
         (bead_id,) = claimed
         task = self._tasks.get(bead_id)
         if task is None or task["report"] == report:
-            return False
+            return self._touch(bead_id) if task is not None else False
         task["report"] = report
+        self._touch(bead_id)
+        return True
+
+    def _touch(self, bead_id: Any) -> bool:
+        """Count a known task as this turn's; True when it was not yet."""
+        if not isinstance(bead_id, str) or bead_id not in self._tasks or bead_id in self._turn:
+            return False
+        self._turn.add(bead_id)
         return True
 
     def _set(self, bead_id: Any, status: Any) -> bool:
@@ -322,6 +338,7 @@ class PlanBoard:
                 )},
                 "state": state,
                 "waits_for": [titles.get(dep, dep) for dep in waits_for],
+                "turn": task["id"] in self._turn,
             })
         counts = {state: sum(task["state"] == state for task in tasks) for state in STATES}
         return {"tasks": tasks, "counts": counts, "total": len(tasks)}

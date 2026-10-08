@@ -144,7 +144,12 @@ def register_project_routes(api: APIRouter, current_space: Any) -> None:
                     continue
                 entry = merged.get(task_id)
                 if entry is None:
-                    merged[task_id] = {**task, "chat_ids": [context_id], "source": "trace"}
+                    # Which turn touched a task is one chat's story, not the project's.
+                    merged[task_id] = {
+                        **{name: value for name, value in task.items() if name != "turn"},
+                        "chat_ids": [context_id],
+                        "source": "trace",
+                    }
                 elif context_id not in entry["chat_ids"]:
                     entry["chat_ids"].append(context_id)
         tasks = list(merged.values())
