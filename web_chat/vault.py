@@ -262,6 +262,11 @@ class Vault:
         row = self._store.credential(user_id, kind)
         return row is not None and row.status == "ok"
 
+    def status(self, user_id: str, kind: str) -> Optional[str]:
+        """The stored credential's status ("ok", NEEDS_REAUTH), or None when there is none."""
+        row = self._store.credential(user_id, kind)
+        return row.status if row is not None else None
+
     async def credential(self, user_id: str, kind: str) -> Optional[Credential]:
         """The credential to sign a request with now, or None when it cannot be used."""
         row = self._store.credential(user_id, kind)

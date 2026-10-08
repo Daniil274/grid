@@ -157,8 +157,11 @@ class ModelAccess:
                 )
             return key
         if not self.credentials.available(provider):
+            problem = getattr(self.credentials, "problem", None)
+            reason = problem(provider) if callable(problem) else None
             raise CredentialError(
-                f"No credential for provider '{provider_key}'. Add your own key in the settings, "
+                (reason if isinstance(reason, str) else None)
+                or f"No credential for provider '{provider_key}'. Add your own key in the settings, "
                 "or ask an admin to change your plan.",
                 details={"provider": provider_key},
             )

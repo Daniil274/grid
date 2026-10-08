@@ -177,3 +177,29 @@ def test_the_day_and_month_windows_start_at_utc_midnight_and_the_first():
     policy = GridConfig(user_limits={"usd_per_day": 1, "usd_per_month": 10}).user_limits
     TurnLimits("u1", lambda: policy, Days(), spend=spend, clock=lambda: 1_790_000_000).admit(0)
     assert spend.since == [1_789_948_800, 1_788_220_800]  # 2026-09-21 00:00 and 2026-09-01 00:00 UTC
+
+
+def test_an_expired_own_login_is_named_as_such():
+    """A ChatGPT login OpenAI stopped renewing is not "no credential on your plan"."""
+    from types import SimpleNamespace
+
+    from web_chat.entitlements import CHATGPT, Entitlement, UserCredentials
+
+    class Own:
+        def has(self, user_id, kind):
+            return False
+
+        def status(self, user_id, kind):
+            return "needs_reauth" if kind == CHATGPT else None
+
+        async def credential(self, user_id, kind):
+            return None
+
+    from schemas.schemas import UserLimitsPolicy
+
+    entitlement = Entitlement(
+        tier="", label="", pool=None, own_credentials=frozenset({CHATGPT}), models=(), limits=UserLimitsPolicy()
+    )
+    source = UserCredentials("u", lambda: entitlement, plans=None, own=Own(), environ={})
+    problem = source.problem(SimpleNamespace(auth="chatgpt", name="chatgpt", base_url=""))
+    assert "expired" in problem and "Reconnect" in problem
