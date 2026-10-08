@@ -29,6 +29,7 @@
           <span class="rail__searchIcon" data-icon="search" data-icon-size="15"></span>
           <input id="chat-search" type="search" placeholder="Search conversations" autocomplete="off">
         </div>
+        <div class="rail__modes" id="chat-modes" role="tablist" aria-label="Conversation grouping"></div>
       </div>
 
       <nav class="rail__list" id="chat-list" aria-label="Conversations"></nav>
@@ -44,8 +45,9 @@
 
       <div class="rail__foot">
         <a class="btn btn--ghost" id="open-usage" href="/usage" target="grid-usage" rel="noopener" data-icon="timeline">Usage</a>
+        <a class="btn btn--ghost" id="open-tasks" href="/tasks" data-icon="check">Tasks</a>
         <button class="btn btn--ghost" id="open-agents" type="button" data-icon="agent" hidden>My agents</button>
-        <button class="btn btn--ghost" id="open-plan" type="button" data-icon="key" hidden>Plan &amp; keys</button>
+        <button class="btn btn--ghost" id="open-plan" type="button" data-icon="key" hidden>Keys &amp; billing</button>
         <a class="btn btn--ghost" id="open-systems" href="/systems" data-icon="mcp" hidden>Systems</a>
         <a class="btn btn--ghost" id="open-reviews" href="/admin/review" data-icon="inspect" hidden>Reviews</a>
         <button class="btn btn--ghost" id="open-settings" type="button" data-icon="sliders">Configuration</button>
@@ -244,12 +246,12 @@
     </div>
   </div>
 
-  <div class="drawer drawer--simple" id="plan" role="dialog" aria-label="Plan and keys">
+  <div class="drawer drawer--simple" id="plan" role="dialog" aria-label="Keys and billing">
     <div class="drawer__backdrop" id="plan-backdrop"></div>
     <div class="drawer__panel">
       <header class="drawer__head">
         <div>
-          <h2>Plan &amp; keys</h2>
+          <h2>Keys &amp; billing</h2>
           <p>What you may use, what it has cost, and the keys you bring yourself.</p>
         </div>
         <button class="iconBtn" id="plan-close" type="button" aria-label="Close" data-icon="close"></button>

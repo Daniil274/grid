@@ -20,6 +20,10 @@ logger = logging.getLogger("grid.web_chat.views")
 
 UNTITLED = "New chat"
 
+#: The metadata type of a message that carries context into a fresh chat
+#: (web_chat.projects_api.SEED_TYPE, restated here to keep views import-light).
+CONTEXT_SEED_TYPE = "context_seed"
+
 
 def conversation_title(view: dict[str, Any]) -> str:
     """The chat's name: the user's title, else its first words, else "New chat"."""
@@ -45,6 +49,8 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
     where its context was compacted (``kind`` "compaction").
     ``id`` is the message's stable id; ``versions`` lists the branches with
     other versions of an edited user message (ContextManager.message_versions).
+    A carried-context seed (``kind`` "context") also exposes ``context`` -
+    where it came from - which the card reads instead of a user bubble.
     """
     if hasattr(msg, "get_text_content"):
         content = msg.get_text_content()
@@ -58,6 +64,15 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
     if images and content == "[multimodal content]":
         content = ""  # an image without words
     metadata = getattr(msg, "metadata", None) or {}
+    kind = (
+        "continuation"
+        if metadata.get("type") == CONTINUATION_TYPE
+        else "compaction"
+        if metadata.get("type") == COMPACTED_TYPE
+        else "context"
+        if metadata.get("type") == CONTEXT_SEED_TYPE
+        else None
+    )
     # Older builds stored a flat "trace_events" list; normalize_steps keeps
     # those conversations renderable by the current timeline component.
     trace = metadata.get("trace") or normalize_steps(metadata.get("trace_events"))
@@ -69,11 +84,14 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
         "content": content,
         "timestamp": getattr(msg, "timestamp", None),
         "trace": trace,
-        "kind": (
-            "continuation"
-            if metadata.get("type") == CONTINUATION_TYPE
-            else "compaction"
-            if metadata.get("type") == COMPACTED_TYPE
+        "kind": kind,
+        "context": (
+            {
+                "source_title": metadata.get("source_title"),
+                "source_id": metadata.get("source_id"),
+                "project": metadata.get("project_id") or metadata.get("project"),
+            }
+            if kind == "context"
             else None
         ),
         "compaction": (

@@ -60,6 +60,7 @@ LOGIN_HTML = ROOT / "login.html"
 REVIEW_HTML = ROOT / "review.html"
 SYSTEMS_HTML = ROOT / "systems.html"
 USAGE_HTML = ROOT / "usage.html"
+TASKS_HTML = ROOT / "tasks.html"
 
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
@@ -206,6 +207,14 @@ class WebChatServer:
         from web_chat.uploads import register_upload_routes
 
         register_upload_routes(api, self.current_space, lambda: self.deployment.uploads_policy)
+        from web_chat.tasks_api import register_task_routes
+
+        # The tracker page's own API: the user's tasks, live from bd.
+        register_task_routes(api, self.current_space)
+        from web_chat.projects_api import register_project_routes
+
+        # The projects: the hierarchy over the user's conversations.
+        register_project_routes(api, self.current_space)
         from web_chat.system_hub import register_system_routes
 
         register_system_routes(api, self.systems, self.current_user, self.current_space, admins_only(self.current_user))
@@ -427,6 +436,13 @@ class WebChatServer:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(USAGE_HTML)
 
+        @app.get("/tasks", response_class=HTMLResponse)
+        async def tasks_page(request: Request) -> Any:
+            # A shell: what it shows comes through the API, which checks who asks.
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(TASKS_HTML)
+
         if self.reviews is not None:
 
             @app.get("/admin/review", response_class=HTMLResponse)
@@ -596,6 +612,7 @@ class WebChatServer:
                         "routed_system": metadata.get("routed_system"),
                         "routed_agent": metadata.get("routed_agent"),
                         "workspace": metadata.get("workspace"),
+                        "project": metadata.get("project_id"),
                         "message_count": sum(
                             1 for msg in shown["messages"] if not is_tool_result(msg)
                         ),
@@ -609,12 +626,17 @@ class WebChatServer:
         async def create_conversation(
             body: ConversationCreateRequest | None = None, space: UserSpace = Depends(current_space)
         ) -> JSONResponse:
+            project_id = body.project_id if body else None
+            if project_id is not None and not space.project_exists(project_id):
+                raise HTTPException(status_code=404, detail="Project not found")
             context_id = space.context_manager().start_new_context()
             selection = {
                 "system_key": body.system_key if body else None,
                 "agent_key": body.agent_key if body else None,
             }
-            space.update_conversation_metadata(context_id, created_by_web=True, title=UNTITLED, **selection)
+            space.update_conversation_metadata(
+                context_id, created_by_web=True, title=UNTITLED, project_id=project_id, **selection
+            )
             workspace = None
             if body is not None and body.workspace:
                 try:
@@ -622,7 +644,12 @@ class WebChatServer:
                 except WorkspaceChoiceError as exc:
                     space.context_manager().delete_family(context_id)
                     raise HTTPException(status_code=400, detail=str(exc)) from None
-            return JSONResponse({"id": context_id, **selection, "workspace": workspace})
+            if project_id is not None:
+                # A project with shared notes seeds the new chat with them.
+                from web_chat.projects_api import seed_project_context
+
+                seed_project_context(space, context_id, project_id)
+            return JSONResponse({"id": context_id, **selection, "workspace": workspace, "project_id": project_id})
 
         @api.put("/api/chat/conversations/{context_id}/workspace")
         async def choose_workspace(
@@ -728,7 +755,6 @@ class WebChatServer:
                 space, context_id, "deleting a message", lambda factory: factory.delete_message(context_id, message_id)
             )
             return JSONResponse({"id": context_id, **result})
-
 
         @api.post("/api/chat/conversations/{context_id}/compact")
         async def compact_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:

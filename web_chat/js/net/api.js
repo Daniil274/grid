@@ -45,6 +45,22 @@ export const api = {
   getConversation: (id, signal) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}`, { cache: "no-store", signal }),
   createConversation: (selection) => request("/api/chat/conversations", json("POST", selection)),
+  /** Projects: a metadata layer over chats (title, parent, description). */
+  projects: () => request("/api/projects", { cache: "no-store" }),
+  createProject: (project) => request("/api/projects", json("POST", project)),
+  updateProject: (id, patch) => request(`/api/projects/${encodeURIComponent(id)}`, json("PATCH", patch)),
+  deleteProject: (id) => request(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** Attach a chat to a project, or detach it (`null`). */
+  setConversationProject: (id, projectId) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/project`, json("PUT", { project_id: projectId })),
+  /** Continue this chat in a new one, seeded with its plan ("plan") or its tail ("tail"). */
+  continueConversation: (id, strategy = "plan") =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/continue`, json("POST", { strategy })),
+  /** The plan of a project: the tasks its chats planned, bd's statuses first. */
+  projectPlan: (id) => request(`/api/projects/${encodeURIComponent(id)}/plan`, { cache: "no-store" }),
+  /** The plan a chat's turns left behind, for the card shown when it opens again. */
+  conversationPlan: (id) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/plan`, { cache: "no-store" }),
   /** The directory a chat works in, before its first message. */
   setWorkspace: (id, path) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/workspace`, json("PUT", { path })),
@@ -67,6 +83,16 @@ export const api = {
     request(`/api/chat/conversations/${encodeURIComponent(id)}/activate`, { method: "POST" }),
   prepareAgent: (systemKey, agentKey) =>
     request("/api/chat/prepare-agent", json("POST", { system_key: systemKey, agent_key: agentKey })),
+  /** The tracker page (web_chat/tasks_api.py): the user's tasks, live from bd. */
+  tasks: (status) =>
+    request(`/api/tasks${status ? `?status=${encodeURIComponent(status)}` : ""}`, { cache: "no-store" }),
+  task: (id) => request(`/api/tasks/${encodeURIComponent(id)}`, { cache: "no-store" }),
+  createTask: (task) => request("/api/tasks", json("POST", task)),
+  updateTask: (id, patch) => request(`/api/tasks/${encodeURIComponent(id)}`, json("PATCH", patch)),
+  closeTask: (id, reason) => request(`/api/tasks/${encodeURIComponent(id)}/close`, json("POST", { reason })),
+  taskDep: (id, action, parentId) =>
+    request(`/api/tasks/${encodeURIComponent(id)}/deps`, json("POST", { action, parent_id: parentId })),
+  initTracker: () => request("/api/tasks/init", { method: "POST" }),
   /** A config file: `target` is the catalog's or a system's key (web_chat/deployment.py); none is the default system's. */
   getSettings: (target) => request(`/api/settings${target ? `?target=${encodeURIComponent(target)}` : ""}`),
   saveSettings: (config, target) => request("/api/settings/structured", json("PUT", { config, target })),

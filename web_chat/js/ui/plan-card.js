@@ -331,9 +331,13 @@ export function createPlanCard() {
   return {
     el: root,
 
-    /** Show the plan a `plan` step carries. */
-    update(step) {
-      const plan = step.plan;
+    /**
+     * Show a plan: either a `plan` step of the trace (`{plan}`) or the bare
+     * plan the chat saved (`{tasks, counts, total}`), so a stored chat can
+     * draw its card before a new turn re-sends a live step.
+     */
+    update(stepOrPlan) {
+      const plan = stepOrPlan?.plan ?? stepOrPlan;
       if (!plan?.tasks?.length) {
         tasks = [];
         rows.clear();
@@ -343,15 +347,16 @@ export function createPlanCard() {
         return;
       }
       root.hidden = false;
+      const total = plan.total ?? plan.tasks.length;
       const counts = plan.counts ?? {};
       const done = counts.closed ?? 0;
-      title.textContent = `Plan · ${done}/${plan.total} done`;
+      title.textContent = `Plan · ${done}/${total} done`;
       summary.textContent = Object.entries(STATES)
         .filter(([state]) => state !== "closed" && counts[state])
         .map(([state, { label }]) => `${counts[state]} ${label.toLowerCase()}`)
         .join(" · ");
-      bar.style.width = `${plan.total ? Math.round((done / plan.total) * 100) : 0}%`;
-      root.dataset.complete = String(plan.total > 0 && done === plan.total);
+      bar.style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
+      root.dataset.complete = String(total > 0 && done === total);
       tasks = plan.tasks;
       // The row the reader is focused on keeps focus across the rebuild.
       const active = typeof document !== "undefined" ? document.activeElement : null;
