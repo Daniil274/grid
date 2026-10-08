@@ -194,6 +194,17 @@ class WebStreamObserver:
         )
         self._recorder.close(step)
 
+    def handle_models_skipped(self, skipped: list[tuple[str, str]]) -> None:
+        """Models of the agent's list this user cannot use now, with the reason each."""
+        self._recorder.note(
+            StepKind.ERROR,
+            f"{len(skipped)} model(s) unavailable",
+            parent_id=self._parent_id,
+            subtitle=", ".join(key for key, _ in skipped),
+            body="\n".join(f"- {key}: {reason}" for key, reason in skipped),
+            tone="warn",
+        )
+
     def handle_outputs_cleared(self, count: int) -> None:
         """Old tool outputs were left out of a request to fit the context
         (core.context_budget): one step per run, with the largest count."""
