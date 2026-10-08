@@ -4,7 +4,9 @@ A turn belongs to its space, not to the socket that started it (see
 web_chat.session), so the space keeps the record of what runs where:
 
 - a conversation is *claimed* from the moment a turn is accepted until the
-  turn has finished - one turn per conversation at a time;
+  turn has finished - one turn per conversation at a time. A claim has an
+  owner (the turn, or None for an operation such as a compaction), so a turn
+  that ends late never releases the claim of the one after it;
 - the turn and its task are *registered* while the task lives, so a socket
   that opens later can attach to it;
 - work started beside the command loop (a delivery decision, moving the queue
@@ -30,20 +32,26 @@ class TurnBoard:
     """Claims, running turns and background work of one space."""
 
     def __init__(self) -> None:
-        self._claimed: set[str] = set()
+        self._claimed: dict[str, Any] = {}
         self._turns: dict[str, tuple[Any, asyncio.Task]] = {}
         self._background: set[asyncio.Task] = set()
 
     # -- claims ----------------------------------------------------------------
-    def claim(self, context_id: str) -> bool:
-        """Reserve the conversation for a new turn; False when one is on already."""
+    def claim(self, context_id: str, owner: Any = None) -> bool:
+        """Reserve the conversation for *owner*; False when one is on already."""
         if context_id in self._claimed:
             return False
-        self._claimed.add(context_id)
+        self._claimed[context_id] = owner
         return True
 
-    def release(self, context_id: str) -> None:
-        self._claimed.discard(context_id)
+    def release(self, context_id: str, owner: Any = None) -> None:
+        """Give the claim back - only *owner*'s: a newer claim stays."""
+        if context_id in self._claimed and self._claimed[context_id] is owner:
+            del self._claimed[context_id]
+
+    def claimed(self) -> list[str]:
+        """The conversations claimed now."""
+        return list(self._claimed)
 
     def is_claimed(self, context_id: str) -> bool:
         return context_id in self._claimed

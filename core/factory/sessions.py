@@ -5,18 +5,42 @@ measured against the model's window (core.context_budget) and, past the
 threshold, summarized and replaced by the summary - the chat people see stays
 as it is. Every compaction starts a new session epoch, so a fork knows which
 steps the summary already covers. A conversation forks before an edited
-message: the branch's session is the original's up to that message.
+message: the branch's session is the original's up to that message. A fork
+into a new chat cuts the same way after a turn, and deleting a turn cuts that
+turn's items out of the session.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from core.compact import COMPACTED_TYPE, compact_conversation
 from core.context_budget import request_tokens, session_transcript
+from core.interruption import CONTINUATION_TYPE
 
 logger = logging.getLogger("grid.agent_factory")
+
+#: Stored user messages that start a turn: one the user sent, or a Continue.
+TURN_START_TYPES = ("user_input", CONTINUATION_TYPE)
+
+
+def is_turn_start(message: Any) -> bool:
+    metadata = getattr(message, "metadata", None) or {}
+    return getattr(message, "role", None) == "user" and metadata.get("type", "user_input") in TURN_START_TYPES
+
+
+def turn_bounds(messages: list, index: int) -> Tuple[Optional[int], int]:
+    """(start, end) of the turn ``messages[index]`` belongs to: its request,
+    and the next turn's (or the end). Start is None before the first turn."""
+    start = next((i for i in range(index, -1, -1) if is_turn_start(messages[i])), None)
+    end = next((i for i in range(index + 1, len(messages)) if is_turn_start(messages[i])), len(messages))
+    return start, end
+
+
+def _is_assistant_message(item: Any) -> bool:
+    """An SDK session item that is the model's written message (not a tool call)."""
+    return isinstance(item, dict) and item.get("role") == "assistant" and item.get("type", "message") == "message"
 
 
 class SessionUpkeep:
@@ -52,14 +76,118 @@ class SessionUpkeep:
         branch_id, _ = self.context_manager.fork_context(context_id, message_id)
         messages = self.context_manager.conversation_view(context_id)["messages"]
         index = next(i for i, m in enumerate(messages) if (m.metadata or {}).get("message_id") == message_id)
-        epochs = self.context_manager.get_context_metadata(context_id).get("session_epochs") or {}
-        branch_epochs = dict(epochs)
+        await self._copy_sessions(context_id, branch_id, messages, index)
+        return branch_id
+
+    async def fork_to_new(self, context_id: str, message_id: str) -> str:
+        """A new conversation that is *context_id* up to the end of *message_id*'s turn.
+
+        The fork holds every message through that turn and, like a branch, each
+        agent's session up to the same point; the original is left as it is.
+        Returns the new conversation's id.
+        """
+        messages = self._messages(context_id)
+        index = self._message_index(messages, message_id)
+        _, end = turn_bounds(messages, index)
+        fork_id = self.context_manager.copy_context(context_id, end)
+        await self._copy_sessions(context_id, fork_id, messages, end)
+        return fork_id
+
+    async def delete_message(self, context_id: str, message_id: str) -> Dict[str, Any]:
+        """Delete a message from the chat and from what the agent remembers.
+
+        A message the user sent as a turn takes its whole turn with it: the
+        answer, the interruption, the messages added mid-turn, and the part of
+        the agent's session the turn wrote - its request, tool calls and
+        results. Any other message (an answer, say) goes alone; an answer also
+        leaves the session as the turn's last assistant message. When the
+        session was summarized since that turn, there is nothing exact to cut:
+        only the chat changes. Returns ``{"removed": [ids], "context": bool}``,
+        ``context`` telling whether the agent's session changed.
+        """
+        messages = self._messages(context_id)
+        index = self._message_index(messages, message_id)
+        start, end = turn_bounds(messages, index)
+        whole_turn = index == start
+        doomed = messages[start:end] if whole_turn else [messages[index]]
+        target = messages[index]
+        answer = target.role == "assistant" and (target.metadata or {}).get("type") == "agent_response"
+
+        context = False
+        span = await self._turn_span(context_id, messages, start, end) if start is not None else None
+        if span is not None and (whole_turn or answer):
+            agent, epoch, session, items, low, high = span
+            if whole_turn:
+                cut = list(range(low, high))
+            else:
+                answers = [i for i in range(low, high) if _is_assistant_message(items[i])]
+                cut = answers[-1:]
+            if cut:
+                dropped = set(cut)
+                kept = [item for i, item in enumerate(items) if i not in dropped]
+                await session.clear_session()
+                if kept:
+                    await session.add_items(kept)
+                context = True
+
+        removed = [(m.metadata or {}).get("message_id") for m in doomed]
+        removed = [mid for mid in removed if mid]
+        self.context_manager.remove_messages(context_id, removed)
+        if context:
+            self.context_manager.shift_session_marks(context_id, agent, epoch, high, -len(cut))
+        return {"removed": removed, "context": context}
+
+    def _messages(self, context_id: str) -> list:
+        view = self.context_manager.conversation_view(context_id)
+        if view is None:
+            raise KeyError(f"Unknown conversation {context_id}")
+        return view["messages"]
+
+    @staticmethod
+    def _message_index(messages: list, message_id: str) -> int:
+        for index, message in enumerate(messages):
+            if (message.metadata or {}).get("message_id") == message_id:
+                return index
+        raise KeyError(f"No message {message_id}")
+
+    async def _turn_span(self, context_id: str, messages: list, start: int, end: int) -> Optional[tuple]:
+        """Where the turn of ``messages[start:end]`` sits in its agent's session:
+        (agent, epoch, session, items, first item, end item); None when unknown -
+        no mark, or the session was summarized since."""
+        mark = (messages[start].metadata or {}).get("session_mark") or {}
+        agent = mark.get("agent")
+        if not agent:
+            return None
+        epoch = int(mark.get("epoch", 0))
+        if epoch != self._session_epoch(context_id, agent):
+            return None
+        session = self._get_agent_session(agent, context_id)
+        items = await session.get_items()
+        following = next(
+            (
+                (m.metadata or {})["session_mark"]
+                for m in messages[end:]
+                if ((m.metadata or {}).get("session_mark") or {}).get("agent") == agent
+            ),
+            None,
+        )
+        low = int(mark.get("items", 0))
+        high = int(following["items"]) if following and int(following.get("epoch", 0)) == epoch else len(items)
+        if not 0 <= low <= high <= len(items):
+            return None
+        return agent, epoch, session, items, low, high
+
+    async def _copy_sessions(self, source_id: str, target_id: str, messages: list, index: int) -> None:
+        """Give *target_id* each agent's session of *source_id* as it was when
+        ``messages[index]``'s turn started (all of it past the last turn)."""
+        epochs = self.context_manager.get_context_metadata(source_id).get("session_epochs") or {}
+        target_epochs = dict(epochs)
         agents = {(m.metadata or {}).get("agent") for m in messages} - {None}
         for agent in sorted(agents):
-            items = await self._get_agent_session(agent, context_id).get_items()
+            items = await self._get_agent_session(agent, source_id).get_items()
             if not items:
                 continue
-            # The first turn of this agent at or after the edit point.
+            # The first turn of this agent at or after the cut.
             mark = next(
                 (
                     (m.metadata or {})["session_mark"]
@@ -69,18 +197,17 @@ class SessionUpkeep:
                 None,
             )
             if mark is None:
-                cut = len(items)  # the agent did nothing after the edit point
+                cut = len(items)  # the agent did nothing after the cut
             elif int(mark.get("epoch", 0)) == int(epochs.get(agent, 0)) and mark["items"] <= len(items):
                 cut = mark["items"]
             else:
                 # Summarized since: the copied marks of this agent no longer apply.
-                branch_epochs[agent] = int(epochs.get(agent, 0)) + 1
-                logger.info("Branch %s: %s starts from the transcript (session was compacted)", branch_id, agent)
+                target_epochs[agent] = int(epochs.get(agent, 0)) + 1
+                logger.info("Conversation %s: %s starts from the transcript (session was compacted)", target_id, agent)
                 continue
             if cut:
-                await self._get_agent_session(agent, branch_id).add_items(items[:cut])
-        self.context_manager.update_context_metadata(branch_id, {"session_epochs": branch_epochs})
-        return branch_id
+                await self._get_agent_session(agent, target_id).add_items(items[:cut])
+        self.context_manager.update_context_metadata(target_id, {"session_epochs": target_epochs})
 
     async def context_usage(self, agent_key: str, context_id: Optional[str] = None) -> Dict[str, int]:
         """How full *agent_key*'s context is in a conversation: tokens, window, threshold.

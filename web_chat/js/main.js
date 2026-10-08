@@ -145,6 +145,8 @@ async function boot() {
     jumpButton: $("#jump-latest"),
     onEditMessage: (edited) => void chat.editMessage(edited),
     onSwitchVersion: (contextId) => void chat.switchVersion(contextId),
+    onDeleteMessage: (target) => void chat.deleteMessage(target),
+    onForkMessage: (id) => void chat.forkAt(id),
     onSpeakMessage: (id) => chat.toggleSpeech(id),
     onReportMessage: ({ id }) => {
       const contextId = store.get().contextId;

@@ -4,6 +4,8 @@
  * Not a browser - no layout, no selectors, no parsing of `innerHTML`.
  */
 
+import { File as BufferFile } from "node:buffer";
+
 class FakeNode {
   constructor() {
     this.parentNode = null;
@@ -188,6 +190,14 @@ class FakeElement extends FakeNode {
 }
 
 export function installFakeDom() {
+  // Browser globals Node only has from version 19/20 on.
+  globalThis.File ??= BufferFile;
+  globalThis.CustomEvent ??= class CustomEvent extends Event {
+    constructor(type, options = {}) {
+      super(type, options);
+      this.detail = options.detail ?? null;
+    }
+  };
   globalThis.Node = FakeNode;
   globalThis.document = {
     createElement: (tag) => new FakeElement(tag),
