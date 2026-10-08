@@ -74,11 +74,12 @@ def test_moving_checks_the_whole_subtree_height(tmp_path):
     a = projects.create("a")
     b = projects.create("b", parent_id=a.id)
     c = projects.create("c", parent_id=b.id)
-    other = projects.create("other")
-    # b (with child c) cannot go under other: it would be depth 3, c depth 4.
+    top = projects.create("top")
+    other = projects.create("other", parent_id=top.id)
+    # b (with child c) cannot go under other: b would be depth 3, c depth 4.
     with pytest.raises(ProjectError):
         projects.update(b.id, parent_id=other.id)
-    # c alone fits under other.
+    # c alone fits under other (depth 3).
     assert projects.update(c.id, parent_id=other.id).parent_id == other.id
 
 
@@ -141,3 +142,18 @@ def test_a_returned_project_is_a_detached_copy(tmp_path):
     project = projects.create("one")
     project.title = "mutated"
     assert projects.get(project.id).title == "one"
+
+
+@pytest.mark.parametrize("damage", ["{not json", '{"projects": [{"title": "no id"}]}'])
+def test_a_damaged_file_is_kept_aside_and_the_store_starts_empty(tmp_path, damage):
+    path = tmp_path / "projects.json"
+    path.write_text(damage, encoding="utf-8")
+
+    projects = ProjectStore(path)
+
+    assert projects.list() == []
+    kept = list(tmp_path.glob("projects.json.unreadable-*"))
+    assert len(kept) == 1 and kept[0].read_text(encoding="utf-8") == damage
+    # The store works on: a new project is written to a fresh file.
+    projects.create("again")
+    assert [p.title for p in ProjectStore(path).list()] == ["again"]

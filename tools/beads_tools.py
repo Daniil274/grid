@@ -10,6 +10,7 @@ import logging
 import subprocess
 import json
 import os
+import re
 import shutil
 import time
 import uuid
@@ -63,6 +64,23 @@ def _get_container_id(context: Any) -> Optional[str]:
 
 # Container path for workspace (Docker forbids bind to "/"). Agent sees root as "/".
 _CONTAINER_ROOT = "/workspace"
+
+#: A bead id as bd mints them (``grid-a1b``, a child ``grid-a1b.1``). It never
+#: starts with ``-``, so bd cannot read an id as a flag.
+BEAD_ID = re.compile(r"^\w[\w.-]{0,63}$")
+
+
+def bd_flag(name: str, value: Any) -> str:
+    """``--name=value`` in one argument: a value starting with ``-`` stays a value."""
+    return f"--{name}={value}"
+
+
+def _bad_ids(*bead_ids: Any) -> Optional[str]:
+    """The tool's error for the first argument that is not a bead id; None when all are."""
+    for bead_id in bead_ids:
+        if not isinstance(bead_id, str) or not BEAD_ID.match(bead_id):
+            return f"❌ Error: not a bead id: {bead_id!r}"
+    return None
 
 def _map_path_to_container(path: Optional[str], context: Any) -> str:
     """The container path of a host path :func:`_resolve_directory` returned."""
@@ -606,9 +624,12 @@ async def beads_create(
         return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
-    args = ["create", title, "-p", str(priority), "-t", type]
+    # Values ride inside their flags and the title follows "--": a title or a
+    # description starting with "-" is text, never an option of bd's.
+    args = ["create", "--json", bd_flag("priority", priority), bd_flag("type", type)]
     if description:
-        args.extend(["--description", description])
+        args.append(bd_flag("description", description))
+    args += ["--", title]
     
     res = await _bd(args, cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
@@ -629,7 +650,9 @@ async def beads_show(context: RunContextWrapper, bead_id: str, directory: str = 
     except ValueError as exc:
         return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
-    
+    if problem := _bad_ids(bead_id):
+        return problem
+
     res = await _bd(["show", bead_id], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error showing bead {bead_id}: {res['error'] or res['output']}"
@@ -664,17 +687,20 @@ async def beads_update(
         return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
     
+    if problem := _bad_ids(bead_id):
+        return problem
+
     args = ["update", bead_id]
     if claim:
         args.append("--claim")
     if status:
-        args.extend(["--status", status])
+        args.append(bd_flag("status", status))
     if title:
-        args.extend(["--title", title])
+        args.append(bd_flag("title", title))
     if description:
-        args.extend(["--description", description])
+        args.append(bd_flag("description", description))
     if notes:
-        args.extend(["--notes", notes])
+        args.append(bd_flag("notes", notes))
         
     res = await _bd(args, cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
@@ -701,8 +727,10 @@ async def beads_close(
     except ValueError as exc:
         return f"❌ Error: {exc}"
     container_id = _get_container_id(context)
-    
-    res = await _bd(["close", bead_id, "--reason", reason], cwd=directory, container_id=container_id, context=context)
+    if problem := _bad_ids(bead_id):
+        return problem
+
+    res = await _bd(["close", bead_id, bd_flag("reason", reason)], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error closing bead {bead_id}: {res['error'] or res['output']}"
     return res["output"]
@@ -752,6 +780,8 @@ async def beads_dep(
     
     if action not in ["add", "remove"]:
         return "❌ Error: action must be 'add' or 'remove'"
+    if problem := _bad_ids(child_id, parent_id):
+        return problem
         
     res = await _bd(["dep", action, child_id, parent_id], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
@@ -924,8 +954,8 @@ async def beads_list(
     if all:
         args.append("--all")
     if status:
-        args.extend(["--status", status])
-    
+        args.append(bd_flag("status", status))
+
     res = await _bd(args, cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error listing beads: {res['error'] or res['output']}"

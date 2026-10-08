@@ -16,6 +16,7 @@ Old chats have no ``project_id`` and need no migration: they simply show as
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import uuid
@@ -23,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("grid.web_chat.projects")
 
 #: The document version, so a future change can migrate in place.
 VERSION = 1
@@ -238,13 +241,30 @@ class ProjectStore:
         except FileNotFoundError:
             self._projects = {}
             return
-        except (json.JSONDecodeError, OSError) as exc:
-            raise ProjectError(f"The projects file {self.path} cannot be read: {exc}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            self._set_aside(exc)
+            return
         projects: Dict[str, Project] = {}
-        for item in raw.get("projects", []) if isinstance(raw, dict) else []:
-            project = Project.from_dict(item)
-            projects[project.id] = project
+        try:
+            for item in raw.get("projects", []) if isinstance(raw, dict) else []:
+                project = Project.from_dict(item)
+                projects[project.id] = project
+        except (KeyError, TypeError, AttributeError) as exc:
+            self._set_aside(exc)
+            return
         self._projects = projects
+
+    def _set_aside(self, exc: BaseException) -> None:
+        """A damaged file: kept beside as ``.unreadable`` and logged, and the space
+        starts with no projects - its chats show as "no project" - instead of
+        every project route and every chat with a project failing."""
+        kept = self.path.with_name(f"{self.path.name}.unreadable-{datetime.now():%Y%m%d-%H%M%S}")
+        logger.error("The projects file %s cannot be read (%s); kept as %s", self.path, exc, kept.name)
+        try:
+            os.replace(self.path, kept)
+        except OSError:
+            logger.error("Could not move %s aside", self.path)
+        self._projects = {}
 
     def _write(self) -> None:
         document = {"version": VERSION, "projects": [project.to_dict() for project in self._projects.values()]}
