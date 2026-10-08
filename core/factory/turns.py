@@ -217,6 +217,17 @@ class TurnRunner:
                 logger.exception("Stream observer failed to show a compaction")
 
     @staticmethod
+    def _report_skipped_models(observer: Any, skipped: Optional[List[Tuple[str, str]]]) -> None:
+        """Say which of the agent's models this user cannot use now: a fallback
+        that silently drops out leaves the turn with fewer models than its list."""
+        handle = getattr(observer, "handle_models_skipped", None)
+        if skipped and handle is not None:
+            try:
+                handle(skipped)
+            except Exception:
+                logger.exception("Stream observer failed to show skipped models")
+
+    @staticmethod
     def _final_text(result: Any, fragments: List[str]) -> str:
         """The answer of a finished run: its final output, else what it streamed.
 
@@ -1161,6 +1172,7 @@ class TurnRunner:
             user_id = user_id or self.context_manager.get_metadata("user_id")
 
             agent = await self.create_agent(agent_key, context_path)
+            self._report_skipped_models(observer, getattr(agent, "_grid_skipped_models", None))
             agent_config = self.config.get_agent(agent_key)
             agent_input = (
                 parse_agent_input(message) if message is not None

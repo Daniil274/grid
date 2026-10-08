@@ -336,6 +336,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             model_keys = agent_config.model_keys()
             candidates: list[ModelCandidate] = []
             unavailable: list[AgentError] = []
+            skipped: list[tuple[str, str]] = []
             for model_key in model_keys:
                 try:
                     sdk_model, candidate_config = self.models.sdk_model(model_key)
@@ -343,6 +344,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                     # A fallback excluded by the plan or missing its own login
                     # must not prevent the available models from running.
                     unavailable.append(refusal)
+                    skipped.append((model_key, str(refusal)))
                     logger.warning("Skipping unavailable model %s: %s", model_key, refusal)
                     continue
                 candidates.append(
@@ -352,16 +354,15 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                         settings=self.models.settings(
                             candidate_config, agent_config.parallel_tool_calls
                         ),
+                        vision=getattr(candidate_config, "vision", None),
                     )
                 )
             if not candidates:
                 raise unavailable[0]
             model_config = self.config.get_model(candidates[0].key)
-            model = (
-                candidates[0].model
-                if len(candidates) == 1
-                else FallbackModel(candidates)
-            )
+            # Even one model goes through FallbackModel: it keeps images away
+            # from a model that cannot see them.
+            model = FallbackModel(candidates)
 
             # Build instructions with context (include conversation context for agents)
             instructions = self._build_agent_instructions(
@@ -403,6 +404,8 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             setattr(agent, "_grid_agent_key", agent_key)
             setattr(agent, "_grid_model_key", candidates[0].key)
             setattr(agent, "_grid_model_keys", model_keys)
+            # Models of its list this user cannot use now, and why: the turn says so.
+            setattr(agent, "_grid_skipped_models", skipped)
             # Auto-run tools (beads_init, beads_ready, etc.) run only once per user/agent
             # in run_agent() when handling the first request — see _initialized_agents.
 
@@ -505,12 +508,13 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                     key=candidate_key,
                     model=candidate_model,
                     settings=self.models.settings(candidate_cfg),
+                    vision=getattr(candidate_cfg, "vision", None),
                 )
             )
         if not candidates:
             raise unavailable[0]
         resolved_model_key = candidates[0].key
-        model = candidates[0].model if len(candidates) == 1 else FallbackModel(candidates)
+        model = FallbackModel(candidates)
 
         tools: List[Any] = []
         mcp_servers_list: List[Any] = []
