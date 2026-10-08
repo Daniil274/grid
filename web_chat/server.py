@@ -53,6 +53,8 @@ from web_chat.space import IsolationUnavailable, UserSpace, WorkspaceChoiceError
 from web_chat.spaces import SpacePool
 from core.interruption import COMPACTED_TYPE
 from web_chat.trace import is_tool_result
+from core.checkpoints import CheckpointError
+from web_chat.session import CHECKPOINTS_KEY
 from web_chat.views import UNTITLED, agent_options, conversation_title, serialize_message, slim_steps, system_options
 
 logger = logging.getLogger("grid.web_chat.server")
@@ -750,6 +752,27 @@ class WebChatServer:
             )
             return JSONResponse({"id": fork_id, "root": fork_id})
 
+        @api.post("/api/chat/conversations/{context_id}/checkpoints/{turn_id}/restore")
+        async def restore_checkpoint(
+            context_id: str, turn_id: str, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """Bring the chat's workspace back to before turn *turn_id*: every file
+            changed since - by that turn or later ones, by any tool - as it was."""
+            manager = space.context_manager()
+            kept = (manager.get_context_metadata(context_id).get(CHECKPOINTS_KEY) or {}).get(turn_id)
+            if kept is None:
+                raise HTTPException(status_code=404, detail="This turn has no checkpoint")
+
+            async def restore(_factory: Any) -> list:
+                workspace = space.conversation_workspace(context_id)
+                return await asyncio.to_thread(space.checkpoints.restore, workspace, kept["before"])
+
+            try:
+                restored = await holding_factory(space, context_id, "restoring files", restore)
+            except CheckpointError as exc:
+                raise HTTPException(status_code=500, detail=f"Could not restore: {exc}") from None
+            return JSONResponse({"id": context_id, "turn_id": turn_id, "restored": restored})
+
         @api.delete("/api/chat/conversations/{context_id}/messages/{message_id}")
         async def delete_message(
             context_id: str, message_id: str, space: UserSpace = Depends(current_space)
@@ -821,8 +844,14 @@ class WebChatServer:
                 )
                 for index, msg in enumerate(shown)
             ]
-            for message in messages:
+            checkpoints = view["metadata"].get(CHECKPOINTS_KEY) or {}
+            for message, stored in zip(messages, shown):
                 message["trace"] = slim_steps(message.get("trace"))
+                # The request of a turn that changed files: Restore goes back to before it.
+                turn_id = (stored.metadata or {}).get("turn_id")
+                kept = checkpoints.get(turn_id) if message["role"] == "user" and turn_id else None
+                if kept and kept.get("files"):
+                    message["checkpoint"] = {"turn_id": turn_id, "files": kept["files"]}
             active_turn = (
                 {
                     "message": active[0].message,

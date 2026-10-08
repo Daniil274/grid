@@ -56,6 +56,11 @@ logger = logging.getLogger(__name__)
 
 #: Internal sentinel marking the end of a turn's event stream.
 _FINISHED = "_finished"
+#: Conversation metadata: turn id -> the workspace checkpoint taken before it.
+CHECKPOINTS_KEY = "checkpoints"
+#: Checkpoints a conversation keeps, newest first; files listed per turn.
+MAX_CHECKPOINTS = 40
+MAX_LISTED_CHANGES = 200
 
 
 class AgentTurn:
@@ -105,6 +110,8 @@ class AgentTurn:
         #: already stopped for passing its dollar budget.
         self._spend = TurnSpend(self._check_usd_budget)
         self._usd_budget_hit = False
+        #: The workspace before the agent ran (core.checkpoints), for Restore.
+        self._checkpoint: Optional[dict] = None
         self._observer = WebStreamObserver(
             self._recorder,
             emit_token=self._token,
@@ -296,6 +303,8 @@ class AgentTurn:
             with suppress(asyncio.CancelledError):
                 await producer
             self._persist_trace()
+            with suppress(Exception, asyncio.CancelledError):
+                await self._record_checkpoint()
             # Stopped, timed out or failed: say so with what Continue needs.
             with suppress(WebSocketDisconnect, RuntimeError, OSError):
                 if await self._announce_interruption() and self.outcome != "stopped":
@@ -330,6 +339,7 @@ class AgentTurn:
             )
             await space.warm_agent(resolution.agent, resolution.system, context_id=self._session.context_id)
             self._recorder.close(step, title=f"Runtime ready · {label}")
+            self._checkpoint = await self._snapshot()
 
             space.update_conversation_metadata(
                 self._session.context_id,
@@ -510,6 +520,39 @@ class AgentTurn:
             except (WebSocketDisconnect, RuntimeError, OSError):
                 # A closed tab must not stall the agent or the other viewers.
                 self._subscribers.discard(session)
+
+    # -- checkpoints -------------------------------------------------------
+    async def _snapshot(self) -> Optional[dict]:
+        """The workspace now; None when it cannot be taken - the turn runs anyway."""
+        checkpoints = getattr(self._session.space, "checkpoints", None)
+        if checkpoints is None:
+            return None
+        workspace = self._session.space.conversation_workspace(self._session.context_id)
+        try:
+            return await asyncio.to_thread(checkpoints.snapshot, workspace)
+        except Exception:
+            logger.warning("No checkpoint of %s before this turn", workspace, exc_info=True)
+            return None
+
+    async def _record_checkpoint(self) -> None:
+        """Keep what the turn changed in the workspace, and say so: Restore goes
+        back to the checkpoint taken before it."""
+        before = self._checkpoint
+        if before is None:
+            return
+        after = await self._snapshot()
+        if after is None:
+            return
+        checkpoints = self._session.space.checkpoints
+        changes = await asyncio.to_thread(checkpoints.changes, before, after)
+        manager, context_id = self._session.manager, self._session.context_id
+        kept = dict(manager.get_context_metadata(context_id).get(CHECKPOINTS_KEY) or {})
+        kept[self.run_id] = {"before": before, "files": len(changes), "changes": changes[:MAX_LISTED_CHANGES]}
+        # The newest turns only: an old checkpoint still restores, it is just not offered.
+        kept = dict(list(kept.items())[-MAX_CHECKPOINTS:])
+        manager.update_context_metadata(context_id, {CHECKPOINTS_KEY: kept})
+        if changes:
+            await self._emit({"type": "checkpoint", "turn_id": self.run_id, "files": len(changes), "changes": changes[:MAX_LISTED_CHANGES]})
 
     # -- persistence -------------------------------------------------------
     def _record_activity(self) -> None:
