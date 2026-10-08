@@ -1002,3 +1002,35 @@ def test_deleting_a_project_reparents_its_chats_and_children(projects_client):
     assert context_id  # the chat still exists, only its project changed
 
     assert projects_client.delete("/api/projects/prj-ghost").status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_changes_files_leaves_a_checkpoint_to_restore(tmp_path):
+    from core.checkpoints import Checkpoints
+    from web_chat.session import CHECKPOINTS_KEY
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "plan.md").write_text("v1")
+
+    async def run(**kwargs):
+        # Any tool: what counts is what the files look like afterwards.
+        (workspace / "plan.md").write_text("v2")
+        (workspace / "new.py").write_text("x = 1")
+        return "Done"
+
+    space, socket = space_for(run), Socket()
+    space.checkpoints = Checkpoints(tmp_path / "checkpoints")
+    space.conversation_workspace = lambda context_id: workspace
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
+    await socket.incoming.put('{"message":"edit the plan"}')
+    event = await socket.event('checkpoint')
+    assert event['files'] == 2
+    assert sorted(change['path'] for change in event['changes']) == ['new.py', 'plan.md']
+    await socket.event('done')
+
+    kept = space.context_manager().get_context_metadata('ctx')[CHECKPOINTS_KEY][event['turn_id']]
+    space.checkpoints.restore(workspace, kept['before'])
+    assert (workspace / "plan.md").read_text() == "v1" and not (workspace / "new.py").exists()
+    await socket.incoming.put(None)
+    await session

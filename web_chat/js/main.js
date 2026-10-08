@@ -161,6 +161,7 @@ async function boot() {
     onSwitchVersion: (contextId) => void chat.switchVersion(contextId),
     onDeleteMessage: (target) => void chat.deleteMessage(target),
     onForkMessage: (id) => void chat.forkAt(id),
+    onRestoreCheckpoint: (checkpoint) => void chat.restoreCheckpoint(checkpoint),
     onSpeakMessage: (id) => chat.toggleSpeech(id),
     onReportMessage: ({ id }) => {
       const contextId = store.get().contextId;

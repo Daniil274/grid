@@ -39,6 +39,7 @@ from core.agent_factory import AgentFactory
 from core.config import Config
 from core.config.prompt_sections import PromptSection
 from core.context import ContextManager
+from core.checkpoints import Checkpoints
 from core.conversation_store import ConversationCodec, ConversationStore
 from core.factory.policy import POLICY_FILTER_KEY
 from core.managers.container_manager import ContainerManager
@@ -281,6 +282,8 @@ class UserSpace:
         else:
             self.conversations_path, _ = single_user_records(config)
         self.conversations_path.parent.mkdir(parents=True, exist_ok=True)
+        # What the workspace looked like before each turn, for Restore.
+        self.checkpoints = Checkpoints(self.conversations_path.parent / "checkpoints")
         # One file per conversation, compressed and - with GRID_SECRETS_KEY -
         # encrypted, written in the background (core.conversation_store). The
         # old single file, if any, is moved into it on first load.
