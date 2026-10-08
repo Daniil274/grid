@@ -81,6 +81,11 @@ class ModelConfig(BaseModel):
     this: it bounds the pause between two chunks, and a model that keeps
     generating never pauses. Unset: no limit.
     """
+    vision: Optional[bool] = None
+    """Whether the model reads images. ``false`` sends it a note in place of each
+    image, and models that see go first for a request with images; unset is
+    unknown - taken as yes until the provider refuses images (core.fallback_model).
+    """
     modalities: Optional[List[Literal["text", "image"]]] = None
     """Output modalities to request, sent as ``modalities`` in the request body.
     ``[image, text]`` asks an image-generation model (OpenRouter

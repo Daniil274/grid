@@ -252,7 +252,8 @@ class TestAgentFactory:
             call_args = mock_agent_class.call_args
             assert call_args[1]['name'] == "Test Agent"
             assert call_args[1]['instructions'] == "Test instructions"
-            assert call_args[1]['model'] is mock_model_instance
+            # One model still goes through FallbackModel (it keeps images from a blind model).
+            assert [c.model for c in call_args[1]['model'].candidates] == [mock_model_instance]
 
     @pytest.mark.asyncio
     async def test_create_agent_builds_ordered_model_fallback(self, config_file):
@@ -312,7 +313,7 @@ class TestAgentFactory:
             agent_class.return_value = Mock()
             await factory.create_agent("test_agent")
 
-        assert agent_class.call_args.kwargs["model"] is available_model
+        assert [c.model for c in agent_class.call_args.kwargs["model"].candidates] == [available_model]
         assert agent_class.call_args.kwargs["model_settings"].store is None
         assert factory._agent_cache["test_agent"]._grid_model_key == "gpt-4"
 
@@ -387,7 +388,7 @@ class TestAgentFactory:
             await factory.create_dynamic_agent(
                 name="dyn-test", instructions="x", model_key="gpt-4",
             )
-            assert mock_agent_class.call_args.kwargs["model"] is primary
+            assert [c.model for c in mock_agent_class.call_args.kwargs["model"].candidates] == [primary]
     
     @pytest.mark.asyncio
     async def test_create_agent_with_force_reload(self, config_file):
