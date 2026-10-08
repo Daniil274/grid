@@ -17,7 +17,6 @@ unfinished dependencies and ``waiting`` with them.
 
 from __future__ import annotations
 
-import re
 import json
 from typing import Any, List, Literal, Optional
 
@@ -25,12 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from tools.beads_tools import _bd_problem, _init_args, run_bd
-
-#: A bead id as bd mints them: the path parameter never reaches a shell, but
-#: it is still checked - it names a row in the user's own tracker and nothing
-#: else. bd takes ids as single arguments, so this is belt and braces.
-_ID = re.compile(r"^[\w-]{1,64}$")
+from tools.beads_tools import BEAD_ID as _ID, _bd_problem, _init_args, bd_flag as _flag, run_bd
 
 #: bd's statuses; ``closed`` is not one of them: a task closes with its reason
 #: through its own route, never as a quiet status change.
@@ -196,16 +190,19 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
 
     @api.post("/api/tasks")
     async def create_task(body: TaskCreateRequest, space: Any = Depends(current_space)) -> JSONResponse:
-        args = ["create", body.title, "-p", str(body.priority), "-t", body.type]
+        args = ["create", "--json", _flag("priority", body.priority), _flag("type", body.type)]
         if body.description:
-            args += ["--description", body.description]
+            args.append(_flag("description", body.description))
         if body.acceptance:
-            args += ["--acceptance", body.acceptance]
+            args.append(_flag("acceptance", body.acceptance))
         if body.assignee:
-            args += ["-a", body.assignee]
+            args.append(_flag("assignee", body.assignee))
         deps = [dep for dep in body.depends_on if _ID.match(dep)]
         if deps:
-            args += ["--deps", ",".join(deps)]
+            args.append(_flag("deps", ",".join(deps)))
+        # The title is the one positional argument: after "--", a title such as
+        # "--db=..." is a title, never a flag.
+        args += ["--", body.title]
         res = await _bd_for(space, args)
         if not res.get("success"):
             raise HTTPException(status_code=400, detail=_reason(res))
@@ -218,21 +215,21 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
         bead_id = _issue_id(bead_id)
         args = ["update", bead_id]
         if body.status is not None:
-            args += ["--status", body.status]
+            args.append(_flag("status", body.status))
         if body.title is not None:
-            args += ["--title", body.title]
+            args.append(_flag("title", body.title))
         if body.description is not None:
-            args += ["--description", body.description]
+            args.append(_flag("description", body.description))
         if body.acceptance is not None:
-            args += ["--acceptance", body.acceptance]
+            args.append(_flag("acceptance", body.acceptance))
         if body.notes is not None:
-            args += ["--notes", body.notes]
+            args.append(_flag("notes", body.notes))
         if body.priority is not None:
-            args += ["-p", str(body.priority)]
+            args.append(_flag("priority", body.priority))
         if body.type is not None:
-            args += ["-t", body.type]
+            args.append(_flag("type", body.type))
         if body.assignee is not None:
-            args += ["-a", body.assignee]
+            args.append(_flag("assignee", body.assignee))
         if len(args) == 2:
             raise HTTPException(status_code=400, detail="Nothing to update.")
         res = await _bd_for(space, args)
@@ -245,7 +242,7 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
     async def close_task(
         bead_id: str, body: TaskCloseRequest, space: Any = Depends(current_space)
     ) -> JSONResponse:
-        res = await _bd_for(space, ["close", _issue_id(bead_id), "--reason", body.reason])
+        res = await _bd_for(space, ["close", _issue_id(bead_id), _flag("reason", body.reason)])
         if not res.get("success"):
             raise HTTPException(status_code=400, detail=_reason(res))
         return JSONResponse({"ok": True, "id": bead_id, "close_reason": body.reason})

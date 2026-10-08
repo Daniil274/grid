@@ -38,7 +38,7 @@ ISSUE = {
 
 
 def _plan_message(text: str = "planned") -> dict:
-    return {"trace": [{"kind": "plan", "plan": PLAN}]}
+    return {"metadata": {"trace": [{"kind": "plan", "plan": PLAN}]}}
 
 
 @pytest.fixture
