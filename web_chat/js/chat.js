@@ -170,12 +170,64 @@ export class ChatController {
       if (intent !== this._navigationIntent) return;
       const branch = await api.createBranch(this._store.get().contextId, id);
       if (intent !== this._navigationIntent) return;
-      await this.openConversation(branch.id, intent);
+      // The new version runs with the agent picked now, not the one the
+      // branch inherited from the original - often the reason for the edit.
+      await this.openConversation(branch.id, intent, { keepSelection: true });
       if (intent !== this._navigationIntent) return;
       await this._begin({ text, spoken: false, images, editOf: branch.edit_of });
     } catch (error) {
       if (intent !== this._navigationIntent) return;
       toast(error.message, { tone: "error" });
+    }
+  }
+
+  /**
+   * Delete a stored message from the chat and from what the agent remembers.
+   * A message the user sent takes its whole turn with it - the answer too.
+   * @param {{id: string, role: string}} target
+   */
+  async deleteMessage({ id, role }) {
+    const { contextId, compacting } = this._store.get();
+    if (!contextId) return;
+    if (this.isStreaming || compacting) {
+      toast("Stop the running turn before deleting a message.", { tone: "error" });
+      return;
+    }
+    const question = role === "user"
+      ? "Delete this message and the agent's answer to it? The agent forgets that turn too."
+      : "Delete this message? The agent forgets it too.";
+    if (!window.confirm(question)) return;
+    try {
+      const result = await api.deleteMessage(contextId, id);
+      await this._reconcile(contextId, { force: true });
+      void this._refreshConversations();
+      toast(
+        result.context ? "Deleted from the chat and the agent's context." : "Deleted from the chat; the agent's context had no exact copy of it (summarized or older).",
+        { tone: result.context ? "success" : "info", timeout: 4000 },
+      );
+    } catch (error) {
+      toast(error.message, { tone: "error" });
+    }
+  }
+
+  /** Open a new chat that is this one up to the end of message *id*'s turn. */
+  async forkAt(id) {
+    const { contextId, compacting } = this._store.get();
+    if (!contextId) return;
+    if (this.isStreaming || compacting) {
+      toast("Stop the running turn before forking.", { tone: "error" });
+      return;
+    }
+    const intent = ++this._navigationIntent;
+    try {
+      const fork = await api.forkConversation(contextId, id);
+      if (intent !== this._navigationIntent) return;
+      await this.openConversation(fork.id, intent, { keepSelection: true });
+      if (intent !== this._navigationIntent) return;
+      await this._refreshConversations();
+      toast("Forked into a new chat.", { tone: "success" });
+    } catch (error) {
+      if (intent === this._navigationIntent) toast(error.message, { tone: "error" });
     }
   }
 
@@ -422,8 +474,11 @@ export class ChatController {
     await this._refreshConversations();
   }
 
-  /** Load a stored conversation, including its reasoning traces. */
-  async openConversation(contextId, intent = null) {
+  /**
+   * Load a stored conversation, including its reasoning traces.
+   * `keepSelection` keeps the agent picked on screen instead of the chat's own.
+   */
+  async openConversation(contextId, intent = null, { keepSelection = false } = {}) {
     if (!contextId) return;
     if (intent === null) intent = ++this._navigationIntent;
     // Leaving a chat mid-turn only stops watching it: the turn runs on the
@@ -448,11 +503,13 @@ export class ChatController {
     if (!payload || intent !== this._navigationIntent) return; // another navigation took over
     this._transcript.setLoading(false);
     // A conversation remembers what was pinned when it ran, including "nothing".
+    const selection = keepSelection
+      ? {}
+      : { systemKey: payload.metadata?.system_key ?? null, agentKey: payload.metadata?.agent_key ?? null };
     this._store.set({
       contextId: payload.id,
       rootId: payload.root ?? payload.id,
-      systemKey: payload.metadata?.system_key ?? null,
-      agentKey: payload.metadata?.agent_key ?? null,
+      ...selection,
       hasAgentContext: Boolean(payload.metadata?.routed_agent),
       chatWorkspace: payload.metadata?.workspace ?? null,
       workspaceLocked: payload.messages.length > 0 || Boolean(payload.active_turn),

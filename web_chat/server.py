@@ -690,6 +690,46 @@ class WebChatServer:
             slot = manager.get_context_metadata(branch_id).get("branch_slot")
             return JSONResponse({"id": branch_id, "edit_of": slot, "root": manager.branch_root(branch_id)})
 
+        async def holding_factory(space: UserSpace, context_id: str, action: str, work: Callable[[Any], Any]) -> Any:
+            """Run *work* on the factory whose agents worked in the conversation,
+            holding the conversation the while, so no turn starts mid-change."""
+            manager = space.context_manager()
+            if manager.conversation_view(context_id) is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            if space.turns.is_running(context_id) or not space.turns.claim(context_id):
+                raise HTTPException(status_code=409, detail=f"Wait for the current operation before {action}")
+            try:
+                registry = await space.registry_for(context_id)
+                system = manager.get_context_metadata(context_id).get("routed_system") or registry.default_key()
+                return await work(registry.factory(system))
+            except KeyError:
+                raise HTTPException(status_code=404, detail="Message not found") from None
+            finally:
+                space.turns.release(context_id)
+
+        @api.post("/api/chat/conversations/{context_id}/forks")
+        async def fork_conversation(
+            context_id: str, body: BranchRequest, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """A new chat that is this one up to the end of the message's turn,
+            the agents' memory included (SessionUpkeep.fork_to_new)."""
+            fork_id = await holding_factory(
+                space, context_id, "forking", lambda factory: factory.fork_to_new(context_id, body.message_id)
+            )
+            return JSONResponse({"id": fork_id, "root": fork_id})
+
+        @api.delete("/api/chat/conversations/{context_id}/messages/{message_id}")
+        async def delete_message(
+            context_id: str, message_id: str, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """Delete a message from the chat and the agent's context; a request
+            takes its whole turn with it (SessionUpkeep.delete_message)."""
+            result = await holding_factory(
+                space, context_id, "deleting a message", lambda factory: factory.delete_message(context_id, message_id)
+            )
+            return JSONResponse({"id": context_id, **result})
+
+
         @api.post("/api/chat/conversations/{context_id}/compact")
         async def compact_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
             """Summarize the agent's session in this conversation now (core.context_budget)."""

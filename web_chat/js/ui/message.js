@@ -13,7 +13,7 @@ import { renderMarkdown } from "../lib/markdown.js";
 import { scopeWorkspaceLinks } from "../lib/workspace-links.js";
 import { ICONS } from "./icons.js";
 import { createReasoningPanel } from "./reasoning.js";
-import { copyText } from "./toast.js";
+import { copyText, toast } from "./toast.js";
 
 const ROLE_LABEL = { assistant: "Grid", user: "You", system: "System" };
 
@@ -77,13 +77,17 @@ function actionButton(label, path, onClick, extraClass = "") {
  * @param {(answer: {id: string, text: string}) => void} [options.onReport] assistant
  *   messages only: report a problem with this answer for review
  * @param {() => void} [options.onContinue] resumes an interrupted turn
+ * @param {(target: {id: string, role: string}) => void} [options.onDelete] deletes a
+ *   stored message from the chat and the agent's context
+ * @param {(id: string) => void} [options.onFork] assistant messages only: a new
+ *   chat up to the end of this turn
  * @param {"continuation"|"compaction"|null} [options.kind] a marker, not a bubble
  * @param {?{tokens_before: ?number, tokens_after: ?number}} [options.compaction]
  *   token counts for a compaction marker
  * @param {string[]} [options.images] data URLs of attached images
  */
 export function createMessage({
-  role, content = "", author = "", timestamp, onEdit, onSpeak, onReport, onContinue, onSwitchVersion,
+  role, content = "", author = "", timestamp, onEdit, onSpeak, onReport, onContinue, onSwitchVersion, onDelete, onFork,
   kind = null, compaction = null, images = [], messageId = null, versions = null,
 }) {
   if (kind === "continuation") return createContinuationMarker({ timestamp });
@@ -123,7 +127,25 @@ export function createMessage({
     isAssistant && onReport
       ? actionButton("Report a problem with this answer", ICONS.inspect, () => startReport(), "msgAction--report")
       : null,
+    isAssistant && onFork ? actionButton("Fork: a new chat up to here", ICONS.fork, () => stored(() => onFork(storedId))) : null,
+    onDelete
+      ? actionButton(
+        role === "user" ? "Delete this message and its answer (chat and context)" : "Delete from chat and context",
+        ICONS.trash,
+        () => stored(() => onDelete({ id: storedId, role })),
+        "msgAction--delete",
+      )
+      : null,
   );
+
+  /** Run *action* once the message is stored; a message in flight has no id yet. */
+  function stored(action) {
+    if (storedId) {
+      action();
+      return;
+    }
+    toast("This message can be changed once its turn is saved.", { timeout: 4000 });
+  }
 
   const authorNode = h("span.msg__author", { text: author || ROLE_LABEL[role] || role });
   // "‹ 2/3 ›": the versions of an edited message, each in its own branch.
