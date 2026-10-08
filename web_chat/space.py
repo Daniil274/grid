@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TypeVar
@@ -38,6 +39,7 @@ from core.agent_factory import AgentFactory
 from core.config import Config
 from core.config.prompt_sections import PromptSection
 from core.context import ContextManager
+from core.conversation_store import ConversationCodec, ConversationStore
 from core.factory.policy import POLICY_FILTER_KEY
 from core.managers.container_manager import ContainerManager
 from core.model_access import ModelAccess
@@ -89,6 +91,11 @@ the file instead of downloading it:
 Only PNG, JPEG, GIF and WebP pictures render this way; every other file is a
 download link. Write the path in full - a bare file name shows as plain text.""",
 )
+
+
+def conversation_directory(conversations: Path) -> Path:
+    """Where the conversations kept in *conversations* (the old single file) live now."""
+    return conversations.with_name(conversations.stem)
 
 
 @dataclass(frozen=True)
@@ -274,9 +281,16 @@ class UserSpace:
         else:
             self.conversations_path, _ = single_user_records(config)
         self.conversations_path.parent.mkdir(parents=True, exist_ok=True)
+        # One file per conversation, compressed and - with GRID_SECRETS_KEY -
+        # encrypted, written in the background (core.conversation_store). The
+        # old single file, if any, is moved into it on first load.
         self.conversations = ContextManager(
             max_history=config.get_max_history(),
             persist_path=str(self.conversations_path),
+            store=ConversationStore(
+                conversation_directory(self.conversations_path),
+                ConversationCodec.from_secrets(os.environ.get("GRID_SECRETS_KEY")),
+            ),
         )
 
         self.personal_agents = (
@@ -783,6 +797,10 @@ class UserSpace:
         """Stop everything the space runs. A space is never rebuilt in place:
         its pool replaces it with a new one (web_chat.spaces)."""
         await self.turns.close()
+        store = getattr(getattr(self, "conversations", None), "store", None)
+        if store is not None:
+            # What the turns wrote last is on disk before the space goes.
+            await asyncio.to_thread(store.flush, durable=True)
         pending = list(self._background)
         for task in pending:
             task.cancel()

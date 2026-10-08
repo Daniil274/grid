@@ -24,6 +24,7 @@ from core.interruption import (
 from schemas import ContextMessage, AgentExecution
 from utils.exceptions import ContextError
 from utils.image_utils import ImageUtils
+from core.conversation_store import ConversationStore
 # Tracing is handled automatically by Agents SDK
 
 logger = Logger.get_logger("context")
@@ -91,6 +92,7 @@ class ContextManager:
         *,
         read_only: bool = False,
         create_initial_context: bool = True,
+        store: Optional["ConversationStore"] = None,
     ):
         """
         Initialize context manager.
@@ -102,6 +104,9 @@ class ContextManager:
                 empty session context after loading (inspector mode)
             create_initial_context: When False, keep only loaded buckets and may
                 leave no active context if persistence is empty
+            store: Keep each conversation in a file of its own (core.conversation_store)
+                instead of *persist_path*, which is then only read once, to move
+                its conversations into the store
         """
         self.max_history = max_history
         self.persist_path = Path(persist_path) if persist_path else None
@@ -110,6 +115,8 @@ class ContextManager:
         self._lock = Lock()
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._encoded: Dict[str, str] = {}  # context id -> JSON, for unchanged contexts
+        self.store = store
+        self._dirty: set = set()  # contexts changed since the store last got them
         self._current_context_id: Optional[str] = None
 
         # Active buffers are assigned via _activate_context
@@ -118,8 +125,12 @@ class ContextManager:
         self._metadata: Dict[str, Any] = {}
 
         # Load from persistence if available (but don't auto-activate old contexts)
-        if self.persist_path and self.persist_path.exists():
-            self._load_from_file(auto_activate=False, normalize_and_save=not self.read_only)
+        if self.store is not None and self.store.exists:
+            self._load_from_store()
+        elif self.persist_path and self.persist_path.exists():
+            self._load_from_file(auto_activate=False, normalize_and_save=not self.read_only and self.store is None)
+            if self.store is not None and not self.read_only and self._contexts:
+                self._move_into_store()
 
         if create_initial_context and not self.read_only:
             # Always start with a fresh context
@@ -727,7 +738,7 @@ class ContextManager:
         with safe_lock(self._lock, timeout=5.0):
             if self._contexts.pop(context_id, None) is None:
                 return False
-            self._encoded.pop(context_id, None)
+            self._mark_changed(context_id)
             if self._current_context_id == context_id:
                 # Never leave the manager pointing at buffers that are gone.
                 self._activate_context(self._create_context())
@@ -1610,6 +1621,66 @@ class ContextManager:
     def _mark_changed(self, context_id: Optional[str]) -> None:
         """Re-encode *context_id* on the next save; unchanged contexts reuse their JSON."""
         self._encoded.pop(context_id, None)
+        if context_id is not None:
+            self._dirty.add(context_id)
+
+    def _save_to_store(self, *, strict: bool) -> None:
+        """Hand the changed conversations to the store; it writes them in the background."""
+        self._mark_changed(self._current_context_id)
+        for context_id in list(self._dirty):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                self.store.remove(context_id)
+                continue
+            encoded = self._encoded.get(context_id)
+            if encoded is None:
+                encoded = self._encoded[context_id] = self._encode_context(bucket)
+            self.store.put(context_id, encoded)
+        self._dirty.clear()
+        self.store.set_manifest({"version": 1, "active_context_id": self._current_context_id})
+        if strict and not self.store.flush(durable=True):
+            raise RuntimeError(f"Conversations could not be written to {self.store.directory}")
+
+    def _load_from_store(self) -> None:
+        """Every conversation of the store; its JSON stays cached until it changes."""
+        try:
+            _, found = self.store.read_all()
+        except Exception:
+            logger.exception("Conversation store %s cannot be read", self.store.directory)
+            raise
+        for context_id, text in found.items():
+            self._contexts[context_id] = self._bucket_from(json.loads(text))
+            self._encoded[context_id] = text
+        logger.info("Loaded %d conversation(s) from %s", len(found), self.store.directory)
+
+    def _move_into_store(self) -> None:
+        """Write the conversations read from *persist_path* into the store, then
+        keep that file aside: from now on the store is the record."""
+        self._dirty = set(self._contexts)
+        self._save_to_store(strict=True)
+        kept = self.persist_path.with_name(f"{self.persist_path.name}.migrated-{datetime.now():%Y%m%d-%H%M%S}")
+        os.replace(self.persist_path, kept)
+        logger.info(
+            "Moved %d conversation(s) into %s; the old file is kept as %s",
+            len(self._contexts), self.store.directory, kept.name,
+        )
+
+    def _bucket_from(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """A context bucket from its stored JSON."""
+        conversation = [
+            self._normalize_loaded_message(ContextMessage(**msg) if isinstance(msg, dict) else msg)
+            for msg in data.get("conversation_history", [])
+        ]
+        executions = [
+            AgentExecution(**ex) if isinstance(ex, dict) else ex for ex in data.get("execution_history", [])
+        ]
+        return {
+            "conversation": conversation,
+            "executions": executions,
+            "metadata": data.get("metadata", {}),
+            "created_at": data.get("created_at"),
+            "updated_at": data.get("updated_at"),
+        }
 
     def _encode_context(self, bucket: Dict[str, Any]) -> str:
         return json.dumps(
@@ -1637,6 +1708,9 @@ class ContextManager:
         they last changed, so a save costs one encode, not one per context. The
         file is replaced in one step: a crash leaves the previous version.
         """
+        if self.store is not None and not self.read_only:
+            self._save_to_store(strict=strict)
+            return
         if self.read_only or not self.persist_path:
             if strict:
                 raise RuntimeError("Conversation persistence is required for restart")
@@ -1666,6 +1740,7 @@ class ContextManager:
                     saved.flush()
                     os.fsync(saved.fileno())
             os.replace(partial, self.persist_path)
+            self._dirty.clear()
             if strict and os.name == "posix":
                 fd = os.open(self.persist_path.parent, os.O_RDONLY)
                 try:
@@ -1698,24 +1773,8 @@ class ContextManager:
             if contexts_data:
                 self._contexts = {}
                 for context_id, bucket in contexts_data.items():
-                    # Load and normalize messages to convert file images to base64
-                    conversation = []
-                    for msg in bucket.get("conversation_history", []):
-                        loaded_msg = ContextMessage(**msg) if isinstance(msg, dict) else msg
-                        normalized_msg = self._normalize_loaded_message(loaded_msg)
-                        conversation.append(normalized_msg)
-                    executions = [
-                        AgentExecution(**ex) if isinstance(ex, dict) else ex
-                        for ex in bucket.get("execution_history", [])
-                    ]
-                    metadata = bucket.get("metadata", {})
-                    self._contexts[context_id] = {
-                        "conversation": conversation,
-                        "executions": executions,
-                        "metadata": metadata,
-                        "created_at": bucket.get("created_at"),
-                        "updated_at": bucket.get("updated_at"),
-                    }
+                    # Messages are normalized: file images become base64.
+                    self._contexts[context_id] = self._bucket_from(bucket)
 
                 # Only activate context if auto_activate is True
                 if auto_activate:
