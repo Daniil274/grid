@@ -23,10 +23,13 @@ import { createComposer } from "./ui/composer.js";
 import { createPolicySwitch } from "./ui/policy-switch.js";
 import { createQueueTray } from "./ui/queue.js";
 import { createConversationList } from "./ui/sidebar.js";
+import { createProjectContext, setActiveProject, storedProject, trackActiveProject } from "./ui/projects.js";
 import { SpeechPlayer, synthesizeSentence } from "./ui/speech.js";
 import { ICONS } from "./ui/icons.js";
 import { createThemeToggle } from "./ui/theme.js";
 import { copyText, toast } from "./ui/toast.js";
+// Loaded for its side effect: turns #runtime-status into a polite live region.
+import "./ui/overlay.js";
 import { createTranscript } from "./ui/transcript.js";
 import { openReportDialog } from "./ui/report-dialog.js";
 import { openWorkspaceDialog } from "./ui/workspace-dialog.js";
@@ -100,7 +103,11 @@ async function refreshConversations() {
 async function refreshProjects() {
   try {
     const { projects } = await api.projects();
-    store.set({ projects: projects ?? [] });
+    const list = projects ?? [];
+    store.set({ projects: list });
+    // A project deleted under the choice: fall back to "no project".
+    const active = store.get().activeProject;
+    if (active && !list.some((project) => project.id === active)) setActiveProject(store, null);
   } catch (error) {
     console.warn("Could not list projects", error);
   }
@@ -252,9 +259,9 @@ async function boot() {
         toast(`Could not move chat: ${error.message}`, { tone: "error" });
       }
     },
-    onCreateProject: async (title) => {
+    onCreateProject: async (title, description = "") => {
       try {
-        const project = await api.createProject({ title });
+        const project = await api.createProject({ title, description });
         await refreshProjects();
         return project;
       } catch (error) {
@@ -262,7 +269,40 @@ async function boot() {
         return null;
       }
     },
+    onCreateSubproject: async (parentId, { title, description = "" }) => {
+      try {
+        const project = await api.createProject({ title, description, parent_id: parentId });
+        await refreshProjects();
+        return project;
+      } catch (error) {
+        toast(`Could not create sub-project: ${error.message}`, { tone: "error" });
+        return null;
+      }
+    },
+    onUpdateProject: async (id, patch) => {
+      try {
+        await api.updateProject(id, patch);
+        await refreshProjects();
+      } catch (error) {
+        toast(`Could not update project: ${error.message}`, { tone: "error" });
+        throw error;
+      }
+    },
+    onDeleteProject: async (id) => {
+      try {
+        await api.deleteProject(id);
+        if (store.get().activeProject === id) setActiveProject(store, null);
+        await refreshProjects();
+        await refreshConversations();
+      } catch (error) {
+        toast(`Could not delete project: ${error.message}`, { tone: "error" });
+        throw error;
+      }
+    },
   });
+
+  // "New chat will be created in: <project>", above the rail's list.
+  createProjectContext({ node: $("#project-context"), store });
 
   // Agents keep working in chats that are not on screen; poll while any is
   // running so their spinners stop when they finish.
@@ -519,10 +559,16 @@ async function boot() {
   // "Open in chat" on the systems page: a new chat with that system pinned.
   const params = new URLSearchParams(location.search);
   const pinned = params.get("system");
-  // ?project=<id> makes that project active: "New chat" starts in it.
-  const projectParam = params.get("project");
-  if (projectParam && store.get().projects.some((project) => project.id === projectParam)) {
-    store.set({ activeProject: projectParam });
+  const conversationParam = params.get("conversation");
+  const taskParam = params.get("task");
+  // ?project=<id>, or the project remembered from last time, is active on a
+  // plain visit: the rail filters to it and "New chat" starts in it. A deep
+  // link to a chat or a system carries its own context instead.
+  if (!pinned && !conversationParam) {
+    const wanted = params.get("project") || storedProject();
+    if (wanted && store.get().projects.some((project) => project.id === wanted)) {
+      store.set({ activeProject: wanted });
+    }
   }
   const [latest] = store.get().conversations;
   if (pinned && store.get().systems.some((system) => system.key === pinned)) {
@@ -531,13 +577,35 @@ async function boot() {
     await chat.startConversation();
     // "Describe it to the builder": the request waits in the composer, to read and send.
     if (params.get("prompt")) composer.setValue(params.get("prompt"));
-  } else if (params.get("conversation")) {
-    // /tasks links back with ?conversation=<id>: open that chat and clean the URL.
-    const conversationId = params.get("conversation");
+  } else if (conversationParam) {
+    // /tasks links back with ?conversation=<id> (and &task=<id>): open that
+    // chat, position its plan on the task, and clean the URL.
     history.replaceState(null, "", "/");
-    await chat.openConversation(conversationId);
+    if (taskParam) globalThis.GridFocusTask = taskParam;
+    await chat.openConversation(conversationParam);
+    // The stored plan arrives asynchronously; tell whatever card holds it.
+    if (taskParam) document.dispatchEvent(new CustomEvent("grid:focus-task", { detail: { id: taskParam } }));
+    // Focus the project that chat belongs to, so "back from tasks" lands in it.
+    const opened = store.get().conversations.find(
+      (conversation) => conversation.id === conversationParam || conversation.open_id === conversationParam,
+    );
+    setActiveProject(store, opened?.project ?? null);
   } else if (latest) {
     await chat.openConversation(latest.open_id ?? latest.id);
+  }
+
+  // Remember the active project across reloads and mirror it into ?project=.
+  trackActiveProject(store);
+
+  // The rail's "Tasks" link follows the active project, so it opens that
+  // project's board - not every task - while the chat is filtered to it.
+  const tasksLink = $("#open-tasks");
+  if (tasksLink) {
+    const syncTasksLink = ({ activeProject }) => {
+      tasksLink.href = activeProject ? `/tasks?project=${encodeURIComponent(activeProject)}` : "/tasks";
+    };
+    syncTasksLink(store.get());
+    store.watch(["activeProject"], syncTasksLink);
   }
 
   // The report button under answers shows only when the server takes reports.

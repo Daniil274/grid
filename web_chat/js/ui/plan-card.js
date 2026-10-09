@@ -229,6 +229,8 @@ export function createPlanCard() {
     "aria-controls": ids.panelResult, "aria-selected": "false", tabindex: "-1", text: "Result",
   });
   const body = h("div.taskDialog__body");
+  // The same task on the tracker page (?task=<id> opens its dialog there).
+  const trackerLink = h("a.taskDialog__tracker", { hidden: true, text: "Open in tracker" });
   const prevButton = h("button.btn.btn--ghost.btn--xs", { type: "button", text: "Previous" });
   const nextButton = h("button.btn.btn--ghost.btn--xs", { type: "button", text: "Next" });
   const count = h("span.taskDialog__count");
@@ -244,6 +246,7 @@ export function createPlanCard() {
       "header.taskDialog__head",
       {},
       h("span.taskDialog__badges", {}, stateBadge, idBadge),
+      trackerLink,
       closeButton,
     ),
     taskTitle,
@@ -316,6 +319,12 @@ export function createPlanCard() {
     replace(stateBadge, h("span.planCard__mark", { text: state.mark, "aria-label": state.label }), h("span", { text: state.label }));
     stateBadge.dataset.state = task.state;
     idBadge.textContent = task.id ?? "";
+    // The tracker's own page: a deep link to the same task's dialog.
+    trackerLink.hidden = !task.id;
+    if (task.id) {
+      trackerLink.href = `/tasks?task=${encodeURIComponent(task.id)}`;
+      trackerLink.title = `Open ${task.id} in the tracker`;
+    }
     taskTitle.textContent = task.title;
     const signature = JSON.stringify([
       {
@@ -378,6 +387,20 @@ export function createPlanCard() {
   };
   prevButton.addEventListener("click", () => stepTo(-1));
   nextButton.addEventListener("click", () => stepTo(1));
+
+  /** Open the dialog on a task of the plan, when the plan knows it. */
+  const focusKnown = (id) => {
+    if (!id) return false;
+    const task = allTasks.find((candidate) => candidate.id === id || candidate.key === id);
+    if (!task) return false;
+    openTask(task);
+    return true;
+  };
+  // A tracker deep link (?conversation=<id>&task=<id>): the card that knows
+  // the task opens it; the others ignore the call.
+  globalThis.document?.addEventListener?.("grid:focus-task", (event) => {
+    if (focusKnown(event?.detail?.id)) globalThis.GridFocusTask = null;
+  });
 
   /** Paint the head and the rows for the chosen scope. */
   const render = () => {
@@ -488,6 +511,14 @@ export function createPlanCard() {
           dismiss();
         }
       }
+      // A deep link from the tracker (?conversation=<id>&task=<id>): open that
+      // task once the plan reaches the screen, then forget the request.
+      if (globalThis.GridFocusTask && focusKnown(globalThis.GridFocusTask)) globalThis.GridFocusTask = null;
+    },
+
+    /** Open a task of the plan from outside (a tracker deep link). */
+    focusTask(id) {
+      return focusKnown(id);
     },
   };
 }

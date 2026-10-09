@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
   <meta name="color-scheme" content="dark light">
   <title>Grid Chat</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="/static/styles/settings.css">
   <link rel="stylesheet" href="/static/styles/voice.css">
   <link rel="stylesheet" href="/static/styles/review.css">
+  <link rel="stylesheet" href="/static/styles/projects.css">
 </head>
 <body>
   <div class="app">
@@ -30,6 +31,7 @@
           <input id="chat-search" type="search" placeholder="Search conversations" autocomplete="off">
         </div>
         <div class="rail__modes" id="chat-modes" role="tablist" aria-label="Conversation grouping"></div>
+        <div class="railProject" id="project-context" hidden></div>
       </div>
 
       <nav class="rail__list" id="chat-list" aria-label="Conversations"></nav>
