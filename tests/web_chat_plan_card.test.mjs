@@ -450,3 +450,30 @@ test("the head folds the card, and the reader's choice outlives the automatic on
   card.setCollapsed(true, { force: true });
   assert.ok(card.el.classList.contains("is-collapsed"));
 });
+
+test("the task dialog links out to the same task on the tracker page", () => {
+  const card = createPlanCard();
+  card.update(planStep(TASKS()));
+  const { dialog } = openRow(card, 1);
+
+  const link = dialog.find("taskDialog__tracker");
+  assert.equal(link.hidden, false, "a task with an id offers the tracker");
+  assert.equal(link.href, "/tasks?task=bd-2");
+  assert.match(link.title, /Open bd-2 in the tracker/);
+});
+
+test("a tracker deep link opens the plan on its task, once", () => {
+  const card = createPlanCard();
+  globalThis.GridFocusTask = "bd-3";
+  card.update(planStep(TASKS()));
+
+  const dialog = card.el.querySelector("dialog");
+  assert.equal(dialog.dataset.open, "true");
+  assert.equal(dialog.find("taskDialog__title").textContent, "Read the docs");
+  assert.equal(globalThis.GridFocusTask, null, "the request is consumed once the plan is on screen");
+
+  // focusTask opens a task of the plan and reports one it does not know.
+  assert.equal(card.focusTask("bd-1"), true);
+  assert.equal(dialog.find("taskDialog__title").textContent, "Research providers");
+  assert.equal(card.focusTask("not-in-this-plan"), false);
+});

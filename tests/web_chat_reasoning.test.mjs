@@ -329,3 +329,23 @@ test("an answer without a plan step shows the saved plan open, as the whole plan
   assert.equal(panel.planEl.classList.contains("is-collapsed"), false);
   assert.equal(panel.planEl.findAll("planCard__task").length, 2);
 });
+
+test("a tracker id in a step's refs deep-links into the tracker", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("s1", {
+      title: "beads_show",
+      refs: [
+        { kind: "task", label: "workspace-xiy", detail: "workspace-xiy" },
+        { kind: "file", label: "a.py", detail: "/x/a.py" },
+      ],
+    }),
+  ]);
+
+  const chips = topList(panel).findAll("refChip");
+  assert.equal(chips[0].getAttribute("href"), "/tasks?task=workspace-xiy");
+  assert.match(chips[0].getAttribute("title"), /Open workspace-xiy in the tracker/);
+  // A file ref is not a link: only a url or a tracker id carries an href.
+  assert.equal(chips[1].tagName, "SPAN");
+  assert.equal(chips[1].getAttribute("href"), null);
+});

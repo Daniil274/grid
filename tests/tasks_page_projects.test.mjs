@@ -114,7 +114,8 @@ test("a trace-only task is read-only in the dialog; a tracker task is editable",
   const save = buttonByText(page.dialog.el, "Save");
   assert.equal(save.hidden, true, "a trace-only task cannot be saved from here");
   const chip = page.dialog.el.querySelectorAll("a").find((node) => node.classList.contains("tasksChip"));
-  assert.equal(chip.getAttribute("href"), "/?conversation=c2");
+  // The dialog's chip carries the task too, so the chat's plan opens on it.
+  assert.equal(chip.getAttribute("href"), "/?conversation=c2&task=trace-2");
 
   page.dialog.openTask(page.tasks.find((task) => task.source === "bd"), page.tasks);
   assert.equal(save.hidden, false, "a task the tracker holds is editable");
@@ -129,5 +130,28 @@ test("loadProjects fills the filter and honours ?project=<id>", async () => {
     assert.equal(page.nodes.project.value, "p2");
   } finally {
     delete globalThis.location;
+  }
+});
+
+test("?conversation=<id> shows that chat's plan and keeps the URL", async () => {
+  const urls = [];
+  globalThis.location = { pathname: "/tasks", search: "?conversation=c9" };
+  globalThis.history = { replaceState: (_state, _title, url) => urls.push(url) };
+  api.tasks = async () => { throw new Error("the tracker must not be asked in conversation mode"); };
+  api.conversationPlan = async (id) => {
+    assert.equal(id, "c9");
+    return { tasks: [{ id: "trace-2", title: "From a plan", state: "ready", status: "open", source: "trace" }], total: 1 };
+  };
+  try {
+    const page = new TasksPage(nodes());
+    await page.load();
+    assert.equal(page._conversation, "c9");
+    assert.equal(page.tasks.length, 1);
+    // Every task points back at the chat it came from, task included.
+    assert.deepEqual(page.tasks[0].chat_ids, ["c9"]);
+    assert.deepEqual(urls, ["/tasks?conversation=c9"]);
+  } finally {
+    delete globalThis.location;
+    delete globalThis.history;
   }
 });

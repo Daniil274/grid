@@ -235,6 +235,15 @@ def test_context_refs_ignore_non_json_arguments():
     assert context_refs(None) == []
 
 
+def test_context_refs_pick_up_tracker_ids():
+    refs = context_refs('{"bead_id": "workspace-xiy", "task_id": "bd-7"}')
+
+    assert [(ref["kind"], ref["detail"]) for ref in (ref.as_dict() for ref in refs)] == [
+        ("task", "workspace-xiy"),
+        ("task", "bd-7"),
+    ]
+
+
 def test_legacy_traces_are_upgraded_to_steps():
     steps = normalize_steps(
         [
