@@ -18,13 +18,14 @@ unfinished dependencies and ``waiting`` with them.
 from __future__ import annotations
 
 import json
-from typing import Any, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from tools.beads_tools import BEAD_ID as _ID, _bd_problem, _init_args, bd_flag as _flag, run_bd
+from web_chat.plan_board import latest_plan
 
 #: bd's statuses; ``closed`` is not one of them: a task closes with its reason
 #: through its own route, never as a quiet status change.
@@ -88,6 +89,51 @@ def _dep_ids(issue: dict[str, Any]) -> List[str]:
     return ids
 
 
+def _graph(issues: List[dict[str, Any]]) -> dict[str, List[str]]:
+    """What each issue waits for, by id: the edges a cycle would run along."""
+    return {
+        issue["id"]: _dep_ids(issue)
+        for issue in issues
+        if isinstance(issue.get("id"), str)
+    }
+
+
+def _dependency_ring(graph: dict[str, List[str]], child: str, parent: str) -> Optional[List[str]]:
+    """The chain from *parent* down to *child*, when *parent* already waits for it.
+
+    Adding *child* - depends on - *parent* would then close a ring; the returned
+    path names the tasks already between them (``[parent, ..., child]``). None
+    when no such chain exists and the edge is safe.
+    """
+    if child == parent:
+        return [child]
+    seen = {parent}
+    previous: dict[str, str] = {}
+    queue = [parent]
+    while queue:
+        at = queue.pop(0)
+        for dep in graph.get(at) or []:
+            if dep in seen:
+                continue
+            seen.add(dep)
+            previous[dep] = at
+            if dep == child:
+                path = [child]
+                while path[-1] in previous:
+                    path.append(previous[path[-1]])
+                path.reverse()
+                return path
+            queue.append(dep)
+    return None
+
+
+def _ring_reason(names: dict[str, str], child: str, parent: str, ring: List[str]) -> str:
+    """Why the edge is refused, naming the ring in the tasks' own titles."""
+    label = lambda task_id: names.get(task_id) or task_id
+    chain = " → ".join(label(task_id) for task_id in [child, *ring])
+    return f"Cannot add this dependency: it would close a cycle ({chain}). Remove one of the links first."
+
+
 def _task(issue: dict[str, Any], statuses: Optional[dict[str, str]] = None) -> dict[str, Any]:
     """One bd issue as the page's task: the plan card's fields and states."""
     statuses = statuses or {}
@@ -121,6 +167,9 @@ def _task(issue: dict[str, Any], statuses: Optional[dict[str, str]] = None) -> d
         "close_reason": issue.get("close_reason") or None,
         "depends_on": depends_on,
         "waits_for": [titles.get(dep) or dep for dep in waits],
+        # What the run that took the task reported, when the source carried it
+        # (a bd issue does not; a plan snapshot does).
+        "report": issue.get("report") if isinstance(issue.get("report"), dict) else None,
     }
 
 
@@ -159,6 +208,41 @@ async def _bd_for(space: Any, args: List[str]) -> dict[str, Any]:
     return await run_bd(args, cwd=str(space.workspace_path))
 
 
+def _chat_sources(space: Any) -> Dict[str, List[str]]:
+    """The chats whose plans named each task id, by id.
+
+    Best-effort and read-only: the global tracker has no project to group by,
+    so a task's source chats come from scanning the conversations' newest
+    plans (the same slice a plan card reads). A space without the routes -
+    a stub in a test, an older server - simply answers none.
+    """
+    out: Dict[str, List[str]] = {}
+    manager = getattr(space, "context_manager", None)
+    if not callable(manager):
+        return out
+    try:
+        views = manager().conversation_views()
+    except Exception:  # noqa: BLE001 - sources are a convenience, never a failure
+        return out
+    for view in views or []:
+        context_id = view.get("id") if isinstance(view, dict) else None
+        if not context_id:
+            continue
+        try:
+            snapshot = manager().get_context_messages(context_id, limit=40)
+        except Exception:  # noqa: BLE001
+            continue
+        plan = latest_plan(list((snapshot or {}).get("messages") or []))
+        for task in (plan or {}).get("tasks") or []:
+            task_id = task.get("id") if isinstance(task, dict) else None
+            if not isinstance(task_id, str):
+                continue
+            ids = out.setdefault(task_id, [])
+            if context_id not in ids:
+                ids.append(context_id)
+    return out
+
+
 def register_task_routes(api: APIRouter, current_space: Any) -> None:
     """The tracker page's routes, each acting in the asking user's workspace."""
 
@@ -178,6 +262,12 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
         issues = _issues(res)
         statuses = {issue.get("id"): issue.get("status") for issue in issues}
         tasks = [_task(issue, statuses) for issue in issues]
+        # The chats that planned a task, so a bd-only board still points back.
+        sources = _chat_sources(space)
+        for task in tasks:
+            chat_ids = sources.get(task["id"])
+            if chat_ids:
+                task["chat_ids"] = chat_ids
         return JSONResponse({"available": True, "reason": None, "tasks": tasks, "total": len(tasks), "counts": _counts(tasks)})
 
     @api.get("/api/tasks/{bead_id}")
@@ -186,6 +276,7 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
         if not res.get("success"):
             raise HTTPException(status_code=404 if "not found" in _reason(res).lower() else 400, detail=_reason(res))
         task = _task(_one(res))
+        task["chat_ids"] = _chat_sources(space).get(task["id"], [])
         return JSONResponse(task)
 
     @api.post("/api/tasks")
@@ -252,12 +343,25 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
         bead_id: str, body: TaskDepRequest, space: Any = Depends(current_space)
     ) -> JSONResponse:
         # bd dep add/remove <blocked> <blocker>: this task waits for the parent.
-        res = await _bd_for(
-            space, ["dep", body.action, _issue_id(bead_id), _issue_id(body.parent_id)]
-        )
+        child = _issue_id(bead_id)
+        parent = _issue_id(body.parent_id)
+        if body.action == "add":
+            # bd does not refuse a ring itself, so the graph is checked here
+            # first: a task that already waits, through the chain, for *child*
+            # cannot also become its blocker. The reason names the would-be ring.
+            if child == parent:
+                raise HTTPException(status_code=400, detail="A task cannot depend on itself.")
+            listing = await _bd_for(space, ["list", "--limit", "0", "--all", "--json"])
+            data = listing.get("data") if listing.get("success") else None
+            issues = [issue for issue in data if isinstance(issue, dict)] if isinstance(data, list) else []
+            ring = _dependency_ring(_graph(issues), child, parent)
+            if ring:
+                names = {issue.get("id"): issue.get("title") for issue in issues}
+                raise HTTPException(status_code=400, detail=_ring_reason(names, child, parent, ring))
+        res = await _bd_for(space, ["dep", body.action, child, parent])
         if not res.get("success"):
             raise HTTPException(status_code=400, detail=_reason(res))
-        return JSONResponse({"ok": True, "id": bead_id, "action": body.action, "parent_id": body.parent_id})
+        return JSONResponse({"ok": True, "id": child, "action": body.action, "parent_id": parent})
 
     @api.post("/api/tasks/init")
     async def init_tracker(space: Any = Depends(current_space)) -> JSONResponse:
