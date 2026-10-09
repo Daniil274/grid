@@ -10,6 +10,7 @@
 
 import { h, replace } from "../lib/dom.js";
 import { api } from "../net/api.js";
+import { hideOverlay, showOverlay } from "../ui/overlay.js";
 import { toast } from "../ui/toast.js";
 
 const usd = (amount) => (amount >= 1 ? `$${amount.toFixed(2)}` : `$${amount.toFixed(4)}`);
@@ -46,12 +47,14 @@ export class PlanDrawer {
 
   async open() {
     this.nodes.drawer.classList.add("is-open");
+    showOverlay(this.nodes.drawer);
     this._status("");
     await this._load();
   }
 
   close() {
     this.nodes.drawer.classList.remove("is-open");
+    hideOverlay(this.nodes.drawer);
   }
 
   _status(text, tone = "") {

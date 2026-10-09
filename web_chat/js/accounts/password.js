@@ -4,6 +4,7 @@
  */
 
 import { api } from "../net/api.js";
+import { hideOverlay, showOverlay } from "../ui/overlay.js";
 
 export class PasswordDrawer {
   /** @param {object} nodes drawer, backdrop, closeButton, form, status */
@@ -25,11 +26,13 @@ export class PasswordDrawer {
     this.nodes.form.reset();
     this._status("");
     this.nodes.drawer.classList.add("is-open");
+    showOverlay(this.nodes.drawer);
     this.nodes.form.querySelector("input")?.focus();
   }
 
   close() {
     this.nodes.drawer.classList.remove("is-open");
+    hideOverlay(this.nodes.drawer);
   }
 
   _status(text, tone = "") {
