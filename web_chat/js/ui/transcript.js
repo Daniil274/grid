@@ -11,6 +11,28 @@ import { createMessage } from "./message.js";
 
 const BOTTOM_TOLERANCE_PX = 4;
 
+/**
+ * Make an answer a polite live region that speaks once, when it settles.
+ *
+ * The answer body is repainted every frame while tokens stream in, so a plain
+ * `aria-live` would narrate every fragment. `aria-busy` stays true for the
+ * whole turn - the caller brackets it with `setWaiting(true)`/`setWaiting(false)`
+ * (js/chat.js) - and only clears when the answer is whole, so a screen reader
+ * announces the finished answer rather than each token.
+ */
+function makeAnswerLive(message) {
+  const body = message.el.querySelector(".msg__body");
+  if (!body) return;
+  body.setAttribute("aria-live", "polite");
+  body.setAttribute("aria-atomic", "false");
+  body.setAttribute("aria-busy", "false");
+  const setWaiting = message.setWaiting;
+  message.setWaiting = (waiting) => {
+    body.setAttribute("aria-busy", String(Boolean(waiting)));
+    setWaiting(waiting);
+  };
+}
+
 /** Only actual reader input can take scrolling away from the live stream. */
 export function createScrollFollower(container) {
   let following = true;
@@ -139,6 +161,7 @@ export function createTranscript({
       const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage, onRestore: onRestoreCheckpoint });
       messages.set(message.id, message);
       container.append(message.el);
+      if (options.role === "assistant" && !options.content) makeAnswerLive(message);
       scrollToBottom(true);
       offersContinue();
       return message;

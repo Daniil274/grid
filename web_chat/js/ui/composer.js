@@ -63,7 +63,10 @@ export function createComposer({
     // While the agent works a message can still be sent: the chosen delivery
     // (or the decision model) says when it reaches the agent.
     sendButton.hidden = false;
-    deliverySelect.hidden = !streaming || !input.value.trim();
+    // Only tie the delivery menu to the streaming state, never to the input's
+    // text: toggling it on every keystroke shoved the Send / Stop buttons
+    // around while the user typed.
+    deliverySelect.hidden = !streaming;
     stopButton.hidden = !streaming;
     stopLabel.textContent = stopping ? "Stop now" : "Stop";
     stopButton.title = stopping
@@ -204,6 +207,21 @@ export function createComposer({
   continueButton.addEventListener("click", () => onContinue());
   store.subscribe(syncButtons);
   renderTray();
+
+  // Keep the jump-to-latest pill clear of the composer. Its height varies with
+  // the multiline input, the attachment and queue trays, and the voice panel,
+  // so publish the real height instead of hard-coding a bottom offset in CSS.
+  const wrap = root.closest?.(".composerWrap");
+  if (wrap && typeof ResizeObserver !== "undefined") {
+    const publishHeight = () => {
+      document.documentElement.style.setProperty(
+        "--composer-height",
+        `${Math.round(wrap.getBoundingClientRect().height)}px`,
+      );
+    };
+    new ResizeObserver(publishHeight).observe(wrap);
+    publishHeight();
+  }
 
   return {
     focus: () => input.focus(),
