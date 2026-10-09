@@ -10,18 +10,22 @@
   <link rel="stylesheet" href="/static/styles/tasks.css">
 </head>
 <body class="tasksPage">
-  <main class="tasksShell">
+  <main id="tasks-page-root" class="tasksShell">
     <header class="tasksHeader">
       <div><a href="/" class="tasksBrand">GRID / TRACKER</a><h1>Tasks</h1><p>The tracker of your workspace: what the chats planned and what stands beside them.</p></div>
       <div class="tasksActions">
         <label><input id="live" type="checkbox" checked> Live · 30s</label>
         <button id="refresh" class="btn btn--ghost">Refresh</button>
-        <button id="theme" class="btn btn--ghost">Theme</button>
+        <label class="tasksTheme">Theme<select id="theme" aria-label="Tracker theme">
+          <option value="light">Light · Studio</option>
+          <option value="dark">Dark · Midnight</option>
+          <option value="vivid">Contrast · Aurora</option>
+        </select></label>
         <button id="new-task" class="btn btn--primary">New task</button>
       </div>
     </header>
     <form id="filters" class="tasksFilters">
-      <label class="tasksSearch">Search<input id="search" type="search" placeholder="Title, id or notes"></label>
+      <label class="tasksSearch">Search<input id="search" type="search" placeholder="Title, id, notes, acceptance or close reason"></label>
       <label>Status<select id="status-filter">
         <option value="" selected>All tasks</option>
         <option value="open">Open</option>
@@ -37,13 +41,15 @@
         <option value="0">P0</option><option value="1">P1</option><option value="2">P2</option>
         <option value="3">P3</option><option value="4">P4</option>
       </select></label>
-      <div class="tasksViews" role="tablist" aria-label="View">
-        <button id="view-board" class="btn btn--ghost" type="button" role="tab" aria-selected="true">Board</button>
-        <button id="view-list" class="btn btn--ghost" type="button" role="tab" aria-selected="false">List</button>
+      <div class="tasksViews" role="group" aria-label="View">
+        <button id="view-board" class="btn btn--ghost" type="button" aria-pressed="true">Board</button>
+        <button id="view-list" class="btn btn--ghost" type="button" aria-pressed="false">Table</button>
       </div>
     </form>
+    <div id="presets" class="tasksPresets" role="group" aria-label="Quick filters"></div>
+    <div id="active-filters" class="tasksActiveFilters" aria-label="Active filters" hidden></div>
+    <div id="undo" class="tasksUndo" role="status" aria-live="polite" hidden></div>
     <div id="status" role="status" aria-live="polite">Loading tasks…</div>
-    <section id="metrics" class="tasksMetrics" aria-label="Task counts"></section>
     <section id="board" class="tasksBoard" aria-label="Tasks by state"></section>
     <section id="list" class="tasksListWrap" hidden aria-label="Tasks as a table">
       <div class="tasksTableScroll"><table class="tasksTable">
