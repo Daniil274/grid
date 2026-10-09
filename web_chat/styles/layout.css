@@ -58,6 +58,12 @@
   outline: none;
 }
 
+/* The border change alone is too quiet for a keyboard ring: restore one. */
+.rail__search input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .rail__list {
   flex: 1;
   min-height: 0;
@@ -137,6 +143,48 @@
   text-transform: uppercase;
 }
 
+/* The "No project" bucket renders its section label as a button (so the
+   unfiled bucket is one click away), but it should still read as a section
+   heading, not a native pill button. */
+.chatGroup__label--btn {
+  display: block;
+  width: 100%;
+  margin: 0;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+  transition: color 120ms var(--ease);
+}
+
+.chatGroup__label--btn:hover {
+  color: var(--text-2);
+}
+
+.chatGroup__label--btn:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+  color: var(--text);
+}
+
+.chatGroup__label--btn.is-active {
+  color: var(--accent);
+}
+
+/* The separator above the unfiled bucket is only meaningful when a project
+   tree sits above it; drop it when "No project" is the first thing shown. */
+.chatGroup.projectGroup--none:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
 .chatRow {
   position: relative;
   border: 1px solid transparent;
@@ -192,6 +240,18 @@
 .chatRow:hover .chatRow__actions,
 .chatRow:focus-within .chatRow__actions {
   display: flex;
+}
+
+/* Touch devices have no hover: keep the rename / delete surface reachable by
+   showing it permanently, and reserve room so it never covers the title. */
+@media (hover: none), (pointer: coarse) {
+  .chatRow__actions {
+    display: flex;
+  }
+
+  .chatRow__main {
+    padding-right: 84px;
+  }
 }
 
 .chatRow__actions .iconBtn:hover {

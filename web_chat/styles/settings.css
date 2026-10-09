@@ -688,6 +688,12 @@
   outline: none;
 }
 
+/* The border alone is not a focus ring: keep a keyboard one visible. */
+.yamlEditor:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 @media (max-width: 860px) {
   .master {
     grid-template-columns: minmax(0, 1fr);
