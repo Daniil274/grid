@@ -13,6 +13,7 @@
 import { h, icon, replace } from "../lib/dom.js";
 import { dayBucket, plural, shortStamp } from "../lib/format.js";
 import { ICONS } from "./icons.js";
+import { openProjectDialog } from "./project-dialog.js";
 
 const BUCKET_ORDER = ["Today", "Yesterday", "This week", "This month", "Earlier"];
 
@@ -39,6 +40,22 @@ function projectChildren(projects) {
   return children;
 }
 
+/** The project and every project under it, by id. */
+function subtreeIds(projects, rootId) {
+  const ids = new Set([rootId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const project of projects) {
+      if (project.parent_id && ids.has(project.parent_id) && !ids.has(project.id)) {
+        ids.add(project.id);
+        grew = true;
+      }
+    }
+  }
+  return ids;
+}
+
 export function createConversationList({
   container,
   searchInput,
@@ -49,10 +66,14 @@ export function createConversationList({
   onDelete,
   onMoveToProject,
   onCreateProject,
+  onCreateSubproject,
+  onUpdateProject,
+  onDeleteProject,
 }) {
   let query = "";
   let renaming = null; // id of the row whose title is an input right now
   let moving = null; // id of the row whose "move to project" popover is open
+  let projectMenu = null; // id of the project whose actions menu is open
   let mode = "date"; // "date" | "projects"
   const collapsed = new Set(); // project ids whose chats are hidden
 
@@ -134,6 +155,77 @@ export function createConversationList({
     );
   };
 
+  // -- the project's own actions (menu, dialog) ---------------------------
+  const openCreate = (parent) =>
+    openProjectDialog({
+      mode: "create",
+      parent,
+      projects: store.get().projects ?? [],
+      onSubmit: async ({ title, description, parent_id }) => {
+        projectMenu = null;
+        if (parent_id) await onCreateSubproject?.(parent_id, { title, description });
+        else await onCreateProject?.(title, description);
+        render(store.get());
+      },
+    });
+
+  const openEdit = (project) =>
+    openProjectDialog({
+      mode: "edit",
+      project,
+      projects: store.get().projects ?? [],
+      onSubmit: async (patch) => {
+        projectMenu = null;
+        await onUpdateProject?.(project.id, patch);
+        render(store.get());
+      },
+      onDelete: async () => {
+        projectMenu = null;
+        await onDeleteProject?.(project.id);
+        render(store.get());
+      },
+    });
+
+  const archiveProject = async (project, archived) => {
+    projectMenu = null;
+    try {
+      await onUpdateProject?.(project.id, { archived });
+    } catch {
+      /* the callback already reported it */
+    }
+    render(store.get());
+  };
+
+  const projectMenuNode = (project, depth) => {
+    // A project at the deepest level the store allows (3) takes no sub-project.
+    const canNest = depth + 2 <= 3;
+    // A handler closes the menu, then acts, so a dialog opens over a clean rail.
+    const item = (label, glyph, handler) =>
+      h(
+        "button.projectMenu__item",
+        {
+          type: "button",
+          role: "menuitem",
+          on: { click: () => { projectMenu = null; handler(); } },
+        },
+        icon(glyph, { size: 14 }),
+        h("span", { text: label }),
+      );
+    return h(
+      "div.projectMenu",
+      { role: "menu", "aria-label": `Actions for ${project.title}`, on: { click: (event) => event?.stopPropagation?.() } },
+      canNest ? item("New sub-project", ICONS.plus, () => openCreate(project)) : null,
+      item("Edit project", ICONS.edit, () => openEdit(project)),
+      h(
+        "a.projectMenu__item",
+        { href: `/tasks?project=${encodeURIComponent(project.id)}`, title: `Tasks of ${project.title}` },
+        icon(ICONS.check, { size: 14 }),
+        h("span", { text: "Open tasks" }),
+      ),
+      item(project.archived ? "Unarchive" : "Archive", ICONS.folder, () => void archiveProject(project, !project.archived)),
+    );
+  };
+
   const row = (conversation, activeId, projects) => {
     const title = h("span.chatRow__title", { text: conversation.title || "New chat" });
     const main = h(
@@ -165,6 +257,13 @@ export function createConversationList({
         moving = moving === conversation.id ? null : conversation.id;
         render(store.get());
       }),
+      // This chat's plan, on the tracker page: the tasks its turns planned.
+      h("a.iconBtn.iconBtn--xs", {
+        href: `/tasks?conversation=${encodeURIComponent(conversation.id)}`,
+        title: "Open tasks planned in this chat",
+        "aria-label": "Open tasks planned in this chat",
+        on: { click: (event) => event?.stopPropagation?.() },
+      }, icon(ICONS.check, { size: 13 })),
       actionButton("Rename chat", ICONS.edit, () => startRename(conversation, title)),
       actionButton("Delete chat", ICONS.trash, () => {
         if (confirm(`Delete "${conversation.title || "New chat"}"? This cannot be undone.`)) onDelete(conversation.id);
@@ -223,20 +322,37 @@ export function createConversationList({
           },
         },
       }, icon(ICONS.chevron, { size: 13 }));
+      const isActive = activeProject === project.id;
       const head = h("div.projectGroup__head", {
-        class: activeProject === project.id ? "is-active" : "",
+        class: [isActive ? "is-active" : "", project.archived ? "is-archived" : ""].filter(Boolean).join(" "),
         style: { "--depth": String(depth) },
       },
         chevron,
         h("button.projectGroup__title", {
           type: "button",
-          title: `Chat in ${project.title}`,
-          on: { click: () => store.set({ activeProject: project.id }) },
+          title: `Filter chats to ${project.title} and start new ones in it`,
+          on: { click: () => { projectMenu = null; store.set({ activeProject: project.id }); } },
         },
           h("span.projectGroup__name", { text: project.title }),
+          project.archived ? h("span.projectGroup__tag", { text: "archived" }) : null,
           items.length ? h("span.projectGroup__count", { text: String(items.length) }) : null,
         ),
+        h("button.projectGroup__menu", {
+          type: "button",
+          class: projectMenu === project.id ? "is-open" : "",
+          title: "Project actions",
+          "aria-label": `Actions for ${project.title}`,
+          "aria-haspopup": "menu",
+          on: {
+            click: (event) => {
+              event?.stopPropagation?.();
+              projectMenu = projectMenu === project.id ? null : project.id;
+              render(store.get());
+            },
+          },
+        }, icon(ICONS.sliders, { size: 14 })),
       );
+      if (projectMenu === project.id) head.append(projectMenuNode(project, depth));
       const group = h("div.projectGroup", {}, head);
       if (!isCollapsed) {
         for (const conversation of items) group.append(row(conversation, activeId, projects));
@@ -245,8 +361,14 @@ export function createConversationList({
       return group;
     };
 
-    const groups = (children.get(null) ?? []).map((project) => node(project, 0)).filter(Boolean);
-    if (unfiled.length) {
+    // Focused on one project: show that project and everything under it.
+    const byId = new Map(projects.map((project) => [project.id, project]));
+    const focused = activeProject && byId.has(activeProject) ? byId.get(activeProject) : null;
+    const roots = focused ? [focused] : (children.get(null) ?? []);
+    const groups = roots.map((project) => node(project, 0)).filter(Boolean);
+    // The unfiled bucket stays visible whenever there is a tree to file into,
+    // so "start outside any project" is always one click away.
+    if (projects.length || unfiled.length) {
       groups.push(h("div.chatGroup.projectGroup--none", {},
         h("button.chatGroup__label.chatGroup__label--btn", {
           type: "button",
@@ -259,8 +381,13 @@ export function createConversationList({
       ));
     }
     if (!groups.length) {
-      replace(container, h("p.rail__empty", { text: query ? "Nothing matches that search." : "No projects yet." }));
-      return;
+      groups.push(h("p.rail__empty", { text: query ? "Nothing matches that search." : "No projects yet." }));
+    }
+    if (onCreateProject && !query) {
+      groups.push(h("button.projectGroup__new", {
+        type: "button",
+        on: { click: () => openCreate(null) },
+      }, icon(ICONS.plus, { size: 14 }), h("span", { text: "New project" })));
     }
     replace(container, groups);
   };
@@ -268,7 +395,12 @@ export function createConversationList({
   const render = ({ conversations, contextId, rootId, projects = [], activeProject = null }) => {
     if (renaming) return;
     const index = new Map(projects.map((project) => [project.id, project]));
-    const visible = conversations.filter((conversation) => matches(conversation, query, index.get(conversation.project)?.title));
+    let visible = conversations.filter((conversation) => matches(conversation, query, index.get(conversation.project)?.title));
+    // The active project is also the rail's filter: only it and its sub-projects.
+    if (activeProject && index.has(activeProject)) {
+      const scope = subtreeIds(projects, activeProject);
+      visible = visible.filter((conversation) => conversation.project && scope.has(conversation.project));
+    }
     const activeId = rootId ?? contextId;
     if (mode === "projects") renderProjects(visible, projects, activeId, activeProject);
     else renderDate(visible, activeId, projects);
@@ -287,6 +419,13 @@ export function createConversationList({
 
   searchInput.addEventListener("input", () => {
     query = searchInput.value.trim().toLowerCase();
+    render(store.get());
+  });
+
+  // A click anywhere but the open project menu (or its button) closes it.
+  document.addEventListener?.("click", () => {
+    if (projectMenu == null) return;
+    projectMenu = null;
     render(store.get());
   });
 
