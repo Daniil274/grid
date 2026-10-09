@@ -54,10 +54,14 @@ const familyIcon = (step) => ICONS[FAMILY_ICONS[toolFamily(step.tool)] ?? ""] ??
 
 function refChip(ref) {
   const label = h("span", { text: ref.label });
-  const glyph = icon(ICONS[ref.kind] ?? ICONS.file, { size: 12 });
+  const glyph = icon(ICONS[ref.kind] ?? (ref.kind === "task" ? ICONS.check : ICONS.file), { size: 12 });
   const title = ref.detail || ref.label;
   if (ref.kind === "url" && /^https?:\/\//i.test(ref.detail)) {
     return h("a.refChip", { href: ref.detail, target: "_blank", rel: "noreferrer noopener", title }, glyph, label);
+  }
+  // A tracker id deep-links into the tracker: the same task, one click away.
+  if (ref.kind === "task" && ref.detail) {
+    return h("a.refChip", { href: `/tasks?task=${encodeURIComponent(ref.detail)}`, title: `Open ${ref.detail} in the tracker` }, glyph, label);
   }
   return h("span.refChip", { title }, glyph, label);
 }

@@ -70,7 +70,7 @@ class StepStatus(str, Enum):
 class ContextRef:
     """One thing the agent looked at, rendered as a chip underneath its step."""
 
-    kind: str  # "file" | "url" | "query" | "agent"
+    kind: str  # "file" | "url" | "query" | "agent" | "task"
     label: str
     detail: str = ""
 
@@ -170,6 +170,8 @@ _REF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("url", ("url", "urls", "link", "links", "source")),
     ("file", ("path", "paths", "file", "files", "file_path", "filename", "directory")),
     ("query", ("query", "q", "pattern", "search", "question", "keyword")),
+    # A tracker id a beads tool touched: the chip deep-links into /tasks.
+    ("task", ("bead_id", "bead_ids", "task_id", "issue_id")),
 )
 
 
@@ -183,7 +185,7 @@ def _ref_label(kind: str, value: str) -> str:
 
 
 def context_refs(arguments: Any) -> list[ContextRef]:
-    """Pull the files, URLs and queries a tool call touched out of its arguments.
+    """Pull the files, URLs, queries and tracker ids a tool call touched out of its arguments.
 
     Deliberately shallow and key-driven: the chips must never claim the agent
     read something it did not, so only well-known argument names are trusted.
