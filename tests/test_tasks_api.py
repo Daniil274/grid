@@ -147,7 +147,48 @@ def test_a_dependency_add_names_the_child_and_the_parent():
     client = TestClient(make_app(bd))
     body = client.post("/api/tasks/p-2/deps", json={"action": "add", "parent_id": "p-1"}).json()
     assert body["ok"] is True
-    assert bd.calls[0][0] == ["dep", "add", "p-2", "p-1"]
+    # The graph is read first (to refuse a ring) and the edge is added last.
+    assert bd.calls[-1][0] == ["dep", "add", "p-2", "p-1"]
+    assert bd.calls[0][0][:2] == ["list", "--limit"]
+
+
+def test_a_dependency_that_would_close_a_ring_is_refused_with_its_chain():
+    def answer(args, cwd):
+        if args[0] == "list":
+            # p-1 waits for p-3, which waits for p-2: p-2 → p-1 would close the ring.
+            return {
+                "success": True,
+                "data": [
+                    issue("p-1", dependencies=[{"type": "blocks", "depends_on_id": "p-3", "title": "Third"}]),
+                    issue("p-3", dependencies=[{"type": "blocks", "depends_on_id": "p-2", "title": "Second"}]),
+                    issue("p-2"),
+                ],
+            }
+        return {"success": True, "output": "ok"}
+
+    bd = Bd(answer)
+    client = TestClient(make_app(bd))
+    response = client.post("/api/tasks/p-2/deps", json={"action": "add", "parent_id": "p-1"})
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "cycle" in detail and "Task p-2" in detail and "Task p-1" in detail
+    # bd's own dep was never asked: the ring never reached the tracker.
+    assert all(call[0][0] != "dep" for call in bd.calls)
+
+
+def test_a_task_cannot_depend_on_itself():
+    bd = Bd({"success": True, "data": []})
+    client = TestClient(make_app(bd))
+    response = client.post("/api/tasks/p-1/deps", json={"action": "add", "parent_id": "p-1"})
+    assert response.status_code == 400 and "itself" in response.json()["detail"]
+    assert bd.calls == []  # nothing was asked of bd
+
+
+def test_removing_a_dependency_never_reads_the_graph_or_checks_rings():
+    bd = Bd({"success": True})
+    client = TestClient(make_app(bd))
+    assert client.post("/api/tasks/p-2/deps", json={"action": "remove", "parent_id": "p-1"}).status_code == 200
+    assert bd.calls == [(["dep", "remove", "p-2", "p-1"], "/tmp/anon")]
 
 
 def test_init_starts_a_tracker_and_tolerates_one_that_already_is():
@@ -202,3 +243,68 @@ def test_a_host_without_bd_answers_that_the_tracker_is_unavailable():
     response = TestClient(app).get("/api/tasks")
     assert response.status_code == 503 and "unavailable" in response.json()["detail"]
     assert bd.calls == []  # bd was never asked to run
+
+
+def test_list_names_the_chats_whose_plans_hold_each_task():
+    """R5: the global board still points back at the chat that planned a task."""
+    plan_task = {"id": "p-1", "key": "k", "title": "Task p-1"}
+
+    class Manager:
+        def conversation_views(self):
+            return [{"id": "c-1"}, {"id": "c-2"}]
+
+        def get_context_messages(self, context_id, limit=40):
+            if context_id == "c-1":
+                return {"messages": [{"metadata": {"trace": [{"kind": "plan", "plan": {"tasks": [plan_task]}}]}}]}
+            return {"messages": []}
+
+    space = SimpleNamespace(workspace_path="/tmp/anon", context_manager=lambda: Manager())
+    bd = Bd({"success": True, "data": [issue("p-1")]})
+    tasks_api._bd_problem = lambda: None
+    tasks_api.run_bd = bd
+    app = FastAPI()
+    api = APIRouter()
+
+    def current_space(request: Request):
+        return space
+
+    register_task_routes(api, current_space)
+    app.include_router(api)
+
+    body = TestClient(app).get("/api/tasks").json()
+    assert body["tasks"][0]["chat_ids"] == ["c-1"]
+
+
+def test_a_space_without_a_plan_route_still_lists_tasks_without_chat_ids():
+    """R5 is best-effort: a space that cannot answer views never fails the list."""
+    space = SimpleNamespace(workspace_path="/tmp/anon")  # no context_manager at all
+    bd = Bd({"success": True, "data": [issue("p-1")]})
+    tasks_api._bd_problem = lambda: None
+    tasks_api.run_bd = bd
+    app = FastAPI()
+    api = APIRouter()
+
+    def current_space(request: Request):
+        return space
+
+    register_task_routes(api, current_space)
+    app.include_router(api)
+
+    body = TestClient(app).get("/api/tasks").json()
+    # No source chat is named; the list still answers, just without a chip back.
+    assert body["tasks"][0].get("chat_ids") in (None, [])
+
+
+def test_a_tasks_report_travels_from_the_source_to_the_page():
+    """R6: what the run that took the task reported reaches the tracker."""
+    report = {"status": "completed", "final": "Done.", "seconds": 3}
+    bd = Bd(lambda args, cwd: {
+        "success": True,
+        "data": [issue("p-1", report=report), issue("p-2")],
+    })
+    client = TestClient(make_app(bd))
+    body = client.get("/api/tasks").json()
+
+    assert body["tasks"][0]["report"] == report
+    # An issue with no report carries None, never a made-up one.
+    assert body["tasks"][1]["report"] is None

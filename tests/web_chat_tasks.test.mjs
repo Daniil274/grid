@@ -86,7 +86,7 @@ test("matchesFilters reads text, type and priority", () => {
   assert.equal(matchesFilters({ ...task, priority: 0 }, { priority: "0" }), true);
 });
 
-test("load reads the API and renders the board, the metrics and the list", async () => {
+test("load renders one board/list without duplicated metric panels", async () => {
   api.tasks = async () => report(TASKS());
   const page = new TasksPage(nodes());
   await page.load();
@@ -94,7 +94,8 @@ test("load reads the API and renders the board, the metrics and the list", async
   assert.equal(page.tasks.length, 2);
   assert.equal(page.nodes.board.findAll("tasksColumn").length, BOARD_ORDER.length);
   assert.equal(page.nodes.board.findAll("tasksCard").length, 2);
-  assert.equal(page.nodes.metrics.findAll("tasksMetric").length, BOARD_ORDER.length);
+  assert.equal(page.nodes.metrics.findAll("tasksMetric").length, 0);
+  assert.equal(page.nodes.metrics.hidden, true);
   assert.equal(page.nodes.listRows.querySelectorAll("tr").length, 2);
   assert.match(page.nodes.status.textContent, /2 of 2 tasks shown/);
 });
@@ -180,6 +181,7 @@ test("saving an edited task patches only the fields that changed", async () => {
   const page = new TasksPage(nodes());
   await page.load();
   page.dialog.openTask(page.tasks[0], page.tasks);
+  buttonByText(page.dialog.el, "Edit").click();
   byLabel(page.dialog.el, "Title").value = "Alpha v2";
   const [form] = page.dialog.el.querySelectorAll("form");
   await form.listeners.submit[0]({ preventDefault() {} });
@@ -204,7 +206,7 @@ test("closing a task records the reason through the API", async () => {
   assert.deepEqual(closed, [{ id: "bd-1", reason: "table written" }]);
 });
 
-test("adding a dependency calls the API with the chosen parent", async () => {
+test("dependency changes are drafts until Save calls the existing API", async () => {
   const deps = [];
   api.tasks = async () => report(TASKS());
   api.taskDep = async (id, action, parentId) => {
@@ -215,8 +217,11 @@ test("adding a dependency calls the API with the chosen parent", async () => {
   const page = new TasksPage(nodes());
   await page.load();
   page.dialog.openTask(page.tasks[0], page.tasks);
+  buttonByText(page.dialog.el, "Edit").click();
   byLabel(page.dialog.el, "Depends on").value = "bd-2";
   await buttonByText(page.dialog.el, "Depends on").listeners.click[0]();
 
+  assert.deepEqual(deps, []);
+  await page.dialog.el.querySelector("form").listeners.submit[0]({ preventDefault() {} });
   assert.deepEqual(deps, [{ id: "bd-1", action: "add", parentId: "bd-2" }]);
 });
