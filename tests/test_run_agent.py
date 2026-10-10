@@ -79,18 +79,41 @@ def use(runner):
     return patch.object(agents, "Runner", runner)
 
 
-async def test_the_answer_ends_with_its_context_id_once(factory):
+async def test_the_answer_carries_no_service_context_id(factory):
+    """The answer is the model's text: the app appends no service footer."""
     runner = ScriptedRunner("Done.")
     with use(runner):
         answer = await factory.run_agent("worker", "Fix it")
 
-    context_id = factory.context_manager.get_current_context_id()
-    assert answer == f"Done.\n\nContext ID: {context_id}"
+    assert answer == "Done."
 
+    # A legacy model-written footer is passed through untouched, once; the
+    # projections that reach the model strip it (test_context).
+    context_id = factory.context_manager.get_current_context_id()
     runner = ScriptedRunner(f"Again.\n\nContext ID: {context_id}")
     with use(runner):
         answer = await factory.run_agent("worker", "More", context_id=context_id)
     assert answer.count("Context ID:") == 1
+
+
+async def test_a_legacy_session_footer_never_reaches_the_model(factory):
+    """A stored SDK session whose legacy answers end with the service
+    ``Context ID`` footer is rewritten before the model reads it."""
+    context_id = factory.context_manager.get_current_context_id()
+    session = factory._get_agent_session("worker", context_id)
+    await session.add_items(
+        [
+            {"role": "user", "content": "Start"},
+            {"role": "assistant", "content": f"Old.\n\nContext ID: {context_id}"},
+        ]
+    )
+
+    with use(ScriptedRunner("New.")):
+        await factory.run_agent("worker", "Go", context_id=context_id)
+
+    items = await factory._get_agent_session("worker", context_id).get_items()
+    assert "Context ID:" not in str(items)
+    assert "Old." in str(items)  # the answer is kept, the footer dropped
 
 
 async def test_history_reaches_the_model_through_one_channel(factory):

@@ -3,6 +3,7 @@ Advanced context management for Grid agents with memory and persistence.
 """
 
 import os
+import re
 from typing import Callable, Iterable, List, Dict, Optional, Any, Tuple, Union
 from datetime import datetime
 from threading import Lock
@@ -32,6 +33,38 @@ logger = Logger.get_logger("context")
 #: Statuses of ``pending_agent_run`` while its turn has not ended.
 ACTIVE_RUN_STATUSES = ("running", "retrying")
 #: A turn that failed; before interruption records existed, nothing else was kept.
+
+# The service footer legacy answers and agent-tool results end with: a trailing
+# "Context ID: ctx-<hex>" line. It must never reach the model again; a context
+# id a user typed into the dialogue is not a footer and stays.
+CONTEXT_ID_FOOTER_RE = re.compile(r"\s*\nContext ID: ctx-[0-9a-fA-F]{8,}[ \t]*$")
+
+
+def strip_service_context_footer(text: str) -> str:
+    """*text* without a trailing service ``Context ID: ctx-...`` footer line.
+
+    Legacy answers were told to end with that line, so stored history may
+    still carry it. Only a footer at the very end of the text is removed.
+    """
+    match = CONTEXT_ID_FOOTER_RE.search(text)
+    return text[: match.start()].rstrip() if match else text
+
+
+def _assistant_content_without_footer(role: str, content: Any) -> Any:
+    """*content* of an assistant message with a legacy service footer removed."""
+    if role != "assistant":
+        return content
+    if isinstance(content, str):
+        return strip_service_context_footer(content)
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append({**part, "text": strip_service_context_footer(part["text"])})
+            else:
+                parts.append(part)
+        return parts
+    return content
 FAILED_RUN_STATUS = "failed"
 
 
@@ -494,6 +527,10 @@ class ContextManager:
                         except Exception:
                             content = "[multimodal content]"
 
+                    # A legacy answer's service footer never reaches the model.
+                    if msg.role == "assistant":
+                        content = strip_service_context_footer(content)
+
                     # Hard trim very long single messages to keep prompt lightweight
                     if len(content) > 2000:
                         content = content[:2000] + "…"
@@ -594,14 +631,14 @@ class ContextManager:
                     if msg.role == "assistant" and not isinstance(msg.content, str):
                         # An answer reaches the model as text; the images an
                         # image model generated with it stay in the chat.
-                        sdk_messages.append({"role": "assistant", "content": msg.get_text_content()})
+                        sdk_messages.append({"role": "assistant", "content": strip_service_context_footer(msg.get_text_content())})
                         continue
                     # Convert to SDK format
                     if isinstance(msg.content, str):
                         # Simple text message
                         sdk_messages.append({
                             "role": msg.role,
-                            "content": msg.content
+                            "content": _assistant_content_without_footer(msg.role, msg.content)
                         })
                     else:
                         # Multimodal message - convert content parts
@@ -614,7 +651,7 @@ class ContextManager:
                         if isinstance(content, str):
                             sdk_messages.append({
                                 "role": msg.role,
-                                "content": content
+                                "content": _assistant_content_without_footer(msg.role, content)
                             })
                         else:
                             # List of content parts
@@ -627,7 +664,7 @@ class ContextManager:
                             
                             sdk_messages.append({
                                 "role": msg.role,
-                                "content": content
+                                "content": _assistant_content_without_footer(msg.role, content)
                             })
                 
                 return sdk_messages
@@ -1672,7 +1709,8 @@ class ContextManager:
             for msg in data.get("conversation_history", [])
         ]
         executions = [
-            AgentExecution(**ex) if isinstance(ex, dict) else ex for ex in data.get("execution_history", [])
+            self._execution_without_footer(AgentExecution(**ex) if isinstance(ex, dict) else ex)
+            for ex in data.get("execution_history", [])
         ]
         return {
             "conversation": conversation,
@@ -1681,6 +1719,18 @@ class ContextManager:
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
         }
+
+    @staticmethod
+    def _execution_without_footer(execution: Any) -> Any:
+        """A loaded execution without a legacy service footer on its output.
+
+        Legacy agent-tool results ended with the ``Context ID`` footer; the
+        execution record feeds sub-agent context, which the model reads.
+        """
+        output = getattr(execution, "output", None)
+        if isinstance(output, str):
+            execution.output = strip_service_context_footer(output)
+        return execution
 
     def _encode_context(self, bucket: Dict[str, Any]) -> str:
         return json.dumps(
@@ -1804,7 +1854,7 @@ class ContextManager:
                     normalized_msg = self._normalize_loaded_message(loaded_msg)
                     conversation.append(normalized_msg)
                 executions = [
-                    AgentExecution(**ex) if isinstance(ex, dict) else ex
+                    self._execution_without_footer(AgentExecution(**ex) if isinstance(ex, dict) else ex)
                     for ex in data.get("execution_history", [])
                 ]
                 bucket = self._contexts[default_context]
@@ -1893,7 +1943,11 @@ class ContextManager:
                     "assistant": "Assistant",
                     "system": "System"
                 }.get(msg.role, msg.role)
-                content = msg.content.strip()
+                raw_content = msg.content
+                if msg.role == "assistant" and isinstance(raw_content, str):
+                    # A legacy answer's service footer never reaches the model.
+                    raw_content = strip_service_context_footer(raw_content)
+                content = raw_content.strip()
                 if len(content) > 2000:
                     content = content[:2000] + "…"
                 lines.append(f"{role}: {content}")
@@ -1912,7 +1966,11 @@ class ContextManager:
                         "assistant": "Assistant",
                         "system": "System"
                     }.get(msg.role, msg.role)
-                    content = msg.content.strip()
+                    raw_content = msg.content
+                    if msg.role == "assistant" and isinstance(raw_content, str):
+                        # A legacy answer's service footer never reaches the model.
+                        raw_content = strip_service_context_footer(raw_content)
+                    content = raw_content.strip()
                     if len(content) > 2000:
                         content = content[:2000] + "…"
                     lines.append(f"{role}: {content}")
@@ -1921,7 +1979,11 @@ class ContextManager:
             if include_tools and self._execution_history:
                 lines.extend(["", "Recent operation results:"])
                 for ex in self._execution_history[-10:]:
-                    summary_output = (ex.output or "").strip()
+                    raw_output = ex.output or ""
+                    if isinstance(raw_output, str):
+                        # A legacy agent-tool result's footer never reaches the model.
+                        raw_output = strip_service_context_footer(raw_output)
+                    summary_output = raw_output.strip()
                     if len(summary_output) > 2000:
                         summary_output = summary_output[:2000] + "…"
                     lines.append(f"Tool/Agent: {ex.agent_name}")
@@ -1963,7 +2025,11 @@ class ContextManager:
             with self._lock:
                 lines = ["Operation context:", f"Current task: {task_input}", ""]
                 for ex in self._execution_history[-5:]:
-                    summary_output = (ex.output or "").strip()
+                    raw_output = ex.output or ""
+                    if isinstance(raw_output, str):
+                        # A legacy agent-tool result's footer never reaches the model.
+                        raw_output = strip_service_context_footer(raw_output)
+                    summary_output = raw_output.strip()
                     if len(summary_output) > 1200:
                         summary_output = summary_output[:1200] + "…"
                     lines.append(f"Tool/Agent: {ex.agent_name}")

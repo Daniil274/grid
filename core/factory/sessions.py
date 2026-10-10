@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from core.compact import COMPACTED_TYPE, compact_conversation
 from core.context_budget import request_tokens, session_transcript
+from core.context import strip_service_context_footer
 from core.interruption import CONTINUATION_TYPE
 
 logger = logging.getLogger("grid.agent_factory")
@@ -60,6 +61,52 @@ class SessionUpkeep:
         epochs = dict(self.context_manager.get_context_metadata(context_id).get("session_epochs") or {})
         epochs[agent_key] = int(epochs.get(agent_key, 0)) + 1
         self.context_manager.update_context_metadata(context_id, {"session_epochs": epochs})
+
+    @staticmethod
+    def _item_without_footer(item: Any) -> Any:
+        """A copy of a legacy session *item* without its service ``Context ID``
+        footer, or the item itself when it carries none.
+        """
+        if not isinstance(item, dict):
+            return item
+        if item.get("type") == "function_call_output" and isinstance(item.get("output"), str):
+            # A legacy agent-tool result ended with the footer.
+            cleaned = strip_service_context_footer(item["output"])
+            return {**item, "output": cleaned} if cleaned != item["output"] else item
+        if _is_assistant_message(item):
+            content = item.get("content")
+            if isinstance(content, str):
+                cleaned = strip_service_context_footer(content)
+                return {**item, "content": cleaned} if cleaned != content else item
+            if isinstance(content, list):
+                parts, changed = [], False
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        cleaned = strip_service_context_footer(part["text"])
+                        changed = changed or cleaned != part["text"]
+                        parts.append({**part, "text": cleaned} if cleaned != part["text"] else part)
+                    else:
+                        parts.append(part)
+                return {**item, "content": parts} if changed else item
+        return item
+
+    async def _strip_legacy_context_footers(self, session: Any) -> None:
+        """Rewrite a session whose legacy items still end with the service
+        ``Context ID:`` footer, so the model never reads it back.
+
+        Answers and agent-tool results written before the footer was dropped
+        from the contract may still sit in a stored SDK session. The session is
+        rewritten without the footer - the same clear-and-refill a message
+        delete uses - keeping every item and its order.
+        """
+        items = await session.get_items()
+        if not items:
+            return
+        cleaned = [self._item_without_footer(item) for item in items]
+        if all(new is old for new, old in zip(cleaned, items)):
+            return
+        await session.clear_session()
+        await session.add_items(cleaned)
 
     async def fork_conversation(self, context_id: str, message_id: str) -> str:
         """Branch *context_id* at user message *message_id*, for an edited version of it.

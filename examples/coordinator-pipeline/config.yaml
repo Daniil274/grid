@@ -424,8 +424,8 @@ agents:
     timeout: 0  # No agent timeout: the coordinator must not be cut off mid-orchestration.
     max_turns: 0  # No turn limit for the same reason.
     model:
-      - glm-latest
       - gpt-6.1-sol
+      - glm-latest
     description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
     tools:
       - orchestrate

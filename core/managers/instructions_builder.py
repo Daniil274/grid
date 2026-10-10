@@ -62,16 +62,6 @@ class InstructionsBuilder:
         if self.platform_sections:
             sections.extend(self.platform_sections)
 
-        context_reference = self._build_context_reference(context_id)
-        if context_reference:
-            sections.append(
-                PromptSection(
-                    key="context_reference",
-                    content=context_reference,
-                    scope="dynamic",
-                )
-            )
-
         history_strategy = "none"
         if include_conversation_context:
             conversation_context = self.context_manager.get_conversation_context()
@@ -177,15 +167,6 @@ class InstructionsBuilder:
         )
 
         return "\n".join(context_parts)
-
-    def _build_context_reference(self, context_id: Optional[str]) -> Optional[str]:
-        if not context_id:
-            return None
-        return (
-            f"Context reference: {context_id}. "
-            f'Always append the line "Context ID: {context_id}" '
-            "to every reply so humans or agents can return to this dialogue via that identifier."
-        )
 
     def _get_base_sections(self, agent_key: str) -> list[PromptSection]:
         if hasattr(self.config, "build_agent_prompt_sections"):
