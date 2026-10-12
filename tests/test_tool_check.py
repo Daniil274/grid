@@ -184,7 +184,9 @@ def test_confined_space_reports_host_tools_as_withheld_and_skips_host_path(tmp_p
 
     issues = diagnose(config, confined=True)
 
-    assert not any("on PATH" in issue.problem for issue in issues)
+    # Docker itself is a host requirement; the confined tools' commands are
+    # not. A system-wide missing-Docker notice must not fail this assertion.
+    assert not any("on PATH" in issue.problem for issue in issues if issue.tool in tools)
     withheld = [issue for issue in issues if issue.tool == "needs_program"]
     assert [issue.kind for issue in withheld] == [CONFIG]
     assert "withheld on this server" in withheld[0].problem

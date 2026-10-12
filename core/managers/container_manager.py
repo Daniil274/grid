@@ -25,6 +25,8 @@ except ImportError:  # pragma: no cover - environment-dependent
     class Container:  # type: ignore[override]
         """Fallback container type used only for typing when docker is absent."""
 
+from utils.process_limits import CONTAINER_OOM_SCORE_ADJ, cgroup_parent, thread_environment
+
 logger = logging.getLogger("grid.container_manager")
 
 # Path inside the container where the host workspace is mounted. Docker forbids bind to "/", so we use /workspace.
@@ -88,6 +90,11 @@ class ContainerManager:
             self.enabled = False
 
     @property
+    def cgroup_parent(self) -> Optional[str]:
+        """The cgroup the containers go under (utils.process_limits)."""
+        return cgroup_parent(self.settings.cgroup_parent)
+
+    @property
     def profile(self) -> str:
         """A digest of the settings a container is made with. A container made
         with other settings - an older Grid, an edited config - is recreated,
@@ -97,7 +104,9 @@ class ContainerManager:
             "memory": self.settings.memory,
             "cpus": self.settings.cpus,
             "pids_limit": self.settings.pids_limit,
+            "cgroup_parent": self.cgroup_parent,
             "hardening": ["cap_drop:ALL", "no-new-privileges", "no-restart", "init"],
+            "sharing": ["no-swap", f"oom_score_adj:{CONTAINER_OOM_SCORE_ADJ}", "thread-env"],
             # Containers made before the workspace was given to their user are
             # recreated, and so their workspace given.
             "workspace_owner": "agent",
@@ -233,7 +242,7 @@ class ContainerManager:
                 # Keep default bridge networking for portability.
                 pass
 
-            container_env = {"BEADS_DAEMON": "0"}
+            container_env = {"BEADS_DAEMON": "0", **thread_environment(self.settings.cpus)}
             for proxy_var in (
                 "HTTP_PROXY",
                 "HTTPS_PROXY",
@@ -261,8 +270,15 @@ class ContainerManager:
                 user="agent",
                 environment=container_env, # Disable beads daemon and forward proxy env vars
                 labels={PROFILE_LABEL: self.profile},
+                # Under one cgroup with every other user's: its limits are the
+                # ceiling of all users together, and equal weights share it.
+                **({"cgroup_parent": self.cgroup_parent} if self.cgroup_parent else {}),
                 # One user's agents cannot take the machine, nor any privilege.
                 mem_limit=self.settings.memory,
+                # No swap: a container swapping its memory slows the whole host.
+                memswap_limit=self.settings.memory,
+                # Under memory pressure the kernel kills in a container, not the server.
+                oom_score_adj=CONTAINER_OOM_SCORE_ADJ,
                 nano_cpus=int(self.settings.cpus * 1e9),
                 pids_limit=self.settings.pids_limit,
                 cap_drop=["ALL"],
