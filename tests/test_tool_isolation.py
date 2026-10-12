@@ -1,7 +1,9 @@
 """An isolating space gives its agents only tools that keep to the user's container or workspace."""
 
+import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -128,7 +130,7 @@ def test_a_search_pattern_is_never_a_ripgrep_option(tmp_path, monkeypatch):
         calls.append(command)
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
 
-    monkeypatch.setattr(search_tools.subprocess, "run", run)
+    monkeypatch.setattr(search_tools, "run_host_command", run)
 
     search_tools._grep_with_ripgrep("--pre=sh", tmp_path, "", True, True, 10)
 
@@ -136,3 +138,50 @@ def test_a_search_pattern_is_never_a_ripgrep_option(tmp_path, monkeypatch):
     assert "--no-config" in command
     assert command[command.index("--regexp") + 1] == "--pre=sh"
     assert command[-2:] == ["--", str(tmp_path)]
+
+
+@pytest.mark.asyncio
+async def test_with_a_container_grep_searches_there_not_in_the_server(tmp_path, monkeypatch):
+    sys.path.insert(0, str(CODER_TOOLS))
+    import search_tools
+
+    (tmp_path / "src").mkdir()
+    calls = []
+    match = json.dumps({"type": "match", "data": {
+        "path": {"text": "/workspace/src/app.py"}, "line_number": 3, "lines": {"text": "needle = 1\n"},
+    }})
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=match + "\n", stderr="")
+
+    monkeypatch.setattr(search_tools, "run_host_command", run)
+    factory = SimpleNamespace(container_id="c0ffee", config=SimpleNamespace(get_working_directory=lambda: str(tmp_path)))
+    set_current_factory(factory)
+    try:
+        result = await search_tools.grep_tool.on_invoke_tool(
+            SimpleNamespace(context=None, tool_name="grep_tool", tool_call_id="t"),
+            json.dumps({"pattern": "needle", "directory": "src"}),
+        )
+    finally:
+        reset_current_factory()
+
+    [command] = calls
+    assert command[:6] == ["docker", "exec", "-w", "/workspace", "c0ffee", "timeout"]
+    assert command[command.index("--threads") + 1] == str(search_tools.RG_THREADS)
+    assert command[-2:] == ["--", "/workspace/src"]
+    assert "app.py:3: needle = 1" in result
+
+
+def test_without_ripgrep_a_runaway_regex_is_killed_not_left_running(tmp_path, monkeypatch):
+    sys.path.insert(0, str(CODER_TOOLS))
+    import search_tools
+
+    (tmp_path / "slow.txt").write_text("a" * 40 + "!\n")
+    monkeypatch.setattr(search_tools, "GREP_TIMEOUT", 2)
+
+    started = time.monotonic()
+    result = search_tools._grep_with_python("(a+)+$", tmp_path, "", True, True, 10)
+
+    assert "exceeded" in result
+    assert time.monotonic() - started < 15

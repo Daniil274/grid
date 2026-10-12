@@ -7,6 +7,9 @@
 # config). Starting those containers needs the Docker daemon, and membership in
 # the docker group is as good as root on this machine - run Grid on a host or
 # VM dedicated to it.
+#
+# Install the two slices next to this unit first:
+#   install -m 644 deploy/grid-server.slice deploy/grid-users.slice /etc/systemd/system/
 
 [Unit]
 Description=Grid web chat (accounts)
@@ -21,6 +24,11 @@ Group=grid
 SupplementaryGroups=docker
 WorkingDirectory=/opt/grid
 EnvironmentFile=/opt/grid/.env
+# The server in its own slice, every container it starts in another
+# (deploy/grid-server.slice, deploy/grid-users.slice): the users' commands
+# together cannot take the CPU or memory the chat needs to answer.
+Slice=grid-server.slice
+Environment=GRID_CGROUP_PARENT=grid-users.slice
 ExecStart=/opt/grid/.venv/bin/grid-web-chat --accounts \
     --routing deploy/routing.yaml \
     --data-dir /var/lib/grid-web \

@@ -51,6 +51,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from utils.process_limits import sandbox_run_args
+
 logger = logging.getLogger("grid.tool_packages")
 
 RUNTIME = Path(__file__).with_name("grid_tool.py")
@@ -443,7 +445,7 @@ async def sandbox_test(image: str, package: Path, *, timeout: float = TEST_TIMEO
     started = time.monotonic()
     code, _, err = await _run(
         ["docker", "run", "-d", "--rm", "--name", name, "--memory", memory, "--pids-limit", "256", "--cpus", "1",
-         "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--init",
+         *sandbox_run_args(memory, 1), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--init",
          "--user", CONTAINER_USER, "--entrypoint", "sleep", image, str(int(timeout) + 120)],
         timeout=120,
     )

@@ -84,6 +84,37 @@ def test_a_container_is_limited_and_unprivileged_and_not_restarted_by_docker(man
     assert run["labels"] == {PROFILE_LABEL: manager.profile}
 
 
+def test_a_container_neither_swaps_nor_outranks_the_server_and_counts_its_threads(manager, tmp_path, monkeypatch):
+    monkeypatch.delenv("GRID_CGROUP_PARENT", raising=False)
+    manager, client = manager
+
+    manager.get_or_create_container("u1", workspace=tmp_path)
+
+    [(_, run)] = client.runs
+    assert run["memswap_limit"] == "1g"
+    assert run["oom_score_adj"] > 0
+    assert "cgroup_parent" not in run
+    assert run["environment"]["OMP_NUM_THREADS"] == "2" and run["environment"]["MAKEFLAGS"] == "-j2"
+
+
+def test_every_container_goes_under_the_machines_cgroup(manager, tmp_path, monkeypatch):
+    monkeypatch.setenv("GRID_CGROUP_PARENT", "grid-users.slice")
+    manager, client = manager
+
+    manager.get_or_create_container("u1", workspace=tmp_path)
+
+    [(_, run)] = client.runs
+    assert run["cgroup_parent"] == "grid-users.slice"
+
+
+def test_a_container_outside_the_machines_cgroup_is_recreated_in_it(manager, tmp_path, monkeypatch):
+    monkeypatch.delenv("GRID_CGROUP_PARENT", raising=False)
+    manager, client = manager
+    before = manager.profile
+    monkeypatch.setenv("GRID_CGROUP_PARENT", "grid-users.slice")
+    assert manager.profile != before
+
+
 def test_a_container_made_with_other_settings_is_recreated(manager, tmp_path):
     manager, client = manager
     source = str(tmp_path.resolve())
@@ -201,6 +232,21 @@ def test_a_server_running_as_root_gives_the_workspace_to_the_containers_user(man
     (tmp_path / "sub" / "file").write_text("x")
     (tmp_path / "link").symlink_to("/etc/passwd")
 
+    # Simulate root-owned files as well as a root process. The real temporary
+    # directory may already belong to uid 1000 when pytest runs without root.
+    real_lstat = module.os.lstat
+    root = str(tmp_path.resolve())
+
+    def root_owned_stat(path, *args, **kwargs):
+        result = real_lstat(path, *args, **kwargs)
+        name = module.os.fsdecode(path)
+        if name == root or name.startswith(root + module.os.sep):
+            values = list(result)
+            values[4:6] = [0, 0]
+            return module.os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(module.os, "lstat", root_owned_stat)
     manager.get_or_create_container("u1", workspace=tmp_path)
     manager.get_or_create_container("u2", workspace=tmp_path)
 

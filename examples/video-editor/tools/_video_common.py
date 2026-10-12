@@ -16,6 +16,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from utils.path_utils import display_agent_path_auto, resolve_agent_path_auto
+from utils.process_limits import run_host_command
 
 from agents.tool import ToolOutputFileContent
 
@@ -64,15 +65,8 @@ def which(binary: str) -> str:
 def run_process(args: list[str], *, timeout: int = 300) -> subprocess.CompletedProcess[str]:
     """Run ffmpeg/ffprobe and return a completed process or raise a concise error."""
     try:
-        return subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=max(1, int(timeout)),
-            shell=False,
-        )
+        # Below the server's priority; a timeout kills ffmpeg's whole group.
+        return run_host_command(args, timeout=max(1, int(timeout)))
     except subprocess.TimeoutExpired as exc:
         raise VideoToolError(f"Command timed out after {timeout}s: {' '.join(args[:3])}") from exc
     except OSError as exc:

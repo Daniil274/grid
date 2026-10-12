@@ -62,3 +62,22 @@ async def test_glob_tool_finds_directories_recursively(agent_workspace):
     )
 
     assert "ocr_output_TLV_123/" in result
+
+
+@pytest.mark.asyncio
+async def test_ripgrep_timeout_does_not_start_another_search(agent_workspace, monkeypatch):
+    module = _load_search_tools_module()
+
+    def timed_out(*args, **kwargs):
+        raise module.subprocess.TimeoutExpired("rg", module.GREP_TIMEOUT)
+
+    def unexpected_fallback(*args, **kwargs):
+        pytest.fail("A timed-out search must not consume a second timeout budget")
+
+    monkeypatch.setattr(module, "_grep_with_ripgrep", timed_out)
+    monkeypatch.setattr(module, "_grep_with_python", unexpected_fallback)
+    result = await module.grep_tool.on_invoke_tool(
+        None, json.dumps({"pattern": "needle", "directory": str(agent_workspace)})
+    )
+
+    assert "Search exceeded" in result

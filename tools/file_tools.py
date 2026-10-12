@@ -6,6 +6,7 @@ Paths are resolved inside the working directory of the running agent.
 
 import os
 import re
+import time
 from pathlib import Path
 from typing import List, Any
 
@@ -40,6 +41,25 @@ def _resolve_tool_path(raw_path: str) -> tuple[str, str]:
 
 MAX_MATCHES = 200
 _SKIPPED_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+#: A search over a directory stops after this many entries or seconds: a walk
+#: of a huge tree would hold a tool thread - and the server's CPU - for minutes.
+WALK_SCAN_LIMIT = 200_000
+WALK_SECONDS = 20
+_STOPPED_EARLY = "\n⚠️ The directory is too large to search whole: stopped early. Narrow the path."
+
+
+def _bounded_walk(path: Path, stopped: list):
+    """``os.walk`` of *path* without the skipped directories, ending at the
+    limits above; appends True to *stopped* when it ended there."""
+    deadline = time.monotonic() + WALK_SECONDS
+    scanned = 0
+    for root, dirs, files in os.walk(path):
+        dirs[:] = sorted(d for d in dirs if d not in _SKIPPED_DIRS)
+        scanned += len(dirs) + len(files)
+        if scanned > WALK_SCAN_LIMIT or time.monotonic() > deadline:
+            stopped.append(True)
+            return
+        yield root, dirs, files
 
 
 def _refuse_git_internals(visible_path: str, resolved: str) -> str | None:
@@ -296,21 +316,22 @@ def search_files(directory: str, pattern: str) -> str:
 
         regex = re.compile(pattern, re.IGNORECASE)
         matches: List[str] = []
-        for root, dirs, files in os.walk(path):
-            dirs[:] = sorted(d for d in dirs if d not in _SKIPPED_DIRS)
+        stopped: List[bool] = []
+        for root, dirs, files in _bounded_walk(path, stopped):
             for file in sorted(files):
                 if regex.search(file):
                     # Relative to the searched directory: host paths stay private.
                     matches.append((Path(root) / file).relative_to(path).as_posix())
 
+        partial = _STOPPED_EARLY if stopped else ""
         if not matches:
-            return f"🔍 No files matching '{pattern}' in {visible_dir}"
+            return f"🔍 No files matching '{pattern}' in {visible_dir}{partial}"
 
         log_tool_result("search_files", f"Found {len(matches)} matches")
         shown = matches[:MAX_MATCHES]
         more = (f"\n... and {len(matches) - len(shown)} more: narrow the pattern"
                 if len(matches) > len(shown) else "")
-        return f"🔍 Matching files in {visible_dir}:\n" + "\n".join(shown) + more
+        return f"🔍 Matching files in {visible_dir}:\n" + "\n".join(shown) + more + partial
     except Exception as e:
         log_tool_error("search_files", str(e))
         return f"❌ Error searching in {visible_dir}: {str(e)}"
@@ -332,6 +353,7 @@ def search_content(filepath: str, query: str) -> str:
         if not path.exists():
             return f"❌ {visible_path} not found"
         needle = query.lower()
+        stopped: List[bool] = []
 
         def lines_of(file: Path) -> list[tuple[int, str]]:
             try:
@@ -349,22 +371,22 @@ def search_content(filepath: str, query: str) -> str:
             matches = [f"{n}: {line}" for n, line in lines_of(path)]
         else:
             matches = []
-            for root, dirs, files in os.walk(path):
-                dirs[:] = sorted(d for d in dirs if d not in _SKIPPED_DIRS)
+            for root, dirs, files in _bounded_walk(path, stopped):
                 for name in sorted(files):
                     file = Path(root) / name
                     relative = file.relative_to(path).as_posix()
                     matches += [f"{relative}:{n}: {line}" for n, line in lines_of(file)]
                     if len(matches) > MAX_MATCHES:
                         break
+        partial = _STOPPED_EARLY if stopped else ""
         if not matches:
-            return f"🔍 No matches for '{query}' in {visible_path}"
+            return f"🔍 No matches for '{query}' in {visible_path}{partial}"
 
         log_tool_result("search_content", f"Found {len(matches)} matching lines")
         shown = matches[:MAX_MATCHES]
         more = ("\n... and more: use a more specific query or path"
                 if len(matches) > len(shown) else "")
-        return f"🔍 Matching lines in {visible_path}:\n" + "\n".join(shown) + more
+        return f"🔍 Matching lines in {visible_path}:\n" + "\n".join(shown) + more + partial
     except Exception as e:
         log_tool_error("search_content", str(e))
         return f"❌ Error searching content in {visible_path}: {str(e)}"

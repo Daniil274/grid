@@ -19,6 +19,7 @@ import yaml
 
 from core.system_quality import (acceptance_revision, acceptance_suite, check_assertion, design_review, read_contract,
                                  revision, save_evidence, system_files)
+from utils.process_limits import sandbox_run_args
 
 # Synchronous agent-tool delegation is supported. Cross-system/background
 # orchestration is refused until it can share the evaluation's lifetime.
@@ -129,7 +130,7 @@ async def run_scenario(access, snapshot: Path, scenario, *, token_limit: int, ca
             async with asyncio.timeout(scenario.timeout_seconds):
                 code, _, err = await _run([
                     "docker", "run", "-d", "--rm", "--name", name,
-                    "--memory", "512m", "--pids-limit", "128", "--cpus", "1",
+                    "--memory", "512m", "--pids-limit", "128", "--cpus", "1", *sandbox_run_args("512m", 1),
                     "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--init",
                     "--user", "agent", "--mount", f"type=bind,source={workspace},target=/workspace",
                     "--workdir", "/workspace", "--entrypoint", "sleep", access.image,
