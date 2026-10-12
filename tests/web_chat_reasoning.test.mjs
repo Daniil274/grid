@@ -80,31 +80,118 @@ test("a call turns into an agent block in place once its sub-agent starts", () =
   assert.deepEqual(titles(agentList(rows(top)[1])), ["bash_tool"]);
 });
 
-test("a running block is open and says what its sub-agent is doing", () => {
+test("a running sub-agent's block stays out of the way until the reader opens it", () => {
   const panel = createReasoningPanel();
   panel.start();
   panel.upsert(step("s1", { kind: "agent", title: "coder", status: "running", duration_ms: null }));
   panel.upsert(step("s2", { title: "bash_tool", parent_id: "s1", status: "running", duration_ms: null }));
 
   const block = rows(topList(panel))[0];
-  assert.ok(block.classList.contains("is-open"));
+  assert.ok(!block.classList.contains("is-open"), "a working sub-agent does not push its block open");
   assert.equal(block.find("step__subtitle").textContent, "bash_tool");
   assert.equal(panel.el.find("reasoning__headline").textContent, "coder › bash_tool");
 
+  // The reader can still open it by hand, and it stays open across updates.
+  block.find("step__head").click();
+  assert.ok(block.classList.contains("is-open"));
   panel.upsert(step("s1", { kind: "agent", title: "coder", body: "done" }));
-  assert.ok(!block.classList.contains("is-open"), "a finished block folds away");
+  assert.ok(block.classList.contains("is-open"));
   panel.finish(10);
 });
 
-test("the reader's choice wins over the block's auto-collapse", () => {
+test("the reader's opened sub-agent block stays open when the turn ends", () => {
   const panel = createReasoningPanel();
+  panel.start();
   panel.upsert(step("s1", { kind: "agent", title: "coder", status: "running", duration_ms: null }));
   const block = rows(topList(panel))[0];
-  block.find("step__head").click(); // the reader closes it
-  block.find("step__head").click(); // and opens it again
+  block.find("step__head").click(); // the reader opens it
+  block.find("step__head").click(); // and closes it again
+  block.find("step__head").click(); // and opens it once more
   panel.upsert(step("s1", { kind: "agent", title: "coder" }));
+  panel.finish(10);
 
-  assert.ok(block.classList.contains("is-open"));
+  assert.ok(block.classList.contains("is-open"), "the reader's last choice stands");
+});
+
+test("a parallel batch opens while its calls run and folds away once done", () => {
+  const panel = createReasoningPanel();
+  panel.start();
+  panel.upsert(step("p1", { kind: "agent", title: "Parallel calls", tool: "parallel", status: "running", duration_ms: null }));
+  panel.upsert(step("p2", { title: "read_file", parent_id: "p1", status: "running", duration_ms: null }));
+  panel.upsert(step("p3", { kind: "agent", title: "Agent", parent_id: "p1", status: "running", duration_ms: null }));
+  panel.upsert(step("p4", { title: "bash_tool", parent_id: "p3", status: "running", duration_ms: null }));
+
+  const batch = rows(topList(panel))[0];
+  assert.ok(batch.classList.contains("is-open"), "a running batch opens to show its calls");
+  assert.deepEqual(titles(agentList(batch)), ["read_file", "Agent"]);
+  // A sub-agent nested in the batch does not push its own block open.
+  assert.ok(!rows(agentList(batch))[1].classList.contains("is-open"));
+
+  panel.upsert(step("p1", { kind: "agent", title: "Parallel calls", tool: "parallel", body: '{"results": []}' }));
+  assert.ok(!batch.classList.contains("is-open"), "a finished batch folds away");
+  panel.finish(10);
+});
+
+test("a parallel batch shows its calls, not the JSON task and report", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("p1", {
+      kind: "agent", title: "Parallel calls", tool: "parallel", subtitle: "2 calls: read_file ×2",
+      detail: '{"calls": [{"tool": "read_file"}, {"tool": "read_file"}]}',
+      body: '{"results": [{"output": "text"}], "wall_seconds": 1.0}',
+    }),
+    step("p2", { title: "read_file", parent_id: "p1" }),
+    step("p3", { title: "read_file", parent_id: "p1" }),
+  ]);
+  const batch = rows(topList(panel))[0];
+  assert.ok(!batch.classList.contains("is-open"), "a stored batch renders collapsed");
+  batch.find("step__head").click();
+
+  assert.deepEqual(titles(agentList(batch)), ["read_file", "read_file"]);
+  assert.deepEqual(panel.el.findAll("payload__label").map((label) => label.textContent), [], "no Task or Report payloads");
+  assert.match(batch.find("step__subtitle").textContent, /2 calls: read_file ×2/);
+  assert.ok(!batch.find("step__subtitle").textContent.includes('{"calls"'));
+});
+
+test("a failed parallel batch shows its error, still without the JSON task and report", () => {
+  const panel = createReasoningPanel();
+  panel.start();
+  panel.upsert(step("p1", { kind: "agent", title: "Parallel calls", tool: "parallel", status: "running", duration_ms: null }));
+  panel.upsert(step("p2", { title: "read_file", parent_id: "p1", status: "running", duration_ms: null }));
+  panel.upsert(step("p1", {
+    kind: "agent", title: "Parallel calls", tool: "parallel", status: "error", tone: "error",
+    subtitle: "2 calls: read_file ×2", detail: '{"calls": [{"tool": "read_file"}, {"tool": "read_file"}]}',
+    body: "ValueError: Calls 0 and 1 both write 'notes.md': run them in sequence.",
+  }));
+  panel.finish(10);
+
+  const batch = rows(topList(panel))[0];
+  // What broke is readable even before the batch is opened.
+  assert.match(batch.find("step__subtitle").textContent, /ValueError: Calls 0 and 1 both write 'notes\.md'/);
+  batch.find("step__head").click();
+  assert.deepEqual(
+    panel.el.findAll("payload__label").map((label) => label.textContent),
+    ["Error"],
+    "the batch's error shows; its task and report do not",
+  );
+  assert.match(batch.find("payload__body").textContent, /run them in sequence/);
+  assert.ok(!batch.textContent.includes('{"calls"'), "the batch's JSON envelope never shows");
+});
+
+test("a tool row nested in a running batch never opens on its own", () => {
+  const panel = createReasoningPanel();
+  panel.start();
+  panel.upsert(step("p1", { kind: "agent", title: "Parallel calls", tool: "parallel", status: "running", duration_ms: null }));
+  panel.upsert(step("p2", { title: "read_file", parent_id: "p1", status: "running", duration_ms: null }));
+  panel.upsert(step("p2", { title: "read_file", parent_id: "p1", detail: '{"path": "notes.md"}', body: "content" }));
+
+  const batch = rows(topList(panel))[0];
+  const inner = rows(agentList(batch))[0];
+  assert.ok(batch.classList.contains("is-open"), "the batch itself opens while it runs");
+  assert.ok(!inner.classList.contains("is-open"), "a tool row inside the batch stays closed");
+  inner.find("step__head").click(); // the reader can still open it by hand
+  assert.ok(inner.classList.contains("is-open"), "manual opening works");
+  panel.finish(10);
 });
 
 test("thinking streams into a step inside a block", () => {
