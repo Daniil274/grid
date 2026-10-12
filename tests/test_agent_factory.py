@@ -471,7 +471,7 @@ class TestAgentFactory:
         assert instructions.startswith("Base prompt")
         assert "Path information:" in instructions
         assert "Context path: /test/context" in instructions
-        assert "Context ID: " in instructions
+        assert "Context ID: " not in instructions  # the service id never reaches the model
 
     
     @pytest.mark.asyncio

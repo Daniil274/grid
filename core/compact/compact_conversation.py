@@ -89,6 +89,7 @@ async def _call_llm_for_summary(
     llm_client: Any,
     model: str,
     max_tokens: int = 20_000,
+    responses_api: Optional[dict] = None,
 ) -> str:
     """
     Call the LLM to generate a conversation summary.
@@ -114,6 +115,43 @@ async def _call_llm_for_summary(
     # Append the compact prompt as a user request
     api_messages.append({"role": "user", "content": compact_prompt})
 
+    if responses_api is not None:
+        options = dict(responses_api)
+        cap = options.pop("max_output_tokens", max_tokens)
+        request = {
+            **options,
+            "model": model,
+            "input": [m for m in api_messages if m["role"] != "system"],
+            "instructions": "\n\n".join(m["content"] for m in api_messages if m["role"] == "system"),
+            "stream": True,
+        }
+        if cap is not None:
+            request["max_output_tokens"] = _clamp_summary_output_tokens(cap)
+        stream = await llm_client.responses.create(**request)
+        chunks = []
+        completed = False
+        output_chars = 0
+        try:
+            async for event in stream:
+                kind = getattr(event, "type", "")
+                if kind == "response.output_text.delta":
+                    chunks.append(event.delta)
+                    output_chars += len(event.delta)
+                    # Plan endpoints disallow an API output cap. Bound locally.
+                    if output_chars > max_tokens * 4:
+                        raise ValueError("compact_conversation: summary exceeds local output cap")
+                elif kind == "response.completed":
+                    completed = True
+                elif kind in ("error", "response.failed", "response.incomplete"):
+                    raise RuntimeError(f"compact_conversation: {kind}: {event}")
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                await close()
+        if not completed:
+            raise RuntimeError("compact_conversation: Responses stream ended without completion")
+        return "".join(chunks)
+
     response = await llm_client.chat.completions.create(
         model=model,
         messages=api_messages,
@@ -133,6 +171,7 @@ async def compact_conversation(
     is_auto_compact: bool = False,
     max_output_tokens: int = 20_000,
     compact_cfg: Optional[Any] = None,
+    responses_api: Optional[dict] = None,
 ) -> CompactionResult:
     """
     Compact a conversation by generating an LLM summary of older messages.
@@ -195,6 +234,7 @@ async def compact_conversation(
                 llm_client,
                 model,
                 max_tokens=max_output_tokens,
+                responses_api=responses_api,
             )
         except Exception as e:
             # Check if this is a context-length error from the API layer

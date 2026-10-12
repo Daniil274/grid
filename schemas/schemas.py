@@ -97,6 +97,12 @@ class ModelConfig(BaseModel):
     cost of calls to this model (core.pricing). Overrides the price snapshot; a model
     that has neither is charged at ``unknown_price``.
     """
+    prompt_cache: Optional[bool] = None
+    """Ask the provider to cache the request prefix: ``cache_control`` at the top
+    of the request body (OpenRouter's automatic caching). Claude caches only on
+    request, and without it an agent pays full price for its whole context on
+    every call. Unset: on for ``anthropic/`` models, off for the rest.
+    """
     preserve_reasoning_content: bool = False
     """When True, reasoning_content from thinking-enabled models is preserved in
     assistant messages that contain tool_calls. Required for providers like
@@ -291,6 +297,13 @@ class IsolationConfig(BaseModel):
     memory: str = Field(default="2g", pattern=r"^[1-9][0-9]*[kmg]$", description="Memory a container may use, e.g. 2g")
     cpus: float = Field(default=2.0, gt=0, le=64, description="CPU cores a container may use")
     pids_limit: int = Field(default=512, ge=32, le=65536, description="Processes a container may run at once")
+    cgroup_parent: Optional[str] = Field(
+        default=None,
+        description=(
+            "The cgroup all containers go under, e.g. grid-users.slice: its limits bound every "
+            "user together (utils.process_limits). GRID_CGROUP_PARENT overrides it."
+        ),
+    )
 
 
 class ProjectToolsConfig(BaseModel):

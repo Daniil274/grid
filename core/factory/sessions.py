@@ -61,6 +61,17 @@ class SessionUpkeep:
         epochs[agent_key] = int(epochs.get(agent_key, 0)) + 1
         self.context_manager.update_context_metadata(context_id, {"session_epochs": epochs})
 
+    async def _strip_legacy_context_footers(self, session: Any) -> None:
+        """Retain legacy history until a provenance-aware atomic migration exists.
+
+        The footer's text is not evidence of service ownership: file reads and
+        assistant quotations can contain the exact same suffix. The SDK Session
+        protocol also has no atomic compare-and-replace; clear/add loses history
+        on failure or concurrent append. Never rewrite persistent data here.
+        Kept as a safe hook for the pending footer-free turn/tool contract.
+        """
+        return
+
     async def fork_conversation(self, context_id: str, message_id: str) -> str:
         """Branch *context_id* at user message *message_id*, for an edited version of it.
 
@@ -258,7 +269,7 @@ class SessionUpkeep:
                 return None
         logger.info("Compacting the session of %s: ~%d/%d tokens", agent_key, tokens_before, window)
         try:
-            client, model = self.models.compact_client_and_model(agent_key)
+            client, model, responses_api = self.models.compact_request(agent_key)
             result = await compact_conversation(
                 messages=session_transcript(items),
                 llm_client=client,
@@ -267,6 +278,7 @@ class SessionUpkeep:
                 is_auto_compact=not force,
                 max_output_tokens=compact_cfg.summary_max_output_tokens,
                 compact_cfg=compact_cfg,
+                responses_api=responses_api,
             )
         except Exception:
             self._compact_tracking.consecutive_failures += 1

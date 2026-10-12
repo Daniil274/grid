@@ -79,18 +79,48 @@ def use(runner):
     return patch.object(agents, "Runner", runner)
 
 
-async def test_the_answer_ends_with_its_context_id_once(factory):
+async def test_the_answer_carries_no_service_context_id(factory):
+    """The answer is the model's text: the app appends no service footer."""
     runner = ScriptedRunner("Done.")
     with use(runner):
         answer = await factory.run_agent("worker", "Fix it")
 
-    context_id = factory.context_manager.get_current_context_id()
-    assert answer == f"Done.\n\nContext ID: {context_id}"
+    assert answer == "Done."
 
+    # A legacy model-written footer is passed through untouched, once; the
+    # projections that reach the model strip it (test_context).
+    context_id = factory.context_manager.get_current_context_id()
     runner = ScriptedRunner(f"Again.\n\nContext ID: {context_id}")
     with use(runner):
         answer = await factory.run_agent("worker", "More", context_id=context_id)
     assert answer.count("Context ID:") == 1
+
+
+async def test_a_legacy_session_footer_is_kept_not_destructively_rewritten(factory):
+    """The automatic legacy-history rewrite is a safe no-op.
+
+    Footer text does not prove service provenance and the SDK Session has no
+    atomic compare-and-replace, so stored items (footer included) must survive
+    untouched rather than risk corrupting or losing history. The projections
+    that do reach the model strip the footer (test_context).
+    """
+    context_id = factory.context_manager.get_current_context_id()
+    session = factory._get_agent_session("worker", context_id)
+    legacy = [
+        {"role": "user", "content": "Start"},
+        {"role": "assistant", "content": f"Old.\n\nContext ID: {context_id}"},
+    ]
+    await session.add_items(legacy)
+
+    with use(ScriptedRunner("New.")):
+        await factory.run_agent("worker", "Go", context_id=context_id)
+
+    items = await factory._get_agent_session("worker", context_id).get_items()
+    # Nothing destructive happened: the legacy answer and its footer are intact.
+    assert "Old." in str(items)
+    assert f"Context ID: {context_id}" in str(items)
+    # The new turn still reaches the same stored session.
+    assert "New." in str(items)
 
 
 async def test_history_reaches_the_model_through_one_channel(factory):

@@ -282,7 +282,7 @@ async def test_a_stopped_sub_agent_reports_what_it_did(
 
     assert reason in output
     assert "file_write" in output  # the caller knows what may already be done
-    assert "Context ID: ctx-" in output
+    assert "Context ID: ctx-" not in output  # the result carries no service id
 
 
 async def test_a_named_context_continues_the_same_sub_agent_session(
@@ -298,8 +298,11 @@ async def test_a_named_context_continues_the_same_sub_agent_session(
 
     factory, tool = sub_agent_tool(tmp_path, monkeypatch, run_streamed)
 
-    first = await tool.on_invoke_tool(tool_ctx("u1"), '{"input": "Start"}')
-    context_id = first.rsplit("Context ID: ", 1)[1].strip()
+    # The caller names the sub-agent's session with the context id the user
+    # typed into the task; the tool result itself carries no service id.
+    first = await tool.on_invoke_tool(tool_ctx("u1"), '{"input": "Start ctx-1a2b3c4d"}')
+    assert "Context ID:" not in first
+    context_id = "ctx-1a2b3c4d"
     await tool.on_invoke_tool(
         tool_ctx("u1"), json.dumps({"input": f"Continue {context_id}"})
     )
