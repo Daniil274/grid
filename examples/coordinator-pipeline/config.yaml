@@ -189,6 +189,12 @@ models:
     context_window: 1050000
     use_responses_api: true
     request_timeout: 300
+  claude-opus-5.5:
+    name: anthropic/claude-opus-5.5
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 128000
+    context_window: 256000
 tools:
   beads_init:
     type: function
@@ -236,20 +242,17 @@ tools:
   orchestrate:
     type: "function"
     name: "orchestrate"
-    description: "Meta-tool: запускает динамического агента для решения подзадачи."
+    description: "Поручает подзадачу новому агенту и возвращает его отчёт."
     # Модели исполнителя по порядку: первая доступная, при сбое запроса — следующая.
     models:
-      - glm-flash
-      - deepseek-flash-latest
-      - muse-spark-1.3-contributor
+      - gpt-6-luna
+      - gpt-6.1-sol
     model_choice: true
     tiers:
       fast:
-        - deepseek-flash-latest
-        - glm-flash
-        - muse-spark-1.3-contributor
+        - gpt-6-luna
       strong:
-        - glm-latest
+        - gpt-6.1-sol
     prompt_addition: |
       `orchestrate(task, agent_system_prompt, executor_tools, init_tools, system_skills, tier, model, timeout_seconds)`
       `model` — одна модель исполнителя по ключу из списка моделей в твоих инструкциях; пробуется первой, затем модели тира. По умолчанию выбирай тир, а `model` — только когда нужна именно эта модель: большой контекст, зрение, проверка другой моделью.
@@ -424,13 +427,11 @@ agents:
     timeout: 0  # No agent timeout: the coordinator must not be cut off mid-orchestration.
     max_turns: 0  # No turn limit for the same reason.
     model:
-      - glm-latest
-      - gpt-6.1-sol
+      - gpt-6-astra
+      - claude-opus-5.5
     description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
     tools:
-      - orchestrate
-      - parallel
-      - call_coordinator
+      - beads_init
       - beads_ready
       - beads_list
       - beads_create
@@ -440,11 +441,10 @@ agents:
       - beads_sync
       - beads_dep
       - beads_plan
-      - beads_init
       - beads_log_append
       - beads_log_read
-      - codegraph
-      - init_codegraph
+      - orchestrate
+      - parallel
       - bash_tool
       - file_read
       - file_write
@@ -454,6 +454,8 @@ agents:
       - grep_tool
       - web_fetch
       - web_search
+      - codegraph
+      - call_coordinator
     system_skills:
       - codegraph
     auto_run_tools:
@@ -466,15 +468,21 @@ agents:
         every_run: true
         parameters:
           directory: ${working_directory}
+      # Once per run: inject the list of accessible systems and their key agents.
+      - name: systems_list
     # Lets the batching rules below take effect: several calls per response.
     parallel_tool_calls: true
     custom_prompt: |
-      Ты — координатор агентского пайплайна. 
-      Просят подумать или предложить — отвечай продуманным предложением; реализуй, когда просят сделать.
+      Ты — координатор агентского пайплайна.
+      Просят подумать или предложить — отвечай продуманным предложением; реализуй, когда просят сделать. Исследование под предложение — такая же работа, её тоже можно отдать агентам.
+
+      ## Что делать самому, а что поручать
+      Агент выполняет подзадачу в своём контексте и возвращает тебе выжимку: поиск, чтение источников и кода, пробные запуски остаются у него, а твой контекст остаётся для плана, сверки и итога. Независимые подзадачи агенты делают одновременно. Поэтому работу, где много поиска, чтения или правок, удобнее поручать агентам, а одну-две быстрые проверки — делать самому.
+
       ## Цикл работы:
       1. **Разведка** — создай задачи в трекере и вызови агентов для разностороннего анализа и исследования задачи.
-      2. **Проектирование** — твоя основная задача создать проверяемый и верефицируемый пайплан из агентов, который будет заточен на успешное выполнение всех этапов задачи.
-      4. **Закрытие** — Изучай результаты и верефицируй. 
+      2. **Проектирование** — твоя основная задача создать проверяемый и верифицируемый план из агентов, который будет заточен на успешное выполнение всех этапов задачи.
+      3. **Закрытие** — изучай результаты и верифицируй.
       Ты обязан передавать доступные тебе инструменты (в том числе для работы с трекером) и скиллы агентам вместе с указанием идентефикатора задачи и их предварительные вызовы инструментов, включая чтение самой задачи и одновления статуса задачи.
 
       ## Инструменты агентов
@@ -502,7 +510,7 @@ agents:
       - Вызов, требующий разрешения, ждёт ответа пользователя прямо в чате; спрашивать разрешение текстом не нужно.
 
       ## Время и стоимость
-      Каждый твой ответ — отдельный проход модели по всему накопленному контексту, поэтому стоимость работы определяется числом твоих ответов, а не числом вызовов в них. Время работы определяется тем, сколько агентов идёт одновременно.
+      Каждый твой ответ — отдельный проход модели по всему накопленному контексту, поэтому стоимость работы определяется числом твоих ответов и тем, сколько в этом контексте лежит, а не числом вызовов в ответе. Страницы и файлы, прочитанные тобой, остаются в контексте и оплачиваются в каждом следующем ответе; от агента приходит только его отчёт. Время работы определяется тем, сколько агентов идёт одновременно.
       Вызовы из одного ответа исполняются строго по очереди в указанном порядке, а их результаты возвращаются тебе вместе. Одновременно выполняются только вызовы внутри `parallel`.
 
       ### План как граф

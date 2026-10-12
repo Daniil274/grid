@@ -276,39 +276,36 @@ async def orchestrate(
     model: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
 ) -> str:
-    """
-    Meta-tool: launches a dynamic agent to solve a task.
-    Arguments:
-    - task: The task the agent should perform
-    - agent_system_prompt: System prompt (role and instructions) for the agent.
-    - executor_tools: List of tools for the agent
-      Example: '["file_list", "file_create"] 
-    - init_tools: JSON string with a list of tools for context collection before
-      launching the agent. Format: '[{"name": "tool_name", "parameters": {...}}]'.
-      The results of these tools will be added to the agent's instructions.
-      Example: '[{"name":"file_list","parameters":{"directory":"."}}]'
-    - system_skills: List of system skill names to load from skills/ directory
-      (next to config.yaml). Accepts a list or comma-separated string.
-    - tier: Named model tier of this system (tools.orchestrate.tiers), e.g. a
-      cheap one for search and checks; omitted, the default models.
-    - model: One executor model by key, where the system offers the choice
-      (its instructions then list the models); tried first, then the tier's.
-    - timeout_seconds: Time limit for the agent; past it you get what it did so far.
+    """Hand a subtask to a new agent and get back its report.
 
-    The result reports status (completed, timeout, max_turns, error), the
-    seconds, model calls and tokens the agent took, and its cost when known.
+    The agent works in its own context: the searching, reading and trial runs
+    it does stay out of yours, and you receive only its answer, with status
+    (completed, timeout, max_turns, error), seconds, model calls, tokens and
+    cost when known. Several orchestrate calls inside ``parallel`` run at the
+    same time.
 
-    The executor's model is not the caller's choice: it runs on the first
-    available model of the tool's ``models`` (or of the chosen tier) and moves
-    to the next one of them when a request fails; without ``models``, on the
-    default agent's model. The time limit can only be tighter than the
-    system's own (settings.agent_timeout); turns are bounded only by the
-    system's settings.max_turns, which the agent is never told.
+    Args:
+        task: What the agent should do and what to report back.
+        agent_system_prompt: The agent's role and standing rules.
+        executor_tools: Keys of your own tools the agent gets, e.g. ["web_search", "web_fetch"].
+        context_id: A context id the user named, to continue that agent session; usually empty.
+        init_tools: JSON list of tool calls made before the agent starts; their results go
+            into its instructions. Format: '[{"name": "tool_name", "parameters": {...}}]'.
+        system_skills: Skill names to load for the agent, as a list or comma-separated.
+        tier: A model tier of this system, e.g. "fast" for search and checks; empty for the
+            default models.
+        model: One executor model by key from the list in your instructions; tried before
+            the tier's models.
+        timeout_seconds: Time for the agent, up to the system limit; past it you get what it
+            has done so far.
 
-    Note: orchestrate calls of one conversation run one after another: each is
-    a step of the conversation's serial pipeline (core.tracing.pipeline_registry).
-    The ``parallel`` tool runs several of them at once.
-    Other conversations - other users - are not held up by them.
+    Only the summary and Args above reach the model. The executor runs on the
+    first available model of the chosen one, the tier or the tool's
+    ``models``, moving to the next when a request fails; without ``models``,
+    on the default agent's model. Turns are bounded by settings.max_turns,
+    which the agent is never told. orchestrate calls of one conversation run
+    one after another as steps of its serial pipeline
+    (core.tracing.pipeline_registry); other conversations are not held up.
     """
     factory = _get_factory_from_context(context)
     if factory is None:
