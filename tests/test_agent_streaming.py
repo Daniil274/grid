@@ -102,7 +102,7 @@ agents:
         with patch.object(agents, "Runner", DummyRunner):
             result = await factory.run_agent("test_agent", "hi", stream=True)
             assert result.startswith("Hello World")
-            assert "ctx-" in result
+            assert "Context ID:" not in result  # the answer carries no service footer
 
 
 @pytest.mark.asyncio
@@ -159,7 +159,7 @@ agents:
         with patch.object(agents, "Runner", DummyRunner):
             result = await factory.run_agent("test_agent", "hi", stream=True)
             assert result.startswith("FINAL")
-            assert "ctx-" in result
+            assert "Context ID:" not in result  # the answer carries no service footer
 
 
 def test_console_stream_observer_can_buffer_text_without_printing():

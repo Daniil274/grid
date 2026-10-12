@@ -14,6 +14,7 @@ import logging
 import re
 import time
 import uuid
+from contextvars import ContextVar
 from typing import Any, List, Optional
 
 from agents import Agent, RunContextWrapper, function_tool
@@ -39,6 +40,9 @@ logger = logging.getLogger("grid.agent_factory")
 
 
 CONTEXT_ID_REGEX = re.compile(r"ctx-[0-9a-fA-F]{8,}")
+
+# Invocation-local handoff: never expose service IDs in model arguments.
+_agent_tool_context_id: ContextVar[Optional[str]] = ContextVar("agent_tool_context_id", default=None)
 
 
 class ToolAssembly:
@@ -520,12 +524,16 @@ class ToolAssembly:
                     raw_ctx.execution_mode = "serial_subtree"
 
                 async def execute_original():
-                    result = original_invoke(
-                        tool_context, json.dumps(normalized_args, ensure_ascii=False)
-                    )
-                    if hasattr(result, "__await__"):
-                        return await result
-                    return result
+                    token = _agent_tool_context_id.set(sub_context_id)
+                    try:
+                        result = original_invoke(
+                            tool_context, json.dumps(normalized_args, ensure_ascii=False)
+                        )
+                        if hasattr(result, "__await__"):
+                            return await result
+                        return result
+                    finally:
+                        _agent_tool_context_id.reset(token)
 
                 result = await registry.run_serialized_step(
                     pipeline_id=pipeline_id,
@@ -557,15 +565,10 @@ class ToolAssembly:
                 else:
                     result_text = str(result)
 
-                # The sub-agent reports the session it actually ran in.
-                reported = re.findall(r"Context ID: (ctx-[0-9a-fA-F]{8,})", result_text)
-                if reported:
-                    execution.context_id = reported[-1]
-                    execution.output = result_text
-                else:
-                    execution.output = (
-                        result_text.rstrip() + "\n\nContext ID: " + sub_context_id
-                    )
+                # The result carries no context id: the service id never
+                # reaches the model. The execution record keeps its context_id
+                # (set above) as metadata only.
+                execution.output = result_text
 
                 self.context_manager.add_execution(execution)
 
@@ -652,15 +655,19 @@ class ToolAssembly:
                 else None
             )
 
-            # The sub-agent session is the requested context, or a new one. Its id
-            # is reported back with the result, so the caller can continue it.
-            # The id comes from model-written text, so the session is also keyed
-            # by user: a named id never opens another user's session.
-            sub_context_id = requested_context_id or f"ctx-{uuid.uuid4().hex[:8]}"
+            # The sub-agent session is the requested context (a context id the
+            # user typed into the task), or a new one. The session is keyed by
+            # user: a named id never opens another user's session.
+            inherited_context_id = _agent_tool_context_id.get()
+            # Consume the handoff before running: nested calls allocate their own IDs.
+            _agent_tool_context_id.set(None)
+            sub_context_id = requested_context_id or inherited_context_id or f"ctx-{uuid.uuid4().hex[:8]}"
             session = self._get_agent_session(
                 agent_key,
                 f"{sub_context_id}@{parent_user_id}" if parent_user_id else sub_context_id,
             )
+            # A legacy session may still hold answers with the service footer.
+            await self._strip_legacy_context_footers(session)
 
             # Create GridRunContext for sub-agent with LOCAL session access
             parent_pipeline_id = (
@@ -771,9 +778,6 @@ class ToolAssembly:
                         sub_observer.finish(error=run_error)
                     except Exception:
                         logger.debug("Failed to settle sub-agent trace", exc_info=True)
-
-            if isinstance(output, str):
-                output = f"{output.rstrip()}\n\nContext ID: {sub_context_id}"
 
             # Record the result as an assistant message so the main agent can discuss and provide corrections
             try:

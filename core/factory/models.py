@@ -9,6 +9,7 @@ model summarizes a session. It holds the config and nothing of a run.
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 from typing import Any, Dict, Optional
 
 from agents import ModelSettings
@@ -95,6 +96,7 @@ class ModelProvider:
           reasoning: {effort: "none"}    → SDK-native reasoning_effort (OpenAI)
           reasoning: {enabled: false}    → extra_body {"reasoning": {"enabled": false}} (OpenRouter etc.)
           modalities: [image, text]      → extra_body {"modalities": [...]} (image generation)
+          prompt_cache: true             → extra_body {"cache_control": {"type": "ephemeral"}}
         """
         max_tokens = getattr(model_config, "max_tokens", None)
         plan_usage = self._uses_plan(model_config)
@@ -114,6 +116,8 @@ class ModelProvider:
         modalities = getattr(model_config, "modalities", None)
         if modalities:
             extra_body["modalities"] = list(modalities)
+        if self._caches_prompt(model_config):
+            extra_body["cache_control"] = {"type": "ephemeral"}
 
         return ModelSettings(
             # A ChatGPT plan takes no output cap and never stores the response (preview limits).
@@ -125,6 +129,27 @@ class ModelProvider:
             extra_body=extra_body or None,
             parallel_tool_calls=parallel_tool_calls,
         )
+
+    def _caches_prompt(self, model_config: Any) -> bool:
+        """Only OpenRouter Chat supports this provider-specific wire field.
+
+        The optional prompt_cache field is supplied by the pending schema change;
+        neither a model name nor an explicit flag establishes API capability.
+        Unknown/custom endpoints fail closed instead of leaking cache_control.
+        """
+        if self.config is None or self._uses_plan(model_config) or getattr(model_config, "use_responses_api", False):
+            return False
+        try:
+            provider = self.config.get_provider(model_config.provider)
+            endpoint = urlparse(provider.base_url)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
+        if endpoint.scheme != "https" or endpoint.hostname != "openrouter.ai":
+            return False
+        explicit = getattr(model_config, "prompt_cache", None)
+        if explicit is not None:
+            return bool(explicit)
+        return str(getattr(model_config, "name", "")).startswith("anthropic/")
 
     def _uses_plan(self, model_config: Any) -> bool:
         """Whether the model is served on the user's ChatGPT plan (provider ``auth: chatgpt``)."""
@@ -201,19 +226,30 @@ class ModelProvider:
         self, key: Optional[str]
     ) -> tuple[Optional[AsyncOpenAI], Optional[str]]:
         """Resolve the client/model to use for full compact."""
+        client, model, _ = self.compact_request(key)
+        return client, model
+
+    def compact_request(self, key: Optional[str]) -> tuple[Any, Optional[str], Optional[dict]]:
+        """Resolve the summary model and its API options together, including fallback."""
+        def resolve(model_key: str) -> tuple[Any, str, Optional[dict]]:
+            client, model = self.client_for(model_key)
+            cfg = self.config.get_model(model_key)
+            options = {"store": False, "max_output_tokens": None} if self._uses_plan(cfg) else ({} if getattr(cfg, "use_responses_api", False) else None)
+            return client, model, options
+
         compact_cfg = self.compact_config
         summary_model_key = getattr(compact_cfg, "summary_model", None)
         if summary_model_key:
             try:
-                return self.client_for(summary_model_key)
+                return resolve(summary_model_key)
             except Exception:
                 logger.warning(
                     "Configured compact.summary_model '%s' is unavailable; falling back to resolved model",
                     summary_model_key,
                 )
         if key:
-            return self.client_for(self.resolve_key(key))
-        return None, None
+            return resolve(self.resolve_key(key))
+        return None, None, None
 
     def context_window(self, agent_key: Optional[str]) -> int:
         """The context window of *agent_key*'s model; a default for unknown agents."""

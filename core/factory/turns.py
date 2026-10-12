@@ -27,6 +27,7 @@ from agents.run import CallModelData, ModelInputData
 from core.action_policy import ActionRunState
 from core.agent_input import AgentInput, context_content, parse_agent_input
 from core.compact import is_prompt_too_long_error
+from core.context import strip_service_context_footer
 from core.context_budget import context_budget_filter
 from core.factory.failures import (
     is_retriable,
@@ -288,6 +289,8 @@ class TurnRunner:
         agent_label = getattr(agent, "name", None) or "dynamic-agent"
         context_id = context_id or self.context_manager.get_current_context_id()
         session = self._get_agent_session(agent_label, context_id)
+        # A legacy session may still hold answers with the service footer.
+        await self._strip_legacy_context_footers(session)
         if action_state is None:
             action_state = self._action_state(
                 self._policy_task(input_message, context_id), context_id=context_id, observer=observer
@@ -527,6 +530,9 @@ class TurnRunner:
                 continue
             content = item.get("content")
             text = content if isinstance(content, str) else item.get("preview") or ""
+            if item.get("role") == "assistant":
+                # A legacy answer's service footer never reaches the model.
+                text = strip_service_context_footer(text)
             text = text.strip()
             if len(text) > _MISSED_MESSAGE_CHARS:
                 text = text[:_MISSED_MESSAGE_CHARS] + " [...]"
@@ -894,7 +900,7 @@ class TurnRunner:
             edit_of: The slot of the message this one is a new version of, in a
                 branch made by fork_conversation (ContextManager.message_versions)
 
-        The answer ends with the line ``Context ID: <id>``. An answer written as
+        An answer written as
         text tool calls (``<tool_call><function=...>``) is retried with a
         correction, up to MALFORMED_TOOL_CALL_RETRIES times.
 
@@ -1201,6 +1207,9 @@ class TurnRunner:
             # History reaches the model through the agent's SDK session: every
             # message, tool call and tool result, images included.
             session = self._get_agent_session(agent_key, active_context_id)
+            # A legacy session may still hold answers or tool results with
+            # the service footer; the model never reads it back.
+            await self._strip_legacy_context_footers(session)
             # Past the threshold, the session is summarized before the turn adds to it.
             self._report_compaction(observer, await self.compact_session(agent_key, active_context_id))
             # Where this turn starts in the agent's session: a branch forked at
@@ -1299,9 +1308,6 @@ class TurnRunner:
                 )
                 output, result, answered = interruption.summary(), progress.result, False
 
-            marker = f"Context ID: {active_context_id}"
-            if marker not in output:
-                output = f"{output.rstrip()}\n\n{marker}"
             if answered:
                 self.context_manager.append_message_to(
                     active_context_id,
