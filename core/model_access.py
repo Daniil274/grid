@@ -142,6 +142,13 @@ class ModelAccess:
         per request.
         """
         provider = config.get_provider(provider_key)
+        if getattr(provider, "auth", "api_key") == "claude":
+            raise CredentialError(
+                f"Provider '{provider_key}' runs through the official Claude Code CLI, which holds "
+                "the login itself; Grid has no API key to build a client with. Configure a separate "
+                "OpenAI-compatible model for compaction.",
+                details={"provider": provider_key},
+            )
         if not self.managed:
             if getattr(provider, "auth", "api_key") == "chatgpt":
                 raise CredentialError(

@@ -32,6 +32,12 @@ DEFAULT_POOL = "default"
 #: Every credential a user may bring: a key per provider preset, and a ChatGPT login.
 ALL_OWN_CREDENTIALS = frozenset({*PROVIDER_PRESETS, "chatgpt"})
 CHATGPT = "chatgpt"
+CLAUDE = "claude"
+
+
+def _is_claude(provider: object) -> bool:
+    """Whether *provider* runs on the official Claude Code CLI login (provider ``auth: claude``)."""
+    return getattr(provider, "auth", "api_key") == CLAUDE
 
 
 @dataclass(frozen=True)
@@ -125,6 +131,7 @@ class UserCredentials:
         plans: Plans,
         own: Optional[OwnCredentials] = None,
         environ: Optional[Mapping[str, str]] = None,
+        local_cli_login: bool = False,
     ) -> None:
         self._user_id = user_id
         self._entitlement = entitlement
@@ -132,12 +139,19 @@ class UserCredentials:
         self._own = own
         self._environ = environ if environ is not None else os.environ
         self._env = EnvCredentials(self._environ)
+        #: True only on the explicit local, single-user server, where the CLI
+        #: login in the operator's home directory is that one user's own
+        #: credential. On a server with accounts the host login is not any one
+        #: user's to spend, so the Claude provider is refused outright.
+        self._local_cli_login = local_cli_login
 
     # -- own ---------------------------------------------------------------------
     def _own_kind(self, provider: object, entitlement: Entitlement) -> Optional[str]:
         """The kind of own credential that would serve *provider*, if the plan allows one."""
         if self._own is None:
             return None
+        if _is_claude(provider):
+            return None  # the CLI holds the Claude login; there is nothing for a user to store
         if getattr(provider, "auth", "api_key") == "chatgpt":
             kind = CHATGPT
         else:
@@ -149,7 +163,7 @@ class UserCredentials:
     # -- pool --------------------------------------------------------------------
     def _pool_credential(self, provider: object, entitlement: Entitlement) -> Optional[Credential]:
         pool = entitlement.pool
-        if pool is None or getattr(provider, "auth", "api_key") == "chatgpt":
+        if pool is None or getattr(provider, "auth", "api_key") in (CHATGPT, CLAUDE):
             return None  # a plan login is the user's alone: no pool serves it
         if pool == DEFAULT_POOL:
             secret = self._env._secret(provider)
@@ -163,6 +177,17 @@ class UserCredentials:
         entitlement = self._entitlement()
         if self.available(provider):
             return None
+        if _is_claude(provider):
+            if not self._local_cli_login:
+                return (
+                    "This model runs on the Claude Code CLI login of this machine's operator, which "
+                    "is not a credential a user account may spend. It is available only on the "
+                    "local, single-user server."
+                )
+            return (
+                "This model runs on the Claude Code CLI's own login. Sign in on the host with "
+                "'claude auth login' (a Claude subscription, not an API key)."
+            )
         is_plan = getattr(provider, "auth", "api_key") == "chatgpt"
         kind = CHATGPT if is_plan else preset_for(getattr(provider, "base_url", ""))
         status = getattr(self._own, "status", None)
@@ -179,10 +204,24 @@ class UserCredentials:
     # -- the CredentialSource protocol -------------------------------------------
     def available(self, provider: object) -> bool:
         entitlement = self._entitlement()
+        if _is_claude(provider):
+            # The CLI's login is the operator's own, on the operator's machine.
+            # Only the explicit local, single-user server may spend it: on a
+            # server with accounts no user may reach the host login.
+            return self._local_cli_login
         return self._own_kind(provider, entitlement) is not None or self._pool_credential(provider, entitlement) is not None
 
     async def credential(self, provider: object) -> Credential:
         entitlement = self._entitlement()
+        if _is_claude(provider):
+            if not self._local_cli_login:
+                raise CredentialError(
+                    "The Claude subscription runs on the Claude Code CLI login of this machine's "
+                    "operator. It is available only on the local, single-user server, not to a "
+                    "user account on a shared server.",
+                    details={"provider": getattr(provider, "name", "")},
+                )
+            return Credential("", CLAUDE, charged=False, subscription=True)
         kind = self._own_kind(provider, entitlement)
         if kind is not None:
             found = await self._own.credential(self._user_id, kind)  # type: ignore[union-attr]

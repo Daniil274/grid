@@ -28,6 +28,9 @@ logger = logging.getLogger("grid.agent_factory")
 # Context window assumed for an agent that is not in the config (dynamic agents).
 DEFAULT_CONTEXT_WINDOW = 128_000
 
+#: Provider auth methods that spend a plan rather than a Grid-held key.
+PLAN_AUTH_METHODS = ("chatgpt", "claude")
+
 
 class ModelProvider:
     """The models of one system's config, ready for agents to run on."""
@@ -152,11 +155,11 @@ class ModelProvider:
         return str(getattr(model_config, "name", "")).startswith("anthropic/")
 
     def _uses_plan(self, model_config: Any) -> bool:
-        """Whether the model is served on the user's ChatGPT plan (provider ``auth: chatgpt``)."""
+        """Whether the model is served on a plan login the CLI/provider holds, not Grid's key."""
         if self.config is None:
             return False
         try:
-            return self.config.get_provider(model_config.provider).auth == "chatgpt"
+            return getattr(self.config.get_provider(model_config.provider), "auth", "api_key") in PLAN_AUTH_METHODS
         except Exception:  # noqa: BLE001 - an unknown provider is reported where the model is built
             return False
 
@@ -165,6 +168,10 @@ class ModelProvider:
         self.access.check_model(self.config, model_key)
         model_config = self.config.get_model(model_key)
         provider_config = self.config.get_provider(model_config.provider)
+        if getattr(provider_config, "auth", "api_key") == "claude":
+            # The Claude Code CLI holds the login; Grid never builds a keyed
+            # client for it and never sees a Claude credential.
+            return self.claude_model(model_key, model_config, provider_config), model_config
         api_key = self.access.api_key(self.config, model_config.provider)
 
         client = self.make_client(
@@ -221,6 +228,37 @@ class ModelProvider:
         if timeout or cap:
             model = BoundedModel(model, key=model_key, timeout=timeout, max_output_tokens=cap)
         return model, model_config
+
+    def claude_model(self, model_key: str, model_config: Any, provider_config: Any) -> Any:
+        """The Agents SDK model backed by the official Claude Code CLI (provider ``auth: claude``).
+
+        Grid holds no Claude credential here: the CLI's own subscription login
+        authorizes every call, and every variable that would bill an API key or
+        a cloud account is removed from the child process (core.claude_cli).
+        The CLI's own login is re-checked on every request, and its built-in
+        tools, MCP servers and host settings are disabled from the command line.
+        """
+        from core.bounded_model import BoundedModel
+        from core.claude_cli import ClaudeCodeRunner
+        from core.claude_model import ClaudeCodeModel
+
+        try:
+            working_directory = self.config.get_working_directory()
+        except Exception:  # noqa: BLE001 - a config without one runs in the current directory
+            working_directory = None
+        runner = ClaudeCodeRunner(
+            binary=getattr(provider_config, "claude_binary", None),
+            working_directory=working_directory,
+            model=model_config.name,
+        )
+        model: Any = ClaudeCodeModel(runner, model_config.name)
+        # The CLI enforces no output cap of its own, and one runaway answer
+        # would hold a run; bound it the way every plan-backed model is bound.
+        timeout = getattr(model_config, "response_timeout", None)
+        cap = getattr(model_config, "max_tokens", None)
+        if timeout or cap:
+            model = BoundedModel(model, key=model_key, timeout=timeout, max_output_tokens=cap)
+        return model
 
     def compact_client_and_model(
         self, key: Optional[str]

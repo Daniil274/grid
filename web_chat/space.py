@@ -179,6 +179,7 @@ class UserSpace:
         on_systems_changed: Optional[Callable[[], None]] = None,
         entitlement: Optional[Callable[[], Entitlement]] = None,
         own_credentials: Optional[OwnCredentials] = None,
+        local_cli_login: bool = False,
     ) -> None:
         """``layout`` None keeps the single-user layout (see the module docs).
 
@@ -202,6 +203,11 @@ class UserSpace:
         ``admins_only`` systems, and access to the shared builder store.
         Other users receive access to their private builder store.
         ``on_systems_changed`` is called for shared changes so every space picks them up.
+
+        ``local_cli_login``: this space is the explicit local, single-user
+        server, so the machine's Claude Code CLI login is that one user's own
+        credential (web_chat.entitlements). A server with accounts leaves it
+        False and refuses the Claude provider.
         """
         self.deployment = deployment
         self.user_id = user_id
@@ -212,6 +218,7 @@ class UserSpace:
         self.usage = usage
         self.admin = admin
         self.on_systems_changed = on_systems_changed
+        self.local_cli_login = local_cli_login
         self.entitlement = entitlement
         policy = (lambda: entitlement().limits) if entitlement is not None else (lambda: deployment.user_limits)
         spend = usage if hasattr(usage, "spent_micro") else None
@@ -250,7 +257,15 @@ class UserSpace:
         self, entitlement: Optional[Callable[[], Entitlement]], own: Optional[OwnCredentials]
     ) -> ModelAccess:
         credentials = (
-            UserCredentials(self.user_id, entitlement, self.deployment.plans, own) if entitlement is not None else None
+            UserCredentials(
+                self.user_id,
+                entitlement,
+                self.deployment.plans,
+                own,
+                local_cli_login=self.local_cli_login,
+            )
+            if entitlement is not None
+            else None
         )
         return ModelAccess(
             credentials,

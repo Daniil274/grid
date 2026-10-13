@@ -236,6 +236,9 @@ def single_user_options(deployment, args: argparse.Namespace) -> dict:
                 lambda user_id: UserSpace(
                     deployment, user_id=user_id, activity=activity, usage=usage, admin=True,
                     entitlement=lambda: deployment.plans.resolve(admin=True), own_credentials=vault,
+                    # This is the explicit local, single-user server: the
+                    # machine's Claude Code CLI login is that one user's own.
+                    local_cli_login=True,
                     # What the system builder makes shows in every space once it is free.
                     on_systems_changed=lambda: pool.invalidate(),
                 )

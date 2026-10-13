@@ -27,12 +27,22 @@ class ProviderConfig(BaseModel):
     default_headers: Dict[str, str] = Field(default_factory=dict)
     timeout: int = Field(default=30, ge=1, le=300)
     max_retries: int = Field(default=2, ge=0, le=1000)
-    auth: Literal["api_key", "chatgpt"] = Field(
+    auth: Literal["api_key", "chatgpt", "claude"] = Field(
         default="api_key",
         description=(
-            "How requests are authorized: with an API key (default), or with the user's ChatGPT plan "
-            "(Sign in with ChatGPT, web_chat.chatgpt). A plan provider serves only Responses API models "
-            "and takes no key from the environment"
+            "How requests are authorized: with an API key (default), with the user's ChatGPT plan "
+            "(Sign in with ChatGPT, web_chat.chatgpt), or with the official Claude Code CLI login "
+            "(auth: claude, core.claude_cli). ChatGPT uses the Responses API; Claude runs the CLI. "
+            "Neither plan provider takes an API key from the environment"
+        ),
+    )
+    claude_binary: Optional[str] = Field(
+        default=None,
+        description=(
+            "Auth: claude only. The Claude Code CLI to run (name on PATH or a path). Unset: the "
+            "'claude' binary, or GRID_CLAUDE_BINARY. Grid holds no Claude credential: the CLI's own "
+            "subscription login authorizes every call, and API-key/cloud credentials are stripped "
+            "from its environment"
         ),
     )
     price_source: Optional[str] = Field(
