@@ -4,6 +4,8 @@ No providers, Docker or MCP are started; the SDK runner is replaced.
 """
 import asyncio
 import json
+import math
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -232,11 +234,83 @@ async def test_errors_hide_secrets_and_do_not_retry(runtime):
 
 async def test_timeout_cancels_target(runtime, monkeypatch):
     runtime.factories["knowledge"].wait = True
-    monkeypatch.setattr("core.system_access.TIMEOUT_SECONDS", 0.01)
+    # Timeouts apply only when the target system enforces delegate limits.
+    runtime.configs["knowledge"].config.settings = SimpleNamespace(
+        enforce_delegate_limits=True)
+    monkeypatch.setattr(runtime.configs["knowledge"], "get_agent_timeout", lambda key: 0.01)
     output = json.loads(
         await runtime.broker.delegate("main", "knowledge", "task", runtime.parent))
     assert output["status"] == "failed" and "timed out" in output["reason"]
     runtime.result.cancel.assert_called_once()
+
+
+def _recording_timeout(monkeypatch):
+    """Patch ``asyncio.timeout`` and return the list of applied timeouts."""
+    applied = []
+    real_timeout = asyncio.timeout
+
+    def recording(value):
+        applied.append(value)
+        return real_timeout(value)
+
+    monkeypatch.setattr(asyncio, "timeout", recording)
+    return applied
+
+
+async def test_delegate_is_unlimited_by_default(runtime, monkeypatch):
+    # No settings.enforce_delegate_limits -> no turn budget, no time budget.
+    applied = _recording_timeout(monkeypatch)
+    output = json.loads(
+        await runtime.broker.delegate("main", "knowledge", "task", runtime.parent))
+    assert output["status"] == "completed"
+    assert runtime.calls[0]["max_turns"] == math.inf
+    assert applied == []
+
+
+async def test_enforced_delegate_uses_the_targets_limits(runtime, monkeypatch):
+    runtime.configs["knowledge"].config.settings = SimpleNamespace(
+        enforce_delegate_limits=True)
+    monkeypatch.setattr(runtime.configs["knowledge"], "get_max_turns", lambda key: 7)
+    monkeypatch.setattr(runtime.configs["knowledge"], "get_agent_timeout", lambda key: 12)
+    applied = _recording_timeout(monkeypatch)
+    output = json.loads(
+        await runtime.broker.delegate("main", "knowledge", "task", runtime.parent))
+    assert output["status"] == "completed"
+    assert runtime.calls[0]["max_turns"] == 7
+    assert applied == [12]
+
+
+async def test_enforced_zero_limits_stay_unlimited(runtime, monkeypatch):
+    runtime.configs["knowledge"].config.settings = SimpleNamespace(
+        enforce_delegate_limits=True)
+    monkeypatch.setattr(runtime.configs["knowledge"], "get_max_turns", lambda key: 0)
+    monkeypatch.setattr(runtime.configs["knowledge"], "get_agent_timeout", lambda key: 0)
+    applied = _recording_timeout(monkeypatch)
+    output = json.loads(
+        await runtime.broker.delegate("main", "knowledge", "task", runtime.parent))
+    assert output["status"] == "completed"
+    assert runtime.calls[0]["max_turns"] == math.inf
+    assert applied == []
+
+
+async def test_delegate_runs_auto_run_tools_before_the_request(runtime, monkeypatch):
+    # An auto_run_tools target is not rejected: its preamble is prepended.
+    runtime.configs["knowledge"].config.agents["reader"] = AgentConfig(
+        name="Reader", model="m", auto_run_tools=[{"tool": "memory_recall"}])
+    seen = []
+
+    async def preamble(agent_key, agent_config, agent, run_ctx, user_message=None):
+        seen.append((agent_key, user_message))
+        return "PREAMBLE-BODY"
+
+    monkeypatch.setattr(
+        runtime.factories["knowledge"], "_auto_run_preamble", preamble, raising=False)
+    output = json.loads(
+        await runtime.broker.delegate("main", "knowledge", "Find facts", runtime.parent))
+    assert output["status"] == "completed"
+    assert seen == [("reader", "Find facts")]
+    assert runtime.calls[0]["input"] == \
+        "PREAMBLE-BODY\n\n[Current user request]\n\nFind facts"
 
 
 async def test_cancellation_propagates_and_restores_factory(runtime):
@@ -358,3 +432,38 @@ async def test_catalog_config_to_tool_to_target_execution(tmp_path, runtime):
     assert output["status"] == "completed"
     assert output["system"] == "knowledge" and output["agent"] == "reader"
     assert registry.factory("knowledge").built == ["reader"]
+
+
+def test_system_access_tools_are_registered_with_instructions():
+    from tools.function_tools import AVAILABLE_TOOLS
+    from tools.system_access_tools import SYSTEM_ACCESS_TOOLS
+
+    assert set(SYSTEM_ACCESS_TOOLS) == {"systems_list", "system_delegate"}
+    for name in SYSTEM_ACCESS_TOOLS:
+        assert name in AVAILABLE_TOOLS
+        assert AVAILABLE_TOOLS[name] is SYSTEM_ACCESS_TOOLS[name]
+
+    listed = AVAILABLE_TOOLS["systems_list"].description
+    delegate = AVAILABLE_TOOLS["system_delegate"].description
+    # Each description carries the instruction to use the other tool and the
+    # key/agent names the model needs, right next to the schema.
+    assert "system_delegate" in listed
+    assert "systems_list" in delegate
+    assert "key agent" in delegate
+
+
+def test_coordinator_pipeline_config_has_no_system_access_tool_errors():
+    from core.config import Config
+    from core.tool_check import CONFIG, diagnose
+
+    root = Path(__file__).resolve().parent.parent / "examples/coordinator-pipeline/config.yaml"
+    config = Config(str(root))
+    issues = diagnose(config)
+
+    assert not any(issue.tool in {"systems_list", "system_delegate"} for issue in issues)
+    # Config errors are the administrator's to fix; environment ones (missing
+    # keys, docker) are not this test's concern.
+    config_problems = " ".join(
+        issue.problem for issue in issues if issue.kind == CONFIG)
+    assert "systems_list" not in config_problems
+    assert "system_delegate" not in config_problems

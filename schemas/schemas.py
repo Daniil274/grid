@@ -333,6 +333,14 @@ class Settings(BaseModel):
     max_turns: int = Field(default=10, ge=0, le=300)
     # 0 disables the agent execution timeout; per-agent `timeout` overrides it.
     agent_timeout: int = Field(default=300, ge=0, le=7200)
+    enforce_delegate_limits: bool = Field(
+        default=False,
+        description=(
+            "When True, cross-system calls (system_delegate) apply the target "
+            "agent's/system's configured timeout and max_turns. When False (default), "
+            "cross-system calls run without turn or time limits."
+        ),
+    )
     debug: bool = False
     mcp_enabled: bool = False
     project_tools: Optional[ProjectToolsConfig] = Field(default=None)

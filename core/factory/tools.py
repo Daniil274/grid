@@ -377,8 +377,14 @@ class ToolAssembly:
                     "Failed to create agent tools %s: %s", agent_tools, e, exc_info=e
                 )
 
-        # Caller-specific closures must not be shared between agent keys.
-        tools.extend(self._system_access_tools(agent_key))
+        # Caller-specific closures must not be shared between agent keys. The
+        # broker's policy-wrapped tools replace the same names a config may have
+        # declared, so systems_list / system_delegate are never listed twice.
+        access_tools = self._system_access_tools(agent_key)
+        if access_tools:
+            provided = {getattr(tool, "name", None) for tool in access_tools}
+            tools = [tool for tool in tools if getattr(tool, "name", None) not in provided]
+            tools.extend(access_tools)
         if PARALLEL in function_tools:
             tools.append(self._parallel_tool(tools))
 
