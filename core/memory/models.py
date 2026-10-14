@@ -108,7 +108,12 @@ class MemoryContextPack:
 
 # UTF-8 bytes are a deliberately conservative tokenizer-free budget estimate.
 def estimated_tokens(text: str) -> int:
-    return len(text.encode("utf-8"))
+    """Approximate model tokens: about three characters each, for Latin and Cyrillic alike.
+
+    Counting UTF-8 bytes instead charged Russian text twice (or six times once
+    JSON-escaped), so a 1000-token budget held barely a sentence of it.
+    """
+    return (len(text) + 2) // 3
 
 
 def context_pack(hits: Sequence[MemorySearchHit], backend_name: str) -> MemoryContextPack:

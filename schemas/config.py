@@ -16,6 +16,8 @@ class MemoryConfig(BaseModel):
     extract_on_compact: bool = True
     extract_on_turn: bool = True      # distil each finished turn into memory
     snapshot_turns: bool = True       # ... and keep the exchange itself as an L0 record
+    extract_with_model: bool = True   # a model writes the turn's memories; the heuristic is the fallback
+    extract_model: str | None = None  # model key for it; default: compact.summary_model, else the agent's
     tenant_id: str = Field(default="default", min_length=1)
     team_id: str = "default"
     user_id: str = "default"

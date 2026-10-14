@@ -51,6 +51,7 @@ memory:
   extract_on_compact: true
   extract_on_turn: true
   snapshot_turns: true
+  extract_with_model: true   # a model writes each turn's memories; heuristic fallback
 
 # Context compaction (core/context_budget.py). The window is 40k tokens and an
 # answer takes up to 8k, so a request is kept under 26k: 40k - 4k reserved for

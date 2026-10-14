@@ -16,7 +16,8 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional, Tuple
 
-from core.compact import COMPACTED_TYPE, compact_conversation
+from core.compact import COMPACTED_TYPE, CompactMessage, compact_conversation
+from core.compact.compact_conversation import _call_llm_for_summary
 from core.context_budget import request_tokens, session_transcript
 from core.interruption import CONTINUATION_TYPE
 
@@ -113,6 +114,89 @@ class SessionUpkeep:
         except Exception:
             logger.warning("Memory extraction after the turn failed; the turn is unaffected", exc_info=True)
             return []
+
+    def remember_turn_later(self, context_id: Optional[str], request: Any, answer: Any,
+                            agent_key: Optional[str] = None) -> Optional[asyncio.Task]:
+        """Run :meth:`remember_turn_async` in the background: the turn does not wait on it."""
+        try:
+            task = asyncio.get_running_loop().create_task(
+                self.remember_turn_async(context_id, request, answer, agent_key))
+        except RuntimeError:
+            return None
+        tasks = self.__dict__.setdefault("_memory_tasks", set())
+        tasks.add(task)  # held until done: the loop keeps only weak references
+        task.add_done_callback(tasks.discard)
+        return task
+
+    async def remember_turn_async(self, context_id: Optional[str], request: Any, answer: Any,
+                                  agent_key: Optional[str] = None) -> list:
+        """Best-effort: store what a finished turn taught, written by a model.
+
+        With ``memory.extract_with_model`` (the default) a model reads the turn and
+        writes a few self-contained facts (core.memory.llm_extract), seeing the
+        related known memories so it neither repeats them nor leaves outdated ones
+        current. Without a model, or when its call or answer fails, the heuristic
+        :meth:`remember_turn` runs instead. Never raises.
+        """
+        try:
+            config = getattr(self, "config", None)
+            if config is None or not hasattr(config, "get_memory_config"):
+                return []
+            settings = config.get_memory_config()
+            if not settings.enabled or not getattr(settings, "extract_on_turn", True):
+                return []
+            if not isinstance(request, str) or not isinstance(answer, str):
+                return []
+            if not request.strip() or not answer.strip():
+                return []
+            if getattr(settings, "extract_with_model", True):
+                manager = self.get_memory_manager()
+                if manager is None:
+                    return []
+                extracted = await self.extract_turn_with_model(manager, request, answer, agent_key, settings)
+                if extracted is not None:
+                    snapshot = bool(getattr(settings, "snapshot_turns", True))
+                    return await asyncio.to_thread(
+                        manager.store_extracted, extracted,
+                        source_ref=f"chat:{context_id}" if context_id else None,
+                        exchange=(request, answer) if snapshot else None,
+                    )
+            return await asyncio.to_thread(self.remember_turn, context_id, request, answer)
+        except Exception:
+            logger.warning("Memory extraction after the turn failed; the turn is unaffected", exc_info=True)
+            return []
+
+    async def extract_turn_with_model(self, manager: Any, request: str, answer: str,
+                                       agent_key: Optional[str], settings: Any) -> Optional[list]:
+        """The model's records for one turn; None when no model answered usefully."""
+        from core.memory import MemoryLayer, MemoryQuery
+        from core.memory.llm_extract import (
+            SYSTEM_PROMPT,
+            extraction_prompt,
+            parse_extraction,
+        )
+
+        models = getattr(self, "models", None)
+        if models is None:
+            return None
+        try:
+            model_key = getattr(settings, "extract_model", None)
+            client, model, options = (
+                models.model_request(model_key) if model_key else models.compact_request(agent_key))
+            if client is None or not model:
+                return None
+            query = MemoryQuery(text=f"{request[:400]} {answer[:400]}",
+                                layers=(MemoryLayer.L1, MemoryLayer.L2, MemoryLayer.L3), limit=15)
+            known = [hit.record for hit in await asyncio.to_thread(manager.search, query)]
+            text = await asyncio.wait_for(_call_llm_for_summary(
+                [CompactMessage(role="system", content=SYSTEM_PROMPT)],
+                extraction_prompt(request, answer, known),
+                client, model, max_tokens=2000, responses_api=options,
+            ), timeout=180)
+            return parse_extraction(text, [record.id for record in known])
+        except Exception:
+            logger.warning("Model memory extraction failed; using the heuristic distiller", exc_info=True)
+            return None
 
     def _session_epoch(self, context_id: str, agent_key: str) -> int:
         """How many times *agent_key*'s session in *context_id* was replaced by a summary."""

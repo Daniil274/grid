@@ -267,14 +267,16 @@ class ModelProvider:
         client, model, _ = self.compact_request(key)
         return client, model
 
+    def model_request(self, model_key: str) -> tuple[Any, str, Optional[dict]]:
+        """(client, model, Responses API options or None) for a one-off request to *model_key*."""
+        client, model = self.client_for(model_key)
+        cfg = self.config.get_model(model_key)
+        options = {"store": False, "max_output_tokens": None} if self._uses_plan(cfg) else ({} if getattr(cfg, "use_responses_api", False) else None)
+        return client, model, options
+
     def compact_request(self, key: Optional[str]) -> tuple[Any, Optional[str], Optional[dict]]:
         """Resolve the summary model and its API options together, including fallback."""
-        def resolve(model_key: str) -> tuple[Any, str, Optional[dict]]:
-            client, model = self.client_for(model_key)
-            cfg = self.config.get_model(model_key)
-            options = {"store": False, "max_output_tokens": None} if self._uses_plan(cfg) else ({} if getattr(cfg, "use_responses_api", False) else None)
-            return client, model, options
-
+        resolve = self.model_request
         compact_cfg = self.compact_config
         summary_model_key = getattr(compact_cfg, "summary_model", None)
         if summary_model_key:

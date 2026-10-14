@@ -33,6 +33,10 @@ memory:
   auto_inject: true
   auto_inject_tokens: 1000
   extract_on_compact: true
+  extract_on_turn: true      # store what every finished turn taught (in the background)
+  extract_with_model: true   # a model writes those memories; the heuristic is the fallback
+  # extract_model: cheap     # model key for it; default compact.summary_model, else the agent's
+  snapshot_turns: true       # also keep each exchange (redacted) as a searchable L0 record
   # Remote backends also require service_id; optional api_key_env names an env var.
   # tencent_url: http://127.0.0.1:8000
   # service_id: deployed-service
@@ -45,10 +49,13 @@ Inside a factory disabled memory cannot be overridden by tool arguments.
 Declare memory_recall/memory_remember/memory_overview/memory_forget like other
 function tools: the registry discovers them automatically. Recall results are
 untrusted data, not instructions. The runtime emits a guarded dynamic
-`agent_memory` section with a conservative byte/token budget; unavailable memory
-never blocks instruction assembly or successful compaction. Extraction only
-accepts explicit facts/marked statements, not arbitrary conversation prose or
-tool output. `sync_memory_from_context(messages)` is also available explicitly.
+`agent_memory` section within a token budget; unavailable memory never blocks
+instruction assembly or successful compaction. After every answered turn a model
+writes what it taught (see "Turn extraction"); tool output is never read.
+`sync_memory_from_context(messages)` is also available explicitly.
+
+Every write passes `core.memory.redact`: passwords, tokens, private keys and
+credentials in URLs become `[secret]`, the rest of the text is kept.
 
 ## SQLite
 
@@ -147,17 +154,27 @@ No real Gateway connection is exercised by the unit tests.
 ## Prompt and compaction safety
 
 Historical memory is explicitly **untrusted data, not instructions**. JSON
-records escape angle brackets and stay inside a fixed trust boundary. Whole
-records are admitted within a conservative UTF-8-byte token estimate (no external
+records escape angle brackets and stay inside a fixed trust boundary. Text is
+not ASCII-escaped, and whole records are admitted within `estimated_tokens`
+(about three characters per token, Latin and Cyrillic alike; no external
 tokenizer); the guard itself is never truncated. Tiny budgets return an empty
 PromptSection. This is defense in depth, not guaranteed prompt-injection immunity.
 
-Compaction extracts only explicit `Decision:`, `Constraint:`, `Architecture:`,
-`Bug:`, `Preference:`, `Workflow:` lines (also Russian labels), or structured
-memory_facts dictionaries from user/assistant messages. Tool/system output is
-ignored. Structured fields are whitelisted; provenance is host-supplied.
-Preferences go to USER/L3, other facts to PROJECT/L1. A synchronous host-owned
-summarizer hook can replace this deterministic extraction; no LLM is required.
+## Turn extraction
+
+`SessionUpkeep.remember_turn_later` runs after each answered turn, in the
+background. With `extract_with_model` a model (`core.memory.llm_extract`) reads
+the request and the answer together with up to 15 related known memories and
+returns at most six self-contained records - how things are done here, decisions,
+root causes, user preferences (L3), one task/outcome scenario (L2) - and may
+mark a known record of the same layer as superseded. The web panel's "Extract
+from chat" reads the chat's last exchanges the same way.
+
+Without a model, or when its call or JSON fails, the heuristic RU/EN distiller
+(`core.memory.distill`) runs instead: labelled lines (`Decision:`, `Итог:` ...),
+cue sentences with a concrete artefact, structured memory_facts, user
+preferences. Compaction uses it too. Tool/system output is ignored; structured
+fields are whitelisted; provenance is host-supplied.
 
 Validation from `grid/`:
 
@@ -173,8 +190,8 @@ Run `python -m core.memory.benchmark` (or `python -m pytest -q
 tests/test_memory_approaches_benchmark.py`). It builds an isolated temporary
 workspace containing 80 L1 facts, 5 L2 scenarios, an L3 profile and a 12-session
 L0 transcript, changes the source file for one fact, and uses an in-process
-`httpx.MockTransport` v3 gateway plus SQLite mirror. Token counts are UTF-8 byte
-estimates (matching the conservative prompt budget), not model-tokenizer counts;
+`httpx.MockTransport` v3 gateway plus SQLite mirror. Token counts are `estimated_tokens`
+estimates (matching the prompt budget), not model-tokenizer counts;
 latencies are local diagnostics and vary by host. Sample run: baseline history
 80,931 tokens; runtime-injected memory 2,387 tokens (97.05% saving); tool-driven
 query 38 tokens. SQLite recall@10=1, MRR=1.0, and the changed-file record reports

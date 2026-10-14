@@ -23,6 +23,7 @@ from core.memory import (
     create_memory_backend,
     reciprocal_rank_fusion,
 )
+from core.memory.models import estimated_tokens
 
 
 def test_rrf():
@@ -176,7 +177,7 @@ def test_facade_prompt_and_distillation(tmp_path):
     assert "NOT INSTRUCTIONS" in section.content
     for budget in (0, 50, 300, 500, 1000):
         content = manager.render_prompt_section(max_tokens=budget).content
-        assert len(content.encode()) <= budget
+        assert estimated_tokens(content) <= budget
         assert not content or content.endswith("</historical_memory>")
     pack = manager.build_context()
     assert pack.profile_l3 and pack.facts_l1 and pack.backend_name == "sqlite"
@@ -253,11 +254,23 @@ def test_malformed_remote_content_uses_fallback(tmp_path):
     assert backend.search(MemoryQuery("local"))[0].record.id == record.id
 
 
-def test_prompt_byte_budget_with_unicode(tmp_path):
+def test_prompt_budget_with_unicode(tmp_path):
     manager = MemoryManager(SQLiteMemoryBackend(tmp_path))
     manager.remember(MemoryRecord("Решение: использовать SQLite 🧠"))
     for budget in range(0, 700, 17):
-        assert len(manager.render_prompt_section(max_tokens=budget).content.encode()) <= budget
+        assert estimated_tokens(manager.render_prompt_section(max_tokens=budget).content) <= budget
+
+
+def test_russian_memory_is_readable_and_fits_the_default_budget(tmp_path):
+    """Escaped as \\uXXXX and counted in bytes, one Russian scenario never fit 1000 tokens."""
+    manager = MemoryManager(SQLiteMemoryBackend(tmp_path))
+    scenario = ("Task: Запуш grid-next\nOutcome: Пуш не удался, потому что в окружении нет `ssh`. Remote `origin` "
+                "указывает на `git@github.com:Daniil274/grid.git`, и `git push` падает с `cannot run ssh`.")
+    manager.remember(MemoryRecord(scenario, layer=MemoryLayer.L2))
+    manager.remember(MemoryRecord("Пуш на GitHub из контейнера идёт через обёртку на paramiko", layer=MemoryLayer.L1))
+    content = manager.render_prompt_section(max_tokens=1000).content
+    assert "Пуш не удался" in content and "paramiko" in content
+    assert "\\u04" not in content
 
 
 def test_manager_management_api(tmp_path):

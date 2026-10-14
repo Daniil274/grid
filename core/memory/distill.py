@@ -11,7 +11,8 @@ The distiller reads ordinary prose, not only ``decision: ...`` lines:
 
 Everything is deterministic, so running it again over the same text yields the same
 records and the backend's content-hash deduplication keeps the store free of copies.
-Tool/system messages are never read. Lines that look like secrets are skipped.
+Tool/system messages are never read. Credentials are masked before anything is read
+(core.memory.redact), so a password in a request costs the record nothing but the password.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import MemoryCategory, MemoryLayer, MemoryRecord, MemoryScope
+from .redact import redact_secrets
 
 C = MemoryCategory
 
@@ -81,9 +83,6 @@ _HEADING = re.compile(r"^\s*#{1,6}\s")
 
 _ARTEFACT = re.compile(
     r"`[^`\n]{2,80}`|(?<![\w/])[\w./-]+\.(?:py|js|mjs|cjs|ts|tsx|jsx|yaml|yml|json|toml|md|html|css|sql|sh|cfg|ini)\b")
-_SECRET = re.compile(
-    r"(?:api[_ -]?key|token|passw(?:or)?d|secret|пароль|токен|ключ api)\s*(?:is|—|[:=])\s*\S+|\bsk-[\w-]{12,}|"
-    r"\bghp_\w{12,}|\bBearer\s+\w{12,}", re.IGNORECASE)
 
 _X = re.IGNORECASE
 _PREFERENCE = re.compile("|".join((
@@ -184,7 +183,7 @@ def _clean(text: str, limit: int = MAX_ITEM) -> str:
 
 
 def _usable(text: str, minimum: int = 12) -> bool:
-    if len(text) < minimum or text.endswith("?") or _SECRET.search(text):
+    if len(text) < minimum or text.endswith("?"):
         return False
     letters = sum(ch.isalpha() for ch in text)
     return letters >= len(text) * 0.4 and text[0] not in "|{[<$>#"
@@ -216,7 +215,7 @@ def _classify(sentence: str, role: str) -> _Item | None:
     if not substantial:
         return None
     for pattern, category, needs_artefact in (
-        (_BUG, C.BUG, False), (_DECISION, C.DECISION, True),
+        (_BUG, C.BUG, True), (_DECISION, C.DECISION, True),
         (_ARCHITECTURE, C.ARCHITECTURE, True), (_WORKFLOW, C.WORKFLOW, False),
     ):
         if pattern.search(sentence) and (artefact or not needs_artefact):
@@ -296,7 +295,7 @@ def _tags(text: str) -> tuple[str, ...]:
     return tuple(tags)
 
 
-def _exchanges(messages: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
+def exchanges(messages: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
     """(user request, assistant reply) pairs; replies between two requests are joined."""
     pairs: list[list[str]] = []
     for message in messages:
@@ -328,6 +327,14 @@ def _outcome(assistant: str, items: list[_Item]) -> str:
     return " ".join(sentences)
 
 
+def snapshot_record(user: str, assistant: str) -> MemoryRecord:
+    """The L0 record of one exchange, credentials masked: searchable, never injected."""
+    return MemoryRecord(
+        content=redact_secrets(f"User: {user[:1500]}\n\nAssistant: {assistant[:3000]}"),
+        layer=MemoryLayer.L0, category=C.NOTE, scope=MemoryScope.PROJECT,
+        confidence=1.0, tags=("chat-snapshot",))
+
+
 def distill_messages(messages: Sequence[Mapping[str, Any]], *, snapshot: bool = False) -> list[MemoryRecord]:
     """Records for a conversation: L1/L3 facts and rules, L2 scenarios and, optionally, L0."""
     records: list[MemoryRecord] = []
@@ -342,6 +349,8 @@ def distill_messages(messages: Sequence[Mapping[str, Any]], *, snapshot: bool = 
             content=item.text, category=item.category, layer=item.layer, scope=item.scope,
             confidence=item.confidence, tags=_tags(item.text)))
 
+    messages = [{**message, "content": redact_secrets(text_of(message))} for message in messages
+                if message.get("role") in ("user", "assistant")]
     per_message: dict[int, list[_Item]] = {}
     for index, message in enumerate(messages):
         role = message.get("role")
@@ -353,16 +362,13 @@ def distill_messages(messages: Sequence[Mapping[str, Any]], *, snapshot: bool = 
             for item in per_message[index]:
                 add(item)
 
-    for user, assistant in _exchanges(messages)[-MAX_EXCHANGES:]:
+    for user, assistant in exchanges(messages)[-MAX_EXCHANGES:]:
         user_clean, assistant_clean = _clean(user, 300), _clean(_FENCE.sub(" ", assistant), 100000)
         if snapshot:
-            records.append(MemoryRecord(
-                content=f"User: {user[:1500]}\n\nAssistant: {assistant[:3000]}",
-                layer=MemoryLayer.L0, category=C.NOTE, scope=MemoryScope.PROJECT,
-                confidence=1.0, tags=("chat-snapshot",)))
-        if len(user_clean) >= 15 and len(assistant_clean) >= 120 and not _SECRET.search(user_clean):
+            records.append(snapshot_record(user, assistant))
+        if len(user_clean) >= 15 and len(assistant_clean) >= 120:
             outcome = _outcome(assistant, scan_text(assistant, "assistant"))
-            if outcome and not _SECRET.search(outcome):
+            if outcome:
                 records.append(MemoryRecord(
                     content=f"Task: {user_clean}\nOutcome: {_clean(outcome, 500)}",
                     layer=MemoryLayer.L2, category=C.NOTE, scope=MemoryScope.PROJECT,

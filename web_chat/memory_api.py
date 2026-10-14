@@ -40,6 +40,7 @@ from core.memory import (
     MemoryRecord,
     MemoryScope,
 )
+from core.memory.distill import exchanges
 from core.memory.models import estimated_tokens
 from web_chat.space import UserSpace
 
@@ -49,6 +50,8 @@ Category = Literal["decision", "constraint", "architecture", "bug", "preference"
 
 #: Most messages one sync reads, newest last.
 SYNC_MESSAGES = 400
+#: Exchanges the model reads on "Extract from chat": one model call each.
+SYNC_EXCHANGES = 8
 
 
 class MemoryCreateRequest(BaseModel):
@@ -87,10 +90,13 @@ class MemorySyncRequest(BaseModel):
 class _Target:
     """The memory one request works on, and what its config says about it."""
 
-    def __init__(self, manager: MemoryManager, settings: Any, enabled: bool) -> None:
+    def __init__(self, manager: MemoryManager, settings: Any, enabled: bool,
+                 factory: Any = None, agent_key: str | None = None) -> None:
         self.manager = manager
         self.settings = settings
         self.enabled = enabled
+        self.factory = factory      # the chat's agent factory: its model writes memories
+        self.agent_key = agent_key
 
 
 _local: weakref.WeakKeyDictionary[Any, dict[tuple, MemoryManager]] = weakref.WeakKeyDictionary()
@@ -119,14 +125,15 @@ def _local_manager(space: Any, config: Any, settings: Any, tenant: str) -> Memor
         return manager
 
 
-def _resolve_sync(space: UserSpace, registry: Any, system: str, context_id: str | None) -> _Target:
+def _resolve_sync(space: UserSpace, registry: Any, system: str, context_id: str | None,
+                  agent_key: str | None = None) -> _Target:
     config = registry.config(system)
     settings = config.get_memory_config()
     factory = registry.factory(system)
     if settings.enabled:
         manager = factory.get_memory_manager()
         if manager is not None:
-            return _Target(manager, settings, True)
+            return _Target(manager, settings, True, factory, agent_key)
     # Disabled in the config: still the factory's own workspace store (the one its
     # memory tools write to), so panel, tools and turn hook share file and namespace.
     shared = getattr(factory, "get_workspace_memory_manager", None)
@@ -152,7 +159,8 @@ async def _target(space: UserSpace, context_id: str | None) -> _Target:
     if system not in set(registry.keys()):
         system = registry.default_key()
     try:
-        return await asyncio.to_thread(_resolve_sync, space, registry, system, context_id)
+        agent_key = metadata.get("routed_agent") or metadata.get("agent_key")
+        return await asyncio.to_thread(_resolve_sync, space, registry, system, context_id, agent_key)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - a config the memory cannot be built from
@@ -210,6 +218,30 @@ def _conversation_messages(space: UserSpace, context_id: str) -> list[dict[str, 
         if role in ("user", "assistant") and isinstance(content, str) and content:
             messages.append({"role": role, "content": content})
     return messages
+
+
+async def _sync_with_model(target: _Target, messages: list[dict[str, Any]], source_ref: str) -> list | None:
+    """The chat's last exchanges, each read by the agents' model (as after a turn).
+
+    None when there is no model for it or it fails: the caller then distils with
+    the heuristic instead. Exchanges go one at a time, oldest first, so a later
+    one sees - and may supersede - what an earlier one stored.
+    """
+    extract = getattr(target.factory, "extract_turn_with_model", None)
+    if not target.enabled or extract is None or not getattr(target.settings, "extract_with_model", True):
+        return None
+    snapshot = bool(getattr(target.settings, "snapshot_turns", True))
+    stored: dict[str, Any] = {}
+    for request, answer in exchanges(messages)[-SYNC_EXCHANGES:]:
+        extracted = await extract(target.manager, request, answer, target.agent_key, target.settings)
+        if extracted is None:
+            return None if not stored else list(stored.values())
+        for record in await asyncio.to_thread(
+            target.manager.store_extracted, extracted, source_ref=source_ref,
+            exchange=(request, answer) if snapshot else None,
+        ):
+            stored[record.id] = record
+    return list(stored.values())
 
 
 def _refused(exc: Exception) -> HTTPException:
@@ -310,12 +342,14 @@ def register_memory_routes(router: APIRouter, current_space: Callable[..., Any])
         target = await _target(space, body.context_id)
         messages = _conversation_messages(space, body.context_id)
         try:
-            stored = await asyncio.to_thread(
-                lambda: target.manager.extract_and_store_from_messages(
-                    messages, source_ref=f"chat:{body.context_id}",
-                    snapshot=bool(getattr(target.settings, "snapshot_turns", True)),
+            stored = await _sync_with_model(target, messages, f"chat:{body.context_id}")
+            if stored is None:
+                stored = await asyncio.to_thread(
+                    lambda: target.manager.extract_and_store_from_messages(
+                        messages, source_ref=f"chat:{body.context_id}",
+                        snapshot=bool(getattr(target.settings, "snapshot_turns", True)),
+                    )
                 )
-            )
         except (ValueError, TypeError, OSError) as exc:
             raise _refused(exc) from None
         return JSONResponse({

@@ -1321,8 +1321,9 @@ class TurnRunner:
                     },
                 )
             if answered:
-                # Not only at compaction: what the turn settled lands in memory now.
-                await asyncio.to_thread(self.remember_turn, active_context_id, message, output)
+                # Not only at compaction: what the turn settled lands in memory, in the
+                # background - a model writes it, and the answer need not wait for that.
+                self.remember_turn_later(active_context_id, message, output, agent_key)
             execution.end_time = time.time()
             execution.output = output
             execution.tools_used = [
