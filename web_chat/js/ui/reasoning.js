@@ -304,6 +304,14 @@ function taskText(detail) {
 }
 
 /**
+ * The parallel tool's block (tools/parallel_tools.py): a container of the
+ * calls it runs side by side, not a sub-agent asked in words. Its task is the
+ * JSON envelope of the batch and its report the JSON of the results, so the
+ * block shows its inner calls and its own subtitle, and nothing else.
+ */
+const isParallelStep = (step) => step.tool === "parallel" || step.title === "Parallel calls";
+
+/**
  * A sub-agent's run: a row whose detail is the sub-agent's own timeline, framed
  * by the task it was given and the report it returned.
  *
@@ -332,6 +340,15 @@ function createAgentRow(step, turnStart, load = null) {
     if (!stale) return;
     if (current.lazy && !loading && (loading = loadOnOpen(load, current, update, report))) return;
     stale = false;
+    // A parallel batch is its inner calls: no task above them, no report below.
+    // A failed batch is an exception the reader has to see: its error shows in
+    // the report's place, never the JSON envelope of the batch or its report.
+    if (isParallelStep(current)) {
+      if (current.status === "error") {
+        replace(report, renderPayload("Error", current.result_payload, current.body, { markdown: false, state: payloadState.result }));
+      }
+      return;
+    }
     const asked = taskText(current.detail);
     replace(task, renderPayload("Task", current.input_payload, asked, { markdown: asked !== current.detail, state: payloadState.input }));
     replace(report, renderPayload(current.status === "error" ? "Error" : "Report", current.result_payload, current.body, { markdown: current.status !== "error", state: payloadState.result }));
@@ -339,7 +356,13 @@ function createAgentRow(step, turnStart, load = null) {
   const { suggest } = disclosure(root, head, fill);
 
   const renderSubtitle = () => {
-    const asked = taskText(current.detail || "").replace(/\s+/g, " ").trim() || current.subtitle;
+    // A parallel batch says what it runs in its own subtitle (tool_summaries);
+    // the JSON envelope of the batch is not words.
+    // A failed batch says what broke - the first line of its error - instead
+    // of only the count of calls that never reported.
+    const asked = isParallelStep(current)
+      ? (current.status === "error" ? String(current.body || "").split("\n")[0].trim() : "") || current.subtitle || ""
+      : taskText(current.detail || "").replace(/\s+/g, " ").trim() || current.subtitle;
     if (current.status === "running") {
       subtitle.textContent = timeline.activity() || asked || "Starting";
       return;
@@ -362,9 +385,13 @@ function createAgentRow(step, turnStart, load = null) {
     stale = true;
     if (root.classList.contains("is-open")) fill();
     renderSubtitle();
-    // Like the panel: open while the sub-agent works, out of the way once it reports.
-    if (next.status === "running") suggest(true);
-    else if (wasRunning) suggest(false);
+    // A parallel batch opens while its calls run so the reader sees which tools
+    // and agents they are, then folds out of the way once it reports. A
+    // sub-agent's own block stays closed while it works; the reader opens it.
+    if (isParallelStep(next)) {
+      if (next.status === "running") suggest(true);
+      else if (wasRunning) suggest(false);
+    }
   };
 
   update(step);

@@ -143,6 +143,7 @@ class AutoRunTools:
             Combined result string ready to be prepended to agent instructions.
         """
         result_parts: List[str] = []
+        observer = getattr(run_context, "stream_observer", None) or self._stream_observer
         working_dir = (
             "/"
             if getattr(self, "container_id", None)
@@ -170,16 +171,16 @@ class AutoRunTools:
                         )
                     if not agent_key:
                         agent_key = "dynamic-agent"
-                    if hasattr(self._stream_observer, "tool_call_started"):
-                        self._stream_observer.tool_call_started(
+                    if hasattr(observer, "tool_call_started"):
+                        observer.tool_call_started(
                             agent_key, tool_name, tool_params
                         )
                     wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
                     result = await target_tool.on_invoke_tool(
                         wrapper, json.dumps(tool_params)
                     )
-                    if hasattr(self._stream_observer, "tool_call_finished"):
-                        self._stream_observer.tool_call_finished(
+                    if hasattr(observer, "tool_call_finished"):
+                        observer.tool_call_finished(
                             agent_key, tool_name, result
                         )
                     # Log the full result of the init tool call in verbose mode

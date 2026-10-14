@@ -191,8 +191,6 @@ class PlanBoard:
     # -- what the trace saw ----------------------------------------------------
     def called(self, tool: str, arguments: Any) -> None:
         """A call started: an agent launched on a task claims it."""
-        if tool != "orchestrate":
-            return
         changed = False
         for bead_id in _claimed(arguments):
             # Taking up a task already in progress still makes it this turn's.

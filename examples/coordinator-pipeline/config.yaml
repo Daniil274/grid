@@ -466,6 +466,8 @@ agents:
         every_run: true
         parameters:
           directory: ${working_directory}
+      # Once per run: inject the list of accessible systems and their key agents.
+      - name: systems_list
     # Lets the batching rules below take effect: several calls per response.
     parallel_tool_calls: true
     custom_prompt: |

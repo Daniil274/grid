@@ -21,7 +21,7 @@ from core.run_stream import (
     tool_event_info,
 )
 from web_chat.payload import normalize_payload
-from web_chat.plan_board import TRACKED_TOOLS, PlanBoard
+from web_chat.plan_board import TRACKED_TOOLS, PlanBoard, _claimed
 from web_chat.tool_summaries import tool_subtitle, tool_title
 from web_chat.trace import (
     Step,
@@ -511,7 +511,7 @@ class WebStreamObserver:
 
     def _follow_plan(self, tool_name: str, arguments: Any, call_id: Optional[str]) -> None:
         """Hand a tracker call to the plan board; its result follows by call id."""
-        if tool_name not in TRACKED_TOOLS:
+        if tool_name not in TRACKED_TOOLS and not _claimed(arguments):
             return
         self._plan.called(tool_name, arguments)
         if call_id:
