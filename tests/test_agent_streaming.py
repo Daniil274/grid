@@ -494,3 +494,82 @@ agents:
     assert state.history is caller.history
     assert state.delegation == {"tool": "call_test_agent", "request": "Check core/"}
     assert started["context"].action_depth == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_executes_init_tools_before_sub_agent_run(tmp_path, monkeypatch):
+    import json
+    from agents.tool import function_tool
+    from agents.tool_context import ToolContext
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+settings:
+  default_agent: "test_agent"
+  max_turns: 2
+  working_directory: "."
+  config_directory: "."
+  mcp_enabled: false
+  agent_logging:
+    enabled: false
+providers:
+  openai:
+    name: "openai"
+    base_url: "https://api.openai.com/v1"
+models:
+  gpt-4:
+    name: "gpt-4"
+    provider: "openai"
+prompt_templates:
+  base: |
+    You are a helpful assistant.
+agents:
+  test_agent:
+    name: "Test Agent"
+    model: "gpt-4"
+    tools: []
+    base_prompt: "base"
+    description: "Test agent"
+""",
+        encoding="utf-8",
+    )
+    started = {}
+    init_calls = []
+
+    @function_tool(name_override="beads_show")
+    async def fake_beads_show(bead_id: str) -> str:
+        init_calls.append(("beads_show", bead_id))
+        return f"Issue {bead_id}: Implement feature"
+
+    class DummyRunner:
+        @staticmethod
+        def run_streamed(**kwargs):
+            started.update(kwargs)
+            return DummyStream(events=[], final_output="done")
+
+    monkeypatch.setattr(agents, "Runner", DummyRunner)
+    factory = AgentFactory(Config(str(config_path)))
+    sub_agent = SimpleNamespace(name="Test Agent", tools=[fake_beads_show])
+    raw_tool = factory._create_context_aware_agent_tool(
+        "test_agent", sub_agent, "Agent", "Delegate"
+    )
+    wrapped_tool = factory._wrap_agent_tool(raw_tool, "test_agent")
+
+    payload = {
+        "input": "Complete bd-1",
+        "init_tools": [{"name": "beads_show", "parameters": {"bead_id": "bd-1"}}],
+    }
+    ctx = ToolContext(
+        context=SimpleNamespace(),
+        tool_name="Agent",
+        tool_call_id="call-init-1",
+        tool_arguments=json.dumps(payload),
+    )
+
+    result = await wrapped_tool.on_invoke_tool(ctx, json.dumps(payload))
+    assert result == "done"
+    assert init_calls == [("beads_show", "bd-1")]
+    assert "=== CONTEXT [beads_show] ===" in started["input"]
+    assert "Issue bd-1: Implement feature" in started["input"]
+    assert "[Current user request]\n\nComplete bd-1" in started["input"]

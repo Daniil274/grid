@@ -29,6 +29,17 @@ const json = (method, body) => ({
   body: JSON.stringify(body),
 });
 
+/** A query string from the params that carry a value; none gives "". */
+const queryString = (params = {}) => {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (value === undefined || value === null || value === "" || value === false) continue;
+    query.set(key, String(value));
+  }
+  const text = query.toString();
+  return text ? `?${text}` : "";
+};
+
 export const api = {
   serverStatus: () => request("/api/server/status", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
   adminServer: () => request("/api/admin/server", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
@@ -159,6 +170,15 @@ export const api = {
   createAgent: (spec) => request("/api/agents", json("POST", spec)),
   updateAgent: (key, spec) => request(`/api/agents/${encodeURIComponent(key)}`, json("PUT", spec)),
   deleteAgent: (key) => request(`/api/agents/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  /** The agent's memory (web_chat/memory_api.py): overview, filtered or searched records, prompt preview. */
+  memoryOverview: (params) => request(`/api/memory${queryString(params)}`, { cache: "no-store" }),
+  createMemoryRecord: (payload) => request("/api/memory/records", json("POST", payload)),
+  updateMemoryRecord: (recordId, payload) =>
+    request(`/api/memory/records/${encodeURIComponent(recordId)}`, json("PUT", payload)),
+  deleteMemoryRecord: (recordId, params) =>
+    request(`/api/memory/records/${encodeURIComponent(recordId)}${queryString(params)}`, { method: "DELETE" }),
+  /** Distil a chat (`{context_id}`) into memory. */
+  syncMemory: (payload) => request("/api/memory/sync", json("POST", payload)),
   /** The systems page (web_chat/system_hub.py). */
   systems: () => request("/api/systems"),
   system: (kind, key) => request(`/api/systems/${encodeURIComponent(kind)}/${encodeURIComponent(key)}`),

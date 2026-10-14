@@ -9,6 +9,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from enum import Enum
 from .action_policy import ActionPolicyConfig
+from .config import MemoryConfig
 
 
 class ToolType(str, Enum):
@@ -555,6 +556,7 @@ class ReviewPolicy(BaseModel):
 
 class GridConfig(BaseModel):
     """Complete Grid system configuration."""
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     settings: Settings = Field(default_factory=Settings)
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
     compact: "CompactConfig" = Field(default_factory=lambda: CompactConfig())

@@ -429,6 +429,26 @@ agents:
     mcp_enabled: true
 
 # =============================================================================
+# PERSISTENT AGENT MEMORY (optional, disabled by default)
+# =============================================================================
+# See core/memory/README.md. Tenant identity and storage are host-owned; the
+# model cannot choose them. To let agents use it, also declare the function
+# tools memory_recall / memory_remember / memory_overview / memory_forget in
+# `tools:` and list them in the agent's `tools:` (see examples/coder/config.yaml).
+#
+# memory:
+#   enabled: true
+#   backend: sqlite              # sqlite | tencent | hybrid
+#   storage_path: .grid/memory.sqlite   # workspace-relative
+#   auto_inject: true            # add relevant memories to the instructions
+#   auto_inject_tokens: 1000
+#   extract_on_compact: true     # save "Decision: ..." lines before compaction
+#   # tencent / hybrid only:
+#   # tencent_url: http://127.0.0.1:8000
+#   # service_id: my-service
+#   # api_key_env: MEMORY_GATEWAY_TOKEN
+
+# =============================================================================
 # COMPACT SYSTEM CONFIGURATION
 # =============================================================================
 # Controls context management and compaction to manage token limits.

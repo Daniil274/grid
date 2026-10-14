@@ -211,6 +211,10 @@ class WebChatServer:
         from web_chat.agents_api import register_personal_agent_routes
 
         register_personal_agent_routes(api, self.current_space)
+        from web_chat.memory_api import register_memory_routes
+
+        # The memory panel's API: records of the user's own workspace memory.
+        register_memory_routes(api, self.current_space)
         from web_chat.uploads import register_upload_routes
 
         register_upload_routes(api, self.current_space, lambda: self.deployment.uploads_policy)

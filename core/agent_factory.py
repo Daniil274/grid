@@ -84,6 +84,20 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
     the other factories of a web space, so a conversation survives routing.
     """
 
+    def get_memory_manager(self):
+        """Lazily share one host-bound memory manager across tools and runtime."""
+        with self._memory_lock:
+            if not self.config.get_memory_config().enabled:
+                return None
+            root = str(Path(self.config.get_working_directory()).resolve())
+            if self._memory_manager is not None and root != getattr(self, "_memory_workspace", root):
+                self._memory_manager.close()
+                self._memory_manager = None
+            if self._memory_manager is None:
+                self._memory_manager = self.config.create_memory_manager(tenant_id=self._memory_tenant)
+                self._memory_workspace = root
+            return self._memory_manager
+
     def __init__(
         self,
         config: Optional[Config] = None,
@@ -169,6 +183,10 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             model_access=model_access,
         )
         self.instructions_builder = self._runtime_support.instructions_builder
+        self._memory_manager = None
+        self._memory_lock = threading.Lock()
+        self._memory_tenant = session_namespace
+        self.instructions_builder.memory_manager_provider = self.get_memory_manager
 
         # Initialize ContainerManager
         from core.managers.container_manager import CONTAINER_WORKDIR, ContainerManager
@@ -747,6 +765,10 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
 
     async def cleanup(self) -> None:
         """Cleanup resources."""
+        manager = getattr(self, "_memory_manager", None)
+        if manager is not None:
+            manager.close()
+            self._memory_manager = None
         gate = getattr(self, "action_gate", None)
         if gate is not None:
             await gate.aclose()

@@ -27,10 +27,15 @@ class InstructionsBuilder:
         config: IConfig,
         context_manager: IContextManager,
         container_id: Optional[str] = None,
+        *,
+        memory_manager=None,
     ) -> None:
         self.config = config
         self.context_manager = context_manager
         self.container_id = container_id
+        self.memory_manager = memory_manager
+        self._explicit_memory_manager = memory_manager is not None
+        self.memory_manager_provider = None
         # Sections a deployment appends for every agent, right after the path
         # context. Nothing in core sets them; the web chat uses one to teach
         # the workspace-file link convention (web_chat/space.py).
@@ -61,6 +66,26 @@ class InstructionsBuilder:
 
         if self.platform_sections:
             sections.extend(self.platform_sections)
+
+        try:
+            settings = self.config.get_memory_config() if hasattr(self.config, "get_memory_config") else None
+            explicit = self._explicit_memory_manager
+            if explicit or (settings is not None and settings.enabled and settings.auto_inject):
+                if self.memory_manager_provider is not None:
+                    manager = self.memory_manager_provider()
+                else:
+                    if self.memory_manager is None:
+                        self.memory_manager = self.config.create_memory_manager()
+                    manager = self.memory_manager
+                if manager is not None:
+                    query = self.context_manager.get_conversation_context() or ""
+                    section = manager.render_prompt_section(
+                        query, max_tokens=settings.auto_inject_tokens if settings is not None else 1000,
+                    )
+                    if section.content:
+                        sections.append(PromptSection(key="agent_memory", content=section.content, scope="dynamic"))
+        except Exception:
+            logger.warning("Memory injection unavailable", exc_info=True)
 
         history_strategy = "none"
         if include_conversation_context:

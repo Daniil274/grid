@@ -17,6 +17,7 @@ import { monitorServer } from "./net/server-monitor.js";
 import { PasswordDrawer } from "./accounts/password.js";
 import { PlanDrawer } from "./accounts/plan.js";
 import { PersonalAgentsDrawer } from "./agents/drawer.js";
+import { MemoryDrawer } from "./ui/memory-dialog.js";
 import { SettingsDrawer } from "./settings/drawer.js";
 import { createRoutePicker } from "./ui/route-picker.js";
 import { createComposer } from "./ui/composer.js";
@@ -357,6 +358,38 @@ async function boot() {
     { onChanged: reloadRuntime },
   );
 
+  const memory = new MemoryDrawer(
+    {
+      drawer: $("#memory"),
+      backdrop: $("#memory-backdrop"),
+      closeButton: $("#memory-close"),
+      syncButton: $("#memory-sync"),
+      newButton: $("#memory-new"),
+      status: $("#memory-status"),
+      backend: $("#memory-backend"),
+      counts: $("#memory-counts"),
+      budget: $("#memory-budget"),
+      tabs: $("#memory-tabs"),
+      scope: $("#memory-scope"),
+      stale: $("#memory-stale"),
+      search: $("#memory-search"),
+      previewButton: $("#memory-preview-toggle"),
+      preview: $("#memory-preview"),
+      previewText: $("#memory-preview-text"),
+      list: $("#memory-list"),
+      editor: $("#memory-editor"),
+    },
+    {
+      getContextId: () => store.get().contextId,
+      onChanged: ({ overview, config }) => {
+        // The rail button shows whether memory is live, and warns about STALE records.
+        const dot = $("#memory-indicator");
+        dot.dataset.state = overview?.healthy === false ? "error" : (overview?.stale_count ?? 0) > 0 ? "stale" : config?.enabled_in_config ? "on" : "local";
+        $("#open-memory").title = `Agent memory · ${config?.backend ?? "?"} · ${overview?.total ?? 0} records${overview?.stale_count ? ` · ${overview.stale_count} STALE` : ""}`;
+      },
+    },
+  );
+
   const accountsAdmin = new AccountsDrawer(
     {
       drawer: $("#admin"),
@@ -415,6 +448,10 @@ async function boot() {
       usageWindow.focus();
       event.preventDefault();
     }
+  });
+  $("#open-memory").addEventListener("click", () => {
+    closeRail();
+    memory.open();
   });
   $("#open-agents").addEventListener("click", () => {
     closeRail();

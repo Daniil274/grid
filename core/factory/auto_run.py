@@ -65,6 +65,7 @@ class AutoRunTools:
         """
         result_parts: List[str] = []
         complete = True
+        observer = getattr(run_context, "stream_observer", None) or self._stream_observer
         for auto_tool in agent_config.auto_run_tools or []:
             tool_every_run = bool(auto_tool.get("every_run", False))
             if tool_every_run != every_run:
@@ -81,8 +82,8 @@ class AutoRunTools:
                     f"Auto-running tool '{tool_name}' for agent '{agent_key}' (cwd={working_dir}, every_run={every_run})"
                 )
                 try:
-                    if hasattr(self._stream_observer, "tool_call_started"):
-                        self._stream_observer.tool_call_started(
+                    if hasattr(observer, "tool_call_started"):
+                        observer.tool_call_started(
                             agent_key, tool_name, tool_params
                         )
                     tool_ctx_wrapper = AutoRunToolContext(
@@ -91,8 +92,8 @@ class AutoRunTools:
                     tool_result = await target_tool.on_invoke_tool(
                         tool_ctx_wrapper, json.dumps(tool_params)
                     )
-                    if hasattr(self._stream_observer, "tool_call_finished"):
-                        self._stream_observer.tool_call_finished(
+                    if hasattr(observer, "tool_call_finished"):
+                        observer.tool_call_finished(
                             agent_key, tool_name, tool_result
                         )
                     # Log the full result of the auto-run tool call in verbose mode
@@ -120,6 +121,19 @@ class AutoRunTools:
                     logger.warning(
                         f"⚠️ Error in auto-run tool '{tool_name}': {tool_err}"
                     )
+                    if hasattr(observer, "tool_call_finished"):
+                        observer.tool_call_finished(
+                            agent_key, tool_name, f"❌ {type(tool_err).__name__}: {tool_err}"
+                        )
+            else:
+                logger.warning(
+                    f"⚠️ Auto-run tool '{tool_name}' is not among the tools of agent '{agent_key}'"
+                )
+                if hasattr(observer, "tool_call_finished"):
+                    observer.tool_call_finished(
+                        agent_key, tool_name,
+                        f"❌ Auto-run tool '{tool_name}' is not among the tools of this agent",
+                    )
         return "".join(result_parts), complete
 
     async def _execute_init_tools(
@@ -143,6 +157,7 @@ class AutoRunTools:
             Combined result string ready to be prepended to agent instructions.
         """
         result_parts: List[str] = []
+        observer = getattr(run_context, "stream_observer", None) or self._stream_observer
         working_dir = (
             "/"
             if getattr(self, "container_id", None)
@@ -170,16 +185,16 @@ class AutoRunTools:
                         )
                     if not agent_key:
                         agent_key = "dynamic-agent"
-                    if hasattr(self._stream_observer, "tool_call_started"):
-                        self._stream_observer.tool_call_started(
+                    if hasattr(observer, "tool_call_started"):
+                        observer.tool_call_started(
                             agent_key, tool_name, tool_params
                         )
                     wrapper = AutoRunToolContext(run_context, tool_name=tool_name)
                     result = await target_tool.on_invoke_tool(
                         wrapper, json.dumps(tool_params)
                     )
-                    if hasattr(self._stream_observer, "tool_call_finished"):
-                        self._stream_observer.tool_call_finished(
+                    if hasattr(observer, "tool_call_finished"):
+                        observer.tool_call_finished(
                             agent_key, tool_name, result
                         )
                     # Log the full result of the init tool call in verbose mode
@@ -199,10 +214,19 @@ class AutoRunTools:
                     )
                 except Exception as e:
                     logger.warning(f"⚠️ init_tool '{tool_name}' error: {e}")
+                    if hasattr(observer, "tool_call_finished"):
+                        observer.tool_call_finished(
+                            agent_key, tool_name, f"❌ {type(e).__name__}: {e}"
+                        )
             else:
                 logger.warning(
                     f"⚠️ init_tool '{tool_name}' not found in agent's tool list"
                 )
+                if hasattr(observer, "tool_call_finished"):
+                    observer.tool_call_finished(
+                        agent_key, tool_name,
+                        f"❌ init_tool '{tool_name}' not found in the agent's tool list",
+                    )
         return "".join(result_parts)
 
     async def _auto_run_preamble(

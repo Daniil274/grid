@@ -22,7 +22,7 @@ logger = logging.getLogger("grid.config")
 
 class Config:
     """Thread-safe configuration manager with validation and caching."""
-    
+
     def __init__(self, config_path: str = "config.yaml", working_directory: Optional[str] = None):
         """
         Initialize configuration manager.
@@ -315,6 +315,36 @@ class Config:
             raise ConfigError("Configuration not loaded")
         return self._config
     
+    # Memory
+    def get_memory_config(self):
+        """Return validated optional memory settings."""
+        return self.config.memory
+
+    def create_memory_manager(self, *, tenant_id: Optional[str] = None):
+        """Create a host-bound manager; callers own its lifetime and cache."""
+        from core.memory import MemoryConfig, MemoryManager, TencentGatewayConfig
+
+        settings = self.get_memory_config()
+        if not settings.enabled:
+            return None
+        root = Path(self.get_working_directory()).resolve(strict=True)
+        path = (root / settings.storage_path).resolve()
+        if not path.is_relative_to(root):
+            raise ConfigError("Memory storage_path escapes workspace")
+        identity = tenant_id or settings.tenant_id
+        gateway = None
+        if settings.backend != "sqlite":
+            gateway = TencentGatewayConfig(
+                team_id=settings.team_id, user_id=identity if tenant_id else settings.user_id,
+                agent_id=settings.agent_id, service_id=settings.service_id,
+                base_url=settings.tencent_url,
+                bearer_token=os.environ.get(settings.api_key_env) if settings.api_key_env else None,
+            )
+        return MemoryManager.from_config(MemoryConfig(
+            workspace_root=root, backend=settings.backend, db_path=path,
+            tenant_id=identity, tencent=gateway,
+        ))
+
     # Working directory methods
     def get_working_directory(self) -> str:
         """Get current working directory."""

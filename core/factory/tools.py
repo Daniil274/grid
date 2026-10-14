@@ -488,6 +488,12 @@ class ToolAssembly:
                 # Not a JSON object (plain text or malformed JSON): the text is the task
                 preferred_text = str(arguments) if arguments is not None else ""
             normalized_args = {"input": preferred_text}
+            if isinstance(arguments, dict):
+                init_tools = arguments.get("init_tools")
+                if isinstance(init_tools, list) and init_tools:
+                    normalized_args["init_tools"] = json.dumps(init_tools, ensure_ascii=False)
+                elif isinstance(init_tools, str) and init_tools.strip():
+                    normalized_args["init_tools"] = init_tools
 
             # Safely convert arguments to string for logging
             requested_context_id = self._extract_context_id_from_text(preferred_text)
@@ -607,7 +613,7 @@ class ToolAssembly:
         # Enhance tool description, but move common rules to the shared prompt (see settings.tools_common_rules)
         effective_description = tool_description or ""
         # Key local rules kept brief (one line), the rest in the shared block
-        local_rule = "Call: pass a single field input (string). Allowed aliases: task, message, prompt."
+        local_rule = 'Call: pass input (string; allowed aliases: task, message, prompt) and optional init_tools (JSON list of {"name": ..., "parameters": {...}} tool calls run before the agent starts).'
         if effective_description:
             effective_description = effective_description + "\n" + local_rule
         else:
@@ -620,6 +626,7 @@ class ToolAssembly:
         async def run_agent_with_context(
             context: RunContextWrapper,
             input: str,
+            init_tools: Optional[str] = None,
         ) -> str:
             local_sub_agent = sub_agent
             if local_sub_agent is None:
@@ -727,8 +734,21 @@ class ToolAssembly:
                 sub_run_ctx,
                 user_message=enhanced_input,
             )
-            if preamble:
-                enhanced_input = f"{preamble}\n\n[Current user request]\n\n{enhanced_input}"
+            init_info = ""
+            if init_tools:
+                try:
+                    parsed_init_tools = json.loads(init_tools) if isinstance(init_tools, str) else init_tools
+                    if not isinstance(parsed_init_tools, list):
+                        raise ValueError("init_tools must be a JSON list")
+                except (ValueError, TypeError) as exc:
+                    logger.warning("Invalid init_tools for agent %s: %s", agent_key, exc)
+                    parsed_init_tools = []
+                init_info = await self._execute_init_tools(
+                    parsed_init_tools, list(local_sub_agent.tools or []), sub_run_ctx
+                )
+            if preamble or init_info:
+                prefix = "\n\n".join(part for part in (preamble, init_info) if part)
+                enhanced_input = f"{prefix}\n\n[Current user request]\n\n{enhanced_input}"
 
             set_current_factory(self)
             run_error: Optional[str] = None

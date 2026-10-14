@@ -105,7 +105,7 @@ def _report(output: Any) -> Optional[dict[str, Any]]:
     return report or None
 
 
-def _claimed(arguments: Any) -> list[str]:
+def claimed_task_ids(arguments: Any) -> list[str]:
     """The task ids an orchestrate call claims through the init_tools it hands its agent."""
     args = _data(arguments)
     init_tools = _data(args.get("init_tools")) if isinstance(args, dict) else None
@@ -191,10 +191,8 @@ class PlanBoard:
     # -- what the trace saw ----------------------------------------------------
     def called(self, tool: str, arguments: Any) -> None:
         """A call started: an agent launched on a task claims it."""
-        if tool != "orchestrate":
-            return
         changed = False
-        for bead_id in _claimed(arguments):
+        for bead_id in claimed_task_ids(arguments):
             # Taking up a task already in progress still makes it this turn's.
             changed |= self._set(bead_id, IN_PROGRESS) | self._touch(bead_id)
         if changed:
@@ -295,7 +293,7 @@ class PlanBoard:
         that is no single task's own, and lands on none of them. The free-text
         task is never searched for one."""
         report = _report(output)
-        claimed = set(_claimed(arguments))
+        claimed = set(claimed_task_ids(arguments))
         if report is None or len(claimed) != 1:
             return False
         (bead_id,) = claimed

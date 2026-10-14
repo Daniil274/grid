@@ -14,6 +14,7 @@ import logging
 from collections import deque
 from typing import Any, Callable, Optional
 
+from core.action_policy import is_policy_block
 from core.run_stream import (
     REASONING_DELTA_EVENTS,
     field_of,
@@ -21,7 +22,7 @@ from core.run_stream import (
     tool_event_info,
 )
 from web_chat.payload import normalize_payload
-from web_chat.plan_board import TRACKED_TOOLS, PlanBoard
+from web_chat.plan_board import TRACKED_TOOLS, PlanBoard, claimed_task_ids
 from web_chat.tool_summaries import tool_subtitle, tool_title
 from web_chat.trace import (
     Step,
@@ -131,6 +132,8 @@ class WebStreamObserver:
         # looks stalled until the call is complete.
         self._writing: dict[str, Step] = {}
         self._written_chars: dict[str, int] = {}
+        # Rows of tools the host ran itself (auto_run_tools, init_tools), oldest first per tool.
+        self._host_calls: dict[str, deque[Step]] = {}
 
     @property
     def policy_blocks(self) -> int:
@@ -335,6 +338,46 @@ class WebStreamObserver:
             return
         self._recorder.update(step, **badge)
 
+    # -- tools the host runs (auto_run_tools, init_tools) -------------------
+    def tool_call_started(
+        self, agent_key: Optional[str], tool_name: str, arguments: Any = None,
+        *, call_id: Optional[str] = None,
+    ) -> None:
+        """Show a tool the host runs before the model is asked as a trace row."""
+        name = str(tool_name or "tool")
+        subtitle = tool_subtitle(name, arguments)
+        if subtitle is None:
+            subtitle = clip(summarize(arguments, 160).replace("\n", " "), 120)
+        step = self._recorder.open(
+            StepKind.TOOL, tool_title(name, None) or name, parent_id=self._parent_id,
+            tool=name, subtitle=subtitle or "set-up step", detail=summarize(arguments),
+            input_payload=normalize_payload(arguments, role="input", tool=name),
+        )
+        self._host_calls.setdefault(name, deque()).append(step)
+
+    def tool_call_finished(
+        self, agent_key: Optional[str], tool_name: Optional[str], output: Any = "",
+        *, call_id: Optional[str] = None,
+    ) -> None:
+        """Close that row; a failure or a policy refusal is shown as an error."""
+        name = str(tool_name or "tool")
+        waiting = self._host_calls.get(name)
+        step = waiting.popleft() if waiting else None
+        text = output if isinstance(output, str) else str(output if output is not None else "")
+        blocked = is_policy_block(text)
+        failed = blocked or text.lstrip().startswith(("❌", "Error", "error:"))
+        payload = normalize_payload(output, tool=name)
+        status = StepStatus.ERROR if failed else StepStatus.DONE
+        if blocked:
+            self._held[0] += 1
+        if step is None:
+            self._recorder.note(
+                StepKind.TOOL, tool_title(name, None) or name, tool=name, body=summarize(output),
+                result_payload=payload, status=status, parent_id=self._parent_id,
+            )
+            return
+        self._recorder.close(step, body=summarize(output), result_payload=payload, status=status)
+
     # -- entry point -------------------------------------------------------
     def handle_event(
         self, event: Any, *, agent_key: Optional[str] = None
@@ -511,7 +554,7 @@ class WebStreamObserver:
 
     def _follow_plan(self, tool_name: str, arguments: Any, call_id: Optional[str]) -> None:
         """Hand a tracker call to the plan board; its result follows by call id."""
-        if tool_name not in TRACKED_TOOLS:
+        if tool_name not in TRACKED_TOOLS and not claimed_task_ids(arguments):
             return
         self._plan.called(tool_name, arguments)
         if call_id:

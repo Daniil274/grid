@@ -1,0 +1,335 @@
+/** The agent memory drawer: summary, layer tabs, filters, record cards and the editor. */
+
+.drawer--memory .drawer__panel {
+  width: min(1180px, 100vw);
+}
+
+/* -- rail button ----------------------------------------------------------- */
+.memDot {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--text-3);
+  opacity: 0.5;
+}
+
+.memDot[data-state="on"] { background: var(--ok); opacity: 1; }
+.memDot[data-state="local"] { background: var(--accent); opacity: 1; }
+.memDot[data-state="stale"] { background: var(--warn); opacity: 1; }
+.memDot[data-state="error"] { background: var(--danger); opacity: 1; }
+
+/* -- header: backend, counts, budget --------------------------------------- */
+.memHead {
+  align-items: flex-start;
+}
+
+.memHead__main {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.memHead__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+}
+
+.memHead__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.memPill {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--bg-2);
+  font-size: 12px;
+}
+
+.memPill__name {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-weight: 550;
+}
+
+.memPill__state {
+  color: var(--text-3);
+}
+
+.memPill[data-state="on"] { border-color: var(--ok); }
+.memPill[data-state="on"] .memPill__state { color: var(--ok); }
+.memPill[data-state="error"] { border-color: var(--danger); }
+.memPill[data-state="error"] .memPill__state { color: var(--danger); }
+
+.memCounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.memCount {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.memCount b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.memCount--stale[data-has="true"] {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.memCount--stale[data-has="true"] b {
+  color: var(--warn);
+}
+
+.memBudget {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.memBudget__bar {
+  width: 96px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--bg-3);
+}
+
+.memBudget__fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 200ms var(--ease);
+}
+
+.memBudget[data-over="true"] .memBudget__fill { background: var(--warn); }
+
+/* -- filters --------------------------------------------------------------- */
+.memBody {
+  display: grid;
+  gap: 16px;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: start;
+}
+
+.memFilters {
+  display: grid;
+  gap: 12px;
+}
+
+.memTabs {
+  padding: 0;
+  overflow-x: auto;
+}
+
+.tab__count {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-3);
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.memFilters__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.memSearch {
+  flex: 1 1 260px;
+}
+
+.memScope {
+  width: auto;
+  padding-block: 7px;
+}
+
+.memStale {
+  user-select: none;
+}
+
+#memory-preview-toggle.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.memPreview__text {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* -- records ---------------------------------------------------------------- */
+.memMaster {
+  grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr);
+}
+
+.memList {
+  display: grid;
+  gap: 10px;
+  max-height: 58vh;
+  padding-right: 4px;
+  overflow-y: auto;
+}
+
+.memCard {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+}
+
+.memCard:hover {
+  border-color: var(--line-strong);
+}
+
+.memCard.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.memCard[data-stale="stale"] {
+  border-left: 3px solid var(--warn);
+}
+
+.memCard__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.memCard__time {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.memCard__title {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.memCard__body {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.memCard__source {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memCard__source span {
+  color: var(--text-2);
+}
+
+.memCard__tags,
+.memCard__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.memCard__actions {
+  justify-content: flex-end;
+}
+
+.memTag {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.memTag--layer {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.memTag--scope,
+.memTag--tag {
+  color: var(--text-3);
+}
+
+.memTag--fresh {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.memTag--fresh[data-status="fresh"] { border-color: var(--ok); color: var(--ok); }
+.memTag--fresh[data-status="stale"] { border-color: var(--warn); background: rgb(240 177 61 / 12%); color: var(--warn); }
+.memTag--fresh[data-status="unverified"] { color: var(--text-3); }
+
+.memForm__actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 860px) {
+  .drawer--memory .drawer__head {
+    flex-wrap: wrap;
+  }
+
+  .memMaster {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .memList {
+    max-height: none;
+  }
+}

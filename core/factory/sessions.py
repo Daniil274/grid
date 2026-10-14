@@ -12,6 +12,7 @@ turn's items out of the session.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional, Tuple
 
@@ -50,6 +51,35 @@ class SessionUpkeep:
     self.context_manager, self._get_agent_session, self.models,
     self.compact_config and self._compact_tracking.
     """
+
+    def sync_memory_from_context(self, messages) -> list:
+        """Best-effort distillation of messages about to leave the SDK session."""
+        try:
+            config = getattr(self, "config", None)
+            if config is None or not hasattr(config, "get_memory_config"):
+                return []
+            settings = config.get_memory_config()
+            if not settings.enabled or not settings.extract_on_compact:
+                return []
+            manager = self.get_memory_manager()
+            if manager is None:
+                return []
+            normalized = []
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                item = dict(message)
+                content = item.get("content", "")
+                if isinstance(content, list):
+                    item["content"] = "\n".join(
+                        part.get("text", "") for part in content
+                        if isinstance(part, dict) and part.get("type") in ("text", "input_text", "output_text")
+                    )
+                normalized.append(item)
+            return manager.extract_and_store_from_messages(normalized)
+        except Exception:
+            logger.warning("Memory extraction failed; compaction continues", exc_info=True)
+            return []
 
     def _session_epoch(self, context_id: str, agent_key: str) -> int:
         """How many times *agent_key*'s session in *context_id* was replaced by a summary."""
@@ -298,6 +328,7 @@ class SessionUpkeep:
             )
             return None
         self._compact_tracking.consecutive_failures = 0
+        await asyncio.to_thread(self.sync_memory_from_context, items)
         await session.clear_session()
         await session.add_items(summary)
         # Turn marks taken before this point no longer count items of this session.

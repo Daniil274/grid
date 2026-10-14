@@ -75,6 +75,25 @@ def test_the_same_step_follows_the_tasks_through_their_agents():
     assert step["plan"]["tasks"][0]["close_reason"] == "done"
 
 
+def test_regular_agent_init_tools_claim_marks_task_in_progress():
+    harness = Harness()
+    planned(harness)
+    init = [
+        {"name": "beads_show", "parameters": {"bead_id": "p-1"}},
+        {"name": "beads_update", "parameters": {"bead_id": "p-1", "claim": True}},
+    ]
+    harness.feed(tool_called("Agent", "c2", json.dumps({"input": "Work on p-1", "init_tools": json.dumps(init)})))
+    assert states(plan_steps(harness)[0])["research"] == "in_progress"
+
+    sub = harness.observer.nested("General-purpose", call_id="c2")
+    sub.handle_event(tool_called("beads_close", "c3", json.dumps({"bead_id": "p-1", "reason": "completed by Agent"})))
+    sub.handle_event(tool_output("c3", json.dumps({"id": "p-1", "status": "closed"})))
+
+    [step] = plan_steps(harness)
+    assert states(step) == {"research": "closed", "compare": "ready", "docs": "ready"}
+    assert step["plan"]["tasks"][0]["close_reason"] == "completed by Agent"
+
+
 def test_a_failed_tracker_call_changes_nothing():
     harness = Harness()
     planned(harness)

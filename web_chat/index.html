@@ -17,6 +17,7 @@
   <link rel="stylesheet" href="/static/styles/voice.css">
   <link rel="stylesheet" href="/static/styles/review.css">
   <link rel="stylesheet" href="/static/styles/projects.css">
+  <link rel="stylesheet" href="/static/styles/memory.css">
 </head>
 <body>
   <div class="app">
@@ -49,6 +50,7 @@
         <a class="btn btn--ghost" id="open-usage" href="/usage" target="grid-usage" rel="noopener" data-icon="timeline">Usage</a>
         <a class="btn btn--ghost" id="open-tasks" href="/tasks" data-icon="check">Tasks</a>
         <button class="btn btn--ghost" id="open-agents" type="button" data-icon="agent" hidden>My agents</button>
+        <button class="btn btn--ghost" id="open-memory" type="button" data-icon="memory" title="What the agent remembers: profile, scenarios, facts and history" aria-haspopup="dialog">Memory<span class="memDot" id="memory-indicator" data-state="unknown" aria-hidden="true"></span></button>
         <button class="btn btn--ghost" id="open-plan" type="button" data-icon="key" hidden>Keys &amp; billing</button>
         <a class="btn btn--ghost" id="open-systems" href="/systems" data-icon="mcp" hidden>Systems</a>
         <a class="btn btn--ghost" id="open-reviews" href="/admin/review" data-icon="inspect" hidden>Reviews</a>
@@ -295,6 +297,59 @@
           <button class="btn btn--danger" id="agents-delete" type="button" hidden>Delete</button>
           <button class="btn btn--primary" id="agents-save" type="button">Save</button>
         </div>
+      </footer>
+    </div>
+  </div>
+
+  <div class="drawer drawer--simple drawer--memory" id="memory" role="dialog" aria-label="Agent memory">
+    <div class="drawer__backdrop" id="memory-backdrop"></div>
+    <div class="drawer__panel">
+      <header class="drawer__head memHead">
+        <div class="memHead__main">
+          <h2>Agent memory</h2>
+          <div class="memHead__meta">
+            <span class="memPill" id="memory-backend" data-state="unknown" title="Memory backend: sqlite, tencent or hybrid"></span>
+            <div class="memCounts" id="memory-counts" aria-label="Records per layer"></div>
+            <div class="memBudget" id="memory-budget" title="Share of the prompt budget that auto-injected memory takes"></div>
+          </div>
+        </div>
+        <div class="memHead__actions">
+          <button class="btn btn--ghost" id="memory-sync" type="button" data-icon="compact" title="Extract decisions, constraints and facts from the open chat">Extract from chat</button>
+          <button class="btn btn--primary" id="memory-new" type="button" data-icon="plus">New record</button>
+          <button class="iconBtn" id="memory-close" type="button" aria-label="Close memory" data-icon="close"></button>
+        </div>
+      </header>
+      <div class="drawer__body memBody">
+        <div class="memFilters">
+          <div class="tabs memTabs" id="memory-tabs" role="tablist" aria-label="Memory layers"></div>
+          <div class="memFilters__row">
+            <div class="rail__search memSearch">
+              <label class="visuallyHidden" for="memory-search">Search memory</label>
+              <span class="rail__searchIcon" data-icon="search" data-icon-size="15"></span>
+              <input id="memory-search" type="search" placeholder="Search memory (BM25 + RRF)" autocomplete="off" title="Hybrid search: BM25 keyword ranking fused with RRF">
+            </div>
+            <label class="visuallyHidden" for="memory-scope">Scope</label>
+            <select class="control memScope" id="memory-scope">
+              <option value="">Any scope</option>
+              <option value="project">project</option>
+              <option value="user">user</option>
+              <option value="system">system</option>
+            </select>
+            <label class="chipToggle memStale"><input type="checkbox" id="memory-stale"><span>Only STALE</span></label>
+            <button class="btn btn--ghost btn--xs" id="memory-preview-toggle" type="button" aria-expanded="false" aria-controls="memory-preview">Prompt Preview</button>
+          </div>
+          <section class="memPreview card" id="memory-preview" hidden>
+            <h3>Prompt section the agent receives</h3>
+            <pre class="memPreview__text" id="memory-preview-text"></pre>
+          </section>
+        </div>
+        <div class="master memMaster">
+          <div class="memList" id="memory-list"></div>
+          <div class="master__detail" id="memory-editor"></div>
+        </div>
+      </div>
+      <footer class="drawer__foot">
+        <span class="drawer__status" id="memory-status" role="status" aria-live="polite"></span>
       </footer>
     </div>
   </div>

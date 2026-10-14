@@ -195,6 +195,12 @@ models:
     temperature: 0.5
     max_tokens: 128000
     context_window: 256000
+  gemini-4-argon:
+    name: google/gemini-4-argon
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 64000
+    context_window: 256000
 tools:
   beads_init:
     type: function
@@ -245,14 +251,15 @@ tools:
     description: "Поручает подзадачу новому агенту и возвращает его отчёт."
     # Модели исполнителя по порядку: первая доступная, при сбое запроса — следующая.
     models:
-      - gpt-6-luna
+      - deepseek-flash-latest
       - gpt-6.1-sol
+      - claude-sonnet-5.5
     model_choice: true
     tiers:
       fast:
-        - gpt-6-luna
+        - deepseek-flash-latest
       strong:
-        - gpt-6.1-sol
+        - claude-sonnet-5.5
     prompt_addition: |
       `orchestrate(task, agent_system_prompt, executor_tools, init_tools, system_skills, tier, model, timeout_seconds)`
       `model` — одна модель исполнителя по ключу из списка моделей в твоих инструкциях; пробуется первой, затем модели тира. По умолчанию выбирай тир, а `model` — только когда нужна именно эта модель: большой контекст, зрение, проверка другой моделью.
@@ -427,6 +434,7 @@ agents:
     timeout: 0  # No agent timeout: the coordinator must not be cut off mid-orchestration.
     max_turns: 0  # No turn limit for the same reason.
     model:
+      - gemini-4-argon
       - gpt-6-astra
       - claude-opus-5.5
     description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
@@ -454,6 +462,7 @@ agents:
       - grep_tool
       - web_fetch
       - web_search
+      - init_codegraph
       - codegraph
       - call_coordinator
     system_skills:
@@ -583,3 +592,4 @@ agents:
       - Be thorough — don't leave a task half-done
       - Report results clearly with file paths and line numbers
       - Use multiple tool and agent calls in one; they are always executed sequentially. After one tool completes, the next one begins, and upon completion, the results of all called tools are returned to you.
+prompt_templates: {}

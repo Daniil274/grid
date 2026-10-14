@@ -1,5 +1,7 @@
 """Configuration and runtime data schemas."""
 
+from .config import MemoryConfig
+
 from .schemas import (
     AgentConfig,
     AgentExecution,
@@ -24,6 +26,7 @@ from .schemas import (
 )
 
 __all__ = [
+    "MemoryConfig",
     "AgentConfig",
     "AgentExecution",
     "AgentLoggingConfig",
