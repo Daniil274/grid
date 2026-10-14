@@ -19,8 +19,10 @@ from core.factory.sessions import SessionUpkeep
 from core.managers.instructions_builder import InstructionsBuilder
 from core.memory import (
     MemoryCategory,
+    MemoryLayer,
     MemoryQuery,
     MemoryRecord,
+    MemoryScope,
     SQLiteMemoryBackend,
     StaleStatus,
 )
@@ -112,13 +114,18 @@ def test_builder_injects_guard_budget_and_caches(tmp_path):
     first = builder.assemble_model_context("agent")
     manager = builder.memory_manager
     manager.remember(MemoryRecord(content="workflow: run tests"))
+    manager.remember(MemoryRecord(content="Answer briefly", layer=MemoryLayer.L3, scope=MemoryScope.USER))
     second = builder.assemble_model_context("agent")
     assert builder.memory_manager is manager
     section = next(s for s in second.sections if s.key == "agent_memory")
     assert section.scope == "dynamic"
     assert "UNTRUSTED HISTORICAL DATA" in section.content
-    assert "run tests" in section.content
+    # Without a request to choose by: the profile only, never "whatever is newest".
+    assert "Answer briefly" in section.content and "run tests" not in section.content
     assert len(section.content.encode()) <= 1000
+    # The factory's per-request choice (core.factory.memory) is used as given.
+    chosen = builder.assemble_model_context("agent", memory_section="<historical_memory>x</historical_memory>")
+    assert next(s for s in chosen.sections if s.key == "agent_memory").content.endswith("x</historical_memory>")
     config.config.memory.auto_inject = False
     assert not any(
         s.key == "agent_memory"
@@ -385,9 +392,7 @@ def test_coder_builder_autoinjects_memory_and_flags_stale(tmp_path):
         )
         assert record.stale_status is StaleStatus.FRESH
 
-        assembly = builder.assemble_model_context("engineer")
-        section = next(s for s in assembly.sections if s.key == "agent_memory")
-        assert section.scope == "dynamic"
+        section = manager.render_prompt_section("keep app modules small", max_tokens=1000)
         assert "UNTRUSTED HISTORICAL DATA" in section.content
         assert "keep app modules small" in section.content
 
@@ -450,7 +455,7 @@ def bare_factory(tmp_path, **options):
 
 
 def test_turn_hook_saves_natural_russian_and_english_turns(tmp_path):
-    factory = bare_factory(tmp_path, enabled=True)
+    factory = bare_factory(tmp_path, enabled=True, snapshot_turns=True)
     try:
         ru = factory.remember_turn(
             "ctx-1",
@@ -538,7 +543,9 @@ def test_default_systems_enable_memory_and_tools(tmp_path):
     for path, agent in ((CODER_CONFIG, "engineer"), (COORDINATOR_CONFIG, "coordinator")):
         config = Config(str(path), working_directory=str(tmp_path))
         settings = config.get_memory_config()
-        assert settings.enabled and settings.extract_on_turn and settings.snapshot_turns, path
+        assert settings.enabled and settings.extract_on_turn and settings.extract_with_model, path
+        assert not settings.snapshot_turns, path  # the chat keeps the exchanges; memory keeps knowledge
+        assert settings.embeddings.provider in config.config.providers, path
         tools = config.get_agent(agent).tools
         assert set(MEMORY_TOOLS) <= set(tools), path
         assert config.skill_path("memory") is not None
@@ -546,3 +553,20 @@ def test_default_systems_enable_memory_and_tools(tmp_path):
     one = Config(str(CODER_CONFIG), working_directory=str(tmp_path))
     two = Config(str(COORDINATOR_CONFIG), working_directory=str(tmp_path))
     assert one.memory_location() == two.memory_location()
+
+
+def test_coordinator_example_owns_memory_and_workers_only_read():
+    """The coordinator writes memory; its workers get the read-only tools."""
+    config = Config(str(COORDINATOR_CONFIG))
+    assert config.get_memory_config().enabled
+    coordinator = config.get_agent("coordinator")
+    assert set(MEMORY_TOOLS) <= set(coordinator.tools)
+    assert "memory" in coordinator.system_skills
+    assert "`memory_recall`" in coordinator.custom_prompt
+
+    worker = config.get_agent("general_purpose")
+    assert {"memory_recall", "memory_overview"} <= set(worker.tools)
+    assert {"memory_remember", "memory_forget"}.isdisjoint(worker.tools)
+    assert "memory" in worker.system_skills
+    for name in MEMORY_TOOLS:
+        assert name in config.config.tools

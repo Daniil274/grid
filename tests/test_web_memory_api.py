@@ -279,7 +279,7 @@ def test_sync_distils_marked_statements_of_the_conversation(client, spaces):
 
     facts = [r for r in result["records"] if r["layer"] != "L0"]
     assert result["scanned"] == 3 and {r["category"] for r in facts} == {"decision", "bug"}
-    assert any(r["layer"] == "L0" for r in result["records"])  # the exchange snapshot
+    assert not any(r["layer"] == "L0" for r in result["records"])  # no raw copies by default
     assert all(r["source_ref"] == "chat:chat-1" for r in result["records"])
     count = client.get("/api/memory", params={"context_id": "chat-1"}).json()["count"]
     assert count == result["stored"]
@@ -364,14 +364,14 @@ def test_sync_distils_natural_russian_and_english_without_prefixes(client, space
 
     assert ru["stored"] >= 4 and en["stored"] >= 4
     by_layer = {r["layer"] for r in ru["records"]} | {r["layer"] for r in en["records"]}
-    assert by_layer == {"L0", "L1", "L2", "L3"}
+    assert by_layer == {"L1", "L2", "L3"}
     shown = client.get("/api/memory", params={"limit": 1000}).json()
     texts = " | ".join(r["content"] for r in shown["records"])
     assert "Всегда используй pytest" in texts and "prefer concise answers" in texts
     assert "TTL" in texts and "worker.py" in texts and "SQLite" in texts
     prefs = [r for r in shown["records"] if r["layer"] == "L3"]
     assert prefs and all(r["scope"] == "user" for r in prefs)
-    assert shown["overview"]["counts"]["L0"] >= 2
+    assert shown["overview"]["counts"]["L0"] == 0  # no raw copies of exchanges by default
 
 
 def test_agent_and_panel_share_one_database_and_namespace(client, spaces):

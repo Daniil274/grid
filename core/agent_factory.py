@@ -27,6 +27,7 @@ from core.context import ContextManager
 from core.factory.auto_run import AutoRunTools
 from core.factory.journal import RunJournal
 from core.factory.mcp import McpServers
+from core.factory.memory import MemoryUpkeep
 from core.factory.models import ModelProvider
 from core.factory.policy import PolicyWiring
 from core.factory.run_context import (
@@ -76,7 +77,7 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, PolicyWiring):
+class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRunTools, PolicyWiring):
     """Builds a system's agents and runs its conversation turns.
 
     One factory per system config. It caches the agents it built, keeps each

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 from ..config.prompt_sections import PromptSection
 from .distill import distill_messages, snapshot_record
-from .llm_extract import Extracted
+from .llm_extract import Extracted, Extraction
 from .models import (
     MemoryBackend,
     MemoryCategory,
@@ -27,6 +28,7 @@ from .models import (
     stats_via_search,
 )
 from .redact import redact_secrets
+from .vectors import VectorIndex, embedding_text
 from .sqlite_backend import SQLiteMemoryBackend
 from .tencent_backend import TencentGatewayConfig, TencentMemoryBackend
 
@@ -64,6 +66,20 @@ def create_memory_backend(config: MemoryConfig) -> MemoryBackend:
         raise
 
 
+#: Short function words that an OR-ed full-text query would match everywhere.
+_FUNCTION_WORDS = frozenset("""
+the and for are was not but you all any can has had her his its our out who why how did get
+let use this that with from have what when your they them then than into also just only
+все всё для как что это эта эти при без над под она они оно его её ему так уже ещё еще
+или нет где кто чем там тут вот был была были будет надо нужно можно если когда тоже также
+""".split())
+
+
+def is_extracted(record: MemoryRecord) -> bool:
+    """Written by the turn hook from a chat, not stored on purpose by a person or agent."""
+    return (record.source_ref or "").startswith("chat:") and record.confidence < 1.0
+
+
 class MemoryManager:
     def __init__(self, backend: MemoryBackend, *, summarizer: Summarizer | None = None) -> None:
         self.backend = backend
@@ -85,6 +101,47 @@ class MemoryManager:
     def forget(self, record_id: str) -> bool:
         return self.backend.forget(record_id)
 
+    # -- Semantic retrieval (vectors computed by the host's Embedder) -------------
+
+    @property
+    def vectors(self) -> VectorIndex | None:
+        """The vector index beside the local SQLite store; None for a remote-only backend."""
+        if not hasattr(self, "_vectors"):
+            local = self.backend if isinstance(self.backend, SQLiteMemoryBackend) else getattr(
+                self.backend, "fallback", None)
+            self._vectors = (VectorIndex(local.db_path, local.namespace)
+                             if isinstance(local, SQLiteMemoryBackend) else None)
+        return self._vectors
+
+    def live_records(self, layers: Iterable[MemoryLayer] = (MemoryLayer.L1, MemoryLayer.L2, MemoryLayer.L3),
+                     ) -> list[MemoryRecord]:
+        """Current records of *layers*: not superseded, not stale."""
+        return [hit.record for hit in self.backend.search(MemoryQuery(layers=tuple(layers), limit=1000))]
+
+    def unembedded(self, model: str) -> list[tuple[MemoryRecord, str]]:
+        """(record, text to embed) for current records lacking a vector of *model*.
+
+        Vectors of records that are gone are dropped on the way.
+        """
+        if self.vectors is None:
+            return []
+        records = self.live_records()
+        self.vectors.prune(record.id for record in records)
+        return [(record, embedding_text(record)) for record in self.vectors.missing(model, records)]
+
+    def store_vectors(self, model: str, pairs: Iterable[tuple[MemoryRecord, Sequence[float]]]) -> int:
+        return self.vectors.put(model, pairs) if self.vectors is not None else 0
+
+    def nearest(self, model: str, query_vector: Sequence[float], *,
+                layers: Iterable[MemoryLayer] = (MemoryLayer.L1, MemoryLayer.L2),
+                limit: int = 8, min_similarity: float = 0.0) -> list[tuple[MemoryRecord, float]]:
+        """Current records of *layers* most similar to the query, at least *min_similarity*."""
+        if self.vectors is None:
+            return []
+        records = {record.id: record for record in self.live_records(layers)}
+        scored = self.vectors.nearest(model, query_vector, records)
+        return [(records[rid], score) for rid, score in scored if score >= min_similarity][:limit]
+
     def search(self, query: MemoryQuery | str = "") -> list[MemorySearchHit]:
         return self.backend.search(MemoryQuery(text=query) if isinstance(query, str) else query)
 
@@ -92,6 +149,35 @@ class MemoryManager:
         return self.backend.build_context(MemoryQuery(text=query) if isinstance(query, str) else query)
 
     def render_prompt_section(self, query: MemoryQuery | str = "", max_tokens: int = 1500) -> PromptSection:
+        """The profile plus records whose words the query literally contains (FTS).
+
+        The fallback when no embedder is configured: semantic selection lives in the
+        host (core.factory.memory), which passes what it chose to :meth:`render_records`.
+        """
+        text = query.text if isinstance(query, MemoryQuery) else query
+        return self.render_records((*self.profile(), *self.keyword_hits(text)), max_tokens)
+
+    def profile(self, limit: int = 50) -> list[MemoryRecord]:
+        """The live L3 records: the user's standing preferences, newest first."""
+        return [hit.record for hit in self.backend.search(MemoryQuery(layers=(MemoryLayer.L3,), limit=limit))]
+
+    def keyword_hits(self, text: str, limit: int = 5,
+                     layers: tuple[MemoryLayer, ...] = (MemoryLayer.L1, MemoryLayer.L2)) -> list[MemoryRecord]:
+        """Records the full-text index matches *text* in; none for an empty text.
+
+        Only hits with an actual term match count: the trigram half of the hybrid
+        search finds something in common between almost any two texts.
+        """
+        # Full-text terms are OR-ed: "в", "не", "on" would match nearly everything.
+        text = " ".join(word for word in re.findall(r"\w+", text)
+                        if len(word) > 2 and word.casefold() not in _FUNCTION_WORDS)
+        if not text:
+            return []
+        hits = self.backend.search(MemoryQuery(text=text, layers=layers, limit=limit))
+        return [hit.record for hit in hits if hit.bm25_rank is not None]
+
+    @staticmethod
+    def render_records(records: Iterable[MemoryRecord], max_tokens: int = 1500) -> PromptSection:
         """Render whole JSON records inside a fixed trust boundary, never truncate it.
 
         Text stays readable (no ``\\uXXXX`` for non-Latin letters); the budget is
@@ -105,10 +191,13 @@ class MemoryManager:
         suffix = "\n</historical_memory>"
         if max_tokens <= 0 or estimated_tokens(prefix + suffix) > max_tokens:
             return PromptSection(key="memory_context", content="", scope="dynamic")
-        pack = self.build_context(query)
         lines: list[str] = []
         used = estimated_tokens(prefix + suffix)
-        for record in (*pack.profile_l3, *pack.scenarios_l2, *pack.facts_l1):
+        seen: set[str] = set()
+        for record in records:
+            if record.id in seen or record.layer == MemoryLayer.L0:
+                continue
+            seen.add(record.id)
             line = json.dumps({"layer": record.layer, "category": record.category,
                                "content": record.content, "source_ref": record.source_ref,
                                "confidence": record.confidence, "status": record.stale_status},
@@ -159,14 +248,20 @@ class MemoryManager:
             stored[result.id] = result
         return list(stored.values())
 
-    def store_extracted(self, items: Iterable[Extracted], *, source_ref: str | None = None,
+    def store_extracted(self, extraction: Extraction | Iterable[Extracted], *, source_ref: str | None = None,
                         exchange: tuple[str, str] | None = None) -> list[MemoryRecord]:
-        """Persist model-extracted records (core.memory.llm_extract) of one turn.
+        """Persist what a model extracted from one turn (core.memory.llm_extract).
 
-        A ``supersedes`` pointing at a record that is gone or lives in another
-        layer is dropped rather than failing the write. ``exchange`` (request,
-        answer) is also kept as the turn's L0 snapshot.
+        Records the turn showed to be no longer true are removed - only ones that
+        were extracted automatically from a chat: what a person or an agent stored
+        on purpose is theirs to change. ``exchange`` (request, answer) is also kept
+        as the turn's L0 snapshot.
         """
+        items = extraction.memories if isinstance(extraction, Extraction) else list(extraction)
+        for record_id in extraction.obsolete if isinstance(extraction, Extraction) else ():
+            old = self.get(record_id)
+            if old is not None and is_extracted(old):
+                self.forget(record_id)
         stored: dict[str, MemoryRecord] = {}
         for item in items:
             supersedes = item.supersedes

@@ -33,10 +33,15 @@ memory:
   auto_inject: true
   auto_inject_tokens: 1000
   extract_on_compact: true
-  extract_on_turn: true      # store what every finished turn taught (in the background)
-  extract_with_model: true   # a model writes those memories; the heuristic is the fallback
+  extract_on_turn: true      # store what every answered turn taught (in the background)
+  extract_with_model: true   # a model writes those memories: lasting knowledge only
   # extract_model: cheap     # model key for it; default compact.summary_model, else the agent's
-  snapshot_turns: true       # also keep each exchange (redacted) as a searchable L0 record
+  snapshot_turns: false      # raw L0 copies of exchanges (the chat keeps them anyway)
+  embeddings:                # semantic selection of what reaches the prompt
+    provider: openrouter     # key of providers:; omit to fall back to literal keyword matches
+    model: qwen/qwen3-embedding-8b
+    min_similarity: 0.45
+    max_records: 6
   # Remote backends also require service_id; optional api_key_env names an env var.
   # tencent_url: http://127.0.0.1:8000
   # service_id: deployed-service
@@ -160,21 +165,43 @@ not ASCII-escaped, and whole records are admitted within `estimated_tokens`
 tokenizer); the guard itself is never truncated. Tiny budgets return an empty
 PromptSection. This is defense in depth, not guaranteed prompt-injection immunity.
 
+## What reaches the prompt
+
+`core.factory.memory.MemoryUpkeep.memory_prompt_section` runs before every turn:
+the user's profile (L3) always, plus the L1/L2 records closest in meaning to the
+request - cosine similarity of embeddings at least `embeddings.min_similarity`,
+at most `embeddings.max_records`. A very short request ("Работай") is searched
+together with the user's previous messages. Records are embedded lazily: any
+record without a vector for the configured model (new, edited, imported) is
+embedded before the next search; vectors live in the `memory_vectors` table of
+the same SQLite file (`core.memory.vectors`), one per record and model, scanned
+exactly - a distilled memory holds hundreds of records, not millions. The
+embedding client comes from the factory's model access, so the web chat uses the
+user's credentials and meters the calls. Defaults were calibrated on real RU/EN
+memories: with Qwen3-Embedding-8B and its query instruction the wanted record
+ranked first for every request tried, unrelated requests stayed below 0.45.
+
+Without embeddings (or when the call fails) only records whose words the
+request literally contains (full-text match, function words dropped) are added.
+`memory_recall` searches the same way, ranked, without the similarity floor.
+
 ## Turn extraction
 
-`SessionUpkeep.remember_turn_later` runs after each answered turn, in the
-background. With `extract_with_model` a model (`core.memory.llm_extract`) reads
-the request and the answer together with up to 15 related known memories and
-returns at most six self-contained records - how things are done here, decisions,
-root causes, user preferences (L3), one task/outcome scenario (L2) - and may
-mark a known record of the same layer as superseded. The web panel's "Extract
-from chat" reads the chat's last exchanges the same way.
+After each answered turn, in the background, a model (`core.memory.llm_extract`)
+reads the request and the answer together with the known records closest to it
+and the latest ones from the same chat. It stores at most three self-contained
+records, usually none: how things are done in this environment, lasting project
+rules, root causes (L1) and the user's standing preferences (L3). Never the
+task's spec, a changelog of the turn or a description of code the code itself
+gives; an L3 "preference" naming files is filed as an L1 constraint. It may
+list known records the turn proved wrong; of those, only ones extracted from a
+chat are removed - what a person or agent stored on purpose stays. A failed call
+stores nothing. The web panel's "Extract from chat" reads the chat's last
+exchanges the same way. Agents call `memory_remember` only when the user asks.
 
-Without a model, or when its call or JSON fails, the heuristic RU/EN distiller
-(`core.memory.distill`) runs instead: labelled lines (`Decision:`, `Итог:` ...),
-cue sentences with a concrete artefact, structured memory_facts, user
-preferences. Compaction uses it too. Tool/system output is ignored; structured
-fields are whitelisted; provenance is host-supplied.
+The heuristic RU/EN distiller (`core.memory.distill`) serves setups without a
+model (`extract_with_model: false`) and compaction. Tool/system output is never
+read; structured fields are whitelisted; provenance is host-supplied.
 
 Validation from `grid/`:
 

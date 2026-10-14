@@ -487,6 +487,7 @@ class TurnRunner:
         agent_key: str,
         context_path: Optional[str],
         include_transcript: bool,
+        memory_section: Optional[str] = None,
     ) -> str:
         """Assemble the agent's instructions and record exactly what was sent."""
         assembly = self.instructions_builder.assemble_model_context(
@@ -494,6 +495,7 @@ class TurnRunner:
             context_path,
             include_conversation_context=include_transcript,
             include_path_context=True,
+            memory_section=memory_section,
         )
         instructions = assembly.instructions
         self.context_manager.set_metadata("last_context_assembly", assembly.to_debug_payload())
@@ -1222,8 +1224,10 @@ class TurnRunner:
             # A transcript in the prompt only for an agent that joins a
             # conversation its session has not seen (e.g. after routing).
             include_transcript = continuing and not await session.get_items(limit=1)
+            # What memory knows about this request, picked by meaning (core.factory.memory).
+            memory_section = await self.memory_prompt_section(active_context_id, message)
             agent.instructions = self._prepare_instructions(
-                agent_key, context_path, include_transcript
+                agent_key, context_path, include_transcript, memory_section=memory_section,
             )
 
             # Claimed right before the request is stored, after the last await,

@@ -48,6 +48,7 @@ class InstructionsBuilder:
         *,
         include_conversation_context: bool = True,
         include_path_context: bool = True,
+        memory_section: Optional[str] = None,
     ) -> ModelContextAssembly:
         """Assemble the full model-facing prompt context for an agent."""
         sections = list(self._get_base_sections(agent_key))
@@ -77,13 +78,18 @@ class InstructionsBuilder:
                     if self.memory_manager is None:
                         self.memory_manager = self.config.create_memory_manager()
                     manager = self.memory_manager
-                if manager is not None:
-                    query = self.context_manager.get_conversation_context() or ""
-                    section = manager.render_prompt_section(
-                        query, max_tokens=settings.auto_inject_tokens if settings is not None else 1000,
-                    )
-                    if section.content:
-                        sections.append(PromptSection(key="agent_memory", content=section.content, scope="dynamic"))
+                if memory_section is not None:
+                    # Chosen for this turn's request by the factory (core.factory.memory).
+                    content = memory_section
+                elif manager is not None:
+                    # No request to choose by: the user's profile only.
+                    content = manager.render_prompt_section(
+                        "", max_tokens=settings.auto_inject_tokens if settings is not None else 1000,
+                    ).content
+                else:
+                    content = ""
+                if content:
+                    sections.append(PromptSection(key="agent_memory", content=content, scope="dynamic"))
         except Exception:
             logger.warning("Memory injection unavailable", exc_info=True)
 

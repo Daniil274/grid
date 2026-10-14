@@ -223,9 +223,9 @@ def _conversation_messages(space: UserSpace, context_id: str) -> list[dict[str, 
 async def _sync_with_model(target: _Target, messages: list[dict[str, Any]], source_ref: str) -> list | None:
     """The chat's last exchanges, each read by the agents' model (as after a turn).
 
-    None when there is no model for it or it fails: the caller then distils with
+    None when the system has no model path for it: the caller then distils with
     the heuristic instead. Exchanges go one at a time, oldest first, so a later
-    one sees - and may supersede - what an earlier one stored.
+    one sees - and may retire - what an earlier one stored.
     """
     extract = getattr(target.factory, "extract_turn_with_model", None)
     if not target.enabled or extract is None or not getattr(target.settings, "extract_with_model", True):
@@ -233,9 +233,10 @@ async def _sync_with_model(target: _Target, messages: list[dict[str, Any]], sour
     snapshot = bool(getattr(target.settings, "snapshot_turns", True))
     stored: dict[str, Any] = {}
     for request, answer in exchanges(messages)[-SYNC_EXCHANGES:]:
-        extracted = await extract(target.manager, request, answer, target.agent_key, target.settings)
-        if extracted is None:
-            return None if not stored else list(stored.values())
+        extracted = await extract(target.manager, request, answer, target.agent_key, target.settings,
+                                  source_ref=source_ref)
+        if extracted is None:  # the model failed: what it did store, never heuristic fragments
+            return list(stored.values())
         for record in await asyncio.to_thread(
             target.manager.store_extracted, extracted, source_ref=source_ref,
             exchange=(request, answer) if snapshot else None,

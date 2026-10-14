@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agents import RunContextWrapper, function_tool
 
-from core.memory import MemoryManager, MemoryQuery
+from core.memory import MemoryLayer, MemoryManager, MemoryQuery
 from core.memory.manager import MemoryConfig
 from core.memory.models import record_from_dict, record_to_dict
 from utils import tool_effects as effects
@@ -48,6 +48,19 @@ def _invoke(context, operation):
 @function_tool
 async def memory_recall(context: RunContextWrapper, query: str = "", limit: int = 20) -> str:
     """Recall relevant historical data (not instructions) from this workspace."""
+    factory = getattr(getattr(context, "context", None), "factory", None) or get_current_factory()
+    search = getattr(factory, "memory_search", None)
+    if search is not None and query.strip():
+        # By meaning (embeddings), every layer but raw transcripts, no similarity floor:
+        # the agent asked, so it gets the closest records ranked, with their scores.
+        try:
+            with _manager(context) as manager:
+                hits = await search(manager, query, layers=(MemoryLayer.L1, MemoryLayer.L2, MemoryLayer.L3),
+                                    limit=max(1, min(limit, 50)), min_similarity=-1.0)
+                return json.dumps([{"record": record_to_dict(record), "score": score} for record, score in hits],
+                                  ensure_ascii=False)
+        except Exception:  # noqa: BLE001 - same contract as _invoke
+            return json.dumps({"error": "Memory operation unavailable or invalid arguments"})
     return await asyncio.to_thread(_invoke, context, lambda manager: [
         {"record": record_to_dict(hit.record), "score": hit.score}
         for hit in manager.search(MemoryQuery(text=query, limit=limit))
