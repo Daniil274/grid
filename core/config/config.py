@@ -320,20 +320,34 @@ class Config:
         """Return validated optional memory settings."""
         return self.config.memory
 
-    def create_memory_manager(self, *, tenant_id: Optional[str] = None):
-        """Create a host-bound manager; callers own its lifetime and cache."""
-        from core.memory import MemoryConfig, MemoryManager, TencentGatewayConfig
+    def memory_location(self, *, tenant_id: Optional[str] = None):
+        """The one place memory lives: (workspace root, SQLite path, identity).
 
+        Agents (``AgentFactory.get_memory_manager``), the memory tools and the web
+        chat's memory API all resolve it here, so what one stores the others read:
+        the same ``.grid/memory.sqlite`` of the workspace and the same namespace
+        (hash of workspace + identity). ``tenant_id`` overrides the configured one.
+        """
         settings = self.get_memory_config()
-        if not settings.enabled:
-            return None
         root = Path(self.get_working_directory()).resolve(strict=True)
         path = (root / settings.storage_path).resolve()
         if not path.is_relative_to(root):
             raise ConfigError("Memory storage_path escapes workspace")
-        identity = tenant_id or settings.tenant_id
+        return root, path, tenant_id or settings.tenant_id
+
+    def create_memory_manager(self, *, tenant_id: Optional[str] = None, force: bool = False):
+        """Create a host-bound manager; callers own its lifetime and cache.
+
+        ``force`` builds the (local) manager even when ``memory.enabled`` is off.
+        """
+        from core.memory import MemoryConfig, MemoryManager, TencentGatewayConfig
+
+        settings = self.get_memory_config()
+        if not settings.enabled and not force:
+            return None
+        root, path, identity = self.memory_location(tenant_id=tenant_id)
         gateway = None
-        if settings.backend != "sqlite":
+        if settings.enabled and settings.backend != "sqlite":
             gateway = TencentGatewayConfig(
                 team_id=settings.team_id, user_id=identity if tenant_id else settings.user_id,
                 agent_id=settings.agent_id, service_id=settings.service_id,
@@ -341,8 +355,8 @@ class Config:
                 bearer_token=os.environ.get(settings.api_key_env) if settings.api_key_env else None,
             )
         return MemoryManager.from_config(MemoryConfig(
-            workspace_root=root, backend=settings.backend, db_path=path,
-            tenant_id=identity, tencent=gateway,
+            workspace_root=root, backend=settings.backend if settings.enabled else "sqlite",
+            db_path=path, tenant_id=identity, tencent=gateway,
         ))
 
     # Working directory methods

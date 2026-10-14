@@ -20,6 +20,11 @@ def _manager(context):
     if factory is not None:
         manager = factory.get_memory_manager()
         if manager is None:
+            # Memory is off in the config, yet the system hands the agent memory
+            # tools: use the workspace's own store, the one the web panel reads.
+            fallback = getattr(factory, "get_workspace_memory_manager", None)
+            manager = fallback() if fallback is not None else None
+        if manager is None:
             raise ValueError("Memory is disabled by host configuration")
         yield manager
     else:

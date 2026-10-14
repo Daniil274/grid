@@ -498,7 +498,7 @@ export class MemoryDrawer {
       this._status(
         result.stored
           ? `Stored ${result.stored} new ${result.stored === 1 ? "record" : "records"} from ${result.scanned} messages`
-          : `Nothing new in ${result.scanned} messages. Mark statements like "decision: …" to be remembered.`,
+          : `Nothing new to remember in ${result.scanned} messages yet: no decisions, rules, fixes or preferences found.`,
         "ok",
       );
       return result;

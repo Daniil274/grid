@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import Any, Literal, Self
 from uuid import uuid4
 
 from ..config.prompt_sections import PromptSection
+from .distill import distill_messages
 from .models import (
     MemoryBackend,
     MemoryCategory,
@@ -115,25 +115,21 @@ class MemoryManager:
         return PromptSection(key="memory_context", content=prefix + "\n".join(lines) + suffix, scope="dynamic")
 
     def extract_and_store_from_messages(self, messages: Sequence[Message], *,
-                                        source_ref: str | None = None) -> list[MemoryRecord]:
-        """Extract explicit structured facts or short marked statements, never tool output.
+                                        source_ref: str | None = None,
+                                        snapshot: bool = False) -> list[MemoryRecord]:
+        """Distil a real conversation (RU/EN prose, never tool output) into memory.
 
-        Unmarked prose is deliberately ignored. A host-owned summarizer can replace
-        this heuristic; its output passes through the same persistence contract.
+        Structured ``memory_facts`` and ``decision: ...`` style lines are kept, and
+        natural text is distilled by :mod:`core.memory.distill`: preferences and rules
+        (L3/L1), decisions, bugs and architecture facts (L1) and one L2 scenario per
+        exchange. ``snapshot=True`` also stores each recent exchange as L0. Storing is
+        idempotent (content-hash deduplication). A host-owned summarizer replaces the
+        heuristic; its output passes through the same persistence contract.
         """
         records: list[MemoryRecord] = []
         if self.summarizer:
             records.extend(self.summarizer(messages))
         else:
-            labels = {
-                "decision": MemoryCategory.DECISION, "решение": MemoryCategory.DECISION,
-                "constraint": MemoryCategory.CONSTRAINT, "ограничение": MemoryCategory.CONSTRAINT,
-                "architecture": MemoryCategory.ARCHITECTURE, "архитектура": MemoryCategory.ARCHITECTURE,
-                "bug": MemoryCategory.BUG, "ошибка": MemoryCategory.BUG,
-                "preference": MemoryCategory.PREFERENCE, "предпочтение": MemoryCategory.PREFERENCE,
-                "workflow": MemoryCategory.WORKFLOW, "процесс": MemoryCategory.WORKFLOW,
-            }
-            pattern = re.compile(r"^\s*(?:[-*]\s*)?(" + "|".join(labels) + r")\s*:\s*(.{3,1000})$", re.IGNORECASE)
             for message in messages:
                 if message.get("role") not in ("user", "assistant"):
                     continue
@@ -151,17 +147,7 @@ class MemoryManager:
                                 records.append(fact_record)
                             except (ValueError, TypeError):
                                 continue
-                content = message.get("content", "")
-                if not isinstance(content, str):
-                    continue
-                for line in content.splitlines():
-                    match = pattern.match(line)
-                    if match:
-                        category = labels[match[1].casefold()]
-                        records.append(MemoryRecord(content=match[2].strip(), category=category,
-                            layer=MemoryLayer.L3 if category == MemoryCategory.PREFERENCE else MemoryLayer.L1,
-                            scope=MemoryScope.USER if category == MemoryCategory.PREFERENCE else MemoryScope.PROJECT,
-                            confidence=0.7))
+            records.extend(distill_messages(messages, snapshot=snapshot))
         stored: dict[str, MemoryRecord] = {}
         for record in records[:100]:
             result = self.remember(replace(record, source_ref=source_ref or record.source_ref))

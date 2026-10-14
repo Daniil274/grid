@@ -14,6 +14,8 @@ class MemoryConfig(BaseModel):
     auto_inject: bool = True
     auto_inject_tokens: int = Field(default=1000, ge=0, le=100000)
     extract_on_compact: bool = True
+    extract_on_turn: bool = True      # distil each finished turn into memory
+    snapshot_turns: bool = True       # ... and keep the exchange itself as an L0 record
     tenant_id: str = Field(default="default", min_length=1)
     team_id: str = "default"
     user_id: str = "default"

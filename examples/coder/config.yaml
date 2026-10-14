@@ -65,7 +65,9 @@ memory:
   storage_path: .grid/memory.sqlite   # workspace-relative; escapes are rejected
   auto_inject: true          # relevant memories are added to the instructions
   auto_inject_tokens: 1000
-  extract_on_compact: true   # "Decision: ..." style lines are saved before a session is compacted
+  extract_on_compact: true   # facts are distilled before a session is compacted
+  extract_on_turn: true      # ... and after every finished turn (RU/EN prose, no prefixes needed)
+  snapshot_turns: true       # the exchange itself is kept as an L0 record
 
 # Context compaction (core/context_budget.py). The window is 40k tokens and an
 # answer takes up to 8k, so a request is kept under 26k: 40k - 4k reserved for

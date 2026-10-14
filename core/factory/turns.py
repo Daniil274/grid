@@ -1320,6 +1320,9 @@ class TurnRunner:
                         "turn_id": turn_id,
                     },
                 )
+            if answered:
+                # Not only at compaction: what the turn settled lands in memory now.
+                await asyncio.to_thread(self.remember_turn, active_context_id, message, output)
             execution.end_time = time.time()
             execution.output = output
             execution.tools_used = [

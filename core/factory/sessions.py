@@ -81,6 +81,39 @@ class SessionUpkeep:
             logger.warning("Memory extraction failed; compaction continues", exc_info=True)
             return []
 
+    def remember_turn(self, context_id: Optional[str], request: Any, answer: Any) -> list:
+        """Best-effort: distil a finished turn (request and answer) into memory.
+
+        Runs after every answered turn when ``memory.enabled`` and ``extract_on_turn``
+        are on - not only when a session is compacted, which a chat rarely reaches.
+        The turn's own two messages are the increment, and storing is idempotent, so
+        nothing is saved twice. The exchange itself becomes an L0 record
+        (``snapshot_turns``); facts, rules and preferences become L1/L3 and the
+        scenario L2. The manager is the one the tools and the web panel use.
+        """
+        try:
+            config = getattr(self, "config", None)
+            if config is None or not hasattr(config, "get_memory_config"):
+                return []
+            settings = config.get_memory_config()
+            if not settings.enabled or not getattr(settings, "extract_on_turn", True):
+                return []
+            if not isinstance(request, str) or not isinstance(answer, str):
+                return []
+            if not request.strip() or not answer.strip():
+                return []
+            manager = self.get_memory_manager()
+            if manager is None:
+                return []
+            return manager.extract_and_store_from_messages(
+                [{"role": "user", "content": request}, {"role": "assistant", "content": answer}],
+                source_ref=f"chat:{context_id}" if context_id else None,
+                snapshot=bool(getattr(settings, "snapshot_turns", True)),
+            )
+        except Exception:
+            logger.warning("Memory extraction after the turn failed; the turn is unaffected", exc_info=True)
+            return []
+
     def _session_epoch(self, context_id: str, agent_key: str) -> int:
         """How many times *agent_key*'s session in *context_id* was replaced by a summary."""
         epochs = self.context_manager.get_context_metadata(context_id).get("session_epochs") or {}

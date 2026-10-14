@@ -50,6 +50,9 @@ class FakeFactory:
     def get_memory_manager(self):
         if not self.config.settings.enabled:
             return None
+        return self.get_workspace_memory_manager()
+
+    def get_workspace_memory_manager(self):
         if self._manager is None:
             root = Path(self.config.root)
             self._manager = MemoryManager.from_config(MemoryConfig(
@@ -274,12 +277,14 @@ def test_sync_distils_marked_statements_of_the_conversation(client, spaces):
 
     result = client.post("/api/memory/sync", json={"context_id": "chat-1"}).json()
 
-    assert result["scanned"] == 3 and result["stored"] == 2
-    assert {r["category"] for r in result["records"]} == {"decision", "bug"}
+    facts = [r for r in result["records"] if r["layer"] != "L0"]
+    assert result["scanned"] == 3 and {r["category"] for r in facts} == {"decision", "bug"}
+    assert any(r["layer"] == "L0" for r in result["records"])  # the exchange snapshot
     assert all(r["source_ref"] == "chat:chat-1" for r in result["records"])
-    assert client.get("/api/memory", params={"context_id": "chat-1"}).json()["count"] == 2
+    count = client.get("/api/memory", params={"context_id": "chat-1"}).json()["count"]
+    assert count == result["stored"]
     again = client.post("/api/memory/sync", json={"context_id": "chat-1"}).json()
-    assert again["stored"] == 2 and client.get("/api/memory").json()["count"] == 2
+    assert again["stored"] == result["stored"] and client.get("/api/memory").json()["count"] == count
 
 
 def test_unknown_conversation_is_a_404(client):
@@ -326,3 +331,62 @@ def test_memory_ui_assets_are_served(client):
     assert api_client.status_code == 200
     for name in ("memoryOverview", "createMemoryRecord", "updateMemoryRecord", "deleteMemoryRecord", "syncMemory"):
         assert name in api_client.text
+
+
+RU_CHAT = [
+    ("user", "Привет! Всегда используй pytest для тестов и отвечай кратко на русском. Нужно починить кэш в cache.py"),
+    ("assistant", "Разобрался. Причина в том, что `cache.py` не сбрасывал TTL при записи.\n\n## Итог\n"
+                  "- Исправил `cache.py`: TTL теперь обновляется при каждой записи\n"
+                  "- Добавил тест tests/test_cache.py\n\nМы решили хранить кэш в SQLite через core/storage.py, "
+                  "а не в памяти процесса, чтобы он переживал перезапуск сервера."),
+]
+EN_CHAT = [
+    ("user", "Let's use FastAPI for the API. I prefer concise answers and you must never touch legacy/db.py."),
+    ("assistant", "Done. I implemented the endpoint in api/server.py and fixed the race condition in worker.py.\n"
+                  "Summary:\n- Endpoint lives in api/server.py\n- Root cause: missing lock in worker.py\n"
+                  "The handler validates every request before it is queued for the worker pool."),
+]
+
+
+def fill(spaces, chat_id, dialogue):
+    now = "2026-01-01T00:00:00Z"
+    spaces.made["alice"].contexts.add(
+        chat_id, [ContextMessage(role=role, content=text, timestamp=now) for role, text in dialogue])
+
+
+def test_sync_distils_natural_russian_and_english_without_prefixes(client, spaces):
+    client.get("/api/memory")
+    fill(spaces, "ru", RU_CHAT)
+    fill(spaces, "en", EN_CHAT)
+
+    ru = client.post("/api/memory/sync", json={"context_id": "ru"}).json()
+    en = client.post("/api/memory/sync", json={"context_id": "en"}).json()
+
+    assert ru["stored"] >= 4 and en["stored"] >= 4
+    by_layer = {r["layer"] for r in ru["records"]} | {r["layer"] for r in en["records"]}
+    assert by_layer == {"L0", "L1", "L2", "L3"}
+    shown = client.get("/api/memory", params={"limit": 1000}).json()
+    texts = " | ".join(r["content"] for r in shown["records"])
+    assert "Всегда используй pytest" in texts and "prefer concise answers" in texts
+    assert "TTL" in texts and "worker.py" in texts and "SQLite" in texts
+    prefs = [r for r in shown["records"] if r["layer"] == "L3"]
+    assert prefs and all(r["scope"] == "user" for r in prefs)
+    assert shown["overview"]["counts"]["L0"] >= 2
+
+
+def test_agent_and_panel_share_one_database_and_namespace(client, spaces):
+    """A fact stored through the factory (as memory_remember does) is in GET /api/memory,
+    and a record written through the API is visible to the factory's manager."""
+    client.get("/api/memory")
+    space = spaces.made["alice"]
+    factory = space.registry.fac
+    manager = factory.get_workspace_memory_manager()
+    from core.memory import MemoryRecord
+    stored = manager.remember(MemoryRecord("Agent says: deploy via make release", category="workflow"))
+
+    records = client.get("/api/memory").json()["records"]
+    assert [r["id"] for r in records] == [stored.id]
+    created = add(client, "panel note")
+    assert manager.get(created["id"]) is not None
+    assert (space.workspace_path / ".grid" / "memory.sqlite").exists()
+    assert space.registry.fac.get_workspace_memory_manager() is manager

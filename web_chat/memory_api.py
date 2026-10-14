@@ -127,6 +127,13 @@ def _resolve_sync(space: UserSpace, registry: Any, system: str, context_id: str 
         manager = factory.get_memory_manager()
         if manager is not None:
             return _Target(manager, settings, True)
+    # Disabled in the config: still the factory's own workspace store (the one its
+    # memory tools write to), so panel, tools and turn hook share file and namespace.
+    shared = getattr(factory, "get_workspace_memory_manager", None)
+    if shared is not None:
+        manager = shared()
+        if manager is not None:
+            return _Target(manager, settings, False)
     tenant = getattr(factory, "_memory_tenant", None) or settings.tenant_id
     return _Target(_local_manager(space, config, settings, tenant), settings, False)
 
@@ -297,14 +304,16 @@ def register_memory_routes(router: APIRouter, current_space: Callable[..., Any])
 
     @router.post("/api/memory/sync")
     async def sync_from_context(body: MemorySyncRequest, space: UserSpace = Depends(current_space)) -> JSONResponse:
-        """Distil the chat's messages into memory (marked statements such as
-        ``decision: ...``; core.memory.manager.MemoryManager.extract_and_store_from_messages)."""
+        """Distil the chat's messages into memory: natural RU/EN prose as well as
+        marked statements (core.memory.distill, MemoryManager.extract_and_store_from_messages).
+        Idempotent: a repeated sync stores nothing twice."""
         target = await _target(space, body.context_id)
         messages = _conversation_messages(space, body.context_id)
         try:
             stored = await asyncio.to_thread(
                 lambda: target.manager.extract_and_store_from_messages(
-                    messages, source_ref=f"chat:{body.context_id}"
+                    messages, source_ref=f"chat:{body.context_id}",
+                    snapshot=bool(getattr(target.settings, "snapshot_turns", True)),
                 )
             )
         except (ValueError, TypeError, OSError) as exc:

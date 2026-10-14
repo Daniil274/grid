@@ -85,18 +85,36 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
     """
 
     def get_memory_manager(self):
-        """Lazily share one host-bound memory manager across tools and runtime."""
+        """Lazily share one host-bound memory manager across tools and runtime.
+
+        None when the system's config leaves ``memory.enabled`` off.
+        """
         with self._memory_lock:
             if not self.config.get_memory_config().enabled:
                 return None
-            root = str(Path(self.config.get_working_directory()).resolve())
-            if self._memory_manager is not None and root != getattr(self, "_memory_workspace", root):
-                self._memory_manager.close()
-                self._memory_manager = None
-            if self._memory_manager is None:
-                self._memory_manager = self.config.create_memory_manager(tenant_id=self._memory_tenant)
-                self._memory_workspace = root
-            return self._memory_manager
+            return self._workspace_memory(force=False)
+
+    def get_workspace_memory_manager(self):
+        """The memory of this factory's workspace, even where ``memory.enabled`` is off.
+
+        The memory tools, the turn hook and the web chat's memory panel all use it, so
+        one ``.grid/memory.sqlite`` and one namespace (workspace + the configured tenant,
+        never the system's key) serve everything that writes or shows memory. With
+        ``memory.enabled`` on it is the very manager of :meth:`get_memory_manager`.
+        """
+        with self._memory_lock:
+            return self._workspace_memory(force=True)
+
+    def _workspace_memory(self, *, force: bool):
+        root = str(Path(self.config.get_working_directory()).resolve())
+        if self._memory_manager is not None and root != getattr(self, "_memory_workspace", root):
+            self._memory_manager.close()
+            self._memory_manager = None
+        if self._memory_manager is None:
+            self._memory_manager = self.config.create_memory_manager(
+                tenant_id=self._memory_tenant, force=force)
+            self._memory_workspace = root
+        return self._memory_manager
 
     def __init__(
         self,
@@ -185,7 +203,9 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
         self.instructions_builder = self._runtime_support.instructions_builder
         self._memory_manager = None
         self._memory_lock = threading.Lock()
-        self._memory_tenant = session_namespace
+        # Memory is the workspace's, shared by every system working in it: the
+        # namespace comes from the config's tenant, not from the system's key.
+        self._memory_tenant = None
         self.instructions_builder.memory_manager_provider = self.get_memory_manager
 
         # Initialize ContainerManager

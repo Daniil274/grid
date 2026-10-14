@@ -433,3 +433,116 @@ async def test_coder_factory_memory_tools_roundtrip(tmp_path):
         assert hits[0]["record"]["id"] == stored["id"]
     finally:
         manager.close()
+
+
+# -- Ordinary conversations reach memory: per-turn hook, shared store, examples ----------
+
+COORDINATOR_CONFIG = Path(__file__).resolve().parent.parent / "examples/coordinator-pipeline/config.yaml"
+
+
+def bare_factory(tmp_path, **options):
+    factory = AgentFactory.__new__(AgentFactory)
+    factory.config = host_config(tmp_path, **options)
+    factory._memory_lock = threading.Lock()
+    factory._memory_manager = None
+    factory._memory_tenant = None
+    return factory
+
+
+def test_turn_hook_saves_natural_russian_and_english_turns(tmp_path):
+    factory = bare_factory(tmp_path, enabled=True)
+    try:
+        ru = factory.remember_turn(
+            "ctx-1",
+            "Всегда используй pytest и отвечай кратко. Почини кэш в cache.py",
+            "Причина в том, что `cache.py` не сбрасывал TTL при записи.\n- Исправил `cache.py`: TTL обновляется при каждой записи\n"
+            "Мы решили хранить кэш в SQLite через core/storage.py, чтобы он переживал перезапуск.",
+        )
+        en = factory.remember_turn(
+            "ctx-1",
+            "I prefer short answers. Let's use FastAPI for the API.",
+            "I implemented the endpoint in api/server.py and fixed the race condition in worker.py.",
+        )
+        assert {r.layer.value for r in ru} >= {"L0", "L1", "L3"}
+        assert {r.layer.value for r in en} >= {"L0", "L1", "L3"}
+        assert all(r.source_ref == "chat:ctx-1" for r in ru + en)
+        manager = factory.get_memory_manager()
+        texts = " | ".join(r.content for r in manager.list_records(limit=1000))
+        assert "Всегда используй pytest" in texts and "TTL" in texts and "worker.py" in texts
+        before = len(manager.list_records(limit=1000))
+        factory.remember_turn("ctx-1", "I prefer short answers. Let's use FastAPI for the API.",
+                              "I implemented the endpoint in api/server.py and fixed the race condition in worker.py.")
+        assert len(manager.list_records(limit=1000)) == before  # idempotent
+    finally:
+        factory.get_memory_manager().close()
+
+
+def test_turn_hook_respects_switches_and_never_raises(tmp_path):
+    off = bare_factory(tmp_path, enabled=False)
+    assert off.remember_turn("c", "Всегда пиши тесты", "Хорошо, буду писать тесты всегда.") == []
+    assert not (tmp_path / ".grid").exists()
+    muted = bare_factory(tmp_path, enabled=True, extract_on_turn=False)
+    assert muted.remember_turn("c", "Всегда пиши тесты", "Хорошо, буду писать тесты всегда.") == []
+    broken = bare_factory(tmp_path, enabled=True)
+    broken.get_memory_manager = Mock(side_effect=RuntimeError("down"))
+    assert broken.remember_turn("c", "Всегда пиши тесты", "Хорошо, буду писать тесты всегда.") == []
+    no_l0 = bare_factory(tmp_path, enabled=True, snapshot_turns=False)
+    try:
+        stored = no_l0.remember_turn("c", "I prefer short answers always.", "Noted, I will keep every answer short.")
+        assert stored and all(r.layer.value != "L0" for r in stored)
+    finally:
+        no_l0.get_memory_manager().close()
+
+
+def test_run_turn_calls_the_hook_for_answered_turns():
+    import inspect
+
+    from core.factory.turns import TurnRunner
+
+    source = inspect.getsource(TurnRunner._run_turn)
+    assert "self.remember_turn" in source
+    assert source.index("with_images(output, generated.images)") < source.index("self.remember_turn")
+
+
+def test_tools_factory_and_panel_resolve_the_same_database_and_namespace(tmp_path):
+    """memory_remember (tools), the turn hook and the web panel use one store."""
+    one = bare_factory(tmp_path, enabled=True)
+    two = bare_factory(tmp_path, enabled=True)
+    a, b = one.get_memory_manager(), two.get_workspace_memory_manager()
+    try:
+        assert a.backend.db_path == b.backend.db_path == (tmp_path / ".grid/memory.sqlite").resolve()
+        assert a.backend.namespace == b.backend.namespace
+        record = a.remember(MemoryRecord("shared by agent"))
+        assert b.get(record.id) is not None
+    finally:
+        a.close()
+        b.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_tools_work_when_memory_is_off_in_config_and_panel_sees_them(tmp_path):
+    factory = bare_factory(tmp_path, enabled=False)
+    assert factory.get_memory_manager() is None
+    context = RunContextWrapper(SimpleNamespace(factory=factory))
+    stored = json.loads(await MEMORY_TOOLS["memory_remember"].on_invoke_tool(
+        context, json.dumps({"content": "Use make release", "layer": "L2"})))
+    assert "error" not in stored
+    panel = factory.get_workspace_memory_manager()
+    try:
+        assert panel.get(stored["id"]) is not None
+    finally:
+        panel.close()
+
+
+def test_default_systems_enable_memory_and_tools(tmp_path):
+    for path, agent in ((CODER_CONFIG, "engineer"), (COORDINATOR_CONFIG, "coordinator")):
+        config = Config(str(path), working_directory=str(tmp_path))
+        settings = config.get_memory_config()
+        assert settings.enabled and settings.extract_on_turn and settings.snapshot_turns, path
+        tools = config.get_agent(agent).tools
+        assert set(MEMORY_TOOLS) <= set(tools), path
+        assert config.skill_path("memory") is not None
+        assert set(MEMORY_TOOLS) <= set(config.config.tools)
+    one = Config(str(CODER_CONFIG), working_directory=str(tmp_path))
+    two = Config(str(COORDINATOR_CONFIG), working_directory=str(tmp_path))
+    assert one.memory_location() == two.memory_location()
