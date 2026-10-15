@@ -1187,6 +1187,7 @@
 .diagramCard {
   position: relative;
   box-sizing: border-box;
+  width: 100%;
   max-width: 100%;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -1194,18 +1195,19 @@
   background: var(--bg-inset);
 }
 
-.msg--assistant .diagramCard,
-.msg[data-role="assistant"] .diagramCard {
+/* Only a wide diagram (lib/diagrams.js sets the class) breaks out of the column. */
+.msg--assistant .diagramCard.diagramCard--wide,
+.msg[data-role="assistant"] .diagramCard.diagramCard--wide {
   left: 50%;
-  width: min(1040px, 100cqw - 8px);
+  width: min(1000px, 100cqw - 16px);
   max-width: none;
   transform: translateX(-50%);
 }
 
 /* A narrow chat column: no breakout, the card is as wide as the answer. */
 @container (max-width: 560px) {
-  .msg--assistant .diagramCard,
-  .msg[data-role="assistant"] .diagramCard {
+  .msg--assistant .diagramCard.diagramCard--wide,
+  .msg[data-role="assistant"] .diagramCard.diagramCard--wide {
     left: 0;
     width: 100%;
     max-width: 100%;
@@ -1256,7 +1258,19 @@
 
 /* The streaming indicator: the diagram's source is still arriving. */
 .codeBar__status {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 6px;
+  color: var(--text-2);
+  font-family: var(--font);
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.codeBar__status::before {
+  content: "";
   flex: none;
   width: 7px;
   height: 7px;
@@ -1271,7 +1285,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .codeBar__status { animation: none; }
+  .codeBar__status::before { animation: none; }
 }
 
 .diagramTabs {
@@ -1347,9 +1361,12 @@
   cursor: grabbing;
 }
 
+/* The SVG has exact pixel width/height; fitting is the viewer's transform alone. */
 .diagramCanvas {
-  display: block;
-  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
   transform-origin: center center;
   transition: transform 60ms ease-out;
   will-change: transform;
@@ -1362,8 +1379,9 @@
 
 .diagramCanvas svg {
   display: block;
-  max-width: 100%;
-  height: auto;
+  flex: none;
+  max-width: none;
+  max-height: none;
 }
 
 /* The source view: the card already has a frame and a bar. */
@@ -1534,11 +1552,6 @@
   min-height: 0;
   max-height: none;
   padding: 0;
-}
-
-.diagramModal .diagramCanvas,
-.diagramModal .diagramCanvas svg {
-  max-height: 100%;
 }
 
 @media (max-width: 640px) {

@@ -24,8 +24,10 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const MERMAID_SRC = new URL("./mermaid.lib.js", import.meta.url).href;
 const LANGS = { mermaid: "mermaid", mmd: "mermaid", diagram: "mermaid", svg: "svg" };
 const CACHE_LIMIT = 80;
-const SCALE_MIN = 0.2;
+const SCALE_MIN = 0.05;
 const SCALE_MAX = 8;
+/** A diagram wider than this (px) breaks out of the chat column. */
+const WIDE_AT = 720;
 
 const PATH = {
   minus: "M5 12h14",
@@ -100,7 +102,19 @@ function watchTheme() {
 
 /* ---------------------------------------------------------------- sanitize */
 
-const BLOCKED = new Set(["script", "foreignobject", "iframe", "object", "embed", "audio", "video", "canvas", "link", "meta", "base"]);
+const BLOCKED = new Set([
+  "script", "iframe", "object", "embed", "audio", "video", "canvas", "link", "meta", "base",
+  "form", "input", "button", "select", "textarea", "img", "feimage",
+]);
+
+/** The only HTML Mermaid-style labels need inside <foreignObject>; anything else is dropped. */
+const FOREIGN_OK = new Set([
+  "div", "span", "p", "br", "b", "strong", "i", "em", "code", "pre", "ul", "ol", "li",
+  "table", "thead", "tbody", "tr", "th", "td", "hr", "sub", "sup",
+]);
+
+/** Attributes that can load or submit something: never kept on foreignObject content. */
+const FOREIGN_DROP = new Set(["href", "src", "data", "srcset", "action", "formaction", "poster", "background"]);
 
 /** Only in-document refs and raster data URLs; links may also leave the page. */
 function safeRef(element, value) {
@@ -135,9 +149,16 @@ function sanitizeToNode(rawSvg, scope = "") {
   if (!root || doc.querySelector("parsererror") || root.localName.toLowerCase() !== "svg") {
     throw new Error("The SVG is not well-formed");
   }
-  for (const element of [root, ...root.querySelectorAll("*")]) {
+  const all = [root, ...root.querySelectorAll("*")];
+  const inForeign = new Set();
+  for (const element of all) {
+    if (element.localName.toLowerCase() !== "foreignobject") continue;
+    for (const inner of element.querySelectorAll("*")) inForeign.add(inner);
+  }
+  for (const element of all) {
     const name = element.localName.toLowerCase();
-    if (element !== root && BLOCKED.has(name)) {
+    const foreign = inForeign.has(element);
+    if (element !== root && (BLOCKED.has(name) || (foreign && !FOREIGN_OK.has(name)))) {
       element.remove();
       continue;
     }
@@ -149,7 +170,9 @@ function sanitizeToNode(rawSvg, scope = "") {
     for (const attr of [...element.attributes]) {
       const attrName = attr.localName.toLowerCase();
       if (attrName.startsWith("on")) element.removeAttributeNode(attr);
+      else if (foreign && FOREIGN_DROP.has(attrName)) element.removeAttributeNode(attr);
       else if (attrName === "href" && !safeRef(element, attr.value)) element.removeAttributeNode(attr);
+      else if (attrName === "style" && foreign && /\\|expression\s*\(/i.test(attr.value)) element.removeAttributeNode(attr);
       else if (attrName === "style") attr.value = cleanCss(attr.value);
     }
     if (name === "a") {
@@ -157,8 +180,47 @@ function sanitizeToNode(rawSvg, scope = "") {
       element.setAttribute("rel", "noreferrer noopener");
     }
   }
+  normalizeSvgDimensions(root);
   if (scope) root.setAttribute("id", scope);
   return root;
+}
+
+/**
+ * Give the root <svg> an exact pixel size. The viewer fits the picture with a CSS
+ * `scale()`, so the SVG must not size itself (`width: 100%`, `max-width`): inside
+ * a flex container that collapses it. With a viewBox the size comes from it;
+ * without one, plain numeric width/height become the viewBox.
+ */
+function normalizeSvgDimensions(root) {
+  const style = root.getAttribute("style");
+  if (style) {
+    const kept = style.split(";").filter((rule) => {
+      const match = /^\s*([\w-]+)\s*:\s*(.*?)\s*$/.exec(rule);
+      if (!match) return Boolean(rule.trim());
+      const prop = match[1].toLowerCase();
+      if (prop === "max-width" || prop === "max-height") return false;
+      return !((prop === "width" || prop === "height") && /%|auto/i.test(match[2]));
+    });
+    root.setAttribute("style", kept.join(";"));
+  }
+  const px = (value) => String(Math.max(1, Math.round(value)));
+  const box = (root.getAttribute("viewBox") ?? "").trim().split(/[\s,]+/).map(Number);
+  if (box.length === 4 && box.every(Number.isFinite) && box[2] > 0 && box[3] > 0) {
+    root.setAttribute("width", px(box[2]));
+    root.setAttribute("height", px(box[3]));
+    return;
+  }
+  const num = (name) => {
+    const raw = root.getAttribute(name) ?? "";
+    return /%/.test(raw) ? 0 : parseFloat(raw);
+  };
+  const width = num("width");
+  const height = num("height");
+  if (width > 0 && height > 0) {
+    root.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    root.setAttribute("width", px(width));
+    root.setAttribute("height", px(height));
+  }
 }
 
 /** Sanitized SVG markup, safe to inject; throws on malformed input. */
@@ -211,7 +273,16 @@ function renderMermaid(code) {
       const { font, vars } = themeVariables(key);
       mermaid.initialize({
         startOnLoad: false, theme: "base", securityLevel: "strict", suppressErrorRendering: true,
-        htmlLabels: false, flowchart: { htmlLabels: false }, fontFamily: font, themeVariables: vars,
+        htmlLabels: false, fontFamily: font, themeVariables: vars,
+        flowchart: { htmlLabels: false, useMaxWidth: false },
+        state: { htmlLabels: false, useMaxWidth: false },
+        class: { htmlLabels: false, useMaxWidth: false },
+        er: { useMaxWidth: false },
+        sequence: { useMaxWidth: false },
+        gantt: { useMaxWidth: false },
+        journey: { useMaxWidth: false },
+        mindmap: { useMaxWidth: false },
+        gitGraph: { useMaxWidth: false },
       });
       configuredFor = key;
     }
@@ -351,21 +422,66 @@ async function downloadPng(result, name) {
  * can outlive this element. Drag pans; Ctrl/Cmd + wheel zooms (any wheel when
  * *wheelAlways* - the fullscreen view has nothing else to scroll).
  */
-function createViewer(state, { onChange, wheelAlways = false } = {}) {
+function createViewer(state, { onChange, wheelAlways = false, mode = "card", onNatural } = {}) {
   const canvas = h("div.diagramCanvas");
   const viewport = h("div.diagramViewport", { tabindex: "0" }, canvas);
+  const modal = mode === "modal";
+  /** Pixel size of the SVG currently shown; the base of every fit. */
+  const natural = { width: 0, height: 0 };
   const apply = () => {
     canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.scale})`;
     onChange?.();
   };
   const zoomBy = (factor) => {
+    state.userZoomed = true;
     state.scale = Math.min(SCALE_MAX, Math.max(SCALE_MIN, state.scale * factor));
     apply();
   };
-  const reset = () => {
-    Object.assign(state, { scale: 1, panX: 0, panY: 0 });
+
+  /**
+   * Fit the whole diagram into the viewport. A card also sizes its viewport to
+   * the diagram's proportions; the fullscreen view fills the screen, and may
+   * enlarge a small diagram. A scale the user chose by hand is left alone
+   * (unless *force*). Before layout (`clientWidth` is 0) sizes are estimated.
+   */
+  function fit({ force = false } = {}) {
+    const { width, height } = natural;
+    if (!(width > 0 && height > 0)) return;
+    let fitScale;
+    if (modal) {
+      const w = viewport.clientWidth > 120 ? viewport.clientWidth : (globalThis.innerWidth ?? 1280) - 96;
+      const hh = viewport.clientHeight > 120 ? viewport.clientHeight : (globalThis.innerHeight ?? 800) - 140;
+      fitScale = Math.min(Math.max(w - 96, 100) / width, Math.max(hh - 96, 100) / height, 1.8);
+    } else {
+      const wide = width > WIDE_AT;
+      const availW = viewport.clientWidth > 80 ? viewport.clientWidth - 36 : wide ? 920 : 680;
+      const toFitW = Math.min(1, availW / width);
+      const targetH = Math.round(Math.min(580, Math.max(200, height * toFitW + 44)));
+      viewport.style.height = `${targetH}px`;
+      fitScale = Math.min(availW / width, (targetH - 36) / height, 1);
+    }
+    if (force || !state.userZoomed) state.scale = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Number(fitScale.toFixed(3))));
     apply();
+  }
+  const reset = () => {
+    Object.assign(state, { panX: 0, panY: 0, userZoomed: false });
+    fit({ force: true });
   };
+
+  // The card is usually built before it is in the page: refit once it has a real width.
+  let observer = null;
+  let seen = "";
+  if (typeof globalThis.ResizeObserver === "function") {
+    observer = new globalThis.ResizeObserver(() => {
+      const w = viewport.clientWidth;
+      if (w < 80) return;
+      const signature = modal ? `${w}x${viewport.clientHeight}` : String(w);
+      if (signature === seen) return;
+      seen = signature;
+      fit();
+    });
+    observer.observe(viewport);
+  }
 
   let drag = null;
   viewport.addEventListener("pointerdown", (event) => {
@@ -403,9 +519,14 @@ function createViewer(state, { onChange, wheelAlways = false } = {}) {
     apply,
     reset,
     zoom: (kind) => (kind === "reset" ? reset() : zoomBy(kind === "in" ? 1.25 : 0.8)),
+    natural,
+    fit: () => fit(),
+    destroy: () => observer?.disconnect(),
     setSvg(node) {
       canvas.replaceChildren(document.importNode(node, true));
-      apply();
+      Object.assign(natural, svgSize(node));
+      onNatural?.(natural);
+      fit();
     },
   };
 }
@@ -423,7 +544,7 @@ function iconButton(path, title, attrs = {}, label = "") {
 
 /** `−  100%  +`, driving whichever viewer *getViewer* returns. */
 function createZoomGroup(getViewer, state) {
-  const pct = h("button.diagramZoom__pct", { type: "button", "data-zoom": "reset", title: "Reset zoom" });
+  const pct = h("button.diagramZoom__pct", { type: "button", "data-zoom": "reset", title: "Fit to view" });
   const el = h(
     "div.diagramZoom",
     {},
@@ -450,14 +571,15 @@ async function attempt(job) {
 /** Fullscreen view: its own zoom state, closed by Escape, the backdrop or ×. */
 function openModal({ title, result, name }) {
   const opener = document.activeElement;
-  const state = { scale: 1, panX: 0, panY: 0 };
+  const state = { scale: 1, panX: 0, panY: 0, userZoomed: false };
   let zoom = null;
-  const viewer = createViewer(state, { wheelAlways: true, onChange: () => zoom?.sync() });
+  const viewer = createViewer(state, { wheelAlways: true, mode: "modal", onChange: () => zoom?.sync() });
   zoom = createZoomGroup(() => viewer, state);
   viewer.setSvg(result.node);
 
   const close = () => {
     document.removeEventListener("keydown", onKey, true);
+    viewer.destroy();
     modal.remove();
     opener?.focus?.();
   };
@@ -493,6 +615,9 @@ function openModal({ title, result, name }) {
   });
   document.addEventListener("keydown", onKey, true);
   document.body.append(modal);
+  // Measured now that it is laid out; once more after the first frame settles.
+  viewer.fit();
+  globalThis.requestAnimationFrame?.(() => viewer.fit());
   zoom.sync();
   viewer.viewport.focus();
 }
@@ -504,7 +629,11 @@ function createCard({ lang, code, source, state }) {
   let ticket = 0;
   let zoom = null;
 
-  const viewer = createViewer(state, { onChange: () => zoom?.sync() });
+  const viewer = createViewer(state, {
+    onChange: () => zoom?.sync(),
+    // Only a wide diagram breaks out of the chat column (see `.diagramCard--wide`).
+    onNatural: ({ width }) => el.classList.toggle("diagramCard--wide", width > WIDE_AT),
+  });
   zoom = createZoomGroup(() => viewer, state);
 
   const badge = h("span.diagramBar__type", { hidden: true });
@@ -596,7 +725,7 @@ const states = new WeakMap();
 function stateFor(container, index) {
   let perContainer = states.get(container);
   if (!perContainer) states.set(container, (perContainer = new Map()));
-  if (!perContainer.has(index)) perContainer.set(index, { view: "diagram", scale: 1, panX: 0, panY: 0 });
+  if (!perContainer.has(index)) perContainer.set(index, { view: "diagram", scale: 1, panX: 0, panY: 0, userZoomed: false });
   return perContainer.get(index);
 }
 

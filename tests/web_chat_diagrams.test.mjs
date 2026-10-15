@@ -53,7 +53,8 @@ document.createElement = (tag) => {
 globalThis.DOMParser = class {
   parseFromString(text) {
     if (/<broken/.test(text)) return { documentElement: xml("parsererror"), querySelector: () => ({}) };
-    return { documentElement: globalThis.nextRoot?.() ?? xml("svg"), querySelector: () => null };
+    const viewBox = /viewBox=['"]([^'"]+)['"]/.exec(text)?.[1];
+    return { documentElement: globalThis.nextRoot?.() ?? xml("svg", viewBox ? { viewBox } : {}), querySelector: () => null };
   }
 };
 globalThis.XMLSerializer = class {
@@ -72,7 +73,9 @@ globalThis.mermaid = {
   async render(_id, code) {
     rendered += 1;
     if (/BAD/.test(code)) throw new Error("Parse error on line 1");
-    return { svg: "<svg viewBox='0 0 10 10'></svg>" };
+    if (/WIDE/.test(code)) return { svg: "<svg viewBox='0 0 1200 400'></svg>" };
+    if (/TALL/.test(code)) return { svg: "<svg viewBox='0 0 300 1200'></svg>" };
+    return { svg: "<svg viewBox='0 0 400 200'></svg>" };
   },
 };
 
@@ -232,7 +235,8 @@ test("sanitizeSvg drops scripts, handlers and external references", () => {
   const out = sanitizeSvg("<svg/>");
   delete globalThis.nextRoot;
 
-  assert.ok(script.removed && foreign.removed && animate.removed);
+  assert.ok(script.removed && animate.removed);
+  assert.equal(foreign.removed, false, "foreignObject itself is kept");
   assert.equal(rect.getAttribute("onclick"), null);
   assert.doesNotMatch(rect.getAttribute("style"), /evil/);
   assert.equal(image.getAttribute("href"), null);
@@ -251,4 +255,78 @@ test("sanitizeSvg refuses malformed input and a non-svg root", () => {
   globalThis.nextRoot = () => xml("html");
   assert.throws(() => sanitizeSvg("<html/>"), /not well-formed/);
   delete globalThis.nextRoot;
+});
+
+test("sanitizeSvg gives the root an exact pixel size and drops fluid sizing", () => {
+  const root = xml("svg", { viewBox: "0 0 640.4 320.6", width: "100%", style: "max-width: 640px; background: red; width: 100%" });
+  globalThis.nextRoot = () => root;
+  sanitizeSvg("<svg/>");
+  assert.equal(root.getAttribute("width"), "640");
+  assert.equal(root.getAttribute("height"), "321");
+  assert.doesNotMatch(root.getAttribute("style"), /max-width|width\s*:\s*100%/);
+  assert.match(root.getAttribute("style"), /background: red/);
+
+  const plain = xml("svg", { width: "300", height: "150px" });
+  globalThis.nextRoot = () => plain;
+  sanitizeSvg("<svg/>");
+  delete globalThis.nextRoot;
+  assert.equal(plain.getAttribute("viewBox"), "0 0 300 150");
+  assert.equal(plain.getAttribute("width"), "300");
+  assert.equal(plain.getAttribute("height"), "150");
+});
+
+test("sanitizeSvg keeps <foreignObject> labels and strips active content inside", () => {
+  const label = xml("span", { style: "color: red; background: url(http://evil/x)" });
+  label.textContent = "Hello";
+  const script = xml("script");
+  const img = xml("img", { src: "http://evil/x.png" });
+  const input = xml("input");
+  const iframe = xml("iframe");
+  const anchor = xml("a", { href: "https://example.com" });
+  const para = xml("p", { onclick: "x()", href: "https://evil", class: "nodeLabel" });
+  const div = xml("div", { xmlns: "http://www.w3.org/1999/xhtml", onmouseover: "x()" }, [label, script, img, input, iframe, anchor, para]);
+  const foreign = xml("foreignObject", { width: "80", height: "24" }, [div]);
+  globalThis.nextRoot = () => xml("svg", { viewBox: "0 0 80 24" }, [foreign]);
+  sanitizeSvg("<svg/>");
+  delete globalThis.nextRoot;
+
+  assert.equal(foreign.removed || div.removed || label.removed || para.removed, false);
+  assert.equal(label.textContent, "Hello");
+  assert.doesNotMatch(label.getAttribute("style"), /evil/);
+  assert.ok(script.removed && img.removed && input.removed && iframe.removed && anchor.removed);
+  assert.equal(div.getAttribute("onmouseover"), null);
+  assert.equal(para.getAttribute("onclick"), null);
+  assert.equal(para.getAttribute("href"), null);
+  assert.equal(para.getAttribute("class"), "nodeLabel");
+});
+
+// --- sizing and fit -------------------------------------------------------------
+
+async function drawn(code) {
+  const { container } = body("mermaid", { code });
+  decorateDiagrams(container);
+  await settle();
+  return card(container);
+}
+
+test("a compact diagram stays in the column and is shown at its natural size", async () => {
+  const el = await drawn("flowchart TD\n COMPACT-->B");
+  assert.equal(el.classList.contains("diagramCard--wide"), false);
+  assert.equal(el.find("diagramViewport").style.height, "244px");
+  assert.equal(el.find("diagramZoom__pct").textContent, "100%");
+});
+
+test("a wide diagram gets the breakout class and is scaled to fit its card", async () => {
+  const el = await drawn("flowchart LR\n WIDE-->B");
+  assert.equal(el.classList.contains("diagramCard--wide"), true);
+  assert.equal(el.find("diagramViewport").style.height, "351px");
+  assert.equal(el.find("diagramZoom__pct").textContent, "77%");
+  assert.match(el.find("diagramCanvas").style.transform, /scale\(0\.767\)/);
+});
+
+test("a tall diagram is capped in height and scaled down to fit it", async () => {
+  const el = await drawn("flowchart TD\n TALL-->B");
+  assert.equal(el.classList.contains("diagramCard--wide"), false);
+  assert.equal(el.find("diagramViewport").style.height, "580px");
+  assert.equal(el.find("diagramZoom__pct").textContent, "45%");
 });
