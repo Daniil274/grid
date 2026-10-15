@@ -271,6 +271,67 @@ class SessionUpkeep:
             "threshold": self.models.compact_threshold(agent_key, self.compact_config),
         }
 
+    async def _summary_of(self, items: list, key: Optional[str], *, auto: bool) -> Optional[list]:
+        """Session *items* as summary messages, by the compaction model (or
+        *key*'s model); None when that failed or wrote nothing - logged."""
+        compact_cfg = self.compact_config
+        try:
+            client, model, responses_api = self.models.compact_request(key)
+            result = await compact_conversation(
+                messages=session_transcript(items),
+                llm_client=client,
+                model=model,
+                suppress_followup_questions=True,
+                is_auto_compact=auto,
+                max_output_tokens=compact_cfg.summary_max_output_tokens,
+                compact_cfg=compact_cfg,
+                responses_api=responses_api,
+            )
+        except Exception:
+            logger.warning("Compacting the session of %s failed", key, exc_info=True)
+            return None
+        summary = [
+            {"role": message.role, "content": message.get_text()}
+            for message in result.summary_messages
+            if message.get_text().strip()
+        ]
+        if not result.success() or not summary:
+            logger.warning(
+                "Compacting the session of %s produced no summary: %s",
+                key,
+                result.user_display_message or result.error_message or result.status.value,
+            )
+            return None
+        return summary
+
+    async def summarize_session(
+        self, session: Any, model_key: Optional[str], *, above_tokens: int = 0
+    ) -> Optional[Dict[str, int]]:
+        """Replace *session* by a summary of it when it holds more than *above_tokens*.
+
+        For a session that belongs to no conversation of the chat - an
+        executor's, continued by its context id (tools.orchestrator_tools): the
+        chat is not touched and the auto-compact bookkeeping does not apply.
+        The summary is written by ``compact.summary_model``, else by
+        *model_key*. Returns ``{"tokens_before", "tokens_after"}``, or None
+        when nothing was summarized; a failure is logged, never raised.
+        """
+        items = await session.get_items()
+        if not items:
+            return None
+        tokens_before = request_tokens(items)
+        if tokens_before <= above_tokens:
+            return None
+        logger.info("Summarizing the session of %s: ~%d tokens", model_key, tokens_before)
+        summary = await self._summary_of(items, model_key, auto=False)
+        if summary is None:
+            return None
+        await session.clear_session()
+        await session.add_items(summary)
+        tokens_after = request_tokens(summary)
+        logger.info("Summarized the session of %s: ~%d -> ~%d tokens", model_key, tokens_before, tokens_after)
+        return {"tokens_before": tokens_before, "tokens_after": tokens_after}
+
     async def compact_session(
         self, agent_key: str, context_id: str, *, force: bool = False
     ) -> Optional[Dict[str, int]]:
@@ -305,34 +366,9 @@ class SessionUpkeep:
                 )
                 return None
         logger.info("Compacting the session of %s: ~%d/%d tokens", agent_key, tokens_before, window)
-        try:
-            client, model, responses_api = self.models.compact_request(agent_key)
-            result = await compact_conversation(
-                messages=session_transcript(items),
-                llm_client=client,
-                model=model,
-                suppress_followup_questions=True,
-                is_auto_compact=not force,
-                max_output_tokens=compact_cfg.summary_max_output_tokens,
-                compact_cfg=compact_cfg,
-                responses_api=responses_api,
-            )
-        except Exception:
+        summary = await self._summary_of(items, agent_key, auto=not force)
+        if summary is None:
             self._compact_tracking.consecutive_failures += 1
-            logger.warning("Compacting the session of %s failed", agent_key, exc_info=True)
-            return None
-        summary = [
-            {"role": message.role, "content": message.get_text()}
-            for message in result.summary_messages
-            if message.get_text().strip()
-        ]
-        if not result.success() or not summary:
-            self._compact_tracking.consecutive_failures += 1
-            logger.warning(
-                "Compacting the session of %s produced no summary: %s",
-                agent_key,
-                result.user_display_message or result.error_message or result.status.value,
-            )
             return None
         self._compact_tracking.consecutive_failures = 0
         await asyncio.to_thread(self.sync_memory_from_context, items)

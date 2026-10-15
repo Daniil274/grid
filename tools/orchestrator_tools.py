@@ -248,11 +248,92 @@ def _chosen_models(factory: Any, model: str, model_keys: List[str]) -> List[str]
     return [model, *(key for key in model_keys if key != model)]
 
 
-def _bounded(requested: Optional[int], ceiling: int) -> Optional[int]:
-    """A caller's limit, never past the operator's (0 there: no limit); None keeps the operator's."""
+#: tools.orchestrate.min_timeout_seconds when the config does not say.
+DEFAULT_MIN_TIMEOUT = 600
+#: tools.orchestrate.resume_compact_tokens when the config does not say.
+DEFAULT_RESUME_COMPACT_TOKENS = 50000
+
+
+def _setting(tool: Any, name: str, default: Optional[int]) -> Optional[int]:
+    value = getattr(tool, name, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else default
+
+
+def _executor_timeout(factory: Any, requested: Optional[int]) -> Optional[int]:
+    """The executor's time: the caller's request, raised to the system's least
+    (``min_timeout_seconds``) and held to its most (``max_timeout_seconds``,
+    else settings.agent_timeout; 0 is no limit). None - the caller asked for
+    nothing - leaves settings.agent_timeout to the run."""
     if not isinstance(requested, int) or isinstance(requested, bool) or requested < 1:
         return None
-    return min(requested, ceiling) if ceiling > 0 else requested
+    tool = _orchestrate_config(factory)
+    ceiling = _setting(tool, "max_timeout_seconds", None)
+    if ceiling is None:
+        ceiling = factory.config.get_agent_timeout()
+    seconds = max(requested, _setting(tool, "min_timeout_seconds", DEFAULT_MIN_TIMEOUT) or 0)
+    return min(seconds, ceiling) if isinstance(ceiling, int) and ceiling > 0 else seconds
+
+
+# -- executors a conversation can continue -----------------------------------
+# Every executor gets a context id of its own; its session (what it did, step
+# by step) is keyed by it. Passing that id back to orchestrate continues the
+# same agent: same role, tools and models unless the call gives new ones. How
+# each was made is kept in the conversation's metadata, so the id works after
+# a restart as the session does; runs outside any conversation keep it here.
+
+_EXECUTORS_KEY = "orchestrate_executors"
+_EXECUTORS_KEPT = 40
+_LOOSE_EXECUTORS: Dict[str, Dict[str, Dict[str, Any]]] = {}
+_LOOSE_KEPT = 200
+
+
+def _executor_name(handle: str) -> str:
+    return f"executor-{handle[4:]}"
+
+
+def _in_conversation(factory: Any, chat_id: str) -> bool:
+    manager = getattr(factory, "context_manager", None)
+    try:
+        return manager is not None and manager.has_context(chat_id) is True
+    except Exception:
+        return False
+
+
+def _executor_book(factory: Any, chat_id: str) -> Dict[str, Dict[str, Any]]:
+    """The executors of conversation *chat_id*: context id -> how it was made."""
+    if _in_conversation(factory, chat_id):
+        try:
+            stored = factory.context_manager.get_metadata(_EXECUTORS_KEY, context_id=chat_id)
+        except Exception:
+            logger.debug("orchestrate: the executors of %s are unreadable", chat_id, exc_info=True)
+            stored = None
+        return dict(stored) if isinstance(stored, dict) else {}
+    return dict(_LOOSE_EXECUTORS.get(chat_id, {}))
+
+
+def _keep_executor(factory: Any, chat_id: str, handle: str, record: Dict[str, Any]) -> None:
+    book = _executor_book(factory, chat_id)
+    book.pop(handle, None)
+    book[handle] = record
+    while len(book) > _EXECUTORS_KEPT:
+        book.pop(next(iter(book)))
+    if _in_conversation(factory, chat_id):
+        try:
+            factory.context_manager.set_metadata(_EXECUTORS_KEY, book, context_id=chat_id)
+            return
+        except Exception:
+            logger.warning("orchestrate: could not record executor %s of %s", handle, chat_id, exc_info=True)
+    _LOOSE_EXECUTORS.pop(chat_id, None)
+    _LOOSE_EXECUTORS[chat_id] = book
+    while len(_LOOSE_EXECUTORS) > _LOOSE_KEPT:
+        _LOOSE_EXECUTORS.pop(next(iter(_LOOSE_EXECUTORS)))
+
+
+#: Put before the task of a continued executor.
+_CONTINUED = (
+    "[You are continuing your earlier work on this assignment: your previous "
+    "steps and their results are above{summarized}. Do not repeat what is done.]\n\n"
+)
 
 
 def _is_model(factory: Any, key: str) -> bool:
@@ -276,19 +357,24 @@ async def orchestrate(
     model: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
 ) -> str:
-    """Hand a subtask to a new agent and get back its report.
+    """Hand a subtask to an agent and get back its report.
 
     The agent works in its own context: the searching, reading and trial runs
     it does stay out of yours, and you receive only its answer, with status
     (completed, timeout, max_turns, error), seconds, model calls, tokens and
-    cost when known. Several orchestrate calls inside ``parallel`` run at the
-    same time.
+    cost when known, and its context_id. Several orchestrate calls inside
+    ``parallel`` run at the same time.
 
     Args:
-        task: What the agent should do and what to report back.
+        task: What the agent should do and what to report back. When continuing an
+            agent, what it should do next, e.g. "Finish the remaining steps and report".
         agent_system_prompt: The agent's role and standing rules.
         executor_tools: Keys of your own tools the agent gets, e.g. ["web_search", "web_fetch"].
-        context_id: A context id the user named, to continue that agent session; usually empty.
+        context_id: Empty starts a new agent. The context_id from an earlier orchestrate
+            result of this conversation continues that agent: it keeps everything it already
+            did (a long history is summarized first) and its role, tools and model unless
+            you pass new ones. Use it after status timeout or max_turns, or to give the same
+            agent a follow-up, instead of starting over.
         init_tools: JSON list of tool calls made before the agent starts; their results go
             into its instructions. Format: '[{"name": "tool_name", "parameters": {...}}]'.
         system_skills: Skill names to load for the agent, as a list or comma-separated.
@@ -296,16 +382,18 @@ async def orchestrate(
             default models.
         model: One executor model by key from the list in your instructions; tried before
             the tier's models.
-        timeout_seconds: Time for the agent, up to the system limit; past it you get what it
-            has done so far.
+        timeout_seconds: Time for the agent, within the system's least and most. Past it the
+            agent writes a report of what it did, and you can continue it by its context_id.
 
     Only the summary and Args above reach the model. The executor runs on the
     first available model of the chosen one, the tier or the tool's
     ``models``, moving to the next when a request fails; without ``models``,
     on the default agent's model. Turns are bounded by settings.max_turns,
-    which the agent is never told. orchestrate calls of one conversation run
-    one after another as steps of its serial pipeline
-    (core.tracing.pipeline_registry); other conversations are not held up.
+    which the agent is never told. The caller's own deadline is paused while
+    the executor works (core.deadlines): the executor's time is its own.
+    orchestrate calls of one conversation run one after another as steps of
+    its serial pipeline (core.tracing.pipeline_registry); other conversations
+    are not held up.
     """
     factory = _get_factory_from_context(context)
     if factory is None:
@@ -313,14 +401,14 @@ async def orchestrate(
 
     # Import pipeline registry (inside function to avoid circular import)
     from core.tracing.pipeline_registry import PipelineRegistry, PipelineStatus
+    from core.deadlines import waiting_for_delegate
 
-    # Register or reuse a shared serial pipeline
     registry = PipelineRegistry()
     raw_ctx = getattr(context, "context", None)
-    inherited_context_id = _sanitize_context_id(getattr(raw_ctx, "context_id", None))
+    # The conversation is the caller's: an id the model passes names an
+    # executor to continue, never another conversation to work in.
     active_context_id = (
-        _sanitize_context_id(context_id)
-        or inherited_context_id
+        _sanitize_context_id(getattr(raw_ctx, "context_id", None))
         or _sanitize_context_id(factory.get_active_context_id())
     )
     if not active_context_id:
@@ -334,11 +422,27 @@ async def orchestrate(
         user_id=ctx_user_id
     )
     if raw_ctx is not None:
-        raw_ctx.context_id = active_context_id
+        if getattr(raw_ctx, "context_id", None) is None:
+            raw_ctx.context_id = active_context_id
         raw_ctx.pipeline_id = pipeline_id
         raw_ctx.execution_mode = "serial_subtree"
 
-    logger.info(f"orchestrate: START | task_len={len(task)} | pipeline_id={pipeline_id}")
+    # A new executor, or the one an earlier result named.
+    requested = _sanitize_context_id(context_id)
+    previous = _executor_book(factory, active_context_id).get(requested) if requested else None
+    notes: List[str] = []
+    if requested and previous is None:
+        notes.append(
+            f"context_id {requested} is not an agent started in this conversation; "
+            "a new agent took the task"
+        )
+    handle = requested if previous is not None else f"ctx-{uuid.uuid4().hex[:8]}"
+    previous = previous or {}
+
+    logger.info(
+        f"orchestrate: START | task_len={len(task)} | pipeline_id={pipeline_id} | "
+        f"executor={handle} | continued={bool(previous)}"
+    )
     verbose_logger.debug(
         f"\n{'='*80}\nORCHESTRATE START\n{'='*80}\n"
         f"Task: {task}\n"
@@ -346,13 +450,15 @@ async def orchestrate(
         f"Executor tools: {executor_tools}\n{'='*80}\n"
     )
 
+    # A continued executor keeps how it was made unless this call says otherwise.
+    tier = _coerce_optional_str(tier) or previous.get("tier")
+    model = _coerce_optional_str(model) or previous.get("model")
+
     # The executor's models come from the orchestrate tool config only, in
     # order: the caller's own models are not the executor's, so when none of
     # these is available the step fails instead of moving on to another model.
-    tier = _coerce_optional_str(tier)
     try:
         model_keys = _configured_models(factory, tier)
-        model = _coerce_optional_str(model)
         if model:
             model_keys = _chosen_models(factory, model, model_keys)
     except ValueError as exc:
@@ -365,10 +471,10 @@ async def orchestrate(
             f"❌ orchestrate: {source} names models that are not in this "
             f"system's config: {', '.join(unknown)}."
         )
-    run_timeout = _bounded(timeout_seconds, factory.config.get_agent_timeout())
+    run_timeout = _executor_timeout(factory, timeout_seconds)
     resolved_model_key = factory.resolve_model_key(model_keys[0] if model_keys else None)
     fallback_model_keys = model_keys[1:]
-    coerced_executor_tools = _coerce_tool_list(executor_tools)
+    coerced_executor_tools = _coerce_tool_list(executor_tools) or previous.get("tools")
 
     # Parse init_tools JSON (optional context-gathering tools)
     parsed_init_tools = None
@@ -381,10 +487,15 @@ async def orchestrate(
                 logger.warning(f"orchestrate: init_tools must be a JSON array, got {type(parsed).__name__}")
         except Exception as e:
             logger.warning(f"orchestrate: cannot parse init_tools JSON: {e} — value: {init_tools[:200]}")
+            notes.append(f"init_tools was not valid JSON ({e}); the agent started without them")
+    if parsed_init_tools is None:
+        # Run again on a continued executor: what they read (its task in the
+        # tracker, say) is current, and they belong to its instructions.
+        parsed_init_tools = previous.get("init_tools")
 
-    base_instructions = _coerce_optional_str(agent_system_prompt)
+    base_instructions = _coerce_optional_str(agent_system_prompt) or previous.get("instructions")
 
-    coerced_system_skills = _coerce_tool_list(system_skills)
+    coerced_system_skills = _coerce_tool_list(system_skills) or previous.get("skills")
 
     # The executor acts under the caller's trusted task; the task text here
     # was written by an agent and reaches the policy only as its purpose.
@@ -396,7 +507,7 @@ async def orchestrate(
     )
 
     executor = await factory.create_dynamic_agent(
-        name=f"executor-{uuid.uuid4().hex[:6]}",
+        name=_executor_name(handle),
         instructions=base_instructions,
         model_key=resolved_model_key,
         tool_names=coerced_executor_tools,
@@ -405,6 +516,39 @@ async def orchestrate(
         action_state=action_state,
         fallback_model_keys=fallback_model_keys,
     )
+
+    record = {
+        "instructions": base_instructions,
+        "tools": coerced_executor_tools,
+        "skills": coerced_system_skills,
+        "tier": tier,
+        "model": model,
+        "init_tools": parsed_init_tools,
+        "runs": int(previous.get("runs") or 0) + 1,
+        "status": "running",
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    # Kept before it runs: a run the user stops can be continued too.
+    _keep_executor(factory, active_context_id, handle, record)
+
+    run_input = task
+    compacted = None
+    if previous:
+        # Its history is in its session, keyed by its name in this conversation;
+        # a long one is summarized, so the next steps do not drag all of it along.
+        limit = _setting(_orchestrate_config(factory), "resume_compact_tokens", DEFAULT_RESUME_COMPACT_TOKENS)
+        if limit:
+            try:
+                session = factory._get_agent_session(executor.name, active_context_id)
+                compacted = await factory.summarize_session(
+                    session, resolved_model_key, above_tokens=limit
+                )
+            except Exception:
+                logger.warning("orchestrate: could not summarize executor %s", handle, exc_info=True)
+                compacted = None
+            if not isinstance(compacted, dict):
+                compacted = None
+        run_input = _CONTINUED.format(summarized=", summarized" if compacted else "") + task
 
     # The executor reports into the caller's view (the web trace, not the
     # console) as a block of its own under this orchestrate call.
@@ -426,7 +570,7 @@ async def orchestrate(
             async def run_executor() -> Any:
                 return await factory.run_agent_object(
                     executor,
-                    task,
+                    run_input,
                     context_id=active_context_id,
                     pipeline_id=pipeline_id,
                     stream_observer=observer,
@@ -437,14 +581,17 @@ async def orchestrate(
                     timeout=run_timeout,
                 )
 
-            outcome = await registry.run_serialized_step(
-                pipeline_id=pipeline_id,
-                agent_name=executor.name,
-                step_coro_factory=run_executor,
-                metadata={"model_key": resolved_model_key, "tools": coerced_executor_tools},
-            )
+            # The caller's clock stops while its executor works under its own.
+            with waiting_for_delegate():
+                outcome = await registry.run_serialized_step(
+                    pipeline_id=pipeline_id,
+                    agent_name=executor.name,
+                    step_coro_factory=run_executor,
+                    metadata={"model_key": resolved_model_key, "tools": coerced_executor_tools},
+                )
         except asyncio.CancelledError:
             run_error = "Cancelled"
+            _keep_executor(factory, active_context_id, handle, {**record, "status": "stopped"})
             # Task was cancelled - check if it was emergency shutdown
             status = await registry.get_pipeline_status(pipeline_id)
 
@@ -459,7 +606,7 @@ async def orchestrate(
                     "failed_tasks": len(status.get("failed_tasks", {})),
                     "total_tasks": status.get("all_tasks", 0),
                     "task": task,
-                    "context_id": active_context_id
+                    "context_id": handle
                 }
                 result_json = json.dumps(result, ensure_ascii=False, indent=2)
                 logger.warning(f"orchestrate: EMERGENCY STOPPED | pipeline_id={pipeline_id} | reason={status.get('emergency_reason')}")
@@ -488,6 +635,9 @@ async def orchestrate(
     if isinstance(executor_model_key, str) and executor_model_key:
         resolved_model_key = executor_model_key
 
+    status = outcome.stopped or "completed"
+    _keep_executor(factory, active_context_id, handle, {**record, "status": status})
+
     # The tools the executor really had: a name the factory could not resolve
     # (a typo, a tool of an MCP server that did not start) is reported, so the
     # caller does not brief the next agent to use it. The task is not echoed:
@@ -495,7 +645,8 @@ async def orchestrate(
     reported_missing = getattr(executor, "_grid_missing_tools", None)
     missing_tools = list(reported_missing) if isinstance(reported_missing, (list, tuple)) else []
     result = {
-        "context_id": active_context_id,
+        # The executor's own id: passed back as context_id, it continues this agent.
+        "context_id": handle,
         "model_key": resolved_model_key,
         "executor_tools": [
             name for name in (coerced_executor_tools or []) if name not in missing_tools
@@ -503,13 +654,26 @@ async def orchestrate(
         "final": _extract_text(outcome.text),
         "pipeline_id": pipeline_id,
         # What the run took, for planning the next ones.
-        "status": outcome.stopped or "completed",
+        "status": status,
         "seconds": round(time.monotonic() - started, 1),
         "model_calls": outcome.model_calls,
         "tokens": {"input": outcome.input_tokens, "output": outcome.output_tokens},
     }
     if tier:
         result["tier"] = tier
+    if previous:
+        result["continued"] = True
+    if compacted:
+        result["summarized_history"] = compacted
+    if run_timeout is not None:
+        result["timeout_seconds"] = run_timeout
+    if status != "completed":
+        result["resume"] = (
+            f'orchestrate(context_id="{handle}", task="<what to do next>") continues this agent '
+            "where it stopped, with what it already did; do not start the task over."
+        )
+    if notes:
+        result["notes"] = notes
     if tally.calls:
         # Only a metered client sees what calls cost (core.model_access).
         result["cost_usd"] = float(Decimal(tally.micro) / MICRO)
@@ -526,8 +690,8 @@ async def orchestrate(
         )
     result_json = json.dumps(result, ensure_ascii=False, indent=2)
     logger.info(
-        f"orchestrate: COMPLETE  | model={resolved_model_key} | "
-        f"output_len={len(result.get('final', ''))}"
+        f"orchestrate: COMPLETE  | model={resolved_model_key} | status={status} | "
+        f"executor={handle} | output_len={len(result.get('final', ''))}"
     )
     verbose_logger.debug(
         f"\n{'='*80}\nORCHESTRATE COMPLETE\n{'='*80}\n"

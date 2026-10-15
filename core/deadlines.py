@@ -1,4 +1,5 @@
-"""Run deadlines that do not count the time a person takes to answer.
+"""Run deadlines that count only the run's own work: not the time a person
+takes to answer, nor the time an agent it delegated to works.
 
 A turn, a sub-agent's run and a call into another system are each bounded in
 seconds (``settings.agent_timeout``, an agent's ``timeout``, the orchestrator's
@@ -7,6 +8,12 @@ seconds (``settings.agent_timeout``, an agent's ``timeout``, the orchestrator's
 wait counted against the agent, so a sub-agent asking for permission was killed
 while the request still sat in the chat - and its retry asked again and died the
 same way.
+
+A coordinator waiting for the agents it started (orchestrate, an agent tool,
+a call into another system) was cut off the same way: its clock ran while each
+delegate worked under a deadline of its own. :func:`waiting_for_delegate`
+pauses the caller's deadlines for that wait, so a caller's limit bounds its own
+thinking and each delegate is bounded by its own.
 
 :class:`Deadline` is ``asyncio.timeout`` that can be paused. Every deadline a
 run enters is recorded in a context variable, which child tasks inherit, so the
@@ -89,8 +96,7 @@ class Deadline:
 
 
 @contextmanager
-def waiting_for_person() -> Iterator[None]:
-    """Pause every deadline of the current run while the block waits for a person."""
+def _paused() -> Iterator[None]:
     held = _ACTIVE.get()
     for deadline in held:
         deadline.pause()
@@ -99,3 +105,20 @@ def waiting_for_person() -> Iterator[None]:
     finally:
         for deadline in reversed(held):
             deadline.resume()
+
+
+@contextmanager
+def waiting_for_person() -> Iterator[None]:
+    """Pause every deadline of the current run while the block waits for a person."""
+    with _paused():
+        yield
+
+
+@contextmanager
+def waiting_for_delegate() -> Iterator[None]:
+    """Pause the caller's deadlines while the block runs an agent it delegated to.
+
+    The delegate enters a deadline of its own inside the block; that one runs.
+    """
+    with _paused():
+        yield

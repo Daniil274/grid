@@ -172,6 +172,32 @@ class ToolConfig(BaseModel):
             "added to the caller's instructions. Off: tiers only."
         ),
     )
+    min_timeout_seconds: int = Field(
+        default=600,
+        ge=0,
+        description=(
+            "orchestrate: the least time an executor gets. A shorter `timeout_seconds` "
+            "is raised to it: an estimate that is too tight stops an agent mid-work, "
+            "while one that finishes early loses nothing to a longer limit."
+        ),
+    )
+    max_timeout_seconds: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "orchestrate: the most time a caller may give an executor; 0 is no limit. "
+            "Unset: settings.agent_timeout."
+        ),
+    )
+    resume_compact_tokens: int = Field(
+        default=50000,
+        ge=0,
+        description=(
+            "orchestrate: an executor continued by its context_id whose history is "
+            "longer than this many tokens continues from a summary of it instead "
+            "of the whole of it; 0 never summarizes."
+        ),
+    )
     max_parallel: int = Field(
         default=4,
         ge=1,
@@ -332,7 +358,9 @@ class Settings(BaseModel):
     # 0 removes the turn limit; per-agent `max_turns` overrides it.
     max_turns: int = Field(default=10, ge=0, le=300)
     # 0 disables the agent execution timeout; per-agent `timeout` overrides it.
-    agent_timeout: int = Field(default=300, ge=0, le=7200)
+    # It bounds an agent's own work: the time its delegates take is not counted
+    # (core.deadlines), and each delegate is bounded by its own limit.
+    agent_timeout: int = Field(default=900, ge=0, le=7200)
     enforce_delegate_limits: bool = Field(
         default=False,
         description=(

@@ -18,7 +18,7 @@ from typing import Any
 from agents import RunContextWrapper, function_tool
 
 from core.action_policy import delegated_state
-from core.deadlines import Deadline
+from core.deadlines import Deadline, waiting_for_delegate
 from core.factory.run_context import GridRunContext, get_runner, runner_max_turns
 from core.run_stream import run_output_text
 from utils.path_utils import factory_path_context
@@ -261,34 +261,36 @@ class SystemAccessBroker:
             max_turns = runner_max_turns(0)
         deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         try:
-            async with deadline:
-                target_agent = await factory.create_agent(target)
-                run_input = task
-                auto_run = getattr(factory, "_auto_run_preamble", None)
-                if auto_run is not None and agent_config.auto_run_tools:
-                    preamble = await auto_run(
-                        target, agent_config, target_agent, child, user_message=task)
-                    if preamble:
-                        run_input = f"{preamble}\n\n[Current user request]\n\n{task}"
-                with factory_path_context(factory):
-                    result = get_runner().run_streamed(
-                        starting_agent=target_agent,
-                        input=run_input,
-                        context=child,
-                        session=None,
-                        max_turns=max_turns,
-                        run_config=factory._run_config(target, observer=observer),
-                    )
-                    if child.run_control is not None:
-                        child.run_control.attach(result)
-                    try:
-                        await factory._consume_stream(
-                            result, observer=observer, agent_key=target,
-                            action_state=state,
+            # The caller's clock stops while the other system works under its own limit.
+            with waiting_for_delegate():
+                async with deadline:
+                    target_agent = await factory.create_agent(target)
+                    run_input = task
+                    auto_run = getattr(factory, "_auto_run_preamble", None)
+                    if auto_run is not None and agent_config.auto_run_tools:
+                        preamble = await auto_run(
+                            target, agent_config, target_agent, child, user_message=task)
+                        if preamble:
+                            run_input = f"{preamble}\n\n[Current user request]\n\n{task}"
+                    with factory_path_context(factory):
+                        result = get_runner().run_streamed(
+                            starting_agent=target_agent,
+                            input=run_input,
+                            context=child,
+                            session=None,
+                            max_turns=max_turns,
+                            run_config=factory._run_config(target, observer=observer),
                         )
-                    finally:
                         if child.run_control is not None:
-                            child.run_control.detach(result)
+                            child.run_control.attach(result)
+                        try:
+                            await factory._consume_stream(
+                                result, observer=observer, agent_key=target,
+                                action_state=state,
+                            )
+                        finally:
+                            if child.run_control is not None:
+                                child.run_control.detach(result)
             if child.run_control is not None and child.run_control.stop_requested:
                 error = "stopped"
                 return json.dumps({"status": "stopped", "reason": "Caller stopped the execution"})

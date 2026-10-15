@@ -25,6 +25,7 @@ from agents.exceptions import (
 )
 
 from core.action_policy import delegated_state
+from core.deadlines import Deadline, waiting_for_delegate
 from core.factory.run_context import GridRunContext, get_runner, runner_max_turns
 from core.interruption import StopRequested
 from core.run_stream import interrupted_run_report, run_output_text
@@ -763,28 +764,40 @@ class ToolAssembly:
             set_current_factory(self)
             run_error: Optional[str] = None
             result = None
+            # The sub-agent is bounded by its own limit; its caller's clock
+            # stops meanwhile (core.deadlines), so a coordinator is never cut
+            # off while it waits for the agents it called.
+            timeout = self.config.get_agent_timeout(agent_key)
+            deadline = Deadline(timeout)
+            # How the caller continues it after a stop: its session is kept.
+            resume_note = (
+                f"\n\nIts session is kept: call {tool_name} again with input that "
+                f"includes {sub_context_id} to continue it where it stopped."
+            )
             try:
-                result = get_runner().run_streamed(
-                    starting_agent=local_sub_agent,
-                    input=enhanced_input,
-                    context=sub_run_ctx,
-                    session=session,
-                    max_turns=runner_max_turns(self.config.get_max_turns(agent_key)),
-                    run_config=self._run_config(agent_key, observer=sub_observer),
-                )
-                control = sub_run_ctx.run_control
-                if control is not None:
-                    control.attach(result)
-                try:
-                    await self._consume_stream(
-                        result,
-                        observer=sub_observer,
-                        agent_key=agent_key,
-                        action_state=sub_run_ctx.action_state,
-                    )
-                finally:
-                    if control is not None:
-                        control.detach(result)
+                with waiting_for_delegate():
+                    async with deadline:
+                        result = get_runner().run_streamed(
+                            starting_agent=local_sub_agent,
+                            input=enhanced_input,
+                            context=sub_run_ctx,
+                            session=session,
+                            max_turns=runner_max_turns(self.config.get_max_turns(agent_key)),
+                            run_config=self._run_config(agent_key, observer=sub_observer),
+                        )
+                        control = sub_run_ctx.run_control
+                        if control is not None:
+                            control.attach(result)
+                        try:
+                            await self._consume_stream(
+                                result,
+                                observer=sub_observer,
+                                agent_key=agent_key,
+                                action_state=sub_run_ctx.action_state,
+                            )
+                        finally:
+                            if control is not None:
+                                control.detach(result)
                 if control is not None and control.stop_requested and result.final_output is None:
                     # Its finished steps are in its session; the caller is told
                     # it stopped, then stops after this step itself.
@@ -798,6 +811,28 @@ class ToolAssembly:
                 run_error = str(exc) or type(exc).__name__
                 logger.warning("Sub-agent %s stopped: %s: %s", agent_key, type(exc).__name__, run_error)
                 output = interrupted_run_report(result, f"Agent {agent_key}", exc)
+                if isinstance(exc, MaxTurnsExceeded):
+                    output += resume_note
+            except TimeoutError as exc:
+                if timeout <= 0 or not deadline.expired():
+                    run_error = str(exc) or type(exc).__name__
+                    raise
+                from core.factory.turns import TIMEOUT_REPORT, limit_report_seconds
+
+                run_error = f"no answer within the agent timeout ({timeout:g} s)"
+                logger.warning("Sub-agent %s stopped after %s s", agent_key, timeout)
+                control = sub_run_ctx.run_control
+                report = ""
+                if not (control is not None and control.stop_requested):
+                    report, _ = await self._report_after_turn_limit(
+                        local_sub_agent, sub_run_ctx, session, sub_observer, agent_key,
+                        sub_run_ctx.action_state, message=TIMEOUT_REPORT, seconds=limit_report_seconds(timeout),
+                    )
+                output = (
+                    f"[Agent {agent_key} ran out of time ({timeout:g} s); its report of the work so far:]\n{report}"
+                    if report
+                    else interrupted_run_report(result, f"Agent {agent_key}", TimeoutError(run_error))
+                ) + resume_note
             except BaseException as exc:
                 run_error = str(exc) or type(exc).__name__
                 raise

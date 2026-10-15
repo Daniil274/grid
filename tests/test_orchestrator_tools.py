@@ -123,11 +123,9 @@ async def test_orchestrate_ignores_a_model_key_from_the_caller():
 
 
 @pytest.mark.asyncio
-async def test_orchestrate_sanitizes_noisy_context_id():
+async def test_a_context_id_from_the_model_never_moves_the_executor_into_another_conversation():
     factory = Mock()
-    factory.get_active_context_id = Mock(return_value=None)
-    factory.context_manager = Mock()
-    factory.context_manager.start_new_context = Mock(return_value="ctx-newcontext")
+    factory.get_active_context_id = Mock(return_value="ctx-99999999")
     factory.config = Mock()
     factory.config.get_tool.side_effect = Exception("Not found")
     factory.resolve_model_key = Mock(return_value="gpt-4")
@@ -137,20 +135,22 @@ async def test_orchestrate_sanitizes_noisy_context_id():
     factory.run_agent_object = AsyncMock(return_value=RunOutcome("DRAFT"))
 
     ctx = Mock()
-    ctx.context = Mock(factory=factory, user_id="user-123", context_id=None)
+    ctx.context = SimpleNamespace(factory=factory, user_id="user-123", context_id="ctx-12345678", pipeline_id=None)
 
     tool = ORCHESTRATOR_TOOLS["orchestrate"]
     noisy_id = "Context ID: ctx-abcdef12 (reuse from previous step)"
-    out = await tool.on_invoke_tool(
+    out = json.loads(await tool.on_invoke_tool(
         ctx,
         input=f'{{"task": "goal", "context_id": {json.dumps(noisy_id)}}}',
-    )
+    ))
 
-    assert "DRAFT" in out
-    assert '"context_id": "ctx-abcdef12"' in out
-    run_kwargs = factory.run_agent_object.await_args.kwargs
-    assert run_kwargs["context_id"] == "ctx-abcdef12"
-    factory.context_manager.start_new_context.assert_not_called()
+    # The executor works in the caller's conversation, which stays the caller's.
+    assert factory.run_agent_object.await_args.kwargs["context_id"] == "ctx-12345678"
+    assert ctx.context.context_id == "ctx-12345678"
+    # ctx-abcdef12 names no executor of this conversation: a new one took the task.
+    assert out["context_id"] != "ctx-abcdef12"
+    assert "not an agent started in this conversation" in out["notes"][0]
+    assert "continued" not in out
 
 
 @pytest.mark.asyncio
@@ -169,19 +169,89 @@ async def test_orchestrate_ignores_invalid_context_id_and_reuses_active():
     ctx.context = Mock(factory=factory, user_id="user-123", context_id=None)
 
     tool = ORCHESTRATOR_TOOLS["orchestrate"]
-    out = await tool.on_invoke_tool(
+    out = json.loads(await tool.on_invoke_tool(
         ctx,
         input='{"task": "goal", "context_id": "reuse parent session"}',
-    )
+    ))
 
-    assert "DRAFT" in out
-    assert '"context_id": "ctx-11223344"' in out
+    assert out["final"] == "DRAFT"
+    assert out["context_id"].startswith("ctx-") and out["context_id"] != "ctx-11223344"
     run_kwargs = factory.run_agent_object.await_args.kwargs
     assert run_kwargs["context_id"] == "ctx-11223344"
 
 
+def _resumable_factory(outcomes, summary=None):
+    factory = Mock()
+    factory.get_active_context_id = Mock(return_value="ctx-0000aaaa")
+    factory.config = Mock()
+    factory.config.get_tool.return_value = SimpleNamespace(models=["worker-model"], tiers={"strong": ["big"]})
+    factory.config.get_agent_timeout = Mock(return_value=900)
+    factory.resolve_model_key = Mock(side_effect=lambda key: key)
+
+    def make_agent(**kwargs):
+        agent = Mock()
+        agent.name = kwargs["name"]
+        agent._grid_missing_tools = []
+        agent._grid_model_key = None
+        return agent
+
+    factory.create_dynamic_agent = AsyncMock(side_effect=make_agent)
+    factory.run_agent_object = AsyncMock(side_effect=list(outcomes))
+    factory._get_agent_session = Mock(return_value="the executor's session")
+    factory.summarize_session = AsyncMock(return_value=summary)
+    return factory
 
 
+async def _call(factory, chat="ctx-0000aaaa", **arguments):
+    ctx = Mock()
+    ctx.context = SimpleNamespace(factory=factory, user_id="u", context_id=chat, pipeline_id=None)
+    return json.loads(await ORCHESTRATOR_TOOLS["orchestrate"].on_invoke_tool(
+        ctx, input=json.dumps({"task": "goal", **arguments})
+    ))
+
+
+@pytest.mark.asyncio
+async def test_an_executor_that_ran_out_of_time_is_continued_by_its_context_id():
+    factory = _resumable_factory(
+        [RunOutcome("[Agent ran out of time; its report:] half done", "timeout"), RunOutcome("all done")],
+        summary={"tokens_before": 90000, "tokens_after": 2500},
+    )
+    first = await _call(
+        factory, agent_system_prompt="You research.", executor_tools=["web_search"], tier="strong",
+        init_tools='[{"name": "beads_show", "parameters": {"bead_id": "x-1"}}]',
+    )
+    assert first["status"] == "timeout"
+    handle = first["context_id"]
+    assert f'context_id="{handle}"' in first["resume"]
+    made = factory.create_dynamic_agent.await_args.kwargs
+
+    second = await _call(factory, context_id=handle, task="Finish and report")
+
+    again = factory.create_dynamic_agent.await_args.kwargs
+    # The same agent: its name keys its session; role, tools, tier and init tools kept.
+    assert again["name"] == made["name"] == f"executor-{handle[4:]}"
+    assert (again["instructions"], again["tool_names"], again["model_key"]) == ("You research.", ["web_search"], "big")
+    assert again["init_tools"] == [{"name": "beads_show", "parameters": {"bead_id": "x-1"}}]
+    # Its long history was summarized before it went on.
+    factory._get_agent_session.assert_called_with(made["name"], "ctx-0000aaaa")
+    assert factory.summarize_session.await_args.kwargs["above_tokens"] == 50000
+    run_input = factory.run_agent_object.await_args.args[1]
+    assert run_input.startswith("[You are continuing your earlier work") and "summarized" in run_input
+    assert run_input.endswith("Finish and report")
+    assert second["continued"] is True
+    assert second["context_id"] == handle
+    assert second["summarized_history"] == {"tokens_before": 90000, "tokens_after": 2500}
+    assert second["status"] == "completed" and "resume" not in second
+
+
+@pytest.mark.asyncio
+async def test_an_executor_is_continued_only_in_its_own_conversation():
+    factory = _resumable_factory([RunOutcome("one", "timeout"), RunOutcome("two")])
+    handle = (await _call(factory))["context_id"]
+    other = await _call(factory, chat="ctx-0000bbbb", context_id=handle)
+    assert other["context_id"] != handle
+    assert "continued" not in other
+    factory.summarize_session.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -416,19 +486,47 @@ async def test_orchestrate_names_the_tiers_when_one_does_not_exist():
 
 
 @pytest.mark.asyncio
-async def test_orchestrate_time_limit_is_never_looser_than_the_systems():
+async def test_orchestrate_time_limit_stays_within_the_systems_least_and_most():
     factory = _tiered_factory(timeout=600, turns=50)
     await _orchestrate(factory, timeout_seconds=1200)
     assert factory.run_agent_object.await_args.kwargs["timeout"] == 600
 
+    # Under the least (600 s by default): raised to it.
     await _orchestrate(factory, timeout_seconds=120)
     kwargs = factory.run_agent_object.await_args.kwargs
-    assert kwargs["timeout"] == 120
+    assert kwargs["timeout"] == 600
     # Turns are the system's alone: the caller sets none.
     assert "max_turns" not in kwargs
 
     await _orchestrate(factory)
     assert factory.run_agent_object.await_args.kwargs["timeout"] is None  # the system's own
+
+    tool = factory.config.get_tool.return_value
+    tool.min_timeout_seconds, tool.max_timeout_seconds = 300, 3600
+    await _orchestrate(factory, timeout_seconds=120)
+    assert factory.run_agent_object.await_args.kwargs["timeout"] == 300
+    await _orchestrate(factory, timeout_seconds=2400)
+    assert factory.run_agent_object.await_args.kwargs["timeout"] == 2400
+    await _orchestrate(factory, timeout_seconds=9000)
+    assert factory.run_agent_object.await_args.kwargs["timeout"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_the_callers_clock_stops_while_its_executor_works():
+    import asyncio
+
+    from core.deadlines import Deadline
+
+    factory = _tiered_factory()
+
+    async def slow_run(*args, **kwargs):
+        await asyncio.sleep(0.3)
+        return RunOutcome("DRAFT")
+
+    factory.run_agent_object = AsyncMock(side_effect=slow_run)
+    async with Deadline(0.1):  # the coordinator's own limit
+        out = json.loads(await _orchestrate(factory))
+    assert out["final"] == "DRAFT"
 
 
 @pytest.mark.asyncio

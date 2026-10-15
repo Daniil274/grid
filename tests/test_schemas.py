@@ -310,7 +310,7 @@ class TestSettings:
         assert settings.default_agent == "assistant"
         assert settings.max_history == 15
         assert settings.max_turns == 10
-        assert settings.agent_timeout == 300
+        assert settings.agent_timeout == 900
         assert settings.debug is False
         assert settings.mcp_enabled is False
         assert settings.working_directory == "."

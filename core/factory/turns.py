@@ -95,6 +95,21 @@ _TURN_LIMIT_REPORT = (
     "sources and paths it rests on), and what is left undone."
 )
 
+# The same for an agent whose time ran out: the work it did stays in its
+# session, and the caller can continue it there.
+TIMEOUT_REPORT = (
+    "Your time for this task is up: no more tool calls. Write your report now "
+    "from the saved tool results: what you did, what you found (with the "
+    "sources and paths it rests on), what is left undone, and the next step "
+    "you would take."
+)
+
+
+def limit_report_seconds(timeout: float) -> float:
+    """Seconds an agent its time limit stopped gets to write that report: a
+    tenth of the limit, from half a minute to two."""
+    return max(30.0, min(120.0, timeout / 10))
+
 
 # Sent after an answer that wrote tool calls as text instead of calling tools.
 TOOL_CALL_CORRECTION = """Your last answer wrote tool calls as text, for example:
@@ -413,6 +428,21 @@ class TurnRunner:
             if timeout <= 0 or not deadline.expired():
                 raise
             logger.warning("Agent %s stopped after %s s", agent_label, timeout)
+            if session is not None and not getattr(run_control, "stop_requested", False):
+                # The steps it finished are in its session: one answer more,
+                # without tools, says what they came to.
+                report, report_run = await self._report_after_turn_limit(
+                    agent, run_ctx, session, observer, agent_label, action_state,
+                    message=TIMEOUT_REPORT, seconds=limit_report_seconds(timeout),
+                )
+                if report:
+                    spent, result = used(), report_run
+                    return RunOutcome(
+                        f"[Agent {agent_label} ran out of time ({timeout:g} s); its report "
+                        f"of the work so far:]\n{report}",
+                        STOPPED_TIMEOUT,
+                        *used(),
+                    )
             report = interrupted_run_report(
                 result, f"Agent {agent_label}",
                 TimeoutError(f"no answer within the agent timeout ({timeout:g} s)"),
@@ -423,29 +453,41 @@ class TurnRunner:
             reset_current_factory()
 
     async def _report_after_turn_limit(
-        self, agent: Any, run_ctx: Any, session: Any, observer: Any, agent_label: str, action_state: Any
+        self,
+        agent: Any,
+        run_ctx: Any,
+        session: Any,
+        observer: Any,
+        agent_label: str,
+        action_state: Any,
+        *,
+        message: str = _TURN_LIMIT_REPORT,
+        seconds: Optional[float] = None,
     ) -> Tuple[str, Any]:
-        """The report of a run that used up its turns: one answer with tools off.
+        """The report of a run its limit stopped: one answer with tools off.
 
-        Returns the report ("" when the model gave none) and the run, whose
-        usage counts toward the agent's. A failure here only means the caller
-        gets the plain summary of the stopped run.
+        *message* asks for it - after the turn limit by default; *seconds*
+        bounds the answer. Returns the report ("" when the model gave none in
+        time) and the run, whose usage counts toward the agent's. A failure
+        here only means the caller gets the plain summary of the stopped run.
         """
-        reporter = agent.clone(model_settings=replace(agent.model_settings, tool_choice="none"))
-        result = get_runner().run_streamed(
-            starting_agent=reporter,
-            input=_TURN_LIMIT_REPORT,
-            context=run_ctx,
-            session=session,
-            max_turns=1,
-            run_config=self._run_config(None),
-        )
+        result = None
         try:
-            await self._consume_stream(
-                result, observer=observer, agent_key=agent_label, action_state=action_state
+            reporter = agent.clone(model_settings=replace(agent.model_settings, tool_choice="none"))
+            result = get_runner().run_streamed(
+                starting_agent=reporter,
+                input=message,
+                context=run_ctx,
+                session=session,
+                max_turns=1,
+                run_config=self._run_config(None),
             )
+            async with asyncio.timeout(seconds if seconds and seconds > 0 else None):
+                await self._consume_stream(
+                    result, observer=observer, agent_key=agent_label, action_state=action_state
+                )
         except Exception as exc:
-            logger.warning("Agent %s wrote no report after its turn limit: %s", agent_label, exc)
+            logger.warning("Agent %s wrote no report after its limit: %s", agent_label, exc or type(exc).__name__)
             return "", result
         final = getattr(result, "final_output", None)
         return (str(final).strip() if final is not None else ""), result
