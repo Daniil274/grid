@@ -9,6 +9,7 @@
 import { $$, h, icon, onFrame } from "../lib/dom.js";
 import { splitFiles, withFiles } from "../lib/files.js";
 import { clock } from "../lib/format.js";
+import { decorateDiagrams } from "../lib/diagrams.js";
 import { renderMarkdown } from "../lib/markdown.js";
 import { scopeWorkspaceLinks } from "../lib/workspace-links.js";
 import { ICONS } from "./icons.js";
@@ -243,6 +244,7 @@ export function createMessage({
     }
     body.innerHTML = renderMarkdown(words);
     decorateCode(body);
+    decorateDiagrams(body);
     // Workspace-file links the agent emits (/api/workspace/files/<path>)
     // download on click, from the directory this chat works in.
     scopeWorkspaceLinks(body);
@@ -515,7 +517,12 @@ function createContextCard({ timestamp, context, content = "" }) {
     head.setAttribute("aria-expanded", String(open));
     chevron.classList.toggle("is-open", open);
   });
-  if (content) body.innerHTML = renderMarkdown(content);
+  if (content) {
+    body.innerHTML = renderMarkdown(content);
+    decorateCode(body);
+    decorateDiagrams(body);
+    scopeWorkspaceLinks(body);
+  }
   const root = h(
     "article.msg.msg--context",
     { id, dataset: { role: "marker" } },

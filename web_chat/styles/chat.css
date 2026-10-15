@@ -1179,3 +1179,369 @@
 /* The newest answer offers to carry its context into a new chat. */
 .msg__newChat { display: flex; justify-content: flex-start; }
 .msg__continueNew { display: inline-flex; align-items: center; gap: 6px; }
+
+/* -- diagrams (lib/diagrams.js) ---------------------------------------------
+   A diagram is a card: a bar (title, Diagram/Code tabs, zoom, actions) over a
+   viewport that pans and zooms a canvas holding the rendered SVG. Like a
+   table it may grow past the answer's column, centred on it. */
+.diagramCard {
+  position: relative;
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+}
+
+.msg--assistant .diagramCard,
+.msg[data-role="assistant"] .diagramCard {
+  left: 50%;
+  width: min(1040px, 100cqw - 8px);
+  max-width: none;
+  transform: translateX(-50%);
+}
+
+/* A narrow chat column: no breakout, the card is as wide as the answer. */
+@container (max-width: 560px) {
+  .msg--assistant .diagramCard,
+  .msg[data-role="assistant"] .diagramCard {
+    left: 0;
+    width: 100%;
+    max-width: 100%;
+    transform: none;
+  }
+}
+
+.diagramBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  box-sizing: border-box;
+  min-height: 36px;
+  height: 36px;
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+}
+
+.diagramBar__title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagramBar__lang {
+  flex: none;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.diagramBar__actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* The streaming indicator: the diagram's source is still arriving. */
+.codeBar__status {
+  display: inline-block;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: diagramPulse 1.1s ease-in-out infinite;
+}
+
+@keyframes diagramPulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .codeBar__status { animation: none; }
+}
+
+.diagramTabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+
+.diagramTab {
+  height: 22px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.diagramTab:hover {
+  color: var(--text);
+}
+
+.diagramTab.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.diagramTab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.diagramZoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.diagramZoom__pct {
+  min-width: 38px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.diagramViewport {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-height: 180px;
+  max-height: 620px;
+  padding: 16px;
+  overflow: hidden;
+  background-image: radial-gradient(circle, var(--line-strong) 1px, transparent 1.4px);
+  background-size: 18px 18px;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+.diagramViewport.is-panning {
+  cursor: grabbing;
+}
+
+.diagramCanvas {
+  display: block;
+  max-width: 100%;
+  transform-origin: center center;
+  transition: transform 60ms ease-out;
+  will-change: transform;
+}
+
+.diagramViewport.is-panning .diagramCanvas,
+.diagramCanvas.is-panning {
+  transition: none;
+}
+
+.diagramCanvas svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+/* The source view: the card already has a frame and a bar. */
+.diagramSource {
+  max-height: 620px;
+  overflow: auto;
+}
+
+.diagramSource pre,
+.msg__body .diagramSource pre {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.diagramSource .codeBar {
+  display: none;
+}
+
+.diagramCard__error {
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.diagramCard__error[hidden] {
+  display: none;
+}
+
+/* The diagram kind (flowchart, sequenceDiagram, ...) next to the language. */
+.diagramBar__type {
+  flex: none;
+  max-width: 14ch;
+  padding: 1px 7px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--bg-3);
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagramBar__type[hidden] { display: none; }
+
+.diagramBar__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* An icon button that also carries a label ("SVG", "PNG"). */
+.diagramBar .iconBtn:has(.iconBtn__text) {
+  width: auto;
+  padding: 0 7px;
+  gap: 4px;
+}
+
+.iconBtn__text {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.diagramBar .iconBtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.diagramBar .iconBtn:disabled:hover {
+  background: transparent;
+  color: var(--text-2);
+}
+
+.diagramBar .iconBtn:focus-visible,
+.diagramZoom__pct:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.diagramZoom__pct {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.diagramTab:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Waiting for the engine: the source is shown, the card is dimmed and pulses. */
+.diagramCard.is-loading .diagramBar__lang {
+  animation: diagramPulse 1.1s ease-in-out infinite;
+}
+
+.diagramCard.is-loading .diagramSource {
+  opacity: 0.7;
+}
+
+/* A diagram that failed to draw: the source stays readable under the message. */
+.diagramCard.is-error {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
+}
+
+.diagramCard.is-error .diagramBar {
+  border-bottom-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+}
+
+.diagramCard.is-error .diagramBar__lang {
+  color: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diagramCard.is-loading .diagramBar__lang { animation: none; }
+}
+
+/* Full screen: the same viewer, over the whole page. */
+.diagramModal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+  background: rgb(0 0 0 / 78%);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.diagramModal__panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+}
+
+.diagramModal .diagramBar {
+  height: 44px;
+  min-height: 44px;
+  padding: 0 10px 0 16px;
+}
+
+.diagramModal .diagramViewport {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  padding: 0;
+}
+
+.diagramModal .diagramCanvas,
+.diagramModal .diagramCanvas svg {
+  max-height: 100%;
+}
+
+@media (max-width: 640px) {
+  .diagramModal { padding: 0; }
+  .diagramModal__panel { border-radius: 0; border-width: 0; }
+}
