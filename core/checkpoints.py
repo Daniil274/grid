@@ -76,8 +76,12 @@ class Checkpoints:
         return found
 
     # -- restore ---------------------------------------------------------------
-    def restore(self, workspace: Path, checkpoint: dict) -> List[dict]:
-        """Bring *workspace* back to *checkpoint*; the files it changed back."""
+    def restore(self, workspace: Path, checkpoint: dict, *, only: Optional[set] = None) -> List[dict]:
+        """Bring *workspace* back to *checkpoint*; the files it changed back.
+
+        *only*: the files to bring back - paths as :meth:`changes` names them -
+        when the workspace is shared and not every change since is the caller's.
+        """
         workspace = Path(workspace).resolve()
         restored: List[dict] = []
         with self._lock:
@@ -93,6 +97,8 @@ class Checkpoints:
                 git_dir = self._git_dir(root)
                 owner = root.stat()
                 for status, path in self._diff(git_dir, old, now):
+                    if only is not None and _join(label, path) not in only:
+                        continue
                     target = root / path
                     if status == "added":
                         # Created since the checkpoint: it goes.

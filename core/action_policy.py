@@ -31,12 +31,13 @@ from uuid import uuid4
 import httpx
 
 from core.action_routing import Routing, effect_of, route_call
+from core.deadlines import waiting_for_person
 from core.decisions import DecisionsModel
 from core.chat_policy import ChatPolicyModel
 from core.policy_resilience import PolicyRunner
 from schemas.action_policy import ActionPolicyConfig, ActionValidatorConfig
 from utils.exceptions import ConfigError
-from utils.path_utils import _sandbox_root, resolve_agent_path
+from utils.path_utils import _sandbox_root, extra_roots
 
 logger = logging.getLogger("grid.action_policy")
 
@@ -723,6 +724,21 @@ class ActionGate:
                     return None
                 candidate = Path(value)
                 if candidate.is_absolute():
+                    # Another space of the run (/project, /user): named as its
+                    # links name it - project/<path> - so the policy's patterns
+                    # (.env, .git/**) see the file's own path within it.
+                    for prefix, space in extra_roots(factory):
+                        name = prefix.strip("/")
+                        if value == prefix or value.startswith(prefix + "/"):
+                            inner = Path(os.path.abspath(space / value[len(prefix):].lstrip("/")))
+                        elif candidate == space or space in candidate.parents:
+                            inner = Path(os.path.abspath(candidate))
+                        else:
+                            continue
+                        if inner != space and space not in inner.parents:
+                            return None
+                        rest = inner.relative_to(space).as_posix()
+                        return name if rest == "." else f"{name}/{rest}"
                     # A container path is workspace-relative only for container runs.
                     if getattr(factory, "container_id", None) and (
                         value == CONTAINER_WORKDIR or value.startswith(CONTAINER_WORKDIR + "/")
@@ -953,7 +969,10 @@ class ActionGate:
                 **decision_meta, **call_meta,
             )
         try:
-            return await asyncio.wait_for(future, timeout=self.config.review_ttl_seconds)
+            # The run's own deadlines stand still meanwhile: a sub-agent asking for
+            # permission is not out of time because the user has not answered yet.
+            with waiting_for_person():
+                return await asyncio.wait_for(future, timeout=self.config.review_ttl_seconds)
         except asyncio.TimeoutError:
             return None
         finally:

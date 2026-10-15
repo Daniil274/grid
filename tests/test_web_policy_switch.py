@@ -106,3 +106,26 @@ async def test_a_user_answers_only_where_the_policy_lets_users_answer():
     # The operator's review API still answers it.
     assert space.resolve_action_review(approval_id, approve=False)
     assert json.loads(await asyncio.wait_for(call, 2))["rule"] == "declined"
+
+
+async def test_the_chats_a_call_waits_in_are_known_for_the_rail_and_the_alerts():
+    policy = ActionPolicyConfig(mode="enforce")
+    gate = ActionGate(policy)
+    space, _, _ = space_with(gate, policy)
+    assert space.awaiting_approval() == {}
+    call, approval_id = await held_call(gate, "ctx-1")
+    waiting = space.awaiting_approval()
+    assert list(waiting) == ["ctx-1"]
+    assert waiting["ctx-1"][0]["approval_id"] == approval_id and waiting["ctx-1"][0]["tool"] == "file_write"
+    assert space.answer_action_review("ctx-1", approval_id, approve=True)
+    assert await asyncio.wait_for(call, 2) == "ran"
+    assert space.awaiting_approval() == {}
+
+    # What only an operator answers is no request to the user.
+    operator = ActionPolicyConfig(mode="enforce", approvals="operator", review_ttl_seconds=10)
+    gate = ActionGate(operator)
+    space, _, _ = space_with(gate, operator)
+    call, approval_id = await held_call(gate, "ctx-1")
+    assert space.awaiting_approval() == {}
+    assert space.resolve_action_review(approval_id, approve=False)
+    await asyncio.wait_for(call, 2)

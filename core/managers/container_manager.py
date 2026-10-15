@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import stat as stat_module
 import sys
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
@@ -36,6 +37,10 @@ CONTAINER_WORKDIR = "/workspace"
 
 #: The label naming the settings a container was made with (ContainerManager.profile).
 PROFILE_LABEL = "grid.isolation.profile"
+
+#: The uid and gid each image's commands run as, asked once per server: every
+#: chat with a space of its own has a manager of its own.
+_AGENT_IDS: Dict[str, Tuple[int, int]] = {}
 
 #: The Grid install this module belongs to: servers run from different copies
 #: (worktrees) never share a container, even for the same workspace.
@@ -113,49 +118,54 @@ class ContainerManager:
         }
         return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
 
-    def get_or_create_container(self, user_id: str, workspace: Path) -> Optional[Container]:
+    def get_or_create_container(
+        self, user_id: str, workspace: Path, mounts: Optional[Dict[str, Path]] = None
+    ) -> Optional[Container]:
         """The running container of *user_id*, with *workspace* - a host
-        directory - mounted at CONTAINER_WORKDIR; made when missing. None
-        when isolation is off or Docker fails."""
+        directory - mounted at CONTAINER_WORKDIR, and each host directory of
+        *mounts* at its container path (a chat's project and user spaces);
+        made when missing. None when isolation is off or Docker fails."""
         if not self.enabled or not self.client:
             return None
 
         # One spelling of the host path for the name, the mount and its check:
         # a path spelled differently would recreate the container on every call.
         workspace = Path(workspace).resolve()
+        mounts = {target: Path(source).resolve() for target, source in (mounts or {}).items()}
         name = container_name(user_id, workspace)
-        expected_host_path = str(workspace)
+        expected = {CONTAINER_WORKDIR: str(workspace), **{target: str(source) for target, source in mounts.items()}}
 
         try:
             container = self.client.containers.get(name)
 
-            # Check that the existing container mounts the correct host path.
-            # Mounts cannot be changed on a running container — recreate if mismatched.
-            current_host_path = None
-            for mount in container.attrs.get("Mounts", []):
-                if mount.get("Destination") == CONTAINER_WORKDIR:
-                    current_host_path = mount.get("Source")
-                    break
+            # Check that the existing container mounts the expected host paths, and
+            # no others. Mounts cannot be changed on a running container — recreate
+            # if mismatched (a chat moved to another project, for one).
+            current = {
+                mount.get("Destination"): mount.get("Source")
+                for mount in container.attrs.get("Mounts", [])
+                if mount.get("Type", "bind") == "bind"
+            }
 
             made_with = (container.attrs.get("Config", {}).get("Labels") or {}).get(PROFILE_LABEL)
-            if current_host_path != expected_host_path or made_with != self.profile:
+            if current != expected or made_with != self.profile:
                 logger.warning(
-                    "Container %s mounts '%s' with settings %s; expected '%s' with %s. Recreating.",
-                    name, current_host_path, made_with, expected_host_path, self.profile,
+                    "Container %s mounts %s with settings %s; expected %s with %s. Recreating.",
+                    name, current, made_with, expected, self.profile,
                 )
                 container.remove(force=True)
-                return self._create_container(user_id, name, workspace=workspace)
+                return self._create_container(user_id, name, workspace=workspace, mounts=mounts)
             if not self._runs_current_image(container):
                 logger.info("Container %s runs an older build of %s. Recreating.", name, self.image)
                 container.remove(force=True)
-                return self._create_container(user_id, name, workspace=workspace)
+                return self._create_container(user_id, name, workspace=workspace, mounts=mounts)
 
             if container.status != "running":
                 container.start()
             return container
         except NotFound:
             # Create new container
-            return self._create_container(user_id, name, workspace=workspace)
+            return self._create_container(user_id, name, workspace=workspace, mounts=mounts)
         except Exception as e:
             logger.error(f"Error getting container {name}: {e}")
             return None
@@ -177,6 +187,48 @@ class ContainerManager:
         except Exception as exc:
             logger.warning("Could not stop the container of %s: %s", user_id, exc)
 
+    def remove_container(self, user_id: str, container_id: str) -> None:
+        """Remove this user's exact container: a chat's, whose files all live
+        in the spaces it mounts, when the chat's runtime is dropped. Found by
+        its ID, as :meth:`stop_container` finds it."""
+        if not self.enabled or not self.client:
+            return
+        try:
+            container = self.client.containers.get(container_id)
+            if container.id == container_id:
+                container.remove(force=True)
+        except NotFound:
+            return
+        except Exception as exc:
+            logger.warning("Could not remove the container of %s: %s", user_id, exc)
+
+    def prune_chat_containers(self, chat_spaces: Path) -> int:
+        """Remove the containers of chats whose spaces lie under *chat_spaces*
+        (``<users>/<id>/chats``, any user): left by a server that stopped
+        without closing them. Called at start, before any chat runs; how many."""
+        if not self.enabled or not self.client:
+            return 0
+        removed = 0
+        try:
+            containers = self.client.containers.list(all=True, filters={"name": "grid-agent-"})
+        except Exception as exc:
+            logger.warning("Cannot list containers to prune: %s", exc)
+            return 0
+        for container in containers:
+            for mount in container.attrs.get("Mounts", []):
+                if mount.get("Destination") != CONTAINER_WORKDIR:
+                    continue
+                source = Path(mount.get("Source") or "/")
+                if source.parent.name == "chats" and source.is_relative_to(chat_spaces):
+                    try:
+                        container.remove(force=True)
+                        removed += 1
+                    except Exception as exc:
+                        logger.warning("Could not remove the orphaned container %s: %s", container.name, exc)
+        if removed:
+            logger.info("Removed %d container(s) of chats left by an earlier run", removed)
+        return removed
+
     def _runs_current_image(self, container: Container) -> bool:
         """Whether *container* runs the build the image tag names now: after a
         rebuild of the image the container is recreated on the new one. Its
@@ -190,6 +242,8 @@ class ContainerManager:
     def _agent_ids(self) -> Optional[Tuple[int, int]]:
         """The uid and gid the image's commands run as, asked of the image once.
         None when it cannot be told."""
+        if self._agent_ids_of is None and self.image in _AGENT_IDS:
+            self._agent_ids_of = _AGENT_IDS[self.image]
         if self._agent_ids_of is None:
             try:
                 output = self.client.containers.run(
@@ -197,11 +251,27 @@ class ContainerManager:
                     remove=True, network_disabled=True,
                 )
                 uid, gid = (int(value) for value in output.decode().split())
-                self._agent_ids_of = (uid, gid)
+                self._agent_ids_of = _AGENT_IDS[self.image] = (uid, gid)
             except Exception as exc:
                 logger.warning("Cannot tell which uid %s runs as: %s", self.image, exc)
                 return None
         return self._agent_ids_of
+
+    def _own_directory(self, directory: Path) -> None:
+        """Give a shared space's directory itself - not what is in it - to the
+        container's user when this server made it as root.
+
+        Other containers (other chats) may be changing what is inside it, so it
+        is never walked: its contents became theirs when they were made there.
+        """
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            return
+        ids = self._agent_ids()
+        if ids is None:
+            return
+        info = os.lstat(directory)
+        if info.st_uid == 0 and stat_module.S_ISDIR(info.st_mode):
+            os.lchown(directory, *ids)
 
     def _own_workspace(self, workspace: Path) -> None:
         """Give *workspace* to the container's user when this server runs as root.
@@ -223,13 +293,21 @@ class ContainerManager:
                 if (stat.st_uid, stat.st_gid) != (uid, gid):
                     os.lchown(name, uid, gid)
 
-    def _create_container(self, user_id: str, container_name: str, workspace: Path) -> Optional[Container]:
-        """Create and start the container of *user_id*; *workspace* is resolved."""
+    def _create_container(
+        self, user_id: str, container_name: str, workspace: Path, mounts: Optional[Dict[str, Path]] = None
+    ) -> Optional[Container]:
+        """Create and start the container of *user_id*; *workspace* and the
+        sources of *mounts* are resolved."""
         try:
             workspace.mkdir(parents=True, exist_ok=True)
             self._own_workspace(workspace)
-            # The workspace is the only host directory the container sees.
+            # The workspace, and the spaces *mounts* names, are the only host
+            # directories the container sees.
             volumes = {str(workspace): {"bind": CONTAINER_WORKDIR, "mode": "rw"}}
+            for target, source in (mounts or {}).items():
+                source.mkdir(parents=True, exist_ok=True)
+                self._own_directory(source)
+                volumes[str(source)] = {"bind": target, "mode": "rw"}
             logger.info("Creating container %s with workspace %s", container_name, workspace)
 
             # Docker Desktop (Windows/macOS) does not support network_mode="host" for Linux containers.

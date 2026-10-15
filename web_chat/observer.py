@@ -126,12 +126,15 @@ class WebStreamObserver:
         # calls of this turn and of its sub-agents; the calls it waits on, by id.
         self._plan = plan if plan is not None else PlanBoard(recorder)
         self._plan_calls: dict[str, tuple[str, Any]] = {}
-        # Rows of tool calls the model is still writing, by the output item id
-        # its argument deltas name, with the characters written so far. A call
-        # with long arguments takes minutes to write; without its row the run
-        # looks stalled until the call is complete.
-        self._writing: dict[str, Step] = {}
-        self._written_chars: dict[str, int] = {}
+        # Rows of tool calls the model is still writing, with the characters
+        # written so far. A call with long arguments takes minutes to write;
+        # without its row the run looks stalled until the call is complete.
+        # Keyed by the model response, the output item id and its index: over
+        # Chat Completions every call of a response has the same item id
+        # (the SDK's fake one) and only the index tells them apart.
+        self._writing: dict[tuple, Step] = {}
+        self._written_chars: dict[tuple, int] = {}
+        self._response_seq = 0
         # Rows of tools the host ran itself (auto_run_tools, init_tools), oldest first per tool.
         self._host_calls: dict[str, deque[Step]] = {}
 
@@ -394,6 +397,9 @@ class WebStreamObserver:
         return None
 
     # -- tool calls being written -----------------------------------------
+    def _writing_key(self, item_id: Any, data: Any) -> tuple:
+        return (self._response_seq, item_id, field_of(data, "output_index"))
+
     def _on_call_started(self, data: Any) -> None:
         item = field_of(data, "item")
         if field_of(item, "type") != "function_call":
@@ -406,8 +412,9 @@ class WebStreamObserver:
             StepKind.TOOL, tool_title(name, None) or name or "Tool call",
             parent_id=self._parent_id, tool=name, subtitle="writing the call…",
         )
-        self._writing[item_id] = step
-        self._written_chars[item_id] = 0
+        key = self._writing_key(item_id, data)
+        self._writing[key] = step
+        self._written_chars[key] = 0
         self._tool_names[step.id] = name
         if call_id:
             # Its tool_called item, or a sub-agent's block, takes this row over.
@@ -416,11 +423,12 @@ class WebStreamObserver:
 
     def _on_call_written(self, data: Any, text: Optional[str]) -> None:
         item_id = field_of(data, "item_id")
-        step = self._writing.get(item_id) if item_id else None
+        key = self._writing_key(item_id, data)
+        step = self._writing.get(key) if item_id else None
         if step is None or not isinstance(text, str):
             return
-        before = self._written_chars[item_id]
-        after = self._written_chars[item_id] = before + len(text)
+        before = self._written_chars[key]
+        after = self._written_chars[key] = before + len(text)
         # Every 2000 characters: often enough to show progress, rarely enough
         # not to flood the trace with an update per token.
         if before == 0 or after // 2000 != before // 2000:
@@ -437,6 +445,10 @@ class WebStreamObserver:
     # -- raw token stream --------------------------------------------------
     def _on_raw_event(self, event: Any, agent_key: Optional[str] = None) -> Optional[str]:
         text, data_type = _delta_text(event)
+        if data_type == "response.created":
+            # A new model response: its output indexes start again from 0.
+            self._response_seq += 1
+            return None
         if data_type == "response.output_item.added":
             self._on_call_started(getattr(event, "data", None))
             return None
@@ -514,6 +526,11 @@ class WebStreamObserver:
         # Human heading/caption; fall back to the raw name and argument blob.
         title = tool_title(tool_name, info.get("server_label")) or name
         block = self._calls_by_id.get(call_id) if call_id else None
+        if block is None:
+            # Some providers change a call's id while it is written: the row
+            # that showed it being written is the earliest one of this tool
+            # still being written - the call takes it, keeping its place.
+            block = self._oldest_writing(tool_name)
         subtitle = tool_subtitle(tool_name, arguments)
         if subtitle is None:
             subtitle = clip(summarize(arguments, 160).replace("\n", " "), 120)
@@ -534,7 +551,9 @@ class WebStreamObserver:
             self._follow_plan(tool_name, arguments, call_id)
             return
         if block is not None and self._forget_writing(block):
-            # The row that showed the call while it was written becomes the call's.
+            # The row that showed the call while it was written becomes the call's,
+            # with the tokens of the response that wrote it.
+            self._recorder.claim_usage(block)
             step = self._recorder.update(block, title=title, **fields)
         else:
             step = self._recorder.open(
@@ -630,6 +649,13 @@ class WebStreamObserver:
             result_payload=normalize_payload(names),
             parent_id=self._parent_id,
         )
+
+    def _oldest_writing(self, tool_name: str) -> Optional[Step]:
+        """The earliest row of a *tool_name* call still being written."""
+        for step in self._writing.values():
+            if self._tool_names.get(step.id) == tool_name and step.status is StepStatus.RUNNING:
+                return step
+        return None
 
     def _forget_writing(self, step: Step) -> bool:
         """Whether *step* was a row of a call being written; it no longer is."""

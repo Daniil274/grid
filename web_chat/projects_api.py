@@ -23,7 +23,7 @@ from web_chat.schemas import (
     ProjectCreateRequest,
     ProjectUpdateRequest,
 )
-from web_chat.tasks_api import _bd_for, _counts, _issues, _task
+from web_chat.tasks_api import _bd_for, _counts, _issues, _project_trackers, _task
 
 #: The metadata type of a message that carries context into a fresh chat.
 SEED_TYPE = "context_seed"
@@ -76,6 +76,10 @@ def register_project_routes(api: APIRouter, current_space: Any) -> None:
         except KeyError:
             raise HTTPException(status_code=404, detail="Project not found") from None
         moved_chats = _reparent_chats(space, project_id, parent_id)
+        # Its space goes to the trash and its memory with it; its chats live on.
+        release = getattr(space, "release_project", None)
+        if release is not None:
+            await release(project_id)
         return JSONResponse({"ok": True, "moved_chats": moved_chats, "moved_projects": len(moved_projects)})
 
     @api.put("/api/chat/conversations/{context_id}/project")
@@ -114,6 +118,10 @@ def register_project_routes(api: APIRouter, current_space: Any) -> None:
         if project_id is not None:
             changes["project_id"] = project_id
         manager.update_context_metadata(new_id, changes)
+        # The continuation keeps working on the files the chat it continues made.
+        assign = getattr(space, "assign_chat_space", None)
+        if assign is not None:
+            assign(new_id, like=context_id)
         manager.append_message_to(
             new_id,
             "user",
@@ -157,13 +165,22 @@ def register_project_routes(api: APIRouter, current_space: Any) -> None:
         for task in tasks:
             # A snapshot from before plans carried states: derive it as bd's tasks do.
             task.setdefault("state", _trace_state(task, statuses))
-        # The tracker is the source of truth about a task's status; a task no
-        # conversation's plan named never enters the project's board.
+        # The tracker is the source of truth about a task's status. In the
+        # user's tracker a task no conversation's plan named never enters the
+        # project's board; a project's own tracker is the project's board.
         known = await _bd_tasks(space)
+        own = await _bd_tasks(space, project_id) if project_id in _project_trackers(space) else {}
         for task in tasks:
-            if task["id"] in known:
-                task.update(known[task["id"]])
+            if task["id"] in own or task["id"] in known:
+                task.update(own.get(task["id"]) or known[task["id"]])
                 task["source"] = "bd"
+        planned = {task["id"] for task in tasks}
+        for task_id, task in own.items():
+            if task_id not in planned:
+                tasks.append({**task, "chat_ids": [], "source": "bd"})
+        for task in tasks:
+            if task["id"] in own:
+                task["project_id"] = project_id
         return JSONResponse({"tasks": tasks, "counts": _counts(tasks), "chats": chats, "total": len(tasks)})
 
     @api.get("/api/chat/conversations/{context_id}/plan")
@@ -207,10 +224,12 @@ def _plan_messages(manager: Any, context_id: str) -> List[Dict[str, Any]]:
     return list((snapshot or {}).get("messages") or [])
 
 
-async def _bd_tasks(space: Any) -> Dict[str, Dict[str, Any]]:
-    """The tracker's tasks by id; an empty map when bd or the tracker is missing."""
+async def _bd_tasks(space: Any, project: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """The tracker's tasks by id - the project's own, when named; an empty map
+    when bd or the tracker is missing."""
     try:
-        result = await _bd_for(space, ["list", "--limit", "0", "--all", "--json", "--sort", "updated", "--reverse"])
+        args = ["list", "--limit", "0", "--all", "--json", "--sort", "updated", "--reverse"]
+        result = await (_bd_for(space, args, project=project) if project else _bd_for(space, args))
     except HTTPException:
         return {}
     if not result.get("success"):

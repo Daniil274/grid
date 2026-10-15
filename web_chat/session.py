@@ -523,15 +523,18 @@ class AgentTurn:
 
     # -- checkpoints -------------------------------------------------------
     async def _snapshot(self) -> Optional[dict]:
-        """The workspace now; None when it cannot be taken - the turn runs anyway."""
-        checkpoints = getattr(self._session.space, "checkpoints", None)
+        """The chat's spaces now; None when they cannot be taken - the turn runs anyway."""
+        space = self._session.space
+        checkpoints = getattr(space, "checkpoints", None)
         if checkpoints is None:
             return None
-        workspace = self._session.space.conversation_workspace(self._session.context_id)
         try:
+            if hasattr(space, "snapshot"):
+                return await asyncio.to_thread(space.snapshot, self._session.context_id)
+            workspace = space.conversation_workspace(self._session.context_id)
             return await asyncio.to_thread(checkpoints.snapshot, workspace)
         except Exception:
-            logger.warning("No checkpoint of %s before this turn", workspace, exc_info=True)
+            logger.warning("No checkpoint of %s before this turn", self._session.context_id, exc_info=True)
             return None
 
     async def _record_checkpoint(self) -> None:
@@ -543,11 +546,15 @@ class AgentTurn:
         after = await self._snapshot()
         if after is None:
             return
-        checkpoints = self._session.space.checkpoints
-        changes = await asyncio.to_thread(checkpoints.changes, before, after)
+        space = self._session.space
+        compare = getattr(space, "checkpoint_changes", None) or space.checkpoints.changes
+        changes = await asyncio.to_thread(compare, before, after)
         manager, context_id = self._session.manager, self._session.context_id
         kept = dict(manager.get_context_metadata(context_id).get(CHECKPOINTS_KEY) or {})
         kept[self.run_id] = {"before": before, "files": len(changes), "changes": changes[:MAX_LISTED_CHANGES]}
+        if "spaces" in before:
+            # Shared spaces restore only what this chat's turns changed: what each turn ended with.
+            kept[self.run_id]["after"] = after
         # The newest turns only: an old checkpoint still restores, it is just not offered.
         kept = dict(list(kept.items())[-MAX_CHECKPOINTS:])
         manager.update_context_metadata(context_id, {CHECKPOINTS_KEY: kept})

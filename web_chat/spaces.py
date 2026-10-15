@@ -105,6 +105,9 @@ class SpacePool:
         """The configs changed: rebuild every space once it is free."""
         for entry in self._entries.values():
             entry.stale = True
+            refresh = getattr(entry.space, "refresh_extras", None)
+            if callable(refresh):
+                refresh()
 
     async def sweep(self) -> int:
         """Retire the free spaces that are stale or unused for too long; how many."""
@@ -117,6 +120,15 @@ class SpacePool:
                 if entry is not None and entry.free and (entry.stale or self._expired(entry)):
                     await self._retire(user_id)
                     retired += 1
+                elif entry is not None:
+                    # A space in use keeps only the chats it has used lately ready
+                    # to run, its trash short and its disk measured.
+                    maintain = getattr(entry.space, "maintain", None)
+                    if maintain is not None:
+                        try:
+                            await maintain()
+                        except Exception:
+                            logger.exception("Upkeep of the space of %s failed", user_id)
         return retired
 
     def _expired(self, entry: _Entry) -> bool:

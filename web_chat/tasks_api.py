@@ -13,11 +13,21 @@ tracker is missing, so the page can degrade; writes are refused (``503`` for
 a missing bd, ``400`` for bd's own refusal). The board's task states are the
 plan card's (web_chat.plan_board.STATES): an open task is ``ready`` without
 unfinished dependencies and ``waiting`` with them.
+
+With chat spaces (web_chat.space) a project keeps a tracker of its own, in its
+space, beside the user's: the chats of a project plan there. bd names a
+tracker's tasks after its directory, so a task's id says whose it is
+(``prj-1a2b3c4d-x7q``): the routes on one task find its tracker by it, a new
+task goes to the project the request names, and the list without a project is
+every tracker's tasks together, each with its ``project_id``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,6 +36,10 @@ from pydantic import BaseModel, Field
 
 from tools.beads_tools import BEAD_ID as _ID, _bd_problem, _init_args, bd_flag as _flag, run_bd
 from web_chat.plan_board import latest_plan
+
+#: A task of a project's own tracker: bd prefixes its ids with the tracker
+#: directory's name (tools.beads_tools._init_args), the project's id.
+PROJECT_TASK = re.compile(r"^(prj-[0-9a-f]{8})-")
 
 #: bd's statuses; ``closed`` is not one of them: a task closes with its reason
 #: through its own route, never as a quiet status change.
@@ -40,6 +54,8 @@ class TaskCreateRequest(BaseModel):
     acceptance: str = Field(default="", max_length=20000)
     assignee: Optional[str] = Field(default=None, max_length=100)
     depends_on: List[str] = Field(default_factory=list, max_length=50)
+    #: The project whose tracker the task goes to; none: the user's.
+    project_id: Optional[str] = Field(default=None, max_length=64)
 
 
 class TaskUpdateRequest(BaseModel):
@@ -200,12 +216,32 @@ def _one(res: dict[str, Any]) -> dict[str, Any]:
     raise HTTPException(status_code=400, detail=_reason(res))
 
 
-async def _bd_for(space: Any, args: List[str]) -> dict[str, Any]:
-    """Run one bd command in the user's workspace; None when bd cannot run."""
+def _tracker(space: Any, project: Optional[str] = None, task_id: Optional[str] = None) -> Path:
+    """The directory of the tracker meant: the project's, named or told by the
+    task's id; else the user's."""
+    of_project = getattr(space, "tracker_dir", None)
+    if of_project is None:
+        return Path(space.workspace_path)
+    if project is None and task_id:
+        match = PROJECT_TASK.match(task_id)
+        project = match.group(1) if match else None
+    return Path(of_project(project))
+
+
+async def _bd_for(
+    space: Any, args: List[str], *, project: Optional[str] = None, task_id: Optional[str] = None
+) -> dict[str, Any]:
+    """Run one bd command in the tracker meant (:func:`_tracker`); 503 when bd cannot run."""
     problem = _bd_problem()
     if problem:
         raise HTTPException(status_code=503, detail=f"The tracker is unavailable: {problem}")
-    return await run_bd(args, cwd=str(space.workspace_path))
+    return await run_bd(args, cwd=str(_tracker(space, project, task_id)))
+
+
+def _project_trackers(space: Any) -> Dict[str, Path]:
+    """The projects that keep a tracker of their own, by id: those with one started."""
+    of_projects = getattr(space, "project_trackers", None)
+    return dict(of_projects()) if of_projects is not None else {}
 
 
 def _chat_sources(space: Any) -> Dict[str, List[str]]:
@@ -249,19 +285,32 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
     @api.get("/api/tasks")
     async def list_tasks(
         status: Optional[Literal["open", "in_progress", "blocked", "deferred", "closed"]] = None,
+        project: Optional[str] = None,
         space: Any = Depends(current_space),
     ) -> JSONResponse:
         args = ["list", "--limit", "0", "--all", "--json", "--sort", "updated", "--reverse"]
         if status:
             args += ["--status", status]
-        res = await _bd_for(space, args)
-        if not res.get("success"):
+        # One tracker when a project is named; else the user's and every project's.
+        sources: Dict[Optional[str], Any] = {project: None} if project else {None: None, **{
+            project_id: None for project_id in _project_trackers(space)}}
+        answers = await asyncio.gather(*(_bd_for(space, args, project=source) for source in sources))
+        res = answers[0]
+        if not any(answer.get("success") for answer in answers):
             # No tracker in this workspace yet, or bd refused to read it: the
             # page still opens, with the reason and a way to start one.
             return JSONResponse({"available": False, "reason": _reason(res), "tasks": [], "total": 0})
-        issues = _issues(res)
-        statuses = {issue.get("id"): issue.get("status") for issue in issues}
-        tasks = [_task(issue, statuses) for issue in issues]
+        tasks = []
+        for source, answer in zip(sources, answers):
+            if not answer.get("success"):
+                continue
+            issues = _issues(answer)
+            statuses = {issue.get("id"): issue.get("status") for issue in issues}
+            for issue in issues:
+                task = _task(issue, statuses)
+                if source is not None:
+                    task["project_id"] = source
+                tasks.append(task)
         # The chats that planned a task, so a bd-only board still points back.
         sources = _chat_sources(space)
         for task in tasks:
@@ -272,11 +321,14 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
 
     @api.get("/api/tasks/{bead_id}")
     async def show_task(bead_id: str, space: Any = Depends(current_space)) -> JSONResponse:
-        res = await _bd_for(space, ["show", _issue_id(bead_id)])
+        res = await _bd_for(space, ["show", _issue_id(bead_id)], task_id=bead_id)
         if not res.get("success"):
             raise HTTPException(status_code=404 if "not found" in _reason(res).lower() else 400, detail=_reason(res))
         task = _task(_one(res))
         task["chat_ids"] = _chat_sources(space).get(task["id"], [])
+        match = PROJECT_TASK.match(task["id"])
+        if match:
+            task["project_id"] = match.group(1)
         return JSONResponse(task)
 
     @api.post("/api/tasks")
@@ -294,7 +346,13 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
         # The title is the one positional argument: after "--", a title such as
         # "--db=..." is a title, never a flag.
         args += ["--", body.title]
-        res = await _bd_for(space, args)
+        project = body.project_id or None
+        if project is not None and project not in _project_trackers(space):
+            # A project's first task starts its tracker: the user asked for it.
+            started = await _bd_for(space, _init_args(str(_tracker(space, project))), project=project)
+            if not started.get("success") and "already" not in (started.get("error") or started.get("output") or "").lower():
+                raise HTTPException(status_code=400, detail=_reason(started))
+        res = await _bd_for(space, args, project=project)
         if not res.get("success"):
             raise HTTPException(status_code=400, detail=_reason(res))
         return JSONResponse(_task(_one(res)), status_code=201)
@@ -323,17 +381,17 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
             args.append(_flag("assignee", body.assignee))
         if len(args) == 2:
             raise HTTPException(status_code=400, detail="Nothing to update.")
-        res = await _bd_for(space, args)
+        res = await _bd_for(space, args, task_id=bead_id)
         if not res.get("success"):
             raise HTTPException(status_code=400, detail=_reason(res))
-        shown = await _bd_for(space, ["show", bead_id])
+        shown = await _bd_for(space, ["show", bead_id], task_id=bead_id)
         return JSONResponse(_task(_one(shown)) if shown.get("success") else {"ok": True})
 
     @api.post("/api/tasks/{bead_id}/close")
     async def close_task(
         bead_id: str, body: TaskCloseRequest, space: Any = Depends(current_space)
     ) -> JSONResponse:
-        res = await _bd_for(space, ["close", _issue_id(bead_id), _flag("reason", body.reason)])
+        res = await _bd_for(space, ["close", _issue_id(bead_id), _flag("reason", body.reason)], task_id=bead_id)
         if not res.get("success"):
             raise HTTPException(status_code=400, detail=_reason(res))
         return JSONResponse({"ok": True, "id": bead_id, "close_reason": body.reason})
@@ -351,23 +409,25 @@ def register_task_routes(api: APIRouter, current_space: Any) -> None:
             # cannot also become its blocker. The reason names the would-be ring.
             if child == parent:
                 raise HTTPException(status_code=400, detail="A task cannot depend on itself.")
-            listing = await _bd_for(space, ["list", "--limit", "0", "--all", "--json"])
+            if _tracker(space, task_id=child) != _tracker(space, task_id=parent):
+                raise HTTPException(status_code=400, detail="A task can wait only for a task of its own tracker.")
+            listing = await _bd_for(space, ["list", "--limit", "0", "--all", "--json"], task_id=child)
             data = listing.get("data") if listing.get("success") else None
             issues = [issue for issue in data if isinstance(issue, dict)] if isinstance(data, list) else []
             ring = _dependency_ring(_graph(issues), child, parent)
             if ring:
                 names = {issue.get("id"): issue.get("title") for issue in issues}
                 raise HTTPException(status_code=400, detail=_ring_reason(names, child, parent, ring))
-        res = await _bd_for(space, ["dep", body.action, child, parent])
+        res = await _bd_for(space, ["dep", body.action, child, parent], task_id=child)
         if not res.get("success"):
             raise HTTPException(status_code=400, detail=_reason(res))
         return JSONResponse({"ok": True, "id": child, "action": body.action, "parent_id": parent})
 
     @api.post("/api/tasks/init")
-    async def init_tracker(space: Any = Depends(current_space)) -> JSONResponse:
-        """Start a tracker in the user's workspace: the page's own choice,
-        never an implicit side effect of reading it."""
-        res = await _bd_for(space, _init_args(str(space.workspace_path)))
+    async def init_tracker(project: Optional[str] = None, space: Any = Depends(current_space)) -> JSONResponse:
+        """Start a tracker in the user's workspace - or the project's space -
+        the page's own choice, never an implicit side effect of reading it."""
+        res = await _bd_for(space, _init_args(str(_tracker(space, project))), project=project)
         if not res.get("success"):
             text = (res.get("error") or res.get("output") or "").lower()
             if "already" not in text:

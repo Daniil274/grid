@@ -104,6 +104,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Run users' agents without containers, on this machine (every user is trusted)",
     )
+    multi.add_argument(
+        "--no-chat-spaces",
+        dest="chat_spaces",
+        action="store_false",
+        help="Let every new chat work in the user's one workspace, as chats made before chat "
+        "spaces do, instead of a space and a container of its own beside its project's and the user's",
+    )
     return parser.parse_args(argv)
 
 
@@ -312,6 +319,7 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
             user_id=user_id,
             layout=SpaceLayout.under(users_dir / user_id),
             require_isolation=not args.trusted_users,
+            chat_spaces=args.chat_spaces,
             turn_counter=accounts,
             activity=activity,
             usage=usage,
@@ -326,6 +334,14 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
     print(f"Data: {data_dir}")
     if not accounts.has_users():
         print("No accounts yet. Create the first admin: grid-web-chat accounts create-admin --username NAME")
+    if args.chat_spaces and not args.trusted_users:
+        # No chat runs yet: a chat's container still here was left by an earlier run.
+        try:
+            from core.managers.container_manager import ContainerManager
+
+            ContainerManager(deployment.config, enabled=True).prune_chat_containers(users_dir)
+        except Exception as exc:  # pruning is upkeep: the server starts anyway
+            print(f"Could not prune chat containers: {exc}")
     pool = SpacePool(build, idle_seconds=IDLE_SPACE_SECONDS)
     return {
         "spaces": pool,

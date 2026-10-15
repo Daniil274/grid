@@ -684,3 +684,60 @@ def test_a_subagent_call_written_first_becomes_its_block():
     assert block["kind"] == StepKind.AGENT.value
     assert block["body"] == "report"
     assert nested["parent_id"] == block["id"]
+
+
+def chat_call_started(name: str, call_id: str, index: int) -> RawResponsesStreamEvent:
+    """A call over Chat Completions: every call of a response has the SDK's fake item id."""
+    item = SimpleNamespace(type="function_call", id="__fake_id__", call_id=call_id, name=name)
+    return RawResponsesStreamEvent(
+        data=SimpleNamespace(type="response.output_item.added", item=item, output_index=index)
+    )
+
+
+def chat_call_written(index: int, text: str) -> RawResponsesStreamEvent:
+    return RawResponsesStreamEvent(data=SimpleNamespace(
+        type="response.function_call_arguments.delta", item_id="__fake_id__", output_index=index, delta=text,
+    ))
+
+
+def test_calls_written_together_keep_their_rows_and_their_order():
+    """Four calls in one response (the screenshot): each becomes its own row, in
+    the order they were written; none is left "writing" behind."""
+    harness = Harness()
+    harness.feed(raw("response.created", ""))
+    calls = [("memory_recall", "c1"), ("glob_tool", "c2"), ("glob_tool", "c3"), ("beads_init", "c4")]
+    for index, (name, call_id) in enumerate(calls):
+        harness.feed(chat_call_started(name, call_id, index), chat_call_written(index, "x" * (10 + index)))
+    rows = harness.steps()
+    assert [row["subtitle"] for row in rows] == [f"writing the call: {10 + index} characters so far" for index in range(4)]
+
+    # The response completes: its tokens belong to the calls it wrote.
+    harness.feed(RawResponsesStreamEvent(data=SimpleNamespace(
+        type="response.completed", response=SimpleNamespace(usage=SimpleNamespace(input_tokens=1200, output_tokens=150)),
+    )))
+    for name, call_id in calls:
+        harness.feed(tool_called(name, call_id, '{"pattern": "*"}'))
+    for _name, call_id in calls:
+        harness.feed(tool_output(call_id, "ok"))
+
+    after = harness.steps()
+    assert [row["id"] for row in after] == [row["id"] for row in rows]
+    assert all(row["status"] == StepStatus.DONE.value for row in after)
+    assert not any("writing the call" in (row["subtitle"] or "") for row in after)
+    assert [(row["tokens_in"], row["tokens_out"]) for row in after] == [(1200, 150)] * 4
+
+
+def test_a_call_whose_id_changed_while_written_still_takes_its_row():
+    harness = Harness()
+    harness.feed(raw("response.created", ""))
+    harness.feed(chat_call_started("glob_tool", "call_early_a", 0), chat_call_started("glob_tool", "call_early_b", 1))
+    first, second = harness.steps()
+
+    # The provider sent other ids by the time the calls were complete.
+    harness.feed(tool_called("glob_tool", "call_final_a", '{"pattern": "*.py"}'),
+                 tool_called("glob_tool", "call_final_b", '{"pattern": "*.md"}'))
+    harness.feed(tool_output("call_final_a", "a"), tool_output("call_final_b", "b"))
+
+    rows = harness.steps()
+    assert [row["id"] for row in rows] == [first["id"], second["id"]]
+    assert [row["body"] for row in rows] == ["a", "b"]

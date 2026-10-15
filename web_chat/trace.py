@@ -355,6 +355,17 @@ class TraceRecorder:
         else:
             self._pending_usage[parent_id] = (tokens_in, tokens_out, False)
 
+    def claim_usage(self, step: Step) -> None:
+        """*step* opened before its response completed - a call shown while the
+        model wrote it - and takes that response's tokens now, as a step
+        opening after the response would (:meth:`open`)."""
+        pending = self._pending_usage.get(step.parent_id)
+        if not pending:
+            return
+        step.tokens_in += pending[0]
+        step.tokens_out += pending[1]
+        self._pending_usage[step.parent_id] = (pending[0], pending[1], True)
+
     def end_reasoning(self, *, parent_id: Optional[str] = None) -> None:
         """Close an agent's live reasoning step, if any: the agent moved on."""
         step = self._open_reasoning.pop(parent_id, None)

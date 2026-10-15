@@ -389,3 +389,13 @@ def test_the_timeline_takes_changes_only_from_its_own_page():
             raise AssertionError("a cross-site socket was accepted")
     except WebSocketDisconnect as closed:
         assert closed.code == 1008
+
+
+def test_the_conversation_list_names_the_calls_waiting_for_approval():
+    space, manager, client = _chat_server_with_contexts()
+    space.awaiting_approval = lambda: {"ctx-a": [{"approval_id": "r1", "tool": "bash_tool", "created_at": 1.0}]}
+
+    listed = {item["id"]: item for item in client.get("/api/chat/conversations").json()}
+
+    assert listed["ctx-a"]["awaiting_approval"] == [{"approval_id": "r1", "tool": "bash_tool", "created_at": 1.0}]
+    assert listed["ctx-b"]["awaiting_approval"] == []

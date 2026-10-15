@@ -63,6 +63,7 @@ class FakeClient:
 def manager(monkeypatch):
     client = FakeClient()
     monkeypatch.setattr(module, "docker", SimpleNamespace(from_env=lambda: client))
+    monkeypatch.setattr(module, "_AGENT_IDS", {})
     config = SimpleNamespace(config=SimpleNamespace(isolation=IsolationConfig(enabled=True, memory="1g", cpus=1.5, pids_limit=256)))
     manager = ContainerManager(config)
     assert manager.enabled

@@ -9,7 +9,7 @@ import contextvars
 from contextlib import contextmanager
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Sequence, Tuple
 
 # Current AgentFactory in the execution context (set by runner when starting agent).
 _current_factory: contextvars.ContextVar[Any] = contextvars.ContextVar("current_agent_factory", default=None)
@@ -66,14 +66,32 @@ def _is_within(base: Path, candidate: Path) -> bool:
     return candidate == base or base in candidate.parents
 
 
-def _resolve_inside_working_dir(file_path: str, working_dir: Path, container_id: Any) -> Path:
+def extra_roots(factory: Any) -> List[Tuple[str, Path]]:
+    """The spaces a run reaches besides its working directory: (agent path, host directory).
+
+    A chat with a space of its own (web_chat.space) works in that space and
+    reaches its project's space at ``/project`` and its user's at ``/user``:
+    the paths its container mounts them at, and the paths the file tools take.
+    A factory without ``extra_roots`` has none - its working directory is all.
+    """
+    roots = getattr(factory, "extra_roots", None) if factory is not None else None
+    if not roots:
+        return []
+    return [("/" + prefix.strip("/"), Path(host).resolve()) for prefix, host in roots.items()]
+
+
+def _resolve_inside_working_dir(
+    file_path: str, working_dir: Path, container_id: Any, extras: Sequence[Tuple[str, Path]] = ()
+) -> Path:
     """
     Resolve an agent-supplied path inside the working directory.
 
     Agents must never access anything above the configured working directory.
     Absolute paths are interpreted as agent-root paths, except when they already
     point inside the working directory (a leaked host path) or, in a run with a
-    container, under CONTAINER_WORKDIR - the path its shell shows.
+    container, under CONTAINER_WORKDIR - the path its shell shows. A path under
+    one of the run's *extras* (``/project/...``) resolves inside that space,
+    never above it.
     """
     normalized = (file_path or ".").replace("\\", "/")
     if normalized in ("", ".", "/"):
@@ -84,6 +102,15 @@ def _resolve_inside_working_dir(file_path: str, working_dir: Path, container_id:
         host_candidate = Path(file_path).resolve()
         if _is_within(working_dir, host_candidate):
             return host_candidate
+        for _prefix, root in extras:
+            if _is_within(root, host_candidate):
+                return host_candidate
+        for prefix, root in extras:
+            if normalized == prefix or normalized.startswith(prefix + "/"):
+                candidate = (root / normalized[len(prefix):].lstrip("/")).resolve()
+                if not _is_within(root, candidate):
+                    raise ValueError("Path escapes working directory")
+                return candidate
 
         if container_id and (
             normalized == CONTAINER_WORKDIR or normalized.startswith(CONTAINER_WORKDIR + "/")
@@ -119,7 +146,7 @@ def resolve_agent_path(file_path: str, factory: Any) -> str:
     """
     working_dir = _sandbox_root(factory)
     container_id = getattr(factory, "container_id", None)
-    return str(_resolve_inside_working_dir(file_path, working_dir, container_id))
+    return str(_resolve_inside_working_dir(file_path, working_dir, container_id, extra_roots(factory)))
 
 
 def container_path(host_path: str | None, factory: Any) -> str:
@@ -131,10 +158,11 @@ def container_path(host_path: str | None, factory: Any) -> str:
     """
     working_dir = _sandbox_root(factory)
     candidate = Path(host_path).resolve() if host_path else working_dir
-    if not _is_within(working_dir, candidate):
-        raise ValueError("Path escapes working directory")
-    rel = candidate.relative_to(working_dir).as_posix()
-    return CONTAINER_WORKDIR if rel == "." else f"{CONTAINER_WORKDIR}/{rel}"
+    for prefix, root in [(CONTAINER_WORKDIR, working_dir), *extra_roots(factory)]:
+        if _is_within(root, candidate):
+            rel = candidate.relative_to(root).as_posix()
+            return prefix if rel == "." else f"{prefix}/{rel}"
+    raise ValueError("Path escapes working directory")
 
 
 def resolve_agent_path_from_ctx(file_path: str, ctx: Any) -> str:
@@ -160,11 +188,17 @@ def display_agent_path(file_path: str, factory: Any) -> str:
     Never reveals directories above the working directory.
     """
     working_dir = _sandbox_root(factory)
+    extras = extra_roots(factory)
     try:
-        resolved = _resolve_inside_working_dir(file_path, working_dir, getattr(factory, "container_id", None))
+        resolved = _resolve_inside_working_dir(file_path, working_dir, getattr(factory, "container_id", None), extras)
     except Exception:
         return "."
 
+    # A file of another space reads as the path it has there: /project/docs/a.md.
+    for prefix, root in extras:
+        if not _is_within(working_dir, resolved) and _is_within(root, resolved):
+            rel = resolved.relative_to(root).as_posix()
+            return prefix if rel == "." else f"{prefix}/{rel}"
     rel = os.path.relpath(resolved, working_dir)
     if rel == ".":
         return "."
@@ -192,18 +226,21 @@ def sanitize_text_for_agent(text: str, factory: Any) -> str:
     working_dir = _sandbox_root(factory)
 
     sanitized = str(text)
-    variants = {
-        str(working_dir),
-        working_dir.as_posix(),
-        working_dir.as_posix().rstrip("/"),
-    }
-    if os.name == "nt":
-        variants.add(str(working_dir).replace("\\", "/"))
-        variants.add(str(working_dir).replace("/", "\\"))
+    # Each space's host path, longest first, becomes the path the agent knows it by.
+    replacements = {}
+    for root, shown in [(working_dir, "."), *((root, prefix) for prefix, root in extra_roots(factory))]:
+        variants = {str(root), root.as_posix(), root.as_posix().rstrip("/")}
+        if os.name == "nt":
+            variants.add(str(root).replace("\\", "/"))
+            variants.add(str(root).replace("/", "\\"))
+        for variant in variants:
+            if variant:
+                replacements.setdefault(variant, shown)
 
-    for variant in sorted((v for v in variants if v), key=len, reverse=True):
-        sanitized = sanitized.replace(variant + "/", "./")
-        sanitized = sanitized.replace(variant, ".")
+    for variant in sorted(replacements, key=len, reverse=True):
+        shown = replacements[variant]
+        sanitized = sanitized.replace(variant + "/", shown + "/")
+        sanitized = sanitized.replace(variant, shown)
 
     return sanitized
 

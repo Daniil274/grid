@@ -490,6 +490,14 @@ class UserLimitsPolicy(BaseModel):
         gt=0,
         description="Dollars one user's calls may cost the operator per UTC calendar month; None for no limit",
     )
+    storage_mb: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Disk all of one user's spaces may hold - their own, their projects' and their chats' "
+            "(web_chat.space); past it no new turn starts until files are deleted. None for no limit"
+        ),
+    )
 
 
 _NAME = r"^[a-z][a-z0-9_-]{0,31}$"

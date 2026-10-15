@@ -347,3 +347,24 @@ def test_a_private_system_cannot_set_the_price_of_its_models(deployment):
 def test_the_builders_evaluations_run_on_the_owners_model_access(deployment):
     alice = space_of(deployment, "alice", admin=False)
     assert alice._builder_access().model_access is alice.model_access
+
+
+def test_editing_a_draft_refreshes_cached_factories_in_chat_runtimes(deployment):
+    root = Path(deployment.routing_path).parent / "users" / "root"
+    admin = UserSpace(deployment, user_id="root", layout=SpaceLayout.under(root), admin=True, chat_spaces=True)
+    access = admin._builder_access()
+    call("builder_create", access, key="stats", name="Stats", description="", config_yaml=private_config())
+
+    admin.assign_chat_space("ctx-1")
+    chat_registry = asyncio.run(admin.registry_for("ctx-1"))
+    old_factory = chat_registry.factory("stats")
+    assert "stats" in chat_registry.built_factories()
+
+    updated = yaml.safe_load(private_config())
+    updated["agents"]["main"]["name"] = "Updated Main"
+    call("builder_write", access, system="stats", path="config.yaml", content=yaml.safe_dump(updated))
+
+    assert "stats" not in chat_registry.built_factories()
+    new_factory = chat_registry.factory("stats")
+    assert new_factory is not old_factory
+    assert chat_registry.agent_label("stats", "main") == "Updated Main"

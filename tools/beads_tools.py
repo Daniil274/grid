@@ -288,6 +288,13 @@ def _resolve_directory(context: RunContextWrapper, directory: str) -> str:
     working directory and never escape it (ValueError). In a container the host
     path is mapped to the container path when the command runs.
     """
+    if directory in ("", ".", None):
+        # A chat with a space of its own keeps its plan in the tracker it shares
+        # with the user's other chats (web_chat.space), not in a new one per chat.
+        factory = getattr(getattr(context, "context", None), "factory", None)
+        tracker = getattr(factory, "tracker_directory", None)
+        if tracker:
+            return str(tracker)
     return resolve_agent_path_from_ctx(directory or ".", context)
 
 

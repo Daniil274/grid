@@ -144,6 +144,10 @@ class ContextManager:
         self.max_history = max_history
         self.persist_path = Path(persist_path) if persist_path else None
         self.read_only = bool(read_only)
+        # Whether the manager keeps an active context of its own at all times: a
+        # host that names every conversation it works in (the web chat) needs
+        # none, and an empty one made at every start piled up as empty chats.
+        self._auto_context = bool(create_initial_context)
 
         self._lock = Lock()
         self._contexts: Dict[str, Dict[str, Any]] = {}
@@ -778,7 +782,13 @@ class ContextManager:
             self._mark_changed(context_id)
             if self._current_context_id == context_id:
                 # Never leave the manager pointing at buffers that are gone.
-                self._activate_context(self._create_context())
+                if self._auto_context:
+                    self._activate_context(self._create_context())
+                else:
+                    self._current_context_id = None
+                    self._conversation_history = []
+                    self._execution_history = []
+                    self._metadata = {}
             self._save_to_file()
             return True
 
@@ -842,7 +852,7 @@ class ContextManager:
     #: Conversation settings a branch keeps from the context it is forked from.
     BRANCH_INHERITED = (
         "title", "title_locked", "created_by_web", "system_key", "agent_key",
-        "routed_system", "routed_agent", "session_epochs", "workspace",
+        "routed_system", "routed_agent", "session_epochs", "workspace", "chat_space",
     )
 
     def branch_root(self, context_id: str) -> str:

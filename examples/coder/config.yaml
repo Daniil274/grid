@@ -238,6 +238,12 @@ models:
     max_tokens: 32000
     context_window: 258000
     request_timeout: 300
+  claude-opus-5.5:
+    name: anthropic/claude-sonnet-5.5
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 128000
+    context_window: 256000
 tools:
   bash_tool:
     type: "function"

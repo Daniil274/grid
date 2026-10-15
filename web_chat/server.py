@@ -65,6 +65,7 @@ REVIEW_HTML = ROOT / "review.html"
 SYSTEMS_HTML = ROOT / "systems.html"
 USAGE_HTML = ROOT / "usage.html"
 TASKS_HTML = ROOT / "tasks.html"
+FILES_HTML = ROOT / "files.html"
 
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
@@ -218,6 +219,10 @@ class WebChatServer:
         from web_chat.uploads import register_upload_routes
 
         register_upload_routes(api, self.current_space, lambda: self.deployment.uploads_policy)
+        from web_chat.explorer_api import register_explorer_routes
+
+        # The files page: browse, edit and arrange the workspace.
+        register_explorer_routes(api, self.current_space)
         from web_chat.tasks_api import register_task_routes
 
         # The tracker page's own API: the user's tasks, live from bd.
@@ -447,6 +452,13 @@ class WebChatServer:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(USAGE_HTML)
 
+        @app.get("/files", response_class=HTMLResponse)
+        async def files_page(request: Request) -> Any:
+            # A shell: what it shows comes through the API, which checks who asks.
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(FILES_HTML)
+
         @app.get("/tasks", response_class=HTMLResponse)
         async def tasks_page(request: Request) -> Any:
             # A shell: what it shows comes through the API, which checks who asks.
@@ -599,6 +611,8 @@ class WebChatServer:
         async def list_conversations(space: UserSpace = Depends(current_space)) -> JSONResponse:
             manager = space.context_manager()
             views = {view["id"]: view for view in manager.conversation_views()}
+            of_approvals = getattr(space, "awaiting_approval", None)
+            awaiting = of_approvals() if of_approvals is not None else {}
             items: list[dict[str, Any]] = []
             for view in views.values():
                 metadata = view["metadata"]
@@ -628,6 +642,10 @@ class WebChatServer:
                             1 for msg in shown["messages"] if not is_tool_result(msg)
                         ),
                         "active": any(space.turns.is_running(member["id"]) for member in family),
+                        # Calls of its running turn that wait for the user's Allow/Decline.
+                        "awaiting_approval": [
+                            review for member in family for review in awaiting.get(member["id"], ())
+                        ],
                     }
                 )
             items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
@@ -648,6 +666,10 @@ class WebChatServer:
             space.update_conversation_metadata(
                 context_id, created_by_web=True, title=UNTITLED, project_id=project_id, **selection
             )
+            # A new chat works in a space of its own (web_chat.space, chat spaces).
+            assign = getattr(space, "assign_chat_space", None)
+            if assign is not None:
+                assign(context_id)
             workspace = None
             if body is not None and body.workspace:
                 try:
@@ -695,10 +717,16 @@ class WebChatServer:
             family = manager.family(context_id)
             if any(space.turns.is_busy(member) for member in family):
                 raise HTTPException(status_code=409, detail="Wait for the current operation before deleting this chat")
-            # A conversation goes with all its branches.
+            # A conversation goes with all its branches - and its space and memory,
+            # unless another chat still works in that space.
+            of_spaces = getattr(space, "chat_space_ids", None)
+            spaces = of_spaces(family) if of_spaces is not None else set()
             deleted = manager.delete_family(context_id)
             if not deleted:
                 raise HTTPException(status_code=404, detail="Conversation not found")
+            release = getattr(space, "release_chats", None)
+            if release is not None:
+                await release(deleted, spaces)
             return JSONResponse({"id": context_id, "deleted": True, "contexts": deleted})
 
         @api.post("/api/chat/conversations/{context_id}/branches")
@@ -768,6 +796,12 @@ class WebChatServer:
                 raise HTTPException(status_code=404, detail="This turn has no checkpoint")
 
             async def restore(_factory: Any) -> list:
+                of_chat = getattr(space, "restore_checkpoint", None)
+                if of_chat is not None:
+                    # This turn and the chat's later ones: in shared spaces only their changes go back.
+                    every = list((manager.get_context_metadata(context_id).get(CHECKPOINTS_KEY) or {}).items())
+                    since = [entry for key, entry in every[[key for key, _ in every].index(turn_id):]]
+                    return await asyncio.to_thread(of_chat, context_id, kept["before"], since)
                 workspace = space.conversation_workspace(context_id)
                 return await asyncio.to_thread(space.checkpoints.restore, workspace, kept["before"])
 
