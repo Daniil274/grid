@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Any, Dict, Iterable, List, Literal, Optional
 
 from core.agent_catalog import AgentCatalog
+from core.deadlines import Deadline
 
 
 class AgentStatus(str, Enum):
@@ -144,11 +145,10 @@ class BackgroundAgentSupervisor:
     async def _execute(self, run: BackgroundAgentRun) -> None:
         try:
             # The deadline starts at launch, not when a queued run acquires a
-            # worker slot. This makes timeout_seconds a real wall-clock timer.
-            await asyncio.wait_for(
-                self._run_agent(run),
-                timeout=run.timeout_seconds,
-            )
+            # worker slot: timeout_seconds is wall-clock time, except the time
+            # the run waits for the user's approval (core.deadlines).
+            async with Deadline(run.timeout_seconds):
+                await self._run_agent(run)
         except asyncio.TimeoutError:
             run.status = AgentStatus.TIMED_OUT
             run.error = f"Agent exceeded its {run.timeout_seconds}s deadline."

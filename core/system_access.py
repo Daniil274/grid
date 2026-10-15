@@ -13,12 +13,12 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
-from contextlib import nullcontext
 from typing import Any
 
 from agents import RunContextWrapper, function_tool
 
 from core.action_policy import delegated_state
+from core.deadlines import Deadline
 from core.factory.run_context import GridRunContext, get_runner, runner_max_turns
 from core.run_stream import run_output_text
 from utils.path_utils import factory_path_context
@@ -259,7 +259,7 @@ class SystemAccessBroker:
         else:
             timeout = 0
             max_turns = runner_max_turns(0)
-        deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
+        deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         try:
             async with deadline:
                 target_agent = await factory.create_agent(target)

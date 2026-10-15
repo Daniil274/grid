@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -29,6 +28,7 @@ from core.agent_input import AgentInput, context_content, parse_agent_input
 from core.compact import is_prompt_too_long_error
 from core.context import strip_service_context_footer
 from core.context_budget import context_budget_filter
+from core.deadlines import Deadline
 from core.factory.failures import (
     is_retriable,
     retry_backoff_seconds,
@@ -71,6 +71,7 @@ from schemas import AgentExecution
 from utils.exceptions import AgentError, ContextError
 from utils.logger import Logger
 from utils.path_utils import reset_current_factory, set_current_factory
+from core.credentials import CredentialError, credential_error_in
 
 logger = logging.getLogger("grid.agent_factory")
 
@@ -328,7 +329,7 @@ class TurnRunner:
             timeout = self.config.get_agent_timeout(agent_label)
         if max_turns is None:
             max_turns = self.config.get_max_turns(agent_label)
-        deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
+        deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         set_current_factory(self)
         try:
             async with deadline:
@@ -589,7 +590,7 @@ class TurnRunner:
         """Recover a missing model result once within the original deadline/session."""
         timeout = self.config.get_agent_timeout(agent_key)
         # 0 means no timeout: a coordinating agent runs as long as it needs.
-        deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
+        deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         try:
             async with deadline:
                 for recovery in range(2):
@@ -668,7 +669,7 @@ class TurnRunner:
                 persist=event.name == "tool_called",
             )
 
-        deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
+        deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         try:
             async with deadline:
                 if stream:
@@ -815,7 +816,10 @@ class TurnRunner:
                             if stored_request:
                                 run_input = OVERFLOW_RETRY_NOTE
                             continue
-                    retriable = is_retriable(exc)
+                    # A credential refused while signing a request reaches here as a
+                    # "connection error"; it is the credential's, and no retry helps.
+                    exc = credential_error_in(exc) or exc
+                    retriable = is_retriable(exc) and not isinstance(exc, CredentialError)
                     error_text = safe_preview(str(exc), max_length=700)
                     self.journal.update_pending_run(
                         agent_key=agent_key,

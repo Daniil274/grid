@@ -102,6 +102,7 @@ settings:
   default_agent: main
   working_directory: .
   allow_path_override: true
+  agent_timeout: 1800                # дефолт схемы (300с) слишком мал для многошаговых задач
   max_turns: 100
   mcp_enabled: true                  # нужно, если есть пакеты инструментов
 providers:                           # скопируй ЦЕЛИКОМ из builder_catalog.providers:
@@ -143,6 +144,8 @@ agents:
   main:
     name: Documentation coordinator
     model: glm-flash
+    timeout: 0                       # ОБЯЗАТЕЛЬНО 0 у координатора: иначе его отрубит посреди ожидания делегатов
+    max_turns: 0                     # 0 снимает лимит ходов у координатора
     description: >-
       Что делает агент — роутер читает это, если агент routable.
     tools: [call_writer, call_reviewer]
