@@ -68,8 +68,9 @@ document.getElementById = () => null;
 document.activeElement = null;
 
 let rendered = 0;
+let initOptions = null;
 globalThis.mermaid = {
-  initialize() {},
+  initialize(options) { initOptions = options; },
   async render(_id, code) {
     rendered += 1;
     if (/BAD/.test(code)) throw new Error("Parse error on line 1");
@@ -329,4 +330,37 @@ test("a tall diagram is capped in height and scaled down to fit it", async () =>
   assert.equal(el.classList.contains("diagramCard--wide"), false);
   assert.equal(el.find("diagramViewport").style.height, "580px");
   assert.equal(el.find("diagramZoom__pct").textContent, "45%");
+});
+
+test("the theme gives ER rows, entities and labels dark-aware colors, in variables and in themeCSS", async () => {
+  const props = {
+    "--bg": "#0f1115", "--bg-2": "#171a21", "--bg-inset": "#1d2129", "--text": "#e8eaed",
+    "--text-2": "#a6adb8", "--line": "#2b303a", "--line-strong": "#3b4250",
+  };
+  const realStyle = globalThis.getComputedStyle;
+  globalThis.getComputedStyle = () => ({ getPropertyValue: (name) => props[name] ?? "" });
+  document.documentElement.dataset.theme = "dark";
+  try {
+    const { container } = body("mermaid", { code: "erDiagram\n A ||--o{ B : has\n DARKTHEME" });
+    decorateDiagrams(container);
+    await settle();
+  } finally {
+    globalThis.getComputedStyle = realStyle;
+    delete document.documentElement.dataset.theme;
+  }
+  const vars = initOptions?.themeVariables;
+  assert.ok(vars, "mermaid was initialised with theme variables");
+  assert.equal(vars.attributeBackgroundColorOdd, "#171a21");
+  assert.equal(vars.attributeBackgroundColorEven, "#1d2129");
+  assert.equal(vars.classText, "#e8eaed");
+  for (const [name, value] of Object.entries(vars)) {
+    if (typeof value === "string") assert.doesNotMatch(value, /^#fff(fff)?$/i, `${name} must not be white in dark`);
+  }
+  const css = initOptions.themeCSS;
+  assert.match(css, /\.er\.attributeBoxOdd[^}]*fill: #171a21/);
+  assert.match(css, /\.er\.attributeBoxEven[^}]*fill: #1d2129/);
+  assert.match(css, /\.er\.entityBox[^}]*fill: #171a21/);
+  assert.match(css, /\.row-rect-odd[^}]*fill: #171a21/);
+  assert.match(css, /\.er\.entityLabel[^}]*fill: #e8eaed/);
+  assert.match(css, /\.er\.relationshipLabelBox[^}]*fill: #0f1115/);
 });

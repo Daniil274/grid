@@ -78,8 +78,57 @@ function themeVariables(key) {
       actorBkg: raised, actorBorder: strong, actorTextColor: text, actorLineColor: text2,
       signalColor: text2, signalTextColor: text, labelBoxBkgColor: raised, labelBoxBorderColor: strong,
       labelTextColor: text, loopTextColor: text, activationBkgColor: inset, activationBorderColor: accent,
+      // erDiagram: Mermaid's base theme paints attribute rows #ffffff / #f2f2f2, white on dark.
+      attributeBackgroundColorOdd: raised, attributeBackgroundColorEven: inset,
+      // class / state / requirement / gantt-like tables and labels.
+      classText: text, labelBackground: bg, labelBackgroundColor: raised, altBackground: inset,
+      stateBkg: raised, stateLabelColor: text, compositeBackground: inset, compositeTitleBackground: raised,
+      compositeBorder: strong, innerEndBackground: text2, specialStateColor: text2, transitionColor: text2,
+      transitionLabelColor: text, errorBkgColor: inset, errorTextColor: text,
+      requirementBackground: raised, requirementBorderColor: strong, requirementTextColor: text,
+      relationColor: text2, relationLabelColor: text, relationLabelBackground: bg,
+      gridColor: line, sectionBkgColor: inset, altSectionBkgColor: raised, sectionBkgColor2: inset,
+      taskBkgColor: raised, taskBorderColor: strong, taskTextColor: text, taskTextLightColor: text,
+      taskTextDarkColor: text, taskTextOutsideColor: text, activeTaskBkgColor: inset, activeTaskBorderColor: accent,
+      doneTaskBkgColor: inset, doneTaskBorderColor: line, critBkgColor: inset, critBorderColor: accent,
+      todayLineColor: accent, excludeBkgColor: inset,
+      pieTitleTextColor: text, pieSectionTextColor: text, pieLegendTextColor: text,
+      pieStrokeColor: bg, pieOuterStrokeColor: strong,
+      commitLabelColor: text, commitLabelBackground: inset, tagLabelColor: text, tagLabelBackground: raised,
+      tagLabelBorder: strong,
+      quadrantTitleFill: text, quadrantXAxisTextFill: text2, quadrantYAxisTextFill: text2,
+      quadrantPointTextFill: text, quadrantInternalBorderStrokeFill: line, quadrantExternalBorderStrokeFill: strong,
+      quadrant1Fill: raised, quadrant2Fill: inset, quadrant3Fill: raised, quadrant4Fill: inset,
+      quadrant1TextFill: text, quadrant2TextFill: text, quadrant3TextFill: text, quadrant4TextFill: text,
+      xyChart: {
+        backgroundColor: bg, titleColor: text, xAxisLabelColor: text2, xAxisTitleColor: text,
+        xAxisTickColor: strong, xAxisLineColor: strong, yAxisLabelColor: text2, yAxisTitleColor: text,
+        yAxisTickColor: strong, yAxisLineColor: strong, plotColorPalette: accent,
+      },
     },
+    css: themeCss({ bg, raised, inset, text, text2, line, strong }),
   };
+}
+
+/**
+ * Rules for the SVG's own <style>. An exported SVG/PNG never sees chat.css, and Mermaid
+ * leaves some fills to defaults (rows, labels, ER boxes), so they are pinned here too.
+ * `.row-rect-*` is the name newer Mermaid releases give ER rows; harmless on 11.4.
+ */
+function themeCss({ bg, raised, inset, text, text2, line, strong }) {
+  return `
+    .er.entityBox, .entityBox { fill: ${raised}; stroke: ${strong}; }
+    .er.attributeBoxOdd, .attributeBoxOdd, .row-rect-odd path, .row-rect-odd rect { fill: ${raised}; stroke: ${strong}; }
+    .er.attributeBoxEven, .attributeBoxEven, .row-rect-even path, .row-rect-even rect { fill: ${inset}; stroke: ${strong}; }
+    .er.entityLabel, .entityLabel, .entityTitleText, .er text.entityLabel { fill: ${text}; }
+    .er.relationshipLabel, .relationshipLabel { fill: ${text}; }
+    .er.relationshipLabelBox, .relationshipLabelBox { fill: ${bg}; stroke: ${line}; opacity: 0.9; }
+    .er.relationshipLine, .relationshipLine { stroke: ${text2}; }
+    .classLabel .box, .classLabel .label { fill: ${raised}; }
+    .classLabel .label, .classTitle, .classText { fill: ${text}; }
+    .edgeLabel, .labelBkg { background-color: ${bg}; }
+    .edgeLabel rect { fill: ${bg}; }
+  `.replace(/\s+/g, " ").trim();
 }
 
 let watching = false;
@@ -270,10 +319,10 @@ function renderMermaid(code) {
     const mermaid = await loadMermaid();
     const key = themeKey();
     if (configuredFor !== key) {
-      const { font, vars } = themeVariables(key);
+      const { font, vars, css } = themeVariables(key);
       mermaid.initialize({
         startOnLoad: false, theme: "base", securityLevel: "strict", suppressErrorRendering: true,
-        htmlLabels: false, fontFamily: font, themeVariables: vars,
+        htmlLabels: false, fontFamily: font, themeVariables: vars, themeCSS: css,
         flowchart: { htmlLabels: false, useMaxWidth: false },
         state: { htmlLabels: false, useMaxWidth: false },
         class: { htmlLabels: false, useMaxWidth: false },

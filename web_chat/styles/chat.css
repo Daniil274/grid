@@ -1384,6 +1384,45 @@
   max-height: none;
 }
 
+/* ER diagrams: Mermaid's base theme paints rows white; keep them on the chat palette. */
+.diagramCanvas svg .er.entityBox {
+  fill: var(--bg-2);
+  stroke: var(--line-strong);
+}
+
+.diagramCanvas svg .er.attributeBoxOdd,
+.diagramCanvas svg .row-rect-odd path,
+.diagramCanvas svg .row-rect-odd rect {
+  fill: var(--bg-3, var(--bg-2));
+  stroke: var(--line-strong);
+}
+
+.diagramCanvas svg .er.attributeBoxEven,
+.diagramCanvas svg .row-rect-even path,
+.diagramCanvas svg .row-rect-even rect {
+  fill: var(--bg-inset);
+  stroke: var(--line-strong);
+}
+
+.diagramCanvas svg .er.entityLabel,
+.diagramCanvas svg .entityTitleText {
+  fill: var(--text);
+}
+
+.diagramCanvas svg .er.relationshipLabel {
+  fill: var(--text);
+}
+
+.diagramCanvas svg .er.relationshipLabelBox {
+  fill: var(--bg-2);
+  stroke: var(--line-strong);
+  opacity: 0.9;
+}
+
+.diagramCanvas svg .er.relationshipLine {
+  stroke: var(--text-2);
+}
+
 /* The source view: the card already has a frame and a bar. */
 .diagramSource {
   max-height: 620px;
