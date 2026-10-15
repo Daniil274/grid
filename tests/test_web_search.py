@@ -89,18 +89,53 @@ async def test_results_name_their_engines_and_the_ones_that_failed(searxng):
 
 
 @pytest.mark.asyncio
-async def test_parameters_reach_searxng_and_bad_ones_are_refused(searxng):
+async def test_parameters_reach_searxng_and_unknown_ones_are_left_out(searxng):
     searxng.answers.append({"results": [result("https://example.org/a")]})
 
     await search(query="release", category="news", time_range="week", language="ru")
+    assert searxng.requests[-1] == {
+        "q": "release", "format": "json", "categories": "news,general", "language": "ru", "time_range": "week",
+    }
 
-    assert searxng.requests[0] == {"q": "release", "format": "json", "categories": "news", "language": "ru", "time_range": "week"}
-    assert (await search(query="x", category="images")).startswith("❌ Unknown category")
-    assert (await search(query="x", time_range="decade")).startswith("❌ Unknown time_range")
-    assert (await search(query="x", language="ru&engines=bing")).startswith("❌ Unknown language")
+    out = await search(query="x", category="images", time_range="decade", language="ru&engines=bing")
+    assert searxng.requests[-1] == {"q": "x", "format": "json", "categories": "general", "language": "auto"}
+    assert "no category 'images'" in out and "no time range 'decade'" in out
+    assert "not a language code" in out and "https://example.org/a" in out
+
+    out = await search(query="word " * 120)
+    assert len(searxng.requests[-1]["q"]) <= web_tools.MAX_QUERY_LENGTH
+    assert "searched for its start" in out
     assert (await search(query="   ")).startswith("❌ Empty")
-    assert (await search(query="x" * 500)).startswith("❌ Search query is longer")
-    assert len(searxng.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_specialized_category_is_searched_with_the_general_engines(searxng):
+    searxng.answers.append({"results": [result("https://example.org/a")]})
+    await search(query="vllm tool calling", category="it")
+    assert searxng.requests[-1]["categories"] == "it,general"
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_finds_nothing_is_widened_and_says_how(searxng):
+    nothing = {"results": [], "unresponsive_engines": []}
+    searxng.answers.extend([nothing, nothing, {"results": [result("https://z.ai/blog/glm-5.3")]}])
+
+    out = await search(query='"GLM-5" OR "GLM-5.3" -docker weights', time_range="year", language="en")
+
+    assert [r["q"] for r in searxng.requests] == ['"GLM-5" OR "GLM-5.3" -docker weights'] * 2 + ["GLM-5 GLM-5.3 weights"]
+    assert "time_range" in searxng.requests[0] and "time_range" not in searxng.requests[1]
+    assert "https://z.ai/blog/glm-5.3" in out
+    assert "nothing for the exact query; these are for: GLM-5 GLM-5.3 weights" in out
+
+
+@pytest.mark.asyncio
+async def test_engines_failing_are_not_widened_around(searxng):
+    searxng.answers.append({"results": [], "unresponsive_engines": [["brave", "too many requests"]]})
+
+    out = await search(query='"exact phrase"', time_range="week")
+
+    assert out.startswith("❌ Search failed")
+    assert len(searxng.requests) == 2  # the one retry of a search no engine answered, no widening
 
 
 @pytest.mark.asyncio
