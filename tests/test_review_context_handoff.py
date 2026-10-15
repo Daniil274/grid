@@ -17,7 +17,7 @@ async def test_new_context_handoff_is_isolated_and_resumable(tmp_path, monkeypat
 
     factory, tool = sub_agent_tool(tmp_path, monkeypatch, run_streamed)
     executions = []
-    monkeypatch.setattr(factory.context_manager, "add_execution", executions.append)
+    monkeypatch.setattr(factory.context_manager, "add_execution", lambda execution, **_: executions.append(execution))
     # Simulate footer-free pending contract even on the clean HEAD.
     original = tool.on_invoke_tool
 

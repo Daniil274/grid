@@ -331,6 +331,9 @@ class TurnRunner:
             max_turns = self.config.get_max_turns(agent_label)
         deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         set_current_factory(self)
+        # What the run and its tools write without naming a conversation goes
+        # into its own, never into one another turn made active.
+        binding = self.context_manager.bind(context_id)
         try:
             async with deadline:
                 while True:
@@ -416,6 +419,7 @@ class TurnRunner:
             )
             return RunOutcome(report, STOPPED_TIMEOUT, *used())
         finally:
+            self.context_manager.unbind(binding)
             reset_current_factory()
 
     async def _report_after_turn_limit(
@@ -462,12 +466,12 @@ class TurnRunner:
     ) -> Optional[Any]:
         """Note the invocation; with agent logging on, start this turn's session
         log and return its token for Logger.deactivate_session_log."""
-        self.context_manager.set_metadata("context_id", context_id)
+        self.context_manager.set_metadata("context_id", context_id, context_id=context_id)
         self.context_manager.set_metadata(
-            "last_invocation", {"agent": agent_key, "timestamp": time.time()}
+            "last_invocation", {"agent": agent_key, "timestamp": time.time()}, context_id=context_id
         )
         if user_id:
-            self.context_manager.set_metadata("user_id", user_id)
+            self.context_manager.set_metadata("user_id", user_id, context_id=context_id)
         agent_logging = self.config.config.settings.agent_logging
         if agent_logging is None or not agent_logging.enabled:
             return None
@@ -667,6 +671,7 @@ class TurnRunner:
                 output=info.get("output") if event.name == "tool_output" else None,
                 extra={"retry_count": progress.attempt, "call_id": info.get("call_id")},
                 persist=event.name == "tool_called",
+                context_id=run_ctx.context_id,
             )
 
         deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
@@ -787,7 +792,9 @@ class TurnRunner:
                     retry_count=progress.attempt,
                 )
                 self.journal.record_event(
-                    event_type="attempt_started", extra={"retry_count": progress.attempt}
+                    event_type="attempt_started",
+                    extra={"retry_count": progress.attempt},
+                    context_id=run_ctx.context_id,
                 )
                 session_mark = await self._session_mark(session)
                 try:
@@ -837,6 +844,7 @@ class TurnRunner:
                             "retriable": retriable,
                             "exception_type": type(exc).__name__,
                         },
+                        context_id=run_ctx.context_id,
                     )
                     if not retriable:
                         progress.recorded_failure = True
@@ -1157,8 +1165,12 @@ class TurnRunner:
         task = ""
         stored = False  # the turn's request is in the conversation
         session_log = None
+        binding = None
         try:
             active_context_id = self._open_context(context_id, use_active_context)
+            # Everything this turn and the tasks it starts write without naming
+            # a conversation goes into this one, whatever other turns activate.
+            binding = self.context_manager.bind(active_context_id)
             execution.context_id = active_context_id
             continuing = context_id is not None or use_active_context
             # Turns of a conversation start only here, one at a time, so a run
@@ -1181,7 +1193,7 @@ class TurnRunner:
                 observer=observer,
             )
             session_log = self._record_invocation(agent_key, active_context_id, user_id, shown_message)
-            user_id = user_id or self.context_manager.get_metadata("user_id")
+            user_id = user_id or self.context_manager.get_metadata("user_id", context_id=active_context_id)
 
             agent = await self.create_agent(agent_key, context_path)
             self._report_skipped_models(observer, getattr(agent, "_grid_skipped_models", None))
@@ -1276,7 +1288,7 @@ class TurnRunner:
             stored = True
 
             run_ctx.session = session
-            run_ctx.metadata = self.context_manager.get_all_metadata()
+            run_ctx.metadata = self.context_manager.get_all_metadata(context_id=active_context_id)
             progress.input_preview = safe_preview(run_input, max_length=700)
             self.journal.update_pending_run(
                 agent_key=agent_key,
@@ -1340,11 +1352,12 @@ class TurnRunner:
                 if getattr(item, "type", "") == "tool_call_item"
                 and (name := tool_event_info(item).get("tool_name"))
             ]
-            self.context_manager.add_execution(execution)
+            self.context_manager.add_execution(execution, context_id=active_context_id)
             self.journal.record_event(
                 event_type="attempt_completed",
                 output=output,
                 extra={"retry_count": progress.attempt},
+                context_id=active_context_id,
             )
             if answered:
                 self.journal.update_pending_run(
@@ -1399,10 +1412,12 @@ class TurnRunner:
                         event_type="execution_failed",
                         output=str(exc),
                         extra={"exception_type": type(exc).__name__},
+                        context_id=active_context_id,
                     )
                 except Exception:
                     logger.debug("Failed to persist pending run failure state", exc_info=True)
-            self.context_manager.add_execution(execution)
+            if active_context_id is not None:
+                self.context_manager.add_execution(execution, context_id=active_context_id)
             raise
         finally:
             if active_context_id is not None and self._run_controls.get(active_context_id) is control:
@@ -1410,3 +1425,5 @@ class TurnRunner:
             # Messages sent during the turn that no model call read go back.
             control.steering.hand_back()
             Logger.deactivate_session_log(session_log)
+            if binding is not None:
+                self.context_manager.unbind(binding)

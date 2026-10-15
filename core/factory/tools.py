@@ -582,7 +582,9 @@ class ToolAssembly:
                 # (set above) as metadata only.
                 execution.output = result_text
 
-                self.context_manager.add_execution(execution)
+                self.context_manager.add_execution(
+                    execution, context_id=self._conversation_of(tool_context)
+                )
 
                 # Log the full tool call result in verbose mode
                 Logger("agent_factory").log_verbose(
@@ -597,7 +599,9 @@ class ToolAssembly:
                 execution.end_time = time.time()
                 execution.error = str(e)
 
-                self.context_manager.add_execution(execution)
+                self.context_manager.add_execution(
+                    execution, context_id=self._conversation_of(tool_context)
+                )
 
                 raise
 
@@ -807,7 +811,9 @@ class ToolAssembly:
 
             # Record the result as an assistant message so the main agent can discuss and provide corrections
             try:
-                self.context_manager.add_tool_result_as_message(tool_name, output)
+                self.context_manager.add_tool_result_as_message(
+                    tool_name, output, context_id=self._conversation_of(context)
+                )
             except Exception as exc:
                 logger.debug(
                     "Failed to record tool result in context: %s", exc, exc_info=exc
@@ -816,6 +822,15 @@ class ToolAssembly:
             return output
 
         return run_agent_with_context
+
+    def _conversation_of(self, tool_context: Any) -> Optional[str]:
+        """The conversation a tool call belongs to, when its run names one.
+
+        None - the running turn's own, which the context manager knows - for a
+        run whose context id is not a conversation (a sub-agent's session).
+        """
+        context_id = getattr(getattr(tool_context, "context", None), "context_id", None)
+        return context_id if self.context_manager.has_context(context_id) else None
 
     def _extract_context_id_from_text(self, text: Optional[str]) -> Optional[str]:
         """Extract context identifier (ctx-XXXXXXXX) from arbitrary text."""
