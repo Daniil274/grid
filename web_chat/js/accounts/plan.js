@@ -113,7 +113,13 @@ export class PlanDrawer {
   }
 
   _key(plan, entry) {
-    const input = h("input.control", { type: "password", autocomplete: "off", placeholder: "Paste a key", maxlength: 400, disabled: !plan.vault_enabled });
+    // Masked, but not a password field: a browser would pair any password
+    // field on the page with a username field and fill a saved login in.
+    const input = h("input.control.control--secret", {
+      type: "text", autocomplete: "off", spellcheck: "false", autocapitalize: "off",
+      "data-1p-ignore": "", "data-lpignore": "true", "data-bwignore": "", "data-form-type": "other",
+      placeholder: "Paste a key", maxlength: 400, disabled: !plan.vault_enabled,
+    });
     return h(
       "div.field",
       {},

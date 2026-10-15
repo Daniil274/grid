@@ -436,3 +436,113 @@ test("a tracker id in a step's refs deep-links into the tracker", () => {
   assert.equal(chips[1].tagName, "SPAN");
   assert.equal(chips[1].getAttribute("href"), null);
 });
+
+test("a closed block draws a mark per step and flags a failure inside", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("a", { kind: "agent", title: "coder" }),
+    step("b", { title: "read_file", tool: "read_file", parent_id: "a" }),
+    step("c", { title: "bash_tool", status: "error", tone: "error", parent_id: "a" }),
+  ]);
+  const block = rows(topList(panel))[0];
+  const marks = block.findAll("step__mark");
+  assert.equal(marks.length, 2);
+  assert.equal(marks[0].dataset.family, "read");
+  assert.equal(marks[1].dataset.status, "error");
+  const flag = block.find("step__flag");
+  assert.equal(flag.hidden, false);
+  assert.equal(flag.dataset.kind, "error");
+});
+
+test("a failure deep inside surfaces on every closed block above it", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("a", { kind: "agent", title: "outer" }),
+    step("b", { kind: "agent", title: "inner", parent_id: "a" }),
+    step("c", { title: "bash_tool", status: "error", tone: "error", parent_id: "b" }),
+  ]);
+  const outer = rows(topList(panel))[0];
+  assert.equal(outer.find("step__flag").hidden, false);
+  assert.equal(outer.find("step__strip").findAll("step__mark").length, 1);
+});
+
+test("a long block folds its marks into a capped strip", () => {
+  const panel = createReasoningPanel();
+  const kids = Array.from({ length: 60 }, (_, i) => step(`k${i}`, { parent_id: "a" }));
+  panel.hydrate([step("a", { kind: "agent", title: "coder" }), ...kids]);
+  const count = rows(topList(panel))[0].findAll("step__mark").length;
+  assert.ok(count <= 24 && count > 1, `${count} marks`);
+});
+
+test("a call held inside a closed block opens the blocks above it", () => {
+  const panel = createReasoningPanel();
+  panel.upsert(step("a", { kind: "agent", title: "outer", status: "running", duration_ms: null }));
+  panel.upsert(step("b", { kind: "agent", title: "inner", parent_id: "a", status: "running", duration_ms: null }));
+  const held = { decision: "review", label: "Waiting for you", title: "file_write", approval_id: "a1", approvals: "user" };
+  panel.upsert(step("c", { title: "file_write", parent_id: "b", status: "running", duration_ms: null, policy: held }));
+  const outer = rows(topList(panel))[0];
+  assert.ok(outer.classList.contains("is-open"));
+  assert.ok(rows(agentList(outer))[0].classList.contains("is-open"));
+  assert.equal(outer.find("step__flag").dataset.kind, "approval");
+  // Once the call is answered the flag goes.
+  panel.upsert(step("c", { title: "file_write", parent_id: "b", policy: { decision: "allow", label: "Allowed" } }));
+  assert.equal(outer.find("step__flag").hidden, true);
+});
+
+test("an open block starts with a fold row that says what it did and folds it", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("a", { kind: "agent", title: "coder", duration_ms: 4200 }),
+    step("b", { title: "read_file", parent_id: "a" }),
+    step("c", { title: "bash_tool", parent_id: "a" }),
+  ]);
+  const block = rows(topList(panel))[0];
+  block.find("step__head").click();
+  assert.ok(block.classList.contains("is-open"));
+  const fold = block.find("step__fold");
+  assert.match(fold.find("step__foldLabel").textContent, /Worked for .*2 steps/);
+  fold.click();
+  assert.ok(!block.classList.contains("is-open"));
+  assert.equal(block.find("step__head").getAttribute("aria-expanded"), "false");
+});
+
+test("folding from the row is the reader's choice: the block stays folded when the turn ends", () => {
+  const panel = createReasoningPanel();
+  panel.upsert(step("a", { kind: "agent", title: "Parallel calls", tool: "parallel", status: "running", duration_ms: null }));
+  const block = rows(topList(panel))[0];
+  assert.ok(block.classList.contains("is-open"));
+  block.find("step__fold").click();
+  panel.upsert(step("a", { kind: "agent", title: "Parallel calls", tool: "parallel", body: "{}" }));
+  assert.ok(!block.classList.contains("is-open"));
+});
+
+test("a failed block's fold row says it failed", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([step("a", { kind: "agent", title: "coder", status: "error", tone: "error", duration_ms: 900 })]);
+  const label = rows(topList(panel))[0].find("step__foldLabel").textContent;
+  assert.match(label, /^Failed after /);
+});
+
+test("an open tool row starts with a fold row that says how it ended and folds it", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([step("t", { title: "read_file", tool: "read_file", detail: "a.py", body: "text", duration_ms: 1500 })]);
+  const row = rows(topList(panel))[0];
+  row.find("step__head").click();
+  assert.ok(row.classList.contains("is-open"));
+  const fold = row.find("step__fold");
+  assert.match(fold.find("step__foldLabel").textContent, /^Done in /);
+  fold.click();
+  assert.ok(!row.classList.contains("is-open"));
+  assert.equal(row.find("step__head").getAttribute("aria-expanded"), "false");
+});
+
+test("a failed tool row's fold row says it failed; thinking has none", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("t", { title: "bash_tool", status: "error", tone: "error", body: "boom", duration_ms: 20 }),
+    step("r", { kind: "reasoning", title: "Thinking", body: "plan" }),
+  ]);
+  const [tool, thinking] = rows(topList(panel));
+  assert.match(tool.find("step__foldLabel").textContent, /^Failed after /);
+  assert.equal(thinking.find("step__fold"), null);
+});

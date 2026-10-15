@@ -462,26 +462,103 @@
   color: var(--text-2);
 }
 
+/* -- tables ---------------------------------------------------------------
+   A table keeps the width its cells want (each between a least and a most
+   width) and scrolls sideways inside its own frame when the screen is
+   narrower. On a wide screen it may grow past the answer's column, centred on
+   it, up to the chat's own width. Its first column stays in view while it
+   scrolls. */
+.chatScroll {
+  container-type: inline-size;
+}
+
 .tableScroll {
+  position: relative;
+  left: 50%;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(1180px, 100cqw - 8px);
   overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  transform: translateX(-50%);
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
 }
 
 .msg__body table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 13.5px;
+  line-height: 1.5;
+  /* The body breaks anywhere, so a long line never widens a message; in a
+     table that let every column shrink to a letter. Words stay whole here. */
+  overflow-wrap: normal;
 }
 
 .msg__body th,
 .msg__body td {
-  padding: 7px 12px;
-  border: 1px solid var(--line);
+  padding: 8px 12px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
   text-align: left;
+  vertical-align: top;
+}
+
+.msg__body th:last-child,
+.msg__body td:last-child {
+  border-right: 0;
+}
+
+.msg__body tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 .msg__body th {
   background: var(--bg-2);
+  color: var(--text);
   font-weight: 600;
+}
+
+.msg__body td {
+  background: var(--bg-1);
+}
+
+.msg__body tbody tr:nth-child(even) td {
+  background: var(--bg-inset);
+}
+
+.msg__body th:first-child,
+.msg__body td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  box-shadow: 1px 0 0 var(--line);
+}
+
+.msg__body .cell {
+  min-width: 6em;
+  max-width: 26em;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+
+@media (max-width: 720px) {
+  .msg__body table {
+    font-size: 13px;
+  }
+
+  .msg__body th,
+  .msg__body td {
+    padding: 6px 9px;
+  }
+
+  .msg__body .cell {
+    min-width: 5.5em;
+    max-width: 15em;
+  }
 }
 
 /* -- jump pill ------------------------------------------------------------ */
@@ -577,6 +654,63 @@
   justify-content: flex-end;
   margin-left: auto;
   gap: 8px;
+}
+
+/* A phone on its side: little height. The bar and the composer shrink to a
+   line each, so the chat keeps most of what is left. */
+@media (max-height: 520px) and (orientation: landscape) {
+  .chatScroll {
+    padding: 10px 16px 4px;
+  }
+
+  .composerWrap {
+    padding: 4px 12px 6px;
+  }
+
+  .composer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: flex-end;
+    padding: 5px 6px 5px 10px;
+  }
+
+  .composer > .queueTray,
+  .composer > .composer__tray {
+    flex-basis: 100%;
+  }
+
+  .composer__input {
+    flex: 1 1 160px;
+    width: auto;
+    max-height: 26vh;
+    padding: 6px 2px;
+  }
+
+  .composer__bar {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  .composer__buttons {
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+
+  .composer__hint,
+  .composer__compact .compactLabel {
+    display: none;
+  }
+
+  .composer__buttons .btn {
+    min-height: 32px;
+    padding: 0 10px;
+  }
+
+  .composer__compact {
+    padding: 0 8px;
+  }
 }
 
 @media (max-width: 720px) {
@@ -1005,199 +1139,6 @@
 /* The policy switch (ui/policy-switch.js): always there, quieter than the delivery menu. */
 .composer__policy {
   max-width: 130px;
-}
-
-/* -- rail modes (Projects | By date) and the project tree ----------------- */
-.rail__modes {
-  display: flex;
-  gap: 4px;
-  padding: 2px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-inset);
-}
-
-.railModes__btn {
-  flex: 1;
-  padding: 5px 8px;
-  border: none;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text-3);
-  font-size: 12px;
-  font-weight: 550;
-}
-
-.railModes__btn:hover {
-  color: var(--text);
-}
-
-.railModes__btn.is-active {
-  background: var(--bg-3);
-  color: var(--text);
-}
-
-.projectGroup {
-  margin-top: 10px;
-}
-
-.projectGroup__head {
-  display: flex;
-  gap: 2px;
-  align-items: center;
-  padding: 2px 4px 2px calc(4px + var(--depth, 0) * 12px);
-  border-radius: var(--radius-sm);
-}
-
-.projectGroup__head.is-active {
-  background: var(--accent-soft);
-}
-
-.projectGroup__chevron {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border: none;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text-3);
-  transform: rotate(90deg);
-  transition: transform 120ms var(--ease);
-}
-
-.projectGroup__chevron:not(.is-open) {
-  transform: none;
-}
-
-.projectGroup__chevron:hover {
-  background: var(--bg-2);
-  color: var(--text);
-}
-
-.projectGroup__title {
-  display: flex;
-  flex: 1;
-  gap: 6px;
-  align-items: center;
-  min-width: 0;
-  padding: 5px 6px;
-  border: none;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  text-align: left;
-}
-
-.projectGroup__name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.projectGroup__count {
-  flex-shrink: 0;
-  color: var(--text-3);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.projectGroup--none {
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
-}
-
-/* -- move-to-project popover ---------------------------------------------- */
-.movePop {
-  position: absolute;
-  top: calc(100% - 2px);
-  right: 6px;
-  z-index: 20;
-  width: min(240px, calc(100vw - 40px));
-  padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-2);
-  box-shadow: var(--shadow-2);
-}
-
-.movePop__head {
-  padding: 2px 6px 6px;
-  color: var(--text-3);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.movePop__list {
-  display: grid;
-  gap: 2px;
-  max-height: min(40vh, 260px);
-  overflow-y: auto;
-}
-
-.movePop__item {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  padding: 6px 8px;
-  border: none;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text);
-  font-size: 12.5px;
-  text-align: left;
-}
-
-.movePop__item:hover {
-  background: var(--bg-3);
-}
-
-.movePop__title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.movePop__createRow {
-  display: flex;
-  gap: 4px;
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--line);
-}
-
-.movePop__new {
-  flex: 1;
-  min-width: 0;
-  padding: 5px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-xs);
-  background: var(--bg-1);
-  color: var(--text);
-  font: inherit;
-  font-size: 12.5px;
-}
-
-.movePop__create {
-  flex-shrink: 0;
-  width: auto;
-  padding: 5px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-xs);
-  background: var(--bg-1);
-  color: var(--text);
-  font-size: 12.5px;
-}
-
-.movePop__create:hover {
-  background: var(--bg-3);
 }
 
 /* -- carried context ---------------------------------------------------- */

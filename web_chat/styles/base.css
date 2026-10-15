@@ -10,6 +10,19 @@ html,
 body {
   height: 100%;
   margin: 0;
+  /* Nothing may make the page wider than the screen: a phone would zoom the
+     whole page out to fit it, and the header would no longer fit at 100%. */
+  overflow-x: hidden;
+}
+
+/* On a touch screen a field below 16px makes iOS zoom the page in when it is
+   focused - and leave it zoomed, the header cut off. */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select {
+    font-size: 16px;
+  }
 }
 
 body {
@@ -217,6 +230,13 @@ kbd {
   line-height: 1.55;
 }
 
+/* A secret typed into a text field (an API key): masked like a password,
+   without being a password field that a browser would fill a login into. */
+.control--secret {
+  -webkit-text-security: disc;
+  font-family: var(--font-mono);
+}
+
 textarea.control {
   font-family: var(--font-mono);
   font-size: 12.5px;
@@ -257,6 +277,10 @@ textarea.control {
 
 .toast[data-tone="success"] { color: var(--ok); }
 .toast[data-tone="error"] { color: var(--danger); }
+.toast[data-tone="attention"] { border-color: var(--warn); }
+.toast[data-tone="attention"] > svg { color: var(--warn); flex: none; }
+.toast__text { min-width: 0; }
+.toast__actions { display: flex; flex: none; gap: 6px; margin-left: auto; }
 
 .toast.is-leaving {
   animation: toastOut 160ms var(--ease) forwards;
@@ -300,11 +324,17 @@ textarea.control {
   background-clip: content-box;
 }
 
+/* Less motion, asked for by the system (Windows: "Animation effects" off).
+   An animation runs once, in no time, and stops: a looping one (a spinner, the
+   typing dots, a shimmer) would otherwise repeat every 0.01 ms - redrawn at a
+   random frame on every paint, which flickers far worse than any motion. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

@@ -898,7 +898,8 @@ export class TasksPage {
     this.selectedId = draft.id;
     this.render();
     try {
-      const created = await api.createTask({ title: clean });
+      // In a project's view the task goes to that project's tracker.
+      const created = await api.createTask({ title: clean, ...(this.project ? { project_id: this.project } : {}) });
       toast(`Created “${clean}”`, { tone: "success" });
       if (created?.id) this.selectedId = created.id;
       await this.load();
@@ -1377,7 +1378,7 @@ export class TasksPage {
       };
       try {
         if (mode === "create") {
-          await api.createTask({ ...fields, depends_on: pendingDeps });
+          await api.createTask({ ...fields, depends_on: pendingDeps, ...(page.project ? { project_id: page.project } : {}) });
           toast("Task created", { tone: "success" });
         } else if (task) {
           const patch = {};

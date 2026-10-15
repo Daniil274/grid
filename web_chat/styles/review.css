@@ -350,14 +350,33 @@ body:not([data-reviews="on"]) .msgAction--report {
   white-space: pre;
 }
 
+/* A column holds what it is given: a long word or a row of chips wraps inside
+   it instead of pushing it - and the page - wider than the screen. */
+.reviewPage__body > * {
+  min-width: 0;
+}
+
 @media (max-width: 800px) {
   .reviewPage__body {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .reviewList {
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  /* The bar wraps: the hint goes under the title instead of squeezing to a
+     word a line, and the actions stay on the screen. */
+  .reviewPage__bar {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 10px 12px;
+  }
+
+  .reviewPage__hint {
+    flex-basis: 100%;
+    order: 10;
   }
 }
 

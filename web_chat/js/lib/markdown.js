@@ -265,8 +265,12 @@ function table(lines, start, out, header) {
     rows.push(cells(match));
     index += 1;
   }
-  const head = header.map((cell) => `<th>${inline(cell)}</th>`).join("");
-  const body = rows.map((row) => `<tr>${row.map((cell) => `<td>${inline(cell)}</td>`).join("")}</tr>`).join("");
+  // A cell's text sits in a block with a least and a most width (styles/chat.css):
+  // a narrow screen scrolls the table instead of breaking every word in it.
+  const head = header.map((cell) => `<th><div class="cell">${inline(cell)}</div></th>`).join("");
+  const body = rows
+    .map((row) => `<tr>${row.map((cell) => `<td><div class="cell">${inline(cell)}</div></td>`).join("")}</tr>`)
+    .join("");
   out.push(`<div class="tableScroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
   return index;
 }

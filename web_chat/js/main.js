@@ -24,6 +24,8 @@ import { createComposer } from "./ui/composer.js";
 import { createPolicySwitch } from "./ui/policy-switch.js";
 import { createQueueTray } from "./ui/queue.js";
 import { createConversationList } from "./ui/sidebar.js";
+import { createApprovalAlerts } from "./ui/approval-alerts.js";
+import { createRailShell, revealRail } from "./ui/rail.js";
 import { createProjectContext, setActiveProject, storedProject, trackActiveProject } from "./ui/projects.js";
 import { SpeechPlayer, synthesizeSentence } from "./ui/speech.js";
 import { ICONS } from "./ui/icons.js";
@@ -137,6 +139,7 @@ function bindShortcuts({ composer, search }) {
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName ?? "");
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
+      if (document.body.classList.contains("rail-collapsed")) revealRail();
       search.focus();
       return;
     }
@@ -228,8 +231,13 @@ async function boot() {
   createConversationList({
     container: $("#chat-list"),
     searchInput: $("#chat-search"),
-    modeToggle: $("#chat-modes"),
     store,
+    // "+" on a project: a new chat in it (the rail made it the active project).
+    onNewChat: async () => {
+      document.body.classList.remove("rail-open");
+      await chat.startConversation();
+      composer.focus();
+    },
     onSelect: async (contextId) => {
       closeRail();
       try {
@@ -302,14 +310,36 @@ async function boot() {
     },
   });
 
-  // "New chat will be created in: <project>", above the rail's list.
+  // "in <project>" under New chat: where a new chat starts.
   createProjectContext({ node: $("#project-context"), store });
+  // The rail's fold button and its bottom menus (More, the account's).
+  createRailShell({
+    collapse: $("#rail-collapse"),
+    more: $("#rail-more"),
+    moreMenu: $("#rail-more-menu"),
+    account: $("#account-button"),
+    accountMenu: $("#account-menu"),
+    accountName: $("#account-name"),
+    avatar: $("#account-avatar"),
+  });
 
   // Agents keep working in chats that are not on screen; poll while any is
-  // running so their spinners stop when they finish.
+  // running so their spinners stop when they finish - and so a call that waits
+  // for the user's approval anywhere is announced (approval-alerts.js).
   setInterval(() => {
     if (store.get().conversations.some((conversation) => conversation.active)) void refreshConversations();
   }, 4000);
+  createApprovalAlerts({
+    store,
+    onOpen: async (contextId) => {
+      closeRail();
+      try {
+        await chat.openConversation(contextId);
+      } catch (error) {
+        toast(`Could not load chat: ${error.message}`, { tone: "error" });
+      }
+    },
+  });
 
   createRoutePicker({
     button: $("#route-chip"),
@@ -426,7 +456,8 @@ async function boot() {
   plan.start();
 
   // -- chrome ------------------------------------------------------------
-  const openRail = () => document.body.classList.add("rail-open");
+  // Beside the chat on a wide screen, a folded rail comes back; on a narrow one it slides over.
+  const openRail = () => revealRail();
   const closeRail = () => document.body.classList.remove("rail-open");
   $("#toggle-rail").addEventListener("click", openRail);
   $("#sidebar-scrim").addEventListener("click", closeRail);
@@ -536,6 +567,8 @@ async function boot() {
   store.subscribe(({ user, accounts, personalAgents: ownAgents, reviews, systemsPage }) => {
     $("#account").hidden = !accounts;
     $("#account-name").textContent = user?.username ?? "";
+    // The change-password form names its account, so no other field is taken for the username.
+    $("#password-username").value = user?.username ?? "";
     $("#open-settings").hidden = user?.role !== "admin";
     $("#open-admin").hidden = !accounts || user?.role !== "admin";
     $("#open-agents").hidden = !ownAgents;
@@ -645,6 +678,16 @@ async function boot() {
     store.watch(["activeProject"], syncTasksLink);
   }
 
+  // The rail's "Files" link opens the directory the chat on screen works in.
+  const filesLink = $("#open-files");
+  if (filesLink) {
+    const syncFilesLink = ({ contextId }) => {
+      filesLink.href = contextId ? `/files?context=${encodeURIComponent(contextId)}` : "/files";
+    };
+    syncFilesLink(store.get());
+    store.watch(["contextId"], syncFilesLink);
+  }
+
   // The report button under answers shows only when the server takes reports.
   document.body.dataset.reviews = store.get().reviews ? "on" : "off";
   // Voice controls and read-aloud buttons exist only when the server offers voice.
@@ -671,7 +714,8 @@ async function boot() {
   });
 
   await selectRoute({ systemKey: store.get().systemKey, agentKey: store.get().agentKey });
-  composer.focus();
+  // Not on a touch screen: the keyboard would cover half of it before anyone asked to type.
+  if (!globalThis.matchMedia?.("(pointer: coarse)")?.matches) composer.focus();
 }
 
 boot().catch((error) => {

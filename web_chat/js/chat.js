@@ -515,6 +515,13 @@ export class ChatController {
 
   /** Start a fresh conversation and clear the transcript. */
   async startConversation() {
+    // The chat on screen is still empty and in the project asked for: it is
+    // the new chat. Another one would only pile up beside it, never written in.
+    const { contextId: openId, conversations = [], activeProject: wanted, streaming, workspaceLocked } = this._store.get();
+    const open = conversations.find((conversation) => conversation.id === openId);
+    if (open && !open.message_count && !open.active && !streaming && !workspaceLocked && (open.project ?? null) === (wanted ?? null)) {
+      return;
+    }
     const intent = ++this._navigationIntent;
     this._detach();
     this._voice?.cleanup();

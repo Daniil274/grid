@@ -9,306 +9,6 @@
   height: 100dvh;
 }
 
-/* -- conversation rail ---------------------------------------------------- */
-.rail {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-right: 1px solid var(--line);
-  background: var(--bg-1);
-}
-
-.rail__head {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-}
-
-.rail__new {
-  justify-content: flex-start;
-  width: 100%;
-  min-height: 38px;
-}
-
-.rail__search {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-
-.rail__searchIcon {
-  position: absolute;
-  left: 10px;
-  display: flex;
-  color: var(--text-3);
-  pointer-events: none;
-}
-
-.rail__search input {
-  width: 100%;
-  padding: 8px 10px 8px 32px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-inset);
-  font-size: 13px;
-}
-
-.rail__search input:focus {
-  border-color: var(--accent-line);
-  outline: none;
-}
-
-/* The border change alone is too quiet for a keyboard ring: restore one. */
-.rail__search input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.rail__list {
-  flex: 1;
-  min-height: 0;
-  padding: 0 8px 12px;
-  overflow-y: auto;
-}
-
-.rail__account {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  padding: 8px 12px 8px 16px;
-  border-top: 1px solid var(--line);
-  color: var(--text-2);
-  font-size: 13px;
-}
-
-/* The signed-in user's own use of this server, under the name: today's
-   turns and tokens, all-time after them. Empty until the first refresh. */
-.rail__accountUsage {
-  flex-basis: 100%;
-  color: var(--text-3);
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rail__accountUsage:empty {
-  display: none;
-}
-
-.rail__accountName {
-  flex: 1;
-  overflow: hidden;
-  font-weight: 550;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rail__foot {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  padding: 10px 12px;
-  border-top: 1px solid var(--line);
-}
-
-.rail__foot .btn {
-  flex: 1 1 auto;
-  justify-content: flex-start;
-  min-height: 34px;
-  padding: 0 10px;
-  font-size: 12.5px;
-}
-
-.rail__empty {
-  padding: 18px 10px;
-  color: var(--text-3);
-  font-size: 12.5px;
-  text-align: center;
-}
-
-.chatGroup {
-  margin-top: 14px;
-}
-
-.chatGroup__label {
-  padding: 0 8px 6px;
-  color: var(--text-3);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-/* The "No project" bucket renders its section label as a button (so the
-   unfiled bucket is one click away), but it should still read as a section
-   heading, not a native pill button. */
-.chatGroup__label--btn {
-  display: block;
-  width: 100%;
-  margin: 0;
-  border: none;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text-3);
-  font-family: inherit;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  text-align: left;
-  cursor: pointer;
-  transition: color 120ms var(--ease);
-}
-
-.chatGroup__label--btn:hover {
-  color: var(--text-2);
-}
-
-.chatGroup__label--btn:focus-visible {
-  outline: 2px solid var(--accent-line);
-  outline-offset: 2px;
-  color: var(--text);
-}
-
-.chatGroup__label--btn.is-active {
-  color: var(--accent);
-}
-
-/* The separator above the unfiled bucket is only meaningful when a project
-   tree sits above it; drop it when "No project" is the first thing shown. */
-.chatGroup.projectGroup--none:first-child {
-  border-top: none;
-  padding-top: 0;
-}
-
-.chatRow {
-  position: relative;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  transition: background 120ms var(--ease);
-}
-
-.chatRow__main {
-  display: grid;
-  gap: 3px;
-  width: 100%;
-  padding: 8px 10px;
-  border: none;
-  border-radius: inherit;
-  background: transparent;
-  text-align: left;
-}
-
-.chatRow__head {
-  display: flex;
-  gap: 7px;
-  align-items: center;
-  min-width: 0;
-}
-
-/* Running agent: a small ring, so a busy chat is visible from anywhere. */
-.chatRow__spinner {
-  flex-shrink: 0;
-  width: 11px;
-  height: 11px;
-  border: 1.6px solid var(--accent-line);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: chatRowSpin 0.8s linear infinite;
-}
-
-@keyframes chatRowSpin {
-  to { transform: rotate(360deg); }
-}
-
-/* Rename / delete surface on hover or keyboard focus, over the timestamp. */
-.chatRow__actions {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  display: none;
-  gap: 2px;
-  padding: 1px;
-  border-radius: var(--radius-xs);
-  background: var(--bg-3);
-}
-
-.chatRow:hover .chatRow__actions,
-.chatRow:focus-within .chatRow__actions {
-  display: flex;
-}
-
-/* Touch devices have no hover: keep the rename / delete surface reachable by
-   showing it permanently, and reserve room so it never covers the title. */
-@media (hover: none), (pointer: coarse) {
-  .chatRow__actions {
-    display: flex;
-  }
-
-  .chatRow__main {
-    padding-right: 84px;
-  }
-}
-
-.chatRow__actions .iconBtn:hover {
-  background: var(--bg-2);
-}
-
-.chatRow__rename {
-  width: 100%;
-  min-width: 0;
-  padding: 2px 6px;
-  border: 1px solid var(--accent-line);
-  border-radius: var(--radius-xs);
-  background: var(--bg-1);
-  color: var(--text);
-  font: inherit;
-  font-size: 13.5px;
-}
-
-.chatRow:hover {
-  background: var(--bg-2);
-}
-
-.chatRow.is-active {
-  border-color: var(--line);
-  background: var(--bg-3);
-}
-
-.chatRow__title {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 13.5px;
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chatRow__meta {
-  display: flex;
-  gap: 5px;
-  align-items: center;
-  overflow: hidden;
-  color: var(--text-3);
-  font-size: 11.5px;
-  white-space: nowrap;
-}
-
-.chatRow__meta > span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chatRow__stamp {
-  margin-left: auto;
-  flex-shrink: 0;
-}
-
 /* -- main column ---------------------------------------------------------- */
 .main {
   position: relative;
@@ -424,9 +124,10 @@
   color: var(--text-2);
 }
 
+/* Working: a steady accent dot. It used to blink, which read as a flickering
+   connection; the turn's own steps show the motion. */
 .statusText[data-state="busy"]::before {
   background: var(--accent);
-  animation: pulse 1.4s ease-in-out infinite;
 }
 
 @keyframes pulse {
@@ -595,6 +296,30 @@ body.rail-open .scrim {
   visibility: visible;
 }
 
+/* -- a phone on its side ---------------------------------------------------
+   Little height: the bar is a thin line - the route's name, nothing beside it
+   that the rail or the route itself already says. */
+@media (max-height: 520px) and (orientation: landscape) {
+  .topbar {
+    gap: 8px;
+    padding: 4px 12px;
+  }
+
+  .topbar__menu {
+    width: 30px;
+    height: 30px;
+  }
+
+  .routeChip {
+    padding: 3px 10px;
+  }
+
+  .routeChip__meta,
+  .topbar__status {
+    display: none;
+  }
+}
+
 /* -- responsive ----------------------------------------------------------- */
 @media (max-width: 1080px) {
   .app {
@@ -622,6 +347,22 @@ body.rail-open .scrim {
 @media (max-width: 720px) {
   .topbar {
     padding: 8px 12px;
+  }
+
+  /* The route popover hangs from the whole bar, inside the screen: hung from
+     the route chip, which starts after the menu button, its right edge was
+     past the screen's, and the page grew wider than the phone. */
+  .topbar__route {
+    position: static;
+  }
+
+  .popover,
+  .popover--route {
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-height: calc(100dvh - 150px);
+    overflow-y: auto;
   }
 
   .topbar__new,

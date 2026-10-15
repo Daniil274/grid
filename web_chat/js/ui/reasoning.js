@@ -76,12 +76,41 @@ function refsRow(refs) {
   return h("div.step__refs", {}, visible);
 }
 
+/**
+ * The fold row an open row starts with - the panel's own headline in miniature:
+ * what the row did and how long it took, and a click folds it from wherever the
+ * reader is, so a long result needs no scrolling back up to its head.
+ */
+function createFoldBar() {
+  const label = h("span.step__foldLabel");
+  const time = h("span.step__foldTime");
+  const el = h(
+    "button.step__fold",
+    { type: "button", "aria-label": "Fold" },
+    h("span.step__foldChevron", {}, icon(ICONS.chevron, { size: 14 })),
+    label,
+    time,
+  );
+  return { el, label, time };
+}
+
+/** What a settled row says about itself: how it ended, and in how long. */
+const outcomeText = (step) => {
+  if (step.status === "running") return "Running";
+  const verb = step.status === "error" ? "Failed after" : "Done in";
+  return step.duration_ms == null ? (step.status === "error" ? "Failed" : "Done") : `${verb} ${duration(step.duration_ms)}`;
+};
+
 /** The parts every row shares: icon, title, subtitle, policy badge, timing. */
-function stepHead(step) {
+function stepHead(step, { rollup = false } = {}) {
   const parts = {
     glyph: h("span.step__icon", {}, icon(familyIcon(step), { size: 14 })),
     title: h("span.step__title", { text: step.title }),
     subtitle: h("span.step__subtitle"),
+    // A block's closed head also says what it holds: a mark per step, and a
+    // flag when something inside needs the reader.
+    strip: rollup ? h("span.step__strip", { "aria-hidden": "true" }) : null,
+    flag: rollup ? h("span.step__flag", { hidden: true }) : null,
     policy: h("span.step__policy", { hidden: true }),
     usage: h("span.step__usage"),
     timing: h("span.step__timing"),
@@ -93,6 +122,8 @@ function stepHead(step) {
     { type: "button", "aria-expanded": "false" },
     parts.glyph,
     h("span.step__label", {}, parts.title, parts.subtitle),
+    parts.strip,
+    parts.flag,
     parts.usage,
     parts.policy,
     parts.timing,
@@ -167,7 +198,12 @@ function disclosure(root, head, onOpen = null) {
   const suggest = (open) => {
     if (!pinned) setOpen(open);
   };
-  return { setOpen, suggest };
+  /** The reader's own choice, made from somewhere other than the head. */
+  const choose = (open) => {
+    pinned = true;
+    setOpen(open);
+  };
+  return { setOpen, suggest, choose };
 }
 
 /**
@@ -219,11 +255,17 @@ function createStepRow(step, load = null) {
     ].filter(Boolean));
   };
 
+  // Thinking is short prose that folds itself; the fold row is for what a tool returned.
+  const fold = inlineBody ? null : createFoldBar();
   const root = h("li.step", { dataset: {
     kind: step.kind, status: step.status, tone: step.tone || "neutral",
     family: toolFamily(step.tool),
-  } }, head, approval, refs, body, detail);
-  const { suggest } = disclosure(root, head, fill);
+  } }, head, approval, refs, fold?.el, body, detail);
+  const { suggest, choose } = disclosure(root, head, fill);
+  fold?.el.addEventListener("click", () => {
+    choose(false);
+    head.scrollIntoView?.({ block: "nearest" });
+  });
 
   /** Thinking stays open while it streams and folds away once it lands. */
   const settle = () => {
@@ -253,6 +295,10 @@ function createStepRow(step, load = null) {
     applyApproval(approval, next);
     applyUsage(usage, next);
     timing.textContent = next.duration_ms == null ? "" : duration(next.duration_ms);
+    if (fold) {
+      fold.label.textContent = outcomeText(next);
+      fold.time.textContent = usageText(next.tokens_in, next.tokens_out);
+    }
     replace(refs, refsRow(next.refs));
     latest = next;
     stale = true;
@@ -263,7 +309,18 @@ function createStepRow(step, load = null) {
   };
 
   update(step);
-  return { root, kind: step.kind, update, appendDelta, settle, activity: () => title.textContent, tick() {} };
+  const own = () => (approval.dataset.approvalId ? "approval" : latest.status === "error" ? "error" : "");
+  return {
+    root,
+    kind: step.kind,
+    update,
+    appendDelta,
+    settle,
+    activity: () => title.textContent,
+    tick() {},
+    mark: () => ({ kind: latest.kind, family: toolFamily(latest.tool), status: latest.status }),
+    attention: own,
+  };
 }
 
 /**
@@ -286,7 +343,34 @@ function createTimeline(list) {
     tick(now) {
       for (const row of rows.values()) row.tick(now);
     },
+    /** What inside needs the reader, at any depth: a held call outranks a failure. */
+    attention() {
+      let found = "";
+      for (const row of rows.values()) {
+        const need = row.attention();
+        if (need === "approval") return need;
+        found ||= need;
+      }
+      return found;
+    },
   };
+}
+
+/** The most marks a closed block draws; more steps share marks. */
+const MAX_MARKS = 24;
+
+/** One mark per step of a block, a run of steps folded into one mark past the cap. */
+function stripMarks(rows) {
+  const marks = [...rows.values()].map((row) => row.mark());
+  if (marks.length <= MAX_MARKS) return marks;
+  const size = Math.ceil(marks.length / MAX_MARKS);
+  const merged = [];
+  for (let at = 0; at < marks.length; at += size) {
+    const run = marks.slice(at, at + size);
+    const status = run.some((m) => m.status === "error") ? "error" : run.some((m) => m.status === "running") ? "running" : run[0].status;
+    merged.push({ ...run[0], status });
+  }
+  return merged;
 }
 
 /** A sub-agent is asked in words; show them, not the JSON envelope they came in. */
@@ -318,8 +402,12 @@ const isParallelStep = (step) => step.tool === "parallel" || step.title === "Par
  * @param {() => number} turnStart - when the turn began, for a live duration.
  */
 function createAgentRow(step, turnStart, load = null) {
-  const { head, title, subtitle, policy, usage, timing, approval } = stepHead(step);
+  const { head, title, subtitle, policy, usage, timing, approval, strip, flag } = stepHead(step, { rollup: true });
   const timeline = createTimeline(h("ol.agent__steps"));
+  const fold = createFoldBar();
+  const foldBar = fold.el;
+  const foldLabel = fold.label;
+  const foldTime = fold.time;
   const task = h("div.agent__task");
   const report = h("div.agent__report");
   const refs = h("div.step__refsSlot");
@@ -329,7 +417,7 @@ function createAgentRow(step, turnStart, load = null) {
     head,
     approval,
     refs,
-    h("div.step__agent", {}, task, timeline.list, report),
+    h("div.step__agent", {}, foldBar, task, timeline.list, report),
   );
   let current = step;
   let stale = true;
@@ -353,9 +441,43 @@ function createAgentRow(step, turnStart, load = null) {
     replace(task, renderPayload("Task", current.input_payload, asked, { markdown: asked !== current.detail, state: payloadState.input }));
     replace(report, renderPayload(current.status === "error" ? "Error" : "Report", current.result_payload, current.body, { markdown: current.status !== "error", state: payloadState.result }));
   };
-  const { suggest } = disclosure(root, head, fill);
+  const { suggest, setOpen, choose } = disclosure(root, head, fill);
+  foldBar.addEventListener("click", () => {
+    choose(false);
+    head.scrollIntoView?.({ block: "nearest" });
+  });
+
+  /** The fold row: the live activity and clock while it runs, the outcome once it reports. */
+  const renderFold = (now = Date.now()) => {
+    if (current.status === "running") {
+      foldLabel.textContent = timeline.activity() || "Working";
+      foldTime.textContent = duration(Math.max(now - turnStart() - (current.at_ms ?? 0), 0));
+      return;
+    }
+    const count = timeline.size ? ` · ${plural(timeline.size, "step")}` : "";
+    const verb = current.status === "error" ? "Failed after" : "Worked for";
+    foldLabel.textContent = current.duration_ms == null ? plural(timeline.size, "step") : `${verb} ${duration(current.duration_ms)}${count}`;
+    foldTime.textContent = usageText(current.tokens_in, current.tokens_out);
+  };
+
+  /** The strip of marks and the flag a closed block wears; only a change touches the DOM. */
+  let drawn = "";
+  const renderRollup = () => {
+    const marks = stripMarks(timeline.rows);
+    const signature = marks.map((m) => `${m.kind}/${m.family}/${m.status}`).join(" ");
+    if (signature !== drawn) {
+      drawn = signature;
+      replace(strip, marks.map((m) => h("span.step__mark", { dataset: { kind: m.kind, family: m.family, status: m.status } })));
+    }
+    const need = timeline.attention();
+    flag.hidden = !need;
+    flag.dataset.kind = need;
+    flag.title = need === "approval" ? "A call inside waits for you" : need ? "A step inside failed" : "";
+  };
 
   const renderSubtitle = () => {
+    renderRollup();
+    renderFold();
     // A parallel batch says what it runs in its own subtitle (tool_summaries);
     // the JSON envelope of the batch is not words.
     // A failed batch says what broke - the first line of its error - instead
@@ -415,6 +537,10 @@ function createAgentRow(step, turnStart, load = null) {
     },
     /** A child changed: refresh what the collapsed head says about it. */
     refresh: renderSubtitle,
+    mark: () => ({ kind: "agent", family: toolFamily(current.tool), status: current.status }),
+    attention: () => (approval.dataset.approvalId ? "approval" : timeline.attention() || (current.status === "error" ? "error" : "")),
+    /** Open for a held call inside, whatever the reader had closed: they must see it. */
+    reveal: () => setOpen(true),
   };
 }
 
@@ -552,7 +678,11 @@ export function createReasoningPanel() {
         timeline.rows.set(step.id, row);
         index.set(step.id, { row, timeline, parentId: existing?.parentId ?? step.parent_id });
       }
-      for (const block of ancestors(step.id)) block.refresh();
+      const held = index.get(step.id).row.attention() === "approval";
+      for (const block of ancestors(step.id)) {
+        block.refresh();
+        if (held) block.reveal();
+      }
       renderHeadline();
     },
 

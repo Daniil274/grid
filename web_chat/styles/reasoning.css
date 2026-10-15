@@ -32,11 +32,20 @@
 }
 
 /* Keep the close control reachable while the reader is inside a long trace. */
+/* Pinned, it spans the whole column on the chat's own background: as wide as
+   its text only, the rows scrolling under it showed through beside it. */
 .reasoning.is-expanded .reasoning__toggle {
   position: sticky;
   top: 0;
   z-index: 2;
-  background: var(--bg-1);
+  width: calc(100% + 4px);
+  border-radius: 0;
+  background: var(--bg);
+  box-shadow: 0 1px 0 var(--line);
+}
+
+.reasoning.is-expanded .reasoning__toggle:hover {
+  background: var(--bg-2);
 }
 
 .reasoning__chevron {
@@ -50,10 +59,16 @@
 }
 
 .reasoning__headline {
+  min-width: 0;
+  overflow: hidden;
   font-weight: 500;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .reasoning__timer {
+  flex-shrink: 0;
   color: var(--text-3);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -161,10 +176,25 @@
   color: var(--danger);
 }
 
+/* A running step: the icon stays still and solid; a thin arc turns around its
+   rim. A blinking icon (opacity) read as flicker. */
 .step[data-status="running"] > .step__head .step__icon {
   border-color: var(--accent-line);
   color: var(--accent);
-  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.step[data-status="running"] > .step__head .step__icon::after {
+  position: absolute;
+  inset: -3px;
+  border: 1.5px solid transparent;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  content: "";
+  animation: stepSpin 0.9s linear infinite;
+}
+
+@keyframes stepSpin {
+  to { transform: rotate(360deg); }
 }
 
 .step:not([data-family=""]):not([data-status="error"]) > .step__head .step__icon { color: var(--step-accent); }
@@ -1124,4 +1154,154 @@ a.refChip:hover {
   font-size: 12.5px;
   font-weight: 600;
   overflow-wrap: anywhere;
+}
+
+/* -- block roll-up -------------------------------------------------------- */
+/* A closed block says what it holds: one tick per step, coloured by the kind
+   of work, and a flag when something inside failed or waits for the reader.
+   Open, the steps themselves are there, so the strip steps aside. */
+.step__strip {
+  display: flex;
+  flex-shrink: 1;
+  gap: 2px;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.step__strip:empty,
+.step.is-open > .step__head .step__strip {
+  display: none;
+}
+
+.step__mark {
+  flex-shrink: 0;
+  width: 4px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--text-3);
+  opacity: 0.55;
+}
+
+.step__mark[data-kind="agent"] {
+  width: 7px;
+  background: var(--accent);
+  opacity: 0.8;
+}
+
+.step__mark[data-kind="reasoning"] { background: var(--accent); opacity: 0.35; }
+.step__mark[data-family="read"]    { background: var(--tool-read); }
+.step__mark[data-family="search"]  { background: var(--tool-search); }
+.step__mark[data-family="write"]   { background: var(--tool-write); }
+.step__mark[data-family="edit"]    { background: var(--tool-edit); }
+.step__mark[data-family="delete"]  { background: var(--tool-delete); }
+.step__mark[data-family="shell"]   { background: var(--tool-shell); }
+.step__mark[data-family="web"]     { background: var(--tool-web); }
+.step__mark[data-family="task"]    { background: var(--tool-task); }
+.step__mark[data-family="agent"]   { background: var(--tool-agent); }
+.step__mark[data-family]:not([data-family=""]) { opacity: 0.8; }
+
+.step__mark[data-status="error"] {
+  background: var(--danger);
+  opacity: 1;
+}
+
+.step__mark[data-status="running"] {
+  background: var(--accent);
+  opacity: 1;
+  animation: markPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes markPulse {
+  50% { opacity: 0.35; }
+}
+
+.step__flag {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.step__flag[hidden] {
+  display: none;
+}
+
+.step__flag[data-kind="approval"] {
+  background: var(--warn);
+  animation: markPulse 1.2s ease-in-out infinite;
+}
+
+/* The flag is for what is hidden: an open block shows it in place. */
+.step.is-open > .step__head .step__flag {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step__mark[data-status="running"],
+  .step__flag[data-kind="approval"] { animation: none; }
+}
+
+/* -- the fold row of an open row ------------------------------------------ */
+/* The panel's headline in miniature, first thing inside an open block or tool
+   row. It sticks under the panel's own pinned headline so a long run or result
+   can be folded from wherever the reader is. A tool row holds it directly and
+   shows it only while open; a block holds it in its body. */
+.step__fold {
+  position: sticky;
+  top: 28px;
+  z-index: 1;
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  width: 100%;
+  padding: 3px 8px 3px 4px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 12.5px;
+  text-align: left;
+  box-shadow: 0 1px 0 var(--line);
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.step__fold:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.step__foldChevron {
+  display: flex;
+  color: var(--text-3);
+  transform: rotate(90deg);
+}
+
+.step__foldLabel {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step__foldTime {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.step[data-status="running"] .step__fold .step__foldLabel {
+  color: var(--text);
+}
+
+.step > .step__fold {
+  display: none;
+}
+
+.step.is-open > .step__fold {
+  display: flex;
 }

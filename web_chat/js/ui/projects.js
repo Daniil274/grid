@@ -9,6 +9,7 @@
 
 import { h, icon, replace } from "../lib/dom.js";
 import { ICONS } from "./icons.js";
+import { swatchOf } from "./sidebar.js";
 
 /** Where the last active project is remembered, across reloads. */
 export const ACTIVE_PROJECT_KEY = "grid:activeProject";
@@ -56,7 +57,8 @@ export function trackActiveProject(store) {
 }
 
 /**
- * The "New chat will be created in: <project>" line above the rail's list.
+ * The line under "New chat" that says where a new chat starts: "in <project>",
+ * with the project's swatch and a button to start outside any project instead.
  *
  * @param {{node: HTMLElement, store: object}} options
  * @returns {{render: Function}}
@@ -72,15 +74,15 @@ export function createProjectContext({ node, store }) {
     node.hidden = false;
     replace(
       node,
-      h("span.railProject__icon", { "aria-hidden": "true" }, icon(ICONS.folder, { size: 13 })),
+      h("span.railProject__swatch", { class: `railSwatch--${swatchOf(project.id)}`, "aria-hidden": "true" }),
       h(
-        "span.railProject__text",
-        {},
-        "New chat will be created in: ",
+        "span.railTarget__text",
+        { title: `New chats start in ${project.title}` },
+        "in ",
         h("strong", { text: project.title }),
       ),
       h(
-        "button.railProject__clear",
+        "button.railTarget__clear",
         {
           type: "button",
           title: "Start new chats outside any project",
