@@ -12,7 +12,9 @@ from fastapi.testclient import TestClient
 from schemas.schemas import UploadsPolicy
 from tests.conftest import link
 from web_chat.uploads import (
+    SVG_CSP,
     UploadError,
+    is_safe_svg,
     open_in_workspace,
     register_upload_routes,
     safe_name,
@@ -98,13 +100,102 @@ def test_inline_never_serves_a_non_image(upload_app):
     _, client, _, workspaces = upload_app
     client.post("/api/workspace/uploads", files={"files": ("input.txt", b"input")})
     (workspaces["alice"] / "notes.txt").write_bytes(b"just text")
-    (workspaces["alice"] / "vector.svg").write_bytes(
-        b"<svg xmlns='http://www.w3.org/2000/svg'><script/></svg>"
-    )
-    for name in ("notes.txt", "vector.svg"):
+    # Scriptable documents wearing an image's name or an SVG's content.
+    (workspaces["alice"] / "page.svg").write_bytes(b"<html><svg></svg><script>alert(1)</script></html>")
+    (workspaces["alice"] / "page.html").write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+    (workspaces["alice"] / "blob.svg").write_bytes(b"\x00\x01<svg/>")
+    for name in ("notes.txt", "page.svg", "page.html", "blob.svg"):
         response = client.get(f"/api/workspace/files/{name}", params={"inline": "1"})
         assert response.headers["content-disposition"].startswith("attachment;"), name
         assert response.headers["content-type"] == "application/octet-stream", name
+        assert "content-security-policy" not in response.headers, name
+
+
+SAFE_SVG = (
+    b"<?xml version='1.0'?>\n<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 4'>"
+    b"<script>alert(1)</script><rect width='4' height='4' onload='x()'/></svg>"
+)
+
+
+def test_inline_svg_is_served_as_an_image_under_a_sandboxing_csp(upload_app):
+    _, client, _, workspaces = upload_app
+    client.post("/api/workspace/uploads", files={"files": ("input.txt", b"input")})
+    (workspaces["alice"] / "chart.svg").write_bytes(SAFE_SVG)
+    url = "/api/workspace/files/chart.svg"
+    inline = client.get(url, params={"inline": "1"})
+    assert inline.status_code == 200 and inline.content == SAFE_SVG
+    assert inline.headers["content-type"] == "image/svg+xml"
+    assert inline.headers["content-disposition"].startswith("inline;")
+    assert inline.headers["cache-control"] == "no-store"
+    assert inline.headers["x-content-type-options"] == "nosniff"
+    csp = inline.headers["content-security-policy"]
+    assert csp == SVG_CSP
+    for directive in ("default-src 'none'", "sandbox"):
+        assert directive in csp
+    assert "script-src" not in csp and "'unsafe-eval'" not in csp
+
+
+def test_svg_is_an_attachment_without_the_inline_flag(upload_app):
+    _, client, _, workspaces = upload_app
+    client.post("/api/workspace/uploads", files={"files": ("input.txt", b"input")})
+    (workspaces["alice"] / "chart.svg").write_bytes(SAFE_SVG)
+    response = client.get("/api/workspace/files/chart.svg")
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert "content-security-policy" not in response.headers
+
+
+def test_svg_extension_is_case_insensitive_and_bom_is_accepted(upload_app):
+    _, client, _, workspaces = upload_app
+    client.post("/api/workspace/uploads", files={"files": ("input.txt", b"input")})
+    (workspaces["alice"] / "UP.SVG").write_bytes(b"\xef\xbb\xbf" + SAFE_SVG)
+    response = client.get("/api/workspace/files/UP.SVG", params={"inline": "1"})
+    assert response.headers["content-type"] == "image/svg+xml"
+    assert response.headers["content-security-policy"] == SVG_CSP
+
+
+def test_svg_is_checked_per_user(upload_app):
+    _, client, _, workspaces = upload_app
+    client.post("/api/workspace/uploads", files={"files": ("input.txt", b"input")})
+    (workspaces["alice"] / "chart.svg").write_bytes(SAFE_SVG)
+    bob = client.get("/api/workspace/files/chart.svg", params={"inline": "1"}, headers={"x-user": "bob"})
+    assert bob.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        b"",
+        b"<html><svg></svg></html>",
+        b"<script>alert(1)</script><svg/>",
+        b"plain text mentioning <svg",
+        b"\x00<svg/>",
+        b"<svg/>\x00",
+        b"\xff\xfe<\x00s\x00v\x00g\x00>\x00",  # UTF-16: not a plain UTF-8 document
+        b"\x89PNG\r\n\x1a\n",
+        b"<?xml version='1.0'?>" + b" " * 1100 + b"<svg/>",  # <svg beyond the sniffed kilobyte
+        b"<!-- no svg tag here -->",
+    ],
+)
+def test_is_safe_svg_rejects_look_alikes(head):
+    assert is_safe_svg(head) is False
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        b"<svg/>",
+        b"  \n<SVG xmlns='http://www.w3.org/2000/svg'/>",
+        b"<?xml version='1.0' encoding='UTF-8'?><svg/>",
+        b"<!-- c --><svg/>",
+        b"<!DOCTYPE svg PUBLIC '-//W3C//DTD SVG 1.1//EN' ''><svg/>",
+        b"\xef\xbb\xbf<svg/>",
+        # The sniffed kilobyte may end inside a multi-byte character.
+        b"<svg>" + "я".encode() * 600,
+    ],
+)
+def test_is_safe_svg_accepts_plain_documents(head):
+    assert is_safe_svg(head) is True
 
 
 def test_live_download_is_bounded_and_has_no_stale_content_length(upload_app, monkeypatch):

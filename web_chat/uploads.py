@@ -56,8 +56,8 @@ OVERHEAD_BYTES = 64 * 1024
 
 
 #: Raster image magic bytes we are willing to serve inline, and their types.
-#: SVG is deliberately absent: it is a scriptable document, not a picture, and
-#: would run in the chat page's own origin.
+#: SVG is deliberately absent: it is a scriptable document, not a picture. It
+#: is served inline only through :func:`is_safe_svg` and a sandboxing CSP.
 IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -74,6 +74,40 @@ def image_media_type(head: bytes) -> str | None:
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+#: How much of a file :func:`is_safe_svg` looks at.
+SVG_SNIFF_BYTES = 1024
+
+#: Served with every inline SVG: as an ``<img>`` it is drawn, but opened
+#: directly nothing in it can run, load anything, or reach this origin.
+SVG_CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox"
+
+
+def is_safe_svg(head: bytes) -> bool:
+    """Whether *head* (the first bytes of a file) opens like a plain UTF-8 SVG
+    document: an XML declaration, a comment, a doctype or the ``<svg`` tag
+    first, and an ``<svg`` tag within the first kilobyte.
+
+    Only a sniff of the shape - the served response's CSP sandbox is what
+    keeps the document harmless.
+    """
+    import codecs
+
+    head = head[:SVG_SNIFF_BYTES]
+    if head.startswith(codecs.BOM_UTF8):
+        head = head[len(codecs.BOM_UTF8):]
+    if b"\0" in head:
+        return False
+    try:
+        # Not final: the kilobyte may end inside a multi-byte character.
+        text = codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
+    except UnicodeDecodeError:
+        return False
+    text = text.lstrip().lower()
+    if not text.startswith(("<?xml", "<svg", "<!--", "<!doctype svg")):
+        return False
+    return "<svg" in text
 
 
 class UploadError(ValueError):
@@ -518,13 +552,23 @@ def register_upload_routes(
         except UploadError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
 
-        # ``?inline=1`` shows a picture inside the chat's own page. Only a real
-        # raster image qualifies - not an SVG, which is a scriptable document
-        # rather than a picture; anything else stays a forced attachment.
+        # ``?inline=1`` shows a picture inside the chat's own page: a real
+        # raster image, or an ``.svg`` that looks like a plain SVG document and
+        # is served under a sandboxing CSP (scripts and any request blocked,
+        # even when its URL is opened directly). Anything else stays a forced
+        # attachment.
         handle = os.fdopen(fd, "rb")
         media_type = None
+        extra_headers: dict[str, str] = {}
         if inline:
-            media_type = image_media_type(handle.read(12))
+            head = handle.read(SVG_SNIFF_BYTES)
+            media_type = image_media_type(head[:12])
+            if media_type is None and name.lower().endswith(".svg") and is_safe_svg(head):
+                media_type = "image/svg+xml"
+                extra_headers = {
+                    "Content-Security-Policy": SVG_CSP,
+                    "X-Content-Type-Options": "nosniff",
+                }
             handle.seek(0)
 
         def chunks():
@@ -553,6 +597,7 @@ def register_upload_routes(
                     f"filename*=UTF-8''{quote(name)}"
                 ),
                 "Cache-Control": "no-store",
+                **extra_headers,
             },
             background=BackgroundTask(handle.close),
         )
