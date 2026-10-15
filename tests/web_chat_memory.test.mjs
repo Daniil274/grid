@@ -103,7 +103,7 @@ test("opening loads the overview and shows backend, counts, budget and the layer
     await drawer.open();
 
     assert.ok(view.drawer.classList.contains("is-open"));
-    assert.deepEqual(stub.calls[0], ["overview", { context_id: "ctx", layer: undefined, scope: undefined, query: undefined, stale_only: undefined, limit: 200 }]);
+    assert.deepEqual(stub.calls[0], ["overview", { context_id: "ctx", layer: undefined, level: undefined, scope: undefined, query: undefined, stale_only: undefined, limit: 200 }]);
     assert.match(view.backend.textContent, /sqlite/);
     assert.match(view.backend.textContent, /active/);
     for (const layer of ["L3", "L2", "L1", "L0"]) assert.match(view.counts.textContent, new RegExp(layer));
@@ -210,8 +210,9 @@ test("a new record is created from the form with parsed tags and the chat's cont
     await drawer.save();
 
     const create = stub.calls.find((call) => call[0] === "create");
+    // A chat with the user's memory only: the record is the user's.
     assert.deepEqual(create[1], {
-      layer: "L2", scope: "project", category: "workflow", title: "Release", content: "Tag then push",
+      layer: "L2", level: "user", scope: "project", category: "workflow", title: "Release", content: "Tag then push",
       file_path: "", source_ref: "", tags: ["ci", "release"], confidence: 1, context_id: "chat-7",
     });
     assert.equal(drawer.draft, null);

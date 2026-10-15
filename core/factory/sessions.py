@@ -53,13 +53,20 @@ class SessionUpkeep:
     """
 
     def sync_memory_from_context(self, messages) -> list:
-        """Best-effort distillation of messages about to leave the SDK session."""
+        """Best-effort distillation of messages about to leave the SDK session.
+
+        Skipped when a model already reads every answered turn (``extract_on_turn``
+        with ``extract_with_model``): those turns are in memory, and the heuristic
+        here would only add sentence fragments beside the model's records.
+        """
         try:
             config = getattr(self, "config", None)
             if config is None or not hasattr(config, "get_memory_config"):
                 return []
             settings = config.get_memory_config()
             if not settings.enabled or not settings.extract_on_compact:
+                return []
+            if settings.extract_on_turn and settings.extract_with_model:
                 return []
             manager = self.get_memory_manager()
             if manager is None:

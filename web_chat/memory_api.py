@@ -7,8 +7,13 @@
     POST   /api/memory/sync            distil the conversation into memory
 
 ``GET`` takes ``context_id`` (the chat whose system and workspace are
-meant), ``layer``, ``scope``, ``category``, ``query``, ``stale_only``,
+meant), ``level``, ``layer``, ``scope``, ``category``, ``query``, ``stale_only``,
 ``include_stale`` and ``limit``; the writes take ``context_id`` in the body.
+
+A chat's memory has levels (core.factory.memory): its own, its project's and
+its user's. Every record says its ``level``; ``GET`` lists them all or one
+(``level``), a new record is stored at the ``level`` it names, and an update
+naming another level moves the record there.
 
 Every route acts in the asking user's space (web_chat.space) and, with a
 ``context_id``, in the workspace and system that chat runs on. The memory is
@@ -45,6 +50,7 @@ from core.memory.models import estimated_tokens
 from web_chat.space import UserSpace
 
 Layer = Literal["L0", "L1", "L2", "L3"]
+Level = Literal["chat", "project", "user"]
 Scope = Literal["project", "user", "system"]
 Category = Literal["decision", "constraint", "architecture", "bug", "preference", "workflow", "note"]
 
@@ -65,6 +71,7 @@ class MemoryCreateRequest(BaseModel):
     file_path: str | None = Field(default=None, max_length=1000)
     confidence: float = Field(default=1.0, ge=0, le=1)
     context_id: str | None = Field(default=None, max_length=200)
+    level: Level | None = None
 
 
 class MemoryUpdateRequest(BaseModel):
@@ -81,6 +88,7 @@ class MemoryUpdateRequest(BaseModel):
     file_path: str | None = Field(default=None, max_length=1000)
     confidence: float | None = Field(default=None, ge=0, le=1)
     context_id: str | None = Field(default=None, max_length=200)
+    level: Level | None = None
 
 
 class MemorySyncRequest(BaseModel):
@@ -91,12 +99,34 @@ class _Target:
     """The memory one request works on, and what its config says about it."""
 
     def __init__(self, manager: MemoryManager, settings: Any, enabled: bool,
-                 factory: Any = None, agent_key: str | None = None) -> None:
+                 factory: Any = None, agent_key: str | None = None,
+                 levels: list[tuple[str, MemoryManager]] | None = None,
+                 titles: dict[str, str] | None = None) -> None:
         self.manager = manager
         self.settings = settings
         self.enabled = enabled
         self.factory = factory      # the chat's agent factory: its model writes memories
         self.agent_key = agent_key
+        #: The chat's memory levels, nearest first; the user's (``manager``) last.
+        self.levels = levels or [("user", manager)]
+        self.titles = titles or {"user": "the user, in any project"}
+
+    def level(self, name: str | None) -> MemoryManager:
+        """The memory of level *name* (the user's when None); 400 for one the chat lacks."""
+        managers = dict(self.levels)
+        if name is None:
+            return self.manager
+        if name not in managers:
+            raise HTTPException(status_code=400, detail=f"This chat has no {name} memory")
+        return managers[name]
+
+    def holder(self, record_id: str) -> tuple[str, MemoryManager, MemoryRecord]:
+        """The level holding record *record_id*; 404 when none does."""
+        for name, manager in self.levels:
+            record = manager.get(record_id)
+            if record is not None:
+                return name, manager, record
+        raise HTTPException(status_code=404, detail="Memory record not found")
 
 
 _local: weakref.WeakKeyDictionary[Any, dict[tuple, MemoryManager]] = weakref.WeakKeyDictionary()
@@ -130,17 +160,20 @@ def _resolve_sync(space: UserSpace, registry: Any, system: str, context_id: str 
     config = registry.config(system)
     settings = config.get_memory_config()
     factory = registry.factory(system)
+    of_levels = getattr(factory, "memory_levels", None)
+    levels = of_levels(context_id, force=True) if of_levels is not None else []
+    titles = factory.memory_level_titles(context_id) if levels else None
     if settings.enabled:
         manager = factory.get_memory_manager()
         if manager is not None:
-            return _Target(manager, settings, True, factory, agent_key)
+            return _Target(manager, settings, True, factory, agent_key, levels=levels, titles=titles)
     # Disabled in the config: still the factory's own workspace store (the one its
     # memory tools write to), so panel, tools and turn hook share file and namespace.
     shared = getattr(factory, "get_workspace_memory_manager", None)
     if shared is not None:
         manager = shared()
         if manager is not None:
-            return _Target(manager, settings, False)
+            return _Target(manager, settings, False, levels=levels, titles=titles)
     tenant = getattr(factory, "_memory_tenant", None) or settings.tenant_id
     return _Target(_local_manager(space, config, settings, tenant), settings, False)
 
@@ -154,7 +187,9 @@ async def _target(space: UserSpace, context_id: str | None) -> _Target:
         if manager.conversation_view(context_id) is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
         metadata = manager.get_context_metadata(context_id)
-    registry = await space.registry_for(context_id)
+    # A chat with a space of its own remembers in its user's space: no runtime of its own is built for this.
+    of_memory = getattr(space, "memory_registry", None)
+    registry = await (of_memory(context_id) if of_memory is not None else space.registry_for(context_id))
     system = metadata.get("routed_system")
     if system not in set(registry.keys()):
         system = registry.default_key()
@@ -167,9 +202,10 @@ async def _target(space: UserSpace, context_id: str | None) -> _Target:
         raise HTTPException(status_code=503, detail=f"Memory is unavailable: {exc}") from None
 
 
-def serialize_record(record: MemoryRecord) -> dict[str, Any]:
+def serialize_record(record: MemoryRecord, level: str | None = None) -> dict[str, Any]:
     return {
         "id": record.id,
+        "level": level or "user",
         "layer": record.layer.value,
         "scope": record.scope.value,
         "category": record.category.value,
@@ -230,18 +266,29 @@ async def _sync_with_model(target: _Target, messages: list[dict[str, Any]], sour
     extract = getattr(target.factory, "extract_turn_with_model", None)
     if not target.enabled or extract is None or not getattr(target.settings, "extract_with_model", True):
         return None
+    from core.factory.memory import chat_episode, store_by_level, store_episode
+
     snapshot = bool(getattr(target.settings, "snapshot_turns", True))
+    context_id = source_ref.removeprefix("chat:")
     stored: dict[str, Any] = {}
     for request, answer in exchanges(messages)[-SYNC_EXCHANGES:]:
-        extracted = await extract(target.manager, request, answer, target.agent_key, target.settings,
-                                  source_ref=source_ref)
+        current = await asyncio.to_thread(chat_episode, target.levels, context_id)
+        extracted = await extract(target.levels, request, answer, target.agent_key, target.settings,
+                                  source_ref=source_ref, titles=target.titles,
+                                  episode=current[1].content if current else None)
         if extracted is None:  # the model failed: what it did store, never heuristic fragments
             return list(stored.values())
         for record in await asyncio.to_thread(
-            target.manager.store_extracted, extracted, source_ref=source_ref,
+            store_by_level, target.levels, extracted, source_ref=source_ref,
             exchange=(request, answer) if snapshot else None,
         ):
             stored[record.id] = record
+        episode = await asyncio.to_thread(store_episode, target.levels, context_id, extracted.episode, current,
+                                          source_ref=source_ref)
+        if episode is not None:
+            if current is not None:
+                stored.pop(current[1].id, None)  # replaced within this sync
+            stored[episode.id] = episode
     return list(stored.values())
 
 
@@ -253,6 +300,7 @@ def register_memory_routes(router: APIRouter, current_space: Callable[..., Any])
     @router.get("/api/memory")
     async def memory_overview(
         context_id: str | None = Query(default=None, max_length=200),
+        level: Level | None = None,
         layer: Layer | None = None,
         scope: Scope | None = None,
         category: Category | None = None,
@@ -271,11 +319,20 @@ def register_memory_routes(router: APIRouter, current_space: Callable[..., Any])
                 enabled=target.enabled, auto_inject=settings.auto_inject,
                 auto_inject_tokens=settings.auto_inject_tokens,
             )
-            records = manager.list_records(
-                layer=layer, scope=scope, category=category, stale_only=stale_only,
-                include_stale=include_stale, query=query, limit=limit,
-            )
-            return {"overview": overview, "records": [serialize_record(r) for r in records]}
+            records = []
+            levels = []
+            for name, holder in target.levels:
+                found = holder.list_records(
+                    layer=layer, scope=scope, category=category, stale_only=stale_only,
+                    include_stale=include_stale, query=query, limit=limit,
+                ) if level in (None, name) else []
+                records.extend(serialize_record(r, name) for r in found)
+                counts = holder.stats().get("counts") or {}
+                levels.append({"level": name, "title": target.titles.get(name, name),
+                               "count": sum(int(v) for k, v in counts.items() if k != "L0" and isinstance(v, int))})
+            if not query:
+                records.sort(key=lambda record: record["updated_at"] or "", reverse=True)
+            return {"overview": overview, "records": records[:limit], "levels": levels}
 
         try:
             data = await asyncio.to_thread(read)
@@ -284,7 +341,7 @@ def register_memory_routes(router: APIRouter, current_space: Callable[..., Any])
         data["config"] = _config_summary(target)
         data["count"] = len(data["records"])
         data["filters"] = {
-            "layer": layer, "scope": scope, "category": category, "query": query,
+            "level": level, "layer": layer, "scope": scope, "category": category, "query": query,
             "stale_only": stale_only, "include_stale": include_stale, "limit": limit,
         }
         return JSONResponse(data)
@@ -292,6 +349,9 @@ def register_memory_routes(router: APIRouter, current_space: Callable[..., Any])
     @router.post("/api/memory/records")
     async def create_record(body: MemoryCreateRequest, space: UserSpace = Depends(current_space)) -> JSONResponse:
         target = await _target(space, body.context_id)
+        names = [name for name, _ in target.levels]
+        level = "user" if body.layer == "L3" else body.level or ("project" if "project" in names else "user")
+        holder = target.level(level)
 
         def write() -> MemoryRecord:
             record = MemoryRecord(
@@ -300,28 +360,39 @@ def register_memory_routes(router: APIRouter, current_space: Callable[..., Any])
                 source_ref=body.source_ref or None, file_path=body.file_path or None,
                 confidence=body.confidence,
             )
-            return target.manager.remember(record)
+            return holder.remember(record)
 
         try:
             record = await asyncio.to_thread(write)
         except (ValueError, TypeError, OSError) as exc:
             raise _refused(exc) from None
-        return JSONResponse(serialize_record(record), status_code=status.HTTP_201_CREATED)
+        return JSONResponse(serialize_record(record, level), status_code=status.HTTP_201_CREATED)
 
     @router.api_route("/api/memory/records/{record_id}", methods=["PUT", "PATCH"])
     async def update_record(
         record_id: str, body: MemoryUpdateRequest, space: UserSpace = Depends(current_space)
     ) -> JSONResponse:
         target = await _target(space, body.context_id)
-        fields = body.model_dump(exclude={"context_id"}, exclude_none=True)
+        fields = body.model_dump(exclude={"context_id", "level"}, exclude_none=True)
+        name, holder, _old = await asyncio.to_thread(target.holder, record_id)
+        destination = target.level(body.level) if body.level and body.level != name else None
+
+        def update() -> MemoryRecord | None:
+            record = holder.update_record(record_id, **fields) if fields else holder.get(record_id)
+            if record is None or destination is None:
+                return record
+            # Another level: the record moves there, whole, and leaves this one.
+            moved = destination.remember(record)
+            holder.forget(record_id)
+            return moved
 
         try:
-            record = await asyncio.to_thread(lambda: target.manager.update_record(record_id, **fields))
+            record = await asyncio.to_thread(update)
         except (ValueError, TypeError, OSError) as exc:
             raise _refused(exc) from None
         if record is None:
             raise HTTPException(status_code=404, detail="Memory record not found")
-        return JSONResponse(serialize_record(record))
+        return JSONResponse(serialize_record(record, body.level if destination is not None else name))
 
     @router.delete("/api/memory/records/{record_id}")
     async def delete_record(
@@ -330,7 +401,8 @@ def register_memory_routes(router: APIRouter, current_space: Callable[..., Any])
         space: UserSpace = Depends(current_space),
     ) -> JSONResponse:
         target = await _target(space, context_id)
-        removed = await asyncio.to_thread(target.manager.forget, record_id)
+        _name, holder, _record = await asyncio.to_thread(target.holder, record_id)
+        removed = await asyncio.to_thread(holder.forget, record_id)
         if not removed:
             raise HTTPException(status_code=404, detail="Memory record not found")
         return JSONResponse({"ok": True, "id": record_id})

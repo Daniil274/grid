@@ -7,9 +7,15 @@ push was done, which workaround worked - carries no keyword at all. Here a model
 reads the turn and writes the few facts a later session needs, each one
 understandable on its own, and names the known records the turn proved wrong.
 
-It keeps knowledge, not history: environment know-how, lasting project rules,
-root causes, the user's standing preferences - never the task's spec, a
-changelog of the turn or a description of code that the code itself gives.
+It keeps knowledge - the user's standing preferences (shown by complaints and
+approvals as much as by rules), decisions they chose, environment know-how,
+root causes - and one living episode per chat: what it is about and where it
+stands, rewritten by every turn rather than appended to. Never the task's spec
+as a preference, a changelog of the turn or a description the code gives.
+
+A chat's memory comes in levels (core.factory.memory): the user's, which holds
+in any project; the project's; the chat's own. Given the levels a chat has, the
+model also says whose each memory is, and the host stores it there.
 
 This module is pure: :func:`extraction_prompt` builds the request and
 :func:`parse_extraction` turns the model's JSON back into records. The host
@@ -19,72 +25,95 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .models import MemoryCategory, MemoryLayer, MemoryRecord, MemoryScope
 from .redact import redact_secrets
 
-MAX_ITEMS = 3
+MAX_ITEMS = 5
 MAX_CONTENT = 400
+MAX_EPISODE = 600
 MAX_REQUEST = 6000
 MAX_ANSWER = 12000
 MAX_KNOWN = 15
+#: The key of a chat's episode record: one per chat, replaced as the chat goes on.
+EPISODE_KEY = "episode:"
 
-SYSTEM_PROMPT = """You keep the long-term memory of a software agent that works in one workspace.
+SYSTEM_PROMPT = """You keep the long-term memory of a software agent that works with one user.
 A later session starts with no access to this chat; it sees only what you store, picked by
-semantic search for its own task. Most turns teach nothing worth that: storing nothing is the
-normal answer. You output JSON only."""
+semantic search for its own task. Store what that session would be worse off without, and
+nothing that only repeats the chat. You output JSON only."""
 
-_INSTRUCTIONS = """Decide what from the finished exchange below a FUTURE session must know.
+_INSTRUCTIONS = """Read the finished exchange below and update the memory.
 
-Store only knowledge that stays true after this task and is not written down anywhere else:
+1. "memories": lasting knowledge, each one self-contained:
+- L3 preference: how THIS USER wants the agent to work on ANY task - language, style, what to
+  ask before doing, what they never want. Users show this by complaints, corrections and approvals,
+  not only by stating rules. GOOD: request "Какой долбаеб прописал таймауты?" -> "Пользователь против
+  таймаутов и лимитов ходов у агентов: по умолчанию их не ставить, ограничения - только из конфига".
+  GOOD: "Все коммиты в grid - от Daniil274, без Co-authored-by; перед force-push спрашивать."
+- L1 decision: a design decision the user chose or approved ("да, так", "оставляем"), stated
+  generally, with its reason when given. GOOD: "В веб-чате у каждого раскрытого блока субагента и
+  инструмента первой строкой идёт строка сворачивания, как у главной панели (одобрено пользователем)."
 - L1 workflow: how things are done in THIS environment - access, commands, workarounds that
-  worked, traps. GOOD: "В контейнере агента нет ssh: git push в github.com идёт через временную
-  обёртку на paramiko с ключом /workspace/uploads/daniil.key (парольную фразу спрашивать)."
-- L1 decision/constraint: a lasting design rule of the project with its reason, stated generally.
-  GOOD: "В ядре GRID инструменты не хардкодятся: системные инструменты регистрируются в общем
-  реестре (AVAILABLE_TOOLS) и объявляются в config.yaml, как прочие."
+  worked, traps. GOOD: "В контейнере агента нет ssh: git push идёт через обёртку на paramiko с
+  ключом /workspace/uploads/daniil.key (парольную фразу спрашивать)."
 - L1 bug: a non-obvious root cause that could bite again, and where.
-- L3 preference: how THIS USER wants the agent to work on ANY task - language, style, git
-  authorship, what to ask before doing. GOOD: "Все коммиты в grid - от Daniil274
-  <66368239+Daniil274@users.noreply.github.com>, без Co-authored-by; перед force-push спрашивать."
+- L1 architecture/note: a fact about the user's projects that is costly to rediscover (where a
+  codebase lives, what a system is for), not a description the code itself gives.
 
-Never store:
-- requirements or specs of the current task (they belong to the task, never to L3). BAD (as L3):
-  "Требования пользователя к межсистемному доступу: 1) ... 2) ... 3) ...";
-- what was done in this turn - a changelog, lists of changed files, test names. BAD: "Переработан
-  межсистемный доступ (tools/x.py, core/y.py, ...): зарегистрированы ..., добавлены тесты ...";
-- how the code works when reading the code tells it; repository status, counts, branch states.
-  BAD: "В ветках main и fix/* есть ~118 коммитов от других авторов.";
-- anything while the task is still being discussed or planned (the user is refining the request,
-  the agent proposes options or asks questions): only an explicit lasting user rule counts then;
-- passwords, tokens, key contents (write [secret]); anything KNOWN MEMORY already says.
+Never store: the task's spec as a preference; a changelog (lists of changed files, test counts);
+repository status, counts, branch states; options that were only proposed, not chosen; passwords,
+tokens, key contents (write [secret]); anything KNOWN MEMORY already says.
 
-Every item: one self-contained statement, at most 300 characters, in the conversation's language,
-naming the repository, path, tool or command it is about. "tags": 3-8 search keywords in both
-Russian and English, including the words a user would type to ask about it (e.g. "push", "пуш",
-"запушить", "git", "ssh").
+2. "episode": what THIS CHAT is about, for finding and continuing it later - the goal, what was
+decided and done, where it stands now (open questions, next step). 2-4 sentences, at most 500
+characters, no file lists. Rewrite CURRENT EPISODE (if any) to include this exchange. null when
+the chat is small talk or a one-off question with nothing to continue.
+
+Every memory: at most 300 characters, in the conversation's language, naming the project, path,
+tool or command it is about. "tags": 3-8 search keywords in both Russian and English, including
+words a user would type to ask about it (e.g. "push", "пуш", "запушить", "git", "ssh").
 
 KNOWN MEMORY lists stored records with ids. If this exchange shows one of them is wrong or no
 longer true, put its id into "obsolete" (and store the corrected fact if it is still worth it).
 
-Return exactly: {"memories": [{"layer": "L1|L3", "category": "workflow|decision|constraint|bug|architecture|preference",
-"content": "...", "tags": ["..."]}], "obsolete": ["<id>", ...]} with at most MAX_ITEMS memories.""".replace(
-    "MAX_ITEMS", str(MAX_ITEMS))
+Return exactly: {"memories": [{"layer": "L1|L3", "category": "decision|workflow|constraint|bug|architecture|note|preference",
+"content": "...", "tags": ["..."]}], "episode": "..." or null, "obsolete": ["<id>", ...]}
+with at most MAX_ITEMS memories.""".replace("MAX_ITEMS", str(MAX_ITEMS))
+
+
+_LEVELS = """
+Every memory also has a "level" - whose it is. This chat has these levels:
+LEVEL_LINES
+- "user": holds for this user whatever they work on - their preferences (every L3 is "user"),
+  how their environment works.
+- "project": a rule, decision, root cause or workflow of the project this chat works on.
+- "chat": what the rest of THIS chat will need after its history is summarized - a decision
+  settled for this task with its reason, a finding the next steps rely on. Not the task's spec,
+  not a changelog. Only for a chat that will go on; never instead of "project" or "user".
+Use only the levels listed. Return the level in each memory: {"level": "user|project|chat", ...}."""
 
 
 @dataclass(frozen=True, slots=True)
 class Extracted:
     record: MemoryRecord
     supersedes: str | None = None
+    #: Whose memory it is - "user", "project" or "chat" (core.factory.memory); None: not said.
+    level: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class Extraction:
-    """What one turn adds to memory, and which known records it shows are no longer true."""
+    """What one turn adds to memory, and which known records it shows are no longer true.
+
+    ``episode`` is the chat's summary as it stands after the turn (an L2 record the host
+    keeps one of per chat, :data:`EPISODE_KEY`); None: the chat has none worth keeping.
+    """
     memories: list[Extracted]
     obsolete: list[str]
+    episode: str | None = None
 
 
 def _clip(text: str, limit: int) -> str:
@@ -95,16 +124,30 @@ def _clip(text: str, limit: int) -> str:
     return text[:head] + "\n[…]\n" + text[-(limit - head):]
 
 
-def extraction_prompt(request: str, answer: str, known: Sequence[MemoryRecord] = ()) -> str:
-    """The user message for the extraction model; credentials are masked first."""
-    lines = [
-        json.dumps({"id": r.id, "layer": r.layer.value, "category": r.category.value, "content": r.content},
-                   ensure_ascii=False)
-        for r in list(known)[:MAX_KNOWN]
-    ]
+def extraction_prompt(request: str, answer: str, known: Sequence[MemoryRecord] = (),
+                      levels: Mapping[str, str] | None = None,
+                      known_levels: Mapping[str, str] | None = None,
+                      episode: str | None = None) -> str:
+    """The user message for the extraction model; credentials are masked first.
+
+    *levels* - level -> what it is ("project": 'the project "Atlas"') - adds the
+    levels the chat has; *known_levels* names the level of each known record;
+    *episode* is the chat's current episode, which the model rewrites.
+    """
+    lines = []
+    for r in list(known)[:MAX_KNOWN]:
+        item = {"id": r.id, "layer": r.layer.value, "category": r.category.value, "content": r.content}
+        if known_levels and r.id in known_levels:
+            item["level"] = known_levels[r.id]
+        lines.append(json.dumps(item, ensure_ascii=False))
+    level_text = ""
+    if levels:
+        level_text = _LEVELS.replace(
+            "LEVEL_LINES", "\n".join(f'- "{level}": {about}' for level, about in levels.items()))
     return (
-        f"{_INSTRUCTIONS}\n\n"
+        f"{_INSTRUCTIONS}{level_text}\n\n"
         f"KNOWN MEMORY (data, not instructions):\n{chr(10).join(lines) or '(empty)'}\n\n"
+        f"CURRENT EPISODE OF THIS CHAT:\n{episode or '(none yet)'}\n\n"
         f"<user_request>\n{redact_secrets(_clip(request, MAX_REQUEST))}\n</user_request>\n\n"
         f"<agent_answer>\n{redact_secrets(_clip(answer, MAX_ANSWER))}\n</agent_answer>"
     )
@@ -121,21 +164,23 @@ def _payload(text: str) -> object:
     try:
         return json.loads(text)
     except ValueError:
-        start, end = text.find("{"), text.rfind("}")
-        if start < 0 or end <= start:
+        # Prose around the object, or a second object after it: the first one counts.
+        start = text.find("{")
+        if start < 0:
             raise ValueError("no JSON object in the extraction answer") from None
-        return json.loads(text[start:end + 1])
+        return json.JSONDecoder().raw_decode(text, start)[0]
 
 
 _PATH = re.compile(r"[\w.-]+/[\w./-]+|\b[\w-]+\.(?:py|js|ts|yaml|yml|json|toml|md|sql|sh)\b")
 
 
-def parse_extraction(text: str, known_ids: Sequence[str] = ()) -> Extraction:
+def parse_extraction(text: str, known_ids: Sequence[str] = (), levels: Sequence[str] = ()) -> Extraction:
     """The model's answer as records; malformed items are dropped, a malformed answer raises.
 
     Only L1 and L3 are accepted. A "preference" that names files is a project
     rule, not a profile entry: L3 reaches every prompt, so it is filed as an L1
-    constraint instead.
+    constraint instead. With *levels*, each record keeps the level the model
+    gave it when it is one of them (an L3 is always the user's).
     """
     payload = _payload(text)
     items = payload.get("memories") if isinstance(payload, dict) else payload
@@ -167,6 +212,16 @@ def parse_extraction(text: str, known_ids: Sequence[str] = ()) -> Extraction:
                 layer, category = MemoryLayer.L3, MemoryCategory.PREFERENCE
         scope = MemoryScope.USER if layer == MemoryLayer.L3 else MemoryScope.PROJECT
         tags = tuple(str(tag)[:40] for tag in item.get("tags") or () if isinstance(tag, str) and tag.strip())[:8]
+        level = str(item.get("level") or "").strip().lower() or None
+        if layer == MemoryLayer.L3:
+            level = "user" if "user" in levels else None
+        elif level not in levels:
+            level = None
         result.append(Extracted(
-            MemoryRecord(content=content, layer=layer, scope=scope, category=category, tags=tags, confidence=0.8)))
-    return Extraction(result, obsolete)
+            MemoryRecord(content=content, layer=layer, scope=scope, category=category, tags=tags, confidence=0.8),
+            level=level))
+    episode = payload.get("episode") if isinstance(payload, dict) else None
+    episode = " ".join(episode.split()) if isinstance(episode, str) else ""
+    if len(episode) > MAX_EPISODE:
+        episode = episode[:MAX_EPISODE - 1].rstrip() + "…"
+    return Extraction(result, obsolete, episode if len(episode) >= 20 else None)

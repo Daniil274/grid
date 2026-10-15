@@ -9,6 +9,11 @@
  *
  * Layers: L3 profile, L2 scenarios, L1 facts, L0 history. A record tied to a
  * file is FRESH while the file is as it was and STALE once it changed.
+ *
+ * Levels: whose a record is - this chat's, its project's, or the user's in any
+ * project (core/factory/memory.py). The server says which levels the open chat
+ * has; the filter and the form offer those, and saving a record with another
+ * level moves it there.
  */
 
 import { debounce, h, replace } from "../lib/dom.js";
@@ -27,14 +32,15 @@ export const LAYER_TABS = [
 
 const LAYER_NAMES = { L3: "Profile", L2: "Scenario", L1: "Fact", L0: "History" };
 const LAYER_COUNT_ORDER = ["L3", "L2", "L1", "L0"];
-const SCOPES = ["project", "user", "system"];
+export const LEVEL_NAMES = { chat: "This chat", project: "Project", user: "You · any project" };
 const CATEGORIES = ["note", "decision", "constraint", "architecture", "bug", "preference", "workflow"];
 const SEARCH_DELAY = 250;
 
 const options = (values) => values.map((value) => ({ value, label: value }));
 
-const blankDraft = (layer = "L1") => ({
+const blankDraft = (layer = "L1", level = "user") => ({
   layer: layer || "L1",
+  level,
   scope: "project",
   category: "note",
   title: "",
@@ -47,6 +53,7 @@ const blankDraft = (layer = "L1") => ({
 
 const draftOf = (record) => ({
   layer: record.layer,
+  level: record.level ?? "user",
   scope: record.scope,
   category: record.category,
   title: record.title ?? "",
@@ -71,6 +78,7 @@ export function payloadOf(draft, contextId) {
   const confidence = Number(draft.confidence);
   return {
     layer: draft.layer,
+    ...(draft.level ? { level: draft.layer === "L3" ? "user" : draft.level } : {}),
     scope: draft.scope,
     category: draft.category,
     title: draft.title.trim(),
@@ -98,6 +106,7 @@ export class MemoryDrawer {
     this.onChanged = onChanged;
     this.layer = "";
     this.scope = "";
+    this.level = "";
     this.staleOnly = false;
     this.query = "";
     this.data = null;
@@ -134,7 +143,7 @@ export class MemoryDrawer {
     syncButton.addEventListener("click", () => this.sync());
     newButton.addEventListener("click", () => this.startNew());
     previewButton.addEventListener("click", () => this.togglePreview());
-    scope.addEventListener("change", () => this.setScope(scope.value));
+    scope.addEventListener("change", () => this.setLevel(scope.value));
     stale.addEventListener("change", () => this.setStaleOnly(Boolean(stale.checked)));
     const later = debounce(() => this.setQuery(search.value), SEARCH_DELAY);
     search.addEventListener("input", later);
@@ -158,6 +167,16 @@ export class MemoryDrawer {
   setScope(scope) {
     this.scope = scope || "";
     return this.load();
+  }
+
+  setLevel(level) {
+    this.level = level || "";
+    return this.load();
+  }
+
+  /** The levels the open chat has, nearest first: [{level, title, count}]. */
+  get levels() {
+    return this.data?.levels?.length ? this.data.levels : [{ level: "user", title: "the user, in any project" }];
   }
 
   setStaleOnly(value) {
@@ -184,6 +203,7 @@ export class MemoryDrawer {
     return {
       context_id: this.getContextId() || undefined,
       layer: this.layer || undefined,
+      level: this.level || undefined,
       scope: this.scope || undefined,
       query: this.query || undefined,
       stale_only: this.staleOnly || undefined,
@@ -207,6 +227,8 @@ export class MemoryDrawer {
       if (token !== this.loadToken) return null; // a newer request answers
       this.data = data;
       this.records = data.records ?? [];
+      if (this.level && !this.levels.some((item) => item.level === this.level)) this.level = "";
+      this._renderLevels();
       this._renderSummary();
       this._renderTabs();
       this._renderPreview();
@@ -272,6 +294,18 @@ export class MemoryDrawer {
     this.nodes.syncButton.disabled = this.busy;
   }
 
+  _renderLevels() {
+    const select = this.nodes.scope;
+    replace(
+      select,
+      h("option", { value: "", text: "Every level" }),
+      this.levels.map((item) =>
+        h("option", { value: item.level, text: `${LEVEL_NAMES[item.level] ?? item.level}${item.count != null ? ` (${item.count})` : ""}` }),
+      ),
+    );
+    select.value = this.level;
+  }
+
   _renderPreview() {
     const text = this.data?.overview?.preview_prompt_section ?? "";
     this.nodes.previewText.textContent = text || "Nothing is injected into the prompt yet.";
@@ -333,7 +367,11 @@ export class MemoryDrawer {
         {},
         h("span.memTag.memTag--layer", { text: record.layer, title: LAYER_NAMES[record.layer] }),
         h("span.memTag", { text: record.category }),
-        h("span.memTag.memTag--scope", { text: record.scope }),
+        h("span.memTag.memTag--scope", {
+          text: LEVEL_NAMES[record.level] ?? record.level ?? record.scope,
+          title: this.levels.find((item) => item.level === record.level)?.title ?? record.scope,
+          dataset: { level: record.level ?? "" },
+        }),
         h("span.memTag.memTag--fresh", { text: freshness(status), dataset: { status } }),
         h("span.memCard__time", { text: shortStamp(record.updated_at || record.created_at) }),
       ),
@@ -360,7 +398,8 @@ export class MemoryDrawer {
 
   startNew() {
     this.selectedId = null;
-    this.draft = blankDraft(this.layer);
+    const names = this.levels.map((item) => item.level);
+    this.draft = blankDraft(this.layer, this.level || (names.includes("project") ? "project" : "user"));
     this._renderList();
     this._renderEditor();
   }
@@ -413,7 +452,11 @@ export class MemoryDrawer {
           "div.formGrid",
           {},
           field("Layer", select(draft, "layer", options(layers))),
-          field("Scope", select(draft, "scope", options(SCOPES))),
+          field(
+            "Level",
+            select(draft, "level", this.levels.map((item) => ({ value: item.level, label: LEVEL_NAMES[item.level] ?? item.level }))),
+            "Whose it is. Another level moves the record there.",
+          ),
           field("Category", select(draft, "category", options(CATEGORIES))),
           field("Confidence", confidence, "0 to 1"),
         ),

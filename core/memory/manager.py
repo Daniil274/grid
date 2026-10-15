@@ -177,7 +177,8 @@ class MemoryManager:
         return [hit.record for hit in hits if hit.bm25_rank is not None]
 
     @staticmethod
-    def render_records(records: Iterable[MemoryRecord], max_tokens: int = 1500) -> PromptSection:
+    def render_records(records: Iterable[MemoryRecord], max_tokens: int = 1500,
+                       levels: Mapping[str, str] | None = None) -> PromptSection:
         """Render whole JSON records inside a fixed trust boundary, never truncate it.
 
         Text stays readable (no ``\\uXXXX`` for non-Latin letters); the budget is
@@ -198,10 +199,13 @@ class MemoryManager:
             if record.id in seen or record.layer == MemoryLayer.L0:
                 continue
             seen.add(record.id)
-            line = json.dumps({"layer": record.layer, "category": record.category,
-                               "content": record.content, "source_ref": record.source_ref,
-                               "confidence": record.confidence, "status": record.stale_status},
-                              ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
+            item = {"layer": record.layer, "category": record.category,
+                    "content": record.content, "source_ref": record.source_ref,
+                    "confidence": record.confidence, "status": record.stale_status}
+            if levels and record.id in levels:
+                # Whose it is: this chat's, its project's, or the user's anywhere.
+                item["level"] = levels[record.id]
+            line = json.dumps(item, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
             cost = estimated_tokens(line + "\n")
             if used + cost <= max_tokens:
                 lines.append(line)
@@ -398,6 +402,17 @@ class MemoryManager:
             "total_estimated_tokens": pack.total_estimated_tokens,
         })
         return data
+
+    def forget_all(self) -> int:
+        """Delete every record of this memory's namespace; how many went."""
+        native = getattr(self.backend, "forget_namespace", None)
+        if native is not None:
+            return native()
+        local = getattr(self.backend, "local", None)
+        if local is not None and hasattr(local, "forget_namespace"):
+            return local.forget_namespace()
+        records = self.list_records(include_superseded=True, limit=1000)
+        return sum(1 for record in records if self.forget(record.id))
 
     def close(self) -> None:
         self.backend.close()

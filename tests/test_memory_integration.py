@@ -201,7 +201,7 @@ async def test_tools_roundtrip_discovery_and_tenant_isolation(tmp_path):
 
 def test_extraction_normalizes_sdk_messages_and_tolerates_errors(tmp_path):
     upkeep = SessionUpkeep()
-    upkeep.config = host_config(tmp_path, enabled=True)
+    upkeep.config = host_config(tmp_path, enabled=True, extract_with_model=False)
     manager = upkeep.config.create_memory_manager()
     upkeep.get_memory_manager = lambda: manager
     try:
@@ -227,10 +227,19 @@ def test_extraction_normalizes_sdk_messages_and_tolerates_errors(tmp_path):
         manager.close()
 
 
+def test_compaction_leaves_memory_to_the_model_when_it_reads_every_turn(tmp_path):
+    upkeep = SessionUpkeep()
+    upkeep.config = host_config(tmp_path, enabled=True)  # extract_on_turn + extract_with_model
+    manager = Mock()
+    upkeep.get_memory_manager = lambda: manager
+    assert upkeep.sync_memory_from_context([{"role": "user", "content": "Decision: use SQLite"}]) == []
+    manager.extract_and_store_from_messages.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_compaction_extracts_original_messages_even_when_backend_fails(tmp_path):
     upkeep = SessionUpkeep()
-    upkeep.config = host_config(tmp_path, enabled=True)
+    upkeep.config = host_config(tmp_path, enabled=True, extract_with_model=False)
     upkeep.compact_config = CompactConfig()
     upkeep._compact_tracking = AutoCompactTrackingState()
     upkeep.models = SimpleNamespace(

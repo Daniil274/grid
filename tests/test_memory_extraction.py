@@ -363,3 +363,79 @@ async def test_memory_recall_tool_searches_by_meaning(tmp_path):
         assert hits[0]["record"]["id"] == push.id and hits[0]["score"] > hits[-1]["score"]
     finally:
         manager.close()
+
+
+# -- episodes, answers with extra text, systems without memory settings ----------------------
+
+def test_the_answer_may_carry_an_episode_and_trailing_objects():
+    answer = ('{"memories": [], "episode": "Пользователь проектирует рендер диаграмм в веб-чате; выбран mermaid."}'
+              '\n{"memories": [{"layer": "L1", "content": "a second object is ignored"}]}')
+    result = parse_extraction(answer)
+    assert result.memories == [] and result.episode.startswith("Пользователь проектирует")
+    assert parse_extraction('{"memories": [], "episode": null}').episode is None
+
+
+def test_a_chat_keeps_one_episode_with_its_project(tmp_path):
+    from core.factory.memory import chat_episode, store_episode
+
+    project = MemoryManager(SQLiteMemoryBackend(tmp_path, tenant_id="t:project:p1"))
+    user = MemoryManager(SQLiteMemoryBackend(tmp_path, tenant_id="t"))
+    levels = [("project", project), ("user", user)]
+    try:
+        assert chat_episode(levels, "ctx-1") is None
+        first = store_episode(levels, "ctx-1", "Обсуждаем рендер диаграмм в веб-чате", None, source_ref="chat:ctx-1")
+        assert first.layer == MemoryLayer.L2 and project.get(first.id) is not None
+        current = chat_episode(levels, "ctx-1")
+        assert current == ("project", first)
+        # The next turn rewrites it: still one episode, the newer text.
+        assert store_episode(levels, "ctx-1", current[1].content, current) is None  # unchanged
+        second = store_episode(levels, "ctx-1", "Рендер диаграмм: выбран mermaid, реализован первый проход",
+                               current, source_ref="chat:ctx-1")
+        episodes = [r for r in project.live_records((MemoryLayer.L2,)) if r.key == "episode:ctx-1"]
+        assert [r.id for r in episodes] == [second.id] and project.get(first.id) is None
+        # Without a project the user keeps it.
+        alone = store_episode([("user", user)], "ctx-2", "Разговор про ASI и омега-точку", None)
+        assert user.get(alone.id) is not None
+    finally:
+        project.close()
+        user.close()
+
+
+@pytest.mark.asyncio
+async def test_the_turn_hook_keeps_the_episode_and_shows_it_to_the_model(tmp_path):
+    answer = json.dumps({"memories": [], "episode": "Пользователь переносит опыт ARTEX на grid; создана artex-explorer"},
+                        ensure_ascii=False)
+    factory, completions, _ = model_factory(tmp_path, answer)
+    try:
+        stored = await factory.remember_turn_async("ctx-9", "Перенеси опыт ARTEX на grid", "Создал систему artex-explorer.")
+        assert [(r.layer, r.key) for r in stored] == [(MemoryLayer.L2, "episode:ctx-9")]
+        await factory.remember_turn_async("ctx-9", "Почини таймауты", "Убрал таймаут у координатора.")
+        prompt = completions.requests[1]["messages"][-1]["content"]
+        assert "CURRENT EPISODE OF THIS CHAT:\nПользователь переносит опыт ARTEX" in prompt
+        episodes = [r for r in factory.get_memory_manager().live_records((MemoryLayer.L2,))]
+        assert len(episodes) == 1  # the same text again: kept, not duplicated
+    finally:
+        factory.get_memory_manager().close()
+
+
+def test_a_system_without_memory_settings_remembers_as_the_default_one():
+    from schemas import MemoryConfig
+    from web_chat.space import UserSpace
+
+    def config(memory=None, providers=("opencode",)):
+        providers = {name: SimpleNamespace(model_copy=lambda deep=False, n=name: n) for name in providers}
+        explicit = {"providers"} | ({"memory"} if memory is not None else set())
+        inner = SimpleNamespace(providers=providers, memory=memory or MemoryConfig(), model_fields_set=explicit)
+        return SimpleNamespace(config=inner, get_memory_config=lambda: inner.memory)
+
+    default = config(MemoryConfig(enabled=True, embeddings={"provider": "openrouter"}), ("opencode", "openrouter"))
+    space = SimpleNamespace(registry=SimpleNamespace(default_key=lambda: "engineering", config=lambda key: default))
+    built = config()
+    UserSpace._inherit_memory(space, built, "artex-explorer")
+    assert built.config.memory.enabled and built.config.memory.embeddings.provider == "openrouter"
+    assert built.config.memory is not default.config.memory
+    assert "openrouter" in built.config.providers
+    # A system that says something about memory - even "off" - keeps it.
+    off = config(MemoryConfig(enabled=False))
+    UserSpace._inherit_memory(space, off, "quiet")
+    assert not off.config.memory.enabled

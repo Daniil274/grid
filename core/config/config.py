@@ -320,32 +320,44 @@ class Config:
         """Return validated optional memory settings."""
         return self.config.memory
 
-    def memory_location(self, *, tenant_id: Optional[str] = None):
+    def memory_location(
+        self, *, tenant_id: Optional[str] = None, root: Optional[str] = None, db_path: Optional[str] = None
+    ):
         """The one place memory lives: (workspace root, SQLite path, identity).
 
         Agents (``AgentFactory.get_memory_manager``), the memory tools and the web
         chat's memory API all resolve it here, so what one stores the others read:
         the same ``.grid/memory.sqlite`` of the workspace and the same namespace
-        (hash of workspace + identity). ``tenant_id`` overrides the configured one.
+        (hash of workspace + identity). ``tenant_id`` overrides the configured one;
+        ``root`` the workspace - a chat working in a space of its own keeps the
+        memory of its user's space (web_chat.space). ``db_path`` is a file the
+        host keeps outside the workspace, where the agents cannot reach it; it
+        replaces ``storage_path``, never the namespace.
         """
         settings = self.get_memory_config()
-        root = Path(self.get_working_directory()).resolve(strict=True)
+        root = Path(root or self.get_working_directory()).resolve(strict=True)
+        if db_path:
+            return root, Path(db_path).resolve(), tenant_id or settings.tenant_id
         path = (root / settings.storage_path).resolve()
         if not path.is_relative_to(root):
             raise ConfigError("Memory storage_path escapes workspace")
         return root, path, tenant_id or settings.tenant_id
 
-    def create_memory_manager(self, *, tenant_id: Optional[str] = None, force: bool = False):
+    def create_memory_manager(
+        self, *, tenant_id: Optional[str] = None, force: bool = False, root: Optional[str] = None,
+        db_path: Optional[str] = None,
+    ):
         """Create a host-bound manager; callers own its lifetime and cache.
 
-        ``force`` builds the (local) manager even when ``memory.enabled`` is off.
+        ``force`` builds the (local) manager even when ``memory.enabled`` is off;
+        ``root`` is the workspace whose memory it is (:meth:`memory_location`).
         """
         from core.memory import MemoryConfig, MemoryManager, TencentGatewayConfig
 
         settings = self.get_memory_config()
         if not settings.enabled and not force:
             return None
-        root, path, identity = self.memory_location(tenant_id=tenant_id)
+        root, path, identity = self.memory_location(tenant_id=tenant_id, root=root, db_path=db_path)
         gateway = None
         if settings.enabled and settings.backend != "sqlite":
             gateway = TencentGatewayConfig(

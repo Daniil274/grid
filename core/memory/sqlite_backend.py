@@ -115,6 +115,20 @@ class SQLiteMemoryBackend:
                 conn.execute("DELETE FROM memory_fts WHERE namespace=? AND id=?", (self.namespace, record_id))
         return removed
 
+    def forget_namespace(self) -> int:
+        """Delete every record of this namespace - every layer, superseded ones,
+        the index and the vectors; how many records went. A chat's or a
+        project's memory goes so when the chat or project does."""
+        removed = 0
+        with self._connection() as conn:
+            for table in self._tables.values():
+                removed += conn.execute(f"DELETE FROM {table} WHERE namespace=?", (self.namespace,)).rowcount
+            if self._fts:
+                conn.execute("DELETE FROM memory_fts WHERE namespace=?", (self.namespace,))
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_vectors'").fetchone():
+                conn.execute("DELETE FROM memory_vectors WHERE namespace=?", (self.namespace,))
+        return removed
+
     def _safe_path(self, file_path: str) -> Path:
         path = Path(file_path)
         path = (path if path.is_absolute() else self.workspace_root / path).resolve()

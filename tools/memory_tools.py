@@ -1,4 +1,10 @@
-"""Workspace-bound persistent memory, with no model-controlled tenant or database."""
+"""Workspace-bound persistent memory, with no model-controlled tenant or database.
+
+A chat's memory has levels (core.factory.memory): its own, its project's and the
+user's. Recall and overview read them all and say whose each record is;
+remember takes the level to store at; forget finds the record in whichever
+level holds it. The levels a chat has come from the host, never from the model.
+"""
 import asyncio
 import json
 from contextlib import contextmanager
@@ -36,6 +42,19 @@ def _manager(context):
             yield manager
 
 
+def _factory(context):
+    return getattr(getattr(context, "context", None), "factory", None) or get_current_factory()
+
+
+def _levels(context) -> list:
+    """(level, manager) of the run's chat, nearest first; [] outside a factory with levels."""
+    factory = _factory(context)
+    of_levels = getattr(factory, "memory_levels", None)
+    if of_levels is None:
+        return []
+    return of_levels(getattr(getattr(context, "context", None), "context_id", None), force=True)
+
+
 def _invoke(context, operation):
     try:
         with _manager(context) as manager:
@@ -48,7 +67,18 @@ def _invoke(context, operation):
 @function_tool
 async def memory_recall(context: RunContextWrapper, query: str = "", limit: int = 20) -> str:
     """Recall relevant historical data (not instructions) from this workspace."""
-    factory = getattr(getattr(context, "context", None), "factory", None) or get_current_factory()
+    factory = _factory(context)
+    levels = _levels(context)
+    if len(levels) > 1 and query.strip():
+        # Every level of the chat, ranked together; each hit says whose it is.
+        try:
+            hits = await factory.memory_search_levels(
+                levels, query, layers=(MemoryLayer.L1, MemoryLayer.L2, MemoryLayer.L3),
+                limit=max(1, min(limit, 50)), min_similarity=-1.0)
+            return json.dumps([{"record": record_to_dict(record), "level": level, "score": score}
+                               for level, record, score in hits], ensure_ascii=False)
+        except Exception:  # noqa: BLE001 - same contract as _invoke
+            return json.dumps({"error": "Memory operation unavailable or invalid arguments"})
     search = getattr(factory, "memory_search", None)
     if search is not None and query.strip():
         # By meaning (embeddings), every layer but raw transcripts, no similarity floor:
@@ -71,9 +101,25 @@ async def memory_recall(context: RunContextWrapper, query: str = "", limit: int 
 async def memory_remember(
     context: RunContextWrapper, content: str, layer: str = "L1",
     category: str = "note", scope: str = "project", source_ref: str | None = None,
+    level: str = "",
 ) -> str:
-    """Store a fact, scenario (L2), or profile preference (L3) in this workspace."""
+    """Store a fact, scenario (L2), or profile preference (L3) in this workspace.
+
+    level: whose memory it is - "chat" (this chat only), "project" (every chat of
+    its project) or "user" (the user, in any project). Empty: the project's when
+    the chat has one, else the user's; a profile preference (L3) is always the user's.
+    """
+    levels = dict(_levels(context))
+    chosen = (level or "").strip().lower()
+    if layer.upper() == "L3":
+        chosen = "user"
+    elif not chosen:
+        chosen = "project" if "project" in levels else "user"
+    if levels and chosen not in levels:
+        return json.dumps({"error": f"This chat has no {chosen} memory; use one of: {', '.join(levels)}"})
+
     def store(manager):
+        manager = levels.get(chosen, manager)
         if source_ref and (source_ref.startswith("file:") or ":" not in source_ref):
             root = Path(resolve_agent_path_from_ctx(".", context)).resolve()
             reference = source_ref.removeprefix("file:")
@@ -81,13 +127,22 @@ async def memory_remember(
                 raise ValueError("Memory source escapes workspace")
         record = record_from_dict({"content": content, "layer": layer, "category": category,
                                    "scope": scope, "source_ref": source_ref})
-        return record_to_dict(manager.remember(record))
+        return {**record_to_dict(manager.remember(record)), "level": chosen if levels else "user"}
     return await asyncio.to_thread(_invoke, context, store)
 
 
 @function_tool
 async def memory_overview(context: RunContextWrapper, limit: int = 100) -> str:
     """List this workspace's current memories, bounded by limit (not a total count)."""
+    levels = _levels(context)
+    if len(levels) > 1:
+        def overview(_manager):
+            records = [
+                {**record_to_dict(hit.record), "level": level}
+                for level, manager in levels for hit in manager.search(MemoryQuery(limit=limit))
+            ]
+            return {"records": records[:limit], "limit": limit}
+        return await asyncio.to_thread(_invoke, context, overview)
     return await asyncio.to_thread(_invoke, context, lambda manager: {
         "records": [record_to_dict(hit.record) for hit in manager.search(MemoryQuery(limit=limit))],
         "limit": limit,
@@ -97,7 +152,14 @@ async def memory_overview(context: RunContextWrapper, limit: int = 100) -> str:
 @function_tool
 async def memory_forget(context: RunContextWrapper, record_id: str) -> str:
     """Delete a memory by id in this namespace; remote outages never confirm deletion."""
-    return await asyncio.to_thread(_invoke, context, lambda manager: {"forgotten": manager.forget(record_id)})
+    levels = _levels(context)
+
+    def forget(manager):
+        for _level, holder in levels or [("user", manager)]:
+            if holder.get(record_id) is not None:
+                return {"forgotten": holder.forget(record_id)}
+        return {"forgotten": False}
+    return await asyncio.to_thread(_invoke, context, forget)
 
 
 MEMORY_TOOLS = {

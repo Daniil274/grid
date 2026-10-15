@@ -11,8 +11,9 @@ together: construction, the agent builders, caches and the context API.
 import logging
 import os
 import threading
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import agents
 from agents import Agent, SQLiteSession
@@ -64,6 +65,9 @@ tracing_config = get_tracing_config()
 
 
 logger = logging.getLogger("grid.agent_factory")
+
+#: Project and chat memories a factory keeps open at once (AgentFactory.level_memory_manager).
+LEVEL_MANAGERS = 32
 verbose_logger = logging.getLogger("grid.verbose")
 _TRACING_CONFIGURED = False
 _TRACING_CONFIG_LOCK = threading.Lock()
@@ -84,6 +88,20 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
     agent's SDK session per conversation, and shares one context manager with
     the other factories of a web space, so a conversation survives routing.
     """
+
+    #: The workspace whose memory the agents keep; None: the working directory.
+    memory_root: Optional[str] = None
+    #: The file that memory lives in, outside the workspace (web_chat.space);
+    #: None: the config's ``memory.storage_path`` inside it.
+    memory_db: Optional[str] = None
+    #: Spaces the agents reach besides the working directory, agent path -> host
+    #: directory (utils.path_utils.extra_roots). Replaced, never changed in place.
+    extra_roots: Dict[str, str] = {}
+    #: The tracker the beads tools use by default (tools.beads_tools); None: the working directory.
+    tracker_directory: Optional[str] = None
+    #: The memory levels a chat has besides the user's (core.factory.memory):
+    #: ``memory_scopes(context_id)`` -> {"chat": key, "project": key}. None: the user's only.
+    memory_scopes: Optional[Callable[[Optional[str]], Dict[str, str]]] = None
 
     def get_memory_manager(self):
         """Lazily share one host-bound memory manager across tools and runtime.
@@ -106,14 +124,38 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         with self._memory_lock:
             return self._workspace_memory(force=True)
 
+    def level_memory_manager(self, level: str, key: str, *, force: bool = False):
+        """The memory of one level beside the user's - a project's, a chat's - in
+        the same file, under a namespace of its own: ``<tenant>:<level>:<key>``.
+        None where the user's memory is off (``force`` as in :meth:`get_workspace_memory_manager`)."""
+        if not force and not self.config.get_memory_config().enabled:
+            return None
+        root = str(Path(self.memory_root or self.config.get_working_directory()).resolve())
+        tenant = f"{self._memory_tenant or self.config.get_memory_config().tenant_id}:{level}:{key}"
+        with self._memory_lock:
+            managers = self.__dict__.setdefault("_level_managers", OrderedDict())
+            cached = managers.get((root, tenant))
+            if cached is not None:
+                managers.move_to_end((root, tenant))
+                return cached
+            manager = self.config.create_memory_manager(
+                tenant_id=tenant, force=True, root=self.memory_root, db_path=self.memory_db)
+            managers[(root, tenant)] = manager
+            # A factory shared by many chats keeps the memories of the latest ones open.
+            while len(managers) > LEVEL_MANAGERS:
+                _key, old = managers.popitem(last=False)
+                old.close()
+            return manager
+
     def _workspace_memory(self, *, force: bool):
-        root = str(Path(self.config.get_working_directory()).resolve())
+        # A chat with a space of its own remembers in its user's space (memory_root).
+        root = str(Path(self.memory_root or self.config.get_working_directory()).resolve())
         if self._memory_manager is not None and root != getattr(self, "_memory_workspace", root):
             self._memory_manager.close()
             self._memory_manager = None
         if self._memory_manager is None:
             self._memory_manager = self.config.create_memory_manager(
-                tenant_id=self._memory_tenant, force=force)
+                tenant_id=self._memory_tenant, force=force, root=self.memory_root, db_path=self.memory_db)
             self._memory_workspace = root
         return self._memory_manager
 
@@ -790,6 +832,8 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         if manager is not None:
             manager.close()
             self._memory_manager = None
+        for level_manager in self.__dict__.pop("_level_managers", {}).values():
+            level_manager.close()
         gate = getattr(self, "action_gate", None)
         if gate is not None:
             await gate.aclose()
