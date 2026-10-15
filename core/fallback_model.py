@@ -16,6 +16,8 @@ from typing import Any, AsyncIterator, Optional, Sequence
 
 from agents.models.interface import Model
 
+from core.credentials import credential_error_in
+
 
 logger = logging.getLogger("grid.models.fallback")
 
@@ -189,6 +191,8 @@ class FallbackModel(Model):
             except Exception as exc:
                 if self._refused_images(candidate, images, exc, attempts, items):
                     continue
+                # A credential refused while signing the request, not a network failure.
+                exc = credential_error_in(exc) or exc
                 errors.append(f"{candidate.key}: {type(exc).__name__}: {exc}")
                 originals.append(exc)
                 logger.warning(
@@ -241,6 +245,7 @@ class FallbackModel(Model):
                     raise
                 if self._refused_images(candidate, images, exc, attempts, items):
                     continue
+                exc = credential_error_in(exc) or exc
                 errors.append(f"{candidate.key}: {type(exc).__name__}: {exc}")
                 originals.append(exc)
                 logger.warning(

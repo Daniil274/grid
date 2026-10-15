@@ -274,7 +274,10 @@ class Vault:
             return None
         payload = self._cipher.open(row.ciphertext, _binding(user_id, kind))
         if payload is None:
+            # Sealed under another GRID_SECRETS_KEY (one that was lost or rotated
+            # away): it will never open again. The user is told to reconnect it.
             logger.error("A stored credential of %s could not be opened (wrong GRID_SECRETS_KEY?)", kind)
+            self._store.set_credential_status(user_id, kind, NEEDS_REAUTH)
             return None
         if payload.get("type") == "api_key":
             return Credential(payload["secret"], "own", charged=False)

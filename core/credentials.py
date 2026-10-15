@@ -28,6 +28,23 @@ class CredentialError(AgentError):
     """No credential may be used for this provider, now."""
 
 
+def credential_error_in(exc: Optional[BaseException]) -> Optional[CredentialError]:
+    """The CredentialError behind *exc*, if one is.
+
+    It is raised while a request is signed (:class:`ManagedAuth`), inside the
+    HTTP client, and the OpenAI SDK reports anything raised there as
+    ``APIConnectionError: Connection error.`` - the reason to act on
+    ("reconnect your key") would be lost behind a network error that never was.
+    """
+    seen: set = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, CredentialError):
+            return exc
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
 @dataclass(frozen=True)
 class Credential:
     """What authorizes one request, and who pays for it."""
