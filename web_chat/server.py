@@ -67,6 +67,7 @@ USAGE_HTML = ROOT / "usage.html"
 TASKS_HTML = ROOT / "tasks.html"
 FILES_HTML = ROOT / "files.html"
 DEVICES_HTML = ROOT / "devices.html"
+LAZY_HTML = ROOT / "lazy.html"
 
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
@@ -125,6 +126,7 @@ class WebChatServer:
         chatgpt: Optional[Any] = None,
         devices_dir: Optional[Path] = None,
         browser_machines: int = 0,
+        lazy_path: Optional[Path] = None,
     ) -> None:
         """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
         accounts; without it ``identify`` decides, by default the single local
@@ -139,7 +141,8 @@ class WebChatServer:
         runs the ChatGPT subscription login (web_chat.chatgpt). ``devices_dir``
         keeps the devices users pair (core.devices.pairing); ``browser_machines``
         is how many browser machines the server runs at once, 0 for none
-        (core.devices.machines)."""
+        (core.devices.machines). ``lazy_path`` is the store of the lazy agents
+        (web_chat.lazy); None runs none."""
         if auth is not None and identify is not None:
             raise ValueError("Pass auth or identify, not both")
         self.deployment = deployment
@@ -282,6 +285,15 @@ class WebChatServer:
             machines=self.machines,
             pairing=PairingStore(devices_dir / "devices.db") if devices_dir is not None else None,
         )
+        # Lazy agents: results by a deadline on a small share of a subscription.
+        self.lazy = None
+        if lazy_path is not None:
+            from core.lazy.store import LazyStore
+            from web_chat.lazy.http import register_lazy_routes
+            from web_chat.lazy.service import LazyAgents
+
+            self.lazy = LazyAgents(LazyStore(lazy_path), spaces, usage=self.usage)
+            register_lazy_routes(api, self.current_user, self.current_space, self.lazy)
         if auth is not None:
             auth.register_routes(self.app, guard=self._guard, current_user=self.current_user)
         else:
@@ -339,8 +351,12 @@ class WebChatServer:
             await self.machines.prune_orphans()
         try:
             await self.restart.recover()
+            if self.lazy is not None:
+                await self.lazy.start()
             yield
         finally:
+            if self.lazy is not None:
+                await self.lazy.close()
             if self.machines is not None:
                 await self.machines.shutdown()
             self._sweeper.cancel()
@@ -352,6 +368,8 @@ class WebChatServer:
                 self.voice.close()
             if self.reviews is not None and self.reviews.agents is not None:
                 await self.reviews.agents.close()
+            if self.lazy is not None:
+                self.lazy.store.close()
             self.usage.close()
 
     async def _sweep_forever(self) -> None:
@@ -489,6 +507,13 @@ class WebChatServer:
             if auth is not None and auth.user_of(request) is None:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(DEVICES_HTML)
+
+        @app.get("/lazy", response_class=HTMLResponse)
+        async def lazy_page(request: Request) -> Any:
+            # A shell: what it shows comes through the API, which checks who asks.
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(LAZY_HTML)
 
         @app.get("/tasks", response_class=HTMLResponse)
         async def tasks_page(request: Request) -> Any:

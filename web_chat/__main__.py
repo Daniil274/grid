@@ -262,6 +262,7 @@ def single_user_options(deployment, args: argparse.Namespace) -> dict:
         "usage": usage,
         "submissions_dir": records / "system_submissions",
         "restart_path": records / "server_restart.json",
+        "lazy_path": records / "lazy.db",
         "identify": single_user(args.user_id),
         "action_review_token": action_review_token,
         "warm_user": args.user_id,
@@ -366,6 +367,7 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
         "restart_path": data_dir / "server_restart.json",
         "devices_dir": data_dir / "devices",
         "browser_machines": args.browser_machines,
+        "lazy_path": data_dir / "lazy.db",
     }
 
 

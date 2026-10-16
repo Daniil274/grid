@@ -179,6 +179,11 @@ class AgentTurn:
         return self._factory.withdraw_steer(self._session.context_id, item_id)
 
     @property
+    def tokens(self) -> tuple[int, int]:
+        """(in, out): the tokens this turn's model calls reported so far."""
+        return self._recorder.tokens_in, self._recorder.tokens_out
+
+    @property
     def elapsed_ms(self) -> int:
         return int((time.monotonic() - self._started) * 1000)
 

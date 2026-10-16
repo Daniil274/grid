@@ -97,6 +97,16 @@ class UsageStore:
                 (user_id, since),
             ).fetchone()[0])
 
+    def tokens_since(self, user_id: str, provider: str, since: float) -> tuple[int, float | None]:
+        """Tokens (in + out) of the user's calls through *provider* since *since*, and when the first was."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COALESCE(SUM(tokens_in + tokens_out), 0), MIN(occurred_at) FROM usage_events "
+                "WHERE user_id = ? AND provider = ? AND occurred_at >= ?",
+                (user_id, provider, since),
+            ).fetchone()
+        return int(row[0]), (float(row[1]) if row[1] is not None else None)
+
     def import_legacy(self, rows: Iterable[dict]) -> None:
         """One atomic baseline at installation; restarts never import it twice."""
         with self._lock:

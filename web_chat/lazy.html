@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Lazy agents · Grid</title>
+  <link rel="stylesheet" href="/static/styles/tokens.css">
+  <link rel="stylesheet" href="/static/styles/base.css">
+  <link rel="stylesheet" href="/static/styles/lazy.css">
+</head>
+<body class="lazyPage">
+  <main class="lazyShell">
+    <header class="lazyHeader">
+      <div class="lazyHeader__title">
+        <a href="/" class="lazyBrand">GRID / LAZY AGENTS</a>
+        <h1>Lazy agents</h1>
+        <p>Give a task a deadline and a small share of your subscription. The agents plan around your hours and the
+          quota windows, work in short steps and sleep in between &mdash; spending nothing while they wait.</p>
+      </div>
+      <div class="lazyHeader__actions">
+        <span id="telemetry" class="lazyBadge" hidden></span>
+        <button id="pause-all" class="btn btn--ghost" type="button" hidden>Pause all</button>
+        <button id="open-settings" class="btn btn--ghost" type="button">Settings</button>
+        <button id="new-task" class="btn btn--primary" type="button">New task</button>
+      </div>
+    </header>
+
+    <div id="status" class="lazyStatus" role="status" aria-live="polite">Loading&hellip;</div>
+    <div id="banners" class="lazyBanners"></div>
+
+    <section class="lazyQuota" id="quota" aria-label="Your subscription now"></section>
+
+    <section class="lazyCard lazyPlan" aria-labelledby="plan-heading">
+      <header class="lazyCard__head">
+        <h2 id="plan-heading">Plan &middot; next 7 days</h2>
+        <ul class="lazyLegend" aria-label="Legend">
+          <li><i class="sw sw--mine"></i>Your hours</li>
+          <li><i class="sw sw--user"></i>Your use</li>
+          <li><i class="sw sw--agents"></i>Agents</li>
+          <li><i class="sw sw--reserve"></i>Your reserve</li>
+          <li><i class="sw sw--deadline"></i>Deadline</li>
+        </ul>
+      </header>
+      <div class="lazyTimeline" id="timeline"></div>
+    </section>
+
+    <section class="lazyTasks" aria-labelledby="tasks-heading">
+      <header class="lazySection__head">
+        <h2 id="tasks-heading">Tasks</h2>
+        <div class="lazyTabs" id="filter" role="tablist" aria-label="Which tasks">
+          <button type="button" role="tab" data-filter="open" aria-selected="true">Open</button>
+          <button type="button" role="tab" data-filter="finished" aria-selected="false">Finished</button>
+          <button type="button" role="tab" data-filter="all" aria-selected="false">All</button>
+        </div>
+      </header>
+      <div id="tasks" class="lazyTaskList"></div>
+    </section>
+  </main>
+
+  <dialog id="task-dialog" class="lazyDialog lazyDialog--wide" aria-labelledby="task-dialog-title"></dialog>
+  <dialog id="deadline-dialog" class="lazyDialog" aria-labelledby="deadline-dialog-title"></dialog>
+  <dialog id="settings-dialog" class="lazyDialog lazyDialog--wide" aria-labelledby="settings-dialog-title"></dialog>
+
+  <script type="module" src="/static/js/lazy/page.js"></script>
+</body>
+</html>

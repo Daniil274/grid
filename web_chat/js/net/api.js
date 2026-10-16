@@ -41,6 +41,16 @@ const queryString = (params = {}) => {
 };
 
 export const api = {
+  /** Lazy agents (web_chat/lazy/http.py): tasks by a deadline on a share of a subscription. */
+  lazy: (tz) => request(`/api/lazy${queryString({ tz })}`, { cache: "no-store" }),
+  lazyCreate: (task) => request("/api/lazy/tasks", json("POST", task)),
+  lazyPreviewNew: (task) => request("/api/lazy/preview", json("POST", task)),
+  lazyUpdate: (id, changes) => request(`/api/lazy/tasks/${encodeURIComponent(id)}`, json("PATCH", changes)),
+  lazyPreview: (id, changes) => request(`/api/lazy/tasks/${encodeURIComponent(id)}/preview`, json("POST", { changes })),
+  lazyApply: (id, change) => request(`/api/lazy/tasks/${encodeURIComponent(id)}/apply`, json("POST", { change })),
+  lazyCancel: (id) => request(`/api/lazy/tasks/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+  lazyDelete: (id) => request(`/api/lazy/tasks/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  lazySettings: (settings) => request("/api/lazy/settings", json("PUT", settings)),
   /** Devices agents use (web_chat/devices_api.py): browser machines, paired PCs and phones. */
   devices: () => request("/api/devices", { cache: "no-store" }),
   startMachine: () => request("/api/devices/machines", { method: "POST" }),

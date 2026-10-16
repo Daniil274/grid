@@ -38,6 +38,7 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Mapping, Optional, Sequence
 
+from core.quota_telemetry import report_claude
 from utils.exceptions import AgentError
 
 logger = logging.getLogger("grid.claude_cli")
@@ -426,6 +427,10 @@ class ClaudeCodeRunner:
             async for raw in process.stdout:
                 event = parse_stream_line(raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw)
                 if event is not None:
+                    if event.get("type") == "rate_limit_event":
+                        # How much of the plan's windows is used: for whoever
+                        # plans around the limits (core.quota_telemetry).
+                        report_claude(event.get("rate_limit_info"))
                     yield _event(event)
             # A normal stdout EOF means the turn is over: wait for the CLI's
             # real exit code instead of racing it with a terminate. Terminating
