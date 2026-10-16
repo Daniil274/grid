@@ -139,7 +139,7 @@ class _Diagnosis:
         self.confined = confined
         self.isolated = confined or bool(getattr(self.grid.isolation, "enabled", False))
         # A package is read once, however many agents use its tool.
-        self._packages_checked: set = set()
+        self._packages_checked: Dict[str, Any] = {}
         self.loader = config.project_tools_loader
         self.issues: List[ToolIssue] = []
         self._requirements_checked: Dict[str, List[str]] = {}
@@ -252,23 +252,41 @@ class _Diagnosis:
             self.add(ENVIRONMENT, f"MCP server needs '{command}' on PATH", agent=agent_key, tool=tool_name,
                      hint=(tool.prompt_addition and _install_hint(tool.prompt_addition)) or f"Install {command}")
 
-    def _check_tool_package(self, agent_key: str, tool_name: str, relative: str) -> None:
-        """Read the package, never run it (core.tool_packages): its problems are the config's."""
+    def _check_tool_package(self, agent_key: str, tool_name: str, relative: str) -> Optional[Any]:
+        """Read the package, never run it (core.tool_packages): its problems are the config's.
+
+        A package is read once however many tools name it - its problems are
+        reported once, under the first tool that does. Returns what it holds,
+        or None when it cannot be read.
+        """
         from core.tool_packages import PackageError, analyze, package_dir
 
-        if tool_name in self._packages_checked:
-            return
-        self._packages_checked.add(tool_name)
+        if relative in self._packages_checked:
+            return self._packages_checked[relative]
+        self._packages_checked[relative] = None
         try:
             info = analyze(package_dir(self.config.config_path.parent, relative))
         except PackageError as exc:
             self.add(CONFIG, str(exc), tool=tool_name)
-            return
+            return None
         for issue in info.issues:
             self.add(CONFIG, f"tool package: {issue}", tool=tool_name)
+        self._packages_checked[relative] = info
+        return info
 
     def _check_function_tool(self, agent_key: str, tool_name: str) -> None:
         from tools.function_tools import tool_isolation
+
+        declared = self.grid.tools.get(tool_name)
+        if declared is not None and declared.tool_package:
+            # One @function_tool of a package: it runs where the agents' commands run.
+            info = self._check_tool_package(agent_key, tool_name, declared.tool_package)
+            func_name = declared.name or tool_name
+            if info is not None and not info.issues and func_name not in {t.name for t in info.tools}:
+                self.add(CONFIG, f"tool package '{declared.tool_package}' has no @function_tool named '{func_name}'",
+                         agent=agent_key, tool=tool_name,
+                         hint=f"Available in {declared.tool_package}: {', '.join(t.name for t in info.tools) or 'none'}")
+            return
 
         if self.confined and not is_confined(tool_isolation(tool_name, self.loader)):
             self.add(CONFIG, "withheld on this server: it acts on the host, not in the user's container or workspace",

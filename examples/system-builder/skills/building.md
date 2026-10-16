@@ -17,8 +17,9 @@
 
 `builder_catalog.shared: false` означает личное хранилище пользователя.
 Соблюдай `private_rules`: провайдеры копируются без изменений, модели берутся
-из каталога, новые инструменты оформляются как MCP-пакеты. Импорт `project_tools`
-на сервере для личных систем запрещён. Личный черновик увидит только владелец;
+из каталога, новые инструменты оформляются пакетами инструментов (`tools/<package>/`)
+с функциями `@function_tool`. Импорт `project_tools` на сервере для личных систем
+запрещён. Личный черновик увидит только владелец;
 он может попробовать его и включить для своего роутера на `/systems`.
 В ответе используй `chat_system` из результата инструмента для ссылки
 `/?system=<chat_system>`: это ключ системы в чате, отдельный от ключа каталога.
@@ -58,18 +59,16 @@ builder_delete, builder_describe или builder_fork. Просьба постр�
    через type: agent, передаёт входы и принимает проверяемые результаты.
    Не заменяй делегирование переключением ролей в одном промпте.
 3. `builder_create` с полным `config.yaml` и описанием для роутера.
-4. Навыки и README — `builder_write`.
-5. Для каждого недостающего инструмента — пакет инструментов с тестами
-   (`builder_write` модулей, тестов, `requirements.txt`), затем
-   `builder_test_tools`. Чини, пока тесты не пройдут.
-6. Напиши `quality.yaml` по навыку quality: результат, контракты ролей,
-   примеры использования, ограничения и сценарии с проверками результата.
-7. `builder_check`: исправь конфигурационные ошибки; отсутствие программ
+4. Навыки, README, пакеты инструментов с тестами (`tools/<package>/*.py`,
+   `test_*.py`, `requirements.txt`) и `quality.yaml` записывай пакетом через
+   `builder_write_files` (или точечно через `builder_write`).
+5. Запусти `builder_test_tools` для каждого пакета инструментов и почини, пока тесты не пройдут.
+6. `builder_check`: исправь конфигурационные ошибки; отсутствие программ
    означает, что запуск ещё не проверен. `healthy` проверяет только конфигурацию.
-8. `builder_evaluate`: реальный запуск сценариев. Разбери провалы, исправь
+7. `builder_evaluate`: реальный запуск сценариев. Разбери провалы, исправь
    реализацию, повтори затронутые тесты пакетов и всю оценку. Максимум три цикла.
    После любого изменения старые отчёты могут устареть — смотри quality.ready.
-9. Итог владельцу: проверенная ревизия, результаты, ограничения, способ пробного
+8. Итог владельцу: проверенная ревизия, результаты, ограничения, способ пробного
    запуска. Недоступная среда — блокер, не повод сообщать об успехе.
 
 ### Проверки и пользовательская приёмка
@@ -102,23 +101,22 @@ settings:
   default_agent: main
   working_directory: .
   allow_path_override: true
-  agent_timeout: 1800                # дефолт схемы (300с) слишком мал для многошаговых задач
+  agent_timeout: 1800
   max_turns: 100
-  mcp_enabled: true                  # нужно, если есть пакеты инструментов
-providers:                           # скопируй ЦЕЛИКОМ из builder_catalog.providers:
-  opencode:                          # без default_headers opencode отвечает 400
+providers:
+  opencode:
     name: opencode
     base_url: https://opencode.ai/zen/go/v1
-    api_key_env: OPENCODE_API_KEY    # имя переменной, никогда не сам ключ
+    api_key_env: OPENCODE_API_KEY
     default_headers:
       User-Agent: grid-agent-system/1.0
       x-opencode-session: grid-coder
     timeout: 300
     max_retries: 3
-models:                              # только модели из builder_catalog.models,
-  glm-flash:                         # с теми же name и provider;
-    name: glm-5.3-flash              # выбирай модель по сложности роли
-    provider: opencode               # и требованиям качества пользователя
+models:
+  glm-flash:
+    name: glm-5.3-flash
+    provider: opencode
 tools:
   call_writer:
     type: agent
@@ -130,22 +128,20 @@ tools:
     target_agent: reviewer
     description: Independently verify the artifact against acceptance criteria.
     context_strategy: minimal
-  word_stats:                        # новый инструмент: пакет
-    type: mcp
-    tool_package: tools/word_stats
-    description: Word and sentence statistics of text files in the workspace
-  file_read:                         # готовый общий инструмент
+  word_stats:
     type: function
-    description: Read a file
+    tool_package: tools/word_stats
+    description: Word and sentence statistics of text files in the workspace.
+  file_read:
+    type: function
   file_write:
     type: function
-    description: Write the requested document artifact
 agents:
   main:
     name: Documentation coordinator
     model: glm-flash
-    timeout: 0                       # ОБЯЗАТЕЛЬНО 0 у координатора: иначе его отрубит посреди ожидания делегатов
-    max_turns: 0                     # 0 снимает лимит ходов у координатора
+    timeout: 0
+    max_turns: 0
     description: >-
       Что делает агент — роутер читает это, если агент routable.
     tools: [call_writer, call_reviewer]
@@ -172,17 +168,20 @@ agents:
       Не изменяй файлы. Если проверить невозможно, назови блокер.
 ```
 
-- Каждый инструмент, которым пользуется агент, объявлен в `tools`, иначе конфиг не загрузится.
-- `type: function` — готовый инструмент: общий (`builder_catalog.shared_tools`) или из
-  готового набора (`builder_catalog.tool_sets`: подключи через
-  `settings.project_tools: {enabled: true, tools_directory: <путь из tool_sets>}`
-  и объяви нужные; `builder_tool_set` покажет, где каждый действует). На сервере с
-  аккаунтами работают только инструменты, которые действуют в контейнере или рабочей
-  папке пользователя — остальные будут скрыты, `builder_check` это покажет.
+- Каждый инструмент, которым пользуется агент, объявлен в `tools`, иначе конфиг не
+  загрузится. Агент перечисляет в своих `tools` только нужные ему функции.
+- `type: function` — функция, доступная агенту. Готовый общий инструмент
+  (`builder_catalog.shared_tools`) или инструмент готового набора
+  (`builder_catalog.tool_sets`: подключи через
+  `settings.project_tools: {enabled: true, tools_directory: <путь из tool_sets>}`;
+  `builder_tool_set` покажет, где каждый действует) объявляется как `type: function`
+  без описания: схема и docstring передаются модели сами. На сервере с аккаунтами
+  работают только инструменты, которые действуют в контейнере или рабочей папке
+  пользователя — остальные будут скрыты, `builder_check` это покажет.
+- Функция из пакета инструментов (`tools/<package>`) — тоже `type: function`, но с
+  `tool_package: tools/<package>`; в ключе — имя функции пакета (ниже).
 - `type: agent` — вызов другого агента системы: `target_agent`, `description`,
   `context_strategy: minimal`.
-- `type: mcp` с `tool_package` — новый инструмент (ниже). Агенту с таким инструментом
-  нужен `mcp_enabled: true` (в settings или у агента).
 
 ## Описания решают маршрутизацию
 
@@ -195,15 +194,16 @@ agents:
 
 Новый инструмент — обычная функция Python в каталоге `tools/<package>/`. Код
 выполняется не на сервере, а в контейнере пользователя; рабочая папка при вызове —
-рабочая папка пользователя, пути относительные.
+рабочая папка пользователя, пути относительные. Каждую такую функцию `@function_tool`
+объяви в `tools` под её именем: `type: function`, `tool_package: tools/<package>`.
 
 ```python
 # tools/word_stats/stats.py
 import re
-from grid_tool import tool
+from grid_tool import function_tool
 
 
-@tool(read_only=True)
+@function_tool(read_only=True)
 def word_stats(path: str, top: int = 10) -> dict:
     """Word statistics of a text file: words, sentences, the most frequent words.
 
@@ -239,7 +239,7 @@ def test_counts_words_and_sentences():
 ```
 
 Правила:
-- `@tool` из `grid_tool`; флаги: `read_only=True` (ничего не меняет),
+- `@function_tool` из `grid_tool`; флаги: `read_only=True` (ничего не меняет),
   `destructive=True` (удаляет или перезаписывает), `open_world=True` (ходит в
   интернет). Их читает политика действий — ставь честно.
 - Docstring обязателен: первая часть — что делает и когда звать, `Args:` —

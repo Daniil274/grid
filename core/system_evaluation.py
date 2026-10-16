@@ -8,16 +8,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import shutil
+import tarfile
 import tempfile
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
-from core.system_quality import (acceptance_revision, acceptance_suite, check_assertion, design_review, read_contract,
+from core.system_quality import (MAX_BYTES, MAX_SYSTEM_BYTES, acceptance_revision, acceptance_suite, check_assertion, design_review, read_contract,
                                  revision, save_evidence, system_files)
 from utils.process_limits import sandbox_run_args
 
@@ -81,7 +83,13 @@ def validate_candidate(document: dict, root: Path) -> None:
     for name, tool in (document.get("tools") or {}).items():
         if name.startswith(FORBIDDEN_PREFIXES) or name == "orchestrate":
             raise ValueError(f"{name}: evaluation supports local agent delegation, not cross-system/background orchestration")
-        if tool.get("type") == "function" and tool_isolation(name) not in {CONTAINER, WORKSPACE}:
+        if tool.get("type") == "function" and tool.get("tool_package"):
+            # One @function_tool of a package: it runs in the evaluation container.
+            if tool.get("server_command") or tool.get("env_vars"):
+                raise ValueError(f"{name}: a function tool with tool_package has no server_command or custom environment")
+            if root.resolve() not in (root / tool["tool_package"]).resolve().parents:
+                raise ValueError("Tool package escapes the system snapshot")
+        elif tool.get("type") == "function" and tool_isolation(name) not in {CONTAINER, WORKSPACE}:
             raise ValueError(f"{name}: tool is not confined to the evaluation workspace/container")
         if tool.get("type") == "mcp":
             package = tool.get("tool_package")
@@ -95,6 +103,66 @@ def validate_candidate(document: dict, root: Path) -> None:
         for skill in agent.get("system_skills") or []:
             if "/" in skill or "\\" in skill or skill in {".", ".."}:
                 raise ValueError("Skills must be local names in skills/")
+
+
+def _workspace_archive(workspace: Path) -> bytes:
+    """A tar of the workspace's files and directories, writable by the sandbox's unprivileged user."""
+    buffer = io.BytesIO()
+    now = int(time.time())
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for path in sorted(workspace.rglob("*")):
+            if path.is_symlink():
+                continue
+            entry = tarfile.TarInfo(path.relative_to(workspace).as_posix())
+            entry.mtime = now
+            if path.is_dir():
+                entry.type, entry.mode = tarfile.DIRTYPE, 0o777
+                tar.addfile(entry)
+            elif path.is_file():
+                data = path.read_bytes()
+                entry.size, entry.mode = len(data), 0o666
+                tar.addfile(entry, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def _extract_workspace(archive: bytes, workspace: Path) -> None:
+    """Replace the workspace with the regular files and directories of a tar from the sandbox.
+
+    Links and special files are skipped, names that leave the workspace are refused,
+    and the size is bounded; nothing is changed unless the whole archive is acceptable.
+    """
+    directories: list[PurePosixPath] = []
+    files: dict[PurePosixPath, bytes] = {}
+    total = 0
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+        for member in tar:
+            name = PurePosixPath(member.name)
+            if name.is_absolute() or ".." in name.parts:
+                raise ValueError(f"Sandbox artifact escapes the workspace: {member.name}")
+            parts = tuple(part for part in name.parts if part != ".")
+            if not parts:
+                continue
+            name = PurePosixPath(*parts)
+            if member.isdir():
+                directories.append(name)
+            elif member.isreg():
+                if member.size > MAX_BYTES:
+                    continue  # larger than any assertion reads
+                total += member.size
+                if total > MAX_SYSTEM_BYTES or len(files) >= 1000:
+                    raise ValueError("Sandbox workspace exceeds the artifact size limit")
+                files[name] = tar.extractfile(member).read()
+    for child in workspace.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+    for name in directories:
+        (workspace / name).mkdir(parents=True, exist_ok=True)
+    for name, data in files.items():
+        target = workspace / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
 
 
 async def run_scenario(access, snapshot: Path, scenario, *, token_limit: int, call_limit: int) -> dict:
@@ -129,15 +197,27 @@ async def run_scenario(access, snapshot: Path, scenario, *, token_limit: int, ca
         try:
             async with asyncio.timeout(scenario.timeout_seconds):
                 code, _, err = await _run([
-                    "docker", "run", "-d", "--rm", "--name", name,
+                    "docker", "run", "-d", "--name", name,
                     "--memory", "512m", "--pids-limit", "128", "--cpus", "1", *sandbox_run_args("512m", 1),
                     "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--init",
-                    "--user", "agent", "--mount", f"type=bind,source={workspace},target=/workspace",
+                    "--user", "agent",
                     "--workdir", "/workspace", "--entrypoint", "sleep", access.image,
                     str(scenario.timeout_seconds + 120),
                 ], timeout=60)
                 if code:
                     raise ValueError("Cannot start evaluation sandbox: " + err[-1000:])
+                # The workspace is copied in and out instead of bind-mounted: when the
+                # server itself runs in a container, its temp paths do not exist on the
+                # Docker host.
+                code, _, err = await _run(["docker", "exec", "-u", "0", name, "sh", "-c",
+                                          "mkdir -p /workspace && (chmod 0777 /workspace || true)"])
+                if code:
+                    raise ValueError("Cannot prepare the sandbox workspace: " + err[-1000:])
+                if scenario.fixtures:
+                    code, _, err = await _run(["docker", "cp", "-", f"{name}:/workspace"],
+                                              stdin=_workspace_archive(workspace), timeout=60)
+                    if code:
+                        raise ValueError("Cannot copy fixtures into the sandbox: " + err[-1000:])
                 manifest = yaml.safe_load((snapshot / "system.yaml").read_text()) or {}
                 requires = manifest.get("requires") or []
                 if requires:
@@ -156,9 +236,11 @@ async def run_scenario(access, snapshot: Path, scenario, *, token_limit: int, ca
                                                for k in config.config.providers}
                 # Install pinned packages before disconnecting network. No
                 # candidate agent is running yet.
-                for tool in config.config.tools.values():
-                    if tool.tool_package:
-                        await ensure_in_container(name, package_dir(snapshot, tool.tool_package))
+                # A package shared by several function tools is deployed once.
+                for relative in dict.fromkeys(
+                    tool.tool_package for tool in config.config.tools.values() if tool.tool_package
+                ):
+                    await ensure_in_container(name, package_dir(snapshot, relative))
                 code, _, err = await _run(["docker", "network", "disconnect", "-f", "bridge", name])
                 if code:
                     raise ValueError("Cannot isolate sandbox network: " + err[-1000:])
@@ -190,6 +272,12 @@ async def run_scenario(access, snapshot: Path, scenario, *, token_limit: int, ca
                 code, _, err = await _run(["docker", "stop", "--time", "1", name], timeout=15)
                 if code:
                     raise ValueError("Cannot stop sandbox before inspecting artifacts: " + err[-1000:])
+                # A stopped container still holds its files: bring them out to inspect.
+                code, archive, err = await _run(["docker", "cp", f"{name}:/workspace/.", "-"], timeout=60, raw=True)
+                if code:
+                    raise ValueError("Cannot copy artifacts out of the sandbox: " + err[-1000:])
+                if archive:
+                    _extract_workspace(archive, workspace)
                 result["assertions"] = [check_assertion(a, answer, workspace) for a in scenario.assertions]
                 result["answer_preview"] = answer[:2000]
                 metered = observer.responses > 0 and not observer.unmetered

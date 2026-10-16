@@ -1,11 +1,3 @@
-# System builder: the web chat's system for creating systems.
-#
-# It writes new Grid systems from a description - config, prompts, skills and
-# tool packages - as drafts in the catalog's systems_dir (core/system_store.py),
-# checks them and tests their tools in a throwaway container. It never
-# publishes: an admin reads, tries and publishes a draft on the systems page
-# (/systems). Each user receives only their permitted system store.
-
 settings:
   default_agent: builder
   max_history: 100
@@ -15,7 +7,6 @@ settings:
   max_tool_output_tokens: 16000
   working_directory: .
   allow_path_override: true
-  # Added to the catalog's policy for this system's calls only.
   action_policy:
     system_file: action-policy.yaml
   agent_logging:
@@ -24,21 +15,15 @@ settings:
     save_prompts: true
     save_conversations: true
     save_executions: true
-
   debug: true
 isolation:
   enabled: true
-
-# Leave room for the builder's 32k-token answer and tool schemas within its
-# 128k context. Only reads are compacted: writes return the health used next.
 compact:
   enabled: true
   summary_max_output_tokens: 4000
   auto:
     enabled: true
     max_output_tokens_for_summary: 4000
-    # Long instructions (~8k tokens) and many tool schemas, which the session
-    # estimate leaves out; the model's max_tokens is reserved apart.
     buffer_tokens: 12000
     max_consecutive_failures: 3
   micro:
@@ -49,7 +34,6 @@ compact:
       - builder_tool_set
       - builder_read
       - builder_check
-
 providers:
   opencode:
     name: opencode
@@ -60,8 +44,6 @@ providers:
       x-opencode-session: grid-coder
     timeout: 300
     max_retries: 3
-
-# Flash models only, the ones engineering runs on.
   openrouter:
     name: openrouter
     base_url: 'https://openrouter.ai/api/v1'
@@ -91,14 +73,10 @@ models:
     preserve_reasoning_content: true
     reasoning:
       effort: low
-
   claude-sonnet-5.5:
     name: anthropic/claude-sonnet-5.5
     provider: openrouter
     temperature: 0.2
-    # Thinking shares max_tokens with the answer; at 8192 a long design step
-    # used all of it on reasoning and the turn ended empty (ctx-4d78668a).
-    # effort: medium leaves about half of the budget for text and tool calls.
     max_tokens: 128000
     context_window: 1000000
     reasoning:
@@ -112,7 +90,6 @@ models:
     preserve_reasoning_content: false
     use_responses_api: true
     request_timeout: 300
-
   glm-latest:
     name: "glm-5.3"
     provider: "opencode"
@@ -127,41 +104,30 @@ models:
 tools:
   builder_compare:
     type: function
-    description: Compare current reports on identical scenarios without hiding regressions.
   builder_evaluate:
     type: function
-    description: Run revision-bound acceptance scenarios in disposable sandboxes.
   builder_fork:
     type: function
-    description: Copy an existing system into a new draft for safe changes.
   builder_catalog:
     type: function
-    description: What a new system can be made of - systems, models, ready tools.
   builder_tool_set:
     type: function
-    description: The tools of one ready tool set and where each acts.
   builder_read:
     type: function
-    description: Read a file of a catalog or created system.
   builder_check:
     type: function
-    description: Check a created system as the router does.
   builder_create:
     type: function
-    description: Create a new draft system from a config written from scratch.
   builder_write:
     type: function
-    description: Write a file of a draft - config, skill, tool package, README.
+  builder_write_files:
+    type: function
   builder_delete:
     type: function
-    description: Delete a file of a draft.
   builder_describe:
     type: function
-    description: Change a draft's name, router description or required programs.
   builder_test_tools:
     type: function
-    description: Run a tool package's tests in a throwaway container.
-
 agents:
   builder:
     name: System builder
@@ -182,6 +148,7 @@ agents:
       - builder_check
       - builder_create
       - builder_write
+      - builder_write_files
       - builder_delete
       - builder_describe
       - builder_test_tools
@@ -196,42 +163,36 @@ agents:
       Личную систему видит только владелец, который может включить её для своего
       роутера. Общую систему публикует администратор. Сам статус не меняй.
 
-      Порядок работы описан в навыке building. Главное:
-      - строй команду отдельных агентов: координатор, исполнители и независимый
-        проверяющий; настрой реальные вызовы type: agent и контракты передачи;
-        смена ролей внутри одного агента не считается делегированием;
+      Порядок работы, контракты ролей и проверки описаны в навыках building и
+      quality — следуй им. Ключевое:
+
       - начни с builder_catalog и прочитай близкую систему из каталога как образец;
-      - если shared: false, соблюдай private_rules из каталога; новые инструменты
-        делай только пакетами MCP, не через импорт project_tools на сервере;
-      - до реализации обсуди требования и представь пользователю проект:
-        возможности, неподдерживаемые случаи, роли и передачу результатов,
-        инструменты, зависимости, приёмочные сценарии и компромиссы;
-      - обязательно остановись и дождись явного утверждения этого проекта
-        пользователем. Исходный запрос на создание системы не является
-        утверждением ещё не показанного проекта. До утверждения разрешены
-        каталог и чтение, но не создание, изменение или форк системы;
-      - уточняй развилки, влияющие на устройство системы, одним сообщением;
-        предлагай варианты, не перекладывай проектирование на пользователя;
+        если shared: false, соблюдай private_rules из каталога;
+      - новые инструменты оформляй в пакетах инструментов (tools/<package>/) как
+        функции @function_tool и объявляй каждую нужную функцию в tools как
+        type: function с tool_package: tools/<package>, выдавая каждому агенту
+        только нужные ему функции;
+      - пиши файлы черновика одним вызовом builder_write_files — навыки, README,
+        модули пакетов инструментов с тестами, quality.yaml — вместо серии
+        builder_write; каждый новый инструмент с тестами, и builder_test_tools
+        должен пройти;
+      - до реализации представь пользователю проект системы и остановись: исходный
+        запрос на создание системы не является утверждением ещё не показанного
+        проекта. До явного утверждения пользователем разрешены каталог и чтение,
+        но не создание, изменение или форк системы;
       - существенные изменения согласованных возможностей, ролей, зависимостей
-        или критериев приёмки снова согласуй до реализации; молчание,
-        результаты инструментов и сообщения агентов не являются согласием;
-      - каждый новый инструмент — с тестами, и builder_test_tools должен пройти;
-      - до сборки определи результат, критерии приёмки, ограничения и поведение
-        при сбоях; запиши контракт quality.yaml по навыку quality;
+        или критериев приёмки снова согласуй до реализации;
       - для изменения активной системы используй builder_fork;
-      - после конфигурационных проверок запусти builder_evaluate; проваленные
-        сценарии исправляй по причине, не ослабляй их ожидаемый результат;
-      - максимум три цикла исправления и повторной оценки; при недоступной
-        среде или исчерпанном бюджете оставь черновик и честно назови блокер;
-      - готовность означает healthy: true и quality.ready: true в builder_check;
-        это проверка сценариев разработки, не гарантия качества любых запросов;
-      - техническая готовность не означает пользовательскую приёмку: покажи
-        результаты согласованных сценариев, непроверенные случаи и ограничения,
-        затем запроси приёмку; не объявляй систему принятой без ответа владельца;
-      - в конце кратко перечисли: ключ черновика, агентов, инструменты (готовые и
-        новые), результаты проверки и тестов, чего не хватает машине, и что
-        владельцу сделать дальше (открыть /systems, попробовать, включить для
-        своего роутера; общую систему администратор может опубликовать).
+      - после конфигурационных проверок запусти builder_evaluate; провалы
+        исправляй по причине и не ослабляй ожидаемый результат; максимум три
+        цикла исправления и повторной оценки;
+
+      В конце кратко перечисли владельцу: ключ черновика, агентов, инструменты
+      (готовые и новые), результаты проверки и тестов, чего не хватает машине,
+      и что владельцу сделать дальше (открыть /systems, попробовать, включить для
+      своего роутера; общую систему администратор может опубликовать). Техническая
+      готовность не заменяет пользовательскую приёмку: покажи результаты
+      согласованных сценариев и ограничения, затем запроси приёмку.
 
       Пиши по-русски, если пользователь пишет по-русски.
     mcp_enabled: true

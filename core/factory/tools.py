@@ -15,6 +15,7 @@ import re
 import time
 import uuid
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, List, Optional
 
 from agents import Agent, RunContextWrapper, function_tool
@@ -29,6 +30,7 @@ from core.deadlines import Deadline, waiting_for_delegate
 from core.devices.hub import holding
 from core.factory.run_context import GridRunContext, get_runner, runner_max_turns
 from core.interruption import StopRequested
+from core.tool_packages import build_package_function_tool
 from core.run_stream import interrupted_run_report, run_output_text
 from schemas import AgentConfig, AgentExecution
 from tools import resolve_tool, tool_isolation
@@ -230,12 +232,17 @@ class ToolAssembly:
         return registry, pipeline_id, active_context_id
 
     def _wrap_tool_with_output_limit(
-        self, tool: Any, tool_key: Optional[str] = None, limit_output: bool = True
+        self,
+        tool: Any,
+        tool_key: Optional[str] = None,
+        limit_output: bool = True,
+        effect: Any = None,
     ) -> Any:
         """Wraps FunctionTool with pipeline serialization and output limits.
 
         ``limit_output`` False leaves the output whole: for a tool whose output
-        is made of other tools' outputs, each limited already.
+        is made of other tools' outputs, each limited already. ``effect`` is
+        what the tool does, when its module cannot declare it (a tool package's).
         """
         settings = self.config.config.settings
         max_tokens = getattr(settings, "max_tool_output_tokens", None) if limit_output else None
@@ -284,7 +291,7 @@ class ToolAssembly:
             )
 
         tool.on_invoke_tool = limited_invoke
-        return self._wrap_tool_with_policy(tool, tool_name, "function")
+        return self._wrap_tool_with_policy(tool, tool_name, "function", effect=effect)
 
     def _parallel_tool(self, siblings: List[Any]) -> Any:
         """The ``parallel`` tool bound to an agent's own tools (tools.parallel_tools).
@@ -313,6 +320,27 @@ class ToolAssembly:
         loader = self.config.project_tools_loader
         tools: List[Any] = []
         for tool_key in tool_keys:
+            declared = getattr(getattr(self.config, "config", None), "tools", None) or {}
+            tool_cfg = declared.get(tool_key)
+            if getattr(tool_cfg, "tool_package", None):
+                # One @function_tool of a tool package: it runs in the user's
+                # container (or the host cache without one), where the agents'
+                # own commands run - so an isolated space may have it.
+                tool, effect = build_package_function_tool(
+                    Path(self.config.config_path).parent,
+                    tool_cfg.tool_package,
+                    tool_key,
+                    func_name=tool_cfg.name or tool_key,
+                    description_override=tool_cfg.description,
+                    default_container_id=self.container_id,
+                    default_workdir=getattr(self, "_container_workdir", "/workspace"),
+                    host_workdir=self.config.get_working_directory(),
+                )
+                if tool is None:
+                    logger.warning("Tool '%s': its package '%s' cannot be used; skipped", tool_key, tool_cfg.tool_package)
+                    continue
+                tools.append(self._wrap_tool_with_output_limit(tool, tool_key, effect=effect))
+                continue
             if self.confine_tools and not is_confined(tool_isolation(tool_key, loader)):
                 logger.warning(
                     "Tool '%s' acts on the host, not in the user's container or workspace; "

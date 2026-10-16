@@ -14,10 +14,10 @@ Every user. Admins build shared drafts in `systems/`; other users build private
 drafts in `users/<id>/built_systems/`, outside the agents' workspace. The tools
 receive only that user's `BuilderAccess` (`core/system_store.py`). A private
 system is selectable by its owner and can be activated for that owner's router
-on `/systems`; it is never published to other users. New Python tools use MCP
-packages in the user's container. Private configs cannot import project tools
-into the server or change the server's providers. On a one-user server the one
-user is the admin.
+on `/systems`; it is never published to other users. New Python tools are
+`@function_tool` functions in tool packages that run in the user's container.
+Private configs cannot import project tools into the server or change the
+server's providers. On a one-user server the one user is the admin.
 
 ## What it can do
 
@@ -27,7 +27,7 @@ user is the admin.
 | `builder_tool_set` | the tools of a ready tool set and where each acts |
 | `builder_read` | a file of a catalog system (an example) or a created one |
 | `builder_create` | a new draft from a config written from scratch |
-| `builder_write` / `builder_delete` | files of a draft: config, skills, tool packages, README |
+| `builder_write` / `builder_write_files` / `builder_delete` | files of a draft: config, skills, tool packages, README |
 | `builder_describe` | a draft's name, router description, required programs |
 | `builder_check` | the router's health check, and what the tool packages hold |
 | `builder_test_tools` | a package's tests in a throwaway container without network |
@@ -40,13 +40,14 @@ the system to a draft on the systems page. Active systems are changed through a 
 
 ## New tools: tool packages
 
-A tool the builder writes is a plain Python function with `@tool` in the
-system's `tools/<package>/`, declared as an MCP tool with `tool_package:`
-(`core/tool_packages/`). The server only reads it: its code runs in the user's
-container, started as an MCP server by the runtime `grid_tool.py`, with its
-pinned PyPI requirements installed there - so it gets no more than the agents'
-shell commands already have, and the action policy judges every call. System
-packages (apt) are not installed this way; a system that needs them says so.
+A tool the builder writes is a plain Python function with `@function_tool` from
+`grid_tool` in the system's `tools/<package>/`. Each such function is declared
+in the config as `type: function` with `tool_package: tools/<package>` and
+granted only to the agents that call it (`core/tool_packages/`). The server only
+reads the package: its code runs in the user's container, with its pinned PyPI
+requirements installed there - so it gets no more than the agents' shell
+commands already have, and the action policy judges every call. System packages
+(apt) are not installed this way; a system that needs them says so.
 
 ## Example request
 
@@ -103,8 +104,8 @@ remaining failure or infrastructure blocker instead of claiming success.
 
 ## Limits of the initial evaluator
 
-- Local synchronous `type: agent` delegation, shared confined tools and local MCP
-  tool packages are supported. Imported `project_tools`, arbitrary MCP commands,
+- Local synchronous `type: agent` delegation, shared confined tools and local
+  `tool_package` function tools are supported. Imported `project_tools`, arbitrary MCP commands,
   background/cross-system orchestration and live container-network integrations
   are refused explicitly.
 - Token and tool-call limits apply to observed events across nested agents. A

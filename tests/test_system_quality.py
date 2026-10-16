@@ -432,3 +432,51 @@ def test_private_acceptance_is_scoped_to_owner(deployment, tmp_path):
     assert client.put(route, headers=BOB, json={"yaml": suite}).status_code == 404
     assert client.put(route, headers=ALICE, json={"yaml": suite}).status_code == 200
     assert client.get("/api/systems/built/private-stats", headers=BOB).status_code == 404
+
+
+def test_workspace_travels_in_and_out_of_the_sandbox_as_tar(tmp_path):
+    import io
+    import tarfile
+    from core.system_evaluation import _extract_workspace, _workspace_archive
+    source = tmp_path / "src"
+    (source / "sub").mkdir(parents=True)
+    (source / "sub" / "a.txt").write_text("a")
+    archive = _workspace_archive(source)
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        assert {m.name: m.mode for m in tar}["sub/a.txt"] == 0o666
+    target = tmp_path / "dst"
+    target.mkdir()
+    (target / "stale.txt").write_text("old")
+    # A stream as `docker cp c:/workspace/. -` makes it, with a link that must be skipped.
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        tar.addfile(tarfile.TarInfo("./"))
+        entry = tarfile.TarInfo("./out.json")
+        entry.size = 2
+        tar.addfile(entry, io.BytesIO(b"{}"))
+        link = tarfile.TarInfo("./link")
+        link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
+        tar.addfile(link)
+    _extract_workspace(buffer.getvalue(), target)
+    assert (target / "out.json").read_text() == "{}"
+    assert not (target / "link").exists() and not (target / "stale.txt").exists()
+    escape = io.BytesIO()
+    with tarfile.open(fileobj=escape, mode="w") as tar:
+        bad = tarfile.TarInfo("../evil")
+        bad.size = 1
+        tar.addfile(bad, io.BytesIO(b"x"))
+    with pytest.raises(ValueError):
+        _extract_workspace(escape.getvalue(), target)
+
+
+def test_design_review_refuses_tool_policing_prompts_and_monolithic_packages(deployment):
+    access, root = create_system(deployment)
+    contract = QualityContract.model_validate(contract_document())
+    document = yaml.safe_load((root / "config.yaml").read_text())
+    document["agents"]["main"]["custom_prompt"] = "Do not call the tool stats_words."
+    document["tools"]["pack"] = {"type": "mcp", "tool_package": "tools/pack"}
+    document["agents"]["second"] = {"name": "S", "description": "d", "model": "m1"}
+    (root / "config.yaml").write_text(yaml.safe_dump(document))
+    errors = design_review(root, contract)["errors"]
+    assert any("forbids tool" in error for error in errors)
+    assert any("type: function" in error and "tools/pack" in error for error in errors)

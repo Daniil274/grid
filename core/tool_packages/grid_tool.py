@@ -20,6 +20,7 @@ one-user server without isolation, a cache on the host) and starts::
     python grid_tool.py serve <package>       an MCP server on stdio: the agent's tools
     python grid_tool.py describe <package>    the tools as JSON, for a check
     python grid_tool.py test <package>        run the test_* functions of test_*.py
+    python grid_tool.py call <package> <tool> one call: JSON arguments on stdin, JSON answer on stdout
 
 The tools run with the workspace as their working directory. This file needs
 only the standard library: it must run in any image with a Python 3.9+.
@@ -79,6 +80,10 @@ def tool(fn=None, *, name=None, read_only=False, destructive=False, open_world=F
         return function
 
     return mark(fn) if fn is not None else mark
+
+
+#: The same decorator under the name agents' frameworks use: ``from grid_tool import function_tool``.
+function_tool = tool
 
 
 # -- describing tools -----------------------------------------------------------------
@@ -385,9 +390,42 @@ def _ms(started):
     return round((time.monotonic() - started) * 1000)
 
 
+def call_once(package, tool_name):
+    """One tool call for a host that runs each ``@function_tool`` on its own.
+
+    Arguments: a JSON object on stdin. Answer: one JSON line, ``{"ok": true, "result": text}``
+    or ``{"ok": false, "error": text}``; whatever the tool prints goes to stderr.
+    """
+    answer = _claim_stdout()
+    try:
+        raw = sys.stdin.read()
+        arguments = json.loads(raw) if raw.strip() else {}
+        if not isinstance(arguments, dict):
+            raise TypeError("the arguments must be a JSON object")
+    except Exception as exc:
+        detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        answer.write(json.dumps({"ok": False, "error": f"Error: {detail}"}, ensure_ascii=False) + "\n")
+        return 1
+    tools, errors = load(package)
+    if tool_name not in tools:
+        reason = f"No tool {tool_name!r}" + (f" ({'; '.join(errors)})" if errors else "")
+        answer.write(json.dumps({"ok": False, "error": reason}, ensure_ascii=False) + "\n")
+        return 1
+    try:
+        result = call(tools[tool_name], arguments)
+    except Exception as exc:
+        detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        answer.write(json.dumps({"ok": False, "error": f"Error: {detail}"}, ensure_ascii=False) + "\n")
+        return 1
+    answer.write(json.dumps({"ok": True, "result": _text(result)}, ensure_ascii=False) + "\n")
+    return 0
+
+
 def main(argv):
+    if len(argv) == 4 and argv[1] == "call":
+        return call_once(argv[2], argv[3])
     if len(argv) != 3 or argv[1] not in ("serve", "describe", "test"):
-        print("usage: grid_tool.py serve|describe|test <package directory>", file=sys.stderr)
+        print("usage: grid_tool.py serve|describe|test <package directory> | call <package directory> <tool>", file=sys.stderr)
         return 2
     command, package = argv[1], argv[2]
     if command == "serve":

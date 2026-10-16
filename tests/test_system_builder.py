@@ -151,9 +151,93 @@ def test_the_builder_writes_only_a_drafts_own_files(deployment, path, problem):
 def test_a_broken_config_is_not_written(deployment):
     access = access_for(deployment)
     call("builder_create", access, key="stats", name="Stats", description="", config_yaml=NEW_SYSTEM)
+    before = deployment.created_store.config_text("stats")
     answer = call("builder_write", access, system="stats", path="config.yaml", content="agents: [1]")
     assert answer.startswith("Not written")
-    assert deployment.created_store.config_text("stats") == NEW_SYSTEM
+    assert deployment.created_store.config_text("stats") == before
+
+
+NOISY = """
+# ===== banner =====
+settings:
+  default_agent: main  # the entry
+tools:
+  builder_check:
+    type: function
+    name: builder_check
+    description: Check it
+  stats:
+    type: function
+    name: stats
+    tool_package: tools/stats
+    description: Keeps its own description
+agents:
+  main:
+    name: Main
+    description: Text statistics
+    model: m1
+    tools: [builder_check, stats]
+""" + PROVIDERS
+
+
+def _assert_canonical(text):
+    assert "#" not in text
+    tools = yaml.safe_load(text)["tools"]
+    assert tools["builder_check"] == {"type": "function"}
+    assert "name" not in tools["stats"]
+    assert tools["stats"]["description"] == "Keeps its own description"
+
+
+def test_configs_are_stored_canonically(deployment):
+    access = access_for(deployment)
+    call("builder_create", access, key="stats", name="Stats", description="", config_yaml=NOISY)
+    _assert_canonical(deployment.created_store.config_text("stats"))
+    answer = call("builder_write", access, system="stats", path="config.yaml", content=NOISY + "# trailing\n", fast=True)
+    assert "written" in answer and "health" not in answer
+    _assert_canonical(deployment.created_store.config_text("stats"))
+
+
+def test_quality_yaml_is_stored_without_comments(deployment):
+    access = access_for(deployment)
+    call("builder_create", access, key="stats", name="Stats", description="", config_yaml=NEW_SYSTEM)
+    from tests.test_system_quality import contract_document
+    text = "# note\n" + yaml.safe_dump(contract_document())
+    answer = call("builder_write", access, system="stats", path="quality.yaml", content=text, fast=True)
+    assert "written" in answer, answer
+    assert "#" not in (deployment.created_store.directory("stats") / "quality.yaml").read_text()
+
+
+def test_prompts_may_not_police_or_document_tools(deployment):
+    access = access_for(deployment)
+    forbid = NEW_SYSTEM.replace("    tools: [stats]\n", "    tools: [stats]\n    custom_prompt: 'Ты НЕ используешь stats_words, только считай сам'\n")
+    assert "forbids tool" in call("builder_create", access, key="stats", name="S", description="", config_yaml=forbid)
+    listing = NEW_SYSTEM.replace(
+        "    tools: [stats]\n",
+        "    tools: [stats]\n    custom_prompt: |\n      - words(text) — count\n      - lines(text) — count\n",
+    )
+    assert "function signatures" in call("builder_create", access, key="stats", name="S", description="", config_yaml=listing)
+
+
+def test_a_monolithic_mcp_package_is_refused_for_several_agents(deployment):
+    access = access_for(deployment)
+    many = NEW_SYSTEM.replace(
+        "    tools: [stats]\n",
+        "    tools: [stats]\n  second:\n    name: Second\n    description: Another\n    model: m1\n    tools: [stats]\n",
+    )
+    assert "type: function" in call("builder_create", access, key="stats", name="S", description="", config_yaml=many)
+
+
+def test_several_files_are_written_together_or_not_at_all(deployment):
+    access = access_for(deployment)
+    call("builder_create", access, key="stats", name="Stats", description="", config_yaml=NEW_SYSTEM)
+    answer = call("builder_write_files", access, system="stats",
+                  files=[{"path": "README.md", "content": "r"}, {"path": "skills/a.md", "content": "s"}], fast=True)
+    assert "README.md" in answer
+    root = deployment.created_store.directory("stats")
+    assert (root / "skills" / "a.md").read_text() == "s"
+    refused = call("builder_write_files", access, system="stats",
+                   files=[{"path": "new.md", "content": "x"}, {"path": "config.yaml", "content": "agents: [1]"}])
+    assert refused.startswith("Not written") and not (root / "new.md").exists()
 
 
 def test_published_systems_and_the_catalog_are_read_only(deployment):

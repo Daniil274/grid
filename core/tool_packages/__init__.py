@@ -17,6 +17,15 @@ itself. A *tool package* is how such tools are made safely:
           tool_package: tools/words
           description: Count and compare words in workspace files
 
+  or, to give each ``@function_tool`` of it to agents as a tool of its own,
+  on one ``type: function`` tool per function (``name`` is the function)::
+
+      tools:
+        word_count:
+          type: function
+          name: word_count
+          tool_package: tools/words
+
 - the server never imports it. It reads it with :mod:`ast` to check it and to
   show it (:func:`analyze`), and copies it, with the runtime, into the user's
   container, where it installs the requirements and starts it as an MCP server
@@ -49,7 +58,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from utils.process_limits import sandbox_run_args
 
@@ -67,10 +76,13 @@ MAX_FILE_BYTES = 512 * 1024
 MAX_PACKAGE_BYTES = 2 * 1024 * 1024
 INSTALL_TIMEOUT = 300.0
 TEST_TIMEOUT = 300.0
+CALL_TIMEOUT = 300.0
 TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 #: A requirement pinned to one version, from the package index: nothing else is installed.
 REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?==[A-Za-z0-9.!+_-]+$")
 SKIPPED_DIRS = {"__pycache__", ".pytest_cache"}
+DECORATORS = ("tool", "function_tool")
+SECTIONS_AFTER_SUMMARY = ("Returns", "Raises", "Examples", "Example", "Notes")
 
 
 class PackageError(RuntimeError):
@@ -124,6 +136,8 @@ class ToolInfo:
     read_only: bool = False
     destructive: bool = False
     open_world: bool = False
+    #: JSON schema of the arguments, built from the source as grid_tool.describe_function does.
+    input_schema: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -147,11 +161,17 @@ class PackageInfo:
 
 
 def _decorator(node: ast.expr) -> Optional[ast.expr]:
-    """The ``tool`` decorator among a function's, as written: ``tool``, ``tool(...)``, ``grid_tool.tool``."""
+    """The ``tool`` decorator among a function's, as written: ``tool``, ``function_tool``,
+    either called, or ``grid_tool.tool`` / ``grid_tool.function_tool``."""
     target = node.func if isinstance(node, ast.Call) else node
-    if isinstance(target, ast.Name) and target.id == "tool":
+    if isinstance(target, ast.Name) and target.id in DECORATORS:
         return node
-    if isinstance(target, ast.Attribute) and target.attr == "tool" and isinstance(target.value, ast.Name) and target.value.id == "grid_tool":
+    if (
+        isinstance(target, ast.Attribute)
+        and target.attr in DECORATORS
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "grid_tool"
+    ):
         return node
     return None
 
@@ -164,6 +184,107 @@ def _flags(decorator: ast.expr) -> Dict[str, Any]:
         if keyword.arg and isinstance(keyword.value, ast.Constant):
             flags[keyword.arg] = keyword.value.value
     return flags
+
+
+def _annotation_schema(node: Optional[ast.expr]) -> Dict[str, Any]:
+    """JSON schema of a parameter annotation as written, like grid_tool._schema."""
+    if node is None:
+        return {}
+    if isinstance(node, ast.Constant):
+        if node.value is None:
+            return {}
+        if isinstance(node.value, str):  # a quoted annotation
+            try:
+                return _annotation_schema(ast.parse(node.value, mode="eval").body)
+            except SyntaxError:
+                return {}
+        return {}
+    simple = {"str": "string", "int": "integer", "float": "number", "bool": "boolean", "list": "array", "dict": "object"}
+    if isinstance(node, ast.Attribute):
+        node_name = node.attr
+        if node_name == "Any":
+            return {}
+        return {"type": simple[node_name]} if node_name in simple else {}
+    if isinstance(node, ast.Name):
+        if node.id == "Any":
+            return {}
+        return {"type": simple[node.id]} if node.id in simple else {}
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):  # X | Y
+        return _union_schema([node.left, node.right])
+    if isinstance(node, ast.Subscript):
+        base = node.value.id if isinstance(node.value, ast.Name) else getattr(node.value, "attr", "")
+        index = node.slice
+        items = list(index.elts) if isinstance(index, ast.Tuple) else [index]
+        if base == "Optional":
+            return _union_schema(items)
+        if base == "Union":
+            return _union_schema(items)
+        if base == "Literal":
+            return {"enum": [item.value for item in items if isinstance(item, ast.Constant)]}
+        if base in ("List", "list", "Sequence", "Set", "set", "FrozenSet", "frozenset", "Tuple", "tuple"):
+            return {"type": "array", "items": _annotation_schema(items[0]) if items else {}}
+        if base in ("Dict", "dict", "Mapping"):
+            return {"type": "object"}
+    return {}
+
+
+def _union_schema(members: List[ast.expr]) -> Dict[str, Any]:
+    others = [
+        member for member in members if not (isinstance(member, ast.Constant) and member.value is None)
+    ]
+    if len(others) == 1:
+        return _annotation_schema(others[0])
+    return {"anyOf": [_annotation_schema(member) for member in others]}
+
+
+def _docstring_parts(text: str) -> Tuple[str, Dict[str, str]]:
+    """The summary and ``Args:`` descriptions of a Google-style docstring, like grid_tool._docstring."""
+    summary: List[str] = []
+    params: Dict[str, str] = {}
+    section: Optional[str] = None
+    current: Optional[str] = None
+    indent: Optional[int] = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped in ("Args:", "Arguments:", "Parameters:"):
+            section, current, indent = "args", None, None
+            continue
+        if stripped.endswith(":") and stripped[:-1] in SECTIONS_AFTER_SUMMARY:
+            section = "other"
+            continue
+        if section == "args" and stripped:
+            depth = len(line) - len(line.lstrip())
+            match = re.match(r"^(\w+)\s*(\([^)]*\))?\s*:\s*(.*)$", stripped)
+            if match and (indent is None or depth <= indent):
+                indent = depth
+                current = match.group(1)
+                params[current] = match.group(3)
+            elif current:
+                params[current] += " " + stripped
+        elif section is None:
+            summary.append(line)
+    return "\n".join(summary).strip(), params
+
+
+def _input_schema(node: ast.AST, param_docs: Dict[str, str]) -> Dict[str, Any]:
+    args = node.args  # type: ignore[attr-defined]
+    positional = args.posonlyargs + args.args
+    defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+    pairs = list(zip(positional, defaults)) + list(zip(args.kwonlyargs, args.kw_defaults))
+    properties: Dict[str, Any] = {}
+    required: List[str] = []
+    for arg, default in pairs:
+        schema = dict(_annotation_schema(arg.annotation))
+        if param_docs.get(arg.arg):
+            schema["description"] = param_docs[arg.arg]
+        if default is None:
+            required.append(arg.arg)
+        elif isinstance(default, ast.Constant) and default.value is not None and isinstance(
+            default.value, (str, int, float, bool)
+        ):
+            schema["default"] = default.value
+        properties[arg.arg] = schema
+    return {"type": "object", "properties": properties, "required": required}
 
 
 def analyze(package: Path) -> PackageInfo:
@@ -223,6 +344,7 @@ def analyze(package: Path) -> PackageInfo:
                 continue
             names[name] = relative.as_posix()
             docstring = ast.get_docstring(node) or ""
+            summary, param_docs = _docstring_parts(docstring)
             if not docstring.strip():
                 info.issues.append(f"{where}: no docstring - the agent reads it to know what the tool does")
             if node.args.vararg or node.args.kwarg:
@@ -248,11 +370,12 @@ def analyze(package: Path) -> PackageInfo:
                 ToolInfo(
                     name=name,
                     module=relative.stem,
-                    description=docstring.strip().split("\n\n")[0],
+                    description=summary or docstring.strip().split("\n\n")[0],
                     params=params,
                     read_only=bool(flags.get("read_only")),
                     destructive=bool(flags.get("destructive")),
                     open_world=bool(flags.get("open_world")),
+                    input_schema=_input_schema(node, param_docs),
                 )
             )
     if not info.tools and not unreadable:
@@ -330,11 +453,18 @@ class Deployment:
     def command(self, mode: str = "serve") -> List[str]:
         return [self.python, self.script, mode, self.package]
 
+    def call_command(self, tool_name: str) -> List[str]:
+        """One call of one tool: arguments as JSON on stdin, a JSON line on stdout."""
+        return [self.python, self.script, "call", self.package, tool_name]
+
     def env(self) -> Dict[str, str]:
         return {"PYTHONPATH": self.pythonpath, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"}
 
 
-async def _run(args: Sequence[str], *, stdin: Optional[bytes] = None, timeout: float = 60.0) -> tuple[int, str, str]:
+async def _run(
+    args: Sequence[str], *, stdin: Optional[bytes] = None, timeout: float = 60.0, raw: bool = False
+) -> tuple[int, Any, str]:
+    """Run a command; with *raw* its stdout stays bytes (a tar stream from ``docker cp``)."""
     process = await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
@@ -352,7 +482,7 @@ async def _run(args: Sequence[str], *, stdin: Optional[bytes] = None, timeout: f
         process.kill()
         await process.wait()
         raise PackageError(f"'{' '.join(args[:4])} …' took longer than {timeout:.0f}s") from None
-    return process.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+    return process.returncode, (out if raw else out.decode("utf-8", "replace")), err.decode("utf-8", "replace")
 
 
 _deploying: Dict[tuple, asyncio.Lock] = {}
@@ -431,6 +561,136 @@ async def ensure_on_host(package: Path, *, timeout: float = INSTALL_TIMEOUT) -> 
                 raise PackageError(f"installing {', '.join(info.requirements)} failed: {(err or out).strip()[-1500:]}")
         (root / ".ready").touch()
     return deployment
+
+
+# -- one @function_tool as an agent's tool ---------------------------------------------------
+def build_package_function_tool(
+    config_dir: Path,
+    package_rel: str,
+    tool_key: str,
+    func_name: str = "",
+    description_override: str = "",
+    default_container_id: Optional[str] = None,
+    default_workdir: str = "/workspace",
+    host_workdir: Optional[str] = None,
+) -> Tuple[Any, Any]:
+    """An agents ``FunctionTool`` for one function of a package, and its policy effect.
+
+    The package is read with :mod:`ast`, never imported here. Each call deploys
+    it (once per content) into the container the call's factory runs in - or the
+    host cache without one - and runs ``grid_tool.py call`` there, so the
+    function's code runs where the agents' own commands do. ``(None, None)``
+    when the package has issues or has no such function.
+    """
+    from agents.tool import FunctionTool
+
+    from utils.tool_effects import EXEC_ANY, egress, read
+
+    target_name = func_name or tool_key
+    try:
+        pkg_path = package_dir(config_dir, package_rel)
+    except PackageError as exc:
+        logger.error("Tool '%s': %s", tool_key, exc)
+        return None, None
+    info = analyze(pkg_path)
+    if info.issues:
+        logger.error("Tool package '%s' of tool '%s' has issues: %s", package_rel, tool_key, "; ".join(info.issues[:3]))
+        return None, None
+    tool_info = next((found for found in info.tools if found.name == target_name), None)
+    if tool_info is None:
+        logger.error("Tool package '%s' has no @function_tool named '%s'", package_rel, target_name)
+        return None, None
+
+    async def on_invoke_tool(ctx: Any, raw_args: Any) -> Any:
+        raw_ctx = getattr(ctx, "context", None)
+        factory = getattr(raw_ctx, "factory", None)
+        container_id = (
+            getattr(raw_ctx, "container_id", None)
+            or getattr(factory, "container_id", None)
+            or default_container_id
+        )
+        if isinstance(raw_args, (bytes, bytearray)):
+            stdin_bytes = bytes(raw_args) or b"{}"
+        elif isinstance(raw_args, str):
+            stdin_bytes = raw_args.encode("utf-8") if raw_args.strip() else b"{}"
+        elif isinstance(raw_args, dict):
+            stdin_bytes = json.dumps(raw_args, ensure_ascii=False).encode("utf-8")
+        else:
+            stdin_bytes = b"{}"
+        deployment = (
+            await ensure_in_container(container_id, pkg_path) if container_id else await ensure_on_host(pkg_path)
+        )
+        env = deployment.env()
+        if container_id:
+            workdir = getattr(factory, "_container_workdir", None) or default_workdir or "/workspace"
+            flags = [part for key, value in env.items() for part in ("-e", f"{key}={value}")]
+            command = ["docker", "exec", "-i", "-w", workdir, *flags, container_id,
+                       *deployment.call_command(target_name)]
+            code, out, err = await _run(command, stdin=stdin_bytes, timeout=CALL_TIMEOUT)
+        else:
+            config = getattr(factory, "config", None)
+            cwd = (config.get_working_directory() if config is not None else host_workdir) or os.getcwd()
+            code, out, err = await _run_host(
+                deployment.call_command(target_name), stdin=stdin_bytes, cwd=cwd,
+                env={**os.environ, **env}, timeout=CALL_TIMEOUT,
+            )
+        lines = [line for line in out.splitlines() if line.strip()]
+        try:
+            payload = json.loads(lines[-1]) if lines else None
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict) or "ok" not in payload:
+            detail = (err or out).strip()[-1500:] or f"exit code {code}"
+            raise RuntimeError(f"Tool '{tool_key}' gave no answer: {detail}")
+        if payload.get("ok"):
+            return payload.get("result", "")
+        return payload.get("error") or "Error"
+
+    tool = FunctionTool(
+        name=tool_key,
+        description=description_override or tool_info.description,
+        params_json_schema=tool_info.input_schema,
+        on_invoke_tool=on_invoke_tool,
+        strict_json_schema=False,
+    )
+    # The policy gate reads these hints with the call (ActionGate.describe_tool).
+    tool.annotations = {
+        "readOnlyHint": tool_info.read_only,
+        "destructiveHint": tool_info.destructive,
+        "openWorldHint": tool_info.open_world,
+    }
+    if tool_info.read_only and not tool_info.destructive and not tool_info.open_world:
+        effect = read()
+    elif tool_info.open_world and tool_info.read_only and not tool_info.destructive:
+        effect = egress(untrusted=True)
+    else:
+        effect = EXEC_ANY
+    return tool, effect
+
+
+async def _run_host(
+    args: Sequence[str], *, stdin: bytes, cwd: str, env: Dict[str, str], timeout: float
+) -> tuple[int, str, str]:
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+    )
+    try:
+        out, err = await asyncio.wait_for(process.communicate(stdin), timeout)
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        raise
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise PackageError(f"a tool call took longer than {timeout:.0f}s") from None
+    return process.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
 # -- tests in a sandbox ---------------------------------------------------------------------

@@ -278,3 +278,233 @@ def test_a_failed_network_disconnect_never_runs_package_code(package, monkeypatc
     assert result["stage"] == "network" and not result["ok"]
     assert not any(call[:2] == ["docker", "exec"] for call in calls)
     assert calls[-1][:3] == ["docker", "rm", "-f"]
+
+
+# -- per-function @function_tool ------------------------------------------------------------
+
+FUNCTION_TOOLS = '''
+from typing import Literal, Optional
+from grid_tool import function_tool
+
+
+@function_tool(read_only=True)
+def count(path: str, unique: bool = False, mode: Literal["words", "lines"] = "words", limit: Optional[int] = None) -> dict:
+    """Count the words or lines of a workspace file.
+
+    Args:
+        path: the file, relative to the workspace
+        unique: count distinct items
+            instead of all of them
+
+    Returns:
+        the count
+    """
+    print("printed by the tool")
+    text = open(path, encoding="utf-8").read()
+    items = text.split() if mode == "words" else text.splitlines()
+    return {"count": len(set(items)) if unique else len(items)}
+
+
+@function_tool(destructive=True)
+def shout(text: str) -> str:
+    """Upper-case a text."""
+    return text.upper()
+'''
+
+
+@pytest.fixture
+def function_package(tmp_path):
+    root = tmp_path / "system" / "tools" / "words"
+    root.mkdir(parents=True)
+    (root / "words.py").write_text(FUNCTION_TOOLS, encoding="utf-8")
+    return root
+
+
+def run_call(package, tool, stdin):
+    return subprocess.run(
+        [sys.executable, str(RUNTIME), "call", str(package), tool],
+        input=stdin, capture_output=True, text=True, cwd=package, timeout=60,
+    )
+
+
+def test_function_tool_is_found_and_described_from_the_source(function_package):
+    info = analyze(function_package)
+    assert info.issues == []
+    by_name = {tool.name: tool for tool in info.tools}
+    assert set(by_name) == {"count", "shout"}
+    assert by_name["count"].description == "Count the words or lines of a workspace file."
+    schema = by_name["count"].input_schema
+    assert schema["required"] == ["path"]
+    assert schema["properties"]["path"] == {"type": "string", "description": "the file, relative to the workspace"}
+    assert schema["properties"]["unique"] == {
+        "type": "boolean", "description": "count distinct items instead of all of them", "default": False}
+    assert schema["properties"]["mode"] == {"enum": ["words", "lines"], "default": "words"}
+    assert schema["properties"]["limit"] == {"type": "integer"}
+
+
+def test_the_source_schema_equals_the_runtimes(function_package):
+    described = json.loads(run_runtime("describe", function_package).stdout)
+    by_name = {tool["name"]: tool for tool in described["tools"]}
+    for tool in analyze(function_package).tools:
+        assert tool.input_schema == by_name[tool.name]["inputSchema"]
+        assert tool.description == by_name[tool.name]["description"]
+
+
+def test_the_runtime_calls_one_tool_and_keeps_prints_off_stdout(function_package):
+    (function_package / "a.txt").write_text("x y x", encoding="utf-8")
+    ok = run_call(function_package, "count", json.dumps({"path": "a.txt", "unique": "true"}))
+    assert ok.returncode == 0
+    assert json.loads(ok.stdout) == {"ok": True, "result": json.dumps({"count": 2}, indent=2)}
+    assert "printed by the tool" in ok.stderr
+    assert json.loads(run_call(function_package, "shout", "").stdout)["ok"] is False  # missing text
+    assert json.loads(run_call(function_package, "shout", '{"text": "hi"}').stdout) == {"ok": True, "result": "HI"}
+
+
+def test_a_failed_call_answers_ok_false(function_package):
+    failed = run_call(function_package, "count", json.dumps({"path": "none.txt"}))
+    payload = json.loads(failed.stdout)
+    assert failed.returncode == 1 and payload["ok"] is False and "FileNotFoundError" in payload["error"]
+    missing = json.loads(run_call(function_package, "nothing", "{}").stdout)
+    assert missing["ok"] is False and "No tool 'nothing'" in missing["error"]
+
+
+def test_call_command_names_the_package_and_tool():
+    from core.tool_packages import Deployment
+
+    deployment = Deployment(root="/opt/grid-tools/abc", python="python3")
+    assert deployment.call_command("count") == [
+        "python3", "/opt/grid-tools/abc/grid_tool.py", "call", "/opt/grid-tools/abc/pkg", "count"]
+
+
+def test_a_function_tool_effect_follows_its_flags(function_package):
+    from core.tool_packages import build_package_function_tool
+    from utils.tool_effects import EXEC, READ
+
+    config_dir = function_package.parent.parent
+    tool, effect = build_package_function_tool(config_dir, "tools/words", "count", "count")
+    assert effect.kind == READ and tool.annotations["readOnlyHint"] is True
+    assert tool.params_json_schema["required"] == ["path"] and tool.strict_json_schema is False
+    shout, effect = build_package_function_tool(config_dir, "tools/words", "loud", "shout", "Shout it")
+    assert effect.kind == EXEC and shout.name == "loud" and shout.description == "Shout it"
+    assert build_package_function_tool(config_dir, "tools/words", "x", "nope") == (None, None)
+
+
+def test_a_function_tool_runs_on_the_host_without_a_container(function_package, monkeypatch, tmp_path):
+    from core.tool_packages import build_package_function_tool
+
+    monkeypatch.setattr("core.tool_packages.HOST_CACHE", tmp_path / "cache")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "a.txt").write_text("x y x", encoding="utf-8")
+    tool, _ = build_package_function_tool(
+        function_package.parent.parent, "tools/words", "count", "count", host_workdir=str(work))
+    ctx = SimpleNamespace(context=None)
+    answer = asyncio.run(tool.on_invoke_tool(ctx, json.dumps({"path": "a.txt"})))
+    assert json.loads(answer) == {"count": 3}
+    shout, _ = build_package_function_tool(function_package.parent.parent, "tools/words", "shout", "shout")
+    assert asyncio.run(shout.on_invoke_tool(ctx, "")).startswith("Error:")  # missing arguments, as text
+
+
+def test_a_function_tool_runs_in_the_container_when_there_is_one(function_package, monkeypatch):
+    from core.tool_packages import Deployment, build_package_function_tool
+
+    deployed = Deployment(root="/opt/grid-tools/abc", python="python3")
+    seen = {}
+
+    async def in_container(container, path):
+        seen["deployed"] = (container, path)
+        return deployed
+
+    async def run(args, *, stdin=None, timeout=60.0):
+        seen["run"] = (list(args), stdin)
+        return 0, 'noise\n{"ok": true, "result": "HI"}\n', ""
+
+    monkeypatch.setattr("core.tool_packages.ensure_in_container", in_container)
+    monkeypatch.setattr("core.tool_packages._run", run)
+    shout, _ = build_package_function_tool(function_package.parent.parent, "tools/words", "shout", "shout")
+    factory = SimpleNamespace(container_id="cid", _container_workdir="/work")
+    ctx = SimpleNamespace(context=SimpleNamespace(factory=factory, container_id=None))
+    assert asyncio.run(shout.on_invoke_tool(ctx, '{"text": "hi"}')) == "HI"
+    assert seen["deployed"] == ("cid", function_package.resolve())
+    command, stdin = seen["run"]
+    assert command[:5] == ["docker", "exec", "-i", "-w", "/work"] and "cid" in command
+    assert command[-5:] == deployed.call_command("shout") and stdin == b'{"text": "hi"}'
+
+
+FUNCTION_CONFIG = """
+settings: {default_agent: a}
+tools:
+  count: {type: function, tool_package: tools/words, description: Count words}
+  loud: {type: function, name: shout, tool_package: tools/words}
+  ghost: {type: function, tool_package: tools/words}
+agents:
+  a: {name: A, model: m, tools: [count, loud, ghost], description: Does things}
+models:
+  m: {name: model, provider: p}
+providers:
+  p: {name: p, base_url: https://example.com/v1, api_key: k}
+"""
+
+
+def test_the_health_check_knows_function_tools_of_a_package(function_package):
+    config_path = function_package.parent.parent / "config.yaml"
+    config_path.write_text(FUNCTION_CONFIG, encoding="utf-8")
+    problems = [issue.text() for issue in diagnose(Config(str(config_path)))]
+    assert any("has no @function_tool named 'ghost'" in text for text in problems)
+    assert not any("named 'count'" in text or "named 'shout'" in text for text in problems)
+    assert not any("is not implemented" in text for text in problems)
+
+
+def test_a_package_shared_by_function_tools_is_listed_once(function_package):
+    from core.system_store import packages_of
+
+    config_path = function_package.parent.parent / "config.yaml"
+    config_path.write_text(FUNCTION_CONFIG, encoding="utf-8")
+    packages = packages_of(Config(str(config_path)))
+    assert len(packages) == 1
+    assert packages[0]["tool"] == "count" and packages[0]["package"] == "tools/words"
+    assert packages[0]["declared_tools"] == ["count", "loud", "ghost"]
+    assert [t["name"] for t in packages[0]["tools"]] == ["count", "shout"]
+
+
+def test_tool_evidence_of_a_package_covers_every_tool_and_survives_config_edits(function_package):
+    from core.system_quality import quality_summary, record_tool_test, revision
+
+    root = function_package.parent.parent
+    (root / "config.yaml").write_text(FUNCTION_CONFIG, encoding="utf-8")
+    assert quality_summary(root)["tools_tested"] is False
+    passed = {"ok": True, "offline": True, "tests": {"passed": 1}}
+    record_tool_test(root, "tools/words", passed, revision(root))
+    assert quality_summary(root)["tools_tested"] is True
+    (root / "config.yaml").write_text(FUNCTION_CONFIG + "\n# edited\n", encoding="utf-8")
+    (root / "README.md").write_text("docs", encoding="utf-8")
+    assert quality_summary(root)["tools_tested"] is True
+    (function_package / "words.py").write_text(FUNCTION_TOOLS + "\n# edited\n", encoding="utf-8")
+    assert quality_summary(root)["tools_tested"] is False
+
+
+def test_evidence_recorded_under_one_tool_key_covers_its_siblings(function_package):
+    from core.system_quality import quality_summary, record_tool_test, revision
+
+    root = function_package.parent.parent
+    (root / "config.yaml").write_text(FUNCTION_CONFIG, encoding="utf-8")
+    record_tool_test(root, "loud", {"ok": True, "offline": True, "tests": {"passed": 2}}, revision(root))
+    assert quality_summary(root)["tools_tested"] is True
+
+
+def test_the_factory_resolves_function_tools_of_a_package_even_when_confined(function_package):
+    from core.factory.tools import ToolAssembly
+    from utils.tool_effects import READ
+
+    config_path = function_package.parent.parent / "config.yaml"
+    config_path.write_text(FUNCTION_CONFIG, encoding="utf-8")
+    seen = []
+    assembly = ToolAssembly.__new__(ToolAssembly)
+    assembly.config = Config(str(config_path))
+    assembly.confine_tools = True
+    assembly.container_id = "cid"
+    assembly._container_workdir = "/workspace"
+    assembly._wrap_tool_with_output_limit = lambda tool, key, **kw: seen.append((key, kw.get("effect"))) or tool
+    tools = assembly._resolve_function_tools(["count", "loud", "ghost"])
+    assert [t.name for t in tools] == ["count", "loud"]  # ghost has no such function: skipped
+    assert seen[0][0] == "count" and seen[0][1].kind == READ

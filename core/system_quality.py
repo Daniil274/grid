@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import stat
 import time
 import uuid
@@ -154,6 +155,49 @@ def revision(root: Path) -> str:
     return digest.hexdigest()
 
 
+_FORBID = re.compile(
+    r"(?:не\s+использу(?:ешь|й|йте|ют)|не\s+вызыва(?:й|йте|ешь)|запрещено\s+(?:использовать|вызывать)|"
+    r"do\s+not\s+(?:use|call|invoke)|don'?t\s+(?:use|call)|must\s+not\s+(?:use|call)|never\s+(?:use|call))",
+    re.IGNORECASE,
+)
+_TOOL_WORD = re.compile(r"\b[a-z][a-z0-9]*_[a-z0-9_]+\b|\btools?\b|функци|инструмент|\bтул", re.IGNORECASE)
+_ACCESS_HEADER = re.compile(r"^\s*#{1,6}\s*Твой\s+доступ\s+к", re.IGNORECASE | re.MULTILINE)
+_SIGNATURE = re.compile(r"^\s*[-*]\s*`?[a-z][a-z0-9_]+\([a-z0-9_,\s=*:\[\]\"']*\)`?\s*[—–:-]", re.IGNORECASE | re.MULTILINE)
+
+
+def prompt_problems(agent: str, prompt: str | None) -> list[str]:
+    """Architectural defects of an agent's custom_prompt: it must not police or document its tools.
+
+    A tool an agent should not use is not granted to it; the schema and docstring
+    of every granted tool already reach the model, so the prompt keeps to the role.
+    """
+    if not prompt:
+        return []
+    problems = []
+    forbids = _ACCESS_HEADER.search(prompt) or any(
+        _FORBID.search(line) and _TOOL_WORD.search(line) for line in prompt.splitlines()
+    )
+    if forbids:
+        problems.append(
+            f"Agent '{agent}' custom_prompt forbids tool/function calls or lists tool access restrictions. "
+            "Declare each tool function as 'type: function' with 'tool_package' and grant each agent "
+            "only the tools it uses in 'tools:'."
+        )
+    if len(_SIGNATURE.findall(prompt)) >= 2:
+        problems.append(
+            f"Agent '{agent}' custom_prompt lists function signatures. Tool schemas and docstrings are "
+            "provided to the model automatically; keep custom_prompt focused on role workflow and contracts."
+        )
+    return problems
+
+
+def monolithic_package_message(name: str, package: str) -> str:
+    return (
+        f"{name}: use 'type: function' with 'tool_package: {package}' for individual @function_tool "
+        "functions instead of a monolithic 'type: mcp' package in a multi-agent system"
+    )
+
+
 def design_review(root: Path, contract: QualityContract) -> dict:
     document = yaml.safe_load((root / "config.yaml").read_text()) or {}
     agents, tools = document.get("agents") or {}, document.get("tools") or {}
@@ -180,7 +224,11 @@ def design_review(root: Path, contract: QualityContract) -> dict:
                 pending.append(target)
     if set(agents) - reached:
         errors.append("Agents unreachable from the default entry: " + ", ".join(sorted(set(agents) - reached)))
+    for key, agent in agents.items():
+        errors.extend(prompt_problems(key, (agent or {}).get("custom_prompt")))
     for name, tool in tools.items():
+        if len(agents) > 1 and tool.get("type") == "mcp" and tool.get("tool_package"):
+            errors.append(monolithic_package_message(name, tool["tool_package"]))
         if tool.get("type") == "agent" and tool.get("context_strategy") != "minimal":
             warnings.append(f"{name}: consider minimal context and explicit artifact references")
     categories = {s.category for s in contract.scenarios}
@@ -249,13 +297,76 @@ def load_evidence(root: Path, name: str) -> dict | None:
         return None
 
 
+def _tool_evidence_name(key: str) -> str:
+    return "tool-" + hashlib.sha256(key.encode()).hexdigest()
+
+
+def _package_key(root: Path, relative: str) -> str:
+    """The evidence name of a package: its path inside the system, normalized."""
+    try:
+        return "package:" + (root / relative).resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return "package:" + relative
+
+
+def _package_digest(root: Path, relative: str) -> str | None:
+    """The content hash of a package that exists on disk, else None."""
+    from core.tool_packages import PackageError, digest, package_dir
+    try:
+        folder = package_dir(root, relative)
+        return digest(folder) if folder.is_dir() else None
+    except (PackageError, OSError):
+        return None
+
+
+def _declared_packages(root: Path) -> dict[str, str]:
+    """Tool key -> tool_package of the config."""
+    try:
+        document = yaml.safe_load((root / "config.yaml").read_text()) or {}
+    except (OSError, ValueError, yaml.YAMLError):
+        return {}
+    return {k: v["tool_package"] for k, v in (document.get("tools") or {}).items()
+            if isinstance(v, dict) and v.get("tool_package")}
+
+
 def record_tool_test(root: Path, tool: str, result: dict, tested_revision: str) -> None:
-    # One file per tool avoids lost updates from independent package tests.
-    name = "tool-" + hashlib.sha256(tool.encode()).hexdigest()
-    save_evidence(root, name, {"revision": tested_revision, "at": time.time(), "tool": tool,
-                              "passed": bool(result.get("ok") and result.get("offline") and
-                                             (result.get("tests") or {}).get("passed", 0) > 0),
-                              "tests": (result.get("tests") or {}).get("passed", 0)})
+    """Save a package's test result for *tool*: a tool key or a package path.
+
+    Several ``type: function`` tools may share one package, so one test marks
+    every tool that names it (and the package itself). The package's own
+    content hash is stored beside the system's revision: editing the config or
+    the README does not make a tested package untested; editing the package does.
+    """
+    declared = _declared_packages(root)
+    relative = declared.get(tool)
+    if relative is None:
+        wanted = _package_key(root, tool)
+        relative = next((r for r in declared.values() if _package_key(root, r) == wanted), None)
+    keys = [tool]
+    package_digest = None
+    if relative is not None:
+        keys += [k for k, r in declared.items() if _package_key(root, r) == _package_key(root, relative)]
+        keys.append(_package_key(root, relative))
+        package_digest = _package_digest(root, relative)
+    payload = {"revision": tested_revision, "package_digest": package_digest, "at": time.time(), "tool": tool,
+               "passed": bool(result.get("ok") and result.get("offline") and
+                              (result.get("tests") or {}).get("passed", 0) > 0),
+               "tests": (result.get("tests") or {}).get("passed", 0)}
+    # One file per key avoids lost updates from independent package tests.
+    for key in dict.fromkeys(keys):
+        save_evidence(root, _tool_evidence_name(key), payload)
+
+
+def _tools_tested(root: Path, current: str, declared: dict[str, str]) -> bool:
+    for key, relative in declared.items():
+        record = load_evidence(root, _tool_evidence_name(key)) or load_evidence(
+            root, _tool_evidence_name(_package_key(root, relative)))
+        if not record or not record.get("passed"):
+            return False
+        digest = _package_digest(root, relative)
+        if record.get("revision") != current and not (digest and record.get("package_digest") == digest):
+            return False
+    return True
 
 
 def quality_summary(root: Path) -> dict:
@@ -266,9 +377,8 @@ def quality_summary(root: Path) -> dict:
         current = revision(root)
         result["revision"] = current
         document = yaml.safe_load((root / "config.yaml").read_text()) or {}
-        packages = [k for k, v in (document.get("tools") or {}).items() if v.get("tool_package")]
-        records = [load_evidence(root, "tool-" + hashlib.sha256(k.encode()).hexdigest()) for k in packages]
-        result["tools_tested"] = all(r and r.get("revision") == current and r.get("passed") for r in records)
+        packages = {k: v["tool_package"] for k, v in (document.get("tools") or {}).items() if v.get("tool_package")}
+        result["tools_tested"] = _tools_tested(root, current, packages)
         if not (root / "quality.yaml").exists():
             return result
         contract = read_contract(root)
