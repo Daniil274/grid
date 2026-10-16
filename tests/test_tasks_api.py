@@ -7,7 +7,6 @@ shape, the answers they make of bd's, and the auth/scope they hold.
 
 from types import SimpleNamespace
 
-import pytest
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 

@@ -6,7 +6,6 @@ it waits, so a coordinator is never cut off by the time its agents take.
 """
 
 import asyncio
-from types import SimpleNamespace
 
 import agents
 
