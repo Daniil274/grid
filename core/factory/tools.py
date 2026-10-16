@@ -14,6 +14,8 @@ import logging
 import re
 import time
 import uuid
+from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, List, Optional
 
 from agents import Agent, RunContextWrapper, function_tool
@@ -24,11 +26,15 @@ from agents.exceptions import (
 )
 
 from core.action_policy import delegated_state
+from core.deadlines import Deadline, waiting_for_delegate
+from core.devices.hub import holding
 from core.factory.run_context import GridRunContext, get_runner, runner_max_turns
 from core.interruption import StopRequested
+from core.tool_packages import build_package_function_tool
 from core.run_stream import interrupted_run_report, run_output_text
 from schemas import AgentConfig, AgentExecution
 from tools import resolve_tool, tool_isolation
+from tools.parallel_tools import DEFAULT_MAX_PARALLEL, PARALLEL, parallel_tool
 from utils.exceptions import ConfigError
 from utils.logger import Logger
 from utils.path_utils import reset_current_factory, set_current_factory
@@ -38,6 +44,9 @@ logger = logging.getLogger("grid.agent_factory")
 
 
 CONTEXT_ID_REGEX = re.compile(r"ctx-[0-9a-fA-F]{8,}")
+
+# Invocation-local handoff: never expose service IDs in model arguments.
+_agent_tool_context_id: ContextVar[Optional[str]] = ContextVar("agent_tool_context_id", default=None)
 
 
 class ToolAssembly:
@@ -100,7 +109,10 @@ class ToolAssembly:
                     mcp_tools.append(tool_key)
 
         resolved: List[Any] = []
+        bind_parallel = PARALLEL in function_tools
         for tool_key in function_tools:
+            if tool_key == PARALLEL:
+                continue
             found = self._resolve_function_tools([tool_key])
             if found:
                 resolved.extend(found)
@@ -117,6 +129,8 @@ class ToolAssembly:
                 logger.debug("Failed to resolve agent tools: %s", exc, exc_info=exc)
                 missing.extend(agent_tools)
 
+        if bind_parallel:
+            resolved.append(self._parallel_tool(resolved))
         return resolved, mcp_tools, missing
 
     @staticmethod
@@ -218,12 +232,21 @@ class ToolAssembly:
         return registry, pipeline_id, active_context_id
 
     def _wrap_tool_with_output_limit(
-        self, tool: Any, tool_key: Optional[str] = None
+        self,
+        tool: Any,
+        tool_key: Optional[str] = None,
+        limit_output: bool = True,
+        effect: Any = None,
     ) -> Any:
-        """Wraps FunctionTool with pipeline serialization and output limits."""
+        """Wraps FunctionTool with pipeline serialization and output limits.
+
+        ``limit_output`` False leaves the output whole: for a tool whose output
+        is made of other tools' outputs, each limited already. ``effect`` is
+        what the tool does, when its module cannot declare it (a tool package's).
+        """
         settings = self.config.config.settings
-        max_tokens = getattr(settings, "max_tool_output_tokens", None)
-        max_chars = getattr(settings, "max_tool_output", None)
+        max_tokens = getattr(settings, "max_tool_output_tokens", None) if limit_output else None
+        max_chars = getattr(settings, "max_tool_output", None) if limit_output else None
         if not hasattr(tool, "on_invoke_tool"):
             return tool
 
@@ -268,7 +291,21 @@ class ToolAssembly:
             )
 
         tool.on_invoke_tool = limited_invoke
-        return self._wrap_tool_with_policy(tool, tool_name, "function")
+        return self._wrap_tool_with_policy(tool, tool_name, "function", effect=effect)
+
+    def _parallel_tool(self, siblings: List[Any]) -> Any:
+        """The ``parallel`` tool bound to an agent's own tools (tools.parallel_tools).
+
+        It runs as one serialized step, which its calls join, so they run side
+        by side; their outputs were limited one by one, so its own is not.
+        """
+        try:
+            max_parallel = self.config.get_tool(PARALLEL).max_parallel
+        except ConfigError:
+            max_parallel = DEFAULT_MAX_PARALLEL
+        return self._wrap_tool_with_output_limit(
+            parallel_tool(siblings, max_parallel=max_parallel), PARALLEL, limit_output=False
+        )
 
     def _resolve_function_tools(self, tool_keys: List[str]) -> List[Any]:
         """Each function tool by key, from this factory's own config: its project
@@ -283,6 +320,27 @@ class ToolAssembly:
         loader = self.config.project_tools_loader
         tools: List[Any] = []
         for tool_key in tool_keys:
+            declared = getattr(getattr(self.config, "config", None), "tools", None) or {}
+            tool_cfg = declared.get(tool_key)
+            if getattr(tool_cfg, "tool_package", None):
+                # One @function_tool of a tool package: it runs in the user's
+                # container (or the host cache without one), where the agents'
+                # own commands run - so an isolated space may have it.
+                tool, effect = build_package_function_tool(
+                    Path(self.config.config_path).parent,
+                    tool_cfg.tool_package,
+                    tool_key,
+                    func_name=tool_cfg.name or tool_key,
+                    description_override=tool_cfg.description,
+                    default_container_id=self.container_id,
+                    default_workdir=getattr(self, "_container_workdir", "/workspace"),
+                    host_workdir=self.config.get_working_directory(),
+                )
+                if tool is None:
+                    logger.warning("Tool '%s': its package '%s' cannot be used; skipped", tool_key, tool_cfg.tool_package)
+                    continue
+                tools.append(self._wrap_tool_with_output_limit(tool, tool_key, effect=effect))
+                continue
             if self.confine_tools and not is_confined(tool_isolation(tool_key, loader)):
                 logger.warning(
                     "Tool '%s' acts on the host, not in the user's container or workspace; "
@@ -331,7 +389,7 @@ class ToolAssembly:
                     exc_info=exc,
                 )
 
-        tools.extend(self._resolve_function_tools(function_tools))
+        tools.extend(self._resolve_function_tools([key for key in function_tools if key != PARALLEL]))
 
         # Add agent tools
         if agent_tools:
@@ -349,8 +407,16 @@ class ToolAssembly:
                     "Failed to create agent tools %s: %s", agent_tools, e, exc_info=e
                 )
 
-        # Caller-specific closures must not be shared between agent keys.
-        tools.extend(self._system_access_tools(agent_key))
+        # Caller-specific closures must not be shared between agent keys. The
+        # broker's policy-wrapped tools replace the same names a config may have
+        # declared, so systems_list / system_delegate are never listed twice.
+        access_tools = self._system_access_tools(agent_key)
+        if access_tools:
+            provided = {getattr(tool, "name", None) for tool in access_tools}
+            tools = [tool for tool in tools if getattr(tool, "name", None) not in provided]
+            tools.extend(access_tools)
+        if PARALLEL in function_tools:
+            tools.append(self._parallel_tool(tools))
 
         # Cache tools
         self._tool_cache[cache_key] = tools
@@ -458,6 +524,12 @@ class ToolAssembly:
                 # Not a JSON object (plain text or malformed JSON): the text is the task
                 preferred_text = str(arguments) if arguments is not None else ""
             normalized_args = {"input": preferred_text}
+            if isinstance(arguments, dict):
+                init_tools = arguments.get("init_tools")
+                if isinstance(init_tools, list) and init_tools:
+                    normalized_args["init_tools"] = json.dumps(init_tools, ensure_ascii=False)
+                elif isinstance(init_tools, str) and init_tools.strip():
+                    normalized_args["init_tools"] = init_tools
 
             # Safely convert arguments to string for logging
             requested_context_id = self._extract_context_id_from_text(preferred_text)
@@ -494,12 +566,16 @@ class ToolAssembly:
                     raw_ctx.execution_mode = "serial_subtree"
 
                 async def execute_original():
-                    result = original_invoke(
-                        tool_context, json.dumps(normalized_args, ensure_ascii=False)
-                    )
-                    if hasattr(result, "__await__"):
-                        return await result
-                    return result
+                    token = _agent_tool_context_id.set(sub_context_id)
+                    try:
+                        result = original_invoke(
+                            tool_context, json.dumps(normalized_args, ensure_ascii=False)
+                        )
+                        if hasattr(result, "__await__"):
+                            return await result
+                        return result
+                    finally:
+                        _agent_tool_context_id.reset(token)
 
                 result = await registry.run_serialized_step(
                     pipeline_id=pipeline_id,
@@ -531,17 +607,14 @@ class ToolAssembly:
                 else:
                     result_text = str(result)
 
-                # The sub-agent reports the session it actually ran in.
-                reported = re.findall(r"Context ID: (ctx-[0-9a-fA-F]{8,})", result_text)
-                if reported:
-                    execution.context_id = reported[-1]
-                    execution.output = result_text
-                else:
-                    execution.output = (
-                        result_text.rstrip() + "\n\nContext ID: " + sub_context_id
-                    )
+                # The result carries no context id: the service id never
+                # reaches the model. The execution record keeps its context_id
+                # (set above) as metadata only.
+                execution.output = result_text
 
-                self.context_manager.add_execution(execution)
+                self.context_manager.add_execution(
+                    execution, context_id=self._conversation_of(tool_context)
+                )
 
                 # Log the full tool call result in verbose mode
                 Logger("agent_factory").log_verbose(
@@ -556,7 +629,9 @@ class ToolAssembly:
                 execution.end_time = time.time()
                 execution.error = str(e)
 
-                self.context_manager.add_execution(execution)
+                self.context_manager.add_execution(
+                    execution, context_id=self._conversation_of(tool_context)
+                )
 
                 raise
 
@@ -578,7 +653,7 @@ class ToolAssembly:
         # Enhance tool description, but move common rules to the shared prompt (see settings.tools_common_rules)
         effective_description = tool_description or ""
         # Key local rules kept brief (one line), the rest in the shared block
-        local_rule = "Call: pass a single field input (string). Allowed aliases: task, message, prompt."
+        local_rule = 'Call: pass input (string; allowed aliases: task, message, prompt) and optional init_tools (JSON list of {"name": ..., "parameters": {...}} tool calls run before the agent starts).'
         if effective_description:
             effective_description = effective_description + "\n" + local_rule
         else:
@@ -591,6 +666,7 @@ class ToolAssembly:
         async def run_agent_with_context(
             context: RunContextWrapper,
             input: str,
+            init_tools: Optional[str] = None,
         ) -> str:
             local_sub_agent = sub_agent
             if local_sub_agent is None:
@@ -626,15 +702,19 @@ class ToolAssembly:
                 else None
             )
 
-            # The sub-agent session is the requested context, or a new one. Its id
-            # is reported back with the result, so the caller can continue it.
-            # The id comes from model-written text, so the session is also keyed
-            # by user: a named id never opens another user's session.
-            sub_context_id = requested_context_id or f"ctx-{uuid.uuid4().hex[:8]}"
+            # The sub-agent session is the requested context (a context id the
+            # user typed into the task), or a new one. The session is keyed by
+            # user: a named id never opens another user's session.
+            inherited_context_id = _agent_tool_context_id.get()
+            # Consume the handoff before running: nested calls allocate their own IDs.
+            _agent_tool_context_id.set(None)
+            sub_context_id = requested_context_id or inherited_context_id or f"ctx-{uuid.uuid4().hex[:8]}"
             session = self._get_agent_session(
                 agent_key,
                 f"{sub_context_id}@{parent_user_id}" if parent_user_id else sub_context_id,
             )
+            # A legacy session may still hold answers with the service footer.
+            await self._strip_legacy_context_footers(session)
 
             # Create GridRunContext for sub-agent with LOCAL session access
             parent_pipeline_id = (
@@ -694,34 +774,61 @@ class ToolAssembly:
                 sub_run_ctx,
                 user_message=enhanced_input,
             )
-            if preamble:
-                enhanced_input = f"{preamble}\n\n[Current user request]\n\n{enhanced_input}"
+            init_info = ""
+            if init_tools:
+                try:
+                    parsed_init_tools = json.loads(init_tools) if isinstance(init_tools, str) else init_tools
+                    if not isinstance(parsed_init_tools, list):
+                        raise ValueError("init_tools must be a JSON list")
+                except (ValueError, TypeError) as exc:
+                    logger.warning("Invalid init_tools for agent %s: %s", agent_key, exc)
+                    parsed_init_tools = []
+                init_info = await self._execute_init_tools(
+                    parsed_init_tools, list(local_sub_agent.tools or []), sub_run_ctx
+                )
+            if preamble or init_info:
+                prefix = "\n\n".join(part for part in (preamble, init_info) if part)
+                enhanced_input = f"{prefix}\n\n[Current user request]\n\n{enhanced_input}"
 
             set_current_factory(self)
             run_error: Optional[str] = None
             result = None
+            # The sub-agent is bounded by its own limit; its caller's clock
+            # stops meanwhile (core.deadlines), so a coordinator is never cut
+            # off while it waits for the agents it called.
+            timeout = self.config.get_agent_timeout(agent_key)
+            deadline = Deadline(timeout)
+            # How the caller continues it after a stop: its session is kept.
+            resume_note = (
+                f"\n\nIts session is kept: call {tool_name} again with input that "
+                f"includes {sub_context_id} to continue it where it stopped."
+            )
+            caller = getattr(getattr(context, "context", None), "context_id", None) or "default"
             try:
-                result = get_runner().run_streamed(
-                    starting_agent=local_sub_agent,
-                    input=enhanced_input,
-                    context=sub_run_ctx,
-                    session=session,
-                    max_turns=runner_max_turns(self.config.get_max_turns(agent_key)),
-                    run_config=self._run_config(agent_key, observer=sub_observer),
-                )
-                control = sub_run_ctx.run_control
-                if control is not None:
-                    control.attach(result)
-                try:
-                    await self._consume_stream(
-                        result,
-                        observer=sub_observer,
-                        agent_key=agent_key,
-                        action_state=sub_run_ctx.action_state,
-                    )
-                finally:
-                    if control is not None:
-                        control.detach(result)
+                # The devices it uses are its own while it runs (core.devices.hub).
+                with waiting_for_delegate(), holding(f"{agent_key}-{sub_context_id}", default=caller):
+                    async with deadline:
+                        result = get_runner().run_streamed(
+                            starting_agent=local_sub_agent,
+                            input=enhanced_input,
+                            context=sub_run_ctx,
+                            session=session,
+                            max_turns=runner_max_turns(self.config.get_max_turns(agent_key)),
+                            run_config=self._run_config(agent_key, observer=sub_observer),
+                        )
+                        control = sub_run_ctx.run_control
+                        if control is not None:
+                            control.attach(result)
+                        try:
+                            await self._consume_stream(
+                                result,
+                                observer=sub_observer,
+                                agent_key=agent_key,
+                                action_state=sub_run_ctx.action_state,
+                            )
+                        finally:
+                            if control is not None:
+                                control.detach(result)
                 if control is not None and control.stop_requested and result.final_output is None:
                     # Its finished steps are in its session; the caller is told
                     # it stopped, then stops after this step itself.
@@ -735,6 +842,28 @@ class ToolAssembly:
                 run_error = str(exc) or type(exc).__name__
                 logger.warning("Sub-agent %s stopped: %s: %s", agent_key, type(exc).__name__, run_error)
                 output = interrupted_run_report(result, f"Agent {agent_key}", exc)
+                if isinstance(exc, MaxTurnsExceeded):
+                    output += resume_note
+            except TimeoutError as exc:
+                if timeout <= 0 or not deadline.expired():
+                    run_error = str(exc) or type(exc).__name__
+                    raise
+                from core.factory.turns import TIMEOUT_REPORT, limit_report_seconds
+
+                run_error = f"no answer within the agent timeout ({timeout:g} s)"
+                logger.warning("Sub-agent %s stopped after %s s", agent_key, timeout)
+                control = sub_run_ctx.run_control
+                report = ""
+                if not (control is not None and control.stop_requested):
+                    report, _ = await self._report_after_turn_limit(
+                        local_sub_agent, sub_run_ctx, session, sub_observer, agent_key,
+                        sub_run_ctx.action_state, message=TIMEOUT_REPORT, seconds=limit_report_seconds(timeout),
+                    )
+                output = (
+                    f"[Agent {agent_key} ran out of time ({timeout:g} s); its report of the work so far:]\n{report}"
+                    if report
+                    else interrupted_run_report(result, f"Agent {agent_key}", TimeoutError(run_error))
+                ) + resume_note
             except BaseException as exc:
                 run_error = str(exc) or type(exc).__name__
                 raise
@@ -746,12 +875,11 @@ class ToolAssembly:
                     except Exception:
                         logger.debug("Failed to settle sub-agent trace", exc_info=True)
 
-            if isinstance(output, str):
-                output = f"{output.rstrip()}\n\nContext ID: {sub_context_id}"
-
             # Record the result as an assistant message so the main agent can discuss and provide corrections
             try:
-                self.context_manager.add_tool_result_as_message(tool_name, output)
+                self.context_manager.add_tool_result_as_message(
+                    tool_name, output, context_id=self._conversation_of(context)
+                )
             except Exception as exc:
                 logger.debug(
                     "Failed to record tool result in context: %s", exc, exc_info=exc
@@ -760,6 +888,15 @@ class ToolAssembly:
             return output
 
         return run_agent_with_context
+
+    def _conversation_of(self, tool_context: Any) -> Optional[str]:
+        """The conversation a tool call belongs to, when its run names one.
+
+        None - the running turn's own, which the context manager knows - for a
+        run whose context id is not a conversation (a sub-agent's session).
+        """
+        context_id = getattr(getattr(tool_context, "context", None), "context_id", None)
+        return context_id if self.context_manager.has_context(context_id) else None
 
     def _extract_context_id_from_text(self, text: Optional[str]) -> Optional[str]:
         """Extract context identifier (ctx-XXXXXXXX) from arbitrary text."""

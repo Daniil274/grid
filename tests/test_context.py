@@ -163,6 +163,48 @@ class TestContextManager:
         assert context.startswith("Previous dialogue")
         assert "User: Hello" in context
         assert "Assistant: Hi there!" in context
+
+    def test_get_conversation_context_strips_a_legacy_service_footer(self):
+        """Legacy answers end with the service ``Context ID`` footer; the
+        model-facing transcript drops it and keeps ids the user typed."""
+        cm = ContextManager()
+
+        cm.add_message("user", "Hello")
+        cm.add_message("assistant", "Hi!\n\nContext ID: ctx-0a1b2c3d")
+        cm.add_message("user", "ctx-0a1b2c3d continue")
+
+        context = cm.get_conversation_context()
+
+        assert "Assistant: Hi!" in context
+        assert "Context ID:" not in context
+        assert "ctx-0a1b2c3d continue" in context  # a user-typed id stays
+
+    def test_get_conversation_history_as_sdk_messages_strips_a_legacy_service_footer(self):
+        """The SDK-message projection drops a legacy footer from assistant
+        messages and passes user messages through untouched."""
+        cm = ContextManager()
+
+        cm.add_message("user", "Hello")
+        cm.add_message("assistant", "Hi!\n\nContext ID: ctx-0a1b2c3d")
+
+        messages = cm.get_conversation_history_as_sdk_messages()
+
+        assert messages[0] == {"role": "user", "content": "Hello"}
+        assert messages[1] == {"role": "assistant", "content": "Hi!"}
+
+    def test_assistant_content_without_footer_handles_text_parts(self):
+        from core.context import _assistant_content_without_footer
+
+        content = [
+            {"type": "output_image", "image": "data:..."},
+            {"type": "output_text", "text": "Done.\n\nContext ID: ctx-0a1b2c3d"},
+        ]
+        cleaned = _assistant_content_without_footer("assistant", content)
+
+        assert cleaned[0] == content[0]  # non-text parts pass through
+        assert cleaned[1]["text"] == "Done."
+        # A user role is never touched.
+        assert _assistant_content_without_footer("user", "Context ID: ctx-0a1b2c3d") == "Context ID: ctx-0a1b2c3d"
     
     def test_get_conversation_context_with_limit(self):
         """Test getting conversation context with message limit."""
@@ -469,6 +511,77 @@ class TestContextManager:
         
         assert "file" in context or "Context" in context
     
+    def test_context_for_agent_tool_conversation_strips_legacy_footer(self):
+        """A legacy assistant footer must not reach the sub-agent input."""
+        cm = ContextManager()
+        cm.add_message("user", "Hello")
+        cm.add_message("assistant", "Hi!\n\nContext ID: ctx-0a1b2c3d")
+
+        context = cm.get_context_for_agent_tool(
+            strategy="conversation", depth=5, task_input="continue"
+        )
+
+        assert "Assistant: Hi!" in context
+        assert "Context ID: ctx-0a1b2c3d" not in context
+
+    def test_context_for_agent_tool_full_strips_legacy_footer(self):
+        """Full context (reference keywords) strips assistant and execution footers."""
+        cm = ContextManager()
+        cm.add_message("user", "Hello")
+        cm.add_message("assistant", "Hi!\n\nContext ID: ctx-0a1b2c3d")
+        cm.add_execution(
+            AgentExecution(
+                agent_name="helper",
+                input_message="read a file",
+                start_time=time.time(),
+                output="file contents here\n\nContext ID: ctx-0a1b2c3d",
+            )
+        )
+
+        context = cm.get_context_for_agent_tool(
+            strategy="smart", depth=5, include_tools=True,
+            task_input="what did you say, which file was read",
+        )
+
+        assert "Assistant: Hi!" in context
+        assert "Output: file contents here" in context
+        assert "Context ID: ctx-0a1b2c3d" not in context
+        # The stored records keep their original text; only the projection is cleaned.
+        assert cm._conversation_history[1].content == "Hi!\n\nContext ID: ctx-0a1b2c3d"
+        assert cm._execution_history[0].output == "file contents here\n\nContext ID: ctx-0a1b2c3d"
+
+    def test_context_for_agent_tool_tool_only_strips_execution_footer(self):
+        """The smart tool-only summary strips a legacy execution footer."""
+        cm = ContextManager()
+        cm.add_execution(
+            AgentExecution(
+                agent_name="helper",
+                input_message="read a file",
+                start_time=time.time(),
+                output="file contents here\n\nContext ID: ctx-0a1b2c3d",
+            )
+        )
+
+        context = cm.get_context_for_agent_tool(
+            strategy="smart", depth=5, include_tools=True,
+            task_input="the size in bytes",
+        )
+
+        assert "Output: file contents here" in context
+        assert "Context ID: ctx-0a1b2c3d" not in context
+        assert cm._execution_history[0].output == "file contents here\n\nContext ID: ctx-0a1b2c3d"
+
+    def test_context_for_agent_tool_keeps_user_typed_footer(self):
+        """A context id the user typed stays, even as a trailing line."""
+        cm = ContextManager()
+        cm.add_message("user", "My session is\nContext ID: ctx-0a1b2c3d")
+
+        context = cm.get_context_for_agent_tool(
+            strategy="conversation", depth=5, task_input="continue"
+        )
+
+        assert "Context ID: ctx-0a1b2c3d" in context
+
     def test_add_tool_result_as_message(self):
         """Test adding tool result as message."""
         cm = ContextManager()

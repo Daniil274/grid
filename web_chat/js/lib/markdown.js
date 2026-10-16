@@ -167,13 +167,18 @@ function blocks(lines) {
         const body = [];
         index += 1;
         while (index < lines.length && !BLOCK.fenceEnd.test(lines[index])) body.push(lines[index++]);
-        index += 1; // closing fence; absent mid-stream, which is fine
+        // A closing fence is absent mid-stream, which is fine. Its presence is
+        // marked on the block: a diagram is drawn only once it is complete
+        // (lib/diagrams.js), never while the model is still writing it.
+        const closed = index < lines.length;
+        index += 1;
         const language = match[1] ? ` data-language="${match[1]}"` : "";
+        const done = closed ? ' data-closed="true"' : "";
         const source = body.join("\n");
         // Round trip: the escaped fence body is restored with the exact
         // inverse of escapeHtml, and the highlighter re-escapes its own
         // output — the value still cannot contain a live tag.
-        out.push(`<pre${language}><code>${highlight(unescapeHtml(source), match[1])}</code></pre>`);
+        out.push(`<pre${language}${done}><code>${highlight(unescapeHtml(source), match[1])}</code></pre>`);
         break;
       }
 
@@ -265,8 +270,12 @@ function table(lines, start, out, header) {
     rows.push(cells(match));
     index += 1;
   }
-  const head = header.map((cell) => `<th>${inline(cell)}</th>`).join("");
-  const body = rows.map((row) => `<tr>${row.map((cell) => `<td>${inline(cell)}</td>`).join("")}</tr>`).join("");
+  // A cell's text sits in a block with a least and a most width (styles/chat.css):
+  // a narrow screen scrolls the table instead of breaking every word in it.
+  const head = header.map((cell) => `<th><div class="cell">${inline(cell)}</div></th>`).join("");
+  const body = rows
+    .map((row) => `<tr>${row.map((cell) => `<td><div class="cell">${inline(cell)}</div></td>`).join("")}</tr>`)
+    .join("");
   out.push(`<div class="tableScroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
   return index;
 }

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 from agents import RunContextWrapper, function_tool
+from pydantic import BaseModel
 
 from core.system_store import SYSTEMS_README_HINT, BuilderAccess, StoreError, SystemManifest, SystemOrigin, check_key, inspect_system
 from utils.tool_isolation import SYSTEMS
@@ -56,13 +57,33 @@ def _inside(root: Path, relative: str) -> Path:
     return path
 
 
-def _validate_config(text: str) -> None:
-    from schemas import GridConfig
+def _validate_config(text: str, root: Optional[Path] = None) -> str:
+    """Check a config's schema and architecture; return its canonical text (no comments, no redundant fields).
 
-    document = yaml.safe_load(text) or {}
-    if not isinstance(document, dict):
-        raise _Refused("A config is a YAML mapping.")
-    GridConfig(**document)
+    *root* is the system's directory when the config belongs to an existing one;
+    the checks do not need it yet, a fresh draft has none.
+    """
+    from core.system_quality import monolithic_package_message, prompt_problems
+    from core.system_store import canonicalize_config
+
+    try:
+        canonical = canonicalize_config(text)
+    except ValueError as exc:
+        raise _Refused(str(exc)) from None
+    document = yaml.safe_load(canonical) or {}
+    agents = document.get("agents") or {}
+    problems = []
+    for key, agent in agents.items():
+        problems.extend(prompt_problems(key, (agent or {}).get("custom_prompt")))
+    if len(agents) > 1:
+        for name, tool in (document.get("tools") or {}).items():
+            if tool.get("type") == "mcp" and tool.get("tool_package"):
+                holders = [k for k, a in agents.items() if name in ((a or {}).get("tools") or [])]
+                if len(holders) > 1:
+                    problems.append(monolithic_package_message(name, tool["tool_package"]))
+    if problems:
+        raise _Refused("; ".join(problems))
+    return canonical
 
 
 def _created(access: BuilderAccess, key: str, *, writable: bool) -> SystemManifest:
@@ -100,6 +121,7 @@ def _health(access: BuilderAccess, key: str) -> Dict[str, Any]:
             {
                 "tool": package["tool"],
                 "package": package["package"],
+                "declared_tools": package.get("declared_tools", [package["tool"]]),
                 "tools": [tool["name"] for tool in package["tools"]],
                 "tests": package["tests"],
                 "requirements": package["requirements"],
@@ -184,7 +206,7 @@ def _catalog(access: BuilderAccess) -> Dict[str, Any]:
             "Only this user's systems are listed and writable. Leave a draft for the owner to activate on /systems.",
             "You may edit owned active systems. Never change their lifecycle status yourself.",
             "Copy providers unchanged and use the catalog's model keys and names.",
-            "Use shared tools or tool_package MCP tools. No project_tools imports or server_command.",
+            "Use shared tools, or tool_package (MCP tools, or type: function tools naming a @function_tool). No project_tools imports or server_command.",
             "Keep allow_path_override: true and config_directory: .; omit logs_directory and routing.",
         ],
         "shared_tools": shared,
@@ -332,7 +354,7 @@ def builder_create(context: RunContextWrapper, key: str, name: str, description:
             raise _Refused(f"The key '{key}' is taken.")
         if access.max_systems is not None and len(access.store.list()) + access.count_other() >= access.max_systems:
             raise _Refused(f"At most {access.max_systems} systems of your own are allowed.")
-        _validate_config(config_yaml)
+        config_yaml = _validate_config(config_yaml)
         access.validate(config_yaml, key)
         access.store.create(
             SystemManifest(
@@ -349,46 +371,101 @@ def builder_create(context: RunContextWrapper, key: str, name: str, description:
     return _answer({"created": key, "chat_system": access.system_key(key), "health": _health(access, key)})
 
 
+class FileWrite(BaseModel):
+    path: str
+    content: str
+
+
+def _prepare(access: BuilderAccess, system: str, root: Path, path: str, content: str) -> tuple:
+    """Check one file for writing; its target, its relative name and its final (canonical) content."""
+    target = _inside(root, path)
+    relative = target.relative_to(root.resolve()).as_posix()
+    if relative in ("system.yaml", "."):
+        raise _Refused("system.yaml is the manifest: change it with builder_describe.")
+    if len(content.encode("utf-8")) > MAX_FILE_BYTES:
+        raise _Refused(f"{relative}: over {MAX_FILE_BYTES} bytes")
+    if relative == "config.yaml":
+        content = _validate_config(content, root)
+        access.validate(content, system)
+    if relative == "quality.yaml":
+        from core.system_quality import QualityContract
+        QualityContract.model_validate(yaml.safe_load(content))
+        # Dumped anew: a contract carries no comments.
+        content = yaml.safe_dump(yaml.safe_load(content), allow_unicode=True, sort_keys=False)
+    return target, relative, content
+
+
+def _commit(root: Path, target: Path, relative: str, content: str) -> None:
+    from core.system_store import _write
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write(target, content)
+    if relative == "quality.yaml":
+        from core.system_quality import save_evidence
+        save_evidence(root, "contract-required", {"required": True})
+
+
 @function_tool
-def builder_write(context: RunContextWrapper, system: str, path: str, content: str) -> str:
+def builder_write(context: RunContextWrapper, system: str, path: str, content: str, fast: bool = False) -> str:
     """Write a file of a draft system: config.yaml, a skill (skills/<name>.md), a tool package file
     (tools/<package>/<module>.py, test_<module>.py, requirements.txt), a README.md.
 
-    config.yaml is checked against the config schema before it is written. Answers with the
-    system's health after the change.
+    config.yaml and quality.yaml are checked against their schemas and stored in a canonical
+    form (no comments, no redundant fields). Answers with the system's health after the change;
+    with fast, only confirms the write - use it for the intermediate files of a batch of edits
+    and call builder_check at the end. To write several files at once use builder_write_files.
 
     Args:
         system: the draft's key
         path: the file, relative to the system's directory
         content: the whole new content of the file
+        fast: skip the health report (the file is still checked before it is written)
     """
     try:
         access = _access(context)
         _created(access, system, writable=True)
         root = access.store.directory(system)
-        target = _inside(root, path)
-        relative = target.relative_to(root.resolve()).as_posix()
-        if relative in ("system.yaml", "."):
-            raise _Refused("system.yaml is the manifest: change it with builder_describe.")
-        if len(content.encode("utf-8")) > MAX_FILE_BYTES:
-            raise _Refused(f"over {MAX_FILE_BYTES} bytes")
-        if relative == "config.yaml":
-            _validate_config(content)
-            access.validate(content, system)
-        if relative == "quality.yaml":
-            from core.system_quality import QualityContract
-            QualityContract.model_validate(yaml.safe_load(content))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        from core.system_store import _write
-        _write(target, content)
-        if relative == "quality.yaml":
-            from core.system_quality import save_evidence
-            save_evidence(root, "contract-required", {"required": True})
+        target, relative, content = _prepare(access, system, root, path, content)
+        _commit(root, target, relative, content)
         access.store.touch(system)
     except (_Refused, StoreError, ValueError) as exc:
         return f"Not written: {exc}"
     access.done(system, "edited", f"{relative} by the system builder")
+    if fast:
+        return _answer({"written": relative})
     return _answer({"written": relative, "health": _health(access, system)})
+
+
+@function_tool
+def builder_write_files(context: RunContextWrapper, system: str, files: List[FileWrite], fast: bool = False) -> str:
+    """Write several files of a draft system at once, with one health report at the end.
+
+    Every file is checked first; if any is refused, none is written.
+
+    Args:
+        system: the draft's key
+        files: the files: path relative to the system's directory, and the whole new content
+        fast: skip the health report
+    """
+    try:
+        access = _access(context)
+        _created(access, system, writable=True)
+        root = access.store.directory(system)
+        if not files:
+            raise _Refused("no files given")
+        if len({f.path for f in files}) != len(files):
+            raise _Refused("a path is given twice")
+        prepared = [_prepare(access, system, root, f.path, f.content) for f in files]
+        for target, relative, content in prepared:
+            _commit(root, target, relative, content)
+        access.store.touch(system)
+    except (_Refused, StoreError, ValueError) as exc:
+        return f"Not written: {exc}"
+    names = [relative for _, relative, _ in prepared]
+    access.done(system, "edited", f"{', '.join(names)} by the system builder")
+    if fast:
+        return _answer({"written": names})
+    return _answer({"written": names, "health": _health(access, system)})
 
 
 @function_tool
@@ -449,7 +526,8 @@ async def builder_test_tools(context: RunContextWrapper, system: str, tool: str)
 
     Args:
         system: the created system's key
-        tool: the key of the config's MCP tool that declares the package (tool_package)
+        tool: the key of a config tool that declares the package (tool_package), or the package itself
+            (tools/<package> or <package>); one test covers every tool that names the package
     """
     from core.tool_packages import PackageError, package_dir, sandbox_test
 
@@ -458,9 +536,22 @@ async def builder_test_tools(context: RunContextWrapper, system: str, tool: str)
         _created(access, system, writable=False)
         config = access.load(system)
         declared = config.config.tools.get(tool)
-        if declared is None or not getattr(declared, "tool_package", None):
-            raise _Refused(f"'{tool}' is not a tool of '{system}' with a tool_package")
-        package = package_dir(access.store.directory(system), declared.tool_package)
+        relative = getattr(declared, "tool_package", None)
+        if not relative:
+            root = access.store.directory(system)
+            wanted = {tool.strip().strip("/")}
+            wanted.add(tool.strip().strip("/") if tool.strip().startswith("tools/") else f"tools/{tool.strip()}")
+            relative = next(
+                (
+                    t.tool_package
+                    for t in config.config.tools.values()
+                    if t.tool_package and t.tool_package.strip("/").removeprefix("./") in wanted
+                ),
+                None,
+            )
+            if relative is None:
+                raise _Refused(f"'{tool}' is not a tool or a tool package of '{system}'")
+        package = package_dir(access.store.directory(system), relative)
     except (_Refused, StoreError, PackageError, ValueError) as exc:
         return f"Not tested: {exc}"
     from core.system_quality import record_tool_test, revision
@@ -584,6 +675,7 @@ SYSTEM_BUILDER_TOOLS: Dict[str, Any] = {
     "builder_check": builder_check,
     "builder_create": builder_create,
     "builder_write": builder_write,
+    "builder_write_files": builder_write_files,
     "builder_delete": builder_delete,
     "builder_describe": builder_describe,
     "builder_test_tools": builder_test_tools,
@@ -609,4 +701,5 @@ TOOL_EFFECTS = {
     "builder_test_tools": _effects.EXEC_ANY,
     "builder_tool_set": _effects.write(),
     "builder_write": _effects.write(),
+    "builder_write_files": _effects.write(),
 }

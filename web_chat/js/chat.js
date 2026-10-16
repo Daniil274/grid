@@ -33,6 +33,7 @@ export class ChatController {
     // The chat being loaded: a newer pick aborts it, and a late answer for a
     // chat no longer on screen is dropped instead of drawn over the new one.
     this._loading = null;
+    this._navigationIntent = 0;
   }
 
   /**
@@ -48,7 +49,8 @@ export class ChatController {
       const current = this._store.get().contextId === contextId && (!supersede || this._loading === load);
       return current ? payload : null;
     } catch (error) {
-      if (load.signal.aborted) return null;
+      if (load.signal.aborted && error?.name === "AbortError") return null;
+      if (supersede && (this._loading !== load || this._store.get().contextId !== contextId)) return null;
       throw error;
     } finally {
       if (this._loading === load) this._loading = null;
@@ -161,14 +163,137 @@ export class ChatController {
    * @param {{id: string, text: string, images: string[]}} edited
    */
   async editMessage({ id, text, images = [] }) {
+    const intent = ++this._navigationIntent;
     try {
       if (this._store.get().compacting) throw new Error("Wait for context compaction to finish before editing.");
       if (this.isStreaming) await this._stopNow();
+      if (intent !== this._navigationIntent) return;
       const branch = await api.createBranch(this._store.get().contextId, id);
-      await this.openConversation(branch.id);
+      if (intent !== this._navigationIntent) return;
+      // The new version runs with the agent picked now, not the one the
+      // branch inherited from the original - often the reason for the edit.
+      await this.openConversation(branch.id, intent, { keepSelection: true });
+      if (intent !== this._navigationIntent) return;
       await this._begin({ text, spoken: false, images, editOf: branch.edit_of });
     } catch (error) {
+      if (intent !== this._navigationIntent) return;
       toast(error.message, { tone: "error" });
+    }
+  }
+
+  /**
+   * Delete a stored message from the chat and from what the agent remembers.
+   * A message the user sent takes its whole turn with it - the answer too.
+   * @param {{id: string, role: string}} target
+   */
+  async deleteMessage({ id, role }) {
+    const { contextId, compacting } = this._store.get();
+    if (!contextId) return;
+    if (this.isStreaming || compacting) {
+      toast("Stop the running turn before deleting a message.", { tone: "error" });
+      return;
+    }
+    const question = role === "user"
+      ? "Delete this message and the agent's answer to it? The agent forgets that turn too."
+      : "Delete this message? The agent forgets it too.";
+    if (!window.confirm(question)) return;
+    try {
+      const result = await api.deleteMessage(contextId, id);
+      await this._reconcile(contextId, { force: true });
+      void this._refreshConversations();
+      toast(
+        result.context ? "Deleted from the chat and the agent's context." : "Deleted from the chat; the agent's context had no exact copy of it (summarized or older).",
+        { tone: result.context ? "success" : "info", timeout: 4000 },
+      );
+    } catch (error) {
+      toast(error.message, { tone: "error" });
+    }
+  }
+
+  /**
+   * Bring the workspace back to before the turn of a message: every file that
+   * turn or a later one changed - by any tool - as it was then.
+   * @param {{turn_id: string, files: number}} checkpoint
+   */
+  async restoreCheckpoint({ turn_id: turnId, files }) {
+    const { contextId, compacting } = this._store.get();
+    if (!contextId) return;
+    if (this.isStreaming || compacting) {
+      toast("Stop the running turn before restoring files.", { tone: "error" });
+      return;
+    }
+    const question = `Restore the workspace to before this message? Files changed by this turn (${files}) `
+      + "and by the turns after it go back to how they were; files created since are removed. The chat stays as it is.";
+    if (!window.confirm(question)) return;
+    try {
+      const { restored } = await api.restoreCheckpoint(contextId, turnId);
+      toast(restored.length ? `Restored ${restored.length} file(s).` : "Nothing to restore: the files are as they were.", {
+        tone: "success", timeout: 4000,
+      });
+    } catch (error) {
+      toast(error.message, { tone: "error" });
+    }
+  }
+
+  /** Open a new chat that is this one up to the end of message *id*'s turn. */
+  async forkAt(id) {
+    const { contextId, compacting } = this._store.get();
+    if (!contextId) return;
+    if (this.isStreaming || compacting) {
+      toast("Stop the running turn before forking.", { tone: "error" });
+      return;
+    }
+    const intent = ++this._navigationIntent;
+    try {
+      const fork = await api.forkConversation(contextId, id);
+      if (intent !== this._navigationIntent) return;
+      await this.openConversation(fork.id, intent, { keepSelection: true });
+      if (intent !== this._navigationIntent) return;
+      await this._refreshConversations();
+      toast("Forked into a new chat.", { tone: "success" });
+    } catch (error) {
+      if (intent === this._navigationIntent) toast(error.message, { tone: "error" });
+    }
+  }
+
+  /**
+   * Carry this chat's context into a new one and open it: the server seeds the
+   * new chat with the plan ("plan") or the tail ("tail") of the chat on screen.
+   */
+  async continueInNewChat(strategy = "plan") {
+    const { contextId, compacting } = this._store.get();
+    if (!contextId) return;
+    if (this.isStreaming || compacting) {
+      toast("Stop the running turn before continuing in a new chat.", { tone: "error" });
+      return;
+    }
+    const intent = ++this._navigationIntent;
+    try {
+      const next = await api.continueConversation(contextId, strategy);
+      if (intent !== this._navigationIntent) return;
+      await this.openConversation(next.id, intent, { keepSelection: true });
+      if (intent !== this._navigationIntent) return;
+      await this._refreshConversations();
+      toast("Continued in a new chat.", { tone: "success" });
+    } catch (error) {
+      if (intent === this._navigationIntent) toast(error.message, { tone: "error" });
+    }
+  }
+
+  /**
+   * Show the plan a chat's turns saved, when it opens again - so the card is
+   * not blank until the next turn re-sends a live plan step. Best effort: an
+   * older server without the route simply leaves the card as it was.
+   */
+  async _showStoredPlan(contextId) {
+    try {
+      const plan = await api.conversationPlan(contextId);
+      if (this._store.get().contextId !== contextId) return;
+      // A plan an answer on screen already shows needs no second card.
+      if (this._transcript.hasPlan()) return;
+      this._transcript.lastAnswer()?.reasoning?.applyStoredPlan(plan);
+    } catch {
+      // The chat's stored plan is a convenience; the live plan still arrives.
     }
   }
 
@@ -272,12 +397,14 @@ export class ChatController {
   /** Open another version of an edited message: its branch becomes the active one. */
   async switchVersion(contextId) {
     if (!contextId || contextId === this._store.get().contextId) return;
+    const intent = ++this._navigationIntent;
     try {
       await api.activateBranch(contextId);
-      await this.openConversation(contextId);
-      void this._refreshConversations();
+      if (intent !== this._navigationIntent) return;
+      await this.openConversation(contextId, intent);
+      if (intent === this._navigationIntent) void this._refreshConversations();
     } catch (error) {
-      toast(error.message, { tone: "error" });
+      if (intent === this._navigationIntent) toast(error.message, { tone: "error" });
     }
   }
 
@@ -300,6 +427,8 @@ export class ChatController {
     // Only the newest interruption can be continued, and only until now.
     this._transcript.retireContinue();
     this._store.set({ resumable: false });
+    // The earlier answers' plans fold away; this turn's card opens with its plan.
+    this._transcript.collapsePlans();
     if (text === null) this._transcript.add({ role: "user", kind: "continuation", timestamp: Date.now() });
     else this._transcript.add({ role: "user", content: text, images, timestamp: Date.now() });
     const message = this._transcript.add({
@@ -320,6 +449,8 @@ export class ChatController {
     // stream would read aloud the steps the message itself discards.
     const turn = { message, contextId, failed: false, finalText: "", spoken };
     this._activeTurn = turn;
+    // The chat has a turn now: its working directory stays as it is.
+    this._store.set({ workspaceLocked: true });
     try {
       this._connection = await ChatConnection.open(contextId);
       this._bind(this._connection, turn);
@@ -384,18 +515,51 @@ export class ChatController {
 
   /** Start a fresh conversation and clear the transcript. */
   async startConversation() {
+    // The chat on screen is still empty and in the project asked for: it is
+    // the new chat. Another one would only pile up beside it, never written in.
+    const { contextId: openId, conversations = [], activeProject: wanted, streaming, workspaceLocked } = this._store.get();
+    const open = conversations.find((conversation) => conversation.id === openId);
+    if (open && !open.message_count && !open.active && !streaming && !workspaceLocked && (open.project ?? null) === (wanted ?? null)) {
+      return;
+    }
+    const intent = ++this._navigationIntent;
     this._detach();
     this._voice?.cleanup();
-    const { systemKey, agentKey } = this._store.get();
-    const conversation = await api.createConversation({ system_key: systemKey, agent_key: agentKey });
-    this._store.set({ contextId: conversation.id, rootId: conversation.id, resumable: false, hasAgentContext: false, compacting: false });
+    const { systemKey, agentKey, activeProject } = this._store.get();
+    const conversation = await api.createConversation({
+      system_key: systemKey,
+      agent_key: agentKey,
+      project_id: activeProject ?? null,
+    });
+    if (intent !== this._navigationIntent) return;
+    this._store.set({
+      contextId: conversation.id, rootId: conversation.id, resumable: false, hasAgentContext: false, compacting: false,
+      chatWorkspace: conversation.workspace ?? null, workspaceLocked: false,
+    });
     this._transcript.clear();
     await this._refreshConversations();
   }
 
-  /** Load a stored conversation, including its reasoning traces. */
-  async openConversation(contextId) {
+  /**
+   * Have the chat on screen work in directory `path`. A chat that already has
+   * messages keeps its directory: a new chat opens in `path` instead.
+   */
+  async chooseWorkspace(path) {
+    const { contextId, workspaceLocked } = this._store.get();
+    if (!contextId || workspaceLocked) await this.startConversation();
+    const id = this._store.get().contextId;
+    const result = await api.setWorkspace(id, path);
+    if (this._store.get().contextId === id) this._store.set({ chatWorkspace: result.workspace });
+    await this._refreshConversations();
+  }
+
+  /**
+   * Load a stored conversation, including its reasoning traces.
+   * `keepSelection` keeps the agent picked on screen instead of the chat's own.
+   */
+  async openConversation(contextId, intent = null, { keepSelection = false } = {}) {
     if (!contextId) return;
+    if (intent === null) intent = ++this._navigationIntent;
     // Leaving a chat mid-turn only stops watching it: the turn runs on the
     // server and is replayed when the chat is opened again.
     this._detach();
@@ -408,23 +572,33 @@ export class ChatController {
     try {
       payload = await this._fetchConversation(contextId, { supersede: true });
     } catch (error) {
-      if (this._store.get().contextId === contextId) this._transcript.setLoading(false);
+      if (intent === this._navigationIntent && this._store.get().contextId === contextId) {
+        this._transcript.setLoading(false);
+        this._transcript.clear();
+        this._store.set({ resumable: false });
+      }
       throw error;
     }
-    if (!payload) return; // another chat was picked meanwhile
+    if (!payload || intent !== this._navigationIntent) return; // another navigation took over
     this._transcript.setLoading(false);
     // A conversation remembers what was pinned when it ran, including "nothing".
+    const selection = keepSelection
+      ? {}
+      : { systemKey: payload.metadata?.system_key ?? null, agentKey: payload.metadata?.agent_key ?? null };
     this._store.set({
       contextId: payload.id,
       rootId: payload.root ?? payload.id,
-      systemKey: payload.metadata?.system_key ?? null,
-      agentKey: payload.metadata?.agent_key ?? null,
+      ...selection,
       hasAgentContext: Boolean(payload.metadata?.routed_agent),
+      chatWorkspace: payload.metadata?.workspace ?? null,
+      workspaceLocked: payload.messages.length > 0 || Boolean(payload.active_turn),
       compacting: this._compactingId === payload.id,
       queue: payload.pending ?? [],
     });
-    this._transcript.render(payload.messages);
+    this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id) });
     this._syncResumable();
+    // The saved plan of the chat, before any live plan step of a new turn.
+    void this._showStoredPlan(payload.id);
     // The agent kept working while the page was away: pick the turn back up.
     if (payload.active_turn) await this._attachToRunningTurn(payload.id, payload.active_turn);
   }
@@ -440,7 +614,9 @@ export class ChatController {
 
   /** Forget a chat; if it is the one on screen, move to the newest other one. */
   async deleteConversation(contextId) {
+    const intent = ++this._navigationIntent;
     await api.deleteConversation(contextId);
+    if (intent !== this._navigationIntent) return;
     if (contextId === this._store.get().contextId) {
       this._detach();
       this._store.set({ contextId: null, hasAgentContext: false });
@@ -448,7 +624,7 @@ export class ChatController {
     }
     await this._refreshConversations();
     const next = this._store.get().conversations[0];
-    if (!this._store.get().contextId && next) await this.openConversation(next.open_id ?? next.id);
+    if (intent === this._navigationIntent && !this._store.get().contextId && next) await this.openConversation(next.open_id ?? next.id);
   }
 
   async renameConversation(contextId, title) {
@@ -500,6 +676,10 @@ export class ChatController {
         this._transcript.follow();
       })
       .on("routed", ({ agent_name: agentName }) => message.setAuthor(agentName))
+      // The turn changed files: its request now offers Restore.
+      .on("checkpoint", ({ turn_id: turnId, files }) => {
+        this._transcript.requestOf(message)?.setCheckpoint({ turn_id: turnId, files });
+      })
       // A message sent while the agent works: how it is delivered, the queue,
       // and - delivered at a step - its place in the thread.
       .on("delivery", ({ delivery, decided_by: decidedBy }) => {
@@ -585,6 +765,8 @@ export class ChatController {
     turn.onSettled?.();
     // The user's own counts may have moved; the page refreshes its badge.
     document.dispatchEvent(new CustomEvent("grid:turn-settled"));
+    // The newest answer now offers "Continue in new chat"; earlier ones do not.
+    this._transcript.refreshContinueInNewChat?.();
     this._syncResumable();
     void this._refreshConversations();
     // A failed turn stores no answer, so reconciling would re-render the
@@ -607,15 +789,21 @@ export class ChatController {
       // Same messages on screen: only take their ids and versions, so an
       // expanded reasoning panel stays as it is.
       if (force || !this._transcript.adopt(payload.messages)) {
-        this._transcript.render(payload.messages);
+        this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id) });
       }
       this._store.set({ queue: payload.pending ?? [], hasAgentContext: Boolean(payload.metadata?.routed_agent) });
+      this._transcript.refreshContinueInNewChat?.();
       this._syncResumable();
       // The queue started the next waiting message: follow that turn too.
       if (payload.active_turn && !this.isStreaming) await this._attachToRunningTurn(payload.id, payload.active_turn);
     } catch (error) {
       console.warn("Could not reconcile the conversation", error);
     }
+  }
+
+  /** Fetches a stored step that left its payloads on the server (``lazy``). */
+  _stepLoader(contextId) {
+    return (messageId, stepId) => api.conversationStep(contextId, messageId, stepId);
   }
 
   /** Offer Continue in the composer while the last turn can still be resumed. */

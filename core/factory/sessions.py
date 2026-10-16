@@ -5,18 +5,43 @@ measured against the model's window (core.context_budget) and, past the
 threshold, summarized and replaced by the summary - the chat people see stays
 as it is. Every compaction starts a new session epoch, so a fork knows which
 steps the summary already covers. A conversation forks before an edited
-message: the branch's session is the original's up to that message.
+message: the branch's session is the original's up to that message. A fork
+into a new chat cuts the same way after a turn, and deleting a turn cuts that
+turn's items out of the session.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from core.compact import COMPACTED_TYPE, compact_conversation
 from core.context_budget import request_tokens, session_transcript
+from core.interruption import CONTINUATION_TYPE
 
 logger = logging.getLogger("grid.agent_factory")
+
+#: Stored user messages that start a turn: one the user sent, or a Continue.
+TURN_START_TYPES = ("user_input", CONTINUATION_TYPE)
+
+
+def is_turn_start(message: Any) -> bool:
+    metadata = getattr(message, "metadata", None) or {}
+    return getattr(message, "role", None) == "user" and metadata.get("type", "user_input") in TURN_START_TYPES
+
+
+def turn_bounds(messages: list, index: int) -> Tuple[Optional[int], int]:
+    """(start, end) of the turn ``messages[index]`` belongs to: its request,
+    and the next turn's (or the end). Start is None before the first turn."""
+    start = next((i for i in range(index, -1, -1) if is_turn_start(messages[i])), None)
+    end = next((i for i in range(index + 1, len(messages)) if is_turn_start(messages[i])), len(messages))
+    return start, end
+
+
+def _is_assistant_message(item: Any) -> bool:
+    """An SDK session item that is the model's written message (not a tool call)."""
+    return isinstance(item, dict) and item.get("role") == "assistant" and item.get("type", "message") == "message"
 
 
 class SessionUpkeep:
@@ -27,6 +52,42 @@ class SessionUpkeep:
     self.compact_config and self._compact_tracking.
     """
 
+    def sync_memory_from_context(self, messages) -> list:
+        """Best-effort distillation of messages about to leave the SDK session.
+
+        Skipped when a model already reads every answered turn (``extract_on_turn``
+        with ``extract_with_model``): those turns are in memory, and the heuristic
+        here would only add sentence fragments beside the model's records.
+        """
+        try:
+            config = getattr(self, "config", None)
+            if config is None or not hasattr(config, "get_memory_config"):
+                return []
+            settings = config.get_memory_config()
+            if not settings.enabled or not settings.extract_on_compact:
+                return []
+            if settings.extract_on_turn and settings.extract_with_model:
+                return []
+            manager = self.get_memory_manager()
+            if manager is None:
+                return []
+            normalized = []
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                item = dict(message)
+                content = item.get("content", "")
+                if isinstance(content, list):
+                    item["content"] = "\n".join(
+                        part.get("text", "") for part in content
+                        if isinstance(part, dict) and part.get("type") in ("text", "input_text", "output_text")
+                    )
+                normalized.append(item)
+            return manager.extract_and_store_from_messages(normalized)
+        except Exception:
+            logger.warning("Memory extraction failed; compaction continues", exc_info=True)
+            return []
+
     def _session_epoch(self, context_id: str, agent_key: str) -> int:
         """How many times *agent_key*'s session in *context_id* was replaced by a summary."""
         epochs = self.context_manager.get_context_metadata(context_id).get("session_epochs") or {}
@@ -36,6 +97,17 @@ class SessionUpkeep:
         epochs = dict(self.context_manager.get_context_metadata(context_id).get("session_epochs") or {})
         epochs[agent_key] = int(epochs.get(agent_key, 0)) + 1
         self.context_manager.update_context_metadata(context_id, {"session_epochs": epochs})
+
+    async def _strip_legacy_context_footers(self, session: Any) -> None:
+        """Retain legacy history until a provenance-aware atomic migration exists.
+
+        The footer's text is not evidence of service ownership: file reads and
+        assistant quotations can contain the exact same suffix. The SDK Session
+        protocol also has no atomic compare-and-replace; clear/add loses history
+        on failure or concurrent append. Never rewrite persistent data here.
+        Kept as a safe hook for the pending footer-free turn/tool contract.
+        """
+        return
 
     async def fork_conversation(self, context_id: str, message_id: str) -> str:
         """Branch *context_id* at user message *message_id*, for an edited version of it.
@@ -52,14 +124,118 @@ class SessionUpkeep:
         branch_id, _ = self.context_manager.fork_context(context_id, message_id)
         messages = self.context_manager.conversation_view(context_id)["messages"]
         index = next(i for i, m in enumerate(messages) if (m.metadata or {}).get("message_id") == message_id)
-        epochs = self.context_manager.get_context_metadata(context_id).get("session_epochs") or {}
-        branch_epochs = dict(epochs)
+        await self._copy_sessions(context_id, branch_id, messages, index)
+        return branch_id
+
+    async def fork_to_new(self, context_id: str, message_id: str) -> str:
+        """A new conversation that is *context_id* up to the end of *message_id*'s turn.
+
+        The fork holds every message through that turn and, like a branch, each
+        agent's session up to the same point; the original is left as it is.
+        Returns the new conversation's id.
+        """
+        messages = self._messages(context_id)
+        index = self._message_index(messages, message_id)
+        _, end = turn_bounds(messages, index)
+        fork_id = self.context_manager.copy_context(context_id, end)
+        await self._copy_sessions(context_id, fork_id, messages, end)
+        return fork_id
+
+    async def delete_message(self, context_id: str, message_id: str) -> Dict[str, Any]:
+        """Delete a message from the chat and from what the agent remembers.
+
+        A message the user sent as a turn takes its whole turn with it: the
+        answer, the interruption, the messages added mid-turn, and the part of
+        the agent's session the turn wrote - its request, tool calls and
+        results. Any other message (an answer, say) goes alone; an answer also
+        leaves the session as the turn's last assistant message. When the
+        session was summarized since that turn, there is nothing exact to cut:
+        only the chat changes. Returns ``{"removed": [ids], "context": bool}``,
+        ``context`` telling whether the agent's session changed.
+        """
+        messages = self._messages(context_id)
+        index = self._message_index(messages, message_id)
+        start, end = turn_bounds(messages, index)
+        whole_turn = index == start
+        doomed = messages[start:end] if whole_turn else [messages[index]]
+        target = messages[index]
+        answer = target.role == "assistant" and (target.metadata or {}).get("type") == "agent_response"
+
+        context = False
+        span = await self._turn_span(context_id, messages, start, end) if start is not None else None
+        if span is not None and (whole_turn or answer):
+            agent, epoch, session, items, low, high = span
+            if whole_turn:
+                cut = list(range(low, high))
+            else:
+                answers = [i for i in range(low, high) if _is_assistant_message(items[i])]
+                cut = answers[-1:]
+            if cut:
+                dropped = set(cut)
+                kept = [item for i, item in enumerate(items) if i not in dropped]
+                await session.clear_session()
+                if kept:
+                    await session.add_items(kept)
+                context = True
+
+        removed = [(m.metadata or {}).get("message_id") for m in doomed]
+        removed = [mid for mid in removed if mid]
+        self.context_manager.remove_messages(context_id, removed)
+        if context:
+            self.context_manager.shift_session_marks(context_id, agent, epoch, high, -len(cut))
+        return {"removed": removed, "context": context}
+
+    def _messages(self, context_id: str) -> list:
+        view = self.context_manager.conversation_view(context_id)
+        if view is None:
+            raise KeyError(f"Unknown conversation {context_id}")
+        return view["messages"]
+
+    @staticmethod
+    def _message_index(messages: list, message_id: str) -> int:
+        for index, message in enumerate(messages):
+            if (message.metadata or {}).get("message_id") == message_id:
+                return index
+        raise KeyError(f"No message {message_id}")
+
+    async def _turn_span(self, context_id: str, messages: list, start: int, end: int) -> Optional[tuple]:
+        """Where the turn of ``messages[start:end]`` sits in its agent's session:
+        (agent, epoch, session, items, first item, end item); None when unknown -
+        no mark, or the session was summarized since."""
+        mark = (messages[start].metadata or {}).get("session_mark") or {}
+        agent = mark.get("agent")
+        if not agent:
+            return None
+        epoch = int(mark.get("epoch", 0))
+        if epoch != self._session_epoch(context_id, agent):
+            return None
+        session = self._get_agent_session(agent, context_id)
+        items = await session.get_items()
+        following = next(
+            (
+                (m.metadata or {})["session_mark"]
+                for m in messages[end:]
+                if ((m.metadata or {}).get("session_mark") or {}).get("agent") == agent
+            ),
+            None,
+        )
+        low = int(mark.get("items", 0))
+        high = int(following["items"]) if following and int(following.get("epoch", 0)) == epoch else len(items)
+        if not 0 <= low <= high <= len(items):
+            return None
+        return agent, epoch, session, items, low, high
+
+    async def _copy_sessions(self, source_id: str, target_id: str, messages: list, index: int) -> None:
+        """Give *target_id* each agent's session of *source_id* as it was when
+        ``messages[index]``'s turn started (all of it past the last turn)."""
+        epochs = self.context_manager.get_context_metadata(source_id).get("session_epochs") or {}
+        target_epochs = dict(epochs)
         agents = {(m.metadata or {}).get("agent") for m in messages} - {None}
         for agent in sorted(agents):
-            items = await self._get_agent_session(agent, context_id).get_items()
+            items = await self._get_agent_session(agent, source_id).get_items()
             if not items:
                 continue
-            # The first turn of this agent at or after the edit point.
+            # The first turn of this agent at or after the cut.
             mark = next(
                 (
                     (m.metadata or {})["session_mark"]
@@ -69,18 +245,17 @@ class SessionUpkeep:
                 None,
             )
             if mark is None:
-                cut = len(items)  # the agent did nothing after the edit point
+                cut = len(items)  # the agent did nothing after the cut
             elif int(mark.get("epoch", 0)) == int(epochs.get(agent, 0)) and mark["items"] <= len(items):
                 cut = mark["items"]
             else:
                 # Summarized since: the copied marks of this agent no longer apply.
-                branch_epochs[agent] = int(epochs.get(agent, 0)) + 1
-                logger.info("Branch %s: %s starts from the transcript (session was compacted)", branch_id, agent)
+                target_epochs[agent] = int(epochs.get(agent, 0)) + 1
+                logger.info("Conversation %s: %s starts from the transcript (session was compacted)", target_id, agent)
                 continue
             if cut:
-                await self._get_agent_session(agent, branch_id).add_items(items[:cut])
-        self.context_manager.update_context_metadata(branch_id, {"session_epochs": branch_epochs})
-        return branch_id
+                await self._get_agent_session(agent, target_id).add_items(items[:cut])
+        self.context_manager.update_context_metadata(target_id, {"session_epochs": target_epochs})
 
     async def context_usage(self, agent_key: str, context_id: Optional[str] = None) -> Dict[str, int]:
         """How full *agent_key*'s context is in a conversation: tokens, window, threshold.
@@ -95,6 +270,67 @@ class SessionUpkeep:
             "window": self.models.context_window(agent_key),
             "threshold": self.models.compact_threshold(agent_key, self.compact_config),
         }
+
+    async def _summary_of(self, items: list, key: Optional[str], *, auto: bool) -> Optional[list]:
+        """Session *items* as summary messages, by the compaction model (or
+        *key*'s model); None when that failed or wrote nothing - logged."""
+        compact_cfg = self.compact_config
+        try:
+            client, model, responses_api = self.models.compact_request(key)
+            result = await compact_conversation(
+                messages=session_transcript(items),
+                llm_client=client,
+                model=model,
+                suppress_followup_questions=True,
+                is_auto_compact=auto,
+                max_output_tokens=compact_cfg.summary_max_output_tokens,
+                compact_cfg=compact_cfg,
+                responses_api=responses_api,
+            )
+        except Exception:
+            logger.warning("Compacting the session of %s failed", key, exc_info=True)
+            return None
+        summary = [
+            {"role": message.role, "content": message.get_text()}
+            for message in result.summary_messages
+            if message.get_text().strip()
+        ]
+        if not result.success() or not summary:
+            logger.warning(
+                "Compacting the session of %s produced no summary: %s",
+                key,
+                result.user_display_message or result.error_message or result.status.value,
+            )
+            return None
+        return summary
+
+    async def summarize_session(
+        self, session: Any, model_key: Optional[str], *, above_tokens: int = 0
+    ) -> Optional[Dict[str, int]]:
+        """Replace *session* by a summary of it when it holds more than *above_tokens*.
+
+        For a session that belongs to no conversation of the chat - an
+        executor's, continued by its context id (tools.orchestrator_tools): the
+        chat is not touched and the auto-compact bookkeeping does not apply.
+        The summary is written by ``compact.summary_model``, else by
+        *model_key*. Returns ``{"tokens_before", "tokens_after"}``, or None
+        when nothing was summarized; a failure is logged, never raised.
+        """
+        items = await session.get_items()
+        if not items:
+            return None
+        tokens_before = request_tokens(items)
+        if tokens_before <= above_tokens:
+            return None
+        logger.info("Summarizing the session of %s: ~%d tokens", model_key, tokens_before)
+        summary = await self._summary_of(items, model_key, auto=False)
+        if summary is None:
+            return None
+        await session.clear_session()
+        await session.add_items(summary)
+        tokens_after = request_tokens(summary)
+        logger.info("Summarized the session of %s: ~%d -> ~%d tokens", model_key, tokens_before, tokens_after)
+        return {"tokens_before": tokens_before, "tokens_after": tokens_after}
 
     async def compact_session(
         self, agent_key: str, context_id: str, *, force: bool = False
@@ -130,35 +366,12 @@ class SessionUpkeep:
                 )
                 return None
         logger.info("Compacting the session of %s: ~%d/%d tokens", agent_key, tokens_before, window)
-        try:
-            client, model = self.models.compact_client_and_model(agent_key)
-            result = await compact_conversation(
-                messages=session_transcript(items),
-                llm_client=client,
-                model=model,
-                suppress_followup_questions=True,
-                is_auto_compact=not force,
-                max_output_tokens=compact_cfg.summary_max_output_tokens,
-                compact_cfg=compact_cfg,
-            )
-        except Exception:
+        summary = await self._summary_of(items, agent_key, auto=not force)
+        if summary is None:
             self._compact_tracking.consecutive_failures += 1
-            logger.warning("Compacting the session of %s failed", agent_key, exc_info=True)
-            return None
-        summary = [
-            {"role": message.role, "content": message.get_text()}
-            for message in result.summary_messages
-            if message.get_text().strip()
-        ]
-        if not result.success() or not summary:
-            self._compact_tracking.consecutive_failures += 1
-            logger.warning(
-                "Compacting the session of %s produced no summary: %s",
-                agent_key,
-                result.user_display_message or result.error_message or result.status.value,
-            )
             return None
         self._compact_tracking.consecutive_failures = 0
+        await asyncio.to_thread(self.sync_memory_from_context, items)
         await session.clear_session()
         await session.add_items(summary)
         # Turn marks taken before this point no longer count items of this session.

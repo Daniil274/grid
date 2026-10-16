@@ -9,6 +9,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from enum import Enum
 from .action_policy import ActionPolicyConfig
+from .config import MemoryConfig
 
 
 class ToolType(str, Enum):
@@ -27,12 +28,22 @@ class ProviderConfig(BaseModel):
     default_headers: Dict[str, str] = Field(default_factory=dict)
     timeout: int = Field(default=30, ge=1, le=300)
     max_retries: int = Field(default=2, ge=0, le=1000)
-    auth: Literal["api_key", "chatgpt"] = Field(
+    auth: Literal["api_key", "chatgpt", "claude"] = Field(
         default="api_key",
         description=(
-            "How requests are authorized: with an API key (default), or with the user's ChatGPT plan "
-            "(Sign in with ChatGPT, web_chat.chatgpt). A plan provider serves only Responses API models "
-            "and takes no key from the environment"
+            "How requests are authorized: with an API key (default), with the user's ChatGPT plan "
+            "(Sign in with ChatGPT, web_chat.chatgpt), or with the official Claude Code CLI login "
+            "(auth: claude, core.claude_cli). ChatGPT uses the Responses API; Claude runs the CLI. "
+            "Neither plan provider takes an API key from the environment"
+        ),
+    )
+    claude_binary: Optional[str] = Field(
+        default=None,
+        description=(
+            "Auth: claude only. The Claude Code CLI to run (name on PATH or a path). Unset: the "
+            "'claude' binary, or GRID_CLAUDE_BINARY. Grid holds no Claude credential: the CLI's own "
+            "subscription login authorizes every call, and API-key/cloud credentials are stripped "
+            "from its environment"
         ),
     )
     price_source: Optional[str] = Field(
@@ -81,6 +92,20 @@ class ModelConfig(BaseModel):
     this: it bounds the pause between two chunks, and a model that keeps
     generating never pauses. Unset: no limit.
     """
+    vision: Optional[bool] = None
+    """Whether the model reads images; ``input_modalities`` says it for every kind
+    of input and wins over this. Unset with no ``input_modalities``: what the
+    model catalog knows (core.model_catalog), else unknown - an image is tried
+    until the provider refuses it (core.fallback_model).
+    """
+    input_modalities: Optional[List[Literal["text", "image", "audio", "video", "pdf"]]] = None
+    """What the model accepts as input besides text: ``image``, ``audio``,
+    ``video``, ``pdf``. A request carrying one of them goes only to the models of
+    the agent that accept it; when none does, the agent is told so in its place
+    (core.fallback_model). Unset: ``vision``, then the model catalog
+    (core.model_catalog); audio, video and PDF are sent only to a model known
+    to take them.
+    """
     modalities: Optional[List[Literal["text", "image"]]] = None
     """Output modalities to request, sent as ``modalities`` in the request body.
     ``[image, text]`` asks an image-generation model (OpenRouter
@@ -91,6 +116,12 @@ class ModelConfig(BaseModel):
     """Dollars per million tokens - ``{input, output, cache_read, cache_write}`` - for the
     cost of calls to this model (core.pricing). Overrides the price snapshot; a model
     that has neither is charged at ``unknown_price``.
+    """
+    prompt_cache: Optional[bool] = None
+    """Ask the provider to cache the request prefix: ``cache_control`` at the top
+    of the request body (OpenRouter's automatic caching). Claude caches only on
+    request, and without it an agent pays full price for its whole context on
+    every call. Unset: on for ``anthropic/`` models, off for the rest.
     """
     preserve_reasoning_content: bool = False
     """When True, reasoning_content from thinking-enabled models is preserved in
@@ -133,7 +164,55 @@ class ToolConfig(BaseModel):
             "agent's model."
         ),
     )
-    
+    tiers: Optional[Dict[str, List[str]]] = Field(
+        default=None,
+        description=(
+            "orchestrate: named model lists a caller picks by name (`tier`) - "
+            "for example a cheap `fast` one for search and checks and a `strong` "
+            "one for design. Each runs like `models`: the first available model, "
+            "then the next. Without a tier, executors run on `models`."
+        ),
+    )
+    model_choice: bool = Field(
+        default=False,
+        description=(
+            "orchestrate: let the caller also pick one executor model by key (`model`) "
+            "from `models` and the tiers; the list of them, with what each is, is "
+            "added to the caller's instructions. Off: tiers only."
+        ),
+    )
+    min_timeout_seconds: int = Field(
+        default=600,
+        ge=0,
+        description=(
+            "orchestrate: the least time an executor gets. A shorter `timeout_seconds` "
+            "is raised to it: an estimate that is too tight stops an agent mid-work, "
+            "while one that finishes early loses nothing to a longer limit."
+        ),
+    )
+    max_timeout_seconds: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "orchestrate: the most time a caller may give an executor; 0 is no limit. "
+            "Unset: settings.agent_timeout."
+        ),
+    )
+    resume_compact_tokens: int = Field(
+        default=50000,
+        ge=0,
+        description=(
+            "orchestrate: an executor continued by its context_id whose history is "
+            "longer than this many tokens continues from a summary of it instead "
+            "of the whole of it; 0 never summarizes."
+        ),
+    )
+    max_parallel: int = Field(
+        default=4,
+        ge=1,
+        description="parallel: how many calls of one parallel call run at once.",
+    )
+
     # For agent tools
     target_agent: Optional[str] = None
     context_strategy: Optional[str] = None
@@ -264,6 +343,13 @@ class IsolationConfig(BaseModel):
     memory: str = Field(default="2g", pattern=r"^[1-9][0-9]*[kmg]$", description="Memory a container may use, e.g. 2g")
     cpus: float = Field(default=2.0, gt=0, le=64, description="CPU cores a container may use")
     pids_limit: int = Field(default=512, ge=32, le=65536, description="Processes a container may run at once")
+    cgroup_parent: Optional[str] = Field(
+        default=None,
+        description=(
+            "The cgroup all containers go under, e.g. grid-users.slice: its limits bound every "
+            "user together (utils.process_limits). GRID_CGROUP_PARENT overrides it."
+        ),
+    )
 
 
 class ProjectToolsConfig(BaseModel):
@@ -281,7 +367,17 @@ class Settings(BaseModel):
     # 0 removes the turn limit; per-agent `max_turns` overrides it.
     max_turns: int = Field(default=10, ge=0, le=300)
     # 0 disables the agent execution timeout; per-agent `timeout` overrides it.
-    agent_timeout: int = Field(default=300, ge=0, le=7200)
+    # It bounds an agent's own work: the time its delegates take is not counted
+    # (core.deadlines), and each delegate is bounded by its own limit.
+    agent_timeout: int = Field(default=900, ge=0, le=7200)
+    enforce_delegate_limits: bool = Field(
+        default=False,
+        description=(
+            "When True, cross-system calls (system_delegate) apply the target "
+            "agent's/system's configured timeout and max_turns. When False (default), "
+            "cross-system calls run without turn or time limits."
+        ),
+    )
     debug: bool = False
     mcp_enabled: bool = False
     project_tools: Optional[ProjectToolsConfig] = Field(default=None)
@@ -431,6 +527,14 @@ class UserLimitsPolicy(BaseModel):
         gt=0,
         description="Dollars one user's calls may cost the operator per UTC calendar month; None for no limit",
     )
+    storage_mb: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Disk all of one user's spaces may hold - their own, their projects' and their chats' "
+            "(web_chat.space); past it no new turn starts until files are deleted. None for no limit"
+        ),
+    )
 
 
 _NAME = r"^[a-z][a-z0-9_-]{0,31}$"
@@ -505,6 +609,7 @@ class ReviewPolicy(BaseModel):
 
 class GridConfig(BaseModel):
     """Complete Grid system configuration."""
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     settings: Settings = Field(default_factory=Settings)
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
     compact: "CompactConfig" = Field(default_factory=lambda: CompactConfig())

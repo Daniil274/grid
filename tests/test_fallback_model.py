@@ -123,3 +123,32 @@ async def test_all_models_failed_reports_each_candidate():
 
     with pytest.raises(AllModelsFailedError, match="primary.*backup"):
         await model.get_response(None, "input", SimpleNamespace(key="outer"))
+
+
+@pytest.mark.asyncio
+async def test_a_credential_refused_while_signing_is_reported_as_itself_not_as_a_connection_error():
+    from openai import APIConnectionError
+
+    from core.credentials import CredentialError, credential_error_in
+
+    def connection_error(reason):
+        # What the OpenAI SDK raises when httpx's auth flow raised CredentialError.
+        try:
+            try:
+                raise CredentialError(reason)
+            except CredentialError as cause:
+                raise APIConnectionError(request=None) from cause
+        except APIConnectionError as error:
+            return error
+
+    first = FakeModel(response_error=connection_error("Your opencode-go credential cannot be used right now. Reconnect it in the settings."))
+    second = FakeModel(response_error=connection_error("Sign in with ChatGPT in the settings to use it."))
+    model = FallbackModel([_candidate("glm-flash", first), _candidate("gpt-6-luna", second)])
+
+    with pytest.raises(AllModelsFailedError) as failed:
+        await model.get_response(None, "input", SimpleNamespace(key="outer"))
+
+    assert "Connection error" not in str(failed.value)
+    assert "glm-flash: CredentialError: Your opencode-go credential" in str(failed.value)
+    assert "gpt-6-luna: CredentialError: Sign in with ChatGPT" in str(failed.value)
+    assert credential_error_in(RuntimeError("plain")) is None

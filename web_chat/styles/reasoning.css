@@ -32,11 +32,20 @@
 }
 
 /* Keep the close control reachable while the reader is inside a long trace. */
+/* Pinned, it spans the whole column on the chat's own background: as wide as
+   its text only, the rows scrolling under it showed through beside it. */
 .reasoning.is-expanded .reasoning__toggle {
   position: sticky;
   top: 0;
   z-index: 2;
-  background: var(--bg-1);
+  width: calc(100% + 4px);
+  border-radius: 0;
+  background: var(--bg);
+  box-shadow: 0 1px 0 var(--line);
+}
+
+.reasoning.is-expanded .reasoning__toggle:hover {
+  background: var(--bg-2);
 }
 
 .reasoning__chevron {
@@ -50,10 +59,16 @@
 }
 
 .reasoning__headline {
+  min-width: 0;
+  overflow: hidden;
   font-weight: 500;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .reasoning__timer {
+  flex-shrink: 0;
   color: var(--text-3);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -161,10 +176,25 @@
   color: var(--danger);
 }
 
+/* A running step: the icon stays still and solid; a thin arc turns around its
+   rim. A blinking icon (opacity) read as flicker. */
 .step[data-status="running"] > .step__head .step__icon {
   border-color: var(--accent-line);
   color: var(--accent);
-  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.step[data-status="running"] > .step__head .step__icon::after {
+  position: absolute;
+  inset: -3px;
+  border: 1.5px solid transparent;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  content: "";
+  animation: stepSpin 0.9s linear infinite;
+}
+
+@keyframes stepSpin {
+  to { transform: rotate(360deg); }
 }
 
 .step:not([data-family=""]):not([data-status="error"]) > .step__head .step__icon { color: var(--step-accent); }
@@ -523,3 +553,755 @@ a.refChip:hover {
 .payload__value[data-type="string"] { color: var(--code-str); }
 .payload__value[data-type="number"] { color: var(--code-num); }
 .payload__value[data-type="boolean"] { color: var(--code-kw); }
+
+/* The plan card (ui/plan-card.js): the conversation's tracker tasks, above the answer. */
+.planCard {
+  margin: 8px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+
+.planCard[hidden] {
+  display: none;
+}
+
+.planCard__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.planCard__heading {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.planCard__chevron {
+  display: flex;
+  color: var(--text-3);
+  transform: rotate(90deg);
+  transition: transform 160ms var(--ease);
+}
+
+.planCard.is-collapsed .planCard__chevron {
+  transform: none;
+}
+
+.planCard__head:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: -2px;
+}
+
+/* This request / Whole plan: the scope the rows show. */
+.planCard__scopes {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 6px;
+}
+
+.planCard__scopes[hidden],
+.planCard.is-collapsed .planCard__scopes {
+  display: none;
+}
+
+.planCard__scope {
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.planCard__scope:hover {
+  background: var(--bg-3);
+}
+
+.planCard__scope[aria-selected="true"] {
+  border-color: var(--accent-line);
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.planCard__scope:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
+.planCard__summary {
+  flex: 1 1 auto;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.planCard__bar {
+  flex: 1 0 100%;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-3);
+  overflow: hidden;
+}
+
+.planCard__fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s var(--ease);
+}
+
+.planCard[data-complete="true"] .planCard__fill {
+  background: var(--ok);
+}
+
+.planCard__tasks {
+  margin: 0;
+  padding: 0 12px 8px;
+  list-style: none;
+}
+
+.planCard.is-collapsed .planCard__tasks {
+  display: none;
+}
+
+.planCard__task {
+  padding: 0;
+  border-top: 1px solid var(--line);
+}
+
+/* The row is a button: the whole task opens its details. */
+.planCard__row {
+  display: grid;
+  min-height: 32px;
+  grid-template-columns: 18px minmax(0, 1fr) auto 12px;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.planCard__row:hover {
+  background: var(--bg-3);
+}
+
+.planCard__row::after {
+  content: "›";
+  color: var(--text-3);
+}
+
+.planCard__row:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
+.planCard__mark {
+  color: var(--text-3);
+  text-align: center;
+}
+
+.planCard__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planCard__meta {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.planCard__task[data-state="closed"] .planCard__mark {
+  color: var(--ok);
+}
+
+.planCard__task[data-state="closed"] .planCard__title {
+  color: var(--text-3);
+}
+
+.planCard__task[data-state="in_progress"] .planCard__mark {
+  color: var(--accent);
+}
+
+.planCard__task[data-state="in_progress"] .planCard__title {
+  font-weight: 600;
+}
+
+.planCard__task[data-state="blocked"] .planCard__mark {
+  color: var(--danger);
+}
+
+@media (max-width: 600px) {
+  .planCard__row {
+    grid-template-columns: 18px minmax(0, 1fr) 12px;
+    min-height: 44px;
+  }
+
+  .planCard__row::after {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .planCard__meta {
+    grid-column: 2;
+    white-space: normal;
+  }
+}
+
+/* -- task dialog (plan-card.js): one task's own details, docked right ----- */
+
+.taskDialog {
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.taskDialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+/* A column: badges and tabs stay put, the body scrolls, the foot holds. */
+.taskDialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+/* A phone reads the task full-bleed; a wider screen docks it right. */
+@media (max-width: 600px) {
+  .taskDialog {
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    max-height: none;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+}
+
+@media (min-width: 601px) {
+  .taskDialog {
+    width: min(460px, 100vw);
+    height: 100dvh;
+    max-height: none;
+    margin: 0 0 0 auto;
+    border-width: 0 0 0 1px;
+    border-radius: 0;
+  }
+}
+
+.taskDialog__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 0 16px;
+}
+
+.taskDialog__badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.taskDialog__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.taskDialog__state[data-state="closed"] {
+  color: var(--ok);
+}
+
+.taskDialog__state[data-state="in_progress"] {
+  color: var(--accent-2);
+}
+
+.taskDialog__state[data-state="blocked"] {
+  color: var(--danger);
+}
+
+.taskDialog__id {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.taskDialog__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-left: auto;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.taskDialog__close:hover {
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.taskDialog__close:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+
+.taskDialog__title {
+  margin: 6px 16px 0;
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.taskDialog__tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.taskDialog__tab {
+  padding: 7px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.taskDialog__tab:hover {
+  color: var(--text);
+}
+
+.taskDialog__tab:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: -2px;
+}
+
+.taskDialog__tab[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.taskDialog__body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 14px 16px 16px;
+}
+
+.taskDialog__panel {
+  min-height: 100%;
+}
+
+.taskDialog__foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.taskDialog__count {
+  flex: 1;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* What the tracker recorded: titled sections, honest when empty. */
+.taskDialog__section {
+  margin: 0 0 14px;
+}
+
+.taskDialog__sectionTitle {
+  margin: 0 0 4px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.taskDialog__missing {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* Notes and close reasons are plain text the tracker kept line by line. */
+.taskDialog__notes {
+  margin: 0;
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Task markdown, on the same pattern as an answer's body. */
+.taskDialog__prose {
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.taskDialog__prose > * + * {
+  margin-top: 0.85em;
+}
+
+.taskDialog__prose h1 { font-size: 1.45em; }
+.taskDialog__prose h2 { font-size: 1.25em; }
+.taskDialog__prose h3 { font-size: 1.1em; }
+
+.taskDialog__prose h1,
+.taskDialog__prose h2,
+.taskDialog__prose h3,
+.taskDialog__prose h4 {
+  margin-top: 1.3em;
+  font-weight: 650;
+}
+
+.taskDialog__prose ul,
+.taskDialog__prose ol {
+  padding-left: 1.4em;
+  margin-block: 0;
+}
+
+.taskDialog__prose li + li,
+.taskDialog__prose li > ul,
+.taskDialog__prose li > ol {
+  margin-top: 0.3em;
+}
+
+.taskDialog__prose blockquote {
+  padding: 2px 0 2px 14px;
+  margin: 0;
+  border-left: 2px solid var(--line-strong);
+  color: var(--text-2);
+}
+
+.taskDialog__prose hr {
+  border: none;
+  border-top: 1px solid var(--line);
+}
+
+.taskDialog__prose :not(pre) > code {
+  padding: 1.5px 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--bg-1);
+  font-size: 0.87em;
+}
+
+.taskDialog__prose pre {
+  padding: 12px 14px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+
+.taskDialog__prose pre code {
+  font-size: 12.5px;
+  line-height: 1.65;
+  white-space: pre;
+}
+
+.taskDialog__prose table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.taskDialog__prose th,
+.taskDialog__prose td {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  text-align: left;
+}
+
+.taskDialog__prose img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Dependencies: chips that jump to the task they name. */
+.taskDialog__deps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.taskDialog__depLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.taskDialog__depLink:hover {
+  border-color: var(--accent-line);
+}
+
+.taskDialog__depLink:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+
+.taskDialog__depLink[data-state="closed"] .planCard__mark {
+  color: var(--ok);
+}
+
+.taskDialog__depLink[data-state="in_progress"] .planCard__mark {
+  color: var(--accent);
+}
+
+.taskDialog__depLink[data-state="blocked"] .planCard__mark {
+  color: var(--danger);
+}
+
+.taskDialog__depTitle {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taskDialog__depOff {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-pill);
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+/* What the run reported: a quiet ledger above the answer. */
+.taskDialog__metrics {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  list-style: none;
+}
+
+.taskDialog__metric {
+  display: contents;
+}
+
+.taskDialog__metricLabel {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.taskDialog__metricValue {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* -- block roll-up -------------------------------------------------------- */
+/* A closed block says what it holds: one tick per step, coloured by the kind
+   of work, and a flag when something inside failed or waits for the reader.
+   Open, the steps themselves are there, so the strip steps aside. */
+.step__strip {
+  display: flex;
+  flex-shrink: 1;
+  gap: 2px;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.step__strip:empty,
+.step.is-open > .step__head .step__strip {
+  display: none;
+}
+
+.step__mark {
+  flex-shrink: 0;
+  width: 4px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--text-3);
+  opacity: 0.55;
+}
+
+.step__mark[data-kind="agent"] {
+  width: 7px;
+  background: var(--accent);
+  opacity: 0.8;
+}
+
+.step__mark[data-kind="reasoning"] { background: var(--accent); opacity: 0.35; }
+.step__mark[data-family="read"]    { background: var(--tool-read); }
+.step__mark[data-family="search"]  { background: var(--tool-search); }
+.step__mark[data-family="write"]   { background: var(--tool-write); }
+.step__mark[data-family="edit"]    { background: var(--tool-edit); }
+.step__mark[data-family="delete"]  { background: var(--tool-delete); }
+.step__mark[data-family="shell"]   { background: var(--tool-shell); }
+.step__mark[data-family="web"]     { background: var(--tool-web); }
+.step__mark[data-family="task"]    { background: var(--tool-task); }
+.step__mark[data-family="agent"]   { background: var(--tool-agent); }
+.step__mark[data-family]:not([data-family=""]) { opacity: 0.8; }
+
+.step__mark[data-status="error"] {
+  background: var(--danger);
+  opacity: 1;
+}
+
+.step__mark[data-status="running"] {
+  background: var(--accent);
+  opacity: 1;
+  animation: markPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes markPulse {
+  50% { opacity: 0.35; }
+}
+
+.step__flag {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.step__flag[hidden] {
+  display: none;
+}
+
+.step__flag[data-kind="approval"] {
+  background: var(--warn);
+  animation: markPulse 1.2s ease-in-out infinite;
+}
+
+/* The flag is for what is hidden: an open block shows it in place. */
+.step.is-open > .step__head .step__flag {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step__mark[data-status="running"],
+  .step__flag[data-kind="approval"] { animation: none; }
+}
+
+/* -- the fold row of an open row ------------------------------------------ */
+/* The panel's headline in miniature, first thing inside an open block or tool
+   row. It sticks under the panel's own pinned headline so a long run or result
+   can be folded from wherever the reader is. A tool row holds it directly and
+   shows it only while open; a block holds it in its body. */
+.step__fold {
+  position: sticky;
+  top: 28px;
+  z-index: 1;
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  width: 100%;
+  padding: 3px 8px 3px 4px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 12.5px;
+  text-align: left;
+  box-shadow: 0 1px 0 var(--line);
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.step__fold:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.step__foldChevron {
+  display: flex;
+  color: var(--text-3);
+  transform: rotate(90deg);
+}
+
+.step__foldLabel {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step__foldTime {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.step[data-status="running"] .step__fold .step__foldLabel {
+  color: var(--text);
+}
+
+.step > .step__fold {
+  display: none;
+}
+
+.step.is-open > .step__fold {
+  display: flex;
+}

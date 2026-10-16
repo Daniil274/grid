@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Devices · Grid</title>
+  <link rel="stylesheet" href="/static/styles/tokens.css">
+  <link rel="stylesheet" href="/static/styles/base.css">
+  <link rel="stylesheet" href="/static/styles/devices.css">
+</head>
+<body class="devicesPage">
+  <main class="devicesShell">
+    <header class="devicesHeader">
+      <div>
+        <a href="/" class="devicesBrand">GRID / DEVICES</a>
+        <h1>Devices</h1>
+        <p>Browsers and computers your agents work on. Watch them live and take control at any moment.</p>
+      </div>
+      <div class="devicesActions">
+        <button id="start-machine" class="btn btn--primary" type="button">Start a browser machine</button>
+        <button id="pair" class="btn btn--ghost" type="button">Connect your computer</button>
+      </div>
+    </header>
+
+    <div id="status" class="devicesStatus" role="status" aria-live="polite">Loading devices…</div>
+
+    <section class="devicesPairing" id="pairing" hidden aria-label="Connect your computer">
+      <h2>Connect your computer</h2>
+      <p>Run this on the computer within 10 minutes. It connects out to this server; no port is opened on it.</p>
+      <pre class="devicesCommand" id="pair-command"></pre>
+      <button class="btn btn--ghost" id="copy-command" type="button">Copy</button>
+    </section>
+
+    <section class="devicesGrid" id="devices" aria-label="Connected devices"></section>
+
+    <section class="devicesPaired" id="paired-wrap" hidden aria-label="Paired devices">
+      <h2>Paired devices</h2>
+      <ul id="paired" class="devicesPairedList"></ul>
+    </section>
+
+    <section class="devicesViewer" id="viewer" hidden aria-label="Live view">
+      <div class="devicesViewer__bar">
+        <strong id="viewer-title"></strong>
+        <span class="devicesViewer__state" id="viewer-state"></span>
+        <form id="viewer-url" class="devicesViewer__url" hidden>
+          <input id="viewer-url-input" type="text" placeholder="Go to address…" autocomplete="off" spellcheck="false">
+        </form>
+        <div class="devicesViewer__spacer"></div>
+        <button class="btn btn--primary" id="viewer-control" type="button">Take control</button>
+        <button class="btn btn--ghost" id="viewer-close" type="button">Close</button>
+      </div>
+      <canvas id="viewer-canvas" class="devicesViewer__canvas" tabindex="0" aria-label="The device's screen"></canvas>
+      <p class="devicesViewer__hint" id="viewer-hint">Agents keep working while you watch. Take control to click and type yourself; they wait until you give it back.</p>
+    </section>
+  </main>
+  <script type="module" src="/static/js/devices/page.js"></script>
+</body>
+</html>

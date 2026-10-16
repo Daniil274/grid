@@ -150,7 +150,7 @@ async def test_a_session_summarized_since_the_edit_point_is_not_cut(factory):
 
     # No exact cut exists any more: the agent reads the copied messages instead.
     assert await factory._get_agent_session("worker", branch).get_items() == []
-    assert [m.content for m in factory.context_manager.conversation_view(branch)["messages"]] == ["first", "One.\n\nContext ID: " + context_id]
+    assert [m.content for m in factory.context_manager.conversation_view(branch)["messages"]] == ["first", "One."]
 
 
 async def test_a_compaction_marker_does_not_hide_an_interruption_from_continue(factory):

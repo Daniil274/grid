@@ -138,3 +138,15 @@ def test_a_file_store_keeps_sealed_rows_owner_only_and_works_as_a_vault_store(tm
     assert asyncio.run(reopened.credential("me", "openai")).secret == "sk-aaaaaaaaaaaaaaaa"
     assert reopened.listing("me")[0]["kind"] == "openai" and reopened.listing("other") == []
     assert reopened.delete("me", "openai") and not reopened.delete("me", "openai")
+
+
+@pytest.mark.asyncio
+async def test_a_credential_sealed_under_a_lost_key_asks_to_be_reconnected(parts):
+    store, cipher = parts
+    Vault(store, cipher).put_api_key("u1", "opencode-go", "oc-aaaaaaaaaaaaaaaa")
+    other = Vault(store, Cipher([Cipher.new_key()]))
+
+    assert await other.credential("u1", "opencode-go") is None
+    # Marked: the settings say to reconnect it, and no request tries it again.
+    assert other.status("u1", "opencode-go") == "needs_reauth"
+    assert not other.has("u1", "opencode-go")

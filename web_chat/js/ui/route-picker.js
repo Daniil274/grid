@@ -74,7 +74,29 @@ function option({ title, description, meta, issues, active, disabled, onPick }) 
 }
 
 export function createRoutePicker({ button, nameNode, metaNode, popover, systemList, agentList, agentHeading, store, onChange }) {
-  const close = () => popover.classList.remove("is-open");
+  // The chip drives the popover: it names it (aria-controls) and reports its
+  // state (aria-expanded), the popover itself is focusable and holds the menu.
+  button.setAttribute("aria-controls", popover.id);
+  button.setAttribute("aria-expanded", "false");
+  popover.setAttribute("tabindex", "-1");
+
+  const options = () => [...popover.querySelectorAll(".routeOption:not([disabled])")];
+
+  const focusFirstOption = () => (options()[0] ?? popover).focus();
+
+  const open = () => {
+    popover.classList.add("is-open");
+    button.setAttribute("aria-expanded", "true");
+    focusFirstOption();
+  };
+
+  /** Close the popover; return focus to the chip when it had it (Escape, pick). */
+  const close = ({ restoreFocus = popover.contains(document.activeElement) } = {}) => {
+    if (!popover.classList.contains("is-open")) return;
+    popover.classList.remove("is-open");
+    button.setAttribute("aria-expanded", "false");
+    if (restoreFocus) button.focus();
+  };
 
   const systemOf = (state) => state.systems.find((system) => system.key === state.systemKey) ?? null;
 
@@ -168,22 +190,47 @@ export function createRoutePicker({ button, nameNode, metaNode, popover, systemL
   };
 
   function pick(selection, { keepOpen = false } = {}) {
-    if (!keepOpen) close();
+    if (!keepOpen) close({ restoreFocus: true });
     onChange(selection);
   }
 
   button.addEventListener("click", (event) => {
     event.stopPropagation();
-    popover.classList.toggle("is-open");
+    if (popover.classList.contains("is-open")) close({ restoreFocus: true });
+    else open();
   });
   popover.addEventListener("click", (event) => event.stopPropagation());
-  document.addEventListener("click", close);
-  document.addEventListener("keydown", (event) => event.key === "Escape" && close());
+  // Arrow keys move between the option buttons; Left/Right hop to the other
+  // column (systems / agents), which is how the two lists read on screen.
+  popover.addEventListener("keydown", (event) => {
+    if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const items = options();
+    if (!items.length) return;
+    event.preventDefault();
+    if (event.key === "Home") return items[0].focus();
+    if (event.key === "End") return items[items.length - 1].focus();
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      const column = event.key === "ArrowLeft" ? systemList : agentList;
+      const [first] = [...column.querySelectorAll(".routeOption:not([disabled])")];
+      if (first) first.focus();
+      return;
+    }
+    const current = items.indexOf(document.activeElement);
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    items[(current + step + items.length) % items.length].focus();
+  });
+  document.addEventListener("click", () => close());
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && popover.classList.contains("is-open")) close({ restoreFocus: true });
+  });
 
   store.watch(["systems", "systemKey", "agentKey", "multiSystem"], (state) => {
     renderChip(state);
     renderSystems(state);
     renderAgents(state);
+    // Re-rendering replaces the option buttons; keep the keyboard inside the
+    // open popover (picking a system reveals its agents beside it).
+    if (popover.classList.contains("is-open") && !popover.contains(document.activeElement)) focusFirstOption();
   });
 
   return { close };

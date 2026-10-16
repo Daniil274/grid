@@ -10,6 +10,7 @@
 
 import { h, replace } from "../lib/dom.js";
 import { api } from "../net/api.js";
+import { hideOverlay, showOverlay } from "../ui/overlay.js";
 import { toast } from "../ui/toast.js";
 
 const usd = (amount) => (amount >= 1 ? `$${amount.toFixed(2)}` : `$${amount.toFixed(4)}`);
@@ -46,12 +47,14 @@ export class PlanDrawer {
 
   async open() {
     this.nodes.drawer.classList.add("is-open");
+    showOverlay(this.nodes.drawer);
     this._status("");
     await this._load();
   }
 
   close() {
     this.nodes.drawer.classList.remove("is-open");
+    hideOverlay(this.nodes.drawer);
   }
 
   _status(text, tone = "") {
@@ -110,7 +113,13 @@ export class PlanDrawer {
   }
 
   _key(plan, entry) {
-    const input = h("input.control", { type: "password", autocomplete: "off", placeholder: "Paste a key", maxlength: 400, disabled: !plan.vault_enabled });
+    // Masked, but not a password field: a browser would pair any password
+    // field on the page with a username field and fill a saved login in.
+    const input = h("input.control.control--secret", {
+      type: "text", autocomplete: "off", spellcheck: "false", autocapitalize: "off",
+      "data-1p-ignore": "", "data-lpignore": "true", "data-bwignore": "", "data-form-type": "other",
+      placeholder: "Paste a key", maxlength: 400, disabled: !plan.vault_enabled,
+    });
     return h(
       "div.field",
       {},

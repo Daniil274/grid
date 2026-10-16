@@ -17,11 +17,13 @@ import hashlib
 import json
 import logging
 import math
+import os
+import re
 import threading
 import time
 from collections import deque
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator, Optional
 from uuid import uuid4
@@ -29,14 +31,18 @@ from uuid import uuid4
 import httpx
 
 from core.action_routing import Routing, effect_of, route_call
+from core.deadlines import waiting_for_person
 from core.decisions import DecisionsModel
 from core.chat_policy import ChatPolicyModel
 from core.policy_resilience import PolicyRunner
 from schemas.action_policy import ActionPolicyConfig, ActionValidatorConfig
 from utils.exceptions import ConfigError
-from utils.path_utils import _sandbox_root, resolve_agent_path
+from utils.path_utils import _sandbox_root, extra_roots
 
 logger = logging.getLogger("grid.action_policy")
+
+#: Effects that change things: allowed freely only when the request asks for changes.
+CHANGE_EFFECTS = frozenset({"write", "exec"})
 
 VERDICTS = ("allow", "deny", "review")
 
@@ -88,6 +94,10 @@ class ActionRunState:
     flows: list = field(default_factory=list)
     # Tools the user allowed for the rest of the turn.
     grants: set = field(default_factory=set)
+    # Whether the request asks for changes at all, asked once per turn
+    # (ActionPolicy._asks_for_changes); None until the first change.
+    asks_for_changes: Optional[bool] = None
+    intent_check: Optional[asyncio.Future] = None
     # Completes when the latest call issued in this run, and every call before
     # it, is finished. See take_turn.
     order_tail: Optional[asyncio.Future] = None
@@ -701,8 +711,45 @@ class ActionGate:
             if root is None:
                 return None
             try:
-                resolved = Path(resolve_agent_path(raw, factory))
-                return resolved.relative_to(root).as_posix()
+                from utils.path_utils import CONTAINER_WORKDIR
+
+                value = raw.replace("\\", "/")
+                # A foreign Windows path must not be interpreted as a relative
+                # POSIX path under the workspace. Native Windows paths still
+                # pass through Path's absolute/containment checks below.
+                if os.name != "nt" and (
+                    re.match(r"^[A-Za-z]:", value)
+                    or value.startswith("//")
+                ):
+                    return None
+                candidate = Path(value)
+                if candidate.is_absolute():
+                    # Another space of the run (/project, /user): named as its
+                    # links name it - project/<path> - so the policy's patterns
+                    # (.env, .git/**) see the file's own path within it.
+                    for prefix, space in extra_roots(factory):
+                        name = prefix.strip("/")
+                        if value == prefix or value.startswith(prefix + "/"):
+                            inner = Path(os.path.abspath(space / value[len(prefix):].lstrip("/")))
+                        elif candidate == space or space in candidate.parents:
+                            inner = Path(os.path.abspath(candidate))
+                        else:
+                            continue
+                        if inner != space and space not in inner.parents:
+                            return None
+                        rest = inner.relative_to(space).as_posix()
+                        return name if rest == "." else f"{name}/{rest}"
+                    # A container path is workspace-relative only for container runs.
+                    if getattr(factory, "container_id", None) and (
+                        value == CONTAINER_WORKDIR or value.startswith(CONTAINER_WORKDIR + "/")
+                    ):
+                        candidate = root / value[len(CONTAINER_WORKDIR):].lstrip("/")
+                    elif candidate != root and root not in candidate.parents:
+                        return None
+                else:
+                    candidate = root / candidate
+                normalized = Path(os.path.abspath(candidate))
+                return normalized.relative_to(root).as_posix()
             except Exception:
                 return None
 
@@ -841,6 +888,51 @@ class ActionGate:
         finally:
             run.pass_turn(previous, own)
 
+    async def _asks_for_changes(self, run: "ActionRunState", filter_name: str) -> bool:
+        """Whether the turn's request asks to make or change something.
+
+        Asked of the policy model once per turn, on its first change: a
+        request to think, propose, explain or review is answered without
+        editing the workspace. When the model cannot answer, the filter
+        decides as it always did.
+        """
+        root = run.root
+        if root.asks_for_changes is not None:
+            return root.asks_for_changes
+        if root.intent_check is None:
+            root.intent_check = asyncio.ensure_future(self._judge(self._intent_packet(root, filter_name)))
+        verdict, _ = await asyncio.shield(root.intent_check)
+        root.asks_for_changes = verdict != "deny"
+        if not root.asks_for_changes:
+            logger.info("Action policy: the request of run %s asks for no changes", root.run_id)
+        return root.asks_for_changes
+
+    def _intent_packet(self, root: "ActionRunState", filter_name: str) -> dict:
+        selected = self.config.filters[filter_name]
+        return {
+            "trusted_task": root.task,
+            "trusted_policy": {
+                "version": self.config.version,
+                "rules": [rule.model_dump() for rule in self.config.rules],
+                "filter": {"name": filter_name, "label": selected.label, "description": selected.description},
+            },
+            "untrusted_action": {
+                "kind": "function",
+                "tool": "change_workspace",
+                "arguments": {"what": "edit, create or delete files and run commands that change things"},
+                "tool_metadata": {
+                    "description": (
+                        "Asked by the host, not by an agent: does the user's request ask to make or "
+                        "change something? Allow when it asks to implement, fix, edit, create or run; "
+                        "deny when it only asks to think, design, propose, explain or review."
+                    ),
+                },
+            },
+            "host_facts": {"effect": "write", "why_judged": ["does the request ask for changes"], "run_took_in": []},
+            "untrusted_history": [],
+            "run": {"attempt": 0, "denials": 0},
+        }
+
     async def _judge(self, packet: dict) -> tuple[str, dict]:
         """The policy model's verdict on a call, with how it was reached."""
         started = time.monotonic()
@@ -877,13 +969,37 @@ class ActionGate:
                 **decision_meta, **call_meta,
             )
         try:
-            return await asyncio.wait_for(future, timeout=self.config.review_ttl_seconds)
+            # The run's own deadlines stand still meanwhile: a sub-agent asking for
+            # permission is not out of time because the user has not answered yet.
+            with waiting_for_person():
+                return await asyncio.wait_for(future, timeout=self.config.review_ttl_seconds)
         except asyncio.TimeoutError:
             return None
         finally:
             with self._review_lock:
                 self._waiters.pop(approval_id, None)
                 self._reviews.pop(approval_id, None)
+
+    async def ask_person(self, run: ActionRunState, tool_name: str, kind: str, detail: str) -> Optional[bool]:
+        """Ask the user about one step a tool is about to take, in their chat.
+
+        For a consequence only the tool can see - a page's «Pay» or «Send»
+        button, a command on the user's own computer - after the policy let
+        the call itself through. *detail* says what would happen; the user
+        reads it with the request. True or False is the answer; None means
+        nobody answered within ``review_ttl_seconds``. The run's deadlines
+        stand still while the user decides.
+        """
+        detail = " ".join(str(detail).split())[:500]
+        digest = hashlib.sha256(f"{tool_name}\n{detail}".encode("utf-8")).hexdigest()
+        routing = Routing(effect=kind, route="review", reasons=(detail,))
+        answer = await self._ask(run, tool_name, kind, digest, routing, {"reason": detail}, {})
+        async with run.lock:
+            self._record(
+                run, tool_name, kind, digest, "allow" if answer else "deny", "tool_confirmation",
+                source="user" if answer is not None else "no_answer",
+            )
+        return answer
 
     async def _mediated_call(
         self, run, tool_name, kind, ctx, raw_args, invoke, descriptor, effect, previous
@@ -956,6 +1072,18 @@ class ActionGate:
                     if routing.route == "judge"
                     else None
                 )
+            if (
+                routing.route == "allow"
+                and routing.effect in CHANGE_EFFECTS
+                and not await self._asks_for_changes(run, filter_name)
+            ):
+                # A request to think, propose or explain grants no changes: the
+                # filter's free pass becomes a judgment against the request.
+                routing = replace(routing, route="judge", reasons=(*routing.reasons, "the request asks for no changes"))
+                async with run.lock:
+                    packet = self._packet(
+                        run, tool_name, kind, projected_arguments, descriptor, routing, filter_name
+                    )
             route_meta = {
                 "effect": routing.effect,
                 "route": routing.route,

@@ -6,7 +6,7 @@ import asyncio
 import pytest
 
 from web_chat.deployment import Deployment
-from web_chat.space import SpaceLayout, UserSpace
+from web_chat.space import SpaceLayout, UserSpace, WorkspaceChoiceError
 from web_chat.systems import SystemRegistry
 
 MINIMAL_CONFIG = """
@@ -241,6 +241,9 @@ def _space(registry: SystemRegistry, *, metadata: dict) -> UserSpace:
     space = object.__new__(UserSpace)
     space.registry = registry
     space.conversation_metadata = lambda context_id: metadata
+    # A shared server's space: every chat works in the space's workspace.
+    space.layout = SpaceLayout.under(Path("/srv/users/u"))
+    space.workspace_path = space.layout.workspace
     return space
 
 
@@ -323,3 +326,99 @@ def test_a_space_that_requires_isolation_gets_a_container_whatever_the_config_sa
     assert isolated.container_id == "c-u1"
     assert single.container_id is None
     assert _Containers.started == ["u1"]
+
+
+class _WorkspaceContainers(_Containers):
+    """Records the workspace each container was asked for."""
+
+    workspaces = []
+
+    def get_or_create_container(self, user_id, workspace=None):
+        _WorkspaceContainers.workspaces.append(Path(workspace))
+        return SimpleNamespace(id=f"c-{Path(workspace).name}", name=f"grid-agent-{Path(workspace).name}")
+
+    def stop_container(self, user_id, container_id):
+        pass
+
+
+def _isolating(minimal_config: Path) -> Path:
+    minimal_config.write_text(
+        MINIMAL_CONFIG.replace("isolation:\n  enabled: false", "isolation:\n  enabled: true"), encoding="utf-8"
+    )
+    return minimal_config
+
+
+@pytest.mark.asyncio
+async def test_chats_work_in_the_directories_chosen_for_them(minimal_config, monkeypatch, tmp_path):
+    """Two chats in two directories: each its own config, factories and container."""
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+    monkeypatch.setattr("web_chat.space.ContainerManager", _WorkspaceContainers)
+    _WorkspaceContainers.workspaces = []
+    home, project = tmp_path / "home", tmp_path / "project"
+    home.mkdir(), project.mkdir()
+    space = UserSpace(Deployment(config_path=str(_isolating(minimal_config)), working_directory=str(home)))
+    manager = space.context_manager()
+    plain, chosen = manager.start_new_context(), manager.start_new_context()
+
+    assert space.can_choose_workspace
+    assert space.choose_workspace(chosen, str(project)) == project.resolve()
+
+    assert space.conversation_workspace(plain) == space.workspace_path
+    assert space.conversation_workspace(chosen) == project.resolve()
+    assert await space.registry_for(plain) is space.registry
+    other = await space.registry_for(chosen)
+    assert other is not space.registry and await space.registry_for(chosen) is other
+    assert other.config(other.default_key()).get_working_directory() == str(project.resolve())
+    assert other.factory(other.default_key()).container_id == "c-project"
+    assert space.registry.factory(space.registry.default_key()).container_id == "c-home"
+    assert _WorkspaceContainers.workspaces == [home.resolve(), project.resolve()]
+    await space.close()
+
+
+def test_a_chat_keeps_its_directory_once_it_has_messages(minimal_config, monkeypatch, tmp_path):
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+    space = UserSpace(Deployment(config_path=str(minimal_config), working_directory=str(tmp_path)))
+    manager = space.context_manager()
+    chat = manager.start_new_context()
+    manager.add_message("user", "hello")
+
+    with pytest.raises(WorkspaceChoiceError, match="before the chat's first message"):
+        space.choose_workspace(chat, str(tmp_path))
+
+
+@pytest.mark.parametrize("path", ["relative/dir", "/no/such/dir/anywhere", "/", ""])
+def test_a_chat_cannot_work_in_a_directory_that_is_not_one(minimal_config, monkeypatch, tmp_path, path):
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+    space = UserSpace(Deployment(config_path=str(minimal_config), working_directory=str(tmp_path)))
+    chat = space.context_manager().start_new_context()
+
+    with pytest.raises(WorkspaceChoiceError):
+        space.choose_workspace(chat, path)
+    assert space.conversation_workspace(chat) == space.workspace_path
+
+
+def test_a_shared_server_gives_every_chat_the_users_workspace(minimal_config, monkeypatch, tmp_path):
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+    deployment = Deployment(config_path=str(minimal_config), routing_path=None)
+    space = UserSpace(deployment, user_id="u1", layout=SpaceLayout.under(tmp_path / "u1"))
+    chat = space.context_manager().start_new_context()
+
+    assert not space.can_choose_workspace
+    with pytest.raises(WorkspaceChoiceError):
+        space.choose_workspace(chat, str(tmp_path))
+
+
+def test_a_branch_works_in_the_directory_of_its_conversation(minimal_config, monkeypatch, tmp_path):
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+    project = tmp_path / "project"
+    project.mkdir()
+    space = UserSpace(Deployment(config_path=str(minimal_config), working_directory=str(tmp_path)))
+    manager = space.context_manager()
+    chat = manager.start_new_context()
+    space.choose_workspace(chat, str(project))
+    manager.add_message("user", "hello")
+    message_id = manager.conversation_view(chat)["messages"][0].metadata["message_id"]
+
+    branch, _ = manager.fork_context(chat, message_id)
+
+    assert space.conversation_workspace(branch) == project.resolve()

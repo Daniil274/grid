@@ -6,6 +6,7 @@ them without the factory's dependencies.
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Protocol
 
 from agents import RawResponsesStreamEvent, RunItemStreamEvent
@@ -152,6 +153,40 @@ def interrupted_run_report(result: Any, agent_label: str, exc: BaseException) ->
     if text:
         lines.append(f"Its last message:\n{text}")
     return "\n".join(lines)
+
+
+#: Why a run ended before its answer (RunOutcome.stopped).
+STOPPED_TIMEOUT = "timeout"
+STOPPED_MAX_TURNS = "max_turns"
+STOPPED_ERROR = "error"
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    """What a finished run hands back: its answer and what it took.
+
+    ``stopped`` is None for a run that answered, else why it ended early
+    (``timeout``, ``max_turns``, ``error``); ``text`` is then the report of
+    :func:`interrupted_run_report`. The counts are the Agents SDK's, summed
+    over the run's retried attempts.
+    """
+
+    text: str
+    stopped: Optional[str] = None
+    model_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+def run_usage(result: Any) -> tuple[int, int, int]:
+    """Model calls, input and output tokens the SDK counted for a run so far."""
+    usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
+
+    def count(name: str) -> int:
+        value = getattr(usage, name, 0)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    return count("requests"), count("input_tokens"), count("output_tokens")
 
 
 def tool_event_info(item: Any) -> dict[str, Any]:

@@ -747,12 +747,15 @@ async def test_factory_routes_real_tool_calls_through_the_gate(tmp_path, monkeyp
             factory.config.get_agent(factory.config.get_default_agent())
         )
         by_name = {getattr(tool, "name", ""): tool for tool in tools}
-        state = factory._action_state("List the files of this project")
+        state = factory._action_state("Write notes.md, then list the files of this project")
         ctx = AutoRunToolContext(
             GridRunContext(factory=factory, context_id="ctx-test", action_state=state)
         )
 
-        gate.validator.evaluate = AsyncMock(return_value={"action": "deny"})
+        # The request asks for changes; every call the validator judges is refused.
+        gate.validator.evaluate = AsyncMock(side_effect=lambda packet: {
+            "action": "allow" if packet["untrusted_action"]["tool"] == "change_workspace" else "deny"
+        })
         # The read-only filter refuses a declared write without asking anyone.
         state.filter = "read_only"
         blocked = json.loads(
@@ -769,7 +772,7 @@ async def test_factory_routes_real_tool_calls_through_the_gate(tmp_path, monkeyp
             ctx, json.dumps({"filepath": "notes.md", "content": "hi"})
         )
         assert (tmp_path / "notes.md").read_text(encoding="utf-8").strip() == "hi"
-        gate.validator.evaluate.assert_not_awaited()
+        assert gate.validator.evaluate.await_count == 1  # only: does the request ask for changes
 
         # A command is judged; the validator's deny stands.
         blocked = json.loads(
@@ -1374,3 +1377,32 @@ def test_a_factory_judges_under_the_catalog_policy_with_its_own_part(tmp_path, m
     assert gate.config.validator == base.validator
     assert gate.validator.prompts == gate.config.prompts
     assert "контроля версий" in gate.validator.prompts.action.instructions
+
+
+async def test_a_tool_asks_the_user_about_a_step_with_consequences():
+    """ask_person: a step only the tool can see (a page's «Pay») waits in the chat for a yes."""
+    from types import SimpleNamespace as _NS
+
+    gate = ActionGate(ActionPolicyConfig(mode="enforce"), validator=_NS(evaluate=AsyncMock()))
+    state = ActionRunState(task="Buy the tea", context_id="ctx-1")
+    asking = asyncio.create_task(gate.ask_person(state, "device_do", "external", "Press the button «Pay» on shop.example"))
+    for _ in range(100):
+        if gate.pending_reviews():
+            break
+        await asyncio.sleep(0.01)
+    (review,) = gate.pending_reviews()
+    assert review["tool"] == "device_do" and review["context_id"] == "ctx-1"
+    assert "Press the button «Pay» on shop.example" in review.get("reasons", ())
+    # An answer from another chat does not count.
+    assert not gate.resolve_review(review["approval_id"], approve=True, context_id="ctx-2")
+    assert gate.resolve_review(review["approval_id"], approve=True, context_id="ctx-1")
+    assert await asking is True
+    assert [e["decision"] for e in state.events][-1] == "allow"
+
+    declined = asyncio.create_task(gate.ask_person(state, "device_do", "external", "Press «Send»"))
+    for _ in range(100):
+        if gate.pending_reviews():
+            break
+        await asyncio.sleep(0.01)
+    gate.resolve_review(gate.pending_reviews()[0]["approval_id"], approve=False)
+    assert await declined is False

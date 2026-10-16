@@ -22,7 +22,7 @@ logger = logging.getLogger("grid.config")
 
 class Config:
     """Thread-safe configuration manager with validation and caching."""
-    
+
     def __init__(self, config_path: str = "config.yaml", working_directory: Optional[str] = None):
         """
         Initialize configuration manager.
@@ -315,6 +315,62 @@ class Config:
             raise ConfigError("Configuration not loaded")
         return self._config
     
+    # Memory
+    def get_memory_config(self):
+        """Return validated optional memory settings."""
+        return self.config.memory
+
+    def memory_location(
+        self, *, tenant_id: Optional[str] = None, root: Optional[str] = None, db_path: Optional[str] = None
+    ):
+        """The one place memory lives: (workspace root, SQLite path, identity).
+
+        Agents (``AgentFactory.get_memory_manager``), the memory tools and the web
+        chat's memory API all resolve it here, so what one stores the others read:
+        the same ``.grid/memory.sqlite`` of the workspace and the same namespace
+        (hash of workspace + identity). ``tenant_id`` overrides the configured one;
+        ``root`` the workspace - a chat working in a space of its own keeps the
+        memory of its user's space (web_chat.space). ``db_path`` is a file the
+        host keeps outside the workspace, where the agents cannot reach it; it
+        replaces ``storage_path``, never the namespace.
+        """
+        settings = self.get_memory_config()
+        root = Path(root or self.get_working_directory()).resolve(strict=True)
+        if db_path:
+            return root, Path(db_path).resolve(), tenant_id or settings.tenant_id
+        path = (root / settings.storage_path).resolve()
+        if not path.is_relative_to(root):
+            raise ConfigError("Memory storage_path escapes workspace")
+        return root, path, tenant_id or settings.tenant_id
+
+    def create_memory_manager(
+        self, *, tenant_id: Optional[str] = None, force: bool = False, root: Optional[str] = None,
+        db_path: Optional[str] = None,
+    ):
+        """Create a host-bound manager; callers own its lifetime and cache.
+
+        ``force`` builds the (local) manager even when ``memory.enabled`` is off;
+        ``root`` is the workspace whose memory it is (:meth:`memory_location`).
+        """
+        from core.memory import MemoryConfig, MemoryManager, TencentGatewayConfig
+
+        settings = self.get_memory_config()
+        if not settings.enabled and not force:
+            return None
+        root, path, identity = self.memory_location(tenant_id=tenant_id, root=root, db_path=db_path)
+        gateway = None
+        if settings.enabled and settings.backend != "sqlite":
+            gateway = TencentGatewayConfig(
+                team_id=settings.team_id, user_id=identity if tenant_id else settings.user_id,
+                agent_id=settings.agent_id, service_id=settings.service_id,
+                base_url=settings.tencent_url,
+                bearer_token=os.environ.get(settings.api_key_env) if settings.api_key_env else None,
+            )
+        return MemoryManager.from_config(MemoryConfig(
+            workspace_root=root, backend=settings.backend if settings.enabled else "sqlite",
+            db_path=path, tenant_id=identity, tencent=gateway,
+        ))
+
     # Working directory methods
     def get_working_directory(self) -> str:
         """Get current working directory."""
@@ -491,8 +547,44 @@ class Config:
                     scope="static",
                 )
             )
+        if "orchestrate" in agent_config.tools:
+            catalog = self.executor_model_catalog()
+            if catalog:
+                sections.append(PromptSection(key="executor_models", content=catalog, scope="static"))
 
         return sections
+
+    def executor_model_catalog(self) -> Optional[str]:
+        """The executor models ``orchestrate`` may run on, for its caller to pick from.
+
+        Only with ``tools.orchestrate.model_choice``: the tiers in order, then
+        each model with what its config says of it. Drawn from the config, so
+        it never offers more than the operator set up.
+        """
+        try:
+            tool = self.get_tool("orchestrate")
+        except ConfigError:
+            return None
+        if not tool.model_choice:
+            return None
+        tiers = tool.tiers or {}
+        models = [tool.models] if isinstance(tool.models, str) else list(tool.models or [])
+        keys = list(dict.fromkeys([*models, *(key for tier in tiers.values() for key in tier)]))
+        if not keys:
+            return None
+        lines = ["\nExecutor models for `orchestrate` (`model` picks one; `tier` a list tried in order):"]
+        if models:
+            lines.append(f"- without tier or model: {' -> '.join(models)}")
+        lines.extend(f"- tier {name}: {' -> '.join(tier)}" for name, tier in tiers.items())
+        for key in keys:
+            model = self.config.models.get(key)
+            if model is None:
+                continue
+            facts = [model.description or model.name, f"context {model.context_window // 1000}k"]
+            if model.capabilities:
+                facts.append(", ".join(model.capabilities))
+            lines.append(f"- `{key}`: {' · '.join(facts)}")
+        return "\n".join(lines)
     
     def _legacy_build_agent_prompt(self, agent_key: str) -> str:
         """Build complete prompt for agent including tool descriptions."""

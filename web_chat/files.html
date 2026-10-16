@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Files · Grid</title>
+  <link rel="stylesheet" href="/static/styles/tokens.css">
+  <link rel="stylesheet" href="/static/styles/base.css">
+  <link rel="stylesheet" href="/static/styles/files.css">
+</head>
+<body class="filesPage">
+  <div class="filesShell" id="files-root">
+    <header class="filesHeader">
+      <button class="iconBtn filesHeader__treeToggle" id="tree-toggle" type="button" title="Folders" aria-label="Show folders" aria-expanded="false"></button>
+      <a href="/" class="filesBrand" id="back-to-chat">GRID / FILES</a>
+      <span class="filesHeader__workspace" id="workspace-label" title="The workspace shown"></span>
+      <div class="filesHeader__spacer"></div>
+      <label class="filesSearch">
+        <span class="visuallyHidden">Search file names</span>
+        <input id="search" type="search" placeholder="Search names in this folder…  /" autocomplete="off" spellcheck="false">
+      </label>
+      <button class="iconBtn" id="theme-toggle" type="button"></button>
+    </header>
+
+    <div class="filesToolbar" role="toolbar" aria-label="Folder actions">
+      <button class="iconBtn" id="go-up" type="button" title="Up one folder (Backspace)" aria-label="Up one folder"></button>
+      <button class="iconBtn" id="refresh" type="button" title="Refresh" aria-label="Refresh"></button>
+      <nav class="filesCrumbs" id="crumbs" aria-label="Folder path"></nav>
+      <div class="filesToolbar__actions">
+        <button class="btn btn--ghost" id="new-folder" type="button">New folder</button>
+        <button class="btn btn--ghost" id="new-file" type="button">New file</button>
+        <button class="btn btn--ghost" id="upload" type="button">Upload</button>
+        <button class="btn btn--ghost" id="paste" type="button" hidden>Paste</button>
+        <button class="btn btn--ghost" id="zip" type="button" title="Download this folder as a zip">Download .zip</button>
+        <label class="filesToggle" title="Show names starting with a dot"><input type="checkbox" id="show-hidden"> Hidden</label>
+      </div>
+      <input type="file" id="upload-input" multiple hidden>
+    </div>
+
+    <div class="filesSelection" id="selection-bar" hidden>
+      <span id="selection-count"></span>
+      <button class="btn btn--ghost" type="button" data-bulk="cut">Cut</button>
+      <button class="btn btn--ghost" type="button" data-bulk="copy">Copy</button>
+      <button class="btn btn--ghost" type="button" data-bulk="move">Move to…</button>
+      <button class="btn btn--ghost" type="button" data-bulk="download">Download</button>
+      <button class="btn btn--danger" type="button" data-bulk="delete">Delete</button>
+      <button class="btn btn--ghost" type="button" data-bulk="clear">Clear</button>
+    </div>
+
+    <div class="filesBody">
+      <aside class="filesTree" id="tree" aria-label="Folders"></aside>
+      <main class="filesMain" id="drop-zone">
+        <div class="filesStatus" id="status" role="status" aria-live="polite"></div>
+        <div class="filesTableWrap">
+          <table class="filesTable" id="listing" aria-label="Files">
+            <thead><tr>
+              <th class="filesTable__check"><input type="checkbox" id="select-all" aria-label="Select all"></th>
+              <th><button type="button" class="filesSort" data-sort="name">Name</button></th>
+              <th class="filesTable__size"><button type="button" class="filesSort" data-sort="size">Size</button></th>
+              <th class="filesTable__date"><button type="button" class="filesSort" data-sort="mtime">Modified</button></th>
+            </tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div class="filesDropHint" id="drop-hint" hidden>Drop to upload here</div>
+      </main>
+      <section class="filesPreview" id="preview" aria-label="File" hidden></section>
+    </div>
+  </div>
+  <script defer src="/static/js/lib/highlight.lib.js"></script>
+  <script defer src="/static/js/lib/highlight.extra.js"></script>
+  <script type="module" src="/static/js/files/page.js"></script>
+</body>
+</html>

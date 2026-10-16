@@ -56,6 +56,7 @@ class StepKind(str, Enum):
     MCP = "mcp"
     MESSAGE = "message"  # narration the agent wrote between its actions
     COMPACT = "compact"  # the context was summarized or old tool outputs left out
+    PLAN = "plan"  # the tracker tasks of the conversation (web_chat.plan_board)
     ERROR = "error"
 
 
@@ -69,7 +70,7 @@ class StepStatus(str, Enum):
 class ContextRef:
     """One thing the agent looked at, rendered as a chip underneath its step."""
 
-    kind: str  # "file" | "url" | "query" | "agent"
+    kind: str  # "file" | "url" | "query" | "agent" | "task"
     label: str
     detail: str = ""
 
@@ -103,6 +104,7 @@ class Step:
     tokens_out: int = 0  # completion tokens of the model responses this step spent
     input_payload: dict[str, Any] | None = None
     result_payload: dict[str, Any] | None = None
+    plan: dict[str, Any] | None = None  # a ``plan`` step's tasks (web_chat.plan_board)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +126,7 @@ class Step:
             "tokens_out": self.tokens_out,
             "input_payload": self.input_payload,
             "result_payload": self.result_payload,
+            "plan": self.plan,
         }
 
 
@@ -167,6 +170,8 @@ _REF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("url", ("url", "urls", "link", "links", "source")),
     ("file", ("path", "paths", "file", "files", "file_path", "filename", "directory")),
     ("query", ("query", "q", "pattern", "search", "question", "keyword")),
+    # A tracker id a beads tool touched: the chip deep-links into /tasks.
+    ("task", ("bead_id", "bead_ids", "task_id", "issue_id")),
 )
 
 
@@ -180,7 +185,7 @@ def _ref_label(kind: str, value: str) -> str:
 
 
 def context_refs(arguments: Any) -> list[ContextRef]:
-    """Pull the files, URLs and queries a tool call touched out of its arguments.
+    """Pull the files, URLs, queries and tracker ids a tool call touched out of its arguments.
 
     Deliberately shallow and key-driven: the chips must never claim the agent
     read something it did not, so only well-known argument names are trusted.
@@ -349,6 +354,17 @@ class TraceRecorder:
             self._pending_usage[parent_id] = (held[0] + tokens_in, held[1] + tokens_out, False)
         else:
             self._pending_usage[parent_id] = (tokens_in, tokens_out, False)
+
+    def claim_usage(self, step: Step) -> None:
+        """*step* opened before its response completed - a call shown while the
+        model wrote it - and takes that response's tokens now, as a step
+        opening after the response would (:meth:`open`)."""
+        pending = self._pending_usage.get(step.parent_id)
+        if not pending:
+            return
+        step.tokens_in += pending[0]
+        step.tokens_out += pending[1]
+        self._pending_usage[step.parent_id] = (pending[0], pending[1], True)
 
     def end_reasoning(self, *, parent_id: Optional[str] = None) -> None:
         """Close an agent's live reasoning step, if any: the agent moved on."""

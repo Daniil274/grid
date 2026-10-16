@@ -1,0 +1,25 @@
+# Every container Grid starts: users' containers, package test and
+# evaluation sandboxes (GRID_CGROUP_PARENT in grid-web-chat.service; Docker's
+# systemd cgroup driver puts each container's scope in this slice).
+#
+# isolation.cpus and isolation.memory bound one user; these bound all of them
+# together. Inside, every container has the same CPU weight, so the users who
+# want CPU at the same time share it equally - each up to isolation.cpus.
+#
+# Size it to the machine, leaving the server and the system their share.
+# For 6 cores and 8 GB of RAM:
+
+[Unit]
+Description=Grid users' containers
+Before=slices.target
+
+[Slice]
+# 4 of the 6 cores, whatever the number of users.
+CPUQuota=400%
+CPUWeight=100
+# Reclaimed and throttled from MemoryHigh on; killed only past MemoryMax.
+MemoryHigh=5G
+MemoryMax=5500M
+MemorySwapMax=0
+IOWeight=50
+TasksMax=4096

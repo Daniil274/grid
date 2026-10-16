@@ -27,7 +27,7 @@ import os
 from pathlib import Path
 from typing import IO, Any, List, Optional, Tuple
 
-from utils.path_utils import _sandbox_root, get_current_factory
+from utils.path_utils import _sandbox_root, extra_roots, get_current_factory
 
 #: Whether this system can walk a path without following links.
 SUPPORTED = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
@@ -50,18 +50,21 @@ class LinkRefused(PermissionError):
 def _confined(path: Any) -> Optional[Tuple[Path, List[str]]]:
     """(workspace root, names below it) when the walk applies; else None.
 
-    *path* is already resolved inside the workspace (utils.path_utils); a path
-    outside it is refused here too.
+    *path* is already resolved inside the workspace (utils.path_utils) or one of
+    the run's other spaces, which is then the root of the walk; a path outside
+    them all is refused here too.
     """
     factory = get_current_factory()
     if not SUPPORTED or factory is None or not getattr(factory, "container_id", None):
         return None
-    root = _sandbox_root(factory)
-    try:
-        relative = Path(os.path.abspath(path)).relative_to(root)
-    except ValueError:
-        raise ValueError("Path escapes working directory") from None
-    return root, list(relative.parts)
+    absolute = Path(os.path.abspath(path))
+    # The run's own space first, then the others it reaches (/project, /user).
+    for root in [_sandbox_root(factory), *(root for _prefix, root in extra_roots(factory))]:
+        try:
+            return root, list(absolute.relative_to(root).parts)
+        except ValueError:
+            continue
+    raise ValueError("Path escapes working directory")
 
 
 def _give_to_workspace_owner(fd: int, root: Path) -> None:

@@ -47,6 +47,7 @@ from core.tool_check import summarize
 from web_chat.attachments import AttachmentError, agent_message, normalize_images
 from web_chat.delivery import DELIVERIES, MessageQueue, decide_delivery
 from web_chat.observer import WebStreamObserver
+from web_chat.plan_board import PlanBoard
 from web_chat.spend import TurnSpend, tracking
 from web_chat.systems import Resolution
 from web_chat.trace import StepKind, TraceRecorder, is_tool_result
@@ -55,6 +56,11 @@ logger = logging.getLogger(__name__)
 
 #: Internal sentinel marking the end of a turn's event stream.
 _FINISHED = "_finished"
+#: Conversation metadata: turn id -> the workspace checkpoint taken before it.
+CHECKPOINTS_KEY = "checkpoints"
+#: Checkpoints a conversation keeps, newest first; files listed per turn.
+MAX_CHECKPOINTS = 40
+MAX_LISTED_CHANGES = 200
 
 
 class AgentTurn:
@@ -104,12 +110,24 @@ class AgentTurn:
         #: already stopped for passing its dollar budget.
         self._spend = TurnSpend(self._check_usd_budget)
         self._usd_budget_hit = False
+        #: The workspace before the agent ran (core.checkpoints), for Restore.
+        self._checkpoint: Optional[dict] = None
         self._observer = WebStreamObserver(
             self._recorder,
             emit_token=self._token,
             reset_answer=lambda: self._queue.put_nowait({"type": "answer_reset"}),
             emit_image=lambda url: self._queue.put_nowait({"type": "image", "url": url}),
+            plan=PlanBoard.continuing(self._recorder, self._stored_messages()),
         )
+
+    def _stored_messages(self) -> list[dict[str, Any]]:
+        """The conversation's recent messages, for the plan its last turns left."""
+        try:
+            snapshot = self._session.manager.get_context_messages(self._session.context_id, limit=40)
+        except Exception:
+            logger.debug("No stored messages to continue the plan from", exc_info=True)
+            return []
+        return list((snapshot or {}).get("messages") or [])
 
     @property
     def message(self) -> str:
@@ -285,6 +303,8 @@ class AgentTurn:
             with suppress(asyncio.CancelledError):
                 await producer
             self._persist_trace()
+            with suppress(Exception, asyncio.CancelledError):
+                await self._record_checkpoint()
             # Stopped, timed out or failed: say so with what Continue needs.
             with suppress(WebSocketDisconnect, RuntimeError, OSError):
                 if await self._announce_interruption() and self.outcome != "stopped":
@@ -292,7 +312,7 @@ class AgentTurn:
             self._record_activity()
             self._record_usage()
             # Release before "done": the client may submit its next turn at once.
-            self._session.release()
+            self._session.release(self)
             with suppress(WebSocketDisconnect, RuntimeError, OSError):
                 await self._emit({
                     "type": "done",
@@ -315,10 +335,11 @@ class AgentTurn:
                 StepKind.PREPARE,
                 "Preparing the runtime",
                 subtitle=f"{resolution.system} · {resolution.agent}",
-                body=f"Workspace: {space.workspace_label}",
+                body=f"Workspace: {space.workspace_label_of(self._session.context_id)}",
             )
-            await space.warm_agent(resolution.agent, resolution.system)
+            await space.warm_agent(resolution.agent, resolution.system, context_id=self._session.context_id)
             self._recorder.close(step, title=f"Runtime ready · {label}")
+            self._checkpoint = await self._snapshot()
 
             space.update_conversation_metadata(
                 self._session.context_id,
@@ -371,7 +392,8 @@ class AgentTurn:
     def _warn_about_tools(self, resolution: Resolution, label: str) -> None:
         """Say which tools will fail before the agent starts; nothing is disabled."""
         try:
-            issues = self._session.space.registry.agent_issues(resolution.system, resolution.agent)
+            registry = self._session.space.registry_of(self._session.context_id)
+            issues = registry.agent_issues(resolution.system, resolution.agent)
         except Exception as exc:  # the check must never cost the turn
             logger.warning("Tool check failed for %s/%s: %s", resolution.system, resolution.agent, exc)
             return
@@ -499,6 +521,46 @@ class AgentTurn:
                 # A closed tab must not stall the agent or the other viewers.
                 self._subscribers.discard(session)
 
+    # -- checkpoints -------------------------------------------------------
+    async def _snapshot(self) -> Optional[dict]:
+        """The chat's spaces now; None when they cannot be taken - the turn runs anyway."""
+        space = self._session.space
+        checkpoints = getattr(space, "checkpoints", None)
+        if checkpoints is None:
+            return None
+        try:
+            if hasattr(space, "snapshot"):
+                return await asyncio.to_thread(space.snapshot, self._session.context_id)
+            workspace = space.conversation_workspace(self._session.context_id)
+            return await asyncio.to_thread(checkpoints.snapshot, workspace)
+        except Exception:
+            logger.warning("No checkpoint of %s before this turn", self._session.context_id, exc_info=True)
+            return None
+
+    async def _record_checkpoint(self) -> None:
+        """Keep what the turn changed in the workspace, and say so: Restore goes
+        back to the checkpoint taken before it."""
+        before = self._checkpoint
+        if before is None:
+            return
+        after = await self._snapshot()
+        if after is None:
+            return
+        space = self._session.space
+        compare = getattr(space, "checkpoint_changes", None) or space.checkpoints.changes
+        changes = await asyncio.to_thread(compare, before, after)
+        manager, context_id = self._session.manager, self._session.context_id
+        kept = dict(manager.get_context_metadata(context_id).get(CHECKPOINTS_KEY) or {})
+        kept[self.run_id] = {"before": before, "files": len(changes), "changes": changes[:MAX_LISTED_CHANGES]}
+        if "spaces" in before:
+            # Shared spaces restore only what this chat's turns changed: what each turn ended with.
+            kept[self.run_id]["after"] = after
+        # The newest turns only: an old checkpoint still restores, it is just not offered.
+        kept = dict(list(kept.items())[-MAX_CHECKPOINTS:])
+        manager.update_context_metadata(context_id, {CHECKPOINTS_KEY: kept})
+        if changes:
+            await self._emit({"type": "checkpoint", "turn_id": self.run_id, "files": len(changes), "changes": changes[:MAX_LISTED_CHANGES]})
+
     # -- persistence -------------------------------------------------------
     def _record_activity(self) -> None:
         """Count the turn for the system that ran it (web_chat.system_activity)."""
@@ -578,8 +640,8 @@ class ChatSession:
     def agent_label(self, system_key: str, agent_key: str) -> str:
         return self.space.registry.agent_label(system_key, agent_key)
 
-    def release(self) -> None:
-        self._turns.release(self.context_id)
+    def release(self, turn: "AgentTurn") -> None:
+        self._turns.release(self.context_id, turn)
 
     # -- commands ----------------------------------------------------------
     async def _dispatch(self, raw: str) -> None:
@@ -828,7 +890,6 @@ class ChatSession:
             await self.send({"type": "error", "content": refusal})
             await self.send({"type": "done"})
             return False
-        self._turns.claim(self.context_id)
         turn = AgentTurn(
             self,
             message,
@@ -837,11 +898,15 @@ class ChatSession:
             images=tuple(images),
             edit_of=edit_of,
         )
+        self._turns.claim(self.context_id, turn)
         task = asyncio.create_task(turn.run())
         self._turns.register(self.context_id, turn, task)
 
         def ended(_task: asyncio.Task) -> None:
             self._turns.forget(self.context_id, turn)
+            # run() releases in its finally; a task cancelled before its first
+            # step never gets there, and the chat must not stay busy for good.
+            self._turns.release(self.context_id, turn)
             self._background(self._advance_queue(turn))
 
         task.add_done_callback(ended)
@@ -849,6 +914,13 @@ class ChatSession:
 
     @staticmethod
     async def _cancel(task: asyncio.Task) -> None:
+        if task.done():
+            return
+        # A message and a Stop can arrive in one burst: the turn's task exists
+        # but has not taken its first step, and a cancel now would skip run()
+        # altogether - no interruption recorded, no "done" sent. One pass of
+        # the loop lets it start, so the cancel lands inside run().
+        await asyncio.sleep(0)
         if task.done():
             return
         task.cancel()

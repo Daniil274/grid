@@ -262,6 +262,11 @@ class Vault:
         row = self._store.credential(user_id, kind)
         return row is not None and row.status == "ok"
 
+    def status(self, user_id: str, kind: str) -> Optional[str]:
+        """The stored credential's status ("ok", NEEDS_REAUTH), or None when there is none."""
+        row = self._store.credential(user_id, kind)
+        return row.status if row is not None else None
+
     async def credential(self, user_id: str, kind: str) -> Optional[Credential]:
         """The credential to sign a request with now, or None when it cannot be used."""
         row = self._store.credential(user_id, kind)
@@ -269,7 +274,10 @@ class Vault:
             return None
         payload = self._cipher.open(row.ciphertext, _binding(user_id, kind))
         if payload is None:
+            # Sealed under another GRID_SECRETS_KEY (one that was lost or rotated
+            # away): it will never open again. The user is told to reconnect it.
             logger.error("A stored credential of %s could not be opened (wrong GRID_SECRETS_KEY?)", kind)
+            self._store.set_credential_status(user_id, kind, NEEDS_REAUTH)
             return None
         if payload.get("type") == "api_key":
             return Credential(payload["secret"], "own", charged=False)

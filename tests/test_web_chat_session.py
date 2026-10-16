@@ -65,6 +65,7 @@ def space_for(run, *, request_stop=lambda context_id: False, continue_agent=None
     )
     return SimpleNamespace(
         context_manager=lambda: manager, workspace_path='.', workspace_label='.', user_id='test', admit_turn=lambda: None,
+        workspace_label_of=lambda context_id: '.', registry_of=lambda context_id: registry,
         factory=factory, warm_agent=AsyncMock(), resolve_turn=resolve_turn,
         update_conversation_metadata=lambda *a, **kw: None,
         registry=registry, turns=TurnBoard(), deployment=SimpleNamespace(),
@@ -100,7 +101,7 @@ async def test_stop_during_agent_warmup_and_next_turn():
     space, socket = space_for(run), Socket()
     started = asyncio.Event()
 
-    async def warm(agent_key, system_key=None):
+    async def warm(agent_key, system_key=None, *, context_id=None):
         started.set()
         await asyncio.Event().wait()
 
@@ -823,5 +824,213 @@ async def test_a_turn_inside_its_token_budget_runs_to_the_end():
     assert recorded == [(40, 30)]
     assert done['tokens_in'] == 40 and done['tokens_out'] == 30
 
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_a_stop_in_the_same_burst_as_the_message_frees_the_chat():
+    """Message and Stops read before the turn's task took a step: the turn still
+    ends as stopped, and the chat takes the next message instead of "busy"."""
+    run = AsyncMock(return_value='Ready')
+    space, socket = space_for(run), Socket()
+    for frame in ('{"message":"first"}', '{"action":"stop"}', '{"action":"stop"}'):
+        socket.incoming.put_nowait(frame)
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
+    assert (await socket.event('done'))['stopped'] is True
+    assert not space.turns.is_claimed('ctx')
+    await socket.incoming.put('{"message":"second"}')
+    assert (await socket.event('final_output'))['content'] == 'Ready'
+    await socket.event('done')
+    await socket.incoming.put(None)
+    await session
+
+
+def test_a_late_release_never_frees_a_newer_claim():
+    board = TurnBoard()
+    first, second = object(), object()
+    assert board.claim('ctx', first)
+    board.release('ctx', first)
+    assert board.claim('ctx', second)
+    board.release('ctx', first)  # the old turn's cleanup, arriving late
+    assert board.is_claimed('ctx')
+    board.release('ctx', second)
+    assert not board.is_claimed('ctx')
+
+
+# -- the projects API -------------------------------------------------------------
+#
+# The projects routes mount on the real WebChatServer; the REST create/list
+# cases live here with them (this module otherwise drives the WebSocket
+# session). Everything is imported locally so the section stands on its own.
+
+
+@pytest.fixture
+def projects_space(tmp_path):
+    """A dummy space with a real ContextManager and a real ProjectStore."""
+    from core.context import ContextManager
+
+    from tests.test_web_ui_routes import _DummySpace
+    from web_chat.projects import ProjectStore
+
+    dummy = _DummySpace()
+    manager = ContextManager(persist_path=str(tmp_path / "conversations.json"))
+    dummy._context_manager = manager
+    dummy.conversations_path = tmp_path / "conversations.json"
+    store = ProjectStore(tmp_path / "projects.json")
+    dummy.project_store = store
+    dummy.project_exists = store.exists
+
+    def update(context_id, **updates):
+        manager.update_context_metadata(context_id, {k: v for k, v in updates.items() if v is not None})
+
+    def by_project():
+        grouped = {}
+        for view in manager.conversation_views():
+            project_id = (view.get("metadata") or {}).get("project_id") or None
+            grouped.setdefault(project_id, []).append(view["id"])
+        return grouped
+
+    dummy.update_conversation_metadata = update
+    dummy.conversations_by_project = by_project
+    return dummy
+
+
+@pytest.fixture
+def projects_client(projects_space):
+    from fastapi.testclient import TestClient
+
+    from tests.test_web_ui_routes import SAME_SITE, _server
+
+    return TestClient(_server(projects_space).app, headers=SAME_SITE)
+
+
+def test_create_list_and_patch_a_project(projects_client):
+    created = projects_client.post("/api/projects", json={"title": "  Grid  ", "description": "the app"})
+    assert created.status_code == 201
+    project = created.json()
+    assert project["title"] == "Grid" and project["parent_id"] is None and project["id"].startswith("prj-")
+
+    listed = projects_client.get("/api/projects").json()["projects"]
+    assert [item["id"] for item in listed] == [project["id"]]
+    assert listed[0]["chat_count"] == 0
+
+    child = projects_client.post("/api/projects", json={"title": "Chats", "parent_id": project["id"]}).json()
+    assert child["parent_id"] == project["id"]
+
+    patched = projects_client.patch(
+        f"/api/projects/{project['id']}", json={"notes": "shared context", "archived": True}
+    )
+    assert patched.status_code == 200
+    assert patched.json()["notes"] == "shared context" and patched.json()["archived"] is True
+
+    assert projects_client.patch("/api/projects/prj-ghost", json={"title": "x"}).status_code == 404
+
+
+def test_a_bad_parent_a_cycle_and_too_deep_are_refused(projects_client):
+    from web_chat.projects import MAX_DEPTH
+
+    assert projects_client.post("/api/projects", json={"title": "orphan", "parent_id": "prj-ghost"}).status_code == 400
+    a = projects_client.post("/api/projects", json={"title": "a"}).json()
+    b = projects_client.post("/api/projects", json={"title": "b", "parent_id": a["id"]}).json()
+    c = projects_client.post("/api/projects", json={"title": "c", "parent_id": b["id"]}).json()
+    assert MAX_DEPTH == 3
+    assert projects_client.post("/api/projects", json={"title": "d", "parent_id": c["id"]}).status_code == 400
+    assert projects_client.patch(f"/api/projects/{a['id']}", json={"parent_id": c["id"]}).status_code == 400
+    assert projects_client.patch(f"/api/projects/{a['id']}", json={"parent_id": a["id"]}).status_code == 400
+
+
+def test_a_chat_is_created_in_a_project_and_listed_with_it(projects_client):
+    project = projects_client.post("/api/projects", json={"title": "Grid"}).json()
+
+    created = projects_client.post("/api/chat/conversations", json={"project_id": project["id"]})
+    assert created.status_code == 200
+    assert created.json()["project_id"] == project["id"]
+
+    rows = projects_client.get("/api/chat/conversations").json()
+    assert len(rows) == 1 and rows[0]["project"] == project["id"]
+    assert projects_client.get("/api/projects").json()["projects"][0]["chat_count"] == 1
+
+
+def test_a_chat_cannot_be_created_in_an_unknown_project(projects_client):
+    assert projects_client.post("/api/chat/conversations", json={"project_id": "prj-ghost"}).status_code == 404
+    assert projects_client.get("/api/chat/conversations").json() == []
+
+
+def test_a_chat_moves_between_projects_and_can_be_detached(projects_client):
+    first = projects_client.post("/api/projects", json={"title": "one"}).json()
+    second = projects_client.post("/api/projects", json={"title": "two"}).json()
+    context_id = projects_client.post("/api/chat/conversations", json={"project_id": first["id"]}).json()["id"]
+
+    moved = projects_client.put(f"/api/chat/conversations/{context_id}/project", json={"project_id": second["id"]})
+    assert moved.status_code == 200 and moved.json()["project_id"] == second["id"]
+    counts = {item["id"]: item["chat_count"] for item in projects_client.get("/api/projects").json()["projects"]}
+    assert counts == {first["id"]: 0, second["id"]: 1}
+
+    detached = projects_client.put(f"/api/chat/conversations/{context_id}/project", json={"project_id": None})
+    assert detached.status_code == 200 and detached.json()["project_id"] is None
+    assert projects_client.get("/api/chat/conversations").json()[0]["project"] is None
+
+
+def test_setting_a_project_on_unknown_targets_is_404(projects_client):
+    project = projects_client.post("/api/projects", json={"title": "one"}).json()
+    context_id = projects_client.post("/api/chat/conversations", json={}).json()["id"]
+    assert (
+        projects_client.put(f"/api/chat/conversations/{context_id}/project", json={"project_id": "prj-ghost"}).status_code
+        == 404
+    )
+    assert (
+        projects_client.put("/api/chat/conversations/ctx-ghost/project", json={"project_id": project["id"]}).status_code
+        == 404
+    )
+
+
+def test_deleting_a_project_reparents_its_chats_and_children(projects_client):
+    root = projects_client.post("/api/projects", json={"title": "root"}).json()
+    middle = projects_client.post("/api/projects", json={"title": "middle", "parent_id": root["id"]}).json()
+    child = projects_client.post("/api/projects", json={"title": "child", "parent_id": middle["id"]}).json()
+    context_id = projects_client.post("/api/chat/conversations", json={"project_id": middle["id"]}).json()["id"]
+
+    deleted = projects_client.delete(f"/api/projects/{middle['id']}")
+    assert deleted.status_code == 200
+    assert deleted.json() == {"ok": True, "moved_chats": 1, "moved_projects": 1}
+
+    remaining = {item["id"]: item for item in projects_client.get("/api/projects").json()["projects"]}
+    assert middle["id"] not in remaining
+    assert remaining[child["id"]]["parent_id"] == root["id"]
+    assert projects_client.get("/api/chat/conversations").json()[0]["project"] == root["id"]
+    assert context_id  # the chat still exists, only its project changed
+
+    assert projects_client.delete("/api/projects/prj-ghost").status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_changes_files_leaves_a_checkpoint_to_restore(tmp_path):
+    from core.checkpoints import Checkpoints
+    from web_chat.session import CHECKPOINTS_KEY
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "plan.md").write_text("v1")
+
+    async def run(**kwargs):
+        # Any tool: what counts is what the files look like afterwards.
+        (workspace / "plan.md").write_text("v2")
+        (workspace / "new.py").write_text("x = 1")
+        return "Done"
+
+    space, socket = space_for(run), Socket()
+    space.checkpoints = Checkpoints(tmp_path / "checkpoints")
+    space.conversation_workspace = lambda context_id: workspace
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
+    await socket.incoming.put('{"message":"edit the plan"}')
+    event = await socket.event('checkpoint')
+    assert event['files'] == 2
+    assert sorted(change['path'] for change in event['changes']) == ['new.py', 'plan.md']
+    await socket.event('done')
+
+    kept = space.context_manager().get_context_metadata('ctx')[CHECKPOINTS_KEY][event['turn_id']]
+    space.checkpoints.restore(workspace, kept['before'])
+    assert (workspace / "plan.md").read_text() == "v1" and not (workspace / "new.py").exists()
     await socket.incoming.put(None)
     await session

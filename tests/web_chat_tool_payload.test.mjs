@@ -115,6 +115,8 @@ test("normal tool and nested agent payloads are lazy, typed and source state sur
   panel.upsert({ ...step, result_payload: payload(json({ x: 2 })) });
   assert.equal(panel.el.find("payload__raw").hidden, false);
   panel.upsert({ id: "agent", kind: "agent", title: "Coder", status: "running", input_payload: payload(json({ input: "task" })), refs: [] });
+  // The sub-agent's block stays closed while it runs; the reader opens it.
+  panel.el.findAll("step__head").at(-1).click();
   assert.ok(panel.el.find("agent__task").find("payload__typed"));
   panel.finish(1);
 });

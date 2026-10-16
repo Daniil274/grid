@@ -11,6 +11,7 @@ def bare_space():
     space = object.__new__(UserSpace)
     space._background = set()
     space._warmup = None
+    space._chosen = {}
     space.registry = AsyncMock()
     space.turns = TurnBoard()
     return space

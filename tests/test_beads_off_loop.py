@@ -46,3 +46,14 @@ def test_bd_in_a_container_is_ended_there_too(monkeypatch):
     assert cmd[:7] == ["docker", "exec", "-w", "/workspace", "-e", "BEADS_DAEMON=0", "c0ffee"]
     assert cmd[7:11] == ["timeout", "-k", "5", str(beads_tools.BD_TIMEOUT_SECONDS)]
     assert timeout > beads_tools.BD_TIMEOUT_SECONDS
+
+
+def test_init_adds_only_the_tracker_to_the_users_project():
+    # bd's defaults write AGENTS.md, CLAUDE.md, editor hooks and git hooks into
+    # the project and stage its files in the user's git index.
+    args = beads_tools._init_args("/home/me/geocrs")
+
+    assert args[0] == "init"
+    assert {"--skip-agents", "--skip-hooks", "--setup-exclude", "--init-if-missing"} <= set(args)
+    # In a container bd would name the issues after the mount point, "workspace".
+    assert args[args.index("--prefix") + 1] == "geocrs"

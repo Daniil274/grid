@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from core.action_policy import ActionGate, ActionRunState, ActionValidator
 from core.config.config import Config
+from core.parallel_lanes import guard as lane_guard
 from core.sdk_patches import tool_error_output
 from tools import tool_effect
 from utils.exceptions import ConfigError
@@ -238,11 +239,15 @@ class PolicyWiring:
             raw_ctx = getattr(ctx, "context", None)
             factory = getattr(raw_ctx, "factory", None) or self
             gate = getattr(factory, "action_gate", None)
+            # In a batch, the call the gate lets through runs as its lane allows.
+            run = lane_guard(
+                inner, tool_name, kind, effect, getattr(gate, "config", None), ActionGate._locator
+            )
             try:
                 if gate is None:
-                    return await inner(ctx, args)
+                    return await run(ctx, args)
                 return await gate.invoke(
-                    tool_name, kind, ctx, args, inner, descriptor=descriptor, effect=effect
+                    tool_name, kind, ctx, args, run, descriptor=descriptor, effect=effect
                 )
             except Exception as exc:
                 # Outermost wrapper: anything raised past the tool's own error

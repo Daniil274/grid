@@ -14,7 +14,7 @@ MAX_TEXT = 32_000
 MAX_PARTS = 40
 MAX_IMAGES = 512_000
 _CONTENT_TYPES = {"text", "input_text", "output_text", "image", "image_url",
-                  "input_image", "resource", "resource_link", "audio"}
+                  "input_image", "resource", "resource_link", "audio", "file", "input_file"}
 _LANGUAGES = {".py": "python", ".js": "javascript", ".ts": "typescript", ".tsx": "tsx",
               ".jsx": "jsx", ".json": "json", ".yaml": "yaml", ".yml": "yaml",
               ".sh": "bash", ".css": "css", ".html": "html", ".sql": "sql",
@@ -173,6 +173,15 @@ def normalize_payload(value: Any, *, role: str = "result", tool: str = "",
                     else:
                         truncated = True
                         add("text", "text/plain", "Image preview unavailable", name="Image")
+                elif typ in {"file", "input_file"}:
+                    # Audio, video or a PDF a tool handed the model (core.media): named
+                    # here, never embedded - its data can be megabytes.
+                    fields = block.get("file") if isinstance(block.get("file"), dict) else block
+                    data = fields.get("file_data") or ""
+                    fmime = data[5:].split(";", 1)[0] if isinstance(data, str) and data.startswith("data:") else ""
+                    name = str(fields.get("filename") or "file")
+                    add("text", "text/plain", f"📎 {name} ({fmime or 'file'}) - sent to the model, not kept in the trace",
+                        name="Attachment")
                 elif typ in {"resource", "resource_link"}:
                     resource = block.get("resource", block)
                     if not isinstance(resource, dict):

@@ -11,6 +11,7 @@
 
 import { h, replace } from "../lib/dom.js";
 import { api } from "../net/api.js";
+import { hideOverlay, showOverlay } from "../ui/overlay.js";
 import { copyText } from "../ui/toast.js";
 import { tokens } from "../lib/format.js";
 
@@ -31,6 +32,7 @@ export class AccountsDrawer {
 
   async open() {
     this.nodes.drawer.classList.add("is-open");
+    showOverlay(this.nodes.drawer);
     this.nodes.created.hidden = true;
     this._status("");
     await this._load();
@@ -38,6 +40,7 @@ export class AccountsDrawer {
 
   close() {
     this.nodes.drawer.classList.remove("is-open");
+    hideOverlay(this.nodes.drawer);
   }
 
   _bind() {

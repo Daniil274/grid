@@ -14,6 +14,7 @@ import logging
 from collections import deque
 from typing import Any, Callable, Optional
 
+from core.action_policy import is_policy_block
 from core.run_stream import (
     REASONING_DELTA_EVENTS,
     field_of,
@@ -21,6 +22,7 @@ from core.run_stream import (
     tool_event_info,
 )
 from web_chat.payload import normalize_payload
+from web_chat.plan_board import TRACKED_TOOLS, PlanBoard, claimed_task_ids
 from web_chat.tool_summaries import tool_subtitle, tool_title
 from web_chat.trace import (
     Step,
@@ -92,6 +94,7 @@ class WebStreamObserver:
         reset_answer: Optional[Callable[[], None]] = None,
         emit_image: Optional[Callable[[str], None]] = None,
         agent_label: str = "",
+        plan: Optional[PlanBoard] = None,
     ) -> None:
         self._recorder = recorder
         self._emit_token = emit_token
@@ -119,12 +122,21 @@ class WebStreamObserver:
         # Calls the policy held in this turn, sub-agents included: one counter,
         # shared by the nested views (web_chat.system_activity).
         self._held = [0]
-        # Rows of tool calls the model is still writing, by the output item id
-        # its argument deltas name, with the characters written so far. A call
-        # with long arguments takes minutes to write; without its row the run
-        # looks stalled until the call is complete.
-        self._writing: dict[str, Step] = {}
-        self._written_chars: dict[str, int] = {}
+        # The conversation's plan (web_chat.plan_board), fed by the tracker
+        # calls of this turn and of its sub-agents; the calls it waits on, by id.
+        self._plan = plan if plan is not None else PlanBoard(recorder)
+        self._plan_calls: dict[str, tuple[str, Any]] = {}
+        # Rows of tool calls the model is still writing, with the characters
+        # written so far. A call with long arguments takes minutes to write;
+        # without its row the run looks stalled until the call is complete.
+        # Keyed by the model response, the output item id and its index: over
+        # Chat Completions every call of a response has the same item id
+        # (the SDK's fake one) and only the index tells them apart.
+        self._writing: dict[tuple, Step] = {}
+        self._written_chars: dict[tuple, int] = {}
+        self._response_seq = 0
+        # Rows of tools the host ran itself (auto_run_tools, init_tools), oldest first per tool.
+        self._host_calls: dict[str, deque[Step]] = {}
 
     @property
     def policy_blocks(self) -> int:
@@ -150,6 +162,8 @@ class WebStreamObserver:
         child._pending_policies = self._pending_policies
         child._tool_names = self._tool_names
         child._held = self._held
+        child._plan = self._plan
+        child._plan_calls = self._plan_calls
         block = self._calls_by_id.get(call_id) if call_id else None
         if block is None and call_id is None:
             # Without an id, adopt the caller's call only when it is unambiguous.
@@ -185,6 +199,17 @@ class WebStreamObserver:
             subtitle=f"{_tokens(tokens_before)} → {_tokens(tokens_after)} tokens",
         )
         self._recorder.close(step)
+
+    def handle_models_skipped(self, skipped: list[tuple[str, str]]) -> None:
+        """Models of the agent's list this user cannot use now, with the reason each."""
+        self._recorder.note(
+            StepKind.ERROR,
+            f"{len(skipped)} model(s) unavailable",
+            parent_id=self._parent_id,
+            subtitle=", ".join(key for key, _ in skipped),
+            body="\n".join(f"- {key}: {reason}" for key, reason in skipped),
+            tone="warn",
+        )
 
     def handle_outputs_cleared(self, count: int) -> None:
         """Old tool outputs were left out of a request to fit the context
@@ -316,6 +341,46 @@ class WebStreamObserver:
             return
         self._recorder.update(step, **badge)
 
+    # -- tools the host runs (auto_run_tools, init_tools) -------------------
+    def tool_call_started(
+        self, agent_key: Optional[str], tool_name: str, arguments: Any = None,
+        *, call_id: Optional[str] = None,
+    ) -> None:
+        """Show a tool the host runs before the model is asked as a trace row."""
+        name = str(tool_name or "tool")
+        subtitle = tool_subtitle(name, arguments)
+        if subtitle is None:
+            subtitle = clip(summarize(arguments, 160).replace("\n", " "), 120)
+        step = self._recorder.open(
+            StepKind.TOOL, tool_title(name, None) or name, parent_id=self._parent_id,
+            tool=name, subtitle=subtitle or "set-up step", detail=summarize(arguments),
+            input_payload=normalize_payload(arguments, role="input", tool=name),
+        )
+        self._host_calls.setdefault(name, deque()).append(step)
+
+    def tool_call_finished(
+        self, agent_key: Optional[str], tool_name: Optional[str], output: Any = "",
+        *, call_id: Optional[str] = None,
+    ) -> None:
+        """Close that row; a failure or a policy refusal is shown as an error."""
+        name = str(tool_name or "tool")
+        waiting = self._host_calls.get(name)
+        step = waiting.popleft() if waiting else None
+        text = output if isinstance(output, str) else str(output if output is not None else "")
+        blocked = is_policy_block(text)
+        failed = blocked or text.lstrip().startswith(("❌", "Error", "error:"))
+        payload = normalize_payload(output, tool=name)
+        status = StepStatus.ERROR if failed else StepStatus.DONE
+        if blocked:
+            self._held[0] += 1
+        if step is None:
+            self._recorder.note(
+                StepKind.TOOL, tool_title(name, None) or name, tool=name, body=summarize(output),
+                result_payload=payload, status=status, parent_id=self._parent_id,
+            )
+            return
+        self._recorder.close(step, body=summarize(output), result_payload=payload, status=status)
+
     # -- entry point -------------------------------------------------------
     def handle_event(
         self, event: Any, *, agent_key: Optional[str] = None
@@ -332,6 +397,9 @@ class WebStreamObserver:
         return None
 
     # -- tool calls being written -----------------------------------------
+    def _writing_key(self, item_id: Any, data: Any) -> tuple:
+        return (self._response_seq, item_id, field_of(data, "output_index"))
+
     def _on_call_started(self, data: Any) -> None:
         item = field_of(data, "item")
         if field_of(item, "type") != "function_call":
@@ -344,8 +412,9 @@ class WebStreamObserver:
             StepKind.TOOL, tool_title(name, None) or name or "Tool call",
             parent_id=self._parent_id, tool=name, subtitle="writing the call…",
         )
-        self._writing[item_id] = step
-        self._written_chars[item_id] = 0
+        key = self._writing_key(item_id, data)
+        self._writing[key] = step
+        self._written_chars[key] = 0
         self._tool_names[step.id] = name
         if call_id:
             # Its tool_called item, or a sub-agent's block, takes this row over.
@@ -354,11 +423,12 @@ class WebStreamObserver:
 
     def _on_call_written(self, data: Any, text: Optional[str]) -> None:
         item_id = field_of(data, "item_id")
-        step = self._writing.get(item_id) if item_id else None
+        key = self._writing_key(item_id, data)
+        step = self._writing.get(key) if item_id else None
         if step is None or not isinstance(text, str):
             return
-        before = self._written_chars[item_id]
-        after = self._written_chars[item_id] = before + len(text)
+        before = self._written_chars[key]
+        after = self._written_chars[key] = before + len(text)
         # Every 2000 characters: often enough to show progress, rarely enough
         # not to flood the trace with an update per token.
         if before == 0 or after // 2000 != before // 2000:
@@ -375,6 +445,10 @@ class WebStreamObserver:
     # -- raw token stream --------------------------------------------------
     def _on_raw_event(self, event: Any, agent_key: Optional[str] = None) -> Optional[str]:
         text, data_type = _delta_text(event)
+        if data_type == "response.created":
+            # A new model response: its output indexes start again from 0.
+            self._response_seq += 1
+            return None
         if data_type == "response.output_item.added":
             self._on_call_started(getattr(event, "data", None))
             return None
@@ -452,6 +526,11 @@ class WebStreamObserver:
         # Human heading/caption; fall back to the raw name and argument blob.
         title = tool_title(tool_name, info.get("server_label")) or name
         block = self._calls_by_id.get(call_id) if call_id else None
+        if block is None:
+            # Some providers change a call's id while it is written: the row
+            # that showed it being written is the earliest one of this tool
+            # still being written - the call takes it, keeping its place.
+            block = self._oldest_writing(tool_name)
         subtitle = tool_subtitle(tool_name, arguments)
         if subtitle is None:
             subtitle = clip(summarize(arguments, 160).replace("\n", " "), 120)
@@ -469,9 +548,12 @@ class WebStreamObserver:
             self._forget_writing(block)
             self._recorder.update(block, **fields)
             self._tool_names[block.id] = str(info.get("tool_name") or "")
+            self._follow_plan(tool_name, arguments, call_id)
             return
         if block is not None and self._forget_writing(block):
-            # The row that showed the call while it was written becomes the call's.
+            # The row that showed the call while it was written becomes the call's,
+            # with the tokens of the response that wrote it.
+            self._recorder.claim_usage(block)
             step = self._recorder.update(block, title=title, **fields)
         else:
             step = self._recorder.open(
@@ -487,11 +569,23 @@ class WebStreamObserver:
             self._recorder.update(step, **badge)
         if call_id:
             self._calls_by_id[call_id] = step
+        self._follow_plan(tool_name, arguments, call_id)
+
+    def _follow_plan(self, tool_name: str, arguments: Any, call_id: Optional[str]) -> None:
+        """Hand a tracker call to the plan board; its result follows by call id."""
+        if tool_name not in TRACKED_TOOLS and not claimed_task_ids(arguments):
+            return
+        self._plan.called(tool_name, arguments)
+        if call_id:
+            self._plan_calls[call_id] = (tool_name, arguments)
 
     def _on_tool_output(self, item: Any, agent_key: Optional[str]) -> None:
         info = tool_event_info(item)
         step = self._take_pending_call(info.get("call_id"))
         value = info.get("output")
+        planned = self._plan_calls.pop(info.get("call_id"), None)
+        if planned is not None:
+            self._plan.finished(*planned, value)
         output = summarize(value)
         tool_name = self._tool_names.get(step.id, "") if step else str(info.get("tool_name") or "")
         result_payload = normalize_payload(
@@ -555,6 +649,13 @@ class WebStreamObserver:
             result_payload=normalize_payload(names),
             parent_id=self._parent_id,
         )
+
+    def _oldest_writing(self, tool_name: str) -> Optional[Step]:
+        """The earliest row of a *tool_name* call still being written."""
+        for step in self._writing.values():
+            if self._tool_names.get(step.id) == tool_name and step.status is StepStatus.RUNNING:
+                return step
+        return None
 
     def _forget_writing(self, step: Step) -> bool:
         """Whether *step* was a row of a call being written; it no longer is."""

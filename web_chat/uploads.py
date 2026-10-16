@@ -8,8 +8,15 @@ the user can download it again. Any file of the workspace can be downloaded the
 same way - a document an agent wrote, for instance.
 
     POST /api/workspace/uploads         multipart ``files`` -> [{path, name, bytes, type, url}]
+                                        (``?dir=<folder>``: into that existing folder
+                                        instead - the explorer's uploads)
     GET  /api/workspace/files/{path}    one file of the workspace, as an attachment
                                         (``?inline=1``: a raster image, inline)
+
+A chat with a space of its own (web_chat.space, chat spaces) names the other
+spaces it reaches by a path's first name: ``project/docs/a.md`` is a file of
+its project's space, ``user/notes.md`` one of its user's, any other path one of
+its own (:func:`locate`). The agents link files the same way.
 
 The workspace is also the agents' - in a container, their commands can put a
 link anywhere in it. The server runs outside that container, often as root,
@@ -32,7 +39,7 @@ import stat
 import unicodedata
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -49,8 +56,8 @@ OVERHEAD_BYTES = 64 * 1024
 
 
 #: Raster image magic bytes we are willing to serve inline, and their types.
-#: SVG is deliberately absent: it is a scriptable document, not a picture, and
-#: would run in the chat page's own origin.
+#: SVG is deliberately absent: it is a scriptable document, not a picture. It
+#: is served inline only through :func:`is_safe_svg` and a sandboxing CSP.
 IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -67,6 +74,40 @@ def image_media_type(head: bytes) -> str | None:
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+#: How much of a file :func:`is_safe_svg` looks at.
+SVG_SNIFF_BYTES = 1024
+
+#: Served with every inline SVG: as an ``<img>`` it is drawn, but opened
+#: directly nothing in it can run, load anything, or reach this origin.
+SVG_CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox"
+
+
+def is_safe_svg(head: bytes) -> bool:
+    """Whether *head* (the first bytes of a file) opens like a plain UTF-8 SVG
+    document: an XML declaration, a comment, a doctype or the ``<svg`` tag
+    first, and an ``<svg`` tag within the first kilobyte.
+
+    Only a sniff of the shape - the served response's CSP sandbox is what
+    keeps the document harmless.
+    """
+    import codecs
+
+    head = head[:SVG_SNIFF_BYTES]
+    if head.startswith(codecs.BOM_UTF8):
+        head = head[len(codecs.BOM_UTF8):]
+    if b"\0" in head:
+        return False
+    try:
+        # Not final: the kilobyte may end inside a multi-byte character.
+        text = codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
+    except UnicodeDecodeError:
+        return False
+    text = text.lstrip().lower()
+    if not text.startswith(("<?xml", "<svg", "<!--", "<!doctype svg")):
+        return False
+    return "<svg" in text
 
 
 class UploadError(ValueError):
@@ -141,16 +182,51 @@ def _uploads_fd(workspace: Path) -> int:
         os.close(workspace_fd)
 
 
+def folder_parts(folder: str) -> list[str]:
+    """The names of workspace folder *folder*; refused when it climbs out."""
+    parts = [part for part in str(folder or "").replace("\\", "/").split("/") if part not in ("", ".")]
+    if any(part == ".." or "\0" in part for part in parts):
+        raise UploadError("No such folder.")
+    return parts
+
+
+def _folder_fd(workspace: Path, parts: list[str]) -> int:
+    """A descriptor of the existing workspace folder *parts*, never through a link."""
+    from utils.confined_fs import LinkRefused, _walk
+
+    try:
+        return _walk(workspace, parts, create=False)
+    except (FileNotFoundError, NotADirectoryError, LinkRefused):
+        raise UploadError("No such folder.") from None
+
+
 class Uploads:
-    """``<workspace>/uploads``, made when missing and never reached through a link.
+    """``<workspace>/uploads``, made when missing and never reached through a link;
+    or, given *folder*, that existing folder of the workspace.
 
     Held by a descriptor where the system opens relative to one (Linux); by
     path elsewhere, checked to be a real directory.
     """
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, folder: Optional[str] = None) -> None:
         self._fd: int | None = None
-        self._path = workspace / UPLOADS_DIR
+        parts = folder_parts(folder) if folder is not None else None
+        self.prefix = "/".join(parts) if parts is not None else UPLOADS_DIR
+        self._path = workspace.joinpath(*parts) if parts is not None else workspace / UPLOADS_DIR
+        if parts is not None:
+            if BY_DESCRIPTOR:
+                self._fd = _folder_fd(workspace, parts)
+                return
+            path = workspace
+            for part in parts:
+                path = path / part
+                try:
+                    plain = _plain(os.lstat(path), stat.S_ISDIR)
+                except OSError:
+                    plain = False
+                if not plain:
+                    raise UploadError("No such folder.")
+            return
         if BY_DESCRIPTOR:
             self._fd = _uploads_fd(workspace)
             return
@@ -238,7 +314,7 @@ async def save_upload(
                     )
                 if written > room:
                     raise UploadError(
-                        "Your uploads are full: delete some files of uploads/ first."
+                        f"Your uploads are full: delete some files of {uploads.prefix or 'the folder'}/ first."
                     )
                 handle.write(chunk)
             if _server_is_root():
@@ -250,7 +326,7 @@ async def save_upload(
         except OSError:
             pass
         raise
-    path = f"{UPLOADS_DIR}/{name}"
+    path = f"{uploads.prefix}/{name}" if uploads.prefix else name
     return {
         "path": path,
         "name": name,
@@ -326,6 +402,39 @@ def _open_by_descriptor(workspace: Path, parts: list[str]) -> int:
     return file_fd
 
 
+def space_prefix(space: Any, context: Optional[str], root: Path) -> str:
+    """The name chat *context* gives space *root*: "" for its own workspace."""
+    of_spaces = getattr(space, "file_spaces", None)
+    if of_spaces is None:
+        return ""
+    _primary, named = of_spaces(context)
+    for name, directory in named.items():
+        if Path(directory).resolve() == root:
+            return name
+    return ""
+
+
+def workspace_of(space: Any, context: Optional[str]) -> Path:
+    """The workspace of chat *context*: a chat may work in a directory of its own."""
+    of_chat = getattr(space, "conversation_workspace", None)
+    return Path(of_chat(context) if of_chat is not None else space.workspace_path)
+
+
+def locate(space: Any, context: Optional[str], path: Optional[str]) -> tuple[Path, str]:
+    """The space workspace path *path* of chat *context* lies in, and the path
+    within that space. A chat with a space of its own reaches its project's and
+    its user's by their names (``project/...``, ``user/...``); every other path,
+    and every path of a chat without one, is in the chat's own workspace."""
+    of_spaces = getattr(space, "file_spaces", None)
+    if of_spaces is None:
+        return workspace_of(space, context), str(path or "")
+    primary, named = of_spaces(context)
+    parts = [part for part in str(path or "").replace("\\", "/").split("/") if part not in ("", ".")]
+    if parts and parts[0] in named:
+        return Path(named[parts[0]]), "/".join(parts[1:])
+    return Path(primary), str(path or "")
+
+
 def register_upload_routes(
     api: APIRouter, current_space: Callable[..., Any], policy: Callable[[], Any]
 ) -> None:
@@ -334,7 +443,10 @@ def register_upload_routes(
 
     @api.post("/api/workspace/uploads")
     async def upload(
-        request: Request, space: Any = Depends(current_space)
+        request: Request,
+        context: Optional[str] = None,
+        dir: Optional[str] = None,
+        space: Any = Depends(current_space),
     ) -> JSONResponse:
         limits = policy()
         if not limits.enabled:
@@ -392,9 +504,14 @@ def register_upload_routes(
                 raise HTTPException(
                     status_code=400, detail="Use the files field for every upload."
                 )
-            workspace = Path(space.workspace_path).resolve()
+            if dir is None:
+                workspace, folder = workspace_of(space, context), None
+            else:
+                workspace, folder = locate(space, context, dir)
+            workspace = workspace.resolve()
+            prefix = space_prefix(space, context, workspace)
             async with locks.setdefault(workspace, asyncio.Lock()):
-                with Uploads(workspace) as uploads:
+                with Uploads(workspace, folder) as uploads:
                     try:
                         for item in files:
                             saved.append(
@@ -419,24 +536,39 @@ def register_upload_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from None
         finally:
             await form.close()
+        if prefix:
+            # Named as the chat names that space: project/docs/x.csv.
+            for item in saved:
+                item["path"] = f"{prefix}/{item['path']}"
+                item["url"] = download_url(item["path"])
         return JSONResponse({"files": saved})
 
     @api.get("/api/workspace/files/{path:path}")
     async def download(
-        path: str, inline: bool = False, space: Any = Depends(current_space)
+        path: str, inline: bool = False, context: Optional[str] = None, space: Any = Depends(current_space)
     ) -> StreamingResponse:
         try:
-            fd, name, size = open_in_workspace(Path(space.workspace_path), path)
+            fd, name, size = open_in_workspace(*locate(space, context, path))
         except UploadError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
 
-        # ``?inline=1`` shows a picture inside the chat's own page. Only a real
-        # raster image qualifies - not an SVG, which is a scriptable document
-        # rather than a picture; anything else stays a forced attachment.
+        # ``?inline=1`` shows a picture inside the chat's own page: a real
+        # raster image, or an ``.svg`` that looks like a plain SVG document and
+        # is served under a sandboxing CSP (scripts and any request blocked,
+        # even when its URL is opened directly). Anything else stays a forced
+        # attachment.
         handle = os.fdopen(fd, "rb")
         media_type = None
+        extra_headers: dict[str, str] = {}
         if inline:
-            media_type = image_media_type(handle.read(12))
+            head = handle.read(SVG_SNIFF_BYTES)
+            media_type = image_media_type(head[:12])
+            if media_type is None and name.lower().endswith(".svg") and is_safe_svg(head):
+                media_type = "image/svg+xml"
+                extra_headers = {
+                    "Content-Security-Policy": SVG_CSP,
+                    "X-Content-Type-Options": "nosniff",
+                }
             handle.seek(0)
 
         def chunks():
@@ -465,6 +597,7 @@ def register_upload_routes(
                     f"filename*=UTF-8''{quote(name)}"
                 ),
                 "Cache-Control": "no-store",
+                **extra_headers,
             },
             background=BackgroundTask(handle.close),
         )

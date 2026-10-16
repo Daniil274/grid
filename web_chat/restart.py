@@ -111,7 +111,11 @@ class ServerRestart:
                 if all(space.idle for space in self.spaces.live()) and not self.other_work():
                     break
                 if asyncio.get_running_loop().time() >= deadline:
-                    stuck = ", ".join(f"{user_id}:{context_id}" for user_id, context_id in captured)
+                    stuck = ", ".join(f"{user_id}:{context_id}" for user_id, context_id in captured) or ", ".join(
+                        f"{space.user_id}:{context_id} (claimed)"
+                        for space in self.spaces.live()
+                        for context_id in space.turns.claimed()
+                    )
                     raise RuntimeError(
                         f"Timed out waiting for running turns to pause ({stuck or 'unknown'})."
                     )

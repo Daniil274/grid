@@ -3,10 +3,12 @@ Advanced context management for Grid agents with memory and persistence.
 """
 
 import os
-from typing import Callable, List, Dict, Optional, Any, Tuple, Union
+import re
+from typing import Callable, Iterable, Iterator, List, Dict, Optional, Any, Tuple, Union
 from datetime import datetime
 from threading import Lock
 from contextlib import contextmanager
+from contextvars import ContextVar, Token
 import copy
 import json
 from pathlib import Path
@@ -24,6 +26,7 @@ from core.interruption import (
 from schemas import ContextMessage, AgentExecution
 from utils.exceptions import ContextError
 from utils.image_utils import ImageUtils
+from core.conversation_store import ConversationStore
 # Tracing is handled automatically by Agents SDK
 
 logger = Logger.get_logger("context")
@@ -31,6 +34,38 @@ logger = Logger.get_logger("context")
 #: Statuses of ``pending_agent_run`` while its turn has not ended.
 ACTIVE_RUN_STATUSES = ("running", "retrying")
 #: A turn that failed; before interruption records existed, nothing else was kept.
+
+# The service footer legacy answers and agent-tool results end with: a trailing
+# "Context ID: ctx-<hex>" line. It must never reach the model again; a context
+# id a user typed into the dialogue is not a footer and stays.
+CONTEXT_ID_FOOTER_RE = re.compile(r"\s*\nContext ID: ctx-[0-9a-fA-F]{8,}[ \t]*$")
+
+
+def strip_service_context_footer(text: str) -> str:
+    """*text* without a trailing service ``Context ID: ctx-...`` footer line.
+
+    Legacy answers were told to end with that line, so stored history may
+    still carry it. Only a footer at the very end of the text is removed.
+    """
+    match = CONTEXT_ID_FOOTER_RE.search(text)
+    return text[: match.start()].rstrip() if match else text
+
+
+def _assistant_content_without_footer(role: str, content: Any) -> Any:
+    """*content* of an assistant message with a legacy service footer removed."""
+    if role != "assistant":
+        return content
+    if isinstance(content, str):
+        return strip_service_context_footer(content)
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append({**part, "text": strip_service_context_footer(part["text"])})
+            else:
+                parts.append(part)
+        return parts
+    return content
 FAILED_RUN_STATUS = "failed"
 
 
@@ -81,9 +116,23 @@ def safe_lock(lock, timeout=5.0):
         lock.release()
 
 
+def _empty_bucket() -> Dict[str, Any]:
+    now = datetime.now().isoformat()
+    return {"conversation": [], "executions": [], "metadata": {}, "created_at": now, "updated_at": now}
+
+
 class ContextManager:
-    """Thread-safe context manager with persistence and memory optimization."""
-    
+    """Thread-safe context manager with persistence and memory optimization.
+
+    Which conversation the methods without a ``context_id`` act on: the one
+    the running turn bound (:meth:`bind`), else the manager's active context.
+    A web chat runs turns of many conversations at once in one manager; each
+    turn binds its own, and the binding is a context variable, so the turn and
+    every task it starts - tool calls, sub-agents - write into that
+    conversation however the others switch the active one. The active context
+    is only the fallback for callers that bind nothing (the CLI).
+    """
+
     def __init__(
         self,
         max_history: int = 15,
@@ -91,6 +140,7 @@ class ContextManager:
         *,
         read_only: bool = False,
         create_initial_context: bool = True,
+        store: Optional["ConversationStore"] = None,
     ):
         """
         Initialize context manager.
@@ -102,24 +152,36 @@ class ContextManager:
                 empty session context after loading (inspector mode)
             create_initial_context: When False, keep only loaded buckets and may
                 leave no active context if persistence is empty
+            store: Keep each conversation in a file of its own (core.conversation_store)
+                instead of *persist_path*, which is then only read once, to move
+                its conversations into the store
         """
         self.max_history = max_history
         self.persist_path = Path(persist_path) if persist_path else None
         self.read_only = bool(read_only)
+        # Whether the manager keeps an active context of its own at all times: a
+        # host that names every conversation it works in (the web chat) needs
+        # none, and an empty one made at every start piled up as empty chats.
+        self._auto_context = bool(create_initial_context)
 
         self._lock = Lock()
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._encoded: Dict[str, str] = {}  # context id -> JSON, for unchanged contexts
+        self.store = store
+        self._dirty: set = set()  # contexts changed since the store last got them
         self._current_context_id: Optional[str] = None
-
-        # Active buffers are assigned via _activate_context
-        self._conversation_history: List[ContextMessage] = []
-        self._execution_history: List[AgentExecution] = []
-        self._metadata: Dict[str, Any] = {}
+        # The conversation of the running turn (bind); one variable per manager.
+        self._bound: ContextVar[Optional[str]] = ContextVar(f"grid_context_{id(self):x}", default=None)
+        # What the methods without a context id act on while there is no context at all.
+        self._detached: Dict[str, Any] = _empty_bucket()
 
         # Load from persistence if available (but don't auto-activate old contexts)
-        if self.persist_path and self.persist_path.exists():
-            self._load_from_file(auto_activate=False, normalize_and_save=not self.read_only)
+        if self.store is not None and self.store.exists:
+            self._load_from_store()
+        elif self.persist_path and self.persist_path.exists():
+            self._load_from_file(auto_activate=False, normalize_and_save=not self.read_only and self.store is None)
+            if self.store is not None and not self.read_only and self._contexts:
+                self._move_into_store()
 
         if create_initial_context and not self.read_only:
             # Always start with a fresh context
@@ -165,15 +227,85 @@ class ContextManager:
         return context_key
 
     def _activate_context(self, context_id: str) -> str:
-        """Activate an existing context bucket and expose its buffers."""
+        """Make a context bucket (created if needed) the manager's active one."""
         context_key = self._create_context(context_id)
-        context_bucket = self._contexts[context_key]
         self._current_context_id = context_key
-        self._conversation_history = context_bucket["conversation"]
-        self._execution_history = context_bucket["executions"]
-        self._metadata = context_bucket["metadata"]
-        context_bucket["updated_at"] = datetime.now().isoformat()
+        self._contexts[context_key]["updated_at"] = datetime.now().isoformat()
         return context_key
+
+    # -- which conversation the methods without a context id act on ----------
+
+    def bind(self, context_id: Optional[str]) -> Token:
+        """Act on *context_id* in this task and the tasks it starts, until :meth:`unbind`.
+
+        Returns the token for :meth:`unbind`. A turn binds its conversation for
+        its whole run (:meth:`bound` does both).
+        """
+        return self._bound.set(context_id)
+
+    def unbind(self, token: Token) -> None:
+        """Undo the :meth:`bind` that returned *token*."""
+        try:
+            self._bound.reset(token)
+        except ValueError:
+            # Reset from another context than bound in: nothing there to restore.
+            self._bound.set(None)
+
+    @contextmanager
+    def bound(self, context_id: Optional[str]) -> Iterator[Optional[str]]:
+        """``with manager.bound(context_id):`` - :meth:`bind` for the block."""
+        token = self.bind(context_id)
+        try:
+            yield context_id
+        finally:
+            self.unbind(token)
+
+    def bound_context_id(self) -> Optional[str]:
+        """The conversation this task bound, or None."""
+        return self._bound.get()
+
+    def _target_id(self, context_id: Optional[str] = None) -> Optional[str]:
+        """The conversation a call acts on: named, bound, else the active one."""
+        if context_id is not None:
+            return context_id
+        bound = self._bound.get()
+        return bound if bound is not None else self._current_context_id
+
+    def _target_bucket(self, context_id: Optional[str] = None) -> Dict[str, Any]:
+        """The bucket a call acts on.
+
+        A named or bound conversation that does not exist - deleted while its
+        turn ran - is never replaced by another one: the call gets a throwaway
+        bucket, so what it writes goes nowhere instead of into another chat.
+        """
+        target = self._target_id(context_id)
+        bucket = self._contexts.get(target) if target is not None else None
+        if bucket is not None:
+            return bucket
+        if context_id is not None or self._bound.get() is not None:
+            logger.debug("Context %s is gone; a write to it is dropped", target)
+            return _empty_bucket()
+        return self._detached
+
+    def _touch(self, context_id: Optional[str] = None) -> None:
+        """Mark the conversation a call changed: newer, and saved on the next save."""
+        target = self._target_id(context_id)
+        bucket = self._contexts.get(target) if target is not None else None
+        if bucket is not None:
+            bucket["updated_at"] = datetime.now().isoformat()
+            self._mark_changed(target)
+
+    @property
+    def _conversation_history(self) -> List[ContextMessage]:
+        return self._target_bucket()["conversation"]
+
+    @property
+    def _execution_history(self) -> List[AgentExecution]:
+        return self._target_bucket()["executions"]
+
+    @property
+    def _metadata(self) -> Dict[str, Any]:
+        return self._target_bucket()["metadata"]
 
     def activate_context(self, context_id: str) -> str:
         """Public helper to switch to a specific context ID, creating it if needed."""
@@ -198,12 +330,16 @@ class ContextManager:
             return new_id
 
     def get_current_context_id(self) -> Optional[str]:
-        """Return the identifier of the active context."""
-        return self._current_context_id
+        """The conversation of this task: the one it bound, else the active one."""
+        return self._target_id()
 
     def list_context_ids(self) -> List[str]:
         """Return the list of known context identifiers."""
         return list(self._contexts.keys())
+
+    def has_context(self, context_id: Optional[str]) -> bool:
+        """Whether *context_id* is a conversation of this manager."""
+        return context_id is not None and context_id in self._contexts
 
     def list_context_summaries(self) -> List[Dict[str, Any]]:
         """Return safe, read-only summaries for all known context buckets."""
@@ -357,7 +493,14 @@ class ContextManager:
             logger.warning("Lock timeout in get_context_executions")
             return None
 
-    def add_message(self, role: str, content: Union[str, List[Any]], metadata: Optional[Dict[str, Any]] = None) -> None:
+    def add_message(
+        self,
+        role: str,
+        content: Union[str, List[Any]],
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        context_id: Optional[str] = None,
+    ) -> None:
         """
         Add message to conversation history.
 
@@ -365,6 +508,7 @@ class ContextManager:
             role: Message role (user, assistant, system)
             content: Message content (string or list of content parts)
             metadata: Optional metadata
+            context_id: The conversation; by default this task's (see the class)
         """
         try:
             with safe_lock(self._lock, timeout=5.0):  # 5 sec timeout
@@ -380,16 +524,14 @@ class ContextManager:
                         metadata=with_message_id(metadata)
                     )
 
-                    self._conversation_history.append(message)
+                    conversation = self._target_bucket(context_id)["conversation"]
+                    conversation.append(message)
 
                     # Trim history if needed
-                    if len(self._conversation_history) > self.max_history:
-                        self._conversation_history.pop(0)
+                    if len(conversation) > self.max_history:
+                        conversation.pop(0)
 
-                    # Update bookkeeping for active context
-                    active_bucket = self._contexts.get(self._current_context_id)
-                    if active_bucket is not None:
-                        active_bucket["updated_at"] = datetime.now().isoformat()
+                    self._touch(context_id)
 
                     # Persist if configured
                     self._save_to_file()
@@ -406,34 +548,30 @@ class ContextManager:
             return list(self._conversation_history)
 
     def replace_conversation_history(self, messages: List[ContextMessage]) -> None:
-        """Replace the active conversation history with a new message list."""
+        """Replace this task's conversation history with a new message list."""
         try:
             with safe_lock(self._lock, timeout=5.0):
-                self._conversation_history.clear()
-                self._conversation_history.extend(messages[-self.max_history:])
-
-                active_bucket = self._contexts.get(self._current_context_id)
-                if active_bucket is not None:
-                    active_bucket["updated_at"] = datetime.now().isoformat()
-
+                conversation = self._conversation_history
+                conversation.clear()
+                conversation.extend(messages[-self.max_history:])
+                self._touch()
                 self._save_to_file()
         except ContextError as exc:
             logger.error("Lock timeout in replace_conversation_history", exc_info=exc)
             raise
-    
-    def add_execution(self, execution: AgentExecution) -> None:
-        """Add agent execution to history."""
+
+    def add_execution(self, execution: AgentExecution, *, context_id: Optional[str] = None) -> None:
+        """Add agent execution to the history of *context_id*, by default this task's."""
         try:
             with safe_lock(self._lock, timeout=5.0):  # 5 sec timeout
-                self._execution_history.append(execution)
+                executions = self._target_bucket(context_id)["executions"]
+                executions.append(execution)
 
                 # Keep execution history reasonable
-                if len(self._execution_history) > self.max_history * 2:
-                    self._execution_history.pop(0)
+                if len(executions) > self.max_history * 2:
+                    executions.pop(0)
 
-                active_bucket = self._contexts.get(self._current_context_id)
-                if active_bucket is not None:
-                    active_bucket["updated_at"] = datetime.now().isoformat()
+                self._touch(context_id)
 
                 # Persist if configured
                 self._save_to_file()
@@ -483,6 +621,10 @@ class ContextManager:
                         except Exception:
                             content = "[multimodal content]"
 
+                    # A legacy answer's service footer never reaches the model.
+                    if msg.role == "assistant":
+                        content = strip_service_context_footer(content)
+
                     # Hard trim very long single messages to keep prompt lightweight
                     if len(content) > 2000:
                         content = content[:2000] + "…"
@@ -529,7 +671,7 @@ class ContextManager:
                     "memory_usage_mb": self._estimate_memory_usage(),
                     "last_user_message": last_user,
                     "last_assistant_message": last_assistant,
-                    "current_context_id": self._current_context_id,
+                    "current_context_id": self._target_id(),
                     "available_contexts": list(self._contexts.keys()),
                 }
         except ContextError:
@@ -583,14 +725,14 @@ class ContextManager:
                     if msg.role == "assistant" and not isinstance(msg.content, str):
                         # An answer reaches the model as text; the images an
                         # image model generated with it stay in the chat.
-                        sdk_messages.append({"role": "assistant", "content": msg.get_text_content()})
+                        sdk_messages.append({"role": "assistant", "content": strip_service_context_footer(msg.get_text_content())})
                         continue
                     # Convert to SDK format
                     if isinstance(msg.content, str):
                         # Simple text message
                         sdk_messages.append({
                             "role": msg.role,
-                            "content": msg.content
+                            "content": _assistant_content_without_footer(msg.role, msg.content)
                         })
                     else:
                         # Multimodal message - convert content parts
@@ -603,7 +745,7 @@ class ContextManager:
                         if isinstance(content, str):
                             sdk_messages.append({
                                 "role": msg.role,
-                                "content": content
+                                "content": _assistant_content_without_footer(msg.role, content)
                             })
                         else:
                             # List of content parts
@@ -616,7 +758,7 @@ class ContextManager:
                             
                             sdk_messages.append({
                                 "role": msg.role,
-                                "content": content
+                                "content": _assistant_content_without_footer(msg.role, content)
                             })
                 
                 return sdk_messages
@@ -651,30 +793,29 @@ class ContextManager:
             logger.warning("Lock timeout in get_last_assistant_message")
             return None
     
-    def set_metadata(self, key: str, value: Any, *, persist: bool = True) -> None:
-        """Set metadata of the active context.
+    def set_metadata(
+        self, key: str, value: Any, *, persist: bool = True, context_id: Optional[str] = None
+    ) -> None:
+        """Set metadata of *context_id*, by default this task's conversation.
 
         ``persist=False`` keeps frequent bookkeeping (per tool call) in memory
         until the next save instead of rewriting the file each time.
         """
         with safe_lock(self._lock, timeout=5.0):
-            self._metadata[key] = value
-            self._mark_changed(self._current_context_id)
-            bucket = self._contexts.get(self._current_context_id)
-            if bucket is not None:
-                bucket["updated_at"] = datetime.now().isoformat()
+            self._target_bucket(context_id)["metadata"][key] = value
+            self._touch(context_id)
             if persist:
                 self._save_to_file()
-    
-    def get_metadata(self, key: str, default: Any = None) -> Any:
-        """Get context metadata."""
-        with safe_lock(self._lock, timeout=5.0):
-            return self._metadata.get(key, default)
 
-    def get_all_metadata(self) -> Dict[str, Any]:
-        """Get all context metadata."""
+    def get_metadata(self, key: str, default: Any = None, *, context_id: Optional[str] = None) -> Any:
+        """Metadata of *context_id*, by default this task's conversation."""
         with safe_lock(self._lock, timeout=5.0):
-            return self._metadata.copy()
+            return self._target_bucket(context_id)["metadata"].get(key, default)
+
+    def get_all_metadata(self, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+        """All metadata of *context_id*, by default this task's conversation."""
+        with safe_lock(self._lock, timeout=5.0):
+            return self._target_bucket(context_id)["metadata"].copy()
 
     def get_context_metadata(self, context_id: str) -> Dict[str, Any]:
         """A copy of one context's metadata; empty for an unknown context."""
@@ -727,10 +868,13 @@ class ContextManager:
         with safe_lock(self._lock, timeout=5.0):
             if self._contexts.pop(context_id, None) is None:
                 return False
-            self._encoded.pop(context_id, None)
+            self._mark_changed(context_id)
             if self._current_context_id == context_id:
-                # Never leave the manager pointing at buffers that are gone.
-                self._activate_context(self._create_context())
+                # Never leave the manager pointing at a context that is gone.
+                if self._auto_context:
+                    self._activate_context(self._create_context())
+                else:
+                    self._current_context_id = None
             self._save_to_file()
             return True
 
@@ -794,7 +938,7 @@ class ContextManager:
     #: Conversation settings a branch keeps from the context it is forked from.
     BRANCH_INHERITED = (
         "title", "title_locked", "created_by_web", "system_key", "agent_key",
-        "routed_system", "routed_agent", "session_epochs",
+        "routed_system", "routed_agent", "session_epochs", "workspace", "chat_space",
     )
 
     def branch_root(self, context_id: str) -> str:
@@ -861,6 +1005,60 @@ class ContextManager:
             self._mark_changed(branch_id)
             self._save_to_file()
             return branch_id, slot
+
+    def copy_context(self, context_id: str, end: int) -> str:
+        """A new conversation of its own holding *context_id*'s first *end* messages.
+
+        Unlike a branch it is not part of the original's family: the rail shows
+        it as a chat of its own, named after the original. Returns its id.
+        """
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                raise KeyError(f"Unknown conversation {context_id}")
+            source = bucket["metadata"]
+            copy_id = self._create_context()
+            target = self._contexts[copy_id]
+            target["conversation"] = [message.model_copy(deep=True) for message in bucket["conversation"][:end]]
+            target["metadata"] = {
+                **{key: copy.deepcopy(source[key]) for key in self.BRANCH_INHERITED if key in source},
+                "forked_from": context_id,
+            }
+            if source.get("title"):
+                target["metadata"]["title"] = f"{source['title']} (fork)"
+            self._mark_changed(copy_id)
+            self._save_to_file()
+            return copy_id
+
+    def remove_messages(self, context_id: str, message_ids: Iterable[str]) -> int:
+        """Delete the messages of *context_id* with these ids; how many went."""
+        doomed = set(message_ids)
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return 0
+            conversation = bucket["conversation"]
+            kept = [message for message in conversation if (message.metadata or {}).get("message_id") not in doomed]
+            removed = len(conversation) - len(kept)
+            if removed:
+                # In place: an active context exposes this very list.
+                conversation[:] = kept
+                self._mark_changed(context_id)
+                self._save_to_file()
+            return removed
+
+    def shift_session_marks(self, context_id: str, agent: str, epoch: int, after: int, delta: int) -> None:
+        """Move *agent*'s marks at item *after* or later by *delta*: its session lost items."""
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return
+            for message in bucket["conversation"]:
+                mark = (message.metadata or {}).get("session_mark") or {}
+                if mark.get("agent") == agent and int(mark.get("epoch", 0)) == epoch and mark.get("items", 0) >= after:
+                    message.metadata["session_mark"] = {**mark, "items": mark["items"] + delta}
+            self._mark_changed(context_id)
+            self._save_to_file()
 
     def set_active_branch(self, context_id: str) -> None:
         """Make *context_id* the branch its conversation opens with."""
@@ -1027,7 +1225,8 @@ class ContextManager:
     ) -> List[Dict[str, Any]]:
         """Append an event dict to a metadata list and persist it."""
         with safe_lock(self._lock, timeout=5.0):
-            current = self._metadata.get(key)
+            metadata = self._metadata
+            current = metadata.get(key)
             items: List[Dict[str, Any]]
             if isinstance(current, list):
                 items = [item for item in current if isinstance(item, dict)]
@@ -1038,10 +1237,8 @@ class ContextManager:
             if max_items > 0 and len(items) > max_items:
                 items = items[-max_items:]
 
-            self._metadata[key] = items
-            bucket = self._contexts.get(self._current_context_id)
-            if bucket is not None:
-                bucket["updated_at"] = datetime.now().isoformat()
+            metadata[key] = items
+            self._touch()
             self._save_to_file()
             return list(items)
 
@@ -1556,6 +1753,79 @@ class ContextManager:
     def _mark_changed(self, context_id: Optional[str]) -> None:
         """Re-encode *context_id* on the next save; unchanged contexts reuse their JSON."""
         self._encoded.pop(context_id, None)
+        if context_id is not None:
+            self._dirty.add(context_id)
+
+    def _save_to_store(self, *, strict: bool) -> None:
+        """Hand the changed conversations to the store; it writes them in the background."""
+        self._mark_changed(self._current_context_id)
+        for context_id in list(self._dirty):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                self.store.remove(context_id)
+                continue
+            encoded = self._encoded.get(context_id)
+            if encoded is None:
+                encoded = self._encoded[context_id] = self._encode_context(bucket)
+            self.store.put(context_id, encoded)
+        self._dirty.clear()
+        self.store.set_manifest({"version": 1, "active_context_id": self._current_context_id})
+        if strict and not self.store.flush(durable=True):
+            raise RuntimeError(f"Conversations could not be written to {self.store.directory}")
+
+    def _load_from_store(self) -> None:
+        """Every conversation of the store; its JSON stays cached until it changes."""
+        try:
+            _, found = self.store.read_all()
+        except Exception:
+            logger.exception("Conversation store %s cannot be read", self.store.directory)
+            raise
+        for context_id, text in found.items():
+            self._contexts[context_id] = self._bucket_from(json.loads(text))
+            self._encoded[context_id] = text
+        logger.info("Loaded %d conversation(s) from %s", len(found), self.store.directory)
+
+    def _move_into_store(self) -> None:
+        """Write the conversations read from *persist_path* into the store, then
+        keep that file aside: from now on the store is the record."""
+        self._dirty = set(self._contexts)
+        self._save_to_store(strict=True)
+        kept = self.persist_path.with_name(f"{self.persist_path.name}.migrated-{datetime.now():%Y%m%d-%H%M%S}")
+        os.replace(self.persist_path, kept)
+        logger.info(
+            "Moved %d conversation(s) into %s; the old file is kept as %s",
+            len(self._contexts), self.store.directory, kept.name,
+        )
+
+    def _bucket_from(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """A context bucket from its stored JSON."""
+        conversation = [
+            self._normalize_loaded_message(ContextMessage(**msg) if isinstance(msg, dict) else msg)
+            for msg in data.get("conversation_history", [])
+        ]
+        executions = [
+            self._execution_without_footer(AgentExecution(**ex) if isinstance(ex, dict) else ex)
+            for ex in data.get("execution_history", [])
+        ]
+        return {
+            "conversation": conversation,
+            "executions": executions,
+            "metadata": data.get("metadata", {}),
+            "created_at": data.get("created_at"),
+            "updated_at": data.get("updated_at"),
+        }
+
+    @staticmethod
+    def _execution_without_footer(execution: Any) -> Any:
+        """A loaded execution without a legacy service footer on its output.
+
+        Legacy agent-tool results ended with the ``Context ID`` footer; the
+        execution record feeds sub-agent context, which the model reads.
+        """
+        output = getattr(execution, "output", None)
+        if isinstance(output, str):
+            execution.output = strip_service_context_footer(output)
+        return execution
 
     def _encode_context(self, bucket: Dict[str, Any]) -> str:
         return json.dumps(
@@ -1583,6 +1853,9 @@ class ContextManager:
         they last changed, so a save costs one encode, not one per context. The
         file is replaced in one step: a crash leaves the previous version.
         """
+        if self.store is not None and not self.read_only:
+            self._save_to_store(strict=strict)
+            return
         if self.read_only or not self.persist_path:
             if strict:
                 raise RuntimeError("Conversation persistence is required for restart")
@@ -1612,6 +1885,7 @@ class ContextManager:
                     saved.flush()
                     os.fsync(saved.fileno())
             os.replace(partial, self.persist_path)
+            self._dirty.clear()
             if strict and os.name == "posix":
                 fd = os.open(self.persist_path.parent, os.O_RDONLY)
                 try:
@@ -1644,24 +1918,8 @@ class ContextManager:
             if contexts_data:
                 self._contexts = {}
                 for context_id, bucket in contexts_data.items():
-                    # Load and normalize messages to convert file images to base64
-                    conversation = []
-                    for msg in bucket.get("conversation_history", []):
-                        loaded_msg = ContextMessage(**msg) if isinstance(msg, dict) else msg
-                        normalized_msg = self._normalize_loaded_message(loaded_msg)
-                        conversation.append(normalized_msg)
-                    executions = [
-                        AgentExecution(**ex) if isinstance(ex, dict) else ex
-                        for ex in bucket.get("execution_history", [])
-                    ]
-                    metadata = bucket.get("metadata", {})
-                    self._contexts[context_id] = {
-                        "conversation": conversation,
-                        "executions": executions,
-                        "metadata": metadata,
-                        "created_at": bucket.get("created_at"),
-                        "updated_at": bucket.get("updated_at"),
-                    }
+                    # Messages are normalized: file images become base64.
+                    self._contexts[context_id] = self._bucket_from(bucket)
 
                 # Only activate context if auto_activate is True
                 if auto_activate:
@@ -1691,7 +1949,7 @@ class ContextManager:
                     normalized_msg = self._normalize_loaded_message(loaded_msg)
                     conversation.append(normalized_msg)
                 executions = [
-                    AgentExecution(**ex) if isinstance(ex, dict) else ex
+                    self._execution_without_footer(AgentExecution(**ex) if isinstance(ex, dict) else ex)
                     for ex in data.get("execution_history", [])
                 ]
                 bucket = self._contexts[default_context]
@@ -1723,9 +1981,6 @@ class ContextManager:
                 except OSError:
                     logger.error("Could not move the unreadable context file aside")
             # Reset to empty state on failure
-            self._conversation_history = []
-            self._execution_history = []
-            self._metadata = {}
             self._contexts = {}
             self._current_context_id = None
             fallback_context = self._create_context()
@@ -1780,7 +2035,11 @@ class ContextManager:
                     "assistant": "Assistant",
                     "system": "System"
                 }.get(msg.role, msg.role)
-                content = msg.content.strip()
+                raw_content = msg.content
+                if msg.role == "assistant" and isinstance(raw_content, str):
+                    # A legacy answer's service footer never reaches the model.
+                    raw_content = strip_service_context_footer(raw_content)
+                content = raw_content.strip()
                 if len(content) > 2000:
                     content = content[:2000] + "…"
                 lines.append(f"{role}: {content}")
@@ -1799,7 +2058,11 @@ class ContextManager:
                         "assistant": "Assistant",
                         "system": "System"
                     }.get(msg.role, msg.role)
-                    content = msg.content.strip()
+                    raw_content = msg.content
+                    if msg.role == "assistant" and isinstance(raw_content, str):
+                        # A legacy answer's service footer never reaches the model.
+                        raw_content = strip_service_context_footer(raw_content)
+                    content = raw_content.strip()
                     if len(content) > 2000:
                         content = content[:2000] + "…"
                     lines.append(f"{role}: {content}")
@@ -1808,7 +2071,11 @@ class ContextManager:
             if include_tools and self._execution_history:
                 lines.extend(["", "Recent operation results:"])
                 for ex in self._execution_history[-10:]:
-                    summary_output = (ex.output or "").strip()
+                    raw_output = ex.output or ""
+                    if isinstance(raw_output, str):
+                        # A legacy agent-tool result's footer never reaches the model.
+                        raw_output = strip_service_context_footer(raw_output)
+                    summary_output = raw_output.strip()
                     if len(summary_output) > 2000:
                         summary_output = summary_output[:2000] + "…"
                     lines.append(f"Tool/Agent: {ex.agent_name}")
@@ -1850,7 +2117,11 @@ class ContextManager:
             with self._lock:
                 lines = ["Operation context:", f"Current task: {task_input}", ""]
                 for ex in self._execution_history[-5:]:
-                    summary_output = (ex.output or "").strip()
+                    raw_output = ex.output or ""
+                    if isinstance(raw_output, str):
+                        # A legacy agent-tool result's footer never reaches the model.
+                        raw_output = strip_service_context_footer(raw_output)
+                    summary_output = raw_output.strip()
                     if len(summary_output) > 1200:
                         summary_output = summary_output[:1200] + "…"
                     lines.append(f"Tool/Agent: {ex.agent_name}")
@@ -1891,7 +2162,9 @@ class ContextManager:
             # Default to smart strategy
             return self._build_smart_context_human(task_input, depth, include_tools)
 
-    def add_tool_result_as_message(self, tool_name: str, output_text: str) -> None:
+    def add_tool_result_as_message(
+        self, tool_name: str, output_text: str, *, context_id: Optional[str] = None
+    ) -> None:
         """Record tool result into conversation as assistant message for follow-ups."""
         if not output_text:
             return
@@ -1900,4 +2173,5 @@ class ContextManager:
             "assistant",
             f"Tool result of {tool_name}: {output_text}",
             metadata={"kind": "tool_result", "tool": tool_name},
+            context_id=context_id,
         )

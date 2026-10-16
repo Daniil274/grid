@@ -64,9 +64,12 @@ class RunJournal:
 
         ``clear_tool_events`` starts the record of a new turn; ``task`` and
         ``turn_id`` are what recovering the turn after a crash needs
-        (ContextManager.recover_abandoned_turn).
+        (ContextManager.recover_abandoned_turn). The record is written into
+        *active_context_id* by name: never into whichever conversation another
+        turn made active meanwhile.
         """
-        existing = self.context_manager.get_metadata("pending_agent_run")
+        target = active_context_id or None
+        existing = self.context_manager.get_metadata("pending_agent_run", context_id=target)
         payload: Dict[str, Any] = existing.copy() if isinstance(existing, dict) else {}
         if clear_tool_events or not isinstance(payload.get("tool_events"), list):
             payload["tool_events"] = []
@@ -94,7 +97,7 @@ class RunJournal:
         elif status in {"completed", "running"}:
             payload.pop("last_error", None)
 
-        self.context_manager.set_metadata("pending_agent_run", payload)
+        self.context_manager.set_metadata("pending_agent_run", payload, context_id=target)
         return payload
 
     def record_event(
@@ -106,13 +109,15 @@ class RunJournal:
         output: Any = None,
         extra: Optional[Dict[str, Any]] = None,
         persist: bool = False,
+        context_id: Optional[str] = None,
     ) -> None:
         """Append a compact runtime event to durable context metadata.
 
         Events are written with the next status change, not one file write per
         event - except with ``persist``: a tool call about to run is saved at
         once, so a process that dies during it still leaves the call on record
-        (ContextManager.recover_abandoned_turn).
+        (ContextManager.recover_abandoned_turn). *context_id* names the turn's
+        conversation; without it, the one the running turn bound.
         """
         event: Dict[str, Any] = {
             "event_type": event_type,
@@ -131,7 +136,7 @@ class RunJournal:
                     event[key] = safe_preview(
                         value, max_length=preview_limit or 300
                     )
-        pending = self.context_manager.get_metadata("pending_agent_run")
+        pending = self.context_manager.get_metadata("pending_agent_run", context_id=context_id)
         if not isinstance(pending, dict):
             pending = {}
         tool_events = pending.get("tool_events")
@@ -141,4 +146,6 @@ class RunJournal:
         tool_events.append(event)
         pending["tool_events"] = tool_events[-100:]
         pending["updated_at"] = datetime.now().isoformat()
-        self.context_manager.set_metadata("pending_agent_run", pending, persist=persist)
+        self.context_manager.set_metadata(
+            "pending_agent_run", pending, persist=persist, context_id=context_id
+        )

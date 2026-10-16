@@ -4,6 +4,8 @@
  * Not a browser - no layout, no selectors, no parsing of `innerHTML`.
  */
 
+import { File as BufferFile } from "node:buffer";
+
 class FakeNode {
   constructor() {
     this.parentNode = null;
@@ -48,6 +50,12 @@ class FakeNode {
   set textContent(value) {
     this.replaceChildren();
     if (value !== "") this.append(new FakeText(String(value)));
+  }
+
+  /** Whether *node* is this node or one of its descendants. */
+  contains(node) {
+    for (let current = node; current; current = current.parentNode) if (current === this) return true;
+    return false;
   }
 }
 
@@ -121,6 +129,12 @@ class FakeElement extends FakeNode {
     for (const fn of this.listeners.click ?? []) fn({ target: this });
   }
 
+  /** Focus lands here, as far as these tests can see it. */
+  focus() {
+    this.focused = true;
+    document.activeElement = this;
+  }
+
   set innerHTML(value) {
     this.replaceChildren();
     this.html = value;
@@ -176,6 +190,14 @@ class FakeElement extends FakeNode {
 }
 
 export function installFakeDom() {
+  // Browser globals Node only has from version 19/20 on.
+  globalThis.File ??= BufferFile;
+  globalThis.CustomEvent ??= class CustomEvent extends Event {
+    constructor(type, options = {}) {
+      super(type, options);
+      this.detail = options.detail ?? null;
+    }
+  };
   globalThis.Node = FakeNode;
   globalThis.document = {
     createElement: (tag) => new FakeElement(tag),

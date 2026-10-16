@@ -6,6 +6,7 @@ route and the voice control describe things the same way.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Callable, Optional
 
@@ -19,6 +20,10 @@ from web_chat.trace import normalize_steps
 logger = logging.getLogger("grid.web_chat.views")
 
 UNTITLED = "New chat"
+
+#: The metadata type of a message that carries context into a fresh chat
+#: (web_chat.projects_api.SEED_TYPE, restated here to keep views import-light).
+CONTEXT_SEED_TYPE = "context_seed"
 
 
 def conversation_title(view: dict[str, Any]) -> str:
@@ -34,6 +39,47 @@ def conversation_title(view: dict[str, Any]) -> str:
     return UNTITLED
 
 
+#: Step fields that hold what a call took and returned: shown only when the
+#: step is opened, so a long trace loads without them (``lazy``) and the
+#: chat fetches a step's whole record on demand.
+LAZY_STEP_FIELDS = ("input_payload", "result_payload", "body", "detail")
+#: A field this small stays in the trace: fetching it would cost more than it saves.
+LAZY_FIELD_BYTES = 2048
+
+
+def _size(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value)
+    try:
+        return len(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return len(str(value))
+
+
+def slim_steps(steps: Optional[list]) -> Optional[list]:
+    """*steps* without their large payloads; each step that lost one is ``lazy``."""
+    if not steps:
+        return steps
+    slim = []
+    for step in steps:
+        if not isinstance(step, dict):
+            slim.append(step)
+            continue
+        heavy = [name for name in LAZY_STEP_FIELDS if _size(step.get(name)) > LAZY_FIELD_BYTES]
+        if not heavy:
+            slim.append(step)
+            continue
+        light = {key: value for key, value in step.items() if key not in heavy}
+        # The agent row reads its task from ``detail``: keep the start of it.
+        if "detail" in heavy and isinstance(step.get("detail"), str):
+            light["detail"] = step["detail"][:400]
+        light["lazy"] = True
+        slim.append(light)
+    return slim
+
+
 def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[dict] = None) -> dict[str, Any]:
     """A stored message as the chat renders it.
 
@@ -45,6 +91,8 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
     where its context was compacted (``kind`` "compaction").
     ``id`` is the message's stable id; ``versions`` lists the branches with
     other versions of an edited user message (ContextManager.message_versions).
+    A carried-context seed (``kind`` "context") also exposes ``context`` -
+    where it came from - which the card reads instead of a user bubble.
     """
     if hasattr(msg, "get_text_content"):
         content = msg.get_text_content()
@@ -58,6 +106,15 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
     if images and content == "[multimodal content]":
         content = ""  # an image without words
     metadata = getattr(msg, "metadata", None) or {}
+    kind = (
+        "continuation"
+        if metadata.get("type") == CONTINUATION_TYPE
+        else "compaction"
+        if metadata.get("type") == COMPACTED_TYPE
+        else "context"
+        if metadata.get("type") == CONTEXT_SEED_TYPE
+        else None
+    )
     # Older builds stored a flat "trace_events" list; normalize_steps keeps
     # those conversations renderable by the current timeline component.
     trace = metadata.get("trace") or normalize_steps(metadata.get("trace_events"))
@@ -69,11 +126,14 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
         "content": content,
         "timestamp": getattr(msg, "timestamp", None),
         "trace": trace,
-        "kind": (
-            "continuation"
-            if metadata.get("type") == CONTINUATION_TYPE
-            else "compaction"
-            if metadata.get("type") == COMPACTED_TYPE
+        "kind": kind,
+        "context": (
+            {
+                "source_title": metadata.get("source_title"),
+                "source_id": metadata.get("source_id"),
+                "project": metadata.get("project_id") or metadata.get("project"),
+            }
+            if kind == "context"
             else None
         ),
         "compaction": (

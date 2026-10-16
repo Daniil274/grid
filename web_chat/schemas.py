@@ -35,10 +35,49 @@ class BranchRequest(BaseModel):
 
 
 class ConversationCreateRequest(BaseModel):
-    """``None`` on either key means the router decides per message."""
+    """``None`` on either key means the router decides per message; on
+    ``workspace``, the chat works in the space's own workspace."""
 
     system_key: Optional[str] = None
     agent_key: Optional[str] = None
+    workspace: Optional[str] = Field(default=None, max_length=4096)
+    project_id: Optional[str] = Field(default=None, max_length=64)
+
+
+class ProjectCreateRequest(BaseModel):
+    """A new project; ``parent_id`` nests it (at most three levels deep)."""
+
+    title: str = Field(min_length=1, max_length=120)
+    parent_id: Optional[str] = Field(default=None, max_length=64)
+    description: Optional[str] = Field(default=None, max_length=4000)
+
+
+class ProjectUpdateRequest(BaseModel):
+    """Only the keys given change; ``parent_id=None`` moves a project to the root."""
+
+    title: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    parent_id: Optional[str] = Field(default=None, max_length=64)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    notes: Optional[str] = Field(default=None, max_length=32768)
+    archived: Optional[bool] = None
+
+
+class ConversationProjectRequest(BaseModel):
+    """Which project a chat belongs to; ``None`` detaches it."""
+
+    project_id: Optional[str] = Field(default=None, max_length=64)
+
+
+class ContinueRequest(BaseModel):
+    """What a continued chat starts from: the source chat's plan, or its tail."""
+
+    strategy: Literal["plan", "tail"] = "plan"
+
+
+class WorkspaceRequest(BaseModel):
+    """The directory a chat works in, as a full path on the server."""
+
+    path: str = Field(min_length=1, max_length=4096)
 
 
 class ActionReviewRequest(BaseModel):

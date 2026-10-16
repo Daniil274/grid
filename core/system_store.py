@@ -49,8 +49,9 @@ Status = Literal["draft", "published", "archived"]
 #: What the system builder is told about the layout of a created system.
 SYSTEMS_README_HINT = (
     "A created system is <store>/<key>/: config.yaml, skills/<name>.md (an agent lists them in "
-    "system_skills, without .md), tools/<package>/ for tool packages (an MCP tool with tool_package: "
-    "tools/<package>), README.md. Relative paths in config.yaml start from that directory."
+    "system_skills, without .md), tools/<package>/ for tool packages (Python with @function_tool "
+    "functions; one `type: function` tool per function, with tool_package: tools/<package> and name: "
+    "<the function>, or one MCP tool with tool_package: tools/<package> for all of them), README.md. Relative paths in config.yaml start from that directory."
 )
 
 
@@ -236,6 +237,39 @@ class SystemStore:
         _write(self.directory(manifest.key) / MANIFEST_FILE, text)
 
 
+def canonicalize_config(text: str) -> str:
+    """A config's one canonical form: validated, without comments and redundant fields.
+
+    The text is parsed and checked against the schema, then dumped anew, so YAML
+    comments, banners and flow-style noise cannot survive by construction. A tool
+    that repeats its own key as ``name`` or a built-in function tool that repeats a
+    description carries nothing the defaults do not, and is cleaned up.
+    """
+    from schemas import GridConfig
+
+    document = yaml.safe_load(text) or {}
+    if not isinstance(document, dict):
+        raise ValueError("A config is a YAML mapping.")
+    GridConfig(**document)
+    tools = document.get("tools")
+    if isinstance(tools, dict):
+        from tools.function_tools import AVAILABLE_TOOLS, TOOL_ALIASES
+
+        for key, tool in tools.items():
+            if not isinstance(tool, dict):
+                continue
+            if tool.get("name") == key:
+                del tool["name"]
+            if (
+                tool.get("type") == "function"
+                and not tool.get("tool_package")
+                and "description" in tool
+                and TOOL_ALIASES.get(key, key) in AVAILABLE_TOOLS
+            ):
+                del tool["description"]
+    return yaml.safe_dump(document, allow_unicode=True, sort_keys=False)
+
+
 def _write(path: Path, text: str) -> None:
     """Replace *path* atomically: a reader sees the old file or the new one."""
     partial = path.with_name(path.name + ".tmp")
@@ -331,16 +365,23 @@ def packages_of(config: Any) -> List[Dict[str, Any]]:
     """The tool packages a config declares, each read without running it (core.tool_packages)."""
     from core.tool_packages import PackageError, analyze, package_dir
 
-    found = []
+    found: List[Dict[str, Any]] = []
+    seen: Dict[str, Dict[str, Any]] = {}
     for name, tool in (config.config.tools or {}).items():
         relative = getattr(tool, "tool_package", None)
         if not relative:
+            continue
+        if relative in seen:
+            # Many function tools may name one package: it is listed once.
+            seen[relative]["declared_tools"].append(name)
             continue
         try:
             info = analyze(package_dir(Path(config.config_path).parent, relative)).to_dict()
         except PackageError as exc:
             info = {"path": relative, "files": [], "tools": [], "requirements": [], "tests": 0, "issues": [str(exc)]}
-        found.append({"tool": name, "package": relative, **info})
+        entry = {"tool": name, "package": relative, "declared_tools": [name], **info}
+        seen[relative] = entry
+        found.append(entry)
     return found
 
 
@@ -454,10 +495,15 @@ class BuilderAccess:
                     raise StoreError("A system skill is a name inside the system's skills/ directory.")
         root = self.store.directory(key).resolve()
         for tool in config.tools.values():
-            if tool.type != "mcp":
+            if tool.type not in ("mcp", "function"):
                 continue
-            if not tool.tool_package or tool.server_command:
-                raise StoreError("Private MCP tools use tool_package, with no server_command.")
+            if tool.type == "function" and not tool.tool_package:
+                continue
+            if not tool.tool_package or tool.server_command or (tool.type == "function" and tool.env_vars):
+                raise StoreError(
+                    "Private MCP tools use tool_package, with no server_command; "
+                    "private function tools with a tool_package have no server_command or env_vars."
+                )
             package = (root / tool.tool_package).resolve()
             if root not in package.parents:
                 raise StoreError("A tool package stays inside the private system's directory.")

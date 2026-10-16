@@ -11,8 +11,9 @@ together: construction, the agent builders, caches and the context API.
 import logging
 import os
 import threading
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import agents
 from agents import Agent, SQLiteSession
@@ -27,6 +28,7 @@ from core.context import ContextManager
 from core.factory.auto_run import AutoRunTools
 from core.factory.journal import RunJournal
 from core.factory.mcp import McpServers
+from core.factory.memory import MemoryUpkeep
 from core.factory.models import ModelProvider
 from core.factory.policy import PolicyWiring
 from core.factory.run_context import (
@@ -63,6 +65,9 @@ tracing_config = get_tracing_config()
 
 
 logger = logging.getLogger("grid.agent_factory")
+
+#: Project and chat memories a factory keeps open at once (AgentFactory.level_memory_manager).
+LEVEL_MANAGERS = 32
 verbose_logger = logging.getLogger("grid.verbose")
 _TRACING_CONFIGURED = False
 _TRACING_CONFIG_LOCK = threading.Lock()
@@ -76,13 +81,83 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, PolicyWiring):
+class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRunTools, PolicyWiring):
     """Builds a system's agents and runs its conversation turns.
 
     One factory per system config. It caches the agents it built, keeps each
     agent's SDK session per conversation, and shares one context manager with
     the other factories of a web space, so a conversation survives routing.
     """
+
+    #: The workspace whose memory the agents keep; None: the working directory.
+    memory_root: Optional[str] = None
+    #: The file that memory lives in, outside the workspace (web_chat.space);
+    #: None: the config's ``memory.storage_path`` inside it.
+    memory_db: Optional[str] = None
+    #: Spaces the agents reach besides the working directory, agent path -> host
+    #: directory (utils.path_utils.extra_roots). Replaced, never changed in place.
+    extra_roots: Dict[str, str] = {}
+    #: The tracker the beads tools use by default (tools.beads_tools); None: the working directory.
+    tracker_directory: Optional[str] = None
+    #: The memory levels a chat has besides the user's (core.factory.memory):
+    #: ``memory_scopes(context_id)`` -> {"chat": key, "project": key}. None: the user's only.
+    memory_scopes: Optional[Callable[[Optional[str]], Dict[str, str]]] = None
+
+    def get_memory_manager(self):
+        """Lazily share one host-bound memory manager across tools and runtime.
+
+        None when the system's config leaves ``memory.enabled`` off.
+        """
+        with self._memory_lock:
+            if not self.config.get_memory_config().enabled:
+                return None
+            return self._workspace_memory(force=False)
+
+    def get_workspace_memory_manager(self):
+        """The memory of this factory's workspace, even where ``memory.enabled`` is off.
+
+        The memory tools, the turn hook and the web chat's memory panel all use it, so
+        one ``.grid/memory.sqlite`` and one namespace (workspace + the configured tenant,
+        never the system's key) serve everything that writes or shows memory. With
+        ``memory.enabled`` on it is the very manager of :meth:`get_memory_manager`.
+        """
+        with self._memory_lock:
+            return self._workspace_memory(force=True)
+
+    def level_memory_manager(self, level: str, key: str, *, force: bool = False):
+        """The memory of one level beside the user's - a project's, a chat's - in
+        the same file, under a namespace of its own: ``<tenant>:<level>:<key>``.
+        None where the user's memory is off (``force`` as in :meth:`get_workspace_memory_manager`)."""
+        if not force and not self.config.get_memory_config().enabled:
+            return None
+        root = str(Path(self.memory_root or self.config.get_working_directory()).resolve())
+        tenant = f"{self._memory_tenant or self.config.get_memory_config().tenant_id}:{level}:{key}"
+        with self._memory_lock:
+            managers = self.__dict__.setdefault("_level_managers", OrderedDict())
+            cached = managers.get((root, tenant))
+            if cached is not None:
+                managers.move_to_end((root, tenant))
+                return cached
+            manager = self.config.create_memory_manager(
+                tenant_id=tenant, force=True, root=self.memory_root, db_path=self.memory_db)
+            managers[(root, tenant)] = manager
+            # A factory shared by many chats keeps the memories of the latest ones open.
+            while len(managers) > LEVEL_MANAGERS:
+                _key, old = managers.popitem(last=False)
+                old.close()
+            return manager
+
+    def _workspace_memory(self, *, force: bool):
+        # A chat with a space of its own remembers in its user's space (memory_root).
+        root = str(Path(self.memory_root or self.config.get_working_directory()).resolve())
+        if self._memory_manager is not None and root != getattr(self, "_memory_workspace", root):
+            self._memory_manager.close()
+            self._memory_manager = None
+        if self._memory_manager is None:
+            self._memory_manager = self.config.create_memory_manager(
+                tenant_id=self._memory_tenant, force=force, root=self.memory_root, db_path=self.memory_db)
+            self._memory_workspace = root
+        return self._memory_manager
 
     def __init__(
         self,
@@ -169,6 +244,12 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             model_access=model_access,
         )
         self.instructions_builder = self._runtime_support.instructions_builder
+        self._memory_manager = None
+        self._memory_lock = threading.Lock()
+        # Memory is the workspace's, shared by every system working in it: the
+        # namespace comes from the config's tenant, not from the system's key.
+        self._memory_tenant = None
+        self.instructions_builder.memory_manager_provider = self.get_memory_manager
 
         # Initialize ContainerManager
         from core.managers.container_manager import CONTAINER_WORKDIR, ContainerManager
@@ -336,6 +417,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             model_keys = agent_config.model_keys()
             candidates: list[ModelCandidate] = []
             unavailable: list[AgentError] = []
+            skipped: list[tuple[str, str]] = []
             for model_key in model_keys:
                 try:
                     sdk_model, candidate_config = self.models.sdk_model(model_key)
@@ -343,6 +425,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                     # A fallback excluded by the plan or missing its own login
                     # must not prevent the available models from running.
                     unavailable.append(refusal)
+                    skipped.append((model_key, str(refusal)))
                     logger.warning("Skipping unavailable model %s: %s", model_key, refusal)
                     continue
                 candidates.append(
@@ -352,16 +435,16 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                         settings=self.models.settings(
                             candidate_config, agent_config.parallel_tool_calls
                         ),
+                        vision=getattr(candidate_config, "vision", None),
+                        modalities=self.models.input_modalities(model_key),
                     )
                 )
             if not candidates:
                 raise unavailable[0]
             model_config = self.config.get_model(candidates[0].key)
-            model = (
-                candidates[0].model
-                if len(candidates) == 1
-                else FallbackModel(candidates)
-            )
+            # Even one model goes through FallbackModel: it keeps images away
+            # from a model that cannot see them.
+            model = FallbackModel(candidates)
 
             # Build instructions with context (include conversation context for agents)
             instructions = self._build_agent_instructions(
@@ -403,6 +486,8 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
             setattr(agent, "_grid_agent_key", agent_key)
             setattr(agent, "_grid_model_key", candidates[0].key)
             setattr(agent, "_grid_model_keys", model_keys)
+            # Models of its list this user cannot use now, and why: the turn says so.
+            setattr(agent, "_grid_skipped_models", skipped)
             # Auto-run tools (beads_init, beads_ready, etc.) run only once per user/agent
             # in run_agent() when handling the first request — see _initialized_agents.
 
@@ -505,12 +590,14 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
                     key=candidate_key,
                     model=candidate_model,
                     settings=self.models.settings(candidate_cfg),
+                    vision=getattr(candidate_cfg, "vision", None),
+                    modalities=self.models.input_modalities(candidate_key),
                 )
             )
         if not candidates:
             raise unavailable[0]
         resolved_model_key = candidates[0].key
-        model = candidates[0].model if len(candidates) == 1 else FallbackModel(candidates)
+        model = FallbackModel(candidates)
 
         tools: List[Any] = []
         mcp_servers_list: List[Any] = []
@@ -743,6 +830,12 @@ class AgentFactory(TurnRunner, SessionUpkeep, ToolAssembly, AutoRunTools, Policy
 
     async def cleanup(self) -> None:
         """Cleanup resources."""
+        manager = getattr(self, "_memory_manager", None)
+        if manager is not None:
+            manager.close()
+            self._memory_manager = None
+        for level_manager in self.__dict__.pop("_level_managers", {}).values():
+            level_manager.close()
         gate = getattr(self, "action_gate", None)
         if gate is not None:
             await gate.aclose()

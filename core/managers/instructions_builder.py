@@ -27,10 +27,15 @@ class InstructionsBuilder:
         config: IConfig,
         context_manager: IContextManager,
         container_id: Optional[str] = None,
+        *,
+        memory_manager=None,
     ) -> None:
         self.config = config
         self.context_manager = context_manager
         self.container_id = container_id
+        self.memory_manager = memory_manager
+        self._explicit_memory_manager = memory_manager is not None
+        self.memory_manager_provider = None
         # Sections a deployment appends for every agent, right after the path
         # context. Nothing in core sets them; the web chat uses one to teach
         # the workspace-file link convention (web_chat/space.py).
@@ -43,6 +48,7 @@ class InstructionsBuilder:
         *,
         include_conversation_context: bool = True,
         include_path_context: bool = True,
+        memory_section: Optional[str] = None,
     ) -> ModelContextAssembly:
         """Assemble the full model-facing prompt context for an agent."""
         sections = list(self._get_base_sections(agent_key))
@@ -62,15 +68,30 @@ class InstructionsBuilder:
         if self.platform_sections:
             sections.extend(self.platform_sections)
 
-        context_reference = self._build_context_reference(context_id)
-        if context_reference:
-            sections.append(
-                PromptSection(
-                    key="context_reference",
-                    content=context_reference,
-                    scope="dynamic",
-                )
-            )
+        try:
+            settings = self.config.get_memory_config() if hasattr(self.config, "get_memory_config") else None
+            explicit = self._explicit_memory_manager
+            if explicit or (settings is not None and settings.enabled and settings.auto_inject):
+                if self.memory_manager_provider is not None:
+                    manager = self.memory_manager_provider()
+                else:
+                    if self.memory_manager is None:
+                        self.memory_manager = self.config.create_memory_manager()
+                    manager = self.memory_manager
+                if memory_section is not None:
+                    # Chosen for this turn's request by the factory (core.factory.memory).
+                    content = memory_section
+                elif manager is not None:
+                    # No request to choose by: the user's profile only.
+                    content = manager.render_prompt_section(
+                        "", max_tokens=settings.auto_inject_tokens if settings is not None else 1000,
+                    ).content
+                else:
+                    content = ""
+                if content:
+                    sections.append(PromptSection(key="agent_memory", content=content, scope="dynamic"))
+        except Exception:
+            logger.warning("Memory injection unavailable", exc_info=True)
 
         history_strategy = "none"
         if include_conversation_context:
@@ -177,15 +198,6 @@ class InstructionsBuilder:
         )
 
         return "\n".join(context_parts)
-
-    def _build_context_reference(self, context_id: Optional[str]) -> Optional[str]:
-        if not context_id:
-            return None
-        return (
-            f"Context reference: {context_id}. "
-            f'Always append the line "Context ID: {context_id}" '
-            "to every reply so humans or agents can return to this dialogue via that identifier."
-        )
 
     def _get_base_sections(self, agent_key: str) -> list[PromptSection]:
         if hasattr(self.config, "build_agent_prompt_sections"):

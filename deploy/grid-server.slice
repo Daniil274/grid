@@ -1,0 +1,19 @@
+# The Grid web chat itself (grid-web-chat.service runs in it: Slice=).
+#
+# systemd reads the dash as nesting: this slice and grid-users.slice are both
+# in grid.slice, and their weights are weighed against each other there. Its
+# CPU weight is ten times that of grid-users.slice: when the users' containers
+# want every core, the server - every user's chat - still answers.
+# MemoryLow keeps its memory from being reclaimed for theirs.
+#
+#   install -m 644 deploy/grid-*.slice /etc/systemd/system/
+#   systemctl daemon-reload
+
+[Unit]
+Description=Grid web chat server
+Before=slices.target
+
+[Slice]
+CPUWeight=1000
+IOWeight=1000
+MemoryLow=1G

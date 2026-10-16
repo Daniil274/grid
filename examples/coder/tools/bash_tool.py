@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents import function_tool
 from utils.path_utils import display_agent_path_auto, get_current_factory, resolve_agent_path_auto
+from utils.process_limits import run_host_command
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +104,11 @@ CONTAINER_ROOT = "/workspace"
 def _container_command(command: str, container_id: str, relative_dir: str, timeout: int) -> list:
     """``docker exec`` of *command* in the container, in the workspace
     directory *relative_dir*; ``timeout`` ends it inside the container too."""
-    workdir = CONTAINER_ROOT if relative_dir in ("", ".") else f"{CONTAINER_ROOT}/{relative_dir}"
+    # An absolute one is a container path already: /project/src, /user.
+    if relative_dir.startswith("/"):
+        workdir = relative_dir
+    else:
+        workdir = CONTAINER_ROOT if relative_dir in ("", ".") else f"{CONTAINER_ROOT}/{relative_dir}"
     return [
         "docker", "exec", "-i", "-w", workdir, container_id,
         "timeout", "-k", "5", str(timeout), "sh", "-c", command,
@@ -147,14 +152,9 @@ def _run_command(
         shell_cmd = f"cd {shlex.quote(str(work_path))} && {command}"
 
     try:
-        result = subprocess.run(
-            shell_cmd,
-            shell=True,
-            capture_output=True,
-            timeout=timeout,
-            encoding=encoding,
-            errors="replace",
-        )
+        # In a process group of its own: a timeout ends what the command
+        # started too, not only its shell (utils.process_limits).
+        result = run_host_command(shell_cmd, shell=True, timeout=timeout, encoding=encoding)
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
         raise TimeoutError(f"Command exceeded timeout of {timeout} seconds")

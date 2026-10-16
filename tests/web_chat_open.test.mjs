@@ -9,8 +9,10 @@ function fakeTranscript() {
   return {
     rendered: [],
     loading: [],
+    cleared: 0,
     render(messages) { this.rendered.push(messages[0]?.content); },
     setLoading(value) { this.loading.push(value); },
+    clear() { this.cleared++; this.rendered.push(null); },
     adopt: () => false,
     resumable: () => false,
   };
@@ -46,6 +48,102 @@ test("the chat picked last is the one drawn, whatever answers first", async () =
     assert.equal(store.get().contextId, "b");
     assert.deepEqual(transcript.rendered, ["chat b"]);
     assert.equal(transcript.loading.at(-1), false);
+  } finally { api.getConversation = original; }
+});
+
+test("a failed current load clears the old transcript and can be retried", async () => {
+  const original = api.getConversation;
+  const pending = new Map();
+  api.getConversation = (id) => new Promise((resolve, reject) => pending.set(id, {
+    resolve: (content) => resolve({ id, messages: [{ content }], metadata: {}, pending: [] }), reject,
+  }));
+  try {
+    const store = createStore({ contextId: null, systems: [], conversations: [] });
+    const transcript = fakeTranscript();
+    const chat = new ChatController({ store, transcript });
+    const first = chat.openConversation("a"); pending.get("a").resolve("chat a"); await first;
+    store.set({ resumable: true });
+    const failed = chat.openConversation("b");
+    pending.get("b").reject(new Error("offline"));
+    await assert.rejects(failed, /offline/);
+    assert.equal(store.get().contextId, "b");
+    assert.deepEqual(transcript.rendered, ["chat a", null]);
+    assert.equal(transcript.cleared, 1);
+    assert.equal(store.get().resumable, false);
+    assert.equal(transcript.loading.at(-1), false);
+    const retry = chat.openConversation("b"); pending.get("b").resolve("chat b"); await retry;
+    assert.deepEqual(transcript.rendered, ["chat a", null, "chat b"]);
+    assert.equal(transcript.loading.at(-1), false);
+  } finally { api.getConversation = original; }
+});
+
+test("an obsolete failed load cannot clear the newly selected transcript", async () => {
+  const original = api.getConversation;
+  const pending = new Map();
+  api.getConversation = (id) => new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  try {
+    const store = createStore({ contextId: null, systems: [], conversations: [] });
+    const transcript = fakeTranscript();
+    const chat = new ChatController({ store, transcript });
+    const old = chat.openConversation("b");
+    const current = chat.openConversation("c");
+    pending.get("c").resolve({ id: "c", messages: [{ content: "chat c" }], metadata: {}, pending: [] });
+    await current;
+    pending.get("b").reject(new Error("late failure"));
+    await old;
+    assert.equal(store.get().contextId, "c");
+    assert.deepEqual(transcript.rendered, ["chat c"]);
+    assert.equal(transcript.cleared, 0);
+    assert.equal(transcript.loading.at(-1), false);
+  } finally { api.getConversation = original; }
+});
+
+test("an old same-ID failure after A-B-A success cannot clear the new transcript", async () => {
+  const original = api.getConversation;
+  const requests = [];
+  api.getConversation = (id) => new Promise((resolve, reject) => requests.push({ id, resolve, reject })); // deliberately ignores abort
+  try {
+    const store = createStore({ contextId: null, systems: [], conversations: [] });
+    const transcript = fakeTranscript();
+    const chat = new ChatController({ store, transcript });
+    const a1 = chat.openConversation("A");
+    const b = chat.openConversation("B");
+    const a2 = chat.openConversation("A");
+    requests[2].resolve({ id: "A", messages: [{ content: "A2" }], metadata: {}, pending: [] });
+    await a2;
+    store.set({ resumable: true });
+    requests[0].reject(new Error("late A1 failure"));
+    await a1;
+    assert.equal(store.get().contextId, "A");
+    assert.equal(store.get().resumable, true);
+    assert.deepEqual(transcript.rendered, ["A2"]);
+    assert.equal(transcript.loading.at(-1), false);
+    requests[1].reject(new Error("obsolete B"));
+    await b;
+  } finally { api.getConversation = original; }
+});
+
+test("an old same-ID failure while A2 is pending leaves loading and resumable state alone", async () => {
+  const original = api.getConversation;
+  const requests = [];
+  api.getConversation = (id) => new Promise((resolve, reject) => requests.push({ id, resolve, reject })); // deliberately ignores abort
+  try {
+    const store = createStore({ contextId: null, systems: [], conversations: [] });
+    store.set({ resumable: true });
+    const transcript = fakeTranscript();
+    const chat = new ChatController({ store, transcript });
+    const a1 = chat.openConversation("A");
+    const b = chat.openConversation("B");
+    const a2 = chat.openConversation("A");
+    requests[0].reject(new Error("late A1 failure"));
+    await a1;
+    assert.equal(store.get().resumable, true);
+    assert.equal(transcript.cleared, 0);
+    assert.equal(transcript.loading.at(-1), true);
+    requests[2].resolve({ id: "A", messages: [{ content: "A2" }], metadata: {}, pending: [] });
+    await a2;
+    requests[1].reject(new Error("obsolete B"));
+    await b;
   } finally { api.getConversation = original; }
 });
 

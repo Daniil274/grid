@@ -20,6 +20,7 @@ configs once nothing uses it.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 from contextlib import asynccontextmanager, suppress
@@ -29,7 +30,8 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Literal, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, WebSocket, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import HTTPConnection
 
@@ -40,17 +42,20 @@ from web_chat.schemas import (
     ActionReviewRequest,
     BranchRequest,
     ConversationCreateRequest,
+    WorkspaceRequest,
     ConversationRenameRequest,
     PrepareAgentRequest,
     SettingsStructuredUpdateRequest,
     SettingsYamlUpdateRequest,
 )
 from web_chat.security import OriginGuard, refusal
-from web_chat.space import IsolationUnavailable, UserSpace
+from web_chat.space import IsolationUnavailable, UserSpace, WorkspaceChoiceError
 from web_chat.spaces import SpacePool
 from core.interruption import COMPACTED_TYPE
 from web_chat.trace import is_tool_result
-from web_chat.views import UNTITLED, agent_options, conversation_title, serialize_message, system_options
+from core.checkpoints import CheckpointError
+from web_chat.session import CHECKPOINTS_KEY
+from web_chat.views import UNTITLED, agent_options, conversation_title, serialize_message, slim_steps, system_options
 
 logger = logging.getLogger("grid.web_chat.server")
 ROOT = Path(__file__).resolve().parent
@@ -59,6 +64,9 @@ LOGIN_HTML = ROOT / "login.html"
 REVIEW_HTML = ROOT / "review.html"
 SYSTEMS_HTML = ROOT / "systems.html"
 USAGE_HTML = ROOT / "usage.html"
+TASKS_HTML = ROOT / "tasks.html"
+FILES_HTML = ROOT / "files.html"
+DEVICES_HTML = ROOT / "devices.html"
 
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
@@ -115,6 +123,8 @@ class WebChatServer:
         usage: Optional[Any] = None,
         vault: Optional[Any] = None,
         chatgpt: Optional[Any] = None,
+        devices_dir: Optional[Path] = None,
+        browser_machines: int = 0,
     ) -> None:
         """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
         accounts; without it ``identify`` decides, by default the single local
@@ -126,7 +136,10 @@ class WebChatServer:
         systems do (web_chat.system_activity); ``submissions_dir`` keeps the user
         systems offered to everyone (web_chat.system_hub). ``vault`` keeps the
         credentials users store for themselves (web_chat.vault); ``chatgpt``
-        runs the ChatGPT subscription login (web_chat.chatgpt)."""
+        runs the ChatGPT subscription login (web_chat.chatgpt). ``devices_dir``
+        keeps the devices users pair (core.devices.pairing); ``browser_machines``
+        is how many browser machines the server runs at once, 0 for none
+        (core.devices.machines)."""
         if auth is not None and identify is not None:
             raise ValueError("Pass auth or identify, not both")
         self.deployment = deployment
@@ -170,6 +183,8 @@ class WebChatServer:
         self.voice: Optional[Any] = None
 
         self.app = FastAPI(title="Grid Web Chat", docs_url=None, redoc_url=None, lifespan=self._lifespan)
+        # A long chat is megabytes of JSON; compressed it is a tenth of that.
+        self.app.add_middleware(GZipMiddleware, minimum_size=2048, compresslevel=5)
 
         @self.app.middleware("http")
         async def security_headers(request: Request, call_next):
@@ -187,8 +202,9 @@ class WebChatServer:
                     self._mutations -= int(mutation)
             for name, value in SECURITY_HEADERS.items():
                 response.headers.setdefault(name, value)
-            if request.url.path.startswith("/api/"):
-                # Live state: a cached answer shows a chat as it was.
+            if request.url.path.startswith("/api/") and "etag" not in response.headers:
+                # Live state: a cached answer shows a chat as it was. A route
+                # with an ETag revalidates instead (no-cache), every time.
                 response.headers["Cache-Control"] = "no-store"
             return response
 
@@ -202,9 +218,25 @@ class WebChatServer:
         from web_chat.agents_api import register_personal_agent_routes
 
         register_personal_agent_routes(api, self.current_space)
+        from web_chat.memory_api import register_memory_routes
+
+        # The memory panel's API: records of the user's own workspace memory.
+        register_memory_routes(api, self.current_space)
         from web_chat.uploads import register_upload_routes
 
         register_upload_routes(api, self.current_space, lambda: self.deployment.uploads_policy)
+        from web_chat.explorer_api import register_explorer_routes
+
+        # The files page: browse, edit and arrange the workspace.
+        register_explorer_routes(api, self.current_space)
+        from web_chat.tasks_api import register_task_routes
+
+        # The tracker page's own API: the user's tasks, live from bd.
+        register_task_routes(api, self.current_space)
+        from web_chat.projects_api import register_project_routes
+
+        # The projects: the hierarchy over the user's conversations.
+        register_project_routes(api, self.current_space)
         from web_chat.system_hub import register_system_routes
 
         register_system_routes(api, self.systems, self.current_user, self.current_space, admins_only(self.current_user))
@@ -236,6 +268,20 @@ class WebChatServer:
                 spaces,
                 auth.accounts.user if auth is not None else (lambda user_id: None),
             )
+        from core.devices.hub import hub as device_hub
+        from core.devices.machines import MachinePool, set_pool
+        from core.devices.pairing import PairingStore
+        from web_chat.devices_api import register_device_routes
+
+        # Devices agents use: browser machines on the server, users' own PCs and phones.
+        self.machines = MachinePool(device_hub(), limit=browser_machines) if browser_machines > 0 else None
+        set_pool(self.machines)
+        register_device_routes(
+            self.app, api, self.current_user,
+            hub=device_hub(),
+            machines=self.machines,
+            pairing=PairingStore(devices_dir / "devices.db") if devices_dir is not None else None,
+        )
         if auth is not None:
             auth.register_routes(self.app, guard=self._guard, current_user=self.current_user)
         else:
@@ -289,10 +335,14 @@ class WebChatServer:
             async with self.spaces.use(self._warm_user) as space:
                 space.schedule_warmup()
         self._sweeper = asyncio.get_running_loop().create_task(self._sweep_forever(), name="space-sweeper")
+        if self.machines is not None:
+            await self.machines.prune_orphans()
         try:
             await self.restart.recover()
             yield
         finally:
+            if self.machines is not None:
+                await self.machines.shutdown()
             self._sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await self._sweeper
@@ -426,6 +476,27 @@ class WebChatServer:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(USAGE_HTML)
 
+        @app.get("/files", response_class=HTMLResponse)
+        async def files_page(request: Request) -> Any:
+            # A shell: what it shows comes through the API, which checks who asks.
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(FILES_HTML)
+
+        @app.get("/devices", response_class=HTMLResponse)
+        async def devices_page(request: Request) -> Any:
+            # A shell: what it shows comes through the API, which checks who asks.
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(DEVICES_HTML)
+
+        @app.get("/tasks", response_class=HTMLResponse)
+        async def tasks_page(request: Request) -> Any:
+            # A shell: what it shows comes through the API, which checks who asks.
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(TASKS_HTML)
+
         if self.reviews is not None:
 
             @app.get("/admin/review", response_class=HTMLResponse)
@@ -530,6 +601,8 @@ class WebChatServer:
                     "current_context_id": space.context_manager().get_current_context_id(),
                     # Where the workspace lives on the server: for admins only.
                     "workspace_path": str(space.workspace_path) if user.is_admin else "",
+                    # Whether a chat may work in a directory of its own (UserSpace.choose_workspace).
+                    "choose_workspace": space.can_choose_workspace,
                     "isolation_enabled": bool(space.container_id),
                     # The policy switch: its filters and the default; null when off.
                     "policy": space.policy_filters(),
@@ -569,6 +642,8 @@ class WebChatServer:
         async def list_conversations(space: UserSpace = Depends(current_space)) -> JSONResponse:
             manager = space.context_manager()
             views = {view["id"]: view for view in manager.conversation_views()}
+            of_approvals = getattr(space, "awaiting_approval", None)
+            awaiting = of_approvals() if of_approvals is not None else {}
             items: list[dict[str, Any]] = []
             for view in views.values():
                 metadata = view["metadata"]
@@ -592,10 +667,16 @@ class WebChatServer:
                         "agent_key": metadata.get("agent_key"),
                         "routed_system": metadata.get("routed_system"),
                         "routed_agent": metadata.get("routed_agent"),
+                        "workspace": metadata.get("workspace"),
+                        "project": metadata.get("project_id"),
                         "message_count": sum(
                             1 for msg in shown["messages"] if not is_tool_result(msg)
                         ),
                         "active": any(space.turns.is_running(member["id"]) for member in family),
+                        # Calls of its running turn that wait for the user's Allow/Decline.
+                        "awaiting_approval": [
+                            review for member in family for review in awaiting.get(member["id"], ())
+                        ],
                     }
                 )
             items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
@@ -605,13 +686,47 @@ class WebChatServer:
         async def create_conversation(
             body: ConversationCreateRequest | None = None, space: UserSpace = Depends(current_space)
         ) -> JSONResponse:
+            project_id = body.project_id if body else None
+            if project_id is not None and not space.project_exists(project_id):
+                raise HTTPException(status_code=404, detail="Project not found")
             context_id = space.context_manager().start_new_context()
             selection = {
                 "system_key": body.system_key if body else None,
                 "agent_key": body.agent_key if body else None,
             }
-            space.update_conversation_metadata(context_id, created_by_web=True, title=UNTITLED, **selection)
-            return JSONResponse({"id": context_id, **selection})
+            space.update_conversation_metadata(
+                context_id, created_by_web=True, title=UNTITLED, project_id=project_id, **selection
+            )
+            # A new chat works in a space of its own (web_chat.space, chat spaces).
+            assign = getattr(space, "assign_chat_space", None)
+            if assign is not None:
+                assign(context_id)
+            workspace = None
+            if body is not None and body.workspace:
+                try:
+                    workspace = str(space.choose_workspace(context_id, body.workspace))
+                except WorkspaceChoiceError as exc:
+                    space.context_manager().delete_family(context_id)
+                    raise HTTPException(status_code=400, detail=str(exc)) from None
+            if project_id is not None:
+                # A project with shared notes seeds the new chat with them.
+                from web_chat.projects_api import seed_project_context
+
+                seed_project_context(space, context_id, project_id)
+            return JSONResponse({"id": context_id, **selection, "workspace": workspace, "project_id": project_id})
+
+        @api.put("/api/chat/conversations/{context_id}/workspace")
+        async def choose_workspace(
+            context_id: str, body: WorkspaceRequest, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """Have a chat work in another directory, before its first message."""
+            try:
+                workspace = space.choose_workspace(context_id, body.path)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="Conversation not found") from None
+            except WorkspaceChoiceError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            return JSONResponse({"id": context_id, "workspace": str(workspace)})
 
         @api.patch("/api/chat/conversations/{context_id}")
         async def rename_conversation(
@@ -633,10 +748,16 @@ class WebChatServer:
             family = manager.family(context_id)
             if any(space.turns.is_busy(member) for member in family):
                 raise HTTPException(status_code=409, detail="Wait for the current operation before deleting this chat")
-            # A conversation goes with all its branches.
+            # A conversation goes with all its branches - and its space and memory,
+            # unless another chat still works in that space.
+            of_spaces = getattr(space, "chat_space_ids", None)
+            spaces = of_spaces(family) if of_spaces is not None else set()
             deleted = manager.delete_family(context_id)
             if not deleted:
                 raise HTTPException(status_code=404, detail="Conversation not found")
+            release = getattr(space, "release_chats", None)
+            if release is not None:
+                await release(deleted, spaces)
             return JSONResponse({"id": context_id, "deleted": True, "contexts": deleted})
 
         @api.post("/api/chat/conversations/{context_id}/branches")
@@ -654,8 +775,9 @@ class WebChatServer:
             if space.turns.is_busy(context_id):
                 raise HTTPException(status_code=409, detail="Wait for the current operation before editing a message")
             metadata = manager.get_context_metadata(context_id)
-            system = metadata.get("routed_system") or space.registry.default_key()
-            factory = space.registry.factory(system)
+            registry = await space.registry_for(context_id)
+            system = metadata.get("routed_system") or registry.default_key()
+            factory = registry.factory(system)
             try:
                 branch_id = await factory.fork_conversation(context_id, body.message_id)
             except KeyError:
@@ -664,6 +786,72 @@ class WebChatServer:
                 raise HTTPException(status_code=400, detail=str(exc)) from None
             slot = manager.get_context_metadata(branch_id).get("branch_slot")
             return JSONResponse({"id": branch_id, "edit_of": slot, "root": manager.branch_root(branch_id)})
+
+        async def holding_factory(space: UserSpace, context_id: str, action: str, work: Callable[[Any], Any]) -> Any:
+            """Run *work* on the factory whose agents worked in the conversation,
+            holding the conversation the while, so no turn starts mid-change."""
+            manager = space.context_manager()
+            if manager.conversation_view(context_id) is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            if space.turns.is_running(context_id) or not space.turns.claim(context_id):
+                raise HTTPException(status_code=409, detail=f"Wait for the current operation before {action}")
+            try:
+                registry = await space.registry_for(context_id)
+                system = manager.get_context_metadata(context_id).get("routed_system") or registry.default_key()
+                return await work(registry.factory(system))
+            except KeyError:
+                raise HTTPException(status_code=404, detail="Message not found") from None
+            finally:
+                space.turns.release(context_id)
+
+        @api.post("/api/chat/conversations/{context_id}/forks")
+        async def fork_conversation(
+            context_id: str, body: BranchRequest, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """A new chat that is this one up to the end of the message's turn,
+            the agents' memory included (SessionUpkeep.fork_to_new)."""
+            fork_id = await holding_factory(
+                space, context_id, "forking", lambda factory: factory.fork_to_new(context_id, body.message_id)
+            )
+            return JSONResponse({"id": fork_id, "root": fork_id})
+
+        @api.post("/api/chat/conversations/{context_id}/checkpoints/{turn_id}/restore")
+        async def restore_checkpoint(
+            context_id: str, turn_id: str, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """Bring the chat's workspace back to before turn *turn_id*: every file
+            changed since - by that turn or later ones, by any tool - as it was."""
+            manager = space.context_manager()
+            kept = (manager.get_context_metadata(context_id).get(CHECKPOINTS_KEY) or {}).get(turn_id)
+            if kept is None:
+                raise HTTPException(status_code=404, detail="This turn has no checkpoint")
+
+            async def restore(_factory: Any) -> list:
+                of_chat = getattr(space, "restore_checkpoint", None)
+                if of_chat is not None:
+                    # This turn and the chat's later ones: in shared spaces only their changes go back.
+                    every = list((manager.get_context_metadata(context_id).get(CHECKPOINTS_KEY) or {}).items())
+                    since = [entry for key, entry in every[[key for key, _ in every].index(turn_id):]]
+                    return await asyncio.to_thread(of_chat, context_id, kept["before"], since)
+                workspace = space.conversation_workspace(context_id)
+                return await asyncio.to_thread(space.checkpoints.restore, workspace, kept["before"])
+
+            try:
+                restored = await holding_factory(space, context_id, "restoring files", restore)
+            except CheckpointError as exc:
+                raise HTTPException(status_code=500, detail=f"Could not restore: {exc}") from None
+            return JSONResponse({"id": context_id, "turn_id": turn_id, "restored": restored})
+
+        @api.delete("/api/chat/conversations/{context_id}/messages/{message_id}")
+        async def delete_message(
+            context_id: str, message_id: str, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """Delete a message from the chat and the agent's context; a request
+            takes its whole turn with it (SessionUpkeep.delete_message)."""
+            result = await holding_factory(
+                space, context_id, "deleting a message", lambda factory: factory.delete_message(context_id, message_id)
+            )
+            return JSONResponse({"id": context_id, **result})
 
         @api.post("/api/chat/conversations/{context_id}/compact")
         async def compact_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
@@ -675,11 +863,12 @@ class WebChatServer:
             agent = metadata.get("routed_agent")
             if not agent:
                 raise HTTPException(status_code=400, detail="No agent has worked in this chat yet")
-            system = metadata.get("routed_system") or space.registry.default_key()
+            registry = await space.registry_for(context_id)
+            system = metadata.get("routed_system") or registry.default_key()
             if not space.turns.claim(context_id):
                 raise HTTPException(status_code=409, detail="Wait for the running turn or compaction before compacting")
             try:
-                outcome = await space.registry.factory(system).compact_session(agent, context_id, force=True)
+                outcome = await registry.factory(system).compact_session(agent, context_id, force=True)
             finally:
                 space.turns.release(context_id)
             if outcome is None:
@@ -696,7 +885,12 @@ class WebChatServer:
             return JSONResponse({"id": context_id, "root": manager.branch_root(context_id)})
 
         @api.get("/api/chat/conversations/{context_id}")
-        async def get_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
+        async def get_conversation(
+            context_id: str, request: Request, space: UserSpace = Depends(current_space)
+        ) -> Response:
+            """The chat as it renders: traces without their large payloads (each
+            such step is ``lazy``, its record at .../steps/{id}). The ETag lets
+            an unchanged chat answer 304 with no body."""
             manager = space.context_manager()
             active = space.turns.running(context_id)
             if active is None:
@@ -719,6 +913,14 @@ class WebChatServer:
                 )
                 for index, msg in enumerate(shown)
             ]
+            checkpoints = view["metadata"].get(CHECKPOINTS_KEY) or {}
+            for message, stored in zip(messages, shown):
+                message["trace"] = slim_steps(message.get("trace"))
+                # The request of a turn that changed files: Restore goes back to before it.
+                turn_id = (stored.metadata or {}).get("turn_id")
+                kept = checkpoints.get(turn_id) if message["role"] == "user" and turn_id else None
+                if kept and kept.get("files"):
+                    message["checkpoint"] = {"turn_id": turn_id, "files": kept["files"]}
             active_turn = (
                 {
                     "message": active[0].message,
@@ -728,7 +930,7 @@ class WebChatServer:
                 if active is not None
                 else None
             )
-            return JSONResponse({
+            body = JSONResponse({
                 "id": context_id,
                 "root": manager.branch_root(context_id),
                 "messages": messages,
@@ -736,7 +938,29 @@ class WebChatServer:
                 "pending": MessageQueue(manager, context_id).public(),
                 "metadata": view["metadata"],
                 "active_turn": active_turn,
-            })
+            }).body
+            etag = '"' + hashlib.sha1(body).hexdigest() + '"'
+            headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+            if etag in (request.headers.get("if-none-match") or ""):
+                return Response(status_code=304, headers=headers)
+            return Response(body, media_type="application/json", headers=headers)
+
+        @api.get("/api/chat/conversations/{context_id}/messages/{message_id}/steps/{step_id}")
+        async def conversation_step(
+            context_id: str, message_id: str, step_id: str, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """One trace step with everything it holds: what a lazy step left out."""
+            view = space.context_manager().conversation_view(context_id)
+            if view is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            for msg in view["messages"]:
+                metadata = msg.metadata or {}
+                if metadata.get("message_id") != message_id:
+                    continue
+                for step in serialize_message(msg)["trace"] or []:
+                    if isinstance(step, dict) and step.get("id") == step_id:
+                        return JSONResponse(step)
+            raise HTTPException(status_code=404, detail="Step not found")
 
         # The system configs are shared by every user: only admins see or edit them.
         @api.get("/api/settings", dependencies=[Depends(admin)])

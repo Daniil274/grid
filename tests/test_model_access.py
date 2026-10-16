@@ -105,3 +105,27 @@ async def test_an_unpriced_model_is_charged_the_fallback_and_a_subscription_is_l
     client = access.client(_config(), api_key=MANAGED_KEY, base_url=PROVIDER.base_url, provider_key="p")
     await client.chat.completions.create(model="unpriced", messages=[])
     assert (spent[0].cost.micro, spent[0].cost.basis, spent[0].charged) == (5_000_000, SUBSCRIPTION, False)
+
+
+async def test_a_spend_tally_counts_the_calls_of_its_scope_and_of_the_tasks_it_starts(monkeypatch):
+    import asyncio
+
+    from core.model_access import tally_spend
+
+    seen, spent = [], []
+    _serve(monkeypatch, {"prompt_tokens": 1_000_000, "completion_tokens": 0}, seen)
+    declared = SimpleNamespace(provider="p", name="m", price={"input": 2, "output": 2})
+    access = ModelAccess(EnvCredentials({"P_KEY": "k"}), on_spend=spent.append)
+    client = access.client(_config({"m": declared}), api_key=MANAGED_KEY, base_url=PROVIDER.base_url, provider_key="p")
+
+    async def call():
+        await client.chat.completions.create(model="m", messages=[])
+
+    await call()  # outside any scope
+    with tally_spend() as outer:
+        await call()
+        with tally_spend() as inner:
+            await asyncio.gather(call(), call())  # tasks started inside the scope
+    assert (outer.calls, outer.micro) == (3, 6_000_000)
+    assert (inner.calls, inner.micro) == (2, 4_000_000)
+    assert len(spent) == 4  # the sink still sees every call

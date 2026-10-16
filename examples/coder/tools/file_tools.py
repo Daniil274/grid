@@ -6,12 +6,13 @@ All paths are isolated in the agent's working directory via resolve_agent_path_a
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents import function_tool
+from core.media import looks_binary, media_output
 from utils import confined_fs
 from utils.path_utils import resolve_agent_path_auto, display_agent_path_auto
 
@@ -304,9 +305,10 @@ def file_read(
     filepath: str,
     offset: int = 0,
     limit_lines: Optional[int] = None,
-) -> str:
+) -> Any:
     """
-    Reads file content.
+    Reads file content. An image, audio recording, video or PDF comes back as
+    itself, for a model that takes it.
 
     Args:
         filepath:    Path to the file
@@ -329,7 +331,14 @@ def file_read(
         if not path.is_file():
             return f"❌ Not a file: {visible}"
 
+        # A picture, a recording or a document goes to the model as itself.
+        media = media_output(path, visible, open_file=confined_fs.open_file)
+        if media is not None:
+            return media
         file_size = path.stat().st_size
+        with confined_fs.open_file(path, "rb") as handle:
+            if looks_binary(handle.read(8192)):
+                return f"❌ {visible} is a binary file ({file_size} bytes), not text; inspect it with a tool made for its format."
         if file_size > MAX_FILE_SIZE:
             return f"⚠️ File too large ({file_size} bytes). Use limit_lines and offset."
 

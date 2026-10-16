@@ -9,10 +9,12 @@
 import { $$, h, icon, onFrame } from "../lib/dom.js";
 import { splitFiles, withFiles } from "../lib/files.js";
 import { clock } from "../lib/format.js";
+import { decorateDiagrams } from "../lib/diagrams.js";
 import { renderMarkdown } from "../lib/markdown.js";
+import { scopeWorkspaceLinks } from "../lib/workspace-links.js";
 import { ICONS } from "./icons.js";
 import { createReasoningPanel } from "./reasoning.js";
-import { copyText } from "./toast.js";
+import { copyText, toast } from "./toast.js";
 
 const ROLE_LABEL = { assistant: "Grid", user: "You", system: "System" };
 
@@ -76,17 +78,30 @@ function actionButton(label, path, onClick, extraClass = "") {
  * @param {(answer: {id: string, text: string}) => void} [options.onReport] assistant
  *   messages only: report a problem with this answer for review
  * @param {() => void} [options.onContinue] resumes an interrupted turn
+ * @param {(target: {id: string, role: string}) => void} [options.onDelete] deletes a
+ *   stored message from the chat and the agent's context
+ * @param {(id: string) => void} [options.onFork] assistant messages only: a new
+ *   chat up to the end of this turn
+ * @param {() => void} [options.onContinueInNewChat] assistant messages only:
+ *   carry this chat's context into a new one
  * @param {"continuation"|"compaction"|null} [options.kind] a marker, not a bubble
+ * @param {?object|string} [options.context] kind="context" only: where the seed
+ *   carried into the chat came from (`{source_title}`/`{source_id}`/`{project}`)
  * @param {?{tokens_before: ?number, tokens_after: ?number}} [options.compaction]
  *   token counts for a compaction marker
  * @param {string[]} [options.images] data URLs of attached images
+ * @param {?{turn_id: string, files: number}} [options.checkpoint] user messages only:
+ *   the turn changed files, and `onRestore` brings them back to before it
+ * @param {(checkpoint: {turn_id: string, files: number}) => void} [options.onRestore]
  */
 export function createMessage({
-  role, content = "", author = "", timestamp, onEdit, onSpeak, onReport, onContinue, onSwitchVersion,
-  kind = null, compaction = null, images = [], messageId = null, versions = null,
+  role, content = "", author = "", timestamp, onEdit, onSpeak, onReport, onContinue, onSwitchVersion, onDelete, onFork,
+  onContinueInNewChat, onRestore, kind = null, compaction = null, context = null, images = [], messageId = null, versions = null,
+  checkpoint = null,
 }) {
   if (kind === "continuation") return createContinuationMarker({ timestamp });
   if (kind === "compaction") return createCompactionMarker({ timestamp, compaction });
+  if (kind === "context") return createContextCard({ timestamp, context, content });
   const isAssistant = role === "assistant";
   const id = `msg-${(sequence += 1)}`;
   const body = h("div.msg__body");
@@ -113,16 +128,72 @@ export function createMessage({
       ? actionButton(SPEECH_UI.idle.title, ICONS.volume, () => onSpeak(id), "msgAction--speak")
       : null;
 
+  // "Restore files": shown once the turn this message started changed files.
+  let currentCheckpoint = null;
+  const restoreButton = role === "user" && onRestore
+    ? actionButton("Restore files to before this message", ICONS.undo, () => currentCheckpoint && onRestore(currentCheckpoint))
+    : null;
+  const showCheckpoint = (next) => {
+    currentCheckpoint = next?.files ? next : null;
+    if (!restoreButton) return;
+    restoreButton.hidden = !currentCheckpoint;
+    if (currentCheckpoint) {
+      const label = `Restore files to before this message (${currentCheckpoint.files} changed since)`;
+      restoreButton.title = label;
+      restoreButton.setAttribute("aria-label", label);
+    }
+  };
+  showCheckpoint(checkpoint);
+
   const actions = h(
     "div.msg__actions",
     {},
     actionButton("Copy message", ICONS.copy, () => copyText(ownWords().text, "Message copied")),
     role === "user" && onEdit ? actionButton("Edit (starts a new branch)", ICONS.edit, () => startEdit()) : null,
+    restoreButton,
     speakButton,
     isAssistant && onReport
       ? actionButton("Report a problem with this answer", ICONS.inspect, () => startReport(), "msgAction--report")
       : null,
+    isAssistant && onFork ? actionButton("Fork: a new chat up to here", ICONS.fork, () => stored(() => onFork(storedId))) : null,
+    onDelete
+      ? actionButton(
+        role === "user" ? "Delete this message and its answer (chat and context)" : "Delete from chat and context",
+        ICONS.trash,
+        () => stored(() => onDelete({ id: storedId, role })),
+        "msgAction--delete",
+      )
+      : null,
   );
+
+  /** Run *action* once the message is stored; a message in flight has no id yet. */
+  function stored(action) {
+    if (storedId) {
+      action();
+      return;
+    }
+    toast("This message can be changed once its turn is saved.", { timeout: 4000 });
+  }
+
+  // The newest answer offers to carry this chat's context into a new one; the
+  // transcript shows it on the last answer only (setContinueInNewChat).
+  const continueInNewChat = isAssistant && onContinueInNewChat
+    ? h(
+        "div.msg__newChat",
+        {},
+        h(
+          "button.btn.btn--ghost.msg__continueNew",
+          {
+            type: "button",
+            title: "Carry this chat's context into a new one",
+            on: { click: () => stored(() => onContinueInNewChat(storedId)) },
+          },
+          icon(ICONS.resume, { size: 13 }),
+          "Continue in new chat",
+        ),
+      )
+    : null;
+  if (continueInNewChat) continueInNewChat.hidden = true;
 
   const authorNode = h("span.msg__author", { text: author || ROLE_LABEL[role] || role });
   // "‹ 2/3 ›": the versions of an edited message, each in its own branch.
@@ -156,11 +227,13 @@ export function createMessage({
     { id, dataset: { role } },
     h("div.msg__meta", {}, authorNode, timestamp ? h("span.msg__time", { text: clock(timestamp) }) : null, switcher),
     reasoning?.el,
+    reasoning?.planEl,
     isAssistant ? null : gallery,
     isAssistant ? null : fileList,
     body,
     isAssistant ? gallery : null,
     actions,
+    continueInNewChat,
   );
 
   const paint = () => {
@@ -171,8 +244,11 @@ export function createMessage({
     }
     body.innerHTML = renderMarkdown(words);
     decorateCode(body);
+    decorateDiagrams(body);
     // Workspace-file links the agent emits (/api/workspace/files/<path>)
-    // download on click; nothing extra is needed here.
+    // download on click, from the directory this chat works in.
+    scopeWorkspaceLinks(body);
+    if (!isAssistant) scopeWorkspaceLinks(fileList);
   };
   const paintSoon = onFrame(paint);
 
@@ -259,9 +335,15 @@ export function createMessage({
     },
 
     /** Take the stored id and versions without re-rendering the message. */
-    adopt({ id: nextId, versions: nextVersions }) {
+    /** The turn this message started changed files: offer Restore. */
+    setCheckpoint(next) {
+      showCheckpoint(next);
+    },
+
+    adopt({ id: nextId, versions: nextVersions, checkpoint: nextCheckpoint }) {
       storedId = nextId ?? storedId;
       renderVersions(nextVersions);
+      showCheckpoint(nextCheckpoint ?? null);
     },
 
     /** Show an image the model generated, once. */
@@ -367,6 +449,12 @@ export function createMessage({
       resumable = false;
       interruptBox?.querySelector(".msg__continue")?.remove();
     },
+
+    /** Offer "Continue in new chat" - the transcript shows it on the last answer. */
+    setContinueInNewChat(available) {
+      if (!continueInNewChat) return;
+      continueInNewChat.hidden = !available;
+    },
   };
 }
 
@@ -391,6 +479,81 @@ function renderImage(url) {
     loading: "lazy",
     on: { click: (event) => event.currentTarget.classList.toggle("is-expanded") },
   });
+}
+
+/** Where a carried-context seed says it came from, in the reader's words. */
+function contextSource(context) {
+  if (!context) return "an earlier chat";
+  if (typeof context === "string") return context;
+  const title = context.source_title || context.source || context.title;
+  if (title) return title;
+  if (context.project_title) return `the project ${context.project_title}`;
+  if (context.project) return `the project ${context.project}`;
+  if (context.source_id) return context.source_id;
+  return "an earlier chat";
+}
+
+/**
+ * The context a chat carried in from another chat or from its project: a
+ * collapsed, never-editable card. It is a copy of what the model was given,
+ * not something the reader wrote, so it has no edit, copy or version action -
+ * a click only opens it to read.
+ */
+function createContextCard({ timestamp, context, content = "" }) {
+  const id = `msg-${(sequence += 1)}`;
+  const body = h("div.msg__contextBody");
+  body.hidden = true;
+  const chevron = h("span.msg__contextChevron", {}, icon(ICONS.chevron, { size: 12 }));
+  const head = h(
+    "button.msg__contextHead",
+    { type: "button", "aria-expanded": "false", title: "Read the context this chat started with" },
+    chevron,
+    icon(ICONS.message, { size: 13 }),
+    h("span.msg__contextLabel", { text: `Context carried from ${contextSource(context)}` }),
+  );
+  head.addEventListener("click", () => {
+    const open = body.hidden;
+    body.hidden = !open;
+    head.setAttribute("aria-expanded", String(open));
+    chevron.classList.toggle("is-open", open);
+  });
+  if (content) {
+    body.innerHTML = renderMarkdown(content);
+    decorateCode(body);
+    decorateDiagrams(body);
+    scopeWorkspaceLinks(body);
+  }
+  const root = h(
+    "article.msg.msg--context",
+    { id, dataset: { role: "marker" } },
+    h("div.msg__meta", {}, h("span.msg__author", { text: "Context" }), timestamp ? h("span.msg__time", { text: clock(timestamp) }) : null),
+    head,
+    body,
+  );
+  return {
+    el: root,
+    id,
+    role: "marker",
+    kind: "context",
+    reasoning: null,
+    text: content,
+    resumable: false,
+    setSpeechState() {},
+    setAuthor() {},
+    setText() {},
+    appendText() {},
+    setWaiting() {},
+    setNotice() {},
+    setFailed() {},
+    setInterrupted() {},
+    retireContinue() {},
+    setContinueInNewChat() {},
+    addImage() {},
+    adopt() {},
+    messageId: null,
+    versions: null,
+    images: [],
+  };
 }
 
 /** The stored user entry of a Continue: a thin marker in the thread. */

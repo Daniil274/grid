@@ -17,18 +17,26 @@ import { monitorServer } from "./net/server-monitor.js";
 import { PasswordDrawer } from "./accounts/password.js";
 import { PlanDrawer } from "./accounts/plan.js";
 import { PersonalAgentsDrawer } from "./agents/drawer.js";
+import { MemoryDrawer } from "./ui/memory-dialog.js";
 import { SettingsDrawer } from "./settings/drawer.js";
 import { createRoutePicker } from "./ui/route-picker.js";
 import { createComposer } from "./ui/composer.js";
 import { createPolicySwitch } from "./ui/policy-switch.js";
 import { createQueueTray } from "./ui/queue.js";
 import { createConversationList } from "./ui/sidebar.js";
+import { createApprovalAlerts } from "./ui/approval-alerts.js";
+import { createRailShell, revealRail } from "./ui/rail.js";
+import { createProjectContext, setActiveProject, storedProject, trackActiveProject } from "./ui/projects.js";
 import { SpeechPlayer, synthesizeSentence } from "./ui/speech.js";
 import { ICONS } from "./ui/icons.js";
 import { createThemeToggle } from "./ui/theme.js";
 import { copyText, toast } from "./ui/toast.js";
+// Loaded for its side effect: turns #runtime-status into a polite live region.
+import "./ui/overlay.js";
 import { createTranscript } from "./ui/transcript.js";
 import { openReportDialog } from "./ui/report-dialog.js";
+import { openWorkspaceDialog } from "./ui/workspace-dialog.js";
+import { setWorkspaceChat } from "./lib/workspace-links.js";
 import { createWelcomeSystems } from "./ui/welcome.js";
 
 const store = createStore({
@@ -40,6 +48,10 @@ const store = createStore({
   multiSystem: false,
   routingEnabled: false,
   conversations: [],
+  // Projects: a metadata layer over chats (web_chat/js/ui/sidebar.js).
+  projects: [],
+  // The project new chats are created in (`null` = no project).
+  activeProject: null,
   contextId: null,
   // The conversation the open branch belongs to: the rail's row.
   rootId: null,
@@ -53,6 +65,11 @@ const store = createStore({
   // Messages waiting for the agent (web_chat/delivery.py).
   queue: [],
   workspacePath: "",
+  // The directory chosen for the chat on screen; null is the server's workspace.
+  chatWorkspace: null,
+  // The chat has messages: its directory no longer changes (ui/workspace-dialog.js).
+  workspaceLocked: false,
+  chooseWorkspace: false,
   isolated: false,
   // The signed-in user ({id, username, role}); `accounts` is false on a one-user server.
   user: null,
@@ -85,6 +102,20 @@ async function refreshConversations() {
   }
 }
 
+/** Projects live on the server; an older server without the routes leaves the rail plain. */
+async function refreshProjects() {
+  try {
+    const { projects } = await api.projects();
+    const list = projects ?? [];
+    store.set({ projects: list });
+    // A project deleted under the choice: fall back to "no project".
+    const active = store.get().activeProject;
+    if (active && !list.some((project) => project.id === active)) setActiveProject(store, null);
+  } catch (error) {
+    console.warn("Could not list projects", error);
+  }
+}
+
 /**
  * Apply a selection and, when it names a concrete agent, warm it server-side so
  * the first message does not pay for model and tool startup. An `auto`
@@ -108,6 +139,7 @@ function bindShortcuts({ composer, search }) {
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName ?? "");
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
+      if (document.body.classList.contains("rail-collapsed")) revealRail();
       search.focus();
       return;
     }
@@ -138,6 +170,9 @@ async function boot() {
     jumpButton: $("#jump-latest"),
     onEditMessage: (edited) => void chat.editMessage(edited),
     onSwitchVersion: (contextId) => void chat.switchVersion(contextId),
+    onDeleteMessage: (target) => void chat.deleteMessage(target),
+    onForkMessage: (id) => void chat.forkAt(id),
+    onRestoreCheckpoint: (checkpoint) => void chat.restoreCheckpoint(checkpoint),
     onSpeakMessage: (id) => chat.toggleSpeech(id),
     onReportMessage: ({ id }) => {
       const contextId = store.get().contextId;
@@ -149,6 +184,7 @@ async function boot() {
       });
     },
     onContinue: () => chat.continueTurn(),
+    onContinueInNewChat: () => void chat.continueInNewChat(),
   });
 
   const chat = new ChatController({
@@ -196,9 +232,19 @@ async function boot() {
     container: $("#chat-list"),
     searchInput: $("#chat-search"),
     store,
+    // "+" on a project: a new chat in it (the rail made it the active project).
+    onNewChat: async () => {
+      document.body.classList.remove("rail-open");
+      await chat.startConversation();
+      composer.focus();
+    },
     onSelect: async (contextId) => {
       closeRail();
-      await chat.openConversation(contextId);
+      try {
+        await chat.openConversation(contextId);
+      } catch (error) {
+        toast(`Could not load chat: ${error.message}`, { tone: "error" });
+      }
     },
     onRename: async (contextId, title) => {
       try {
@@ -214,13 +260,86 @@ async function boot() {
         toast(error.message, { tone: "error" });
       }
     },
+    onMoveToProject: async (contextId, projectId) => {
+      try {
+        await api.setConversationProject(contextId, projectId);
+        await refreshConversations();
+      } catch (error) {
+        toast(`Could not move chat: ${error.message}`, { tone: "error" });
+      }
+    },
+    onCreateProject: async (title, description = "") => {
+      try {
+        const project = await api.createProject({ title, description });
+        await refreshProjects();
+        return project;
+      } catch (error) {
+        toast(`Could not create project: ${error.message}`, { tone: "error" });
+        return null;
+      }
+    },
+    onCreateSubproject: async (parentId, { title, description = "" }) => {
+      try {
+        const project = await api.createProject({ title, description, parent_id: parentId });
+        await refreshProjects();
+        return project;
+      } catch (error) {
+        toast(`Could not create sub-project: ${error.message}`, { tone: "error" });
+        return null;
+      }
+    },
+    onUpdateProject: async (id, patch) => {
+      try {
+        await api.updateProject(id, patch);
+        await refreshProjects();
+      } catch (error) {
+        toast(`Could not update project: ${error.message}`, { tone: "error" });
+        throw error;
+      }
+    },
+    onDeleteProject: async (id) => {
+      try {
+        await api.deleteProject(id);
+        if (store.get().activeProject === id) setActiveProject(store, null);
+        await refreshProjects();
+        await refreshConversations();
+      } catch (error) {
+        toast(`Could not delete project: ${error.message}`, { tone: "error" });
+        throw error;
+      }
+    },
+  });
+
+  // "in <project>" under New chat: where a new chat starts.
+  createProjectContext({ node: $("#project-context"), store });
+  // The rail's fold button and its bottom menus (More, the account's).
+  createRailShell({
+    collapse: $("#rail-collapse"),
+    more: $("#rail-more"),
+    moreMenu: $("#rail-more-menu"),
+    account: $("#account-button"),
+    accountMenu: $("#account-menu"),
+    accountName: $("#account-name"),
+    avatar: $("#account-avatar"),
   });
 
   // Agents keep working in chats that are not on screen; poll while any is
-  // running so their spinners stop when they finish.
+  // running so their spinners stop when they finish - and so a call that waits
+  // for the user's approval anywhere is announced (approval-alerts.js).
   setInterval(() => {
     if (store.get().conversations.some((conversation) => conversation.active)) void refreshConversations();
   }, 4000);
+  createApprovalAlerts({
+    store,
+    onOpen: async (contextId) => {
+      closeRail();
+      try {
+        await chat.openConversation(contextId);
+      } catch (error) {
+        toast(`Could not load chat: ${error.message}`, { tone: "error" });
+      }
+    },
+  });
 
   createRoutePicker({
     button: $("#route-chip"),
@@ -269,6 +388,38 @@ async function boot() {
     { onChanged: reloadRuntime },
   );
 
+  const memory = new MemoryDrawer(
+    {
+      drawer: $("#memory"),
+      backdrop: $("#memory-backdrop"),
+      closeButton: $("#memory-close"),
+      syncButton: $("#memory-sync"),
+      newButton: $("#memory-new"),
+      status: $("#memory-status"),
+      backend: $("#memory-backend"),
+      counts: $("#memory-counts"),
+      budget: $("#memory-budget"),
+      tabs: $("#memory-tabs"),
+      scope: $("#memory-scope"),
+      stale: $("#memory-stale"),
+      search: $("#memory-search"),
+      previewButton: $("#memory-preview-toggle"),
+      preview: $("#memory-preview"),
+      previewText: $("#memory-preview-text"),
+      list: $("#memory-list"),
+      editor: $("#memory-editor"),
+    },
+    {
+      getContextId: () => store.get().contextId,
+      onChanged: ({ overview, config }) => {
+        // The rail button shows whether memory is live, and warns about STALE records.
+        const dot = $("#memory-indicator");
+        dot.dataset.state = overview?.healthy === false ? "error" : (overview?.stale_count ?? 0) > 0 ? "stale" : config?.enabled_in_config ? "on" : "local";
+        $("#open-memory").title = `Agent memory · ${config?.backend ?? "?"} · ${overview?.total ?? 0} records${overview?.stale_count ? ` · ${overview.stale_count} STALE` : ""}`;
+      },
+    },
+  );
+
   const accountsAdmin = new AccountsDrawer(
     {
       drawer: $("#admin"),
@@ -305,7 +456,8 @@ async function boot() {
   plan.start();
 
   // -- chrome ------------------------------------------------------------
-  const openRail = () => document.body.classList.add("rail-open");
+  // Beside the chat on a wide screen, a folded rail comes back; on a narrow one it slides over.
+  const openRail = () => revealRail();
   const closeRail = () => document.body.classList.remove("rail-open");
   $("#toggle-rail").addEventListener("click", openRail);
   $("#sidebar-scrim").addEventListener("click", closeRail);
@@ -327,6 +479,10 @@ async function boot() {
       usageWindow.focus();
       event.preventDefault();
     }
+  });
+  $("#open-memory").addEventListener("click", () => {
+    closeRail();
+    memory.open();
   });
   $("#open-agents").addEventListener("click", () => {
     closeRail();
@@ -361,7 +517,19 @@ async function boot() {
     chip.addEventListener("click", () => composer.setValue(chip.dataset.prompt));
   }
 
-  $("#workspace-pill").addEventListener("click", () => copyText(store.get().workspacePath, "Workspace path copied"));
+  const shownWorkspace = ({ chatWorkspace, workspacePath }) => chatWorkspace || workspacePath;
+  $("#workspace-pill").addEventListener("click", () => {
+    const state = store.get();
+    if (!state.chooseWorkspace) {
+      copyText(shownWorkspace(state), "Workspace path copied");
+      return;
+    }
+    openWorkspaceDialog({
+      current: shownWorkspace(state),
+      started: state.workspaceLocked,
+      choose: (path) => chat.chooseWorkspace(path),
+    });
+  });
 
   bindShortcuts({ composer, search: $("#chat-search") });
 
@@ -378,6 +546,7 @@ async function boot() {
       // leave only the agent on `auto`.
       systemKey: store.get().systemKey ?? single,
       workspacePath: bootstrap.workspace_path ?? "",
+      chooseWorkspace: Boolean(bootstrap.choose_workspace),
       isolated: Boolean(bootstrap.isolation_enabled),
       contextId: store.get().contextId ?? bootstrap.current_context_id ?? null,
       user: bootstrap.user ?? null,
@@ -390,6 +559,7 @@ async function boot() {
       policy: bootstrap.policy ?? null,
     });
     await refreshConversations();
+    await refreshProjects();
   }
 
   // Who is signed in, on a server with accounts; the system configs are
@@ -397,6 +567,8 @@ async function boot() {
   store.subscribe(({ user, accounts, personalAgents: ownAgents, reviews, systemsPage }) => {
     $("#account").hidden = !accounts;
     $("#account-name").textContent = user?.username ?? "";
+    // The change-password form names its account, so no other field is taken for the username.
+    $("#password-username").value = user?.username ?? "";
     $("#open-settings").hidden = user?.role !== "admin";
     $("#open-admin").hidden = !accounts || user?.role !== "admin";
     $("#open-agents").hidden = !ownAgents;
@@ -428,15 +600,19 @@ async function boot() {
   document.addEventListener("grid:turn-settled", refreshAccountUsage);
   void refreshAccountUsage();
 
-  store.subscribe(({ workspacePath, isolated, streaming, compacting, hasAgentContext, contextId, restartPending, serverUnavailable }) => {
+  store.subscribe(({ workspacePath, chatWorkspace, chooseWorkspace, isolated, streaming, compacting, hasAgentContext, contextId, restartPending, serverUnavailable }) => {
     const label = serverUnavailable ? "Reconnecting to server…" : restartPending ? "Server restarting · waiting for saved steps" : compacting ? "Compacting context…" : streaming ? "Working" : isolated ? "Container isolated" : "Local runtime";
     $("#runtime-status").textContent = label;
     $("#runtime-status").dataset.state = streaming || compacting ? "busy" : "ready";
     $("#compact-context").disabled = !contextId || !hasAgentContext || streaming || compacting || Boolean(restartPending);
     $("#compact-context").setAttribute("aria-busy", String(compacting));
     $("#compact-context .compactLabel").textContent = compacting ? "Compacting…" : "Compact context";
-    $("#workspace-pill").textContent = workspacePath;
-    $("#workspace-pill").hidden = !workspacePath;
+    const workspace = chatWorkspace || workspacePath;
+    $("#workspace-pill").textContent = workspace;
+    $("#workspace-pill").hidden = !workspace;
+    $("#workspace-pill").title = chooseWorkspace ? "Working directory of this chat: choose another" : "Copy workspace path";
+    $("#workspace-pill").dataset.chosen = String(Boolean(chatWorkspace));
+    setWorkspaceChat(contextId);
   });
 
   await reloadRuntime();
@@ -453,6 +629,17 @@ async function boot() {
   // "Open in chat" on the systems page: a new chat with that system pinned.
   const params = new URLSearchParams(location.search);
   const pinned = params.get("system");
+  const conversationParam = params.get("conversation");
+  const taskParam = params.get("task");
+  // ?project=<id>, or the project remembered from last time, is active on a
+  // plain visit: the rail filters to it and "New chat" starts in it. A deep
+  // link to a chat or a system carries its own context instead.
+  if (!pinned && !conversationParam) {
+    const wanted = params.get("project") || storedProject();
+    if (wanted && store.get().projects.some((project) => project.id === wanted)) {
+      store.set({ activeProject: wanted });
+    }
+  }
   const [latest] = store.get().conversations;
   if (pinned && store.get().systems.some((system) => system.key === pinned)) {
     history.replaceState(null, "", "/");
@@ -460,8 +647,45 @@ async function boot() {
     await chat.startConversation();
     // "Describe it to the builder": the request waits in the composer, to read and send.
     if (params.get("prompt")) composer.setValue(params.get("prompt"));
+  } else if (conversationParam) {
+    // /tasks links back with ?conversation=<id> (and &task=<id>): open that
+    // chat, position its plan on the task, and clean the URL.
+    history.replaceState(null, "", "/");
+    if (taskParam) globalThis.GridFocusTask = taskParam;
+    await chat.openConversation(conversationParam);
+    // The stored plan arrives asynchronously; tell whatever card holds it.
+    if (taskParam) document.dispatchEvent(new CustomEvent("grid:focus-task", { detail: { id: taskParam } }));
+    // Focus the project that chat belongs to, so "back from tasks" lands in it.
+    const opened = store.get().conversations.find(
+      (conversation) => conversation.id === conversationParam || conversation.open_id === conversationParam,
+    );
+    setActiveProject(store, opened?.project ?? null);
   } else if (latest) {
     await chat.openConversation(latest.open_id ?? latest.id);
+  }
+
+  // Remember the active project across reloads and mirror it into ?project=.
+  trackActiveProject(store);
+
+  // The rail's "Tasks" link follows the active project, so it opens that
+  // project's board - not every task - while the chat is filtered to it.
+  const tasksLink = $("#open-tasks");
+  if (tasksLink) {
+    const syncTasksLink = ({ activeProject }) => {
+      tasksLink.href = activeProject ? `/tasks?project=${encodeURIComponent(activeProject)}` : "/tasks";
+    };
+    syncTasksLink(store.get());
+    store.watch(["activeProject"], syncTasksLink);
+  }
+
+  // The rail's "Files" link opens the directory the chat on screen works in.
+  const filesLink = $("#open-files");
+  if (filesLink) {
+    const syncFilesLink = ({ contextId }) => {
+      filesLink.href = contextId ? `/files?context=${encodeURIComponent(contextId)}` : "/files";
+    };
+    syncFilesLink(store.get());
+    store.watch(["contextId"], syncFilesLink);
   }
 
   // The report button under answers shows only when the server takes reports.
@@ -490,7 +714,8 @@ async function boot() {
   });
 
   await selectRoute({ systemKey: store.get().systemKey, agentKey: store.get().agentKey });
-  composer.focus();
+  // Not on a touch screen: the keyboard would cover half of it before anyone asked to type.
+  if (!globalThis.matchMedia?.("(pointer: coarse)")?.matches) composer.focus();
 }
 
 boot().catch((error) => {

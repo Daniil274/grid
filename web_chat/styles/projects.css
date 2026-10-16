@@ -1,0 +1,67 @@
+/* The project dialog. The rail's project tree is styles/rail.css.
+   Tokens only (styles/tokens.css). */
+
+/* -- the project dialog ---------------------------------------------------- */
+.projectDialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+  color: var(--text);
+  box-shadow: var(--shadow-2);
+}
+
+.projectDialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+.projectDialog__form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.projectDialog__heading {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.projectDialog__parent {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.projectDialog__consequence {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--danger-soft);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.projectDialog__status {
+  min-height: 16px;
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.projectDialog__status[data-tone="error"] {
+  color: var(--danger);
+}
+
+.projectDialog__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.projectDialog__delete {
+  margin-right: auto;
+}

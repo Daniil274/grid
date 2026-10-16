@@ -107,13 +107,19 @@ class BoundedModel(Model):
                         remaining = ends_at - loop.time()
                         if remaining <= 0:
                             raise self._too_slow()
-                        event = await asyncio.wait_for(anext(stream), remaining)
+                        # The timer says whether it fired: the clock alone can
+                        # read just short of the deadline when it does (Windows
+                        # ticks are ~15 ms, and asyncio fires within one).
+                        deadline = asyncio.timeout(remaining)
+                        try:
+                            async with deadline:
+                                event = await anext(stream)
+                        except TimeoutError:
+                            if not deadline.expired():
+                                raise  # the provider's own timeout, not this limit
+                            raise self._too_slow() from None
                 except StopAsyncIteration:
                     return
-                except TimeoutError:
-                    if ends_at is None or loop.time() < ends_at:
-                        raise  # the provider's own timeout, not this limit
-                    raise self._too_slow() from None
                 if self.max_output_tokens is not None and getattr(event, "type", None) in GENERATED_DELTA_EVENTS:
                     chars += len(getattr(event, "delta", "") or "")
                     if chars > self.max_output_tokens * CHARS_PER_TOKEN:

@@ -5,6 +5,7 @@ import { h } from "../lib/dom.js";
 import { renderMarkdown } from "../lib/markdown.js";
 import { highlight, diffStats } from "../lib/highlight.js";
 import { languageFor, toolFamily } from "../lib/languages.js";
+import { scopedWorkspaceUrl } from "../lib/workspace-links.js";
 import { copyText } from "./toast.js";
 
 const MAX_TEXT = 32000;
@@ -24,7 +25,7 @@ function safeLink(value) {
   if (!value.startsWith("/api/workspace/files/") || /%2e|%2f|%5c/i.test(value)) return null;
   const path = value.split("?")[0];
   if (path.includes("#") || path.split("/").some((p) => p === "." || p === "..")) return null;
-  return value;
+  return scopedWorkspaceUrl(value);
 }
 
 function imageSource(value) {
@@ -34,7 +35,7 @@ function imageSource(value) {
   if (!link?.startsWith("/api/workspace/files/")) return null;
   const path = link.split("?")[0];
   if (!/\.(png|jpe?g|gif|webp)$/i.test(path)) return null;
-  return `${path}?inline=1`;
+  return scopedWorkspaceUrl(`${path}?inline=1`);
 }
 
 function resourceLink(uri, label) {

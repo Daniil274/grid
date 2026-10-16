@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import nullcontext
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from agents import Agent, RunConfig, RunItemStreamEvent, SQLiteSession
@@ -26,7 +26,9 @@ from agents.run import CallModelData, ModelInputData
 from core.action_policy import ActionRunState
 from core.agent_input import AgentInput, context_content, parse_agent_input
 from core.compact import is_prompt_too_long_error
+from core.context import strip_service_context_footer
 from core.context_budget import context_budget_filter
+from core.deadlines import Deadline
 from core.factory.failures import (
     is_retriable,
     retry_backoff_seconds,
@@ -53,10 +55,15 @@ from core.interruption import (
     completed_names,
 )
 from core.run_stream import (
+    STOPPED_ERROR,
+    STOPPED_MAX_TURNS,
+    STOPPED_TIMEOUT,
+    RunOutcome,
     append_action_reasoning,
     interrupted_run_report,
     last_message_text,
     run_output_text,
+    run_usage,
     tool_event_info,
 )
 from core.steering import Steering, SteerMessage
@@ -64,6 +71,7 @@ from schemas import AgentExecution
 from utils.exceptions import AgentError, ContextError
 from utils.logger import Logger
 from utils.path_utils import reset_current_factory, set_current_factory
+from core.credentials import CredentialError, credential_error_in
 
 logger = logging.getLogger("grid.agent_factory")
 
@@ -78,6 +86,29 @@ _MISSING_FINAL_ANSWER = (
     "results; do not repeat completed actions. Finish the remaining work and "
     "write a concrete final report."
 )
+
+# Sent, with tools off, to a dynamic agent that used up its turns: the caller
+# gets its report rather than its last half-sentence.
+_TURN_LIMIT_REPORT = (
+    "You have used up your turn limit: no more tool calls. Write your report "
+    "now from the saved tool results: what you did, what you found (with the "
+    "sources and paths it rests on), and what is left undone."
+)
+
+# The same for an agent whose time ran out: the work it did stays in its
+# session, and the caller can continue it there.
+TIMEOUT_REPORT = (
+    "Your time for this task is up: no more tool calls. Write your report now "
+    "from the saved tool results: what you did, what you found (with the "
+    "sources and paths it rests on), what is left undone, and the next step "
+    "you would take."
+)
+
+
+def limit_report_seconds(timeout: float) -> float:
+    """Seconds an agent its time limit stopped gets to write that report: a
+    tenth of the limit, from half a minute to two."""
+    return max(30.0, min(120.0, timeout / 10))
 
 
 # Sent after an answer that wrote tool calls as text instead of calling tools.
@@ -203,6 +234,17 @@ class TurnRunner:
                 logger.exception("Stream observer failed to show a compaction")
 
     @staticmethod
+    def _report_skipped_models(observer: Any, skipped: Optional[List[Tuple[str, str]]]) -> None:
+        """Say which of the agent's models this user cannot use now: a fallback
+        that silently drops out leaves the turn with fewer models than its list."""
+        handle = getattr(observer, "handle_models_skipped", None)
+        if skipped and handle is not None:
+            try:
+                handle(skipped)
+            except Exception:
+                logger.exception("Stream observer failed to show skipped models")
+
+    @staticmethod
     def _final_text(result: Any, fragments: List[str]) -> str:
         """The answer of a finished run: its final output, else what it streamed.
 
@@ -217,7 +259,12 @@ class TurnRunner:
             return streamed
         return str(run_output_text(result))
 
-    async def run_agent_object_simple(
+    async def run_agent_object_simple(self, agent: Any, input_message: str, **kwargs: Any) -> str:
+        """Run an Agent instance in its own session and return its answer text
+        (:meth:`run_agent_object`, keeping only the text)."""
+        return (await self.run_agent_object(agent, input_message, **kwargs)).text
+
+    async def run_agent_object(
         self,
         agent: Any,
         input_message: str,
@@ -229,8 +276,9 @@ class TurnRunner:
         user_id: Optional[str] = None,
         run_control: Optional[Any] = None,
         timeout: Optional[float] = None,
-    ) -> str:
-        """Run an Agent instance in its own session and return its answer text.
+        max_turns: Optional[int] = None,
+    ) -> RunOutcome:
+        """Run an Agent instance in its own session: its answer and what it took.
 
         Used for dynamic and background agents. The run has its own SDK session
         (agent name + context id) and never reads or changes the factory's
@@ -251,11 +299,14 @@ class TurnRunner:
         ``timeout`` bounds the whole run in seconds; past it the caller gets
         what the agent did so far. None is ``settings.agent_timeout``, as for a
         turn; 0 is no limit, for a caller that keeps a deadline of its own.
+        ``max_turns`` bounds its turns the same way; None is ``settings.max_turns``.
         """
         observer = stream_observer or self._stream_observer
         agent_label = getattr(agent, "name", None) or "dynamic-agent"
         context_id = context_id or self.context_manager.get_current_context_id()
         session = self._get_agent_session(agent_label, context_id)
+        # A legacy session may still hold answers with the service footer.
+        await self._strip_legacy_context_footers(session)
         if action_state is None:
             action_state = self._action_state(
                 self._policy_task(input_message, context_id), context_id=context_id, observer=observer
@@ -279,21 +330,35 @@ class TurnRunner:
         attempt = 0
         recovered = False
         result: Any = None
+        # What the attempts before the current one used: a retry starts a new
+        # SDK run, which counts from zero, so each attempt adds its predecessor.
+        spent = (0, 0, 0)
+
+        def used() -> tuple[int, int, int]:
+            calls, tokens_in, tokens_out = run_usage(result)
+            return spent[0] + calls, spent[1] + tokens_in, spent[2] + tokens_out
+
         # settings.agent_timeout bounds the whole run, as it bounds a turn: a
         # model that never finishes its answer must not hold the caller forever.
         if timeout is None:
             timeout = self.config.get_agent_timeout(agent_label)
-        deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
+        if max_turns is None:
+            max_turns = self.config.get_max_turns(agent_label)
+        deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         set_current_factory(self)
+        # What the run and its tools write without naming a conversation goes
+        # into its own, never into one another turn made active.
+        binding = self.context_manager.bind(context_id)
         try:
             async with deadline:
                 while True:
+                    spent = used()
                     result = get_runner().run_streamed(
                         starting_agent=agent,
                         input=input_message,
                         context=run_ctx,
                         session=session,
-                        max_turns=runner_max_turns(self.config.get_max_turns(agent_label)),
+                        max_turns=runner_max_turns(max_turns),
                         run_config=self._run_config(None),
                     )
                     try:
@@ -321,7 +386,29 @@ class TurnRunner:
                         # Not transient: retrying would repeat the work. The caller
                         # gets what the agent did so far.
                         logger.warning("Agent %s stopped: %s: %s", agent_label, type(exc).__name__, exc)
-                        return interrupted_run_report(result, f"Agent {agent_label}", exc)
+                        if (
+                            isinstance(exc, MaxTurnsExceeded)
+                            and session is not None
+                            and not getattr(run_control, "stop_requested", False)
+                        ):
+                            # The turn limit ends a run between turns: its session
+                            # holds every result, so one answer more, without
+                            # tools, is the report the caller needs.
+                            report, report_run = await self._report_after_turn_limit(
+                                agent, run_ctx, session, observer, agent_label, action_state
+                            )
+                            if report:
+                                spent, result = used(), report_run
+                                return RunOutcome(
+                                    f"[Agent {agent_label} reached its turn limit; its report "
+                                    f"of the work so far:]\n{report}",
+                                    STOPPED_MAX_TURNS,
+                                    *used(),
+                                )
+                        stopped = STOPPED_MAX_TURNS if isinstance(exc, MaxTurnsExceeded) else STOPPED_ERROR
+                        return RunOutcome(
+                            interrupted_run_report(result, f"Agent {agent_label}", exc), stopped, *used()
+                        )
                     except Exception as exc:
                         if not is_retriable(exc):
                             raise
@@ -336,17 +423,74 @@ class TurnRunner:
                         )
                         await asyncio.sleep(delay)
                         continue
-                    return self._final_text(result, fragments)
+                    return RunOutcome(self._final_text(result, fragments), None, *used())
         except TimeoutError:
             if timeout <= 0 or not deadline.expired():
                 raise
             logger.warning("Agent %s stopped after %s s", agent_label, timeout)
-            return interrupted_run_report(
+            if session is not None and not getattr(run_control, "stop_requested", False):
+                # The steps it finished are in its session: one answer more,
+                # without tools, says what they came to.
+                report, report_run = await self._report_after_turn_limit(
+                    agent, run_ctx, session, observer, agent_label, action_state,
+                    message=TIMEOUT_REPORT, seconds=limit_report_seconds(timeout),
+                )
+                if report:
+                    spent, result = used(), report_run
+                    return RunOutcome(
+                        f"[Agent {agent_label} ran out of time ({timeout:g} s); its report "
+                        f"of the work so far:]\n{report}",
+                        STOPPED_TIMEOUT,
+                        *used(),
+                    )
+            report = interrupted_run_report(
                 result, f"Agent {agent_label}",
                 TimeoutError(f"no answer within the agent timeout ({timeout:g} s)"),
             )
+            return RunOutcome(report, STOPPED_TIMEOUT, *used())
         finally:
+            self.context_manager.unbind(binding)
             reset_current_factory()
+
+    async def _report_after_turn_limit(
+        self,
+        agent: Any,
+        run_ctx: Any,
+        session: Any,
+        observer: Any,
+        agent_label: str,
+        action_state: Any,
+        *,
+        message: str = _TURN_LIMIT_REPORT,
+        seconds: Optional[float] = None,
+    ) -> Tuple[str, Any]:
+        """The report of a run its limit stopped: one answer with tools off.
+
+        *message* asks for it - after the turn limit by default; *seconds*
+        bounds the answer. Returns the report ("" when the model gave none in
+        time) and the run, whose usage counts toward the agent's. A failure
+        here only means the caller gets the plain summary of the stopped run.
+        """
+        result = None
+        try:
+            reporter = agent.clone(model_settings=replace(agent.model_settings, tool_choice="none"))
+            result = get_runner().run_streamed(
+                starting_agent=reporter,
+                input=message,
+                context=run_ctx,
+                session=session,
+                max_turns=1,
+                run_config=self._run_config(None),
+            )
+            async with asyncio.timeout(seconds if seconds and seconds > 0 else None):
+                await self._consume_stream(
+                    result, observer=observer, agent_key=agent_label, action_state=action_state
+                )
+        except Exception as exc:
+            logger.warning("Agent %s wrote no report after its limit: %s", agent_label, exc or type(exc).__name__)
+            return "", result
+        final = getattr(result, "final_output", None)
+        return (str(final).strip() if final is not None else ""), result
 
     def _open_context(self, context_id: Optional[str], use_active_context: bool) -> str:
         """The conversation this request belongs to: named, active, or new."""
@@ -364,12 +508,12 @@ class TurnRunner:
     ) -> Optional[Any]:
         """Note the invocation; with agent logging on, start this turn's session
         log and return its token for Logger.deactivate_session_log."""
-        self.context_manager.set_metadata("context_id", context_id)
+        self.context_manager.set_metadata("context_id", context_id, context_id=context_id)
         self.context_manager.set_metadata(
-            "last_invocation", {"agent": agent_key, "timestamp": time.time()}
+            "last_invocation", {"agent": agent_key, "timestamp": time.time()}, context_id=context_id
         )
         if user_id:
-            self.context_manager.set_metadata("user_id", user_id)
+            self.context_manager.set_metadata("user_id", user_id, context_id=context_id)
         agent_logging = self.config.config.settings.agent_logging
         if agent_logging is None or not agent_logging.enabled:
             return None
@@ -390,6 +534,7 @@ class TurnRunner:
         agent_key: str,
         context_path: Optional[str],
         include_transcript: bool,
+        memory_section: Optional[str] = None,
     ) -> str:
         """Assemble the agent's instructions and record exactly what was sent."""
         assembly = self.instructions_builder.assemble_model_context(
@@ -397,6 +542,7 @@ class TurnRunner:
             context_path,
             include_conversation_context=include_transcript,
             include_path_context=True,
+            memory_section=memory_section,
         )
         instructions = assembly.instructions
         self.context_manager.set_metadata("last_context_assembly", assembly.to_debug_payload())
@@ -433,6 +579,9 @@ class TurnRunner:
                 continue
             content = item.get("content")
             text = content if isinstance(content, str) else item.get("preview") or ""
+            if item.get("role") == "assistant":
+                # A legacy answer's service footer never reaches the model.
+                text = strip_service_context_footer(text)
             text = text.strip()
             if len(text) > _MISSED_MESSAGE_CHARS:
                 text = text[:_MISSED_MESSAGE_CHARS] + " [...]"
@@ -487,7 +636,7 @@ class TurnRunner:
         """Recover a missing model result once within the original deadline/session."""
         timeout = self.config.get_agent_timeout(agent_key)
         # 0 means no timeout: a coordinating agent runs as long as it needs.
-        deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
+        deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         try:
             async with deadline:
                 for recovery in range(2):
@@ -564,9 +713,10 @@ class TurnRunner:
                 output=info.get("output") if event.name == "tool_output" else None,
                 extra={"retry_count": progress.attempt, "call_id": info.get("call_id")},
                 persist=event.name == "tool_called",
+                context_id=run_ctx.context_id,
             )
 
-        deadline = asyncio.timeout(timeout) if timeout > 0 else nullcontext()
+        deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         try:
             async with deadline:
                 if stream:
@@ -684,7 +834,9 @@ class TurnRunner:
                     retry_count=progress.attempt,
                 )
                 self.journal.record_event(
-                    event_type="attempt_started", extra={"retry_count": progress.attempt}
+                    event_type="attempt_started",
+                    extra={"retry_count": progress.attempt},
+                    context_id=run_ctx.context_id,
                 )
                 session_mark = await self._session_mark(session)
                 try:
@@ -713,7 +865,10 @@ class TurnRunner:
                             if stored_request:
                                 run_input = OVERFLOW_RETRY_NOTE
                             continue
-                    retriable = is_retriable(exc)
+                    # A credential refused while signing a request reaches here as a
+                    # "connection error"; it is the credential's, and no retry helps.
+                    exc = credential_error_in(exc) or exc
+                    retriable = is_retriable(exc) and not isinstance(exc, CredentialError)
                     error_text = safe_preview(str(exc), max_length=700)
                     self.journal.update_pending_run(
                         agent_key=agent_key,
@@ -731,6 +886,7 @@ class TurnRunner:
                             "retriable": retriable,
                             "exception_type": type(exc).__name__,
                         },
+                        context_id=run_ctx.context_id,
                     )
                     if not retriable:
                         progress.recorded_failure = True
@@ -800,7 +956,7 @@ class TurnRunner:
             edit_of: The slot of the message this one is a new version of, in a
                 branch made by fork_conversation (ContextManager.message_versions)
 
-        The answer ends with the line ``Context ID: <id>``. An answer written as
+        An answer written as
         text tool calls (``<tool_call><function=...>``) is retried with a
         correction, up to MALFORMED_TOOL_CALL_RETRIES times.
 
@@ -1051,8 +1207,12 @@ class TurnRunner:
         task = ""
         stored = False  # the turn's request is in the conversation
         session_log = None
+        binding = None
         try:
             active_context_id = self._open_context(context_id, use_active_context)
+            # Everything this turn and the tasks it starts write without naming
+            # a conversation goes into this one, whatever other turns activate.
+            binding = self.context_manager.bind(active_context_id)
             execution.context_id = active_context_id
             continuing = context_id is not None or use_active_context
             # Turns of a conversation start only here, one at a time, so a run
@@ -1075,9 +1235,10 @@ class TurnRunner:
                 observer=observer,
             )
             session_log = self._record_invocation(agent_key, active_context_id, user_id, shown_message)
-            user_id = user_id or self.context_manager.get_metadata("user_id")
+            user_id = user_id or self.context_manager.get_metadata("user_id", context_id=active_context_id)
 
             agent = await self.create_agent(agent_key, context_path)
+            self._report_skipped_models(observer, getattr(agent, "_grid_skipped_models", None))
             agent_config = self.config.get_agent(agent_key)
             agent_input = (
                 parse_agent_input(message) if message is not None
@@ -1106,6 +1267,9 @@ class TurnRunner:
             # History reaches the model through the agent's SDK session: every
             # message, tool call and tool result, images included.
             session = self._get_agent_session(agent_key, active_context_id)
+            # A legacy session may still hold answers or tool results with
+            # the service footer; the model never reads it back.
+            await self._strip_legacy_context_footers(session)
             # Past the threshold, the session is summarized before the turn adds to it.
             self._report_compaction(observer, await self.compact_session(agent_key, active_context_id))
             # Where this turn starts in the agent's session: a branch forked at
@@ -1118,8 +1282,10 @@ class TurnRunner:
             # A transcript in the prompt only for an agent that joins a
             # conversation its session has not seen (e.g. after routing).
             include_transcript = continuing and not await session.get_items(limit=1)
+            # What memory knows about this request, picked by meaning (core.factory.memory).
+            memory_section = await self.memory_prompt_section(active_context_id, message)
             agent.instructions = self._prepare_instructions(
-                agent_key, context_path, include_transcript
+                agent_key, context_path, include_transcript, memory_section=memory_section,
             )
 
             # Claimed right before the request is stored, after the last await,
@@ -1164,7 +1330,7 @@ class TurnRunner:
             stored = True
 
             run_ctx.session = session
-            run_ctx.metadata = self.context_manager.get_all_metadata()
+            run_ctx.metadata = self.context_manager.get_all_metadata(context_id=active_context_id)
             progress.input_preview = safe_preview(run_input, max_length=700)
             self.journal.update_pending_run(
                 agent_key=agent_key,
@@ -1204,9 +1370,6 @@ class TurnRunner:
                 )
                 output, result, answered = interruption.summary(), progress.result, False
 
-            marker = f"Context ID: {active_context_id}"
-            if marker not in output:
-                output = f"{output.rstrip()}\n\n{marker}"
             if answered:
                 self.context_manager.append_message_to(
                     active_context_id,
@@ -1219,6 +1382,10 @@ class TurnRunner:
                         "turn_id": turn_id,
                     },
                 )
+            if answered:
+                # Not only at compaction: what the turn settled lands in memory, in the
+                # background - a model writes it, and the answer need not wait for that.
+                self.remember_turn_later(active_context_id, message, output, agent_key)
             execution.end_time = time.time()
             execution.output = output
             execution.tools_used = [
@@ -1227,11 +1394,12 @@ class TurnRunner:
                 if getattr(item, "type", "") == "tool_call_item"
                 and (name := tool_event_info(item).get("tool_name"))
             ]
-            self.context_manager.add_execution(execution)
+            self.context_manager.add_execution(execution, context_id=active_context_id)
             self.journal.record_event(
                 event_type="attempt_completed",
                 output=output,
                 extra={"retry_count": progress.attempt},
+                context_id=active_context_id,
             )
             if answered:
                 self.journal.update_pending_run(
@@ -1286,10 +1454,12 @@ class TurnRunner:
                         event_type="execution_failed",
                         output=str(exc),
                         extra={"exception_type": type(exc).__name__},
+                        context_id=active_context_id,
                     )
                 except Exception:
                     logger.debug("Failed to persist pending run failure state", exc_info=True)
-            self.context_manager.add_execution(execution)
+            if active_context_id is not None:
+                self.context_manager.add_execution(execution, context_id=active_context_id)
             raise
         finally:
             if active_context_id is not None and self._run_controls.get(active_context_id) is control:
@@ -1297,3 +1467,10 @@ class TurnRunner:
             # Messages sent during the turn that no model call read go back.
             control.steering.hand_back()
             Logger.deactivate_session_log(session_log)
+            if active_context_id is not None:
+                # The devices the turn used are free again for the user's other chats.
+                from core.devices.hub import hub as device_hub
+
+                device_hub().release(active_context_id)
+            if binding is not None:
+                self.context_manager.unbind(binding)

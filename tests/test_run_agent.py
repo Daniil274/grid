@@ -79,18 +79,48 @@ def use(runner):
     return patch.object(agents, "Runner", runner)
 
 
-async def test_the_answer_ends_with_its_context_id_once(factory):
+async def test_the_answer_carries_no_service_context_id(factory):
+    """The answer is the model's text: the app appends no service footer."""
     runner = ScriptedRunner("Done.")
     with use(runner):
         answer = await factory.run_agent("worker", "Fix it")
 
-    context_id = factory.context_manager.get_current_context_id()
-    assert answer == f"Done.\n\nContext ID: {context_id}"
+    assert answer == "Done."
 
+    # A legacy model-written footer is passed through untouched, once; the
+    # projections that reach the model strip it (test_context).
+    context_id = factory.context_manager.get_current_context_id()
     runner = ScriptedRunner(f"Again.\n\nContext ID: {context_id}")
     with use(runner):
         answer = await factory.run_agent("worker", "More", context_id=context_id)
     assert answer.count("Context ID:") == 1
+
+
+async def test_a_legacy_session_footer_is_kept_not_destructively_rewritten(factory):
+    """The automatic legacy-history rewrite is a safe no-op.
+
+    Footer text does not prove service provenance and the SDK Session has no
+    atomic compare-and-replace, so stored items (footer included) must survive
+    untouched rather than risk corrupting or losing history. The projections
+    that do reach the model strip the footer (test_context).
+    """
+    context_id = factory.context_manager.get_current_context_id()
+    session = factory._get_agent_session("worker", context_id)
+    legacy = [
+        {"role": "user", "content": "Start"},
+        {"role": "assistant", "content": f"Old.\n\nContext ID: {context_id}"},
+    ]
+    await session.add_items(legacy)
+
+    with use(ScriptedRunner("New.")):
+        await factory.run_agent("worker", "Go", context_id=context_id)
+
+    items = await factory._get_agent_session("worker", context_id).get_items()
+    # Nothing destructive happened: the legacy answer and its footer are intact.
+    assert "Old." in str(items)
+    assert f"Context ID: {context_id}" in str(items)
+    # The new turn still reaches the same stored session.
+    assert "New." in str(items)
 
 
 async def test_history_reaches_the_model_through_one_channel(factory):
@@ -431,3 +461,115 @@ async def test_a_dynamic_agent_stops_at_the_agent_timeout_and_reports_it(factory
 
     assert "no answer within the agent timeout (0.05 s)" in answer
     assert HangingRunner.calls == 1
+
+
+class _FinishedRun:
+    """A streamed run that answers at once, with the usage the SDK counted."""
+
+    def __init__(self, answer, requests, input_tokens, output_tokens):
+        self.final_output = answer
+        self.new_items = []
+        self.context_wrapper = SimpleNamespace(
+            usage=SimpleNamespace(requests=requests, input_tokens=input_tokens, output_tokens=output_tokens)
+        )
+
+    async def stream_events(self):
+        return
+        yield  # pragma: no cover
+
+
+async def test_a_dynamic_agent_reports_what_its_run_took_and_gets_the_callers_turn_limit(factory):
+    class Runner:
+        kwargs = []
+
+        @classmethod
+        def run_streamed(cls, **kwargs):
+            cls.kwargs.append(kwargs)
+            return _FinishedRun("done", 3, 1200, 80)
+
+    with use(Runner):
+        outcome = await factory.run_agent_object(SimpleNamespace(name="executor-2"), "task", max_turns=2)
+
+    assert (outcome.text, outcome.stopped) == ("done", None)
+    assert (outcome.model_calls, outcome.input_tokens, outcome.output_tokens) == (3, 1200, 80)
+    assert Runner.kwargs[0]["max_turns"] == 2
+
+
+async def test_a_dynamic_agent_stopped_by_its_time_limit_says_so(factory):
+    class Hanging:
+        new_items = []
+
+        async def stream_events(self):
+            await asyncio.Event().wait()
+            yield  # pragma: no cover
+
+    class HangingRunner:
+        @classmethod
+        def run_streamed(cls, **kwargs):
+            return Hanging()
+
+    with use(HangingRunner):
+        outcome = await factory.run_agent_object(SimpleNamespace(name="executor-3"), "task", timeout=0.05)
+
+    assert outcome.stopped == "timeout"
+    assert "no answer within the agent timeout (0.05 s)" in outcome.text
+
+
+class _TurnLimitRun:
+    """A streamed run that used up its turns after some tool calls."""
+
+    new_items = [SimpleNamespace(type="tool_call_item", raw_item=SimpleNamespace(name="web_fetch"))]
+    final_output = None
+    context_wrapper = SimpleNamespace(usage=SimpleNamespace(requests=4, input_tokens=900, output_tokens=40))
+
+    async def stream_events(self):
+        from agents.exceptions import MaxTurnsExceeded
+
+        raise MaxTurnsExceeded("Max turns (4) exceeded")
+        yield  # pragma: no cover
+
+
+async def test_a_dynamic_agent_at_its_turn_limit_writes_its_report_without_tools(factory):
+    from agents import Agent
+
+    class Runner:
+        kwargs = []
+
+        @classmethod
+        def run_streamed(cls, **kwargs):
+            cls.kwargs.append(kwargs)
+            if len(cls.kwargs) == 1:
+                return _TurnLimitRun()
+            return _FinishedRun("Found three providers; the fourth is left.", 1, 300, 60)
+
+    with use(Runner):
+        outcome = await factory.run_agent_object(Agent(name="executor-5", instructions="Research."), "task", max_turns=4)
+
+    assert outcome.stopped == "max_turns"
+    assert outcome.text == (
+        "[Agent executor-5 reached its turn limit; its report of the work so far:]\n"
+        "Found three providers; the fourth is left."
+    )
+    report = Runner.kwargs[1]
+    assert report["max_turns"] == 1 and report["session"] is Runner.kwargs[0]["session"]
+    assert report["starting_agent"].model_settings.tool_choice == "none"
+    assert "no more tool calls" in report["input"]
+    # The report's request counts with the run's.
+    assert (outcome.model_calls, outcome.input_tokens, outcome.output_tokens) == (5, 1200, 100)
+
+
+async def test_without_a_report_the_turn_limit_still_says_what_the_agent_did(factory):
+    from agents import Agent
+
+    class Runner:
+        @classmethod
+        def run_streamed(cls, **kwargs):
+            return _TurnLimitRun()
+
+    with use(Runner):
+        outcome = await factory.run_agent_object(Agent(name="executor-6", instructions="Research."), "task", max_turns=4)
+
+    assert outcome.stopped == "max_turns"
+    assert outcome.text.startswith("[Agent executor-6 reached its turn limit]")
+    # The summary is of the run that did the work, not of the failed report.
+    assert "web_fetch" in outcome.text

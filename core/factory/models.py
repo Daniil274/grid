@@ -9,7 +9,8 @@ model summarizes a session. It holds the config and nothing of a run.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from urllib.parse import urlparse
+from typing import Any, Dict, FrozenSet, Optional
 
 from agents import ModelSettings
 from agents.model_settings import Reasoning
@@ -17,7 +18,9 @@ from openai import AsyncOpenAI
 
 from core.bounded_model import BoundedModel
 from core.compact import get_auto_compact_threshold
+from core.modalities import IMAGE, TEXT_ONLY
 from core.model_access import ModelAccess
+from core.model_catalog import catalog as model_catalog
 from core.responses_model import StreamedOutputResponsesModel
 from core.vision_model import VisionChatCompletionsModel
 
@@ -26,6 +29,9 @@ logger = logging.getLogger("grid.agent_factory")
 
 # Context window assumed for an agent that is not in the config (dynamic agents).
 DEFAULT_CONTEXT_WINDOW = 128_000
+
+#: Provider auth methods that spend a plan rather than a Grid-held key.
+PLAN_AUTH_METHODS = ("chatgpt", "claude")
 
 
 class ModelProvider:
@@ -95,6 +101,7 @@ class ModelProvider:
           reasoning: {effort: "none"}    → SDK-native reasoning_effort (OpenAI)
           reasoning: {enabled: false}    → extra_body {"reasoning": {"enabled": false}} (OpenRouter etc.)
           modalities: [image, text]      → extra_body {"modalities": [...]} (image generation)
+          prompt_cache: true             → extra_body {"cache_control": {"type": "ephemeral"}}
         """
         max_tokens = getattr(model_config, "max_tokens", None)
         plan_usage = self._uses_plan(model_config)
@@ -114,6 +121,8 @@ class ModelProvider:
         modalities = getattr(model_config, "modalities", None)
         if modalities:
             extra_body["modalities"] = list(modalities)
+        if self._caches_prompt(model_config):
+            extra_body["cache_control"] = {"type": "ephemeral"}
 
         return ModelSettings(
             # A ChatGPT plan takes no output cap and never stores the response (preview limits).
@@ -126,20 +135,82 @@ class ModelProvider:
             parallel_tool_calls=parallel_tool_calls,
         )
 
+    def _caches_prompt(self, model_config: Any) -> bool:
+        """Only OpenRouter Chat supports this provider-specific wire field.
+
+        The optional prompt_cache field is supplied by the pending schema change;
+        neither a model name nor an explicit flag establishes API capability.
+        Unknown/custom endpoints fail closed instead of leaking cache_control.
+        """
+        if self.config is None or self._uses_plan(model_config) or getattr(model_config, "use_responses_api", False):
+            return False
+        try:
+            provider = self.config.get_provider(model_config.provider)
+            endpoint = urlparse(provider.base_url)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
+        if endpoint.scheme != "https" or endpoint.hostname != "openrouter.ai":
+            return False
+        explicit = getattr(model_config, "prompt_cache", None)
+        if explicit is not None:
+            return bool(explicit)
+        return str(getattr(model_config, "name", "")).startswith("anthropic/")
+
     def _uses_plan(self, model_config: Any) -> bool:
-        """Whether the model is served on the user's ChatGPT plan (provider ``auth: chatgpt``)."""
+        """Whether the model is served on a plan login the CLI/provider holds, not Grid's key."""
         if self.config is None:
             return False
         try:
-            return self.config.get_provider(model_config.provider).auth == "chatgpt"
+            return getattr(self.config.get_provider(model_config.provider), "auth", "api_key") in PLAN_AUTH_METHODS
         except Exception:  # noqa: BLE001 - an unknown provider is reported where the model is built
             return False
+
+    def input_modalities(self, model_key: str) -> Optional[FrozenSet[str]]:
+        """What the model of *model_key* accepts as input; None when that is unknown.
+
+        Its config's ``input_modalities``, else ``vision`` over what the model
+        catalog knows (core.model_catalog), else the catalog alone. The Claude
+        Code CLI takes text only, whatever the model behind it could read.
+        """
+        try:
+            model_config = self.config.get_model(model_key)
+        except Exception:  # noqa: BLE001 - a model the config does not name: nothing is known of it
+            return None
+        try:
+            provider = self.config.get_provider(model_config.provider)
+        except Exception:  # noqa: BLE001 - an unknown provider is reported where the model is built
+            provider = None
+        if getattr(provider, "auth", None) == "claude":
+            return TEXT_ONLY
+        declared = getattr(model_config, "input_modalities", None)
+        if declared:
+            return frozenset(declared) | TEXT_ONLY
+        known = None
+        if provider is not None:
+            known = model_catalog().lookup(
+                getattr(provider, "base_url", "") or "",
+                str(model_config.name),
+                getattr(provider, "price_source", None),
+            )
+        vision = getattr(model_config, "vision", None)
+        if vision is None:
+            return known
+        accepted = set(known or TEXT_ONLY)
+        if vision:
+            accepted.add(IMAGE)
+        else:
+            accepted.discard(IMAGE)
+        return frozenset(accepted)
 
     def sdk_model(self, model_key: str) -> tuple[Any, Any]:
         """Create one Agents SDK model and return it with its config."""
         self.access.check_model(self.config, model_key)
         model_config = self.config.get_model(model_key)
         provider_config = self.config.get_provider(model_config.provider)
+        if getattr(provider_config, "auth", "api_key") == "claude":
+            # The Claude Code CLI holds the login; Grid never builds a keyed
+            # client for it and never sees a Claude credential.
+            return self.claude_model(model_key, model_config, provider_config), model_config
         api_key = self.access.api_key(self.config, model_config.provider)
 
         client = self.make_client(
@@ -197,23 +268,67 @@ class ModelProvider:
             model = BoundedModel(model, key=model_key, timeout=timeout, max_output_tokens=cap)
         return model, model_config
 
+    def claude_model(self, model_key: str, model_config: Any, provider_config: Any) -> Any:
+        """The Agents SDK model backed by the official Claude Code CLI (provider ``auth: claude``).
+
+        Grid holds no Claude credential here: the CLI's own subscription login
+        authorizes every call, and every variable that would bill an API key or
+        a cloud account is removed from the child process (core.claude_cli).
+        The CLI's own login is re-checked on every request, and its built-in
+        tools, MCP servers and host settings are disabled from the command line.
+        """
+        from core.bounded_model import BoundedModel
+        from core.claude_cli import ClaudeCodeRunner
+        from core.claude_model import ClaudeCodeModel
+
+        try:
+            working_directory = self.config.get_working_directory()
+        except Exception:  # noqa: BLE001 - a config without one runs in the current directory
+            working_directory = None
+        runner = ClaudeCodeRunner(
+            binary=getattr(provider_config, "claude_binary", None),
+            working_directory=working_directory,
+            model=model_config.name,
+        )
+        model: Any = ClaudeCodeModel(runner, model_config.name)
+        # The CLI enforces no output cap of its own, and one runaway answer
+        # would hold a run; bound it the way every plan-backed model is bound.
+        timeout = getattr(model_config, "response_timeout", None)
+        cap = getattr(model_config, "max_tokens", None)
+        if timeout or cap:
+            model = BoundedModel(model, key=model_key, timeout=timeout, max_output_tokens=cap)
+        return model
+
     def compact_client_and_model(
         self, key: Optional[str]
     ) -> tuple[Optional[AsyncOpenAI], Optional[str]]:
         """Resolve the client/model to use for full compact."""
+        client, model, _ = self.compact_request(key)
+        return client, model
+
+    def model_request(self, model_key: str) -> tuple[Any, str, Optional[dict]]:
+        """(client, model, Responses API options or None) for a one-off request to *model_key*."""
+        client, model = self.client_for(model_key)
+        cfg = self.config.get_model(model_key)
+        options = {"store": False, "max_output_tokens": None} if self._uses_plan(cfg) else ({} if getattr(cfg, "use_responses_api", False) else None)
+        return client, model, options
+
+    def compact_request(self, key: Optional[str]) -> tuple[Any, Optional[str], Optional[dict]]:
+        """Resolve the summary model and its API options together, including fallback."""
+        resolve = self.model_request
         compact_cfg = self.compact_config
         summary_model_key = getattr(compact_cfg, "summary_model", None)
         if summary_model_key:
             try:
-                return self.client_for(summary_model_key)
+                return resolve(summary_model_key)
             except Exception:
                 logger.warning(
                     "Configured compact.summary_model '%s' is unavailable; falling back to resolved model",
                     summary_model_key,
                 )
         if key:
-            return self.client_for(self.resolve_key(key))
-        return None, None
+            return resolve(self.resolve_key(key))
+        return None, None, None
 
     def context_window(self, agent_key: Optional[str]) -> int:
         """The context window of *agent_key*'s model; a default for unknown agents."""

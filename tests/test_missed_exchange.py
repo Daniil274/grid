@@ -24,3 +24,23 @@ def test_missed_exchange_lists_other_agents_messages_since_own_last_turn(config_
     # Nothing was missed by the agent that spoke last, nor by one new here.
     assert factory._missed_exchange(ctx, "engineer") == ""
     assert factory._missed_exchange(ctx, "newcomer") == ""
+
+
+def test_missed_exchange_strips_legacy_assistant_footer(config_file):
+    """A legacy answer's service Context ID footer never reaches the model."""
+    factory = AgentFactory(Config(str(config_file)))
+    ctx = factory.context_manager.start_new_context()
+    _say(factory, ctx, "user", "coordinator", "add loading labels")
+    _say(factory, ctx, "assistant", "coordinator", "labels started")
+    _say(factory, ctx, "user", "engineer", "why does the right pane flicker?")
+    _say(
+        factory, ctx, "assistant", "engineer",
+        "clear() on every selection; keep the old card\n\nContext ID: ctx-0a1b2c3d",
+    )
+
+    missed = factory._missed_exchange(ctx, "coordinator")
+
+    assert "Agent engineer:\nclear() on every selection; keep the old card" in missed
+    assert "Context ID: ctx-0a1b2c3d" not in missed
+    # The user's words are never touched.
+    assert "why does the right pane flicker?" in missed

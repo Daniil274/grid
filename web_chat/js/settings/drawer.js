@@ -14,6 +14,7 @@
 
 import { h, replace } from "../lib/dom.js";
 import { api } from "../net/api.js";
+import { hideOverlay, showOverlay } from "../ui/overlay.js";
 import { toast } from "../ui/toast.js";
 import { CollectionEditor } from "./collection.js";
 import { SchemaKit, blankOf, child, rootSlot } from "./schema-form.js";
@@ -53,12 +54,14 @@ export class SettingsDrawer {
   async open() {
     await this.load(this.target);
     this.nodes.drawer.classList.add("is-open");
+    showOverlay(this.nodes.drawer);
     document.body.classList.add("has-overlay");
   }
 
   close() {
     if (this._dirty() && !window.confirm("Discard unsaved changes?")) return;
     this.nodes.drawer.classList.remove("is-open");
+    hideOverlay(this.nodes.drawer);
     document.body.classList.remove("has-overlay");
   }
 

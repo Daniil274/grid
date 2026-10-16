@@ -480,17 +480,19 @@ async def test_web_stop_then_continue_over_the_real_factory(factory):
             factory=factory, routed=True, warning="",
         )
 
+    registry = SimpleNamespace(
+        agent_label=lambda system, agent: "Worker",
+        selection_is_valid=lambda system, agent: True,
+        agent_issues=lambda system, agent: [],
+    )
     space = SimpleNamespace(
         context_manager=lambda: manager, workspace_path=".", workspace_label=".", user_id="test", factory=factory, admit_turn=lambda: None,
+        workspace_label_of=lambda context_id: ".", registry_of=lambda context_id: registry,
         warm_agent=AsyncMock(), resolve_turn=resolve_turn,
         update_conversation_metadata=lambda ctx, **updates: manager.update_context_metadata(
             ctx, {key: value for key, value in updates.items() if value is not None}
         ),
-        registry=SimpleNamespace(
-            agent_label=lambda system, agent: "Worker",
-            selection_is_valid=lambda system, agent: True,
-            agent_issues=lambda system, agent: [],
-        ),
+        registry=registry,
         turns=TurnBoard(),
     )
 

@@ -13,6 +13,7 @@
 import { h, replace } from "../lib/dom.js";
 import { api } from "../net/api.js";
 import { chipPicker, field, select, textArea, textInput, toggle } from "../settings/fields.js";
+import { hideOverlay, showOverlay } from "../ui/overlay.js";
 
 const templateId = (template) => `${template.system}/${template.agent}`;
 
@@ -32,6 +33,7 @@ export class PersonalAgentsDrawer {
 
   async open() {
     this.nodes.drawer.classList.add("is-open");
+    showOverlay(this.nodes.drawer);
     await this._load();
     const [first] = this.catalog.agents;
     if (first) this._edit(first);
@@ -40,6 +42,7 @@ export class PersonalAgentsDrawer {
 
   close() {
     this.nodes.drawer.classList.remove("is-open");
+    hideOverlay(this.nodes.drawer);
   }
 
   _bind() {

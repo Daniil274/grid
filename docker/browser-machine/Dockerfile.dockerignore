@@ -1,0 +1,4 @@
+# Only the node goes into a browser machine.
+*
+!grid_node
+grid_node/**/__pycache__

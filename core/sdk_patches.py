@@ -21,6 +21,7 @@ from agents.tool import FunctionTool
 from openai.types.responses import ResponseFunctionToolCall
 
 from core.action_policy import ActionGate
+from core.parallel_lanes import guard as lane_guard
 from utils.logger import Logger
 
 logger = logging.getLogger("grid.sdk_patches")
@@ -149,16 +150,18 @@ def _patch_mcp_tool_errors() -> None:
 
         raw_ctx = getattr(context, "context", None)
         gate = getattr(getattr(raw_ctx, "factory", None), "action_gate", None)
+        # In a batch, the call the gate lets through runs as its lane allows.
+        run = lane_guard(invoke, name, "mcp", None, getattr(gate, "config", None), ActionGate._locator)
         try:
             if gate is None:
-                result = await invoke(context, input_json)
+                result = await run(context, input_json)
             else:
                 result = await gate.invoke(
                     name,
                     "mcp",
                     context,
                     input_json,
-                    invoke,
+                    run,
                     descriptor=ActionGate.describe_tool(tool, name, "mcp"),
                 )
         except ModelBehaviorError as exc:

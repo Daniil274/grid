@@ -28,6 +28,7 @@ import { renderMarkdown } from "../lib/markdown.js";
 import { ICONS } from "./icons.js";
 import { toolFamily } from "../lib/languages.js";
 import { renderPayload } from "./tool-payload.js";
+import { createPlanCard } from "./plan-card.js";
 
 /** The tokens a step spent, prompt first, completion second; "" when none. */
 const usageText = (tokensIn, tokensOut) => {
@@ -53,10 +54,14 @@ const familyIcon = (step) => ICONS[FAMILY_ICONS[toolFamily(step.tool)] ?? ""] ??
 
 function refChip(ref) {
   const label = h("span", { text: ref.label });
-  const glyph = icon(ICONS[ref.kind] ?? ICONS.file, { size: 12 });
+  const glyph = icon(ICONS[ref.kind] ?? (ref.kind === "task" ? ICONS.check : ICONS.file), { size: 12 });
   const title = ref.detail || ref.label;
   if (ref.kind === "url" && /^https?:\/\//i.test(ref.detail)) {
     return h("a.refChip", { href: ref.detail, target: "_blank", rel: "noreferrer noopener", title }, glyph, label);
+  }
+  // A tracker id deep-links into the tracker: the same task, one click away.
+  if (ref.kind === "task" && ref.detail) {
+    return h("a.refChip", { href: `/tasks?task=${encodeURIComponent(ref.detail)}`, title: `Open ${ref.detail} in the tracker` }, glyph, label);
   }
   return h("span.refChip", { title }, glyph, label);
 }
@@ -71,12 +76,41 @@ function refsRow(refs) {
   return h("div.step__refs", {}, visible);
 }
 
+/**
+ * The fold row an open row starts with - the panel's own headline in miniature:
+ * what the row did and how long it took, and a click folds it from wherever the
+ * reader is, so a long result needs no scrolling back up to its head.
+ */
+function createFoldBar() {
+  const label = h("span.step__foldLabel");
+  const time = h("span.step__foldTime");
+  const el = h(
+    "button.step__fold",
+    { type: "button", "aria-label": "Fold" },
+    h("span.step__foldChevron", {}, icon(ICONS.chevron, { size: 14 })),
+    label,
+    time,
+  );
+  return { el, label, time };
+}
+
+/** What a settled row says about itself: how it ended, and in how long. */
+const outcomeText = (step) => {
+  if (step.status === "running") return "Running";
+  const verb = step.status === "error" ? "Failed after" : "Done in";
+  return step.duration_ms == null ? (step.status === "error" ? "Failed" : "Done") : `${verb} ${duration(step.duration_ms)}`;
+};
+
 /** The parts every row shares: icon, title, subtitle, policy badge, timing. */
-function stepHead(step) {
+function stepHead(step, { rollup = false } = {}) {
   const parts = {
     glyph: h("span.step__icon", {}, icon(familyIcon(step), { size: 14 })),
     title: h("span.step__title", { text: step.title }),
     subtitle: h("span.step__subtitle"),
+    // A block's closed head also says what it holds: a mark per step, and a
+    // flag when something inside needs the reader.
+    strip: rollup ? h("span.step__strip", { "aria-hidden": "true" }) : null,
+    flag: rollup ? h("span.step__flag", { hidden: true }) : null,
     policy: h("span.step__policy", { hidden: true }),
     usage: h("span.step__usage"),
     timing: h("span.step__timing"),
@@ -88,6 +122,8 @@ function stepHead(step) {
     { type: "button", "aria-expanded": "false" },
     parts.glyph,
     h("span.step__label", {}, parts.title, parts.subtitle),
+    parts.strip,
+    parts.flag,
     parts.usage,
     parts.policy,
     parts.timing,
@@ -162,7 +198,12 @@ function disclosure(root, head, onOpen = null) {
   const suggest = (open) => {
     if (!pinned) setOpen(open);
   };
-  return { setOpen, suggest };
+  /** The reader's own choice, made from somewhere other than the head. */
+  const choose = (open) => {
+    pinned = true;
+    setOpen(open);
+  };
+  return { setOpen, suggest, choose };
 }
 
 /**
@@ -173,7 +214,21 @@ function disclosure(root, head, onOpen = null) {
  * result - is built when it opens: a stored chat holds hundreds of steps,
  * some with tens of thousands of characters, and nearly all stay closed.
  */
-function createStepRow(step) {
+/**
+ * A stored step that left its payloads on the server (``lazy``): fetch its
+ * whole record the first time it is opened and show it through *apply*.
+ * False when there is no way to fetch it - what the step holds is shown.
+ */
+function loadOnOpen(load, step, apply, placeholder) {
+  if (!load) return false;
+  replace(placeholder, h("p.payload__empty", { text: "Loading…" }));
+  load(step.id)
+    .then((full) => apply({ ...step, ...full, lazy: false }))
+    .catch(() => replace(placeholder, h("p.payload__empty", { text: "Could not load this step's details." })));
+  return true;
+}
+
+function createStepRow(step, load = null) {
   const inlineBody = INLINE_BODY_KINDS.has(step.kind);
   const { head, title, subtitle, policy, usage, timing, glyph, approval } = stepHead(step);
   const detail = h("div.step__detail");
@@ -182,10 +237,12 @@ function createStepRow(step) {
   let latest = step;
   let stale = true;
   const payloadState = { input: {}, result: {} };
+  let loading = false;
 
   /** Build the hidden part from the latest step; once per change, only when open. */
   const fill = () => {
     if (!stale) return;
+    if (latest.lazy && !loading && (loading = loadOnOpen(load, latest, update, detail))) return;
     stale = false;
     // Streaming thinking is appended as it arrives; it is rendered once it lands.
     if (body && latest.status !== "running") {
@@ -198,11 +255,17 @@ function createStepRow(step) {
     ].filter(Boolean));
   };
 
+  // Thinking is short prose that folds itself; the fold row is for what a tool returned.
+  const fold = inlineBody ? null : createFoldBar();
   const root = h("li.step", { dataset: {
     kind: step.kind, status: step.status, tone: step.tone || "neutral",
     family: toolFamily(step.tool),
-  } }, head, approval, refs, body, detail);
-  const { suggest } = disclosure(root, head, fill);
+  } }, head, approval, refs, fold?.el, body, detail);
+  const { suggest, choose } = disclosure(root, head, fill);
+  fold?.el.addEventListener("click", () => {
+    choose(false);
+    head.scrollIntoView?.({ block: "nearest" });
+  });
 
   /** Thinking stays open while it streams and folds away once it lands. */
   const settle = () => {
@@ -232,17 +295,32 @@ function createStepRow(step) {
     applyApproval(approval, next);
     applyUsage(usage, next);
     timing.textContent = next.duration_ms == null ? "" : duration(next.duration_ms);
+    if (fold) {
+      fold.label.textContent = outcomeText(next);
+      fold.time.textContent = usageText(next.tokens_in, next.tokens_out);
+    }
     replace(refs, refsRow(next.refs));
     latest = next;
     stale = true;
     if (root.classList.contains("is-open")) fill();
-    const hasBlocks = Boolean(next.detail || next.input_payload) || Boolean(!inlineBody && (next.body || next.result_payload));
+    const hasBlocks = Boolean(next.lazy || next.detail || next.input_payload) || Boolean(!inlineBody && (next.body || next.result_payload));
     root.classList.toggle("has-detail", hasBlocks || Boolean(inlineBody && (next.status === "running" || next.body)));
     if (inlineBody) suggest(next.status === "running");
   };
 
   update(step);
-  return { root, kind: step.kind, update, appendDelta, settle, activity: () => title.textContent, tick() {} };
+  const own = () => (approval.dataset.approvalId ? "approval" : latest.status === "error" ? "error" : "");
+  return {
+    root,
+    kind: step.kind,
+    update,
+    appendDelta,
+    settle,
+    activity: () => title.textContent,
+    tick() {},
+    mark: () => ({ kind: latest.kind, family: toolFamily(latest.tool), status: latest.status }),
+    attention: own,
+  };
 }
 
 /**
@@ -265,7 +343,34 @@ function createTimeline(list) {
     tick(now) {
       for (const row of rows.values()) row.tick(now);
     },
+    /** What inside needs the reader, at any depth: a held call outranks a failure. */
+    attention() {
+      let found = "";
+      for (const row of rows.values()) {
+        const need = row.attention();
+        if (need === "approval") return need;
+        found ||= need;
+      }
+      return found;
+    },
   };
+}
+
+/** The most marks a closed block draws; more steps share marks. */
+const MAX_MARKS = 24;
+
+/** One mark per step of a block, a run of steps folded into one mark past the cap. */
+function stripMarks(rows) {
+  const marks = [...rows.values()].map((row) => row.mark());
+  if (marks.length <= MAX_MARKS) return marks;
+  const size = Math.ceil(marks.length / MAX_MARKS);
+  const merged = [];
+  for (let at = 0; at < marks.length; at += size) {
+    const run = marks.slice(at, at + size);
+    const status = run.some((m) => m.status === "error") ? "error" : run.some((m) => m.status === "running") ? "running" : run[0].status;
+    merged.push({ ...run[0], status });
+  }
+  return merged;
 }
 
 /** A sub-agent is asked in words; show them, not the JSON envelope they came in. */
@@ -283,14 +388,26 @@ function taskText(detail) {
 }
 
 /**
+ * The parallel tool's block (tools/parallel_tools.py): a container of the
+ * calls it runs side by side, not a sub-agent asked in words. Its task is the
+ * JSON envelope of the batch and its report the JSON of the results, so the
+ * block shows its inner calls and its own subtitle, and nothing else.
+ */
+const isParallelStep = (step) => step.tool === "parallel" || step.title === "Parallel calls";
+
+/**
  * A sub-agent's run: a row whose detail is the sub-agent's own timeline, framed
  * by the task it was given and the report it returned.
  *
  * @param {() => number} turnStart - when the turn began, for a live duration.
  */
-function createAgentRow(step, turnStart) {
-  const { head, title, subtitle, policy, usage, timing, approval } = stepHead(step);
+function createAgentRow(step, turnStart, load = null) {
+  const { head, title, subtitle, policy, usage, timing, approval, strip, flag } = stepHead(step, { rollup: true });
   const timeline = createTimeline(h("ol.agent__steps"));
+  const fold = createFoldBar();
+  const foldBar = fold.el;
+  const foldLabel = fold.label;
+  const foldTime = fold.time;
   const task = h("div.agent__task");
   const report = h("div.agent__report");
   const refs = h("div.step__refsSlot");
@@ -300,23 +417,74 @@ function createAgentRow(step, turnStart) {
     head,
     approval,
     refs,
-    h("div.step__agent", {}, task, timeline.list, report),
+    h("div.step__agent", {}, foldBar, task, timeline.list, report),
   );
   let current = step;
   let stale = true;
   const payloadState = { input: {}, result: {} };
+  let loading = false;
   /** The task and the report, built from the latest step when the block is open. */
   const fill = () => {
     if (!stale) return;
+    if (current.lazy && !loading && (loading = loadOnOpen(load, current, update, report))) return;
     stale = false;
+    // A parallel batch is its inner calls: no task above them, no report below.
+    // A failed batch is an exception the reader has to see: its error shows in
+    // the report's place, never the JSON envelope of the batch or its report.
+    if (isParallelStep(current)) {
+      if (current.status === "error") {
+        replace(report, renderPayload("Error", current.result_payload, current.body, { markdown: false, state: payloadState.result }));
+      }
+      return;
+    }
     const asked = taskText(current.detail);
     replace(task, renderPayload("Task", current.input_payload, asked, { markdown: asked !== current.detail, state: payloadState.input }));
     replace(report, renderPayload(current.status === "error" ? "Error" : "Report", current.result_payload, current.body, { markdown: current.status !== "error", state: payloadState.result }));
   };
-  const { suggest } = disclosure(root, head, fill);
+  const { suggest, setOpen, choose } = disclosure(root, head, fill);
+  foldBar.addEventListener("click", () => {
+    choose(false);
+    head.scrollIntoView?.({ block: "nearest" });
+  });
+
+  /** The fold row: the live activity and clock while it runs, the outcome once it reports. */
+  const renderFold = (now = Date.now()) => {
+    if (current.status === "running") {
+      foldLabel.textContent = timeline.activity() || "Working";
+      foldTime.textContent = duration(Math.max(now - turnStart() - (current.at_ms ?? 0), 0));
+      return;
+    }
+    const count = timeline.size ? ` · ${plural(timeline.size, "step")}` : "";
+    const verb = current.status === "error" ? "Failed after" : "Worked for";
+    foldLabel.textContent = current.duration_ms == null ? plural(timeline.size, "step") : `${verb} ${duration(current.duration_ms)}${count}`;
+    foldTime.textContent = usageText(current.tokens_in, current.tokens_out);
+  };
+
+  /** The strip of marks and the flag a closed block wears; only a change touches the DOM. */
+  let drawn = "";
+  const renderRollup = () => {
+    const marks = stripMarks(timeline.rows);
+    const signature = marks.map((m) => `${m.kind}/${m.family}/${m.status}`).join(" ");
+    if (signature !== drawn) {
+      drawn = signature;
+      replace(strip, marks.map((m) => h("span.step__mark", { dataset: { kind: m.kind, family: m.family, status: m.status } })));
+    }
+    const need = timeline.attention();
+    flag.hidden = !need;
+    flag.dataset.kind = need;
+    flag.title = need === "approval" ? "A call inside waits for you" : need ? "A step inside failed" : "";
+  };
 
   const renderSubtitle = () => {
-    const asked = taskText(current.detail || "").replace(/\s+/g, " ").trim() || current.subtitle;
+    renderRollup();
+    renderFold();
+    // A parallel batch says what it runs in its own subtitle (tool_summaries);
+    // the JSON envelope of the batch is not words.
+    // A failed batch says what broke - the first line of its error - instead
+    // of only the count of calls that never reported.
+    const asked = isParallelStep(current)
+      ? (current.status === "error" ? String(current.body || "").split("\n")[0].trim() : "") || current.subtitle || ""
+      : taskText(current.detail || "").replace(/\s+/g, " ").trim() || current.subtitle;
     if (current.status === "running") {
       subtitle.textContent = timeline.activity() || asked || "Starting";
       return;
@@ -339,9 +507,13 @@ function createAgentRow(step, turnStart) {
     stale = true;
     if (root.classList.contains("is-open")) fill();
     renderSubtitle();
-    // Like the panel: open while the sub-agent works, out of the way once it reports.
-    if (next.status === "running") suggest(true);
-    else if (wasRunning) suggest(false);
+    // A parallel batch opens while its calls run so the reader sees which tools
+    // and agents they are, then folds out of the way once it reports. A
+    // sub-agent's own block stays closed while it works; the reader opens it.
+    if (isParallelStep(next)) {
+      if (next.status === "running") suggest(true);
+      else if (wasRunning) suggest(false);
+    }
   };
 
   update(step);
@@ -365,6 +537,10 @@ function createAgentRow(step, turnStart) {
     },
     /** A child changed: refresh what the collapsed head says about it. */
     refresh: renderSubtitle,
+    mark: () => ({ kind: "agent", family: toolFamily(current.tool), status: current.status }),
+    attention: () => (approval.dataset.approvalId ? "approval" : timeline.attention() || (current.status === "error" ? "error" : "")),
+    /** Open for a held call inside, whatever the reader had closed: they must see it. */
+    reveal: () => setOpen(true),
   };
 }
 
@@ -373,6 +549,9 @@ function createAgentRow(step, turnStart) {
  */
 export function createReasoningPanel() {
   const top = createTimeline(h("ol.reasoning__steps"));
+  // The plan is a step of the trace, but the reader follows it outside the
+  // panel, which folds away once the turn ends (ui/plan-card.js).
+  const plan = createPlanCard();
   // Every row at any depth, by step id, with the timeline that holds it.
   const index = new Map();
   const headline = h("span.reasoning__headline", { text: "Thinking" });
@@ -432,10 +611,34 @@ export function createReasoningPanel() {
     for (let entry = index.get(index.get(id)?.parentId); entry; entry = index.get(entry.parentId)) yield entry.row;
   };
 
-  const makeRow = (step) => (step.kind === "agent" ? createAgentRow(step, () => startedAt) : createStepRow(step));
+  // Fetches a stored step's whole record (hydrate's ``loadStep``); null while live.
+  let stepLoader = null;
+  const makeRow = (step) => (step.kind === "agent" ? createAgentRow(step, () => startedAt, stepLoader) : createStepRow(step, stepLoader));
 
   return {
     el: root,
+    planEl: plan.el,
+
+    /** Whether this answer shows a plan card. */
+    get hasPlan() {
+      return plan.hasPlan;
+    },
+
+    /** Fold the plan card, or open it (ui/plan-card.js: the reader's choice stands). */
+    setPlanCollapsed(collapsed) {
+      plan.setCollapsed(collapsed);
+    },
+
+    /**
+     * Show the plan a stored chat saved, when no plan step of this answer
+     * already shows one. A saved plan may be an older turn's, so it shows as
+     * the whole plan, never as this answer's request.
+     */
+    applyStoredPlan(stored) {
+      if (plan.hasPlan) return;
+      plan.update(stored, { scoped: false });
+      plan.setCollapsed(false);
+    },
 
     get isEmpty() {
       return index.size === 0;
@@ -457,6 +660,10 @@ export function createReasoningPanel() {
 
     /** Create or patch a step, addressed by `step.id`, inside its sub-agent's block. */
     upsert(step) {
+      if (step.kind === "plan") {
+        plan.update(step);
+        return;
+      }
       root.hidden = false;
       const existing = index.get(step.id);
       if (existing && (existing.row.kind === "agent") === (step.kind === "agent")) {
@@ -471,7 +678,11 @@ export function createReasoningPanel() {
         timeline.rows.set(step.id, row);
         index.set(step.id, { row, timeline, parentId: existing?.parentId ?? step.parent_id });
       }
-      for (const block of ancestors(step.id)) block.refresh();
+      const held = index.get(step.id).row.attention() === "approval";
+      for (const block of ancestors(step.id)) {
+        block.refresh();
+        if (held) block.reveal();
+      }
       renderHeadline();
     },
 
@@ -510,8 +721,16 @@ export function createReasoningPanel() {
       renderHeadline();
     },
 
-    /** Render a stored trace from a reloaded conversation, collapsed. */
-    hydrate(steps) {
+    /**
+     * Render a stored trace from a reloaded conversation, collapsed.
+     * `loadStep(id)` fetches the whole record of a step stored as ``lazy``.
+     */
+    hydrate(steps, { loadStep = null } = {}) {
+      stepLoader = loadStep;
+      for (const step of steps ?? []) if (step.kind === "plan") plan.update(step);
+      // A stored answer's plan starts folded; the transcript opens the newest.
+      plan.setCollapsed(true);
+      steps = steps?.filter((step) => step.kind !== "plan");
       if (!steps?.length) return;
       for (const step of steps) this.upsert(step);
       // The last step listed may be a short one inside a block that ran on.

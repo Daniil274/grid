@@ -17,6 +17,9 @@ schemas.UserLimitsPolicy); they apply on a server with accounts.
   user's own key or subscription cost the operator nothing and are not counted.
   A cost is known only once a call is done, so a turn can pass a budget by one
   call before it is stopped.
+- *Storage*: the disk all of the user's spaces hold, as last measured
+  (web_chat.space measures it in the background); a user past it starts no
+  turn until they delete files.
 """
 
 from __future__ import annotations
@@ -65,13 +68,16 @@ class TurnLimits:
         counter: Optional[TurnCounter] = None,
         spend: Optional[SpendReader] = None,
         clock: Callable[[], float] = time.time,
+        storage: Optional[Callable[[], Optional[int]]] = None,
     ) -> None:
-        """*policy* is read at every turn, so an edited config applies at once."""
+        """*policy* is read at every turn, so an edited config applies at once.
+        *storage* gives the bytes the user's spaces hold (None: not measured yet)."""
         self._user_id = user_id
         self._policy = policy
         self._counter = counter
         self._spend = spend
         self._clock = clock
+        self._storage = storage
 
     def admit(self, running: int) -> Optional[str]:
         """None when a new turn may start - it is then counted - or why not.
@@ -96,6 +102,12 @@ class TurnLimits:
         refusal = self._over_budget(policy)
         if refusal is not None:
             return refusal
+        used = self._storage() if self._storage is not None and policy.storage_mb is not None else None
+        if used is not None and used > policy.storage_mb * 1024 * 1024:
+            return (
+                f"Your files take {used / (1024 * 1024):,.0f} MB, more than the {policy.storage_mb:,} MB "
+                "this server keeps for you. Delete some in Files to go on."
+            )
         if self._counter is not None and not self._counter.count_turn(self._user_id, policy.turns_per_day):
             return f"You have used today's {policy.turns_per_day} turns. The count starts again at 00:00 UTC."
         return None

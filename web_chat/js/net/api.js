@@ -29,20 +29,66 @@ const json = (method, body) => ({
   body: JSON.stringify(body),
 });
 
+/** A query string from the params that carry a value; none gives "". */
+const queryString = (params = {}) => {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (value === undefined || value === null || value === "" || value === false) continue;
+    query.set(key, String(value));
+  }
+  const text = query.toString();
+  return text ? `?${text}` : "";
+};
+
 export const api = {
+  /** Devices agents use (web_chat/devices_api.py): browser machines, paired PCs and phones. */
+  devices: () => request("/api/devices", { cache: "no-store" }),
+  startMachine: () => request("/api/devices/machines", { method: "POST" }),
+  stopMachine: (id) => request(`/api/devices/machines/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  deviceControl: (id, taken) => request(`/api/devices/${encodeURIComponent(id)}/control`, json("POST", { taken })),
+  newPairing: () => request("/api/devices/pairing", { method: "POST" }),
+  forgetDevice: (id) => request(`/api/devices/paired/${encodeURIComponent(id)}`, { method: "DELETE" }),
   serverStatus: () => request("/api/server/status", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
   adminServer: () => request("/api/admin/server", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
   restartServer: () => request("/api/admin/server/restart", { method: "POST" }),
   bootstrap: () => request("/api/chat/bootstrap"),
-  uploadFiles: (files) => {
+  /** Into the workspace of chat `contextId` (a chat may work in a directory of its own). */
+  uploadFiles: (files, contextId) => {
     const body = new FormData();
     for (const file of files) body.append("files", file);
-    return request("/api/workspace/uploads", { method: "POST", body });
+    const scope = contextId ? `?context=${encodeURIComponent(contextId)}` : "";
+    return request(`/api/workspace/uploads${scope}`, { method: "POST", body });
   },
   listConversations: () => request("/api/chat/conversations", { cache: "no-store" }),
+  // Revalidated every time: an unchanged chat answers 304 from its ETag.
   getConversation: (id, signal) =>
-    request(`/api/chat/conversations/${encodeURIComponent(id)}`, { cache: "no-store", signal }),
+    request(`/api/chat/conversations/${encodeURIComponent(id)}`, { cache: "no-cache", signal }),
+  /** A trace step with its payloads, which the conversation left out (``lazy``). */
+  conversationStep: (id, messageId, stepId) =>
+    request(
+      `/api/chat/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/steps/${encodeURIComponent(stepId)}`,
+      { cache: "no-cache" },
+    ),
   createConversation: (selection) => request("/api/chat/conversations", json("POST", selection)),
+  /** Projects: a metadata layer over chats (title, parent, description). */
+  projects: () => request("/api/projects", { cache: "no-store" }),
+  createProject: (project) => request("/api/projects", json("POST", project)),
+  updateProject: (id, patch) => request(`/api/projects/${encodeURIComponent(id)}`, json("PATCH", patch)),
+  deleteProject: (id) => request(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** Attach a chat to a project, or detach it (`null`). */
+  setConversationProject: (id, projectId) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/project`, json("PUT", { project_id: projectId })),
+  /** Continue this chat in a new one, seeded with its plan ("plan") or its tail ("tail"). */
+  continueConversation: (id, strategy = "plan") =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/continue`, json("POST", { strategy })),
+  /** The plan of a project: the tasks its chats planned, bd's statuses first. */
+  projectPlan: (id) => request(`/api/projects/${encodeURIComponent(id)}/plan`, { cache: "no-store" }),
+  /** The plan a chat's turns left behind, for the card shown when it opens again. */
+  conversationPlan: (id) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/plan`, { cache: "no-store" }),
+  /** The directory a chat works in, before its first message. */
+  setWorkspace: (id, path) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/workspace`, json("PUT", { path })),
   renameConversation: (id, title) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}`, json("PATCH", { title })),
   deleteConversation: (id) =>
@@ -50,12 +96,34 @@ export const api = {
   /** Fork before a user message; the edited text then goes into the branch. */
   createBranch: (id, messageId) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/branches`, json("POST", { message_id: messageId })),
+  /** A new chat holding this one up to the end of the message's turn. */
+  forkConversation: (id, messageId) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/forks`, json("POST", { message_id: messageId })),
+  /** Delete a message from the chat and the agent's context; a request takes its turn along. */
+  deleteMessage: (id, messageId) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" }),
+  /** Bring the chat's workspace back to before turn `turnId` (core.checkpoints). */
+  restoreCheckpoint: (id, turnId) =>
+    request(
+      `/api/chat/conversations/${encodeURIComponent(id)}/checkpoints/${encodeURIComponent(turnId)}/restore`,
+      { method: "POST" },
+    ),
   compactConversation: (id) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/compact`, { method: "POST" }),
   activateBranch: (id) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/activate`, { method: "POST" }),
   prepareAgent: (systemKey, agentKey) =>
     request("/api/chat/prepare-agent", json("POST", { system_key: systemKey, agent_key: agentKey })),
+  /** The tracker page (web_chat/tasks_api.py): the user's tasks, live from bd. */
+  tasks: (status) =>
+    request(`/api/tasks${status ? `?status=${encodeURIComponent(status)}` : ""}`, { cache: "no-store" }),
+  task: (id) => request(`/api/tasks/${encodeURIComponent(id)}`, { cache: "no-store" }),
+  createTask: (task) => request("/api/tasks", json("POST", task)),
+  updateTask: (id, patch) => request(`/api/tasks/${encodeURIComponent(id)}`, json("PATCH", patch)),
+  closeTask: (id, reason) => request(`/api/tasks/${encodeURIComponent(id)}/close`, json("POST", { reason })),
+  taskDep: (id, action, parentId) =>
+    request(`/api/tasks/${encodeURIComponent(id)}/deps`, json("POST", { action, parent_id: parentId })),
+  initTracker: () => request("/api/tasks/init", { method: "POST" }),
   /** A config file: `target` is the catalog's or a system's key (web_chat/deployment.py); none is the default system's. */
   getSettings: (target) => request(`/api/settings${target ? `?target=${encodeURIComponent(target)}` : ""}`),
   saveSettings: (config, target) => request("/api/settings/structured", json("PUT", { config, target })),
@@ -109,6 +177,15 @@ export const api = {
   createAgent: (spec) => request("/api/agents", json("POST", spec)),
   updateAgent: (key, spec) => request(`/api/agents/${encodeURIComponent(key)}`, json("PUT", spec)),
   deleteAgent: (key) => request(`/api/agents/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  /** The agent's memory (web_chat/memory_api.py): overview, filtered or searched records, prompt preview. */
+  memoryOverview: (params) => request(`/api/memory${queryString(params)}`, { cache: "no-store" }),
+  createMemoryRecord: (payload) => request("/api/memory/records", json("POST", payload)),
+  updateMemoryRecord: (recordId, payload) =>
+    request(`/api/memory/records/${encodeURIComponent(recordId)}`, json("PUT", payload)),
+  deleteMemoryRecord: (recordId, params) =>
+    request(`/api/memory/records/${encodeURIComponent(recordId)}${queryString(params)}`, { method: "DELETE" }),
+  /** Distil a chat (`{context_id}`) into memory. */
+  syncMemory: (payload) => request("/api/memory/sync", json("POST", payload)),
   /** The systems page (web_chat/system_hub.py). */
   systems: () => request("/api/systems"),
   system: (kind, key) => request(`/api/systems/${encodeURIComponent(kind)}/${encodeURIComponent(key)}`),
