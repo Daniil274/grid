@@ -12,6 +12,7 @@ from typing import List, Any
 
 from agents import function_tool
 from utils.logger import Logger
+from core.media import looks_binary, media_output
 from utils import confined_fs
 from utils.path_utils import display_agent_path_auto, resolve_agent_path_auto
 from utils.text_patch import PatchError, apply_patch, keep_newlines, replace_once
@@ -191,15 +192,16 @@ def delete_file(filepath: str) -> str:
 
 
 @function_tool
-def read_file(filepath: str) -> str:
+def read_file(filepath: str) -> Any:
     """
-    Reads file content.
+    Reads file content. An image, audio recording, video or PDF comes back as
+    itself, for a model that takes it.
 
     Args:
         filepath: Path to the file
 
     Returns:
-        str: File content
+        File content
     """
     visible_path = display_agent_path_auto(filepath)
     log_tool_call("read_file", {"filepath": visible_path})
@@ -213,6 +215,15 @@ def read_file(filepath: str) -> str:
         if not path.is_file():
             log_tool_error("read_file", f"{visible_path} is not a file")
             return f"❌ {visible_path} is not a file"
+
+        # A picture, a recording or a document goes to the model as itself.
+        media = media_output(path, visible_path, open_file=confined_fs.open_file)
+        if media is not None:
+            log_tool_result("read_file", "media" if isinstance(media, list) else media)
+            return media
+        with confined_fs.open_file(path, "rb") as handle:
+            if looks_binary(handle.read(8192)):
+                return f"❌ {visible_path} is a binary file ({path.stat().st_size} bytes), not text; inspect it with a tool made for its format."
 
         content = confined_fs.read_text(path)
         lines_count = len(content.splitlines())

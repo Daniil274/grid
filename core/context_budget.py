@@ -32,11 +32,15 @@ import json
 from typing import Any, Callable, Iterable, List, Optional, Set
 
 from core.compact.base import CompactMessage
+from core.modalities import part_modality
 
 CHARS_PER_TOKEN = 4
 #: A screenshot-sized image costs about this much with common vision models.
 IMAGE_TOKENS = 1500
 IMAGE_PART_TYPES = frozenset({"input_image", "image_url"})
+#: What other media cost, roughly: a few minutes of audio, a short clip, some pages.
+#: Counted this way, not by the length of their base64 data.
+MEDIA_TOKENS = {"image": IMAGE_TOKENS, "audio": 4000, "video": 10000, "pdf": 4000}
 
 CLEARED_NOTE = (
     "[Output of {tool} cleared to keep the context within the model's window. "
@@ -58,8 +62,9 @@ def _tokens(value: Any) -> int:
     if isinstance(value, str):
         return _text_tokens(value)
     if isinstance(value, dict):
-        if value.get("type") in IMAGE_PART_TYPES:
-            return IMAGE_TOKENS
+        modality = part_modality(value)
+        if modality is not None:
+            return MEDIA_TOKENS[modality]
         return sum(_tokens(item) for key, item in value.items() if key != "id")
     if isinstance(value, (list, tuple)):
         return sum(_tokens(item) for item in value)
@@ -171,8 +176,9 @@ def _content_text(content: Any) -> str:
     for part in content or []:
         if not isinstance(part, dict):
             continue
-        if part.get("type") in IMAGE_PART_TYPES:
-            parts.append("[image]")
+        modality = part_modality(part)
+        if modality is not None:
+            parts.append(f"[{modality}]")
         elif isinstance(part.get("text"), str):
             parts.append(part["text"])
     return "\n".join(parts)

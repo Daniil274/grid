@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from urllib.parse import urlparse
-from typing import Any, Dict, Optional
+from typing import Any, Dict, FrozenSet, Optional
 
 from agents import ModelSettings
 from agents.model_settings import Reasoning
@@ -18,7 +18,9 @@ from openai import AsyncOpenAI
 
 from core.bounded_model import BoundedModel
 from core.compact import get_auto_compact_threshold
+from core.modalities import IMAGE, TEXT_ONLY
 from core.model_access import ModelAccess
+from core.model_catalog import catalog as model_catalog
 from core.responses_model import StreamedOutputResponsesModel
 from core.vision_model import VisionChatCompletionsModel
 
@@ -162,6 +164,43 @@ class ModelProvider:
             return getattr(self.config.get_provider(model_config.provider), "auth", "api_key") in PLAN_AUTH_METHODS
         except Exception:  # noqa: BLE001 - an unknown provider is reported where the model is built
             return False
+
+    def input_modalities(self, model_key: str) -> Optional[FrozenSet[str]]:
+        """What the model of *model_key* accepts as input; None when that is unknown.
+
+        Its config's ``input_modalities``, else ``vision`` over what the model
+        catalog knows (core.model_catalog), else the catalog alone. The Claude
+        Code CLI takes text only, whatever the model behind it could read.
+        """
+        try:
+            model_config = self.config.get_model(model_key)
+        except Exception:  # noqa: BLE001 - a model the config does not name: nothing is known of it
+            return None
+        try:
+            provider = self.config.get_provider(model_config.provider)
+        except Exception:  # noqa: BLE001 - an unknown provider is reported where the model is built
+            provider = None
+        if getattr(provider, "auth", None) == "claude":
+            return TEXT_ONLY
+        declared = getattr(model_config, "input_modalities", None)
+        if declared:
+            return frozenset(declared) | TEXT_ONLY
+        known = None
+        if provider is not None:
+            known = model_catalog().lookup(
+                getattr(provider, "base_url", "") or "",
+                str(model_config.name),
+                getattr(provider, "price_source", None),
+            )
+        vision = getattr(model_config, "vision", None)
+        if vision is None:
+            return known
+        accepted = set(known or TEXT_ONLY)
+        if vision:
+            accepted.add(IMAGE)
+        else:
+            accepted.discard(IMAGE)
+        return frozenset(accepted)
 
     def sdk_model(self, model_key: str) -> tuple[Any, Any]:
         """Create one Agents SDK model and return it with its config."""

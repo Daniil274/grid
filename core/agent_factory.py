@@ -436,6 +436,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
                             candidate_config, agent_config.parallel_tool_calls
                         ),
                         vision=getattr(candidate_config, "vision", None),
+                        modalities=self.models.input_modalities(model_key),
                     )
                 )
             if not candidates:
@@ -590,6 +591,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
                     model=candidate_model,
                     settings=self.models.settings(candidate_cfg),
                     vision=getattr(candidate_cfg, "vision", None),
+                    modalities=self.models.input_modalities(candidate_key),
                 )
             )
         if not candidates:

@@ -18,6 +18,7 @@ NOTE: _fetch_response body is a copy of openai_chatcompletions.py:246-376
 from __future__ import annotations
 
 import json
+import mimetypes
 import time
 from typing import Any, Literal, cast
 
@@ -44,6 +45,8 @@ from agents.tracing.spans import Span
 from agents.util._json import _to_dump_compatible
 
 from core.generated_images import ReportingStream, report
+from core.media import AUDIO_FORMATS
+from core.modalities import AUDIO, IMAGE, VIDEO, modality_of_mime
 
 
 class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
@@ -116,6 +119,50 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
         return normalized
 
     @staticmethod
+    def _chat_media(part: Any) -> dict | None:
+        """A media part as Chat Completions providers take it; None for text.
+
+        A file part carries audio, video, an image or a PDF as a data URL
+        (core.media): audio becomes ``input_audio``, video ``video_url`` and an
+        image ``image_url``, as OpenRouter documents them; a PDF stays a file.
+        """
+        if not isinstance(part, dict):
+            return None
+        kind = part.get("type")
+        if kind in ("image_url", "input_audio", "video_url"):
+            return part
+        if kind != "file":
+            return None
+        fields = part.get("file") if isinstance(part.get("file"), dict) else {}
+        data = fields.get("file_data") or ""
+        mime = data[5:].split(";", 1)[0] if isinstance(data, str) and data.startswith("data:") else ""
+        modality = modality_of_mime(mime) or modality_of_mime(mimetypes.guess_type(fields.get("filename") or "")[0])
+        if modality == AUDIO and mime in AUDIO_FORMATS:
+            return {"type": "input_audio", "input_audio": {"data": data.split(",", 1)[1], "format": AUDIO_FORMATS[mime]}}
+        if modality == VIDEO and mime:
+            return {"type": "video_url", "video_url": {"url": data}}
+        if modality == IMAGE and mime:
+            return {"type": "image_url", "image_url": {"url": data, "detail": "auto"}}
+        return part
+
+    @staticmethod
+    def _media_note(parts: list[dict]) -> str:
+        return "[Tool result image]" if all(p.get("type") == "image_url" for p in parts) else "[Tool result media]"
+
+    @staticmethod
+    def _user_media_in_chat_shape(messages: list[dict]) -> list[dict]:
+        """User messages with their file parts in the shape of their modality."""
+        result = []
+        for msg in messages:
+            content = msg.get("content")
+            if msg.get("role") == "user" and isinstance(content, list) and any(
+                isinstance(p, dict) and p.get("type") == "file" for p in content
+            ):
+                msg = {**msg, "content": [VisionChatCompletionsModel._chat_media(p) or p for p in content]}
+            result.append(msg)
+        return result
+
+    @staticmethod
     def _extract_images_from_tool_messages(
         messages: list[dict],
     ) -> list[dict]:
@@ -132,14 +179,15 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
         message AFTER the entire run — not after each individual tool message.
         """
         result: list[dict] = []
-        pending_images: list[dict] = []  # images accumulated across current tool-message run
+        pending_images: list[dict] = []  # media accumulated across current tool-message run
+        messages = VisionChatCompletionsModel._user_media_in_chat_shape(messages)
 
         for msg in messages:
             if msg.get("role") != "tool":
                 # Leaving a run of tool messages — flush collected images first
                 if pending_images:
                     user_content: list[dict] = [
-                        {"type": "text", "text": "[Tool result image]"},
+                        {"type": "text", "text": VisionChatCompletionsModel._media_note(pending_images)},
                         *pending_images,
                     ]
                     result.append({"role": "user", "content": user_content})
@@ -156,8 +204,9 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
             text_parts = []
             image_parts = []
             for part in parts:
-                if isinstance(part, dict) and part.get("type") == "image_url":
-                    image_parts.append(part)
+                media = VisionChatCompletionsModel._chat_media(part)
+                if media is not None:
+                    image_parts.append(media)
                 else:
                     text_parts.append(part)
 
@@ -174,7 +223,11 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
                     for p in text_parts
                 )
             else:
-                tool_msg["content"] = "[Image provided below]"
+                tool_msg["content"] = (
+                    "[Image provided below]"
+                    if all(p.get("type") == "image_url" for p in image_parts)
+                    else "[Media provided below]"
+                )
             result.append(tool_msg)
 
             # Accumulate images — will be flushed after the entire tool-message run
@@ -183,7 +236,7 @@ class VisionChatCompletionsModel(OpenAIChatCompletionsModel):
         # Flush any remaining images at the end
         if pending_images:
             user_content = [
-                {"type": "text", "text": "[Tool result image]"},
+                {"type": "text", "text": VisionChatCompletionsModel._media_note(pending_images)},
                 *pending_images,
             ]
             result.append({"role": "user", "content": user_content})

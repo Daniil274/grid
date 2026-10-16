@@ -11,6 +11,9 @@ older one is replaced in that request by a short text note, in place, so the
 turn it belonged to still reads in order. The session is never changed: the
 filter works on a copy, and a later request with a larger budget sends them
 all again.
+
+Audio, video and PDF documents (core.media) weigh far more than a screenshot:
+only the newest ``MAX_OTHER_MEDIA`` of them go out with a request, the same way.
 """
 
 from __future__ import annotations
@@ -19,12 +22,20 @@ from typing import Any, Callable, List
 
 from agents.run import CallModelData, ModelInputData
 
+from core.modalities import IMAGE, NAMES, part_modality
+
 #: Content-part types that carry an image in SDK input items.
 IMAGE_PART_TYPES = frozenset({"input_image", "image_url"})
 
 OMITTED_NOTE = (
     "[Earlier image omitted: only the {limit} most recent images are sent with each "
     "request. Look again (for example, take a new screenshot) if you need it.]"
+)
+#: Audio, video and PDF parts sent with one request, newest first.
+MAX_OTHER_MEDIA = 2
+OMITTED_MEDIA_NOTE = (
+    "[Earlier {name} omitted: only the {limit} most recent audio, video and PDF "
+    "attachments are sent with each request. Read the file again if you need it.]"
 )
 
 
@@ -43,10 +54,6 @@ def _parts_of(item: Any) -> tuple[str, list] | None:
     return None
 
 
-def _is_image(part: Any) -> bool:
-    return isinstance(part, dict) and part.get("type") in IMAGE_PART_TYPES
-
-
 def limit_images(items: List[Any], max_images: int) -> List[Any]:
     """*items* with only the newest *max_images* images; older ones become notes.
 
@@ -54,7 +61,7 @@ def limit_images(items: List[Any], max_images: int) -> List[Any]:
     omitted image are returned as they are; an item that loses one is a shallow
     copy with a new parts list, so the caller's items are never modified.
     """
-    kept = 0
+    kept = other = 0
     result = list(items)
     note = {"type": "input_text", "text": OMITTED_NOTE.format(limit=max_images)}
     for index in range(len(result) - 1, -1, -1):
@@ -64,14 +71,25 @@ def limit_images(items: List[Any], max_images: int) -> List[Any]:
         key, parts = found
         new_parts = None
         for position in range(len(parts) - 1, -1, -1):
-            if not _is_image(parts[position]):
+            modality = part_modality(parts[position])
+            if modality is None:
                 continue
-            if kept < max_images:
-                kept += 1
-                continue
+            if modality == IMAGE:
+                if kept < max_images:
+                    kept += 1
+                    continue
+                replacement = dict(note)
+            else:
+                if other < MAX_OTHER_MEDIA:
+                    other += 1
+                    continue
+                replacement = {
+                    "type": "input_text",
+                    "text": OMITTED_MEDIA_NOTE.format(name=NAMES[modality], limit=MAX_OTHER_MEDIA),
+                }
             if new_parts is None:
                 new_parts = list(parts)
-            new_parts[position] = dict(note)
+            new_parts[position] = replacement
         if new_parts is not None:
             result[index] = {**result[index], key: new_parts}
     return result

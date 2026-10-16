@@ -93,9 +93,18 @@ class ModelConfig(BaseModel):
     generating never pauses. Unset: no limit.
     """
     vision: Optional[bool] = None
-    """Whether the model reads images. ``false`` sends it a note in place of each
-    image, and models that see go first for a request with images; unset is
-    unknown - taken as yes until the provider refuses images (core.fallback_model).
+    """Whether the model reads images; ``input_modalities`` says it for every kind
+    of input and wins over this. Unset with no ``input_modalities``: what the
+    model catalog knows (core.model_catalog), else unknown - an image is tried
+    until the provider refuses it (core.fallback_model).
+    """
+    input_modalities: Optional[List[Literal["text", "image", "audio", "video", "pdf"]]] = None
+    """What the model accepts as input besides text: ``image``, ``audio``,
+    ``video``, ``pdf``. A request carrying one of them goes only to the models of
+    the agent that accept it; when none does, the agent is told so in its place
+    (core.fallback_model). Unset: ``vision``, then the model catalog
+    (core.model_catalog); audio, video and PDF are sent only to a model known
+    to take them.
     """
     modalities: Optional[List[Literal["text", "image"]]] = None
     """Output modalities to request, sent as ``modalities`` in the request body.
