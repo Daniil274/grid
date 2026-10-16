@@ -28,11 +28,38 @@ Output = Union[str, List[Union[ToolOutputText, ToolOutputImage, ToolOutputFileCo
 
 
 def _who(context: RunContextWrapper) -> tuple[str, str]:
-    """(user, conversation) the call is made for; a device belongs to one user, and is used by one conversation at a time."""
+    """(user, holder) the call is made for: a device belongs to one user, and is
+    used by one conversation - or one run inside it - at a time (core.devices.hub)."""
+    from core.devices.hub import current_holder
+
     run = getattr(context, "context", None)
     user = getattr(run, "user_id", None) or "local"
     conversation = getattr(run, "context_id", None) or "default"
-    return str(user), str(conversation)
+    return str(user), current_holder(str(conversation))
+
+
+async def _ask_person(context: RunContextWrapper, tool: str, detail: str) -> Optional[bool]:
+    """The user's answer about a step with consequences; None when nobody answered,
+    or there is no one to ask (no action policy here)."""
+    run = getattr(context, "context", None)
+    gate = getattr(getattr(run, "factory", None), "action_gate", None)
+    state = getattr(run, "action_state", None)
+    if gate is None or state is None:
+        raise LookupError("no one to ask")
+    return await gate.ask_person(state, tool, "external", detail)
+
+
+def _needs_confirmation(result: Any) -> Optional[str]:
+    """What a device holds back until a person confirms it (grid_node NeedsConfirmation)."""
+    from grid_node.node import CONFIRM_PREFIX
+
+    if not getattr(result, "isError", False):
+        return None
+    for item in getattr(result, "content", None) or []:
+        words = getattr(item, "text", "") or ""
+        if words.startswith(CONFIRM_PREFIX):
+            return words[len(CONFIRM_PREFIX):]
+    return None
 
 
 def _arguments(arguments: Optional[str]) -> dict:
@@ -55,6 +82,14 @@ def _outputs(result: Any) -> Output:
             parts.append(ToolOutputImage(image_url=f"data:{item.mimeType};base64,{item.data}", detail="auto"))
         elif kind == "audio":
             parts.append(ToolOutputFileContent(file_data=f"data:{item.mimeType};base64,{item.data}", filename="audio"))
+        elif kind == "resource" and getattr(item.resource, "blob", None):
+            resource = item.resource
+            name = str(resource.uri).rsplit("/", 1)[-1] or "file"
+            parts.append(ToolOutputFileContent(
+                file_data=f"data:{resource.mimeType or 'application/octet-stream'};base64,{resource.blob}", filename=name,
+            ))
+        elif kind == "resource" and getattr(item.resource, "text", None) is not None:
+            parts.append(ToolOutputText(text=item.resource.text))
         else:
             parts.append(ToolOutputText(text=f"[{kind} content from the device]"))
     if getattr(result, "isError", False):
@@ -68,13 +103,28 @@ def _outputs(result: Any) -> Output:
 async def _call(context: RunContextWrapper, kind: str, device: str, tool: str, arguments: Optional[str]) -> Output:
     from core.devices.hub import DeviceError, hub
 
-    user, conversation = _who(context)
+    user, holder = _who(context)
     try:
         parsed = _arguments(arguments)
     except ValueError as exc:
         return f"❌ arguments must be a JSON object of the tool's parameters: {exc}"
+    parsed.pop("confirmed", None)  # a person confirms a step, never an agent
     try:
-        result = await hub().call(user, device, tool, parsed, holder=conversation, allowed=kind)
+        result = await hub().call(user, device, tool, parsed, holder=holder, allowed=kind)
+        detail = _needs_confirmation(result)
+        if detail is not None:
+            try:
+                answer = await _ask_person(context, f"device_{kind}", detail)
+            except LookupError:
+                return (
+                    f"❌ This needs a person's confirmation - {detail} - and no one can be asked here. "
+                    "Tell the user what you were about to do and let them do it."
+                )
+            if answer is None:
+                return f"❌ {detail}: this needs the user's confirmation, and they did not answer. Tell them and stop here."
+            if not answer:
+                return f"❌ The user declined: {detail}. Do not try it another way; ask them what they want instead."
+            result = await hub().call(user, device, tool, {**parsed, "confirmed": True}, holder=holder, allowed=kind)
     except DeviceError as exc:
         return f"❌ {exc}"
     except Exception as exc:  # the device failed the call
@@ -93,8 +143,8 @@ async def devices(context: RunContextWrapper) -> str:
     from core.devices.hub import hub
     from core.devices.machines import pool
 
-    user, conversation = _who(context)
-    connected = [device.summary(conversation) for device in hub().devices(user)]
+    user, holder = _who(context)
+    connected = [device.summary(holder) for device in hub().devices(user)]
     machines = pool()
     lines = {"devices": connected}
     if machines is not None:

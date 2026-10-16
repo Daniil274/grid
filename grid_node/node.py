@@ -42,6 +42,18 @@ ToolHandler = Callable[[Dict[str, Any]], Awaitable[List[Content]]]
 ViewSink = Callable[[Dict[str, Any]], Awaitable[None]]
 
 
+#: How a tool says a step needs a person's yes first: the server asks them and,
+#: on a yes, calls the tool again with ``confirmed`` - which no agent can set.
+CONFIRM_PREFIX = "needs confirmation: "
+
+
+class NeedsConfirmation(Exception):
+    """Raised by a tool for a step with consequences outside (pay, send, delete)."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(CONFIRM_PREFIX + detail)
+
+
 #: How risky a tool is, as MCP tool annotations say it; the server gives agents
 #: each class through a tool of its own, which the action policy judges apart.
 LOOK = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True}

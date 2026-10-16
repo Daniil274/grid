@@ -1377,3 +1377,32 @@ def test_a_factory_judges_under_the_catalog_policy_with_its_own_part(tmp_path, m
     assert gate.config.validator == base.validator
     assert gate.validator.prompts == gate.config.prompts
     assert "контроля версий" in gate.validator.prompts.action.instructions
+
+
+async def test_a_tool_asks_the_user_about_a_step_with_consequences():
+    """ask_person: a step only the tool can see (a page's «Pay») waits in the chat for a yes."""
+    from types import SimpleNamespace as _NS
+
+    gate = ActionGate(ActionPolicyConfig(mode="enforce"), validator=_NS(evaluate=AsyncMock()))
+    state = ActionRunState(task="Buy the tea", context_id="ctx-1")
+    asking = asyncio.create_task(gate.ask_person(state, "device_do", "external", "Press the button «Pay» on shop.example"))
+    for _ in range(100):
+        if gate.pending_reviews():
+            break
+        await asyncio.sleep(0.01)
+    (review,) = gate.pending_reviews()
+    assert review["tool"] == "device_do" and review["context_id"] == "ctx-1"
+    assert "Press the button «Pay» on shop.example" in review.get("reasons", ())
+    # An answer from another chat does not count.
+    assert not gate.resolve_review(review["approval_id"], approve=True, context_id="ctx-2")
+    assert gate.resolve_review(review["approval_id"], approve=True, context_id="ctx-1")
+    assert await asking is True
+    assert [e["decision"] for e in state.events][-1] == "allow"
+
+    declined = asyncio.create_task(gate.ask_person(state, "device_do", "external", "Press «Send»"))
+    for _ in range(100):
+        if gate.pending_reviews():
+            break
+        await asyncio.sleep(0.01)
+    gate.resolve_review(gate.pending_reviews()[0]["approval_id"], approve=False)
+    assert await declined is False

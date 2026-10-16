@@ -402,6 +402,7 @@ async def orchestrate(
     # Import pipeline registry (inside function to avoid circular import)
     from core.tracing.pipeline_registry import PipelineRegistry, PipelineStatus
     from core.deadlines import waiting_for_delegate
+    from core.devices.hub import holding
 
     registry = PipelineRegistry()
     raw_ctx = getattr(context, "context", None)
@@ -581,8 +582,9 @@ async def orchestrate(
                     timeout=run_timeout,
                 )
 
-            # The caller's clock stops while its executor works under its own.
-            with waiting_for_delegate():
+            # The caller's clock stops while its executor works under its own;
+            # the devices it uses are its own while it runs (core.devices.hub).
+            with waiting_for_delegate(), holding(executor.name, default=active_context_id):
                 outcome = await registry.run_serialized_step(
                     pipeline_id=pipeline_id,
                     agent_name=executor.name,

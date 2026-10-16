@@ -20,9 +20,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Optional, Set
 
 from mcp import ClientSession, types
 
@@ -39,6 +40,33 @@ HELLO_SECONDS = 20
 CALL_SECONDS = 120
 
 Sink = Callable[[Dict[str, Any]], Awaitable[None]]
+
+# Who holds a device: the conversation, or a run inside it - its path, as
+# "ctx-1/executor-ab12". A run and the runs it starts pass a device between
+# them; two runs side by side (parallel executors) do not share one.
+_holder: ContextVar[Optional[str]] = ContextVar("grid_device_holder", default=None)
+
+
+def current_holder(default: str) -> str:
+    """The holder the running code calls devices as: its run's, else *default* (its conversation)."""
+    return _holder.get() or default
+
+
+@contextmanager
+def holding(name: str, default: str) -> Iterator[str]:
+    """Run the block as a holder of its own inside the current one; its leases end with it."""
+    holder = f"{current_holder(default)}/{name}"
+    token = _holder.set(holder)
+    try:
+        yield holder
+    finally:
+        _holder.reset(token)
+        hub().release(holder)
+
+
+def _related(first: str, second: str) -> bool:
+    """Whether one holder is the other, or runs inside it."""
+    return first == second or first.startswith(second + "/") or second.startswith(first + "/")
 
 
 class DeviceError(Exception):
@@ -78,13 +106,13 @@ class Device:
     calls: int = 0
 
     def held_by_other(self, holder: str) -> bool:
-        return bool(self.holder) and self.holder != holder and self.held_until > time.time()
+        return bool(self.holder) and not _related(self.holder, holder) and self.held_until > time.time()
 
     def summary(self, holder: Optional[str] = None) -> Dict[str, Any]:
         if self.person:
             status = "a person has control"
         elif holder is not None and self.held_by_other(holder):
-            status = "in use by another conversation"
+            status = "in use by another conversation or agent"
         else:
             status = "free"
         return {
@@ -231,7 +259,7 @@ class DeviceHub:
             )
         if device.held_by_other(holder):
             raise DeviceError(
-                f"{device.name} is in use by another conversation; use another device or start a new machine."
+                f"{device.name} is in use by another conversation or agent; use another device or start a new machine."
             )
         device.holder, device.held_until = holder, time.time() + LEASE_SECONDS
         try:
@@ -245,9 +273,9 @@ class DeviceHub:
         return result
 
     def release(self, holder: str) -> None:
-        """End every lease of conversation *holder* (its turn ended for good, the chat was deleted)."""
+        """End every lease of *holder* and the runs inside it (its turn or run ended)."""
         for device in self._devices.values():
-            if device.holder == holder:
+            if device.holder and (device.holder == holder or device.holder.startswith(holder + "/")):
                 device.holder, device.held_until = None, 0.0
 
     # -- the live view ------------------------------------------------------

@@ -270,3 +270,85 @@ async def test_a_paired_computer_dials_in_and_its_tools_are_called(tmp_path):
             dialing.cancel()
         server.should_exit = True
         await asyncio.gather(serving, *(t for t in [dialing] if t), return_exceptions=True)
+
+
+class ConfirmingScreen(FakeScreen):
+    """A device whose «Pay» needs a person's yes, as the browser's does."""
+
+    def tools(self):
+        from grid_node.node import NeedsConfirmation, ToolSpec, text
+
+        async def pay(args):
+            if not args.get("confirmed"):
+                raise NeedsConfirmation("Press the button «Pay» on shop.example")
+            self.ran.append("paid")
+            return [text("paid")]
+
+        schema = {"type": "object", "properties": {"confirmed": {"type": "boolean"}}}
+        return [*super().tools(), ToolSpec("pay", "Pay", schema, pay)]
+
+
+class Gate:
+    def __init__(self, answer):
+        self.answer, self.asked = answer, []
+
+    async def ask_person(self, state, tool, kind, detail):
+        self.asked.append((tool, kind, detail))
+        return self.answer
+
+
+def gated_ctx(gate):
+    return SimpleNamespace(context=SimpleNamespace(
+        user_id="alice", context_id="chat-a", action_state=object(), factory=SimpleNamespace(action_gate=gate),
+    ))
+
+
+@pytest.mark.parametrize("answer, outcome", [(True, "paid"), (False, "❌ The user declined"), (None, "they did not answer")])
+async def test_a_step_with_consequences_waits_for_the_users_yes(fresh_hub, answer, outcome):
+    driver = ConfirmingScreen()
+    tasks, end = await connected(fresh_hub, driver)
+    try:
+        gate = Gate(answer)
+        # The agent cannot confirm for the user: its own "confirmed" is dropped.
+        out = await invoke(device_tools.device_do, gated_ctx(gate), device="dev-1", tool="pay",
+                           arguments='{"confirmed": true}')
+        assert outcome in out
+        assert gate.asked == [("device_do", "external", "Press the button «Pay» on shop.example")]
+        assert driver.ran == (["paid"] if answer else [])
+    finally:
+        await end.close()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_without_anyone_to_ask_the_step_is_not_taken(fresh_hub):
+    driver = ConfirmingScreen()
+    tasks, end = await connected(fresh_hub, driver)
+    try:
+        out = await invoke(device_tools.device_do, run_ctx(), device="dev-1", tool="pay")
+        assert "no one can be asked here" in out and driver.ran == []
+    finally:
+        await end.close()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_runs_side_by_side_take_turns_but_a_run_inside_shares_its_callers_device(fresh_hub):
+    from core.devices.hub import LOOK, DeviceError, holding
+
+    tasks, end = await connected(fresh_hub, FakeScreen())
+    look = lambda holder: fresh_hub.call("alice", "dev-1", "screen_look", {}, holder=holder, allowed=LOOK)
+    try:
+        await look("chat-a")  # the coordinator's turn uses it
+        with holding("executor-1", default="chat-a") as first:
+            assert first == "chat-a/executor-1"
+            await look(first)  # its executor takes it over
+            with holding("executor-2", default="chat-a"):
+                pass
+            with pytest.raises(DeviceError, match="in use by another"):
+                await look("chat-a/executor-2")  # a sibling waits
+        # The executor ended: its lease went with it.
+        await look("chat-a/executor-2")
+        fresh_hub.release("chat-a")
+        await look("chat-b")
+    finally:
+        await end.close()
+        await asyncio.gather(*tasks, return_exceptions=True)

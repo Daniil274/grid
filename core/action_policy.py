@@ -980,6 +980,27 @@ class ActionGate:
                 self._waiters.pop(approval_id, None)
                 self._reviews.pop(approval_id, None)
 
+    async def ask_person(self, run: ActionRunState, tool_name: str, kind: str, detail: str) -> Optional[bool]:
+        """Ask the user about one step a tool is about to take, in their chat.
+
+        For a consequence only the tool can see - a page's «Pay» or «Send»
+        button, a command on the user's own computer - after the policy let
+        the call itself through. *detail* says what would happen; the user
+        reads it with the request. True or False is the answer; None means
+        nobody answered within ``review_ttl_seconds``. The run's deadlines
+        stand still while the user decides.
+        """
+        detail = " ".join(str(detail).split())[:500]
+        digest = hashlib.sha256(f"{tool_name}\n{detail}".encode("utf-8")).hexdigest()
+        routing = Routing(effect=kind, route="review", reasons=(detail,))
+        answer = await self._ask(run, tool_name, kind, digest, routing, {"reason": detail}, {})
+        async with run.lock:
+            self._record(
+                run, tool_name, kind, digest, "allow" if answer else "deny", "tool_confirmation",
+                source="user" if answer is not None else "no_answer",
+            )
+        return answer
+
     async def _mediated_call(
         self, run, tool_name, kind, ctx, raw_args, invoke, descriptor, effect, previous
     ):

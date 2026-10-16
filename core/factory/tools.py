@@ -26,6 +26,7 @@ from agents.exceptions import (
 
 from core.action_policy import delegated_state
 from core.deadlines import Deadline, waiting_for_delegate
+from core.devices.hub import holding
 from core.factory.run_context import GridRunContext, get_runner, runner_max_turns
 from core.interruption import StopRequested
 from core.run_stream import interrupted_run_report, run_output_text
@@ -774,8 +775,10 @@ class ToolAssembly:
                 f"\n\nIts session is kept: call {tool_name} again with input that "
                 f"includes {sub_context_id} to continue it where it stopped."
             )
+            caller = getattr(getattr(context, "context", None), "context_id", None) or "default"
             try:
-                with waiting_for_delegate():
+                # The devices it uses are its own while it runs (core.devices.hub).
+                with waiting_for_delegate(), holding(f"{agent_key}-{sub_context_id}", default=caller):
                     async with deadline:
                         result = get_runner().run_streamed(
                             starting_agent=local_sub_agent,

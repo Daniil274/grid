@@ -19,6 +19,7 @@ from agents import RunContextWrapper, function_tool
 
 from core.action_policy import delegated_state
 from core.deadlines import Deadline, waiting_for_delegate
+from core.devices.hub import holding
 from core.factory.run_context import GridRunContext, get_runner, runner_max_turns
 from core.run_stream import run_output_text
 from utils.path_utils import factory_path_context
@@ -261,8 +262,9 @@ class SystemAccessBroker:
             max_turns = runner_max_turns(0)
         deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         try:
-            # The caller's clock stops while the other system works under its own limit.
-            with waiting_for_delegate():
+            # The caller's clock stops while the other system works under its own
+            # limit; the devices it uses are held as a run inside the caller's.
+            with waiting_for_delegate(), holding(f"{target_system}.{target}", default=parent.context_id or "default"):
                 async with deadline:
                     target_agent = await factory.create_agent(target)
                     run_input = task

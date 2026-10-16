@@ -1467,5 +1467,10 @@ class TurnRunner:
             # Messages sent during the turn that no model call read go back.
             control.steering.hand_back()
             Logger.deactivate_session_log(session_log)
+            if active_context_id is not None:
+                # The devices the turn used are free again for the user's other chats.
+                from core.devices.hub import hub as device_hub
+
+                device_hub().release(active_context_id)
             if binding is not None:
                 self.context_manager.unbind(binding)

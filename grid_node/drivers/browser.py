@@ -14,10 +14,11 @@ import asyncio
 import base64
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from grid_node.node import LOOK, Content, Driver, ToolSpec, ViewSink, image, text
+from grid_node.node import LOOK, Content, Driver, NeedsConfirmation, ToolSpec, ViewSink, image, text
 
 logger = logging.getLogger("grid.node.browser")
 
@@ -30,6 +31,29 @@ ACTION_TIMEOUT_MS = 15_000
 
 def _schema(properties: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required or [], "additionalProperties": False}
+
+
+#: Buttons whose press has consequences outside the page: money, messages,
+#: publishing, deleting. Pressing one waits for a person's yes (NeedsConfirmation).
+CONSEQUENTIAL = re.compile(
+    r"\b(buy|purchase|pay|payment|checkout|check out|place order|order now|confirm order|complete order|"
+    r"subscribe|donate|transfer|send|post|publish|tweet|delete|remove account|book now|reserve)\b"
+    r"|купит|оплат|заказать|оформить заказ|подтвердить заказ|подписат|перевест|отправит|опубликова|удалит|"
+    r"пожертвова|забронирова",
+    re.IGNORECASE,
+)
+#: Set by the server after a person confirmed the step; never by an agent.
+CONFIRMED = {"type": "boolean", "description": "Set by the server once a person confirmed; leave it out."}
+
+# The words a press would act on: the element's own name, and for a field the
+# names of its form's submit buttons (Enter sends the form).
+_NAME_JS = """el => {
+  const name = n => ((n.getAttribute && n.getAttribute('aria-label')) || n.innerText || n.value || n.title || '').trim();
+  const target = el.closest('button, a, input, [role=button], [role=link], [role=menuitem]') || el;
+  const form = target.form || target.closest && target.closest('form');
+  const submits = form ? [...form.querySelectorAll('button, input[type=submit]')].map(name).filter(Boolean) : [];
+  return {own: name(target).slice(0, 120), form: submits.join(' | ').slice(0, 200)};
+}"""
 
 
 class BrowserDriver(Driver):
@@ -120,12 +144,12 @@ class BrowserDriver(Driver):
                      _schema({"full_page": {"type": "boolean", "default": False}}), self.screenshot, LOOK),
             ToolSpec("browser_click", "Click an element by its ref, or a point by x and y (CSS pixels).",
                      _schema({"ref": ref, "x": {"type": "number"}, "y": {"type": "number"},
-                              "double": {"type": "boolean", "default": False}}), self.click),
+                              "double": {"type": "boolean", "default": False}, "confirmed": CONFIRMED}), self.click),
             ToolSpec("browser_type", "Type text into an element by its ref; submit presses Enter after it.",
                      _schema({"ref": ref, "text": {"type": "string"}, "submit": {"type": "boolean", "default": False},
-                              "clear": {"type": "boolean", "default": True}}, ["ref", "text"]), self.type),
+                              "clear": {"type": "boolean", "default": True}, "confirmed": CONFIRMED}, ["ref", "text"]), self.type),
             ToolSpec("browser_press", "Press a key or a combination, e.g. Enter, Escape, Control+A.",
-                     _schema({"key": {"type": "string"}}, ["key"]), self.press),
+                     _schema({"key": {"type": "string"}, "confirmed": CONFIRMED}, ["key"]), self.press),
             ToolSpec("browser_scroll", "Scroll the page by pixels (positive down/right).",
                      _schema({"dy": {"type": "number", "default": 600}, "dx": {"type": "number", "default": 0}}), self.scroll),
             ToolSpec("browser_history", "Go back or forward in the current tab.",
@@ -158,13 +182,39 @@ class BrowserDriver(Driver):
         data = await page.screenshot(full_page=bool(args.get("full_page")), type="png")
         return [text(f"Screenshot of {await self._where()}"), image(data)]
 
+    async def _names(self, page: Any, ref: Optional[str] = None, point: Optional[tuple] = None) -> Dict[str, str]:
+        """What a press would act on: the element's name and its form's submit buttons."""
+        try:
+            if ref:
+                return await self._target(page, ref).evaluate(_NAME_JS, timeout=ACTION_TIMEOUT_MS)
+            if point:
+                handle = await page.evaluate_handle("([x, y]) => document.elementFromPoint(x, y)", list(point))
+                element = handle.as_element()
+                return await element.evaluate(_NAME_JS) if element is not None else {}
+            return await page.evaluate(f"(() => {{ const el = document.activeElement; return el ? ({_NAME_JS})(el) : {{}}; }})()")
+        except Exception:
+            return {}
+
+    async def _check(self, page: Any, args: Dict[str, Any], action: str, names: Dict[str, str], *, submits: bool) -> None:
+        """Hold a press with consequences outside the page until a person confirms it."""
+        if args.get("confirmed"):
+            return
+        own, form = names.get("own", ""), names.get("form", "") if submits else ""
+        for label, words in (("the button", own), ("the form's", form)):
+            if words and CONSEQUENTIAL.search(words):
+                where = page.url
+                raise NeedsConfirmation(f"{action} {label} «{words}» on {where}")
+
     async def click(self, args: Dict[str, Any]) -> List[Content]:
         page = await self._ensure_page()
         count = 2 if args.get("double") else 1
         if args.get("ref"):
+            await self._check(page, args, "Press", await self._names(page, ref=args["ref"]), submits=False)
             await self._target(page, args["ref"]).click(click_count=count, timeout=ACTION_TIMEOUT_MS)
         elif args.get("x") is not None and args.get("y") is not None:
-            await page.mouse.click(float(args["x"]), float(args["y"]), click_count=count)
+            point = (float(args["x"]), float(args["y"]))
+            await self._check(page, args, "Press", await self._names(page, point=point), submits=False)
+            await page.mouse.click(point[0], point[1], click_count=count)
         else:
             return [text("❌ Give ref, or x and y.")]
         await page.wait_for_load_state("domcontentloaded")
@@ -178,12 +228,15 @@ class BrowserDriver(Driver):
         else:
             await target.press_sequentially(str(args["text"]), timeout=ACTION_TIMEOUT_MS)
         if args.get("submit"):
+            await self._check(page, args, "Send with Enter", await self._names(page, ref=args["ref"]), submits=True)
             await target.press("Enter")
             await page.wait_for_load_state("domcontentloaded")
         return [text(f"Typed. Now: {await self._where()}")]
 
     async def press(self, args: Dict[str, Any]) -> List[Content]:
         page = await self._ensure_page()
+        if str(args["key"]).split("+")[-1] in ("Enter", "NumpadEnter", "Space", " "):
+            await self._check(page, args, f"Press {args['key']} on", await self._names(page), submits=True)
         await page.keyboard.press(str(args["key"]))
         return [text(f"Pressed {args['key']}. Now: {await self._where()}")]
 

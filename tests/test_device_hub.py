@@ -210,7 +210,11 @@ async def test_a_real_browser_is_read_and_driven_through_the_hub(tmp_path):
         button = re.search(r'button "Buy" \[ref=(e\d+)\]', snapshot).group(1)
 
         await call("browser_type", {"ref": box, "text": "tea"})
-        clicked = await call("browser_click", {"ref": button})
+        held = await call("browser_click", {"ref": button})
+        # «Buy» has consequences outside the page: nothing happens before a person says yes.
+        assert held.isError and held.content[0].text.startswith("needs confirmation: Press the button «Buy»")
+        assert "Shop" in (await call("browser_snapshot", {}, LOOK)).content[0].text
+        clicked = await call("browser_click", {"ref": button, "confirmed": True})
         assert "bought tea" in clicked.content[0].text
 
         shot = await call("browser_screenshot", {}, LOOK)
