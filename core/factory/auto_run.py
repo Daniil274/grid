@@ -2,7 +2,8 @@
 
 ``auto_run_tools`` of an agent's config: one-time ones once per user and
 agent, per-message ones on every request; their output becomes part of the
-agent's input.
+agent's input. They need not be among the agent's own tools: the operator
+runs them, so a one-time setup step does not have to be offered to the model.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from agents import Agent
 from core.action_policy import is_policy_block
 from core.factory.run_context import AutoRunToolContext, GridRunContext
 from schemas import AgentConfig
+from utils.exceptions import ConfigError
 from utils.logger import Logger
 
 logger = logging.getLogger("grid.agent_factory")
@@ -76,7 +78,7 @@ class AutoRunTools:
             )
             target_tool = next(
                 (t for t in tools if getattr(t, "name", "") == tool_name), None
-            )
+            ) or self._unlisted_auto_run_tool(tool_name)
             if target_tool and hasattr(target_tool, "on_invoke_tool"):
                 logger.info(
                     f"Auto-running tool '{tool_name}' for agent '{agent_key}' (cwd={working_dir}, every_run={every_run})"
@@ -127,14 +129,24 @@ class AutoRunTools:
                         )
             else:
                 logger.warning(
-                    f"⚠️ Auto-run tool '{tool_name}' is not among the tools of agent '{agent_key}'"
+                    f"⚠️ Auto-run tool '{tool_name}' of agent '{agent_key}' is not a function tool of this system"
                 )
                 if hasattr(observer, "tool_call_finished"):
                     observer.tool_call_finished(
                         agent_key, tool_name,
-                        f"❌ Auto-run tool '{tool_name}' is not among the tools of this agent",
+                        f"❌ Auto-run tool '{tool_name}' is not a function tool of this system",
                     )
         return "".join(result_parts), complete
+
+    def _unlisted_auto_run_tool(self, tool_name: str) -> Any:
+        """A function tool of the config that the agent does not list, built as
+        its listed tools are (isolation, output limit); None for any other name."""
+        try:
+            if self.config.get_tool(tool_name).type != "function":
+                return None
+        except (ConfigError, AttributeError):  # an unknown name; a factory without a config
+            return None
+        return next(iter(self._resolve_function_tools([tool_name])), None)
 
     async def _execute_init_tools(
         self,

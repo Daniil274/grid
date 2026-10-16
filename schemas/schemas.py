@@ -245,7 +245,10 @@ class AgentConfig(BaseModel):
     mcp_enabled: bool = False
     auto_run_tools: Optional[List[Dict[str, Any]]] = Field(
         default=None, 
-        description="List of tools to run automatically on agent startup. Each item: {'name': 'tool_name', 'parameters': {}}"
+        description=(
+            "Tools to run automatically on agent startup. Each item: {'name': 'tool_name', 'parameters': {}}. "
+            "A function tool of the config runs even when it is not among the agent's tools."
+        ),
     )
     parallel_tool_calls: bool = Field(
         default=False,

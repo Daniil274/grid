@@ -77,3 +77,28 @@ async def test_init_tools_failures_reach_the_observer():
         [{"name": "beads_show", "parameters": {}}, {"name": "nope"}], tools, run_context(observer)
     )
     assert [row["status"] for row in recorder.snapshot()] == ["error", "error"]
+
+
+async def test_a_config_function_tool_the_agent_does_not_list_still_auto_runs():
+    """A setup step the operator runs need not be offered to the model."""
+    recorder, observer = make_observer()
+    factory, tools = make_factory({})
+    beads_init = SimpleNamespace(name="beads_init", on_invoke_tool=AsyncMock(return_value="✅ Beads initialized."))
+    declared = {"beads_init": SimpleNamespace(type="function"), "helper": SimpleNamespace(type="agent")}
+
+    def get_tool(name):
+        if name not in declared:
+            from utils.exceptions import ConfigError
+            raise ConfigError(f"no tool {name}")
+        return declared[name]
+
+    factory.config = SimpleNamespace(get_tool=get_tool)
+    factory._resolve_function_tools = lambda keys: [beads_init] if keys == ["beads_init"] else []
+    config = SimpleNamespace(auto_run_tools=[{"name": "beads_init"}, {"name": "helper"}, {"name": "ghost"}])
+
+    info, complete = await factory._execute_auto_run_tools("a", config, tools, ".", run_context(observer))
+
+    assert "Beads initialized" in info and complete
+    assert tools == []  # the agent's own tools are unchanged
+    rows = {row["tool"]: row["status"] for row in recorder.snapshot()}
+    assert rows == {"beads_init": "done", "helper": "error", "ghost": "error"}
