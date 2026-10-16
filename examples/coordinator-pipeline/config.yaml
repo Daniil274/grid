@@ -114,6 +114,12 @@ providers:
     price_source: openai
     timeout: 300
     max_retries: 2
+  claude-code:
+    name: claude-code
+    base_url: cli://claude  # unused: the Claude Code CLI is the endpoint
+    auth: claude
+    timeout: 300
+    max_retries: 0  # the CLI retries itself
 
 models:
   # response_timeout: seconds one answer of a model may take, first byte to
@@ -220,6 +226,22 @@ models:
     temperature: 0.2
     max_tokens: 64000
     context_window: 256000
+  sonnet-5-5:
+    name: claude-sonnet-5-5
+    provider: claude-code
+    # The model reads 1M; the window is declared so that compaction starts
+    # near 200k: 272000 - 64000 answer - 8000 reserves (compact.auto).
+    max_tokens: 64000
+    context_window: 272000
+    description: "Claude Sonnet 5.5 through the Claude Code subscription"
+  opus-5-5:
+    name: claude-opus-5-5
+    provider: claude-code
+    # The model reads 1M; the window is declared so that compaction starts
+    # near 200k: 272000 - 64000 answer - 8000 reserves (compact.auto).
+    max_tokens: 64000
+    context_window: 272000
+    description: "Claude Opus 5.5 through the Claude Code subscription"
 tools:
   beads_init:
     type: function
@@ -271,15 +293,15 @@ tools:
     # Модели исполнителя по порядку: первая доступная, при сбое запроса — следующая.
     models:
       - deepseek-flash-latest
+      - sonnet-5-5
       - gpt-6.1-sol
-      - claude-sonnet-5.5
     model_choice: true
     tiers:
       fast:
         - deepseek-flash-latest
       strong:
-        - claude-sonnet-5.5
-    # Время исполнителя: не меньше 10 минут и не больше часа (по умолчанию — settings.agent_timeout).
+        - sonnet-5-5
+        - gpt-6.1-sol
     min_timeout_seconds: 600
     max_timeout_seconds: 3600
     # Продолженный по context_id исполнитель с историей длиннее этого продолжает со сжатой.
@@ -511,12 +533,11 @@ agents:
     timeout: 0  # No agent timeout: the coordinator must not be cut off mid-orchestration.
     max_turns: 0  # No turn limit for the same reason.
     model:
-      - gemini-4-argon
       - gpt-6-astra
-      - claude-opus-5.5
+      - opus-5-5
+      - gemini-4-argon
     description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
     tools:
-      - beads_init
       - beads_ready
       - beads_list
       - beads_create
@@ -530,6 +551,12 @@ agents:
       - beads_log_read
       - orchestrate
       - parallel
+      - devices
+      - device_look
+      - device_do
+      - device_run
+      - device_start
+      - device_stop
       - bash_tool
       - file_read
       - file_write
@@ -539,21 +566,15 @@ agents:
       - grep_tool
       - web_fetch
       - web_search
-      - init_codegraph
-      - codegraph
-      - call_coordinator
       - memory_recall
       - memory_remember
       - memory_overview
       - memory_forget
       - systems_list
       - system_delegate
-      - devices
-      - device_look
-      - device_do
-      - device_run
-      - device_start
-      - device_stop
+      - init_codegraph
+      - codegraph
+      - call_coordinator
     system_skills:
       - codegraph
       - memory

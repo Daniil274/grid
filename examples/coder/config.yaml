@@ -133,6 +133,12 @@ providers:
     price_source: openai
     timeout: 300
     max_retries: 2
+  claude-code:
+    name: claude-code
+    base_url: cli://claude  # unused: the Claude Code CLI is the endpoint
+    auth: claude
+    timeout: 300
+    max_retries: 0  # the CLI retries itself
 models:
   claude-sonnet-5.5:
     name: anthropic/claude-sonnet-5.5
@@ -244,6 +250,22 @@ models:
     temperature: 0.5
     max_tokens: 128000
     context_window: 256000
+  sonnet-5-5:
+    name: claude-sonnet-5-5
+    provider: claude-code
+    # The model reads 1M; the window is declared so that compaction starts
+    # near 200k: 272000 - 64000 answer - 8000 reserves (compact.auto).
+    max_tokens: 64000
+    context_window: 272000
+    description: "Claude Sonnet 5.5 through the Claude Code subscription"
+  opus-5-5:
+    name: claude-opus-5-5
+    provider: claude-code
+    # The model reads 1M; the window is declared so that compaction starts
+    # near 200k: 272000 - 64000 answer - 8000 reserves (compact.auto).
+    max_tokens: 64000
+    context_window: 272000
+    description: "Claude Opus 5.5 through the Claude Code subscription"
 tools:
   bash_tool:
     type: "function"
@@ -469,9 +491,8 @@ agents:
   engineer:
     name: "Engineer"
     model:
-      - claude-sonnet-5.5
+      - opus-5-5
       - gpt-6.1-sol
-      - deepseek-v4-pro
     timeout: 0
     max_turns: 0
     mcp_enabled: true
