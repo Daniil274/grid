@@ -11,6 +11,7 @@ import { splitFiles, withFiles } from "../lib/files.js";
 import { clock } from "../lib/format.js";
 import { decorateDiagrams } from "../lib/diagrams.js";
 import { renderMarkdown } from "../lib/markdown.js";
+import { decorateMath } from "../lib/math.js";
 import { scopeWorkspaceLinks } from "../lib/workspace-links.js";
 import { ICONS } from "./icons.js";
 import { createReasoningPanel } from "./reasoning.js";
@@ -245,6 +246,7 @@ export function createMessage({
     body.innerHTML = renderMarkdown(words);
     decorateCode(body);
     decorateDiagrams(body);
+    decorateMath(body);
     // Workspace-file links the agent emits (/api/workspace/files/<path>)
     // download on click, from the directory this chat works in.
     scopeWorkspaceLinks(body);
@@ -521,6 +523,7 @@ function createContextCard({ timestamp, context, content = "" }) {
     body.innerHTML = renderMarkdown(content);
     decorateCode(body);
     decorateDiagrams(body);
+    decorateMath(body);
     scopeWorkspaceLinks(body);
   }
   const root = h(

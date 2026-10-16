@@ -27,6 +27,7 @@
 
 import { h, icon, replace } from "../lib/dom.js";
 import { renderMarkdown } from "../lib/markdown.js";
+import { decorateMath } from "../lib/math.js";
 import { ICONS } from "./icons.js";
 
 /** How each state reads, in the order the summary lists them. */
@@ -75,7 +76,11 @@ function taskRow(task, onOpen) {
 }
 
 /** Task text the tracker recorded, as markdown; the plan never trusts it as HTML. */
-const prose = (markdown) => h("div.taskDialog__prose", { html: renderMarkdown(markdown) });
+const prose = (markdown) => {
+  const view = h("div.taskDialog__prose", { html: renderMarkdown(markdown) });
+  decorateMath(view);
+  return view;
+};
 
 /** What the field honestly says when nothing was ever recorded for it. */
 const missing = (text) => h("p.taskDialog__missing", { text });

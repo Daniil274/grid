@@ -3,6 +3,7 @@
  * markdown/code renderers. Remote images never trigger an automatic request. */
 import { h } from "../lib/dom.js";
 import { renderMarkdown } from "../lib/markdown.js";
+import { decorateMath } from "../lib/math.js";
 import { highlight, diffStats } from "../lib/highlight.js";
 import { languageFor, toolFamily } from "../lib/languages.js";
 import { scopedWorkspaceUrl } from "../lib/workspace-links.js";
@@ -81,7 +82,10 @@ function partView(part) {
   let body;
   switch (part.kind) {
     case "json": body = jsonView(part.data); break;
-    case "markdown": body = h("div.payload__body.payload__body--prose", { html: renderMarkdown(text) }); break;
+    case "markdown":
+      body = h("div.payload__body.payload__body--prose", { html: renderMarkdown(text) });
+      decorateMath(body);
+      break;
     case "diff": body = h("pre.payload__body.payload__code.payload__code--diff", { dataset: { language: "diff" } },
       h("code", { html: highlight(text, "diff") })); break;
     case "code": {

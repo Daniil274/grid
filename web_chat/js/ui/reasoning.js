@@ -25,6 +25,7 @@
 import { h, icon, replace } from "../lib/dom.js";
 import { duration, plural, tokens } from "../lib/format.js";
 import { renderMarkdown } from "../lib/markdown.js";
+import { decorateMath } from "../lib/math.js";
 import { ICONS } from "./icons.js";
 import { toolFamily } from "../lib/languages.js";
 import { renderPayload } from "./tool-payload.js";
@@ -248,6 +249,7 @@ function createStepRow(step, load = null) {
     if (body && latest.status !== "running") {
       body.classList.remove("is-streaming");
       body.innerHTML = renderMarkdown(latest.body);
+      decorateMath(body);
     }
     replace(detail, [
       renderPayload("Input", latest.input_payload, latest.detail, { state: payloadState.input, tool: latest.tool }),

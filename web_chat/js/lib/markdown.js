@@ -14,6 +14,9 @@
  * 2. **Streaming tolerance.** Half-typed emphasis and unclosed code fences are
  *    normal mid-stream; they render as themselves instead of corrupting the
  *    rest of the document.
+ *
+ * Formulas - TeX between \( \) or $ $, and \[ \] or $$ $$ - become `.math`
+ * elements holding their escaped source; lib/math.js typesets them.
  */
 
 import { highlight } from "./highlight.js";
@@ -21,6 +24,22 @@ import { highlight } from "./highlight.js";
 const SAFE_HREF = /^(https?:\/\/|mailto:|#|\/)/i;
 /** Sentinel around extracted code spans: escapeHtml never emits this entity, so it cannot collide. */
 const MARK = '&#0;';
+/** The same for extracted formulas. */
+const MATH_MARK = '&#1;';
+
+/**
+ * Formulas within a line: \( \) inline, \[ \] and $$ $$ display, and $ $ by
+ * Pandoc's rule - the opening $ is followed and the closing one preceded by a
+ * non-space, and the closing one is not followed by a digit or a letter - so
+ * "from $5 to $10" and "$HOME" stay text.
+ */
+const INLINE_MATH = /\\\((.+?)\\\)|\\\[(.+?)\\\]|\$\$(.+?)\$\$|(?<![\\$\w])\$(?=[^\s$])([^$\n]*?[^\s\\$])\$(?![\d$\w])/g;
+
+/** A formula's element; a *block* one stands on lines of its own, outside any paragraph. */
+const mathElement = (tex, display, block = false) => {
+  const tag = block ? "div" : "span";
+  return `<${tag} class="math${display ? " math--display" : ""}">${tex}</${tag}>`;
+};
 
 export function escapeHtml(value) {
   return String(value ?? "")
@@ -83,6 +102,13 @@ function safeImageSrc(raw) {
 function inline(escaped) {
   const codeSpans = [];
   let text = escaped.replace(/`([^`\n]+)`/g, (_, code) => `${MARK}${codeSpans.push(code) - 1}${MARK}`);
+  // Formulas too: "_" and "*" in TeX are not emphasis.
+  const formulas = [];
+  text = text.replace(INLINE_MATH, (_, paren, bracket, dollars, single) => {
+    const display = paren === undefined && single === undefined;
+    const tex = paren ?? bracket ?? dollars ?? single;
+    return `${MATH_MARK}${formulas.push(mathElement(tex, display)) - 1}${MATH_MARK}`;
+  });
 
   text = text
     // Images come before links: the leading "!" must not be left behind by the
@@ -106,11 +132,14 @@ function inline(escaped) {
     .replace(/(^|[^\w_])_([^\s_][^_]*?)_(?!\w)/g, "$1<em>$2</em>")
     .replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
 
-  return text.replace(new RegExp(`${MARK}(\\d+)${MARK}`, "g"), (_, i) => `<code>${codeSpans[Number(i)]}</code>`);
+  return text
+    .replace(new RegExp(`${MATH_MARK}(\\d+)${MATH_MARK}`, "g"), (_, i) => formulas[Number(i)])
+    .replace(new RegExp(`${MARK}(\\d+)${MARK}`, "g"), (_, i) => `<code>${codeSpans[Number(i)]}</code>`);
 }
 
 const BLOCK = {
   fence: /^\s*(?:```|~~~)\s*([\w+#.-]*)\s*$/,
+  math: /^\s*(\\\[|\$\$)(.*)$/,
   fenceEnd: /^\s*(?:```|~~~)\s*$/,
   heading: /^(#{1,6})\s+(.*)$/,
   rule: /^\s*([-*_])(?:\s*\1){2,}\s*$/,
@@ -122,11 +151,38 @@ const BLOCK = {
 
 /** Identify a line's block type once, so the walker never re-tests patterns. */
 function classify(line) {
-  for (const name of ["fence", "heading", "rule", "quote", "bullet", "ordered", "row"]) {
+  for (const name of ["fence", "math", "heading", "rule", "quote", "bullet", "ordered", "row"]) {
     const match = BLOCK[name].exec(line);
     if (match) return { name, match };
   }
   return { name: line.trim() ? "text" : "blank", match: null };
+}
+
+/**
+ * The display formula opened on lines[start] by *open* (\[ or $$, *rest*
+ * following it): its TeX and the index after it. It ends on the first line
+ * that ends with the closing delimiter. Null while it is unclosed - mid-stream -
+ * and for what is not one: a blank line first (TeX itself ends a formula there)
+ * or a closing delimiter inside a line, as in "$$x$$ is the value".
+ */
+function displayMath(lines, start, open, rest) {
+  const close = open === "$$" ? "$$" : "\\]";
+  const parts = [];
+  for (let index = start; index < lines.length; index += 1) {
+    const text = index === start ? rest : lines[index];
+    if (index > start && !text.trim()) return null;
+    const trimmed = text.trimEnd();
+    const at = trimmed.indexOf(close);
+    if (at === -1) {
+      parts.push(text);
+      continue;
+    }
+    if (at !== trimmed.length - close.length) return null;
+    parts.push(trimmed.slice(0, at));
+    const tex = parts.join("\n").trim();
+    return tex ? { tex, next: index + 1 } : null;
+  }
+  return null;
 }
 
 const cells = (match) => match[1].split("|").map((cell) => cell.trim());
@@ -179,6 +235,19 @@ function blocks(lines) {
         // inverse of escapeHtml, and the highlighter re-escapes its own
         // output — the value still cannot contain a live tag.
         out.push(`<pre${language}${done}><code>${highlight(unescapeHtml(source), match[1])}</code></pre>`);
+        break;
+      }
+
+      case "math": {
+        const formula = displayMath(lines, index, match[1], match[2]);
+        if (!formula) {
+          pending.push(line);
+          index += 1;
+          break;
+        }
+        flush();
+        out.push(mathElement(formula.tex, true, true));
+        index = formula.next;
         break;
       }
 

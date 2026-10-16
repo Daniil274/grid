@@ -72,6 +72,26 @@ pre {
   font-family: var(--font-mono);
 }
 
+/* Formulas (lib/math.js). Until KaTeX arrives, and when it cannot read one, a
+   formula shows its TeX source; a display formula wider than its column
+   scrolls on its own instead of widening the page. */
+.math:not([data-typeset]),
+.math--source {
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+}
+
+.math--display {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.math--display .katex-display {
+  margin: 0.5em 0;
+}
+
 kbd {
   padding: 1px 5px;
   border: 1px solid var(--line);

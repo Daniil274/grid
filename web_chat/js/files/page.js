@@ -25,6 +25,7 @@ import { createThemeToggle } from "../ui/theme.js";
 import { highlight } from "../lib/highlight.js";
 import { languageFor } from "../lib/languages.js";
 import { renderMarkdown } from "../lib/markdown.js";
+import { decorateMath } from "../lib/math.js";
 
 const params = new URLSearchParams(location.search);
 const context = params.get("context") || "";
@@ -731,7 +732,9 @@ function renderPreview() {
     body = h("div.filesPreview__body.filesPreview__body--editor", {}, area);
     requestAnimationFrame(() => area.focus());
   } else if (file.view === "rendered" && MARKDOWN.test(file.path)) {
-    body = h("div.filesPreview__body", {}, h("article.filesMarkdown", { html: renderMarkdown(file.text) }));
+    const article = h("article.filesMarkdown", { html: renderMarkdown(file.text) });
+    decorateMath(article);
+    body = h("div.filesPreview__body", {}, article);
   } else {
     body = h("div.filesPreview__body", {}, codeView(file.text, languageFor({ name: nameOf(file.path) })));
   }
