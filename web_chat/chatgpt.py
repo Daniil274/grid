@@ -486,7 +486,9 @@ async def _check(vault: Any, args: Any) -> int:
         if model is None:
             print("No model to try.", file=sys.stderr)
             return 1
-        body = {"model": model, "input": "Reply with the single word OK.", "store": False, "stream": True}
+        # The plan takes the input as a list of items only.
+        prompt = [{"role": "user", "content": [{"type": "input_text", "text": "Reply with the single word OK."}]}]
+        body = {"model": model, "input": prompt, "store": False, "stream": True}
         print(f"POST /responses ({model}) ...")
         async with http.stream("POST", f"{RESOURCE}/responses", headers=headers, json=body) as response:
             print(f"  status {response.status_code}")
