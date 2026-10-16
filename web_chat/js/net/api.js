@@ -41,6 +41,13 @@ const queryString = (params = {}) => {
 };
 
 export const api = {
+  /** Devices agents use (web_chat/devices_api.py): browser machines, paired PCs and phones. */
+  devices: () => request("/api/devices", { cache: "no-store" }),
+  startMachine: () => request("/api/devices/machines", { method: "POST" }),
+  stopMachine: (id) => request(`/api/devices/machines/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  deviceControl: (id, taken) => request(`/api/devices/${encodeURIComponent(id)}/control`, json("POST", { taken })),
+  newPairing: () => request("/api/devices/pairing", { method: "POST" }),
+  forgetDevice: (id) => request(`/api/devices/paired/${encodeURIComponent(id)}`, { method: "DELETE" }),
   serverStatus: () => request("/api/server/status", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
   adminServer: () => request("/api/admin/server", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
   restartServer: () => request("/api/admin/server/restart", { method: "POST" }),

@@ -62,6 +62,15 @@ def test_the_chat_page_sends_strangers_to_sign_in(client):
     assert client.get("/login").status_code == 200
 
 
+def test_the_devices_page_is_for_signed_in_users(server, accounts):
+    assert TestClient(server.app, headers=SAME_SITE).get("/devices", follow_redirects=False).headers["location"] == "/login"
+    accounts.create_user("alice", PASSWORD)
+    page = signed_in(server, "alice").get("/devices")
+    assert page.status_code == 200 and "/static/js/devices/page.js" in page.text
+    # A device signs in with a pairing code or its token, outside /api; neither is a session.
+    assert TestClient(server.app).post("/node/pair", json={"code": "WRONGCODE1"}).status_code in (403, 404)
+
+
 def test_signing_in_sets_a_cookie_scripts_cannot_read(server, accounts):
     accounts.create_user("alice", PASSWORD)
     client = TestClient(server.app, headers=SAME_SITE)

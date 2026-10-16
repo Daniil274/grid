@@ -66,6 +66,7 @@ SYSTEMS_HTML = ROOT / "systems.html"
 USAGE_HTML = ROOT / "usage.html"
 TASKS_HTML = ROOT / "tasks.html"
 FILES_HTML = ROOT / "files.html"
+DEVICES_HTML = ROOT / "devices.html"
 
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
@@ -122,6 +123,8 @@ class WebChatServer:
         usage: Optional[Any] = None,
         vault: Optional[Any] = None,
         chatgpt: Optional[Any] = None,
+        devices_dir: Optional[Path] = None,
+        browser_machines: int = 0,
     ) -> None:
         """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
         accounts; without it ``identify`` decides, by default the single local
@@ -133,7 +136,10 @@ class WebChatServer:
         systems do (web_chat.system_activity); ``submissions_dir`` keeps the user
         systems offered to everyone (web_chat.system_hub). ``vault`` keeps the
         credentials users store for themselves (web_chat.vault); ``chatgpt``
-        runs the ChatGPT subscription login (web_chat.chatgpt)."""
+        runs the ChatGPT subscription login (web_chat.chatgpt). ``devices_dir``
+        keeps the devices users pair (core.devices.pairing); ``browser_machines``
+        is how many browser machines the server runs at once, 0 for none
+        (core.devices.machines)."""
         if auth is not None and identify is not None:
             raise ValueError("Pass auth or identify, not both")
         self.deployment = deployment
@@ -262,6 +268,20 @@ class WebChatServer:
                 spaces,
                 auth.accounts.user if auth is not None else (lambda user_id: None),
             )
+        from core.devices.hub import hub as device_hub
+        from core.devices.machines import MachinePool, set_pool
+        from core.devices.pairing import PairingStore
+        from web_chat.devices_api import register_device_routes
+
+        # Devices agents use: browser machines on the server, users' own PCs and phones.
+        self.machines = MachinePool(device_hub(), limit=browser_machines) if browser_machines > 0 else None
+        set_pool(self.machines)
+        register_device_routes(
+            self.app, api, self.current_user,
+            hub=device_hub(),
+            machines=self.machines,
+            pairing=PairingStore(devices_dir / "devices.db") if devices_dir is not None else None,
+        )
         if auth is not None:
             auth.register_routes(self.app, guard=self._guard, current_user=self.current_user)
         else:
@@ -315,10 +335,14 @@ class WebChatServer:
             async with self.spaces.use(self._warm_user) as space:
                 space.schedule_warmup()
         self._sweeper = asyncio.get_running_loop().create_task(self._sweep_forever(), name="space-sweeper")
+        if self.machines is not None:
+            await self.machines.prune_orphans()
         try:
             await self.restart.recover()
             yield
         finally:
+            if self.machines is not None:
+                await self.machines.shutdown()
             self._sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await self._sweeper
@@ -458,6 +482,13 @@ class WebChatServer:
             if auth is not None and auth.user_of(request) is None:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(FILES_HTML)
+
+        @app.get("/devices", response_class=HTMLResponse)
+        async def devices_page(request: Request) -> Any:
+            # A shell: what it shows comes through the API, which checks who asks.
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(DEVICES_HTML)
 
         @app.get("/tasks", response_class=HTMLResponse)
         async def tasks_page(request: Request) -> Any:

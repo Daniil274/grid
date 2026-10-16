@@ -48,6 +48,7 @@ dependencies = [
     "python-multipart>=0.0.20",
     "uvicorn[standard]>=0.20.0",
     "docker>=7.0.0",
+    "websockets>=13",  # core.devices: the hub reaches browser machines; devices dial in
     "aiohttp>=3.9.0",
     "beautifulsoup4>=4.12.0",
     "markdownify>=0.13.0",
@@ -58,6 +59,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# A device's side (grid_node) with its browser driver: on a user's PC, or in a browser machine.
+node = [
+    "playwright>=1.55",
+]
 voice = [
     "faster-whisper>=1.1.0",
     "torch>=2.2.0",
@@ -88,6 +93,7 @@ only-include = [
     "grid.py",
     "grid_mcp.py",
     "grid_control",
+    "grid_node",
     "context_inspector",
     "core",
     "schemas",

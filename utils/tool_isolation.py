@@ -17,6 +17,9 @@ declares where each of its tools acts, in a module-level ``TOOL_ISOLATION``:
   systems only (core.system_store) - the system builder's tools. The tools
   themselves use the store granted to the user: a private store for users,
   the shared store for admins (web_chat.space).
+- :data:`DEVICES`: acts on the user's own devices only - browser machines the
+  server started for that user, PCs and phones the user paired (core.devices):
+  never the host, never another user's device.
 - anything else, and a tool that declares nothing: acts on the host machine -
   its desktop, its programs, the server's own files.
 
@@ -32,9 +35,10 @@ from typing import Optional
 CONTAINER = "container"
 WORKSPACE = "workspace"
 SYSTEMS = "systems"
+DEVICES = "devices"
 
 #: What an isolating space may give its agents.
-CONFINED = frozenset({CONTAINER, WORKSPACE, SYSTEMS})
+CONFINED = frozenset({CONTAINER, WORKSPACE, SYSTEMS, DEVICES})
 
 
 def is_confined(isolation: Optional[str]) -> bool:

@@ -73,6 +73,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default="default_user",
         help="The single user's identifier, naming its container isolation workspace",
     )
+    parser.add_argument(
+        "--browser-machines",
+        type=int,
+        default=int(os.environ.get("GRID_BROWSER_MACHINES", "0") or 0),
+        help="How many browser machines (a Chromium each, in a container) agents may use at once; "
+        "0 starts none. Needs the grid-browser-machine:local image (docker/browser-machine).",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
 
@@ -357,6 +364,8 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
         "usage": usage,
         "submissions_dir": data_dir / "systems" / "submissions",
         "restart_path": data_dir / "server_restart.json",
+        "devices_dir": data_dir / "devices",
+        "browser_machines": args.browser_machines,
     }
 
 
