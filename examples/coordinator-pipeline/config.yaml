@@ -538,6 +538,7 @@ agents:
       - gemini-4-argon
     description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
     tools:
+      - beads_init
       - beads_ready
       - beads_list
       - beads_create
