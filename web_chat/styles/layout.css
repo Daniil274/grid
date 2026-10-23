@@ -13,10 +13,20 @@
 .main {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* topbar · reference-only notice (when shown) · transcript · composer.
+     The banner is display:none when there is no reference, so its row must be
+     reserved by position: auto-placement would otherwise hand the flexible
+     middle track to the transcript and push the composer off the screen. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0; /* lets the transcript row shrink so it can scroll */
 }
+
+.main > .topbar { grid-row: 1; }
+.main > .referenceBanner { grid-row: 2; }
+.main > .chatScroll { grid-row: 3; }
+.main > .composerWrap { grid-row: 4; }
 
 .topbar {
   /* backdrop-filter makes the bar a stacking context: its popovers can rise no
@@ -28,6 +38,8 @@
   display: flex;
   gap: 12px;
   align-items: center;
+  /* A wide status or workspace path must not widen the grid column under it. */
+  min-width: 0;
   padding: 10px 20px;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--bg) 84%, transparent);
@@ -40,12 +52,14 @@
 
 .topbar__route {
   position: relative;
+  min-width: 0;
 }
 
 .routeChip {
   display: flex;
   gap: 10px;
   align-items: center;
+  min-width: 0;
   max-width: min(46vw, 420px);
   padding: 5px 10px 5px 12px;
   border: 1px solid var(--line);
@@ -101,14 +115,17 @@
   align-items: center;
   margin-left: auto;
   min-width: 0;
+  overflow: hidden;
 }
 
 .statusText {
   display: flex;
   gap: 7px;
   align-items: center;
+  min-width: 0;
   color: var(--text-3);
   font-size: 12px;
+  overflow: hidden;
   white-space: nowrap;
 }
 
@@ -363,6 +380,18 @@ body.rail-open .scrim {
     width: auto;
     max-height: calc(100dvh - 150px);
     overflow-y: auto;
+  }
+
+  /* One scroll for the whole picker: two independently capped lists left the
+     Agents heading below the popover's clipped bottom edge on a phone. */
+  .routeColumns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .routeList {
+    max-height: none;
+    overflow: visible;
   }
 
   .topbar__new,

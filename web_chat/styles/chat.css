@@ -721,7 +721,17 @@
   }
 
   .composerWrap {
-    padding: 6px 12px 14px;
+    padding: 4px 12px 8px;
+  }
+
+  .composer {
+    padding: 8px 10px 6px;
+  }
+
+  /* A long draft must not turn the composer into a third of the phone. */
+  .composer__input {
+    max-height: 28dvh;
+    padding: 2px 4px 4px;
   }
 
   .composer__hint {

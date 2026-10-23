@@ -211,15 +211,24 @@
   gap: 8px;
   align-items: baseline;
   min-width: 0;
-  flex: 1;
+  /* A zero basis let the strip and badges take the row first, leaving the
+     label at 0 width while its title painted over them. */
+  flex: 1 1 auto;
 }
 
 .step__title {
   flex-shrink: 0;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
   font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .step__subtitle {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--text-3);
   font-size: 12px;
@@ -1267,6 +1276,12 @@ a.refChip:hover {
   transition: background 120ms var(--ease), color 120ms var(--ease);
 }
 
+/* Only the outermost row's fold is pinned. A nested block that pins at the
+   same 28px covers its ancestors' fold rows instead of stacking under them. */
+.agent__steps .step__fold {
+  position: static;
+}
+
 .step__fold:hover {
   background: var(--bg-2);
   color: var(--text);
@@ -1304,4 +1319,26 @@ a.refChip:hover {
 
 .step.is-open > .step__fold {
   display: flex;
+}
+
+/* A phone has no room for six levels of 22px gutters. The smaller gutter keeps
+   the deepest row inside the transcript; the token counter is the first thing
+   to give up its width there, so the agent's name stays readable. */
+@media (max-width: 600px) {
+  .step {
+    padding-left: 16px;
+  }
+
+  .step::before {
+    left: 6px;
+  }
+
+  .step__icon {
+    width: 16px;
+    height: 16px;
+  }
+
+  .agent__steps .step__usage {
+    display: none;
+  }
 }
