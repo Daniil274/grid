@@ -26,6 +26,20 @@ class PersistentSpace(FakeSpace):
         self.conversations = ContextManager(persist_path=str(path))
 
 
+def pin_revision(manager, context_id="ctx"):
+    """Make a stored conversation revision-aware, as a running server would.
+
+    A conversation written before revisions existed is legacy: it can be read,
+    never resumed. Restart recovery is only expected to resume a conversation
+    pinned by the server that paused it, so fixtures seed a manifest.
+    """
+    from core import revisions
+
+    assert manager.pin_revision(
+        context_id, revisions.build_manifest(context_id, revisions.environment_of(None))
+    )
+
+
 def saved_interruption(manager, turn_id="original", *, reason=StopReason.USER_STOP, in_flight=()):
     manager.ensure_context("ctx")
     record = Interruption(reason=reason, task="work", agent="a", in_flight=list(in_flight))
@@ -35,6 +49,7 @@ def saved_interruption(manager, turn_id="original", *, reason=StopReason.USER_ST
         "pending_agent_run": {"turn_id": turn_id, "status": "interrupted"},
         "routed_system": "s", "routed_agent": "a",
     })
+    pin_revision(manager)
 
 
 def resumable_space(path, continued):
@@ -203,6 +218,7 @@ async def test_queue_of_an_already_answered_turn_is_restored(tmp_path):
     manager.append_message_to("ctx", "assistant", "answered")
     manager.update_context_metadata("ctx", {"pending_agent_run": {"turn_id": "original", "status": "completed"}})
     MessageQueue(manager, "ctx").add("next request", [], "after_turn")
+    pin_revision(manager)
     continued = []
     space = resumable_space(path, continued)
     restart = ServerRestart(SpacePool(lambda _: space), tmp_path / "restart.json", Mock())

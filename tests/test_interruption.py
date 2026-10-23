@@ -477,7 +477,7 @@ async def test_web_stop_then_continue_over_the_real_factory(factory):
     async def resolve_turn(message, **kwargs):
         return SimpleNamespace(
             system=kwargs.get("system_key") or "s", agent=kwargs.get("agent_key") or "worker",
-            factory=factory, routed=True, warning="",
+            factory=factory, config=None, routed=True, warning="",
         )
 
     registry = SimpleNamespace(

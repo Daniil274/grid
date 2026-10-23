@@ -21,7 +21,11 @@ class Socket:
 
 
 def session_with(space):
-    space.context_manager = lambda: SimpleNamespace()
+    # No conversation is stored or run here: the socket only moves the policy
+    # switch. An intentionally ephemeral manager says so explicitly.
+    space.context_manager = lambda: SimpleNamespace(
+        ensure_context=lambda context_id: None, revision_trusted_ephemeral=True
+    )
     socket = Socket()
     return ChatSession(space, socket, "ctx-1"), socket
 

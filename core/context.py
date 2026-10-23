@@ -27,6 +27,7 @@ from schemas import ContextMessage, AgentExecution
 from utils.exceptions import ContextError
 from utils.image_utils import ImageUtils
 from core.conversation_store import ConversationStore
+from core import revisions as revision_contracts
 # Tracing is handled automatically by Agents SDK
 
 logger = Logger.get_logger("context")
@@ -169,6 +170,10 @@ class ContextManager:
         self._encoded: Dict[str, str] = {}  # context id -> JSON, for unchanged contexts
         self.store = store
         self._dirty: set = set()  # contexts changed since the store last got them
+        # Conversations created in this process and not pinned yet: only those
+        # may be pinned (core.revisions). A loaded one without a manifest is
+        # legacy, and stays that way.
+        self._new_contexts: set = set()
         self._current_context_id: Optional[str] = None
         # The conversation of the running turn (bind); one variable per manager.
         self._bound: ContextVar[Optional[str]] = ContextVar(f"grid_context_{id(self):x}", default=None)
@@ -182,6 +187,10 @@ class ContextManager:
             self._load_from_file(auto_activate=False, normalize_and_save=not self.read_only and self.store is None)
             if self.store is not None and not self.read_only and self._contexts:
                 self._move_into_store()
+
+        # Everything loaded came from persistence: none of it was created here,
+        # so none of it may be pinned now - a legacy conversation stays legacy.
+        self._new_contexts.clear()
 
         if create_initial_context and not self.read_only:
             # Always start with a fresh context
@@ -224,6 +233,7 @@ class ContextManager:
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
             }
+            self._new_contexts.add(context_key)
         return context_key
 
     def _activate_context(self, context_id: str) -> str:
@@ -340,6 +350,90 @@ class ContextManager:
     def has_context(self, context_id: Optional[str]) -> bool:
         """Whether *context_id* is a conversation of this manager."""
         return context_id is not None and context_id in self._contexts
+
+    # -- revision manifests (core.revisions) -----------------------------------
+
+    def is_new_context(self, context_id: Optional[str]) -> bool:
+        """Whether *context_id* was created in this process and never pinned.
+
+        A conversation read from persistence is never new: its manifest, or its
+        absence (legacy), is part of what was stored.
+        """
+        return context_id is not None and context_id in self._new_contexts
+
+    def has_history(self, context_id: str) -> bool:
+        """Whether a conversation holds any message or execution.
+
+        An empty one is what a chat looks like between opening it and its first
+        turn; it carries no history a revision could protect.
+        """
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return False
+            return bool(bucket.get("conversation") or bucket.get("executions"))
+
+    def revision_manifest(self, context_id: str) -> Optional[Dict[str, Any]]:
+        """A copy of one conversation's revision manifest, or None.
+
+        None means the conversation carries no manifest: either it was created
+        in this process and no turn has pinned it yet, or it was stored before
+        revisions existed (legacy, read-only).
+        """
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return None
+            manifest = bucket.get("revision")
+            return copy.deepcopy(manifest) if isinstance(manifest, dict) else None
+
+    def revision_status(self, context_id: str) -> str:
+        """``pinned``, ``tampered``, ``new``, ``legacy`` or ``unknown``."""
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return "unknown"
+            manifest = bucket.get("revision")
+            if isinstance(manifest, dict):
+                return "pinned" if revision_contracts.manifest_digest_ok(manifest) else "tampered"
+            return "new" if context_id in self._new_contexts else "legacy"
+
+    def pin_revision(self, context_id: str, manifest: Dict[str, Any]) -> bool:
+        """Pin a conversation created here to *manifest*, and persist it.
+
+        Immutable: a conversation that already has a manifest is never re-pinned
+        (returns False), and a legacy one is never adopted. A manifest whose
+        digest does not match its content, or that belongs to another
+        conversation, is refused. The pin is saved strictly: a pin this process
+        cannot persist is rolled back rather than believed.
+        """
+        if not isinstance(manifest, dict) or not revision_contracts.manifest_digest_ok(manifest):
+            raise ContextError("A revision manifest must match its own digest")
+        if manifest.get("context_id") != context_id:
+            raise ContextError("A revision manifest must belong to the conversation it pins")
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None or bucket.get("revision") is not None:
+                return False
+            # Only a conversation demonstrably created here may be pinned. A
+            # conversation read from persistence - empty or not - is legacy:
+            # its lack of a manifest is part of what was stored, and an empty
+            # chat reopened after a restart must not be silently adopted.
+            if context_id not in self._new_contexts:
+                return False
+            bucket["revision"] = copy.deepcopy(manifest)
+            # Pinned once: from now on it is stored state, checked every turn.
+            self._new_contexts.discard(context_id)
+            self._mark_changed(context_id)
+            try:
+                self._save_to_file(strict=True)
+            except Exception:
+                # Never leave a pin in memory that a restart would not find.
+                bucket.pop("revision", None)
+                self._new_contexts.add(context_id)
+                self._mark_changed(context_id)
+                raise
+            return True
 
     def list_context_summaries(self) -> List[Dict[str, Any]]:
         """Return safe, read-only summaries for all known context buckets."""
@@ -989,6 +1083,24 @@ class ContextManager:
             branch_id = self._create_context()
             branch = self._contexts[branch_id]
             branch["conversation"] = [message.model_copy(deep=True) for message in conversation[:index]]
+            # A branch holds a copy of the parent's history, so it is pinned to
+            # what the parent was pinned to - or stays legacy with it. A branch
+            # must not become a way around a revision the parent cannot continue.
+            parent_manifest = bucket.get("revision")
+            self._new_contexts.discard(branch_id)
+            if isinstance(parent_manifest, dict):
+                # Same revision, renamed to the branch: the compatibility it
+                # records is the parent's, so a turn on the branch is judged by it.
+                inherited = copy.deepcopy(parent_manifest)
+                # Never repair or re-sign a damaged/copied manifest by forking.
+                # Keeping it verbatim preserves the refusal on the new branch.
+                if (revision_contracts.manifest_digest_ok(parent_manifest)
+                        and parent_manifest.get("context_id") == context_id):
+                    inherited["context_id"] = branch_id
+                    inherited["forked_from"] = context_id
+                    inherited.pop("digest", None)
+                    inherited["digest"] = revision_contracts.digest_of(inherited)
+                branch["revision"] = inherited
             branch["metadata"] = {
                 **{
                     key: copy.deepcopy(bucket["metadata"][key])
@@ -1807,12 +1919,15 @@ class ContextManager:
             self._execution_without_footer(AgentExecution(**ex) if isinstance(ex, dict) else ex)
             for ex in data.get("execution_history", [])
         ]
+        manifest = data.get("revision")
         return {
             "conversation": conversation,
             "executions": executions,
             "metadata": data.get("metadata", {}),
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
+            # Absent on a conversation stored before revisions existed: legacy.
+            "revision": copy.deepcopy(manifest) if isinstance(manifest, dict) else None,
         }
 
     @staticmethod
@@ -1828,23 +1943,24 @@ class ContextManager:
         return execution
 
     def _encode_context(self, bucket: Dict[str, Any]) -> str:
-        return json.dumps(
-            {
-                "conversation_history": [
-                    msg.model_dump() if hasattr(msg, "model_dump") else msg
-                    for msg in bucket.get("conversation", [])
-                ],
-                "execution_history": [
-                    ex.model_dump() if hasattr(ex, "model_dump") else ex
-                    for ex in bucket.get("executions", [])
-                ],
-                "metadata": bucket.get("metadata", {}),
-                "created_at": bucket.get("created_at"),
-                "updated_at": bucket.get("updated_at"),
-            },
-            ensure_ascii=False,
-            default=str,
-        )
+        document = {
+            "conversation_history": [
+                msg.model_dump() if hasattr(msg, "model_dump") else msg
+                for msg in bucket.get("conversation", [])
+            ],
+            "execution_history": [
+                ex.model_dump() if hasattr(ex, "model_dump") else ex
+                for ex in bucket.get("executions", [])
+            ],
+            "metadata": bucket.get("metadata", {}),
+            "created_at": bucket.get("created_at"),
+            "updated_at": bucket.get("updated_at"),
+        }
+        manifest = bucket.get("revision")
+        if isinstance(manifest, dict):
+            # A pinned conversation carries its manifest; a legacy one gains none.
+            document["revision"] = manifest
+        return json.dumps(document, ensure_ascii=False, default=str)
 
     def _save_to_file(self, *, strict: bool = False) -> None:
         """Write every context to the persistence file, atomically.

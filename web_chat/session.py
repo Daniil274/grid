@@ -40,6 +40,7 @@ from typing import Any, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from core import revisions
 from core.interruption import INTERRUPTED_TYPE, is_resumable
 from core.pricing import format_usd
 from core.steering import SteerMessage
@@ -58,6 +59,17 @@ logger = logging.getLogger(__name__)
 _FINISHED = "_finished"
 #: Conversation metadata: turn id -> the workspace checkpoint taken before it.
 CHECKPOINTS_KEY = "checkpoints"
+
+
+def revision_error_event(exc: revisions.ContextCompatibilityError) -> dict[str, Any]:
+    """A refusal the client can act on: reason, machine code, conversation, details."""
+    return {
+        "type": "error",
+        "content": str(exc),
+        "code": exc.code,
+        "context_id": exc.context_id,
+        "details": exc.details,
+    }
 #: Checkpoints a conversation keeps, newest first; files listed per turn.
 MAX_CHECKPOINTS = 40
 MAX_LISTED_CHANGES = 200
@@ -342,6 +354,13 @@ class AgentTurn:
                 subtitle=f"{resolution.system} · {resolution.agent}",
                 body=f"Workspace: {space.workspace_label_of(self._session.context_id)}",
             )
+            # Routing may land on another system than the one the conversation
+            # is pinned to. That is refused here - explicitly, with its code -
+            # before an MCP server is warmed or any model call is made. A new
+            # conversation has nothing pinned yet: its turn pins it below.
+            manifest = revisions.preflight(self._session.manager, self._session.context_id)
+            if manifest is not None and getattr(resolution.config, "config", None) is not None:
+                revisions.compatible(manifest, resolution.config, self._session.context_id)
             await space.warm_agent(resolution.agent, resolution.system, context_id=self._session.context_id)
             self._recorder.close(step, title=f"Runtime ready · {label}")
             self._checkpoint = await self._snapshot()
@@ -387,7 +406,12 @@ class AgentTurn:
             self.outcome = "error"
             logger.exception("Web chat run failed")
             self._recorder.fail(str(exc))
-            self._queue.put_nowait({"type": "error", "content": str(exc)})
+            event = (
+                revision_error_event(exc)
+                if isinstance(exc, revisions.ContextCompatibilityError)
+                else {"type": "error", "content": str(exc)}
+            )
+            self._queue.put_nowait(event)
         finally:
             drop = getattr(self._observer, "drop_unwritten_calls", None)
             if drop is not None:
@@ -613,6 +637,10 @@ class ChatSession:
         self._socket = websocket
         self.context_id = context_id
         self.manager = space.context_manager()
+        # A chat id that does not exist yet is a new chat: the client picks it
+        # before the first message. An existing one - including a legacy one
+        # loaded from disk - is left exactly as stored.
+        self.manager.ensure_context(self.context_id)
         self.send_lock = asyncio.Lock()
 
     @property
@@ -881,8 +909,16 @@ class ChatSession:
             await self.send({"type": "error", "content": "Unknown system or agent"})
             await self.send({"type": "done"})
             return False
-        # No turn of this conversation runs here, so one that the record says
-        # is running died with an earlier process: record it before routing.
+        # A conversation pinned to another revision is refused before routing,
+        # warm-up, the daily-turn quota and any metadata write: the client gets
+        # the machine code, not a generic failure after work has begun.
+        try:
+            await self._check_revision(system_key)
+        except revisions.ContextCompatibilityError as exc:
+            await self.send(revision_error_event(exc))
+            await self.send({"type": "done"})
+            return False
+        # Recovery mutates stored execution state, so it must follow admission.
         self.manager.recover_abandoned_turn(self.context_id)
         if message is None and self.manager.pending_interruption(self.context_id) is None:
             await self.send({"type": "error", "content": "There is nothing to continue in this conversation."})
@@ -916,6 +952,33 @@ class ChatSession:
 
         task.add_done_callback(ended)
         return True
+
+    async def _check_revision(self, system_key: Any) -> None:
+        """Refuse a pinned conversation that cannot run here, before any work.
+
+        The checks that need no configuration (unknown conversation, legacy,
+        tampered or future manifest) run first. Then the system the conversation
+        last ran on - the selection the client sent, else what the stored
+        metadata records, else the default system - is resolved to a config and
+        compared with the pinned digest. An explicit selection of another
+        system is therefore refused here rather than silently re-pinned.
+        """
+        manifest = revisions.preflight(self.manager, self.context_id)
+        if manifest is None:
+            return
+        metadata = self.manager.get_context_metadata(self.context_id)
+        requested = system_key if isinstance(system_key, str) and system_key else None
+        pinned_system = requested or metadata.get("routed_system") or metadata.get("system_key")
+        registry = self.space.registry_of(self.context_id)
+        config_of = getattr(registry, "config", None)
+        if not callable(config_of):
+            # A transport without configs (tests, a future backend): the turn's
+            # own gate still refuses before any model call.
+            return
+        config = config_of(pinned_system or registry.default_key())
+        if getattr(config, "config", None) is None:
+            return
+        revisions.compatible(manifest, config, self.context_id)
 
     @staticmethod
     async def _cancel(task: asyncio.Task) -> None:

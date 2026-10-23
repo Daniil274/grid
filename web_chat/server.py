@@ -105,6 +105,22 @@ def config_schema() -> dict[str, Any]:
     return GridConfig.model_json_schema()
 
 
+def _revision_view(manager: Any, context_id: str) -> dict[str, Any]:
+    """What a conversation is pinned to, for the history API (secret-free)."""
+    from core import revisions
+
+    status_of = getattr(manager, "revision_status", None)
+    manifest_of = getattr(manager, "revision_manifest", None)
+    if not callable(status_of) or not callable(manifest_of):
+        return {"status": "unavailable"}
+    try:
+        summary = revisions.manifest_summary(manifest_of(context_id))
+        summary["status"] = status_of(context_id)
+        return summary
+    except Exception:  # a broken record must not hide the conversation
+        return {"status": "malformed"}
+
+
 class WebChatServer:
     def __init__(
         self,
@@ -963,6 +979,9 @@ class WebChatServer:
                 "pending": MessageQueue(manager, context_id).public(),
                 "metadata": view["metadata"],
                 "active_turn": active_turn,
+                # What this conversation is pinned to, when the manager keeps
+                # revisions: read-only, secret-free, and absent for legacy chats.
+                "revision": _revision_view(manager, context_id),
             }).body
             etag = '"' + hashlib.sha1(body).hexdigest() + '"'
             headers = {"ETag": etag, "Cache-Control": "private, no-cache"}

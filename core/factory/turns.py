@@ -72,6 +72,7 @@ from utils.exceptions import AgentError, ContextError
 from utils.logger import Logger
 from utils.path_utils import reset_current_factory, set_current_factory
 from core.credentials import CredentialError, credential_error_in
+from core.revisions import ContextCompatibilityError, admit_turn
 
 logger = logging.getLogger("grid.agent_factory")
 
@@ -1214,6 +1215,11 @@ class TurnRunner:
             # a conversation goes into this one, whatever other turns activate.
             binding = self.context_manager.bind(active_context_id)
             execution.context_id = active_context_id
+            # The revision gate runs here - after the conversation is known and
+            # before anything leaves this process (no model call, no tool, no
+            # journal write). Every entry point shares this turn core: web chat,
+            # lazy agents, the CLI, Continue and a retried attempt alike.
+            admit_turn(self.context_manager, active_context_id, self.config)
             continuing = context_id is not None or use_active_context
             # Turns of a conversation start only here, one at a time, so a run
             # record that still says "running" was left by a process that ended.
@@ -1425,6 +1431,11 @@ class TurnRunner:
                     turn_id=turn_id,
                     images=generated.images,
                 )
+            raise
+        except ContextCompatibilityError:
+            # The conversation was refused before the turn ran: nothing left
+            # this process, so there is no execution and no journal entry to
+            # record - only the refusal itself.
             raise
         except Exception as exc:
             execution.end_time = time.time()

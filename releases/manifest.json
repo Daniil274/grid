@@ -1,0 +1,90 @@
+{
+  "schema": "grid.release.manifest",
+  "schema_version": 1,
+  "project": "grid",
+  "current": "0.2.0",
+  "status": "prepared",
+  "activation": {
+    "state": "not-performed",
+    "by": "user",
+    "requires": ["backup", "review", "restart"],
+    "note": "Prepared in the working tree. No restart, image publication or configuration change was performed; the owner activates it after a backup and review."
+  },
+  "baseline": {
+    "version": "0.1.0",
+    "context_revision": "none",
+    "note": "Conversations stored before revision pinning are legacy: readable, never re-pinned, never continued."
+  },
+  "releases": [
+    {
+      "version": "0.2.0",
+      "date": "2026-10-23",
+      "status": "prepared",
+      "kind": "additive-foundation",
+      "summary": "Immutable per-conversation revision manifests: first-turn pinning, fail-closed compatibility gate before execution, machine-readable release manifest and validator.",
+      "documentation": [
+        "docs/revisions.md",
+        "docs/release-process.md",
+        "CHANGELOG.md"
+      ],
+      "changes": [
+        "core/revisions.py: versioned history/checkpoint/runtime/tools contracts, content-addressed manifest, secret-free system-config projection",
+        "core/context.py: persist and load the manifest with the conversation (JSON file and encrypted conversation store), immutable pinning",
+        "core/factory/turns.py: revision gate before any external operation, shared by web chat, lazy agents and the CLI",
+        "core/__init__.py: 0.1.0 -> 0.2.0",
+        "tools/release_check.py: offline release manifest validator"
+      ],
+      "context_revision": {
+        "manifest_version": 1,
+        "supported_manifest_versions": [1],
+        "contracts": {
+          "history": {
+            "name": "grid.context.history",
+            "version": 1,
+            "digest": "sha256:023826b1fafed54a653b4f3a8bafe613ddb3be234a96c2b217b87be77809f7e1"
+          },
+          "checkpoint": {
+            "name": "grid.context.checkpoint",
+            "version": 1,
+            "digest": "sha256:d1e90e677e00ae1659e8ee179ff29f45297899f49eac9ed1ce39aeb234c46222"
+          },
+          "runtime": {
+            "name": "grid.agent.runtime",
+            "version": 1,
+            "digest": "sha256:3bc6f9fdcab929bff9e45d85e5319cc1fccee84afbe2703130dac4d374b58126"
+          },
+          "tools": {
+            "name": "grid.tools.contract",
+            "version": 1,
+            "digest": "sha256:6cf2ff2408e7124a76f3c7b02779d0e5c179e7253021d5c0bd2757d39a860e2a"
+          }
+        },
+        "compatibility": {
+          "grid_version": "exact",
+          "manifest_version": "supported-only",
+          "contract_version": "supported-only",
+          "contract_definition": "exact-digest",
+          "runtime_python": "exact-minor",
+          "system_config": "exact-digest",
+          "system_defaults": "projection-only",
+          "legacy_conversations": "read-only",
+          "repin": "never",
+          "permissions_authority": "action_policy"
+        },
+        "privacy": {
+          "stored": "projection-only",
+          "digest_material": "redacted",
+          "never_stored": ["prompts", "credentials", "environment values"]
+        },
+        "claims": {
+          "replay": "none",
+          "exactly_once": "none"
+        }
+      },
+      "validation": {
+        "command": "python tools/release_check.py",
+        "tests": ["tests/test_revision_compatibility.py"]
+      }
+    }
+  ]
+}
