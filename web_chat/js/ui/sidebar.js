@@ -10,7 +10,7 @@
  *   the chat on screen opens by itself. A long project shows its latest chats
  *   and a "Show N more" line; archived projects wait folded at the end.
  * - A chat row is one line - title and age - with a "⋯" menu (rename, move to
- *   a project, its tasks, delete); a double click renames it in place. Opening
+ *   a project, its tasks, reference-only copy, delete); a double click renames it in place. Opening
  *   a chat makes its project the active one, so "New chat" continues there.
  * - A chat is dragged onto a project to move it there, or onto "Chats" to take
  *   it out of any project.
@@ -202,6 +202,7 @@ export function createConversationList({
   onRename,
   onDelete,
   onMoveToProject,
+  onReferenceCopy,
   onCreateProject,
   onCreateSubproject,
   onUpdateProject,
@@ -328,6 +329,12 @@ export function createConversationList({
       onMoveToProject && { label: "Move to project", icon: ICONS.folder, submenu: () => moveItems(conversation, tree) },
       { label: "Tasks of this chat", icon: ICONS.check, href: `/tasks?conversation=${encodeURIComponent(conversation.id)}` },
       { label: "Files of this chat", icon: ICONS.file, href: `/files?context=${encodeURIComponent(conversation.id)}` },
+      onReferenceCopy && (conversation.message_count ?? 0) > 0 && {
+        label: "Reference-only copy…",
+        icon: ICONS.copy,
+        title: "For an old chat this runtime cannot continue: preview a new empty chat that points at it",
+        run: () => onReferenceCopy(conversation),
+      },
       "-",
       {
         label: "Delete",

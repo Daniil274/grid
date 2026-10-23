@@ -35,6 +35,8 @@ import { copyText, toast } from "./ui/toast.js";
 import "./ui/overlay.js";
 import { createTranscript } from "./ui/transcript.js";
 import { openReportDialog } from "./ui/report-dialog.js";
+import { openMigrationDialog, sourceConversationId } from "./ui/migration-dialog.js";
+import { renderReferenceBanner } from "./ui/reference-banner.js";
 import { openWorkspaceDialog } from "./ui/workspace-dialog.js";
 import { setWorkspaceChat } from "./lib/workspace-links.js";
 import { createWelcomeSystems } from "./ui/welcome.js";
@@ -62,6 +64,9 @@ const store = createStore({
   stopping: false,
   // The conversation ends with a turn that stopped early and can be continued.
   resumable: false,
+  // The target's `metadata.migration` record: a reference-only chat points at
+  // the old conversation it was bootstrapped from (ui/reference-banner.js).
+  reference: null,
   // Messages waiting for the agent (web_chat/delivery.py).
   queue: [],
   workspacePath: "",
@@ -195,6 +200,17 @@ async function boot() {
     voice: globalThis.VoiceUI,
   });
 
+  // A reference-only chat keeps its source visible: read and copy there, paste
+  // into a new request here. It is never imported or replayed (core/migration.py).
+  renderReferenceBanner({
+    container: $("#reference-banner"),
+    migration: store.get().reference,
+    conversations: store.get().conversations,
+  });
+  store.watch(["reference", "conversations"], ({ reference, conversations }) => {
+    renderReferenceBanner({ container: $("#reference-banner"), migration: reference, conversations });
+  });
+
   const composer = createComposer({
     input: $("#composer-input"),
     sendButton: $("#send"),
@@ -266,6 +282,29 @@ async function boot() {
         await refreshConversations();
       } catch (error) {
         toast(`Could not move chat: ${error.message}`, { tone: "error" });
+      }
+    },
+    onReferenceCopy: async (conversation) => {
+      closeRail();
+      const sourceId = sourceConversationId(conversation);
+      try {
+        // The dry run writes nothing; its report is what the owner confirms.
+        const report = await api.migrationPreview(sourceId);
+        openMigrationDialog({
+          report,
+          sourceTitle: conversation.title,
+          apply: (token) => api.migrationApply(sourceId, token),
+          onOpened: async (contextId) => {
+            await refreshConversations();
+            await chat.openConversation(contextId);
+            toast(
+              "Reference-only chat created. The old history is in the source chat, not imported here.",
+              { tone: "success", timeout: 7000 },
+            );
+          },
+        });
+      } catch (error) {
+        toast(`Could not prepare the reference-only copy: ${error.message}`, { tone: "error" });
       }
     },
     onCreateProject: async (title, description = "") => {

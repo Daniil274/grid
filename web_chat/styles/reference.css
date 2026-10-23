@@ -1,0 +1,151 @@
+/**
+ * Reference-only chats: the persistent source notice above the transcript and
+ * the dry-run report the owner confirms (ui/reference-banner.js,
+ * ui/migration-dialog.js).
+ */
+
+.referenceBanner {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.referenceBanner[hidden] { display: none; }
+
+.referenceBanner__body { display: grid; gap: 4px; min-width: 0; }
+
+.referenceBanner__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--text);
+}
+
+.referenceBanner__badge {
+  padding: 1px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.referenceBanner__text,
+.referenceBanner__hint { margin: 0; }
+
+.referenceBanner__hint { color: var(--text-3); }
+
+.referenceBanner__link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.referenceBanner__link:hover { color: var(--accent-2); }
+
+/* -- the owner's dry-run report ------------------------------------------- */
+.migrationDialog {
+  width: min(620px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.migrationDialog::backdrop { background: rgb(0 0 0 / 55%); }
+
+.migrationDialog__content,
+.migrationDialog__form {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+}
+
+.migrationDialog__form { padding: 0; }
+
+.migrationDialog__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.migrationDialog__intro,
+.migrationDialog__reason {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.migrationDialog__reason { color: var(--text-3); font-style: italic; }
+
+.migrationDialog__facts {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+
+.migrationDialog__fact {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.migrationDialog__fact dt { color: var(--text-3); font-weight: 600; }
+.migrationDialog__fact dd { margin: 0; color: var(--text); }
+
+.migrationDialog__sourceLink {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.migrationDialog__consent {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.migrationDialog__consent input { margin-top: 2px; }
+
+.migrationDialog__status {
+  min-height: 1em;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.migrationDialog__status[data-tone="error"] { color: var(--danger); }
+.migrationDialog__status:empty { display: none; }
+
+.migrationDialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 20px 20px;
+}
+
+@media (max-width: 640px) {
+  .migrationDialog__fact { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+}

@@ -42,6 +42,7 @@ from web_chat.schemas import (
     ActionReviewRequest,
     BranchRequest,
     ConversationCreateRequest,
+    MigrationRequest,
     WorkspaceRequest,
     ConversationRenameRequest,
     PrepareAgentRequest,
@@ -52,6 +53,7 @@ from web_chat.security import OriginGuard, refusal
 from web_chat.space import IsolationUnavailable, UserSpace, WorkspaceChoiceError
 from web_chat.spaces import SpacePool
 from core.interruption import COMPACTED_TYPE
+from core import migration
 from web_chat.trace import is_tool_result
 from core.checkpoints import CheckpointError
 from web_chat.session import CHECKPOINTS_KEY
@@ -855,6 +857,88 @@ class WebChatServer:
                 space, context_id, "forking", lambda factory: factory.fork_to_new(context_id, body.message_id)
             )
             return JSONResponse({"id": fork_id, "root": fork_id})
+
+        # -- reference-only bootstrap (core.migration) ----------------------
+        # A conversation that cannot be continued here - legacy, or pinned to
+        # another version/system - can be *referenced* from a new empty
+        # conversation. The preview writes nothing; the POST needs the token
+        # from it and an explicit confirmation. No history, execution, queue,
+        # session or workspace file is imported, and the original is untouched.
+
+        def migration_target(space: UserSpace, context_id: str) -> tuple[Any, dict[str, str]]:
+            """The configuration and explicit selection the new chat is pinned to.
+
+            The current default system of the space, loaded from its registry -
+            no factory, no chat runtime, so a preview writes nothing and starts
+            no container. The selection is the one a new chat makes when the
+            user picks it explicitly, so the target's first turn runs the
+            system it was pinned to instead of routing elsewhere. The source's
+            ``routed_system`` is deliberately not inherited.
+            """
+            registry = space.registry_of(context_id)
+            system_key = registry.default_key()
+            config = registry.config(system_key)
+            return config, {
+                "system_key": system_key,
+                "agent_key": config.get_default_agent(),
+            }
+
+        @api.get("/api/chat/conversations/{context_id}/migration")
+        async def migration_preview(
+            context_id: str, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """Dry run: the reference-only bootstrap report and its confirmation token."""
+            manager = space.context_manager()
+            if manager.conversation_view(context_id) is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            config, selection = migration_target(space, context_id)
+            report = await asyncio.to_thread(
+                migration.plan, manager, context_id, config, selection=selection
+            )
+            return JSONResponse(report)
+
+        @api.post("/api/chat/conversations/{context_id}/migration")
+        async def migration_apply(
+            context_id: str, body: MigrationRequest, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """Bootstrap the reference-only conversation under a confirmed, bound request."""
+            manager = space.context_manager()
+            if manager.conversation_view(context_id) is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            if not body.confirm:
+                raise HTTPException(status_code=400, detail="Explicit confirmation is required")
+            config, selection = migration_target(space, context_id)
+            if space.turns.is_running(context_id) or not space.turns.claim(context_id):
+                raise HTTPException(
+                    status_code=409, detail="Wait for the current operation before migrating this conversation"
+                )
+            try:
+                # The migration hashes and writes files: sync work, off the loop,
+                # and no factory or runtime is built for it.
+                report = await asyncio.to_thread(
+                    migration.apply,
+                    manager,
+                    context_id,
+                    config,
+                    confirmation=body.plan_token,
+                    confirm=True,
+                    selection=selection,
+                )
+            finally:
+                space.turns.release(context_id)
+            if report.get("status") in ("applied", "completed"):
+                target_id = (report.get("target") or {}).get("context_id")
+                assign = getattr(space, "assign_chat_space", None)
+                if target_id and assign is not None:
+                    # The normal new chat's space: metadata only, no directory is
+                    # made and no container started at migration time.
+                    assign(target_id)
+                return JSONResponse(report)
+            if report.get("code") in (migration.CONFIRMATION_REQUIRED, migration.CONFIRMATION_STALE):
+                return JSONResponse(report, status_code=409)
+            if report.get("code") == migration.SYSTEM_UNRESOLVED:
+                return JSONResponse(report, status_code=503)
+            return JSONResponse(report, status_code=409)
 
         @api.post("/api/chat/conversations/{context_id}/checkpoints/{turn_id}/restore")
         async def restore_checkpoint(

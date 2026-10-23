@@ -339,6 +339,15 @@ class ContextManager:
             self._save_to_file()
             return new_id
 
+    def create_context(self, context_id: Optional[str] = None) -> str:
+        """Create an empty conversation without activating it; return its id.
+
+        The conversation is created in this process, so a first turn may pin it
+        (core.revisions); nothing is persisted until a turn or a pin saves it.
+        """
+        with safe_lock(self._lock, timeout=5.0):
+            return self._create_context(context_id)
+
     def get_current_context_id(self) -> Optional[str]:
         """The conversation of this task: the one it bound, else the active one."""
         return self._target_id()

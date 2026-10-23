@@ -15,7 +15,13 @@ async function request(url, options = {}) {
     throw new Error("Signed out");
   }
   if (!response.ok) {
-    throw new Error(payload?.detail || `${options.method || "GET"} ${url} failed (${response.status})`);
+    const error = new Error(
+      payload?.detail || payload?.reason || `${options.method || "GET"} ${url} failed (${response.status})`,
+    );
+    // A refused migration still carries its machine-readable report.
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
   }
   return payload;
 }
@@ -109,6 +115,15 @@ export const api = {
   /** A new chat holding this one up to the end of the message's turn. */
   forkConversation: (id, messageId) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/forks`, json("POST", { message_id: messageId })),
+  /** Dry run of a reference-only bootstrap: a report and its bound token. Writes nothing. */
+  migrationPreview: (id) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/migration`, { cache: "no-store" }),
+  /** Create the empty reference-only chat after the owner confirms the preview token. */
+  migrationApply: (id, planToken) =>
+    request(
+      `/api/chat/conversations/${encodeURIComponent(id)}/migration`,
+      json("POST", { plan_token: planToken, confirm: true }),
+    ),
   /** Delete a message from the chat and the agent's context; a request takes its turn along. */
   deleteMessage: (id, messageId) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" }),

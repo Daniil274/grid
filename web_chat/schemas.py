@@ -34,6 +34,18 @@ class BranchRequest(BaseModel):
     message_id: str = Field(min_length=1, max_length=64)
 
 
+class MigrationRequest(BaseModel):
+    """A reference-only bootstrap: the dry-run token plus an explicit confirmation.
+
+    ``confirm`` must be true and ``plan_token`` must be the one from
+    ``GET /api/chat/conversations/{id}/migration``; both are required, and the
+    server recomputes the plan so a changed conversation refuses the token.
+    """
+
+    plan_token: str = Field(min_length=16, max_length=128)
+    confirm: bool = False
+
+
 class ConversationCreateRequest(BaseModel):
     """``None`` on either key means the router decides per message; on
     ``workspace``, the chat works in the space's own workspace."""

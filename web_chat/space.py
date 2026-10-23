@@ -1019,7 +1019,16 @@ class UserSpace:
         doomed: List[str] = []
         for view in views:
             context_id, metadata = view["id"], view.get("metadata") or {}
-            if view["messages"] or context_id in busy or context_id in roots or metadata.get("active_branch"):
+            if (
+                view["messages"]
+                or context_id in busy
+                or context_id in roots
+                or metadata.get("active_branch")
+                # A reference-only conversation of core.migration is empty by
+                # design: it is the recorded target of a bootstrap, not a chat
+                # nobody wrote in, so pruning it would lose that record.
+                or metadata.get("migration")
+            ):
                 continue
             try:
                 age = (now - datetime.fromisoformat(str(view.get("updated_at")))).total_seconds()

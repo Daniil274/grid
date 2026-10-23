@@ -534,7 +534,7 @@ export class ChatController {
     if (intent !== this._navigationIntent) return;
     this._store.set({
       contextId: conversation.id, rootId: conversation.id, resumable: false, hasAgentContext: false, compacting: false,
-      chatWorkspace: conversation.workspace ?? null, workspaceLocked: false,
+      chatWorkspace: conversation.workspace ?? null, workspaceLocked: false, reference: null,
     });
     this._transcript.clear();
     await this._refreshConversations();
@@ -591,6 +591,10 @@ export class ChatController {
       ...selection,
       hasAgentContext: Boolean(payload.metadata?.routed_agent),
       chatWorkspace: payload.metadata?.workspace ?? null,
+      // A reference-only target keeps its source link on screen (ui/reference-banner.js).
+      reference: payload.metadata?.migration?.action === "context.reference_bootstrap"
+        ? payload.metadata.migration
+        : null,
       workspaceLocked: payload.messages.length > 0 || Boolean(payload.active_turn),
       compacting: this._compactingId === payload.id,
       queue: payload.pending ?? [],
@@ -619,7 +623,7 @@ export class ChatController {
     if (intent !== this._navigationIntent) return;
     if (contextId === this._store.get().contextId) {
       this._detach();
-      this._store.set({ contextId: null, hasAgentContext: false });
+      this._store.set({ contextId: null, hasAgentContext: false, reference: null });
       this._transcript.clear();
     }
     await this._refreshConversations();
