@@ -44,6 +44,40 @@ update is activated by the user after a backup and review
 - `docs/revisions.md` (what is pinned, compatibility, refusals, legacy, privacy,
   limits) and `docs/release-process.md` (publication criteria, safe update and
   rollback).
+- `core/migration.py`: **reference-only bootstrap** (`action =
+  "context.reference_bootstrap"`, `version = 1`) as the one supported way
+  forward for a conversation that cannot continue here - legacy (no manifest)
+  or pinned to another Grid version, runtime or resolved system. It creates a
+  **new empty** conversation pinned to this environment and records an explicit,
+  machine-readable reference to the old one; nothing is adopted, replayed or
+  executed. The source is never written, re-pinned, edited or deleted and keeps
+  its own state byte for byte; the record states its provenance honestly -
+  `unknown` for a legacy conversation, the pinned revision (version and digest)
+  for an intact but incompatible one. Messages, executions, agent SDK sessions,
+  queued messages, a pending run, checkpoints, workspace files, approvals,
+  credentials and the action policy are **not** imported: they are named with
+  counts only, and history is referenced by digest, never loaded as executable
+  state. Dry run first (writes nothing, returns a token bound to the exact source
+  content, manifest and metadata); applying needs that token **and**
+  `confirm=true`, recomputes the plan under a process lock, and refuses a changed
+  source as `migration.confirmation_stale`. The target's pin and record are
+  stored strictly before success, so a failed pin leaves no half-migrated
+  conversation; a repeated apply in the same environment returns
+  `migration.completed` for the same target (idempotent). A target whose
+  configuration no longer resolves is `migration.target_incompatible`: it is
+  never re-pinned, and the safe next step is to bootstrap from that target.
+  Future-format, malformed, tampered and unknown-integrity records are refused
+  fail-closed.
+- Web chat API: `GET /api/chat/conversations/{id}/migration` (dry run) and
+  `POST /api/chat/conversations/{id}/migration` with
+  `{"plan_token": "...", "confirm": true}` (`MigrationRequest`), owner-scoped
+  and holding the conversation's turn slot while it runs.
+- Web chat UI: the rail's "Reference-only copy…" action runs the preview and
+  states what is never imported or restored before the owner ticks consent and
+  sends the bound token; the new empty chat carries a persistent banner with a
+  link to the source, so an old thread can be read and copied by hand - it is
+  not handed to the agent automatically. `web_chat/space.py` never prunes an
+  empty conversation that is a bootstrap target.
 - CI: a `release` job runs the offline validator before installing
   dependencies, checks that the checkout holds no `.env`, and runs the focused
   revision tests. CD additionally requires the release tag to match the
@@ -67,14 +101,25 @@ update is activated by the user after a backup and review
   absolute paths are not stored. Only a projection (agent/model/tool keys,
   providers, context sizes, resolved limits, policy mode and file name) is kept;
   digest material is redacted, credential-looking files are never read, and
-  oversized files are fingerprinted by size. Rotating a credential does not
-  invalidate a conversation; changing a prompt does.
+  source files are hashed in full (sha256) - there is no size-only
+  fingerprinting. Rotating a credential does not invalidate a conversation;
+  changing a prompt does.
 
 ### Not included
 
-- **No migration.** A conversation stored before revisions (no manifest) is
-  legacy: readable, never continued, never adopted or re-pinned. There is no
-  supported conversion; start a new conversation.
+- **No migration of history.** A conversation stored before revisions (no
+  manifest) is legacy: readable, never continued, never adopted or re-pinned.
+  There is no conversion that makes old history continuable, and no messages,
+  executions, sessions, checkpoints, queues, approvals, credentials or workspace
+  files move into another conversation. The only supported path is a
+  **reference-only bootstrap**: a new empty conversation plus a reference to the
+  old one.
+  - **No automatic availability of old content.** The reference is a link for a
+    person, not context for the agent, the model or the tools. Pasted text
+    becomes part of a new request; it is not executable state.
+  - **No permission change.** The new conversation runs with the ordinary
+    current permissions of its configuration and action policy; the reference
+    record and its confirmation grant nothing.
 - **No in-place re-pin.** Editing or copying a manifest does not make a
   conversation continuable; a changed manifest fails as tampered and one from
   another conversation fails as a context mismatch.
@@ -95,6 +140,12 @@ update is activated by the user after a backup and review
 - `tests/test_revision_compatibility.py` covers pinning, refusal codes,
   tampering, legacy read-only behaviour, secret-free storage, the gate position
   and the release manifest validator.
+- `tests/test_context_migration.py` covers the migration dry run and its
+  no-write behaviour, token binding, confirmation and staleness, one empty pinned
+  target with the original preserved, the excluded
+  approvals/queues/sessions/credentials state, idempotence, tampered, future,
+  malformed and foreign sources, `target_incompatible` without re-pinning, and
+  the owner-scoped API. `tests/web_chat_reference.test.mjs` covers the UI path.
 
 ## [0.1.0] - baseline
 

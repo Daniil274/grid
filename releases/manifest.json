@@ -32,7 +32,10 @@
         "core/context.py: persist and load the manifest with the conversation (JSON file and encrypted conversation store), immutable pinning",
         "core/factory/turns.py: revision gate before any external operation, shared by web chat, lazy agents and the CLI",
         "core/__init__.py: 0.1.0 -> 0.2.0",
-        "tools/release_check.py: offline release manifest validator"
+        "tools/release_check.py: offline release manifest validator",
+        "core/migration.py: reference-only bootstrap (context.reference_bootstrap, version 1) - a new empty pinned conversation plus a machine-readable reference to the old one; nothing adopted, replayed or executed",
+        "web_chat/server.py + web_chat/schemas.py: owner-scoped GET (dry run) and POST (confirmed) migration endpoints with MigrationRequest",
+        "web_chat UI: rail action, preview dialog with explicit consent, and a persistent source banner on the new empty chat"
       ],
       "context_revision": {
         "manifest_version": 1,
@@ -81,9 +84,69 @@
           "exactly_once": "none"
         }
       },
+      "context_reference_bootstrap": {
+        "action": "context.reference_bootstrap",
+        "version": 1,
+        "record_key": "migration",
+        "target": "new-empty-context",
+        "target_history": "empty",
+        "target_title": "Reference-only chat",
+        "source": "preserved-not-rewritten",
+        "source_provenance": "unknown-for-legacy, pinned-revision-for-incompatible",
+        "executable_state": "none",
+        "history": "referenced-by-digest",
+        "imported": [],
+        "not_imported": [
+          "messages",
+          "executions",
+          "agent SDK sessions",
+          "queued messages",
+          "pending agent run",
+          "checkpoints",
+          "workspace files",
+          "approvals",
+          "credential state",
+          "action policy state"
+        ],
+        "confirmation": {
+          "dry_run": "required",
+          "owner": "explicit",
+          "binding": "source content, revision manifest and metadata",
+          "request_fields": ["plan_token", "confirm"]
+        },
+        "api": [
+          {
+            "method": "GET",
+            "path": "/api/chat/conversations/{id}/migration",
+            "effect": "dry-run-report-and-confirmation-binding; writes nothing"
+          },
+          {
+            "method": "POST",
+            "path": "/api/chat/conversations/{id}/migration",
+            "body": "{plan_token: string(16..128), confirm: true}",
+            "effect": "create-empty-pinned-target-and-reference-record"
+          }
+        ],
+        "idempotent": "same-target-when-the-environment-still-resolves",
+        "target_incompatible": "reported-not-re-pinned; bootstrap-from-the-target-itself",
+        "refused_fail_closed": [
+          "migration.source_tampered",
+          "migration.source_malformed",
+          "migration.source_future",
+          "migration.source_integrity_unknown"
+        ],
+        "permissions": "current-configuration-and-action-policy",
+        "compatibility_gate": "unchanged-exact",
+        "repin": "never",
+        "agent_access_to_source_history": "none-by-default; source link for the owner only"
+      },
       "validation": {
         "command": "python tools/release_check.py",
-        "tests": ["tests/test_revision_compatibility.py"]
+        "tests": [
+          "tests/test_revision_compatibility.py",
+          "tests/test_context_migration.py"
+        ],
+        "ui_tests": ["tests/web_chat_reference.test.mjs"]
       }
     }
   ]
