@@ -27,6 +27,12 @@ How the two talk, precisely:
 * **History.** Prior ``function_call`` and ``function_call_output`` items are
   rendered into the prompt, so a tool's result reaches the next turn instead
   of being dropped.
+* **A tool called by name.** Claude Code habits sometimes win and the model
+  emits a native ``tool_use`` instead of filling the envelope. That call is not
+  run by the CLI (it holds no Grid tool), so it goes to the agent as an
+  ordinary tool call: a name the agent does not know is answered with an error
+  (core.sdk_patches) and the model carries on. One stray call never ends the
+  user's turn. A call the envelope asks for too is made once, not twice.
 * **System prompt.** Grid's system instructions and the tool instructions
   replace Claude Code's own system prompt (``--system-prompt-file``), behind
   a preamble that names what the CLI still attaches about its host.
@@ -44,7 +50,8 @@ The CLI's own login (``claude auth login``) is the only authorization. It is
 checked before **every** launch (core.claude_cli.require_subscription), and
 the CLI runs with no built-in tools, no MCP tools (``--disallowedTools
 "mcp__*"``) and no host settings; if its ``init`` event still announces tools,
-the turn is refused before generation. Input the
+the turn is refused before generation, because nothing has been generated yet
+and the lockdown itself is broken. Input the
 CLI cannot take - audio, files, hosted tools - is refused with an explicit
 error rather than silently dropped. The one limit that cannot be
 closed from here is organization-managed Claude Code settings, which override
@@ -153,6 +160,14 @@ def _chunk(
         choices=[Choice(index=0, delta=delta, finish_reason=finish_reason)],
         usage=usage,
     )
+
+
+def _arguments_key(arguments: str) -> str:
+    """A tool call's arguments for comparison, whatever the key order."""
+    try:
+        return json.dumps(json.loads(arguments), sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return arguments
 
 
 @dataclass(frozen=True)
@@ -673,9 +688,18 @@ class ClaudeCodeModel(Model):
         tool_index = 0
         seen_text = False
         schema_fallback: Any = None
-        # Native calls announced but not yet answered, by tool_use id. A call
-        # the CLI never answered with a tool_result did not run.
-        unanswered: Dict[str, str] = {}
+        # Native calls announced by a complete assistant message, by tool_use id.
+        # A matching tool_result means the CLI answered that call.
+        announced_calls: Dict[str, str] = {}
+        # Native calls the model asked for by name, kept until the turn's answer
+        # is known: one the envelope asks for too must not run twice.
+        native_calls: List[Dict[str, Any]] = []
+        seen_native: set[tuple[str, str]] = set()
+        # Set once a validated final answer streamed: then the turn succeeded and
+        # nothing is handed back.
+        settled = False
+        # The calls the turn's answer actually made, as (name, arguments).
+        asked: set[tuple[str, str]] = set()
         # Tool turns: the envelope's "message" streams while the CLI writes the
         # StructuredOutput input, instead of arriving with the result. Not with
         # a structured "final" answer: its JSON must stay the only text.
@@ -714,24 +738,29 @@ class ClaudeCodeModel(Model):
                     # tool; its input is kept in case the result omits the value.
                     schema_fallback = call.get("input")
                     continue
-                # The model sometimes calls a tool by name instead of putting it
-                # in the envelope. That is only a proposal until the CLI answers
-                # it with a tool_result carrying the same tool_use id.
                 call_id = str(call.get("id") or "")
                 if call_id:
-                    unanswered.setdefault(call_id, name)
+                    announced_calls.setdefault(call_id, name)
+                # The model sometimes calls a tool by name instead of putting it
+                # in the envelope. That is the one case this bridge can turn into
+                # a tool call for the agent (see the end of the turn): the CLI
+                # holds no Grid tool, and a name the agent does not know is
+                # answered with an error instead of ending the run.
+                arguments = json.dumps(call.get("input") or {}, ensure_ascii=False)
+                if (name, arguments) not in seen_native:
+                    seen_native.add((name, arguments))
+                    native_calls.append({"name": name, "arguments": arguments})
             for result in tool_results(event):
-                answered = unanswered.pop(str(result.get("tool_use_id") or ""), None)
-                if answered is None or ran_nothing(result):
-                    # No such call, or one the CLI held no tool for: it answered
-                    # "No such tool available" and ran nothing.
-                    continue
-                raise ClaudeCliError(
-                    f"The Claude Code CLI ran a tool it was not given ({answered}). Built-in "
-                    "tools and MCP are disabled for this bridge, so the result is refused rather "
-                    "than run twice.",
-                    details={"tools": [answered]},
-                )
+                answered = announced_calls.pop(str(result.get("tool_use_id") or ""), None)
+                if answered is not None and not ran_nothing(result):
+                    # The CLI did not answer with "no such tool": it holds this
+                    # tool and may have run it. The turn continues either way;
+                    # this line is what an operator needs to close that hole.
+                    logger.warning(
+                        "The Claude Code CLI answered a native tool call (%s) it was not given; "
+                        "built-in tools and MCP are disabled for this bridge.",
+                        answered,
+                    )
             for fragment in thinking_deltas(event):
                 yield _chunk(model=self.model, reasoning=fragment)
             if stream_message:
@@ -787,6 +816,7 @@ class ClaudeCodeModel(Model):
                         details={"subtype": result.get("subtype"), "reason": result.get("result")},
                     )
                 yield _chunk(model=self.model, content=json.dumps(answer, ensure_ascii=False))
+                settled = True
             elif turn.mode == "tools":
                 if not isinstance(answer, Mapping):
                     raise ClaudeCliError(
@@ -798,11 +828,14 @@ class ClaudeCodeModel(Model):
                 if final is not None:
                     # A final structured answer ends the turn without tool calls.
                     yield _chunk(model=self.model, content=json.dumps(final, ensure_ascii=False))
+                    settled = True
                 else:
                     for call in answer.get("tool_calls") or []:
                         if not isinstance(call, Mapping):
                             continue
                         finish_reason = "tool_calls"
+                        arguments = json.dumps(call.get("arguments") or {}, ensure_ascii=False)
+                        asked.add((str(call.get("name")), _arguments_key(arguments)))
                         yield _chunk(
                             model=self.model,
                             tool_call=ChoiceDeltaToolCall(
@@ -811,7 +844,7 @@ class ClaudeCodeModel(Model):
                                 type="function",
                                 function=ChoiceDeltaToolCallFunction(
                                     name=str(call.get("name")),
-                                    arguments=json.dumps(call.get("arguments") or {}, ensure_ascii=False),
+                                    arguments=arguments,
                                 ),
                             ),
                         )
@@ -826,6 +859,33 @@ class ClaudeCodeModel(Model):
                             rest = "\n\n" + message
                         if rest:
                             yield _chunk(model=self.model, content=rest)
+        # A call the model asked for by name and the envelope did not make too:
+        # it goes to the agent as an ordinary tool call. An answer for a name the
+        # agent does not know (core.sdk_patches) tells the model what happened and
+        # the run continues, instead of the user getting a dead turn.
+        if not settled:
+            for call in native_calls:
+                if (call["name"], _arguments_key(call["arguments"])) in asked:
+                    continue
+                logger.warning(
+                    "The Claude Code CLI announced a native tool call (%s); handing it back to "
+                    "the agent as a tool call instead of letting it end the turn.",
+                    call["name"],
+                )
+                finish_reason = "tool_calls"
+                yield _chunk(
+                    model=self.model,
+                    tool_call=ChoiceDeltaToolCall(
+                        index=tool_index,
+                        id=f"call_{tool_index}",
+                        type="function",
+                        function=ChoiceDeltaToolCallFunction(
+                            name=call["name"],
+                            arguments=call["arguments"],
+                        ),
+                    ),
+                )
+                tool_index += 1
         yield _chunk(model=self.model, finish_reason=finish_reason, usage=usage)
 
 

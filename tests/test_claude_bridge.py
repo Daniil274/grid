@@ -388,8 +388,10 @@ def test_a_native_tool_call_without_a_tool_result_is_only_a_proposal():
     assert _text(asyncio.run(_get(model))) == "Hello"
 
 
-def test_a_native_tool_call_the_cli_answered_is_refused():
-    # A tool_result carrying the call's id is proof the CLI ran it.
+def test_a_native_tool_call_the_cli_answered_goes_back_to_the_agent():
+    # A tool_result carrying the call's id means the CLI answered that call.
+    # The turn must not die on it: the call goes back to the agent as an
+    # ordinary tool call, whose answer tells the model the tool is not there.
     events = [
         ClaudeEvent("assistant", "", {"type": "assistant", "message": {"content": [
             {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}},
@@ -400,8 +402,8 @@ def test_a_native_tool_call_the_cli_answered_is_refused():
         ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": ""}),
     ]
     model, _ = _model(events)
-    with pytest.raises(ClaudeCliError, match=r"ran a tool it was not given \(Bash\)"):
-        asyncio.run(_get(model))
+    calls = _calls(asyncio.run(_get(model)))
+    assert [(call.name, call.arguments) for call in calls] == [("Bash", '{"command": "ls"}')]
 
 
 def test_a_tool_result_for_another_call_does_not_convict_this_one():
@@ -420,6 +422,65 @@ def test_a_tool_result_for_another_call_does_not_convict_this_one():
     ]
     model, _ = _model(events)
     assert _text(asyncio.run(_get(model))) == "Hello"
+
+
+def test_an_escaped_native_call_does_not_end_the_turn():
+    """ctx-7dc8d1e0: the model asked for a tool by name and the whole turn died.
+
+    The user got "The turn did not finish ... ran a tool it was not given"
+    instead of an answer. The call must reach the agent as a tool call, whose
+    answer (the SDK's unknown-tool error) lets the model continue.
+    """
+    from agents import Agent, Runner
+
+    from core import sdk_patches
+
+    sdk_patches.install()  # a run answers a tool it does not know instead of dying
+    first = [
+        ClaudeEvent("assistant", "", {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/workspace"}},
+        ]}}),
+        ClaudeEvent("user", "", {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "is_error": False, "content": "a.txt"},
+        ]}}),
+        ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False,
+                                          "result": ""}),
+    ]
+    answer = "В папке только служебные файлы."
+    second = [
+        ClaudeEvent("stream_event", "", {"event": {"type": "content_block_delta",
+                                                   "delta": {"type": "text_delta", "text": answer}}}),
+        ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False,
+                                          "result": answer}),
+    ]
+    runner = _ScriptedRunner([first, second])
+    agent = Agent(name="engineer", model=ClaudeCodeModel(runner, "claude-sonnet-5"))
+
+    result = asyncio.run(Runner.run(agent, "Что лежит в папке?", max_turns=3))
+
+    assert result.final_output == answer
+    assert runner.calls == 2  # the model got a second turn, not a dead run
+    answers = [
+        item.raw_item["output"]
+        for item in result.new_items
+        if item.type == "tool_call_output_item"
+    ]
+    assert "Tool 'Read' is not available" in answers[0]
+
+
+class _ScriptedRunner:
+    """A runner that plays a different batch of events on each call."""
+
+    def __init__(self, batches):
+        self.batches = list(batches)
+        self.calls = 0
+
+    async def stream(self, prompt, *, json_schema=None, partials=False, system_prompt=None,
+                     effort=None, images=()):
+        batch = self.batches[min(self.calls, len(self.batches) - 1)]
+        self.calls += 1
+        for event in batch:
+            yield event
 
 
 def test_init_with_tools_other_than_the_schema_tool_is_refused_before_generation():
@@ -493,7 +554,7 @@ def test_the_cli_structured_output_tool_input_is_used_when_the_result_omits_it()
     assert _text(response) == '{"answer": "42"}'
 
 
-def test_the_cli_structured_output_tool_result_is_refused_in_plain_mode():
+def test_the_cli_structured_output_tool_result_is_handed_back_in_plain_mode():
     events = [
         _structured_output_tool_event(),
         ClaudeEvent("user", "", {"type": "user", "message": {"content": [
@@ -503,8 +564,8 @@ def test_the_cli_structured_output_tool_result_is_refused_in_plain_mode():
         ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": ""}),
     ]
     model, runner = _model(events)
-    with pytest.raises(ClaudeCliError, match=r"ran a tool it was not given \(StructuredOutput\)"):
-        asyncio.run(_get(model))
+    calls = _calls(asyncio.run(_get(model)))
+    assert [call.name for call in calls] == ["StructuredOutput"]
     # Plain mode never asked for a schema, so nothing is exempted.
     assert runner.calls[0]["json_schema"] is None
 
