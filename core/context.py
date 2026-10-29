@@ -6,6 +6,7 @@ import atexit
 import os
 import re
 import threading
+import time
 from typing import Callable, Iterable, Iterator, List, Dict, Optional, Any, Tuple, Union
 from datetime import datetime
 from threading import Lock
@@ -36,6 +37,10 @@ logger = Logger.get_logger("context")
 
 #: The parts of a conversation's JSON document, encoded and reused one by one.
 _DOCUMENT_PARTS = ("conversation", "executions", "metadata")
+
+#: Pause before a background save that failed is tried again, so a store that
+#: keeps refusing (a full disk, say) cannot spin the saver thread.
+SAVE_RETRY_PAUSE = 0.5
 
 #: Statuses of ``pending_agent_run`` while its turn has not ended.
 ACTIVE_RUN_STATUSES = ("running", "retrying")
@@ -2010,10 +2015,20 @@ class ContextManager:
                 self._save_cond.wait_for(lambda: self._save_requested)
                 self._save_requested = False
                 seq = self._save_seq
+            failed = False
             try:
                 self._save_async(seq)
             except Exception:
+                # Nothing of that request is known to be on disk: it was put back
+                # into the changed set and asked for again (see _save_async), and
+                # must not be counted as written below.
+                failed = True
                 logger.exception("Saving conversations in the background failed")
+            if failed:
+                # Paused, so a store that keeps refusing does not spin this thread;
+                # a request made meanwhile is still there when the pause is over.
+                time.sleep(SAVE_RETRY_PAUSE)
+                continue
             with self._save_cond:
                 # This run - or a strict save that overtook it - has every change
                 # asked for up to *seq*; a later request carries the rest.
@@ -2089,8 +2104,33 @@ class ContextManager:
                 return
         try:
             self._write_jobs(jobs)
+        except Exception as error:
+            # The snapshot was written by nobody: a store that refuses the put
+            # (or an encoding that fails) leaves every conversation of it as
+            # changed, and the save is asked for again. Dropping _dirty there
+            # lost the change for good: nothing but the next write of that
+            # conversation carried it, and the exit flush only writes the dirty.
+            failure: Optional[BaseException] = error
+        else:
+            failure = None
         finally:
             self._save_gate.release()
+        if failure is not None:
+            # After the gate: _requeue takes the manager lock, and a strict save
+            # waiting for this gate while holding that lock would deadlock.
+            self._requeue(jobs)
+            raise failure
+
+    def _requeue(self, jobs: List[Tuple[str, Optional[Dict[str, Any]], Dict[str, str], int]]) -> None:
+        """Put the conversations of a failed background save back into the dirty set.
+
+        The cached parts of a context stay: they are exactly what the failed
+        write meant to store, and a newer change drops the ones it touched.
+        """
+        with safe_lock(self._lock, timeout=5.0):
+            for context_id, _snapshot, _parts, _version in jobs:
+                self._dirty.add(context_id)
+            self._request_save()
 
     def _write_jobs(self, jobs: List[Tuple[str, Optional[Dict[str, Any]], Dict[str, str], int]]) -> None:
         """Hand the snapshots to the store; the caller holds the save gate."""
