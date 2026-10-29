@@ -111,6 +111,68 @@ def test_malformed_mcp_resource_unknown_blocks_and_empty_content_survive():
     assert normalize_payload({"content": [], "isError": True})["is_error"]
 
 
+def test_memory_soft_errors_are_errors_without_reclassifying_other_tools():
+    failure = {"error": "Memory operation unavailable or invalid arguments"}
+    for tool in ("memory_recall", "memory_overview", "memory_remember", "memory_forget",
+                 "server.memory_recall"):
+        payload = normalize_payload(failure, tool=tool)
+        assert payload["is_error"], tool
+        # The payload's own shape is untouched: only the status is added.
+        assert payload["parts"][0]["data"] == failure
+    # Another tool may return an `error` field as ordinary data.
+    assert not normalize_payload(failure, tool="read_file")["is_error"]
+    assert not normalize_payload({"error": "  "}, tool="memory_recall")["is_error"]
+    assert not normalize_payload(failure, role="input", tool="memory_recall")["is_error"]
+
+
+def test_memory_soft_error_marks_the_step_as_error():
+    recorder = TraceRecorder(lambda _: None)
+    obs = WebStreamObserver(recorder, emit_token=lambda _: None)
+    obs.handle_event(event("tool_called", "m1", tool="memory_recall", args='{"query":"x"}'))
+    obs.handle_event(event("tool_output", "m1", tool="memory_recall",
+                           output='{"error":"Memory operation unavailable or invalid arguments"}'))
+    row = recorder.snapshot()[0]
+    assert row["status"] == "error"
+    assert row["result_payload"]["is_error"]
+
+
+def test_a_resumed_memory_failure_is_an_error_without_a_tool_name():
+    # A resumed run can deliver a tool's output with no call to match it and no
+    # name on the event: only the payload itself can still say it failed.
+    recorder = TraceRecorder(lambda _: None)
+    obs = WebStreamObserver(recorder, emit_token=lambda _: None)
+    obs.handle_event(event("tool_output", "resumed",
+                           output='{"error":"This chat has no chat memory","isError":true}'))
+    row = recorder.snapshot()[0]
+    assert row["status"] == "error"
+    assert row["result_payload"]["is_error"]
+
+
+@pytest.mark.asyncio
+async def test_a_memory_tool_refusal_carries_the_standard_error_flag():
+    # `isError` is what every payload reader understands; a bare {"error": ...}
+    # only means something to a reader that already knows the tool's name.
+    from agents.tool_context import ToolContext
+    from tools import memory_tools
+
+    factory = SimpleNamespace(
+        memory_levels=lambda context_id, force=True: [("project", SimpleNamespace())]
+    )
+    context = ToolContext(
+        context=SimpleNamespace(factory=factory), tool_name="memory_remember",
+        tool_call_id="c1", tool_arguments="{}",
+    )
+    raw = await memory_tools.memory_remember.on_invoke_tool(
+        context, json.dumps({"content": "x", "level": "chat"})
+    )
+    assert json.loads(raw) == {
+        "error": "This chat has no chat memory; use one of: project",
+        "isError": True,
+    }
+    # Even where the step does not know which tool produced this answer.
+    assert normalize_payload(raw, tool="")["is_error"]
+
+
 def test_total_image_and_part_budgets_are_bounded():
     value = [{"type": "image", "mimeType": "image/png", "data": "a" * 250000}] * 8
     p = normalize_payload(value)

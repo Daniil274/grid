@@ -86,3 +86,29 @@ def test_render_js_is_not_offered_and_old_calls_with_it_still_work(monkeypatch, 
     ))
 
     assert result == "Source: https://example.com/\n\npage text"
+
+
+def test_a_long_page_comes_in_parts_that_fit_the_output_limit(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    page = "".join(f"line {n:06d}\n" for n in range(9000))  # 108k characters
+
+    async def fetched(url, timeout):
+        return 200, page, ""
+
+    monkeypatch.setattr(web_tools, "_fetch_url", fetched)
+
+    def call(**args):
+        return asyncio.run(web_tools.web_fetch.on_invoke_tool(
+            SimpleNamespace(context=None, tool_name="web_fetch", tool_call_id="t"),
+            json.dumps({"url": "https://example.com/", **args}),
+        ))
+
+    first = call()
+    # ~4 characters a token: under the smallest shipped max_tool_output_tokens (12000).
+    assert len(first) // 4 < 12000
+    assert "line 000000" in first and "call web_fetch again with start=40000" in first
+    second = call(start=40000)
+    assert second.startswith("[characters 40000-80000 of ") and "start=80000" in second
+    assert "past the end" in call(start=10_000_000)

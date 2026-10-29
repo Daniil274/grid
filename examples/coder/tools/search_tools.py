@@ -16,7 +16,7 @@ _GRID_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_GRID_ROOT))
 
 from agents import function_tool
-from utils.path_utils import display_agent_path_auto, get_current_factory, resolve_agent_path_auto
+from utils.path_utils import container_path, display_agent_path_auto, get_current_factory, resolve_agent_path_auto
 from utils.process_limits import run_host_command
 
 
@@ -284,7 +284,7 @@ def _report(pattern: str, results: list, max_results: int) -> str:
 
 def _grep_in_container(
     container_id: str,
-    relative_dir: str,
+    target: str,
     pattern: str,
     file_extensions: str,
     case_sensitive: bool,
@@ -292,8 +292,8 @@ def _grep_in_container(
     max_results: int,
 ) -> str:
     """ripgrep in the run's container: the user's search takes that user's
-    CPUs, not the server's (core.managers.container_manager)."""
-    target = CONTAINER_ROOT if relative_dir in ("", ".") else f"{CONTAINER_ROOT}/{relative_dir}"
+    CPUs, not the server's (core.managers.container_manager). *target* is the
+    directory's path in the container (utils.path_utils.container_path)."""
     cmd = [
         "docker", "exec", "-w", CONTAINER_ROOT, container_id,
         # `timeout` ends the search inside the container too.
@@ -415,10 +415,12 @@ def grep_tool(
     except (FileNotFoundError, NotADirectoryError) as exc:
         return str(exc)
 
-    container_id = getattr(get_current_factory(), "container_id", None)
+    factory = get_current_factory()
+    container_id = getattr(factory, "container_id", None)
     if container_id:
+        # /user and /project are mounted at their own paths, not under /workspace.
         return _grep_in_container(
-            container_id, display_agent_path_auto(directory),
+            container_id, container_path(str(base_path), factory),
             pattern, file_extensions, case_sensitive, use_regex, max_results,
         )
 

@@ -185,3 +185,37 @@ def test_without_ripgrep_a_runaway_regex_is_killed_not_left_running(tmp_path, mo
 
     assert "exceeded" in result
     assert time.monotonic() - started < 15
+
+
+@pytest.mark.asyncio
+async def test_with_a_container_grep_searches_another_space_at_its_mount(tmp_path, monkeypatch):
+    sys.path.insert(0, str(CODER_TOOLS))
+    import search_tools
+
+    workspace, user = tmp_path / "ws", tmp_path / "user"
+    workspace.mkdir()
+    (user / "grid").mkdir(parents=True)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(search_tools, "run_host_command", run)
+    factory = SimpleNamespace(
+        container_id="c0ffee",
+        extra_roots={"user": str(user)},
+        config=SimpleNamespace(get_working_directory=lambda: str(workspace)),
+    )
+    set_current_factory(factory)
+    try:
+        await search_tools.grep_tool.on_invoke_tool(
+            SimpleNamespace(context=None, tool_name="grep_tool", tool_call_id="t"),
+            json.dumps({"pattern": "needle", "directory": "/user/grid"}),
+        )
+    finally:
+        reset_current_factory()
+
+    [command] = calls
+    # /user is mounted at /user, not under /workspace (was /workspace//user/grid).
+    assert command[-2:] == ["--", "/user/grid"]

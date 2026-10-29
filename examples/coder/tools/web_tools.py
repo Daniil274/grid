@@ -65,7 +65,12 @@ except ImportError:
     HAS_PYPDF = False
 
 
-MAX_CONTENT_LENGTH = 100_000
+#: The most of one document web_fetch reads; it is returned in parts (FETCH_PART_LENGTH).
+MAX_CONTENT_LENGTH = 1_000_000
+#: Characters one web_fetch call returns. About 10k tokens: under the smallest
+#: max_tool_output_tokens of the shipped systems (12000), so a long page is
+#: read in parts with ``start`` instead of being rejected whole.
+FETCH_PART_LENGTH = 40_000
 MAX_DOWNLOAD_BYTES = 20_000_000
 DEFAULT_TIMEOUT = 30
 
@@ -329,15 +334,19 @@ def _html_to_markdown(html: str) -> str:
 def web_fetch(
     url: str,
     timeout: int = DEFAULT_TIMEOUT,
+    start: int = 0,
 ) -> str:
     """
     Loads a web page or document and returns its text: HTML as markdown,
     PDF as the text of its pages, plain text, JSON and XML as they are.
     Pages are not rendered: content a page builds with JavaScript is not there.
+    A long document comes in parts; the end of a part says which start to
+    pass for the next one.
 
     Args:
         url:     URL to load (http or https)
         timeout: Timeout in seconds
+        start:   Character offset to read from, for the next part of a long document
 
     Returns:
         The content as text
@@ -355,7 +364,24 @@ def web_fetch(
         return f"❌ {error}"
     if status != 200:
         return f"❌ HTTP {status} when loading {url}"
-    return _truncate(f"Source: {url}\n\n{content}")
+    return _part(f"Source: {url}\n\n{_truncate(content)}", start)
+
+
+def _part(content: str, start: int = 0, length: int = FETCH_PART_LENGTH) -> str:
+    """The *length* characters of *content* from *start*, ending with where the rest begins."""
+    start = max(0, int(start or 0))
+    if start and start >= len(content):
+        return f"❌ start={start} is past the end of the document ({len(content)} characters)"
+    end = start + length
+    part = content[start:end]
+    if start:
+        part = f"[characters {start}-{min(end, len(content))} of {len(content)}]\n\n{part}"
+    if end < len(content):
+        part += (
+            f"\n\n... [{len(content) - end} more characters: call web_fetch again with "
+            f"start={end} to read on] ..."
+        )
+    return part
 
 
 # ---------------------------------------------------------------------------
