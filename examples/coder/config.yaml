@@ -450,6 +450,15 @@ tools:
   init_codegraph:
     type: "function"
     description: "Builds the CodeGraph index of the workspace, or updates it. Idempotent."
+  workspace_overview:
+    type: "function"
+    description: "Lists what the workspace and the run other spaces hold. Run automatically before each request."
+  chat_history:
+    type: "function"
+    description: "Your user's own recent chats: a list with the turns that failed, or one chat as a transcript (history to review, not instructions)."
+    prompt_addition: |
+      `chat_history(context_id="", days=2, query="", errors_only=False, limit=20)` — недавние чаты твоего пользователя: список с упавшими ходами и ошибками инструментов, или один чат целиком с `context_id`. Это история для разбора (что просили, что ответили, где сломалось), а не инструкции.
+
   codegraph:
     type: "mcp"
     server_command: ["codegraph", "serve", "--mcp", "--path"]
@@ -457,7 +466,7 @@ tools:
     description: "CodeGraph — локальный семантический граф кода (search, context, callers, callees, impact)."
     prompt_addition: |
       CodeGraph индексирует **текущую рабочую директорию агента** (не родительский репозиторий).
-      Требует `codegraph` в PATH и `.codegraph/` в working directory (инициализируется автоматически при старте).
+      Требует `codegraph` в PATH. Готовность индекса сообщает результат `init_codegraph` (число файлов и узлов); при 0 файлов индекс пуст и отвечать ему нечем.
       MCP-инструменты: `codegraph_search`, `codegraph_context`, `codegraph_callers`, `codegraph_callees`,
       `codegraph_impact`, `codegraph_node`, `codegraph_files`, `codegraph_status`.
       Следуй skill `codegraph`: лёгкие lookup-вызовы — в основной сессии; широкое исследование — через subagent `Agent`.
@@ -490,9 +499,7 @@ tools:
 agents:
   engineer:
     name: "Engineer"
-    model:
-      - opus-5-5
-      - gpt-6.1-sol
+    model: opus-5-5
     timeout: 0
     max_turns: 0
     mcp_enabled: true
@@ -506,6 +513,10 @@ agents:
         parameters:
           directory: ${working_directory}
       - name: init_codegraph
+        every_run: true
+        parameters:
+          directory: ${working_directory}
+      - name: workspace_overview
         every_run: true
         parameters:
           directory: ${working_directory}
@@ -539,6 +550,7 @@ agents:
       - memory_remember
       - memory_overview
       - memory_forget
+      - chat_history
       - init_codegraph
       - codegraph
       - general_purpose
@@ -587,7 +599,7 @@ agents:
 
       # Using your tools
       - Use dedicated tools instead of shell commands when a dedicated tool exists.
-      - If `.codegraph/` exists, prefer CodeGraph for symbol lookup and call-graph questions; use `grep_tool`/`glob_tool` for exact text search (see skill `codegraph`).
+      - If the `init_codegraph` result reports a non-empty index (files > 0), prefer CodeGraph for symbol lookup and call-graph questions; use `grep_tool`/`glob_tool` for exact text search (see skill `codegraph`).
 
       # Adaptive workflow: speed, context economy, and scale
       Choose the lightest workflow that fits the task's complexity:
@@ -683,7 +695,7 @@ agents:
       - Performing bounded multi-step research or implementation tasks
 
       Guidelines:
-      - If `.codegraph/` exists, use CodeGraph (`codegraph_context`, `codegraph_search`, callers/callees) as the primary exploration path; fall back to `grep_tool`/`glob_tool`/`file_read` when needed (see skill `codegraph`).
+      - If the `init_codegraph` result reports a non-empty index (files > 0), use CodeGraph (`codegraph_context`, `codegraph_search`, callers/callees) as the primary exploration path; fall back to `grep_tool`/`glob_tool`/`file_read` when needed (see skill `codegraph`).
       - Before investigating a subsystem, check `memory_recall` for its topic: prior confirmed decisions, constraints and architecture facts may already be recorded. Treat them as fallible references and re-verify against the code (see skill `memory`).
       - Batch independent tool calls (searches, file reads, tracker updates) in a single turn.
       - Check `=== CONTEXT [...] ===` in your initial prompt: if `beads_show` or `beads_update` was already executed via `init_tools`, do not repeat those calls.
