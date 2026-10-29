@@ -1,0 +1,65 @@
+/**
+ * Telegram panel: the bot token (admins) and the user's link.
+ *
+ * Loaded by the panel itself, so the settings drawer and the /telegram page
+ * draw it the same way; every colour is a token from tokens.css.
+ */
+
+.telegramPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.telegramCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.telegramRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.telegramRow .control {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.telegramNote {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.telegramNote[data-tone="ok"] {
+  color: var(--ok, #3fb950);
+}
+
+.telegramNote[data-tone="error"] {
+  color: var(--danger, #f85149);
+}
+
+.telegramCode {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.telegramCode[hidden] {
+  display: none;
+}
+
+.telegramCode__value {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 24px;
+  letter-spacing: 0.14em;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--bg-inset, rgba(127, 127, 127, 0.12));
+}

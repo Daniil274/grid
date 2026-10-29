@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Telegram · Grid</title>
+    <link rel="stylesheet" href="/static/styles/tokens.css" />
+    <link rel="stylesheet" href="/static/styles/base.css" />
+    <link rel="stylesheet" href="/static/styles/settings.css" />
+    <style>
+      /* A page, not a drawer: it scrolls, and it is one narrow column. */
+      body {
+        overflow: auto;
+        padding: 48px 20px 80px;
+      }
+      .telegramPage {
+        width: min(720px, 100%);
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+      .telegramPage__head {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .telegramPage__back {
+        color: var(--text-3);
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="telegramPage">
+      <header class="telegramPage__head">
+        <a class="telegramPage__back" href="/">← Back to the chat</a>
+        <h1>Telegram</h1>
+      </header>
+      <div id="telegram-root"></div>
+    </div>
+    <script type="module" src="/static/js/settings/telegram-page.js"></script>
+  </body>
+</html>
