@@ -18,6 +18,7 @@ import { hideOverlay, showOverlay } from "../ui/overlay.js";
 import { toast } from "../ui/toast.js";
 import { CollectionEditor } from "./collection.js";
 import { SchemaKit, blankOf, child, rootSlot } from "./schema-form.js";
+import { TelegramPanel } from "./telegram.js";
 
 /** Settings shown on the General tab; the rest of `settings` is on Advanced. */
 const GENERAL_SETTINGS = [
@@ -150,6 +151,7 @@ export class SettingsDrawer {
         ["policy", "Policy", () => this._sectionsPane([["settings", "Settings", { only: ["action_policy", "proxy", "debug"] }], ["compact", "Context compaction"]])],
         ["users", "Users", () => this._sectionsPane([["user_limits", "User limits"], ["personal_agents", "Personal agents"], ["review", "Answer reviews"]])],
         ["voice", "Voice", () => this._sectionsPane([["voice", "Voice"]])],
+        ["telegram", "Telegram", () => this._telegramPane()],
         ["yaml", "YAML", () => this._yamlPane()],
       ];
     }
@@ -175,6 +177,7 @@ export class SettingsDrawer {
             ["scenarios", "Scenarios"],
           ]),
       ],
+      ["telegram", "Telegram", () => this._telegramPane()],
       ["yaml", "YAML", () => this._yamlPane()],
     ];
   }
@@ -357,6 +360,11 @@ export class SettingsDrawer {
     });
     collection.render();
     return h("div.master", {}, h("div.master__list", {}, h("div.master__head", {}, h("h3", { text: "Prompts" }), addButton), list), editor);
+  }
+
+  /** The Telegram channel: its bot token, and the admin's own link to it. */
+  _telegramPane() {
+    return new TelegramPanel({ isAdmin: true }).mount();
   }
 
   _yamlPane() {
