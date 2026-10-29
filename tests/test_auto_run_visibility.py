@@ -79,6 +79,18 @@ async def test_init_tools_failures_reach_the_observer():
     assert [row["status"] for row in recorder.snapshot()] == ["error", "error"]
 
 
+async def test_a_missing_first_init_tool_does_not_stop_the_rest():
+    # It used to raise UnboundLocalError (agent_key) and drop every init tool.
+    recorder, observer = make_observer()
+    factory, tools = make_factory({"beads_list": "3 open issues"})
+    factory.config = SimpleNamespace(get_working_directory=lambda: ".")
+    info = await factory._execute_init_tools(
+        [{"name": "beads_show", "parameters": {}}, {"name": "beads_list"}], tools, run_context(observer)
+    )
+    assert "3 open issues" in info
+    assert [row["status"] for row in recorder.snapshot()] == ["error", "done"]
+
+
 async def test_a_config_function_tool_the_agent_does_not_list_still_auto_runs():
     """A setup step the operator runs need not be offered to the model."""
     recorder, observer = make_observer()

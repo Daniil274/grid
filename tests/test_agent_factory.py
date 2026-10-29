@@ -596,3 +596,14 @@ def test_runner_max_turns_zero_means_no_limit():
     assert runner_max_turns(5) == 5
     # An infinite bound never trips the SDK's `current_turn > max_turns` check.
     assert not (10_000 > runner_max_turns(0))
+
+
+def test_an_unreadable_env_file_does_not_stop_the_import(monkeypatch):
+    from core import agent_factory
+
+    def unreadable():
+        raise PermissionError(13, "Permission denied", ".env")
+
+    monkeypatch.setattr(agent_factory, "load_dotenv", unreadable)
+
+    agent_factory._load_env()

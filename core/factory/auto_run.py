@@ -175,6 +175,15 @@ class AutoRunTools:
             if getattr(self, "container_id", None)
             else self.config.get_working_directory()
         )
+        # Named once, before the loop: a tool that is not found reports under
+        # it too (it used to be unbound there and failed every init tool).
+        agent_key = (
+            getattr(run_context, "agent_key", None)
+            or getattr(run_context, "agent_name", None)
+            or getattr(run_context, "agent_id", None)
+            or getattr(getattr(run_context, "context", None), "agent_key", None)
+            or "dynamic-agent"
+        )
         for spec in init_tools:
             tool_name = spec.get("name")
             tool_params = self._substitute_tool_params(
@@ -186,17 +195,6 @@ class AutoRunTools:
             if target_tool and hasattr(target_tool, "on_invoke_tool"):
                 logger.info(f"init_tool: running '{tool_name}' for dynamic agent")
                 try:
-                    agent_key = (
-                        getattr(run_context, "agent_key", None)
-                        or getattr(run_context, "agent_name", None)
-                        or getattr(run_context, "agent_id", None)
-                    )
-                    if not agent_key:
-                        agent_key = getattr(
-                            getattr(run_context, "context", None), "agent_key", None
-                        )
-                    if not agent_key:
-                        agent_key = "dynamic-agent"
                     if hasattr(observer, "tool_call_started"):
                         observer.tool_call_started(
                             agent_key, tool_name, tool_params

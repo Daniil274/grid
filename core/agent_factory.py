@@ -60,7 +60,17 @@ __all__ = [
 ]
 
 sdk_patches.install()
-load_dotenv()
+
+
+def _load_env() -> None:
+    """Read ``.env`` into the environment; an unreadable file is skipped, not fatal."""
+    try:
+        load_dotenv()
+    except PermissionError as exc:
+        logging.getLogger("grid.agent_factory").warning(".env is not readable, skipped: %s", exc)
+
+
+_load_env()
 tracing_config = get_tracing_config()
 
 
@@ -667,7 +677,22 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
                     container_id=getattr(self, "container_id", None),
                     action_state=action_state,
                 )
-                init_info = await self._execute_init_tools(init_tools, tools, temp_ctx)
+                # init_tools are the caller's calls made before the agent
+                # starts (e.g. beads_show, beads_update claim=true): they need
+                # not be among the tools the agent itself is given.
+                known = {getattr(tool, "name", "") for tool in tools}
+                extra_names = [
+                    tool_name
+                    for tool_name in dict.fromkeys(
+                        spec.get("name") for spec in init_tools if isinstance(spec, dict)
+                    )
+                    if tool_name and tool_name not in known
+                ]
+                init_pool = list(tools)
+                if extra_names:
+                    extra_tools, _, _ = await self._resolve_tools_for_names(extra_names)
+                    init_pool.extend(extra_tools)
+                init_info = await self._execute_init_tools(init_tools, init_pool, temp_ctx)
                 if init_info:
                     enhanced_instructions = init_info + "\n\n" + enhanced_instructions
                     logger.info(

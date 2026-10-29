@@ -173,13 +173,18 @@ class TurnRunner:
         fragments: List[str] = []
         async for event in result.stream_events():
             append_action_reasoning(action_state, event)
+            fragment = None
             try:
-                if on_event is not None:
-                    on_event(event)
+                # The observer gets the event first: what the browser is shown
+                # must not wait for the run record to reach the disk.
                 fragment = observer.handle_event(event, agent_key=agent_key)
             except Exception:
                 logger.exception("Stream observer failed for %s", agent_key)
-                continue
+            try:
+                if on_event is not None:
+                    on_event(event)
+            except Exception:
+                logger.exception("Stream bookkeeping failed for %s", agent_key)
             if fragment:
                 fragments.append(fragment)
         return fragments
