@@ -8,6 +8,7 @@ import { highlight, diffStats } from "../lib/highlight.js";
 import { languageFor, toolFamily } from "../lib/languages.js";
 import { scopedWorkspaceUrl } from "../lib/workspace-links.js";
 import { copyText } from "./toast.js";
+import { MEMORY_LAYER_NAMES, MEMORY_LEVEL_NAMES } from "../lib/memory-labels.js";
 
 const MAX_TEXT = 32000;
 const MAX_PARTS = 40;
@@ -76,12 +77,12 @@ function jsonView(value) {
   return walk(value);
 }
 
-function partView(part) {
+function partView(part, memory, role) {
   if (!part || typeof part !== "object") return h("pre.payload__body", { text: "Invalid content block" });
   const text = textOf(part.data).slice(0, MAX_TEXT);
   let body;
   switch (part.kind) {
-    case "json": body = jsonView(part.data); break;
+    case "json": body = (memory && memoryJson(part.data, memory, role)) || jsonView(part.data); break;
     case "markdown":
       body = h("div.payload__body.payload__body--prose", { html: renderMarkdown(text) });
       decorateMath(body);
@@ -137,30 +138,259 @@ function legacyPayload(text, markdown) {
   return { version: 1, parts: [{ kind, data }], raw_text: raw, truncated: raw.length > MAX_TEXT };
 }
 
-export function renderPayload(label, typed, legacy, { markdown = false, state = {}, tool = "" } = {}) {
+/* ------------------------------------------------------------------------- *
+ * Memory operations. The four memory_* tools answer with records, a saved
+ * record or a deletion flag; their arguments are a search, a listing, a
+ * record to keep or an id to drop. Cards read far better than that JSON and
+ * say whose memory it is (this chat, the project, the user). Any shape this
+ * code does not recognise stays on the generic JSON view, and the card's
+ * Source/Copy buttons keep showing the untouched payload.
+ * ------------------------------------------------------------------------- */
+
+const MEMORY_TOOLS = new Set(["memory_recall", "memory_overview", "memory_remember", "memory_forget"]);
+const MEMORY_PREVIEW = 280; // characters of a record body shown unasked
+const MEMORY_FIRST = 5; // cards shown before "Show N more"
+const MEMORY_MAX_CARDS = 50; // hard bound on rendered cards
+
+const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const clean = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+const shorten = (value, limit) => (clean(value).length > limit ? `${clean(value).slice(0, limit).trimEnd()}…` : clean(value));
+
+/** The memory tool behind a (possibly `server.`-prefixed) step name, or "". */
+function memoryTool(tool) {
+  const key = String(tool ?? "").toLowerCase().split(".").pop();
+  return MEMORY_TOOLS.has(key) ? key : "";
+}
+
+const memoryTag = (text, kind) => (text ? h("span.payload__memTag", { text, dataset: { kind } }) : null);
+
+/** A rank shown as itself: RRF-style scores are small, so two decimals would
+ * turn 0.016 into 0.02. It is a relevance rank, never a probability. */
+function scoreText(score) {
+  if (!Number.isFinite(score)) return null;
+  if (score === 0) return "0";
+  if (Math.abs(score) >= 1) return score.toFixed(2);
+  return Math.abs(score) >= 0.001 ? String(Number(score.toPrecision(3))) : score.toExponential(2);
+}
+
+/** A record as a card: layer/category/owner/staleness, title, source, tags. */
+function memoryCard(record, { score, level } = {}) {
+  const content = typeof record.content === "string" ? record.content : "";
+  const rawTitle = typeof record.title === "string" ? clean(record.title) : "";
+  const layer = String(record.layer ?? "");
+  // Only an explicit level names the owner: `scope` is a storage label, not
+  // the level a record lives at, so it must never stand in for a missing one.
+  const owner = String(level ?? record.level ?? "");
+  const source = [record.file_path, record.source_ref]
+    .find((value) => typeof value === "string" && value.trim()) ?? "";
+  const tags = Array.isArray(record.tags) ? record.tags.filter((tag) => typeof tag === "string" && tag).slice(0, 8) : [];
+  const stamp = typeof (record.updated_at || record.created_at) === "string" ? clean(record.updated_at || record.created_at) : "";
+  const firstLine = content.split("\n")[0];
+  // The heading is one line of text at most, whether it is the record's title
+  // or its opening words: a title is untrusted data too and may be endless.
+  const lead = rawTitle || firstLine;
+  const heading = shorten(lead, 80) || "Untitled record";
+  // Whatever the shortened heading dropped, and the rest of the text, still
+  // gets a readable body.
+  const body = [
+    lead.length > 80 ? lead.slice(80).trimStart() : "",
+    rawTitle ? content : content.slice(firstLine.length).replace(/^\n+/, ""),
+  ].filter(Boolean).join("\n");
+  const rank = scoreText(score);
+  const facts = [
+    typeof record.id === "string" && record.id ? ["id", record.id] : null,
+    source ? [record.file_path ? "file" : "source", source] : null,
+    tags.length ? ["tags", tags.map((tag) => `#${tag}`).join(" ")] : null,
+    stamp ? ["updated", stamp] : null,
+  ].filter(Boolean);
+  return h("article.payload__memCard",
+    { dataset: { layer, stale: String(record.stale_status ?? "") } },
+    h("div.payload__memHead", {},
+      memoryTag(layer, "layer"),
+      memoryTag(clean(record.category), "category"),
+      memoryTag(MEMORY_LEVEL_NAMES[owner] ?? owner, "level"),
+      memoryTag(clean(record.stale_status).toUpperCase(), "stale"),
+      rank ? h("span.payload__memScore", { text: rank, title: "Relevance score, not a probability" }) : null),
+    h("h5.payload__memTitle", { text: heading }),
+    body ? h("p.payload__memBody", { text: shorten(body, MEMORY_PREVIEW) }) : null,
+    body.length > MEMORY_PREVIEW
+      ? h("details.payload__memDetails", {}, h("summary", { text: "Full text" }),
+        h("p.payload__memBody", { text: body.slice(0, MAX_TEXT) })) : null,
+    facts.length
+      ? h("details.payload__memDetails", {}, h("summary", { text: "Details" }),
+        h("div.payload__memFacts", {}, facts.map(([key, value]) => h("div.payload__memFact", {},
+          h("span.payload__memKey", { text: `${key}: ` }), h("span.payload__memValue", { text: String(value) }))))) : null);
+}
+
+/** A one-line answer: a confirmation, an empty state or a refusal. */
+const memoryNote = (tone, ...children) => h("p.payload__memNote", { dataset: { tone } }, ...children);
+
+/** Cards bounded up front; the rest appears on demand and never all at once.
+ * Callers pass every entry, so the count that cannot be rendered stays honest
+ * instead of disappearing behind a slice taken before this bound. */
+function memoryCards(entries, makeCard) {
+  const capped = entries.slice(0, MEMORY_MAX_CARDS);
+  const shown = capped.slice(0, MEMORY_FIRST).map(makeCard);
+  const rest = capped.slice(MEMORY_FIRST).map(makeCard);
+  const box = h("div.payload__memList", {}, shown);
+  if (rest.length) {
+    const more = h("button.payload__memMore", { type: "button", text: `Show ${rest.length} more` });
+    more.addEventListener("click", () => { more.remove(); box.append(...rest); });
+    box.append(more);
+  }
+  if (entries.length > MEMORY_MAX_CARDS) {
+    box.append(h("small.payload__notice", { text: `${entries.length - MEMORY_MAX_CARDS} more records · see source` }));
+  }
+  return box;
+}
+
+function memoryError(message) {
+  return h("div.payload__mem", {}, memoryNote("error", h("strong", { text: "Memory error" }), h("span", { text: ` — ${message}` })));
+}
+
+function memoryRecall(data) {
+  if (isObject(data) && typeof data.query === "string") {
+    const query = clean(data.query);
+    // An empty query is a listing, not a search: say what the tool does.
+    return h("div.payload__mem", {}, memoryNote("info",
+      query ? h("span", { text: "Search memory for " }) : h("span", { text: "List memories" }),
+      query ? h("q", { text: query }) : null,
+      typeof data.limit === "number" ? h("span", { text: ` · up to ${data.limit} results` }) : null));
+  }
+  if (!Array.isArray(data)) return null;
+  if (!data.length) return h("div.payload__mem", {}, memoryNote("empty", h("span", { text: "No relevant memories found." })));
+  const entries = data.map((hit) => {
+    const record = isObject(hit) && isObject(hit.record) ? hit.record : hit;
+    if (!isObject(record) || typeof record.content !== "string") return null;
+    return { record, score: isObject(hit) && typeof hit.score === "number" ? hit.score : undefined,
+      level: isObject(hit) && typeof hit.level === "string" ? hit.level : undefined };
+  }).filter(Boolean);
+  if (!entries.length) return null;
+  return h("div.payload__mem", {},
+    memoryNote("info", h("span", { text: entries.length === 1 ? "1 related memory" : `${entries.length} related memories` })),
+    memoryCards(entries, ({ record, score, level }) => memoryCard(record, { score, level })));
+}
+
+function memoryOverview(data) {
+  if (isObject(data) && typeof data.limit === "number" && !Array.isArray(data.records)) {
+    return h("div.payload__mem", {}, memoryNote("info", h("span", { text: `Up to ${data.limit} records` })));
+  }
+  if (!isObject(data) || !Array.isArray(data.records)) return null;
+  const records = data.records.filter((record) => isObject(record) && typeof record.content === "string");
+  // Entries that are not records say nothing about the memory: only an empty
+  // answer does, so an unreadable one falls back to the JSON view instead of
+  // claiming there is nothing stored.
+  if (!records.length) {
+    return data.records.length ? null : h("div.payload__mem", {}, memoryNote("empty", h("span", { text: "Memory is empty." })));
+  }
+  // The tool is capped by its own limit: say so instead of implying a total.
+  const bounded = typeof data.limit === "number" && records.length >= data.limit;
+  return h("div.payload__mem", {},
+    memoryNote("info", h("span", { text: records.length === 1 ? "1 record" : `${records.length} records` }),
+      bounded ? h("span", { text: ` · limit ${data.limit} reached, older records may exist` }) : null),
+    memoryCards(records, (record) => memoryCard(record)));
+}
+
+function memoryRemember(data, role) {
+  if (!isObject(data) || typeof data.content !== "string") return null;
+  const stored = typeof data.id === "string" && Boolean(data.id);
+  const owner = MEMORY_LEVEL_NAMES[String(data.level ?? "")] ?? clean(data.level);
+  const card = memoryCard(data);
+  if (!stored) {
+    // Only an argument can be "about to be saved"; a result without an id is
+    // not a confirmation of anything, so it keeps the generic JSON view.
+    if (role === "result") return null;
+    return h("div.payload__mem", {}, memoryNote("info", h("span", { text: "Record to save" }), owner ? h("span", { text: ` · ${owner}` }) : null), card);
+  }
+  const layer = MEMORY_LAYER_NAMES[String(data.layer ?? "")] ?? clean(data.layer);
+  return h("div.payload__mem", {},
+    memoryNote("ok", h("strong", { text: "Saved" }), h("span", { text: ` · ${[layer, clean(data.category), owner].filter(Boolean).join(" · ")}` })),
+    card);
+}
+
+function memoryForget(data, role) {
+  if (!isObject(data)) return null;
+  if (typeof data.forgotten === "boolean") {
+    return data.forgotten
+      ? h("div.payload__mem", {}, memoryNote("ok", h("strong", { text: "Deleted" }), h("span", { text: " · the record is gone from this memory" })))
+      : h("div.payload__mem", {}, memoryNote("empty", h("span", { text: "Nothing deleted — no record with that id in this memory." })));
+  }
+  const id = typeof data.record_id === "string" ? clean(data.record_id) : "";
+  // A result without the deletion flag is unknown, not an intent to delete.
+  if (role === "result") return null;
+  return id ? h("div.payload__mem", {}, memoryNote("info", h("span", { text: "Delete record " }), h("code", { text: id }))) : null;
+}
+
+/** A memory-specific view for a typed JSON part, or null to keep the generic one. */
+function memoryJson(data, tool, role) {
+  if (isObject(data) && typeof data.error === "string" && data.error) return memoryError(clean(data.error));
+  try {
+    switch (tool) {
+      case "memory_recall": return memoryRecall(data);
+      case "memory_overview": return memoryOverview(data);
+      case "memory_remember": return memoryRemember(data, role);
+      case "memory_forget": return memoryForget(data, role);
+      default: return null;
+    }
+  } catch { return null; }
+}
+
+/** Which half of a call a payload is: arguments or what came back. Labels are
+ * the only hint older call sites give, so an explicit role wins but a known
+ * label still separates "Record to save" from "Saved". */
+function payloadRole(label, explicit) {
+  if (explicit) return explicit === "input" || explicit === "result" ? explicit : "";
+  if (label === "Input" || label === "Task") return "input";
+  if (label === "Result" || label === "Report" || label === "Error") return "result";
+  return "";
+}
+
+export function renderPayload(label, typed, legacy, { markdown = false, state = {}, tool = "", role = "" } = {}) {
   const value = typed?.version === 1 && Array.isArray(typed.parts) ? typed : legacyPayload(legacy, markdown);
   if (!value) return null;
   const parts = value.parts.slice(0, MAX_PARTS);
-  const raw = typeof value.raw_text === "string" ? value.raw_text : parts.map((p) => textOf(p?.data)).join("\n\n");
-  const source = raw.slice(0, MAX_TEXT);
-  const display = h("div.payload__typed", {}, parts.length ? parts.map(partView) : h("span.payload__empty", { text: "No content returned" }));
-  const rawBlock = h("pre.payload__body.payload__raw", {}, h("code", { text: source || "Empty text" }));
+  const given = typeof value.raw_text === "string" ? value.raw_text : null;
+  // What the Source view would show, made only when the reader asks for it: a
+  // payload without ``raw_text`` is serialised part by part, which is the work
+  // the typed view already does - a folded card must not pay for both.
+  let rawText = null;
+  const source = () => (rawText ??= (given ?? parts.map((p) => textOf(p?.data)).join("\n\n")).slice(0, MAX_TEXT));
+  // How long the source is, without building it: only string parts (text,
+  // stderr) can hold a long body, and a structured part is bounded by the
+  // typed view, which says so itself.
+  const size = given != null
+    ? given.length
+    : parts.reduce((total, p) => total + (p && p.kind !== "image" && typeof p.data === "string" ? p.data.length : 0), 0);
+  const truncated = value.truncated || size > MAX_TEXT || value.parts.length > MAX_PARTS;
+  const memory = memoryTool(tool);
+  const half = payloadRole(label, role);
+  const display = h("div.payload__typed", {}, parts.length ? parts.map((part) => partView(part, memory, half)) : h("span.payload__empty", { text: "No content returned" }));
+  // The raw view is the payload's own bytes shown a second time. A server-sent
+  // ``raw_text`` is already a string, so its node costs nothing to make; a
+  // payload without one is serialised part by part - the work the typed view
+  // just did - so that view waits for the reader to press Source.
+  let rawBlock = given == null ? null : h("pre.payload__body.payload__raw", {}, h("code", { text: given.slice(0, MAX_TEXT) || "Empty text" }));
+  const rawView = () => (rawBlock ??= h("pre.payload__body.payload__raw", {}, h("code", { text: source() || "Empty text" })));
   const toggle = h("button.payload__source", { type: "button" });
+  const notice = truncated
+    ? h("small.payload__notice", { text: `Truncated${Number.isFinite(value.original_size) ? ` · original ${value.original_size} bytes` : ""}` })
+    : null;
+  const card = h("div.payload", { dataset: { family: toolFamily(tool), error: value.is_error ? "true" : "false" } },
+    h("div.payload__bar", {},
+    h("span.payload__label", { text: label }),
+    h("span.payload__format", { text: [...new Set(parts.map((p) => p?.kind || "text"))].join(" + ") || "empty" }),
+    toggle, h("button.payload__source", { type: "button", text: "Copy", title: truncated ? "Copy available source preview" : "Copy source",
+      on: { click: () => copyText(source(), `${label} copied`) } })), display, rawBlock, notice);
   const apply = () => {
+    // Appending a node already in the card moves it: the source lands between
+    // the typed view and the notice, and the notice keeps the last place.
+    if (state.source && !rawBlock) card.append(rawView(), ...(notice ? [notice] : []));
     display.hidden = Boolean(state.source);
-    rawBlock.hidden = !state.source;
+    if (rawBlock) rawBlock.hidden = !state.source;
     toggle.textContent = state.source ? "Preview" : "Source";
     toggle.setAttribute("aria-pressed", String(Boolean(state.source)));
   };
   toggle.addEventListener("click", () => { state.source = !state.source; apply(); });
   apply();
-  const truncated = value.truncated || raw.length > MAX_TEXT || value.parts.length > MAX_PARTS
-    || parts.some((p) => p && p.kind !== "image" && textOf(p.data).length > MAX_TEXT);
-  return h("div.payload", { dataset: { family: toolFamily(tool), error: value.is_error ? "true" : "false" } },
-    h("div.payload__bar", {},
-    h("span.payload__label", { text: label }),
-    h("span.payload__format", { text: [...new Set(parts.map((p) => p?.kind || "text"))].join(" + ") || "empty" }),
-    toggle, h("button.payload__source", { type: "button", text: "Copy", title: truncated ? "Copy available source preview" : "Copy source",
-      on: { click: () => copyText(source, `${label} copied`) } })), display, rawBlock,
-    truncated ? h("small.payload__notice", { text: `Truncated${Number.isFinite(value.original_size) ? ` · original ${value.original_size} bytes` : ""}` }) : null);
+  return card;
 }

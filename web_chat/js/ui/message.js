@@ -10,7 +10,7 @@ import { $$, h, icon, onFrame } from "../lib/dom.js";
 import { splitFiles, withFiles } from "../lib/files.js";
 import { clock } from "../lib/format.js";
 import { decorateDiagrams } from "../lib/diagrams.js";
-import { renderMarkdown } from "../lib/markdown.js";
+import { renderMarkdown, renderMarkdownBlocks } from "../lib/markdown.js";
 import { decorateMath } from "../lib/math.js";
 import { scopeWorkspaceLinks } from "../lib/workspace-links.js";
 import { ICONS } from "./icons.js";
@@ -57,6 +57,68 @@ function decorateCode(container) {
       ),
     );
   }
+}
+
+/**
+ * Paint markdown into *container* one block at a time.
+ *
+ * A block that is already written renders the same HTML however the answer
+ * continues, so its node is kept and only the block still being written is
+ * rebuilt and decorated. A streaming answer therefore costs one small
+ * insertion per frame instead of re-parsing and re-highlighting the whole
+ * message, and a closed block keeps the node - and the work - it got once.
+ *
+ * *key* names the growing document (the message's element id), so two answers
+ * streaming at once do not evict each other's cached blocks.
+ */
+function createBlockView(container, key) {
+  /** One entry per painted block: the HTML it came from and the nodes it made. */
+  let entries = [];
+
+  const drop = (from) => {
+    for (let index = from; index < entries.length; index += 1) {
+      for (const node of entries[index].nodes) node.remove();
+    }
+    entries = entries.slice(0, from);
+  };
+
+  /** Remove children this view did not put there (a pulse, a notice, an editor). */
+  const sweep = () => {
+    const own = new Set();
+    for (const entry of entries) for (const node of entry.nodes) own.add(node);
+    for (const child of [...container.childNodes]) if (!own.has(child)) child.remove();
+  };
+
+  return {
+    paint(source) {
+      const blocks = renderMarkdownBlocks(source, key);
+      const owned = entries.every((entry) => entry.nodes.every((node) => node.parentNode === container));
+      if (!owned) {
+        // The body was rebuilt elsewhere (the editor, an error box): start over.
+        drop(0);
+        container.replaceChildren();
+      } else {
+        sweep();
+      }
+      let keep = 0;
+      while (keep < entries.length && keep < blocks.length && entries[keep].html === blocks[keep]) keep += 1;
+      if (keep === entries.length && keep === blocks.length) return;
+      drop(keep);
+      for (let index = keep; index < blocks.length; index += 1) {
+        // Built and decorated in a detached holder: a fenced block is itself a
+        // <pre>, and decoration looks for one inside its scope.
+        const holder = h("div");
+        holder.innerHTML = blocks[index];
+        decorateCode(holder);
+        decorateDiagrams(holder);
+        decorateMath(holder);
+        scopeWorkspaceLinks(holder);
+        const nodes = [...holder.childNodes];
+        for (const node of nodes) container.append(node);
+        entries.push({ html: blocks[index], nodes });
+      }
+    },
+  };
 }
 
 function actionButton(label, path, onClick, extraClass = "") {
@@ -237,19 +299,17 @@ export function createMessage({
     continueInNewChat,
   );
 
+  const view = createBlockView(body, id);
+
   const paint = () => {
     const { text: words, files } = ownWords();
     if (!isAssistant) {
       fileList.replaceChildren(...files.map(renderFile));
       fileList.hidden = !files.length;
     }
-    body.innerHTML = renderMarkdown(words);
-    decorateCode(body);
-    decorateDiagrams(body);
-    decorateMath(body);
+    view.paint(words);
     // Workspace-file links the agent emits (/api/workspace/files/<path>)
     // download on click, from the directory this chat works in.
-    scopeWorkspaceLinks(body);
     if (!isAssistant) scopeWorkspaceLinks(fileList);
   };
   const paintSoon = onFrame(paint);
@@ -310,6 +370,7 @@ export function createMessage({
     el: root,
     id,
     role,
+    kind: null,
     reasoning,
 
     get text() {

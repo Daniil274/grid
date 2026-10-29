@@ -85,6 +85,15 @@ export const api = {
       `/api/chat/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/steps/${encodeURIComponent(stepId)}`,
       { cache: "no-cache" },
     ),
+  /**
+   * A lazy step of the turn still running: it has no stored message yet, so the
+   * record comes from the turn's own recorder under the reserved id ``live``.
+   */
+  conversationLiveStep: (id, stepId) =>
+    request(
+      `/api/chat/conversations/${encodeURIComponent(id)}/messages/live/steps/${encodeURIComponent(stepId)}`,
+      { cache: "no-cache" },
+    ),
   createConversation: (selection) => request("/api/chat/conversations", json("POST", selection)),
   /** Projects: a metadata layer over chats (title, parent, description). */
   projects: () => request("/api/projects", { cache: "no-store" }),
@@ -188,6 +197,9 @@ export const api = {
   removeCredential: (kind) => request(`/api/credentials/${encodeURIComponent(kind)}`, { method: "DELETE" }),
   connectChatGPT: () => request("/api/chatgpt/connect", { method: "POST" }),
   usageReport: (query, options = {}) => request(`/api/usage?${new URLSearchParams(query)}`, { ...options, cache: "no-store" }),
+  /** Subscriptions and keys: windows, limits and how to read them (web_chat.usage_snapshot). */
+  usageSnapshot: () => request("/api/usage/snapshot", { cache: "no-store" }),
+  refreshUsage: (source, confirm = false) => request("/api/usage/refresh", json("POST", { source, confirm })),
   adminUsers: () => request("/api/admin/users"),
   reviews: () => request("/api/action-policy/reviews"),
   resolveReview: (id, decision) =>

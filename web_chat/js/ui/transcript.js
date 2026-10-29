@@ -230,6 +230,19 @@ export function createTranscript({
     adopt(stored) {
       const handles = [...messages.values()];
       if (handles.length !== stored.length) return false;
+      // Messages are matched by id, not by count: a different conversation, a
+      // branch switch or an edited answer all keep the count and would
+      // otherwise be adopted silently, leaving the wrong text on screen.
+      for (let index = 0; index < handles.length; index += 1) {
+        const handle = handles[index];
+        const message = stored[index];
+        if (handle.messageId && message.id && handle.messageId !== message.id) return false;
+        if (handle.role !== message.role) return false;
+        if ((handle.kind ?? null) !== (message.kind ?? null)) return false;
+        // Only a bubble shows the text it was built from; a marker's is derived.
+        if ((handle.role === "user" || handle.role === "assistant")
+          && (handle.text ?? "") !== (message.content ?? "")) return false;
+      }
       handles.forEach((handle, index) => handle.adopt({
         id: stored[index].id, versions: stored[index].versions, checkpoint: stored[index].checkpoint ?? null,
       }));

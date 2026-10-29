@@ -43,6 +43,12 @@ const usageText = (tokensIn, tokensOut) => {
 const INLINE_BODY_KINDS = new Set(["reasoning", "message"]);
 const MAX_VISIBLE_REFS = 6;
 
+/** Set text only when it differs: a clock that ticks without changing the
+ * string still costs a style recalculation. */
+const write = (node, value) => {
+  if (node.textContent !== value) node.textContent = value;
+};
+
 const stepIcon = (kind) => ICONS[kind] ?? ICONS.prepare;
 
 /** An icon per tool family: one glance says what kind of work the step runs,
@@ -216,17 +222,30 @@ function disclosure(root, head, onOpen = null) {
  * some with tens of thousands of characters, and nearly all stay closed.
  */
 /**
- * A stored step that left its payloads on the server (``lazy``): fetch its
- * whole record the first time it is opened and show it through *apply*.
- * False when there is no way to fetch it - what the step holds is shown.
+ * A step that left its payloads on the server (``lazy``): fetch its whole
+ * record the first time it is opened and show it through *apply*.
+ *
+ * *load* is a provider (``() => loader``), asked at that moment, not when the
+ * row is built: a live step has no stored message to ask about until its turn
+ * ends, and the frame that announced it carries only its identity, labels and
+ * status. The provider answers null while there is no source at all.
+ *
+ * @returns a promise of success, or null when nothing can fetch the step yet -
+ * the row then stays stale, so opening it again loads it.
  */
 function loadOnOpen(load, step, apply, placeholder) {
-  if (!load) return false;
+  const fetch = load?.();
+  if (typeof fetch !== "function") return null;
   replace(placeholder, h("p.payload__empty", { text: "Loading…" }));
-  load(step.id)
-    .then((full) => apply({ ...step, ...full, lazy: false }))
-    .catch(() => replace(placeholder, h("p.payload__empty", { text: "Could not load this step's details." })));
-  return true;
+  return fetch(step.id)
+    .then((full) => {
+      apply({ ...step, ...full, lazy: false });
+      return true;
+    })
+    .catch(() => {
+      replace(placeholder, h("p.payload__empty", { text: "Could not load this step's details." }));
+      return false;
+    });
 }
 
 function createStepRow(step, load = null) {
@@ -243,7 +262,16 @@ function createStepRow(step, load = null) {
   /** Build the hidden part from the latest step; once per change, only when open. */
   const fill = () => {
     if (!stale) return;
-    if (latest.lazy && !loading && (loading = loadOnOpen(load, latest, update, detail))) return;
+    if (latest.lazy) {
+      // A fetch already on its way paints when it lands; with no source yet the
+      // row stays stale, so opening it again - or the source arriving - loads it.
+      if (loading) return;
+      const pending = loadOnOpen(load, latest, update, detail);
+      if (!pending) return;
+      loading = true;
+      pending.then((ok) => { if (!ok) { loading = false; stale = true; } });
+      return;
+    }
     stale = false;
     // Streaming thinking is appended as it arrives; it is rendered once it lands.
     if (body && latest.status !== "running") {
@@ -318,6 +346,10 @@ function createStepRow(step, load = null) {
     update,
     appendDelta,
     settle,
+    /** Ask again for a lazy step's record (the panel's step source arrived). */
+    retry: () => {
+      if (root.classList.contains("is-open")) fill();
+    },
     activity: () => title.textContent,
     tick() {},
     mark: () => ({ kind: latest.kind, family: toolFamily(latest.tool), status: latest.status }),
@@ -428,7 +460,15 @@ function createAgentRow(step, turnStart, load = null) {
   /** The task and the report, built from the latest step when the block is open. */
   const fill = () => {
     if (!stale) return;
-    if (current.lazy && !loading && (loading = loadOnOpen(load, current, update, report))) return;
+    if (current.lazy) {
+      // See createStepRow: no source yet keeps the block retryable.
+      if (loading) return;
+      const pending = loadOnOpen(load, current, update, report);
+      if (!pending) return;
+      loading = true;
+      pending.then((ok) => { if (!ok) { loading = false; stale = true; } });
+      return;
+    }
     stale = false;
     // A parallel batch is its inner calls: no task above them, no report below.
     // A failed batch is an exception the reader has to see: its error shows in
@@ -526,6 +566,10 @@ function createAgentRow(step, turnStart, load = null) {
     update,
     appendDelta() {},
     settle: () => suggest(false),
+    /** Ask again for a lazy step's record (the panel's step source arrived). */
+    retry: () => {
+      if (root.classList.contains("is-open")) fill();
+    },
     activity: () => {
       const inner = current.status === "running" ? timeline.activity() : "";
       return inner ? `${title.textContent} › ${inner}` : title.textContent;
@@ -533,7 +577,7 @@ function createAgentRow(step, turnStart, load = null) {
     /** Called on the panel's ticker: a running block keeps its clock moving. */
     tick(now) {
       if (current.status !== "running") return;
-      timing.textContent = duration(Math.max(now - turnStart() - (current.at_ms ?? 0), 0));
+      write(timing, duration(Math.max(now - turnStart() - (current.at_ms ?? 0), 0)));
       renderSubtitle();
       timeline.tick(now);
     },
@@ -572,6 +616,7 @@ export function createReasoningPanel() {
   let running = false;
   let startedAt = 0;
   let ticker = null;
+  let lastTick = 0;
   let pinnedOpen = false; // the reader opened or closed it; stop auto-managing
   let totalMs = null;
   let totalUsage = null; // the turn's tokens (input, output), when it reported them
@@ -589,8 +634,8 @@ export function createReasoningPanel() {
   const renderHeadline = () => {
     if (running) {
       const now = Date.now();
-      headline.textContent = top.activity() || "Thinking";
-      timer.textContent = duration(now - startedAt);
+      write(headline, top.activity() || "Thinking");
+      write(timer, duration(now - startedAt));
       top.tick(now);
       return;
     }
@@ -598,11 +643,34 @@ export function createReasoningPanel() {
     // agent itself did, so a delegation reads as one step, not twenty.
     const count = top.size;
     if (!count) return;
-    headline.textContent = totalMs == null ? plural(count, "step") : `Worked for ${duration(totalMs)}`;
+    write(headline, totalMs == null ? plural(count, "step") : `Worked for ${duration(totalMs)}`);
     const trailing = [];
     if (totalMs != null) trailing.push(`· ${plural(count, "step")}`);
     if (totalUsage) trailing.push(`· ${usageText(totalUsage.tokensIn, totalUsage.tokensOut)}`);
-    timer.textContent = trailing.join(" ");
+    write(timer, trailing.join(" "));
+  };
+
+  /**
+   * The clock ticks with the frame, not on its own timer.
+   *
+   * Reading a duration is a DOM write only when the string actually changed
+   * (a tick a second at most while the turn runs), so a quiet turn costs no
+   * layout at all - and the numbers land in the same frame that paints the
+   * step they describe rather than a timer's 200 ms later.
+   */
+  const TICK_MS = 200;
+  const requestTick = globalThis.requestAnimationFrame
+    ? (fn) => globalThis.requestAnimationFrame(fn)
+    : (fn) => setTimeout(() => fn(Date.now()), 16);
+  const cancelTick = globalThis.requestAnimationFrame
+    ? (handle) => globalThis.cancelAnimationFrame(handle)
+    : (handle) => clearTimeout(handle);
+  const tick = (now) => {
+    if (!running) return;
+    ticker = requestTick(tick);
+    if (now - lastTick < TICK_MS) return;
+    lastTick = now;
+    renderHeadline();
   };
 
   /** The block a step belongs in: its sub-agent's, or the top when unknown. */
@@ -615,7 +683,11 @@ export function createReasoningPanel() {
 
   // Fetches a stored step's whole record (hydrate's ``loadStep``); null while live.
   let stepLoader = null;
-  const makeRow = (step) => (step.kind === "agent" ? createAgentRow(step, () => startedAt, stepLoader) : createStepRow(step, stepLoader));
+  // Where a live turn's lazy steps come from (setStepSource): a provider, so a
+  // row built before the turn knows its chat still finds its record later.
+  let stepSource = null;
+  const loadFor = () => stepSource?.() ?? stepLoader;
+  const makeRow = (step) => (step.kind === "agent" ? createAgentRow(step, () => startedAt, loadFor) : createStepRow(step, loadFor));
 
   return {
     el: root,
@@ -629,6 +701,17 @@ export function createReasoningPanel() {
     /** Fold the plan card, or open it (ui/plan-card.js: the reader's choice stands). */
     setPlanCollapsed(collapsed) {
       plan.setCollapsed(collapsed);
+    },
+
+    /**
+     * Where a live step's whole record comes from: a provider of a loader,
+     * ``() => ((stepId) => Promise) | null``. A stored chat hands its loader to
+     * `hydrate` instead; a live turn has no stored message id yet.
+     */
+    setStepSource(source) {
+      stepSource = source;
+      // A card the reader opened before its source existed loads now.
+      for (const { row } of index.values()) row.retry?.();
     },
 
     /**
@@ -657,7 +740,9 @@ export function createReasoningPanel() {
       root.dataset.state = "running";
       setExpanded(true);
       renderHeadline();
-      ticker = setInterval(renderHeadline, 200);
+      lastTick = 0;
+      if (ticker != null) cancelTick(ticker);
+      ticker = requestTick(tick);
     },
 
     /** Create or patch a step, addressed by `step.id`, inside its sub-agent's block. */
@@ -711,7 +796,7 @@ export function createReasoningPanel() {
     finish(durationMs, autoCollapse = true, usage = null) {
       if (!running && totalMs != null) return;
       running = false;
-      clearInterval(ticker);
+      if (ticker != null) cancelTick(ticker);
       ticker = null;
       totalMs = durationMs ?? Date.now() - startedAt;
       // The server's own count of the turn's tokens, when it said them.

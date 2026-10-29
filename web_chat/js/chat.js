@@ -438,6 +438,7 @@ export class ChatController {
     });
     message.setWaiting(true);
     message.reasoning.start();
+    message.reasoning.setStepSource(this._liveStepSource(contextId, message));
     this._transcript.follow();
     this._store.set({ streaming: true, stopping: false });
     void this._refreshConversations(); // the rail shows this chat as working
@@ -648,6 +649,7 @@ export class ChatController {
     const message = this._transcript.add({ role: "assistant", author: "Grid", timestamp: Date.now() - elapsedMs });
     message.setWaiting(true);
     message.reasoning.start(elapsedMs);
+    message.reasoning.setStepSource(this._liveStepSource(contextId, message));
     this._transcript.scrollToBottom(true);
     this._store.set({ streaming: true });
 
@@ -808,6 +810,23 @@ export class ChatController {
   /** Fetches a stored step that left its payloads on the server (``lazy``). */
   _stepLoader(contextId) {
     return (messageId, stepId) => api.conversationStep(contextId, messageId, stepId);
+  }
+
+  /**
+   * Where a live answer's lazy steps come from.
+   *
+   * A step frame of a running turn carries only its identity, labels and
+   * status: opening the card fetches the rest. Until the turn is stored the
+   * recorder answers under the reserved message id ``live``; afterwards the
+   * message's own id works, so a card opened late still loads.
+   */
+  _liveStepSource(contextId, message) {
+    return () => (stepId) => {
+      const stored = message.messageId;
+      return stored
+        ? api.conversationStep(contextId, stored, stepId)
+        : api.conversationLiveStep(contextId, stepId);
+    };
   }
 
   /** Offer Continue in the composer while the last turn can still be resumed. */

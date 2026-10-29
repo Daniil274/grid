@@ -183,6 +183,14 @@
   max-width: var(--content-width);
   margin: 0 auto 26px;
   animation: msgIn 200ms var(--ease);
+  /* A chat is a stack of blocks the reader scrolls past: an off-screen message
+     keeps its place (the size it measured) but pays no layout or paint until
+     it comes back. The intrinsic size is only the first estimate - `auto`
+     remembers the real height once a message has been seen, so the scrollbar
+     does not jump. Nothing about the look changes: the same box, the same
+     margins, only skipped while out of view. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
 }
 
 @keyframes msgIn {

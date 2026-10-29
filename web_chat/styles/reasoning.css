@@ -563,6 +563,34 @@ a.refChip:hover {
 .payload__value[data-type="number"] { color: var(--code-num); }
 .payload__value[data-type="boolean"] { color: var(--code-kw); }
 
+/* Memory operations (ui/tool-payload.js): a search or a listing answers with
+   record cards, a save or a deletion with one compact line. Same vocabulary as
+   the memory drawer, so a record looks the same wherever it is shown. */
+.payload__mem { display: grid; gap: 8px; padding: 10px 12px; }
+.payload__memNote { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; color: var(--text-2); font-size: 12px; }
+.payload__memNote[data-tone="ok"] strong { color: var(--ok); }
+.payload__memNote[data-tone="error"] { color: var(--danger); }
+.payload__memNote[data-tone="empty"] { color: var(--text-3); }
+.payload__memNote code { font-family: var(--font-mono, monospace); overflow-wrap: anywhere; }
+.payload__memList { display: grid; gap: 8px; }
+.payload__memCard { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-inset); }
+.payload__memCard[data-stale="stale"] { border-left: 3px solid var(--warn); }
+.payload__memHead { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.payload__memTag { padding: 1px 8px; border: 1px solid var(--line); border-radius: var(--radius-pill); color: var(--text-3); font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; }
+.payload__memTag[data-kind="layer"] { border-color: var(--accent-line); background: var(--accent-soft); color: var(--text); font-family: var(--font-mono, monospace); }
+.payload__memTag[data-kind="stale"] { color: var(--text-3); }
+.payload__memScore { margin-left: auto; color: var(--text-3); font-family: var(--font-mono, monospace); font-size: 11px; }
+.payload__memTitle { margin: 0; font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.payload__memBody { margin: 0; color: var(--text-2); font-size: 12px; overflow-wrap: anywhere; }
+.payload__memDetails > summary { cursor: pointer; color: var(--text-3); font-size: 11.5px; }
+.payload__memDetails > summary:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+.payload__memFacts { display: grid; gap: 2px; padding: 4px 0 0 10px; border-left: 1px solid var(--line); }
+.payload__memFact { display: flex; gap: 6px; min-width: 0; font-family: var(--font-mono, monospace); font-size: 11.5px; }
+.payload__memKey { flex: 0 0 auto; color: var(--text-3); }
+.payload__memValue { overflow-wrap: anywhere; }
+.payload__memMore { justify-self: start; padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--radius-pill); background: transparent; color: var(--text-2); font-size: 11.5px; cursor: pointer; }
+.payload__memMore:hover, .payload__memMore:focus-visible { border-color: var(--accent-line); color: var(--accent); }
+
 /* The plan card (ui/plan-card.js): the conversation's tracker tasks, above the answer. */
 .planCard {
   margin: 8px 0 10px;
