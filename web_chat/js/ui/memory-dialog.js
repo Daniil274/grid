@@ -19,6 +19,7 @@
 import { debounce, h, replace } from "../lib/dom.js";
 import { api } from "../net/api.js";
 import { shortStamp } from "../lib/format.js";
+import { MEMORY_LAYER_NAMES, MEMORY_LEVEL_NAMES } from "../lib/memory-labels.js";
 import { field, select, textArea, textInput } from "../settings/fields.js";
 import { hideOverlay, showOverlay } from "./overlay.js";
 
@@ -30,9 +31,9 @@ export const LAYER_TABS = [
   { value: "L0", label: "History L0" },
 ];
 
-const LAYER_NAMES = { L3: "Profile", L2: "Scenario", L1: "Fact", L0: "History" };
+const LAYER_NAMES = MEMORY_LAYER_NAMES;
 const LAYER_COUNT_ORDER = ["L3", "L2", "L1", "L0"];
-export const LEVEL_NAMES = { chat: "This chat", project: "Project", user: "You · any project" };
+export const LEVEL_NAMES = MEMORY_LEVEL_NAMES;
 const CATEGORIES = ["note", "decision", "constraint", "architecture", "bug", "preference", "workflow"];
 const SEARCH_DELAY = 250;
 

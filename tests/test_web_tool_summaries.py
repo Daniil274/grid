@@ -176,3 +176,37 @@ def test_unknown_arguments_shape_is_safe_for_every_formatter():
         result = tool_subtitle(name, {})
         assert result is None or isinstance(result, str)
         tool_subtitle(name, {"filepath": None, "task": [], "content": {}, "pattern": 5})
+
+
+# -- workspace memory --------------------------------------------------------
+
+
+def test_memory_subtitles_describe_the_operation_arguments():
+    assert tool_title("memory_recall") == "Recall memory"
+    assert tool_title("memory_overview") == "Memory overview"
+    assert tool_title("memory_remember") == "Remember"
+    assert tool_title("memory_forget") == "Forget memory"
+
+    assert tool_subtitle("memory_recall", {"query": "auth tokens"}) == '"auth tokens"'
+    assert tool_subtitle("memory_overview", {"limit": 25}) == "up to 25 records"
+    assert tool_subtitle(
+        "memory_remember",
+        {"content": "Use SQLite for memory", "layer": "L1", "category": "decision"},
+    ) == 'L1 decision: "Use SQLite for memory"'
+    assert tool_subtitle("memory_forget", {"record_id": "abc123"}) == "abc123"
+
+
+def test_memory_subtitles_stay_honest_when_arguments_are_partial():
+    # A search without a query has nothing to show; the caller falls back.
+    assert tool_subtitle("memory_recall", {"limit": 5}) is None
+    assert tool_subtitle("memory_forget", {"bead_id": "bd-1"}) is None
+    assert tool_subtitle("memory_overview", {}) == ""
+    # A save without content still says where it goes.
+    assert tool_subtitle("memory_remember", {"layer": "L3", "category": "preference"}) == "L3 preference"
+    # Multi-line content collapses to its first line, and long text is clipped.
+    assert tool_subtitle("memory_remember", {"content": "line one\nline two"}) == '"line one"'
+    clipped = tool_subtitle("memory_remember", {"content": "word " * 100})
+    # The quoted snippet is shortened inside the quotes, so the caption keeps
+    # both its delimiters and the 120-character budget.
+    assert clipped is not None and len(clipped) <= 120
+    assert clipped.startswith('"') and clipped.endswith('"') and "…" in clipped

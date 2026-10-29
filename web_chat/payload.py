@@ -40,6 +40,18 @@ def _blocks(value: Any) -> bool:
     )
 
 
+# These tools report their own expected failures as {"error": "..."} instead of
+# raising, so the step must still be marked as an error. Kept narrow on purpose:
+# other tools may legitimately return an `error` field as data.
+_SOFT_ERROR_TOOLS = {"memory_recall", "memory_overview", "memory_remember", "memory_forget"}
+
+
+def _soft_error(tool: str, value: Any) -> bool:
+    key = str(tool or "").rsplit(".", 1)[-1].strip().lower()
+    return (key in _SOFT_ERROR_TOOLS and isinstance(value, dict)
+            and isinstance(value.get("error"), str) and bool(value["error"].strip()))
+
+
 def normalize_payload(value: Any, *, role: str = "result", tool: str = "",
                       markdown: bool = False) -> dict[str, Any]:
     """Serialize a bounded preview without allowing failures to break a run.
@@ -258,6 +270,13 @@ def normalize_payload(value: Any, *, role: str = "result", tool: str = "",
     else:
         source = original
     truncated = truncated or len(source) > MAX_TEXT
-    return {"version": 1, "parts": parts, "raw_text": source[:MAX_TEXT],
-            "truncated": truncated, "original_size": original_size,
-            "is_error": isinstance(value, dict) and value.get("isError") is True}
+    payload = {"version": 1, "parts": parts, "raw_text": source[:MAX_TEXT],
+               "truncated": truncated, "original_size": original_size,
+               "is_error": (isinstance(value, dict) and value.get("isError") is True)
+               or (role != "input" and _soft_error(tool, value))}
+    # A one-text-part payload whose raw text is that very text carries the same
+    # bytes twice; the client joins the parts when ``raw_text`` is absent.
+    if (not truncated and len(parts) == 1
+            and parts[0].get("kind") == "text" and parts[0].get("data") == source):
+        del payload["raw_text"]
+    return payload

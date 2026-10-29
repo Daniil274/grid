@@ -399,6 +399,40 @@ def _delegate_brief(a: dict) -> Optional[str]:
     return _first_line(a, "input", "task", "message", "prompt", "goal")
 
 
+# Memory operations: four tools with very different arguments, so the caption
+# names what will actually happen (a search, a listing, a save, a deletion).
+_MEMORY_LAYER_NAMES = {"L0": "history", "L1": "fact", "L2": "scenario", "L3": "profile"}
+
+
+def _memory_recall(a: dict) -> Optional[str]:
+    query = _first_line(a, "query", "q")
+    if query:
+        return f'"{query}"'
+    return None
+
+
+def _memory_overview(a: dict) -> Optional[str]:
+    limit = _val(a, "limit")
+    if limit is None:
+        return None
+    return f"up to {_text(limit)} records"
+
+
+def _memory_remember(a: dict) -> Optional[str]:
+    layer = str(_val(a, "layer") or "").upper()
+    category = _val(a, "category")
+    tag = " ".join(part for part in (layer, _text(category) if category else "") if part)
+    content = _first_line(a, "content", "text")
+    if content:
+        snippet = clip(_text(content), 60)
+        return f'{tag}: "{snippet}"' if tag else f'"{snippet}"'
+    return tag or None
+
+
+def _memory_forget(a: dict) -> Optional[str]:
+    return _first_line(a, "record_id", "id")
+
+
 def _codegraph_query(a: dict) -> Optional[str]:
     query = _val(a, "query", "symbol", "symbols", "name")
     if query is not None:
@@ -507,6 +541,11 @@ TOOL_TITLES: dict[str, str] = {
     "control_revert": "Revert experiment change",
     "control_scenarios": "List scenarios",
     "control_status": "Check experiment status",
+    # workspace memory
+    "memory_recall": "Recall memory",
+    "memory_overview": "Memory overview",
+    "memory_remember": "Remember",
+    "memory_forget": "Forget memory",
     # vision
     "crop_image": "Crop image",
     # common shell / screen tools (robustness; not in the local registry)
@@ -583,6 +622,11 @@ TOOL_SUBTITLES: dict[str, Callable[[dict[str, Any]], Optional[str]]] = {
     "control_diff": _read_file,
     "control_revert": _control_revert,
     "control_status": _control_submit_task,
+    # workspace memory
+    "memory_recall": _memory_recall,
+    "memory_overview": _memory_overview,
+    "memory_remember": _memory_remember,
+    "memory_forget": _memory_forget,
     # vision
     "crop_image": _crop_image,
     # common shell / screen tools

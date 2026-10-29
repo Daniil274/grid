@@ -20,6 +20,21 @@ from utils.path_utils import get_current_factory, resolve_agent_path_from_ctx
 from utils.tool_isolation import WORKSPACE
 
 
+#: One refusal for every failure a memory tool can see. It never carries a host
+#: path, a gateway credential or a backend traceback.
+MEMORY_ERROR = "Memory operation unavailable or invalid arguments"
+
+
+def memory_failure(message: str = MEMORY_ERROR) -> str:
+    """The memory tools' answer when an operation could not be done.
+
+    ``isError`` is the flag every payload reader already understands: it keeps
+    the step an error even where the tool's name is not known - a resumed run,
+    for one - which a bare ``{"error": ...}`` cannot do.
+    """
+    return json.dumps({"error": message, "isError": True}, ensure_ascii=False)
+
+
 @contextmanager
 def _manager(context):
     factory = getattr(getattr(context, "context", None), "factory", None) or get_current_factory()
@@ -61,7 +76,7 @@ def _invoke(context, operation):
             return json.dumps(operation(manager), ensure_ascii=False)
     except Exception:  # noqa: BLE001 - optional backend failures must not break a tool run
         # Do not expose host paths, gateway credentials or arbitrary backend errors.
-        return json.dumps({"error": "Memory operation unavailable or invalid arguments"})
+        return memory_failure()
 
 
 @function_tool
@@ -78,7 +93,7 @@ async def memory_recall(context: RunContextWrapper, query: str = "", limit: int 
             return json.dumps([{"record": record_to_dict(record), "level": level, "score": score}
                                for level, record, score in hits], ensure_ascii=False)
         except Exception:  # noqa: BLE001 - same contract as _invoke
-            return json.dumps({"error": "Memory operation unavailable or invalid arguments"})
+            return memory_failure()
     search = getattr(factory, "memory_search", None)
     if search is not None and query.strip():
         # By meaning (embeddings), every layer but raw transcripts, no similarity floor:
@@ -90,7 +105,7 @@ async def memory_recall(context: RunContextWrapper, query: str = "", limit: int 
                 return json.dumps([{"record": record_to_dict(record), "score": score} for record, score in hits],
                                   ensure_ascii=False)
         except Exception:  # noqa: BLE001 - same contract as _invoke
-            return json.dumps({"error": "Memory operation unavailable or invalid arguments"})
+            return memory_failure()
     return await asyncio.to_thread(_invoke, context, lambda manager: [
         {"record": record_to_dict(hit.record), "score": hit.score}
         for hit in manager.search(MemoryQuery(text=query, limit=limit))
@@ -116,7 +131,7 @@ async def memory_remember(
     elif not chosen:
         chosen = "project" if "project" in levels else "user"
     if levels and chosen not in levels:
-        return json.dumps({"error": f"This chat has no {chosen} memory; use one of: {', '.join(levels)}"})
+        return memory_failure(f"This chat has no {chosen} memory; use one of: {', '.join(levels)}")
 
     def store(manager):
         manager = levels.get(chosen, manager)
