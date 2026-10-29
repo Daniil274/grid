@@ -34,6 +34,15 @@ export class ChatConnection {
     socket.addEventListener("close", () => this._closeHandler?.());
   }
 
+  /**
+   * Whether this connection can still carry a frame. A phone that slept or a
+   * network that moved leaves the socket closed without every close event
+   * arriving, so callers ask this rather than trust the last event they saw.
+   */
+  get isOpen() {
+    return this._socket.readyState === WebSocket.OPEN;
+  }
+
   /** @param {ChatEventType} type */
   on(type, handler) {
     this._handlers.set(type, handler);
@@ -56,7 +65,7 @@ export class ChatConnection {
    *   "after_turn", or null for the decision model to choose
    */
   send(message, selection, images = [], editOf = null, delivery = null) {
-    this._post({
+    return this._post({
       message,
       ...selection,
       ...(images.length ? { images } : {}),
@@ -67,7 +76,7 @@ export class ChatConnection {
 
   /** Act on a waiting message: "send_queued" or "unqueue". */
   queued(action, id) {
-    this._post({ action, id });
+    return this._post({ action, id });
   }
 
   /**
@@ -75,38 +84,45 @@ export class ChatConnection {
    * once, wherever the agent is.
    */
   stop({ now = false } = {}) {
-    this._post(now ? { action: "stop", now: true } : { action: "stop" });
+    return this._post(now ? { action: "stop", now: true } : { action: "stop" });
   }
 
   /** Resume the interrupted turn the conversation ends with. */
   resume() {
-    this._post({ action: "continue" });
+    return this._post({ action: "continue" });
   }
 
   /** Run this conversation under policy filter *filter*, its running turn too. */
   policyFilter(filter) {
-    this._post({ action: "policy_filter", filter });
+    return this._post({ action: "policy_filter", filter });
   }
 
   /** Allow or decline a call the policy holds for the user; `remember` allows the tool for the turn. */
   answerReview(approvalId, { approve, remember = false }) {
-    this._post({ action: "policy_review", approval_id: approvalId, approve, remember });
+    return this._post({ action: "policy_review", approval_id: approvalId, approve, remember });
   }
 
   /** Follow the conversation's running turn: the server replays it, then streams live. */
   attach() {
-    this._post({ action: "attach" });
+    return this._post({ action: "attach" });
   }
 
   close() {
     this._handlers.clear();
     this._closeHandler = null;
+    // A socket still connecting must be closed too, or it opens for nobody.
     if (this._socket.readyState <= WebSocket.OPEN) this._socket.close();
   }
 
+  /**
+   * Send one frame. False when the socket cannot carry it any more: dropping
+   * a frame silently would leave the page waiting for an answer nobody sends.
+   * @returns {boolean}
+   */
   _post(payload) {
-    if (this._socket.readyState !== WebSocket.OPEN) return;
+    if (!this.isOpen) return false;
     this._socket.send(JSON.stringify(payload));
+    return true;
   }
 
   _dispatch(raw) {

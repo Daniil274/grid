@@ -13,7 +13,7 @@ import { api } from "./net/api.js";
 import { tokens } from "./lib/format.js";
 import { ChatController } from "./chat.js";
 import { AccountsDrawer } from "./accounts/admin.js";
-import { monitorServer } from "./net/server-monitor.js";
+import { monitorPageLifecycle, monitorServer } from "./net/server-monitor.js";
 import { PasswordDrawer } from "./accounts/password.js";
 import { PlanDrawer } from "./accounts/plan.js";
 import { PersonalAgentsDrawer } from "./agents/drawer.js";
@@ -659,13 +659,15 @@ async function boot() {
   document.addEventListener("grid:server-status", ({ detail }) => {
     store.set({ restartPending: ["preparing", "restarting"].includes(detail.phase), serverUnavailable: false });
   });
-  const stopMonitoring = monitorServer({
+  // Watching the server is what tells the page an instance changed under it,
+  // so it must stop while the page is away - but only when it is really gone:
+  // a page kept in the back/forward cache comes back as it was (net/server-monitor.js).
+  monitorPageLifecycle(() => monitorServer({
     read: () => store.get().user?.role === "admin" ? api.adminServer() : api.serverStatus(),
     onStatus: (detail) => document.dispatchEvent(new CustomEvent("grid:server-status", { detail })),
     onRestart: () => chat.reconnectAfterRestart(),
     onUnavailable: () => store.set({ restartPending: true, serverUnavailable: true }),
-  });
-  window.addEventListener("pagehide", stopMonitoring, { once: true });
+  }));
   // "Open in chat" on the systems page: a new chat with that system pinned.
   const params = new URLSearchParams(location.search);
   const pinned = params.get("system");

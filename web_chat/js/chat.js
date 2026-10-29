@@ -11,6 +11,17 @@ import { api } from "./net/api.js";
 import { ChatConnection } from "./net/chat-socket.js";
 import { toast } from "./ui/toast.js";
 
+/**
+ * How long a burst of "the page is back" events - hidden to visible, the page
+ * restored from the back/forward cache, the network returning - waits for its
+ * last member before one resync runs. They arrive together; one attach is enough.
+ */
+const RESUME_DEBOUNCE_MS = 200;
+/** How many times a resync retries a conversation it could not read. */
+const RESUME_RETRIES = 2;
+/** Base delay between those retries; the second waits twice as long. */
+const RESUME_RETRY_MS = 300;
+
 export class ChatController {
   /**
    * @param {object} deps
@@ -34,6 +45,87 @@ export class ChatController {
     // chat no longer on screen is dropped instead of drawn over the new one.
     this._loading = null;
     this._navigationIntent = 0;
+    // The resync a burst of wake-up events scheduled (see resumeLive).
+    this._resume = null;
+    this._listenForLifecycle();
+  }
+
+  /**
+   * The page can sleep, lose its network or be restored from the back/forward
+   * cache without the turn's socket ever saying so. Every way back is one
+   * resync; the resync itself is debounced, so a burst of them is one attach.
+   */
+  _listenForLifecycle() {
+    const page = globalThis.window ?? globalThis;
+    const onVisible = () => {
+      if (globalThis.document?.visibilityState === "visible") void this.resumeLive();
+    };
+    const wake = () => void this.resumeLive();
+    try {
+      globalThis.document?.addEventListener?.("visibilitychange", onVisible);
+      page?.addEventListener?.("pageshow", wake);
+      page?.addEventListener?.("online", wake);
+    } catch {
+      // A host without page events (a test, a worker) simply never resumes.
+    }
+  }
+
+  /**
+   * The page came back: stop following the turn on screen - without finalising
+   * it - and attach to the conversation again. A turn still running on the
+   * server is rebuilt from its snapshot; one that finished meanwhile shows what
+   * was stored. Debounced: the wake-up events arrive as a burst.
+   * @returns {Promise<void>} settled once the resync (if any) has run
+   */
+  resumeLive(delay = RESUME_DEBOUNCE_MS) {
+    if (!this._store.get().contextId) return Promise.resolve();
+    if (!this._resume) {
+      const pending = { timer: null, resolve: null };
+      pending.promise = new Promise((resolve) => { pending.resolve = resolve; });
+      this._resume = pending;
+    }
+    const pending = this._resume;
+    clearTimeout(pending.timer);
+    pending.timer = setTimeout(() => {
+      const { resolve } = pending;
+      this._resume = null;
+      resolve(this._resyncLive());
+    }, delay);
+    return pending.promise;
+  }
+
+  /** One resync: drop the turn, then reconcile - retried while it cannot be read. */
+  async _resyncLive() {
+    const { contextId } = this._store.get();
+    if (!contextId) return;
+    this._dropLiveTurn();
+    for (let attempt = 0; attempt <= RESUME_RETRIES; attempt += 1) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, RESUME_RETRY_MS * attempt));
+      // Reconciling attaches to the server's running turn, or shows what was stored.
+      if (await this._reconcile(contextId)) return;
+      if (this._store.get().contextId !== contextId) return; // another chat took over
+    }
+  }
+
+  /**
+   * Stop following the turn on screen, keeping everything it drew. Nothing is
+   * finalised: the answer, its trace and its status come from the server when
+   * the page attaches again.
+   */
+  _dropLiveTurn() {
+    const turn = this._activeTurn;
+    this._connection?.close();
+    this._connection = null;
+    this._activeTurn = null;
+    this._store.set({ streaming: false, stopping: false });
+    // Whoever waits for this turn to settle (Stop, an edit) must not hang.
+    turn?.onSettled?.();
+  }
+
+  /** The turn's socket cannot carry a frame any more: resync to the server. */
+  _lostTurn() {
+    toast("The connection to this turn was lost. Reconnecting…", { tone: "error", timeout: 4000 });
+    void this.resumeLive();
   }
 
   /**
@@ -86,7 +178,7 @@ export class ChatController {
     if (this.isStreaming) {
       // The agent is working: the server delivers the message now, at the
       // agent's next step or after the turn; `delivery` null lets it decide.
-      this._connection?.send(text, this._selection(), images, null, delivery);
+      if (!this._connection?.send(text, this._selection(), images, null, delivery)) this._lostTurn();
       return;
     }
     await this._begin({ text, spoken, images });
@@ -96,7 +188,7 @@ export class ChatController {
   async sendQueued(item) {
     if (this._store.get().compacting) return;
     if (this.isStreaming) {
-      this._connection?.queued("send_queued", item.id);
+      if (!this._connection?.queued("send_queued", item.id)) this._lostTurn();
       return;
     }
     await this._queuedWhileIdle("unqueue", item.id);
@@ -105,7 +197,9 @@ export class ChatController {
 
   /** Drop a waiting message. */
   async dropQueued(item) {
-    if (this.isStreaming) this._connection?.queued("unqueue", item.id);
+    if (this.isStreaming) {
+      if (!this._connection?.queued("unqueue", item.id)) this._lostTurn();
+    }
     else await this._queuedWhileIdle("unqueue", item.id);
   }
 
@@ -448,7 +542,7 @@ export class ChatController {
     // assistant message of the run, including the narration before each tool
     // call, and only the last one survives into `final_output`. Speaking the
     // stream would read aloud the steps the message itself discards.
-    const turn = { message, contextId, failed: false, finalText: "", spoken };
+    const turn = { message, contextId, failed: false, finalText: "", spoken, done: false };
     this._activeTurn = turn;
     // The chat has a turn now: its working directory stays as it is.
     this._store.set({ workspaceLocked: true });
@@ -477,7 +571,7 @@ export class ChatController {
   /** The policy switch moved: the next turns, and the one running now, follow it. */
   setPolicyFilter(filter) {
     this._store.set({ policyFilter: filter });
-    this._connection?.policyFilter(filter);
+    if (this._connection && !this._connection.policyFilter(filter)) this._lostTurn();
   }
 
   /** Answer a call the policy holds in this chat for the user's permission. */
@@ -486,7 +580,7 @@ export class ChatController {
       toast("This request is no longer waiting for an answer.", { tone: "error" });
       return;
     }
-    this._connection.answerReview(approvalId, { approve, remember });
+    if (!this._connection.answerReview(approvalId, { approve, remember })) this._lostTurn();
   }
 
   /**
@@ -496,7 +590,7 @@ export class ChatController {
    */
   stop({ now = false } = {}) {
     this.stopSpeaking();
-    this._connection?.stop({ now });
+    if (this._connection && !this._connection.stop({ now })) this._lostTurn();
   }
 
   /** Silence whatever is being read aloud, wherever it was started from. */
@@ -640,20 +734,29 @@ export class ChatController {
   /** Attach to a turn already running on the server and replay it in place. */
   async _attachToRunningTurn(contextId, { message: userText, resumes, elapsed_ms: elapsedMs }) {
     const last = this._transcript.last();
-    if (resumes) {
-      if (last?.role !== "marker") this._transcript.add({ role: "user", kind: "continuation", timestamp: Date.now() - elapsedMs });
-    } else if (!(last?.role === "user" && last.text === userText)) {
-      this._transcript.add({ role: "user", content: userText, timestamp: Date.now() - elapsedMs });
+    // The answer this page was streaming into when it went away is this same
+    // turn, still on screen: the snapshot refills that bubble instead of
+    // stacking a second one under the request. A stored message has an id; a
+    // live one does not yet.
+    const rebuild = last?.role === "assistant" && !last.messageId ? last : null;
+    if (!rebuild) {
+      if (resumes) {
+        if (last?.role !== "marker") this._transcript.add({ role: "user", kind: "continuation", timestamp: Date.now() - elapsedMs });
+      } else if (!(last?.role === "user" && last.text === userText)) {
+        this._transcript.add({ role: "user", content: userText, timestamp: Date.now() - elapsedMs });
+      }
     }
     this._transcript.retireContinue();
-    const message = this._transcript.add({ role: "assistant", author: "Grid", timestamp: Date.now() - elapsedMs });
+    const message = rebuild ?? this._transcript.add({ role: "assistant", author: "Grid", timestamp: Date.now() - elapsedMs });
+    // The snapshot's token frame carries the whole answer so far: start empty.
+    if (rebuild) message.setText("");
     message.setWaiting(true);
     message.reasoning.start(elapsedMs);
     message.reasoning.setStepSource(this._liveStepSource(contextId, message));
     this._transcript.scrollToBottom(true);
     this._store.set({ streaming: true });
 
-    const turn = { message, contextId, failed: false, finalText: "", spoken: false };
+    const turn = { message, contextId, failed: false, finalText: "", spoken: false, done: false };
     this._activeTurn = turn;
     try {
       this._connection = await ChatConnection.open(contextId);
@@ -737,6 +840,9 @@ export class ChatController {
         message.setFailed(content);
       })
       .on("done", ({ duration_ms: durationMs, stopped, detached, tokens_in: tokensIn, tokens_out: tokensOut }) => {
+        // The turn is over. Only this frame says so: a socket that goes quiet
+        // leaves the turn as the server still has it, to be attached again.
+        turn.done = true;
         if (detached) {
           // The turn finished before we could attach: show what was stored.
           turn.detached = true;
@@ -744,6 +850,7 @@ export class ChatController {
           return;
         }
         message.reasoning.finish(durationMs, this._transcript.isFollowing(), { tokensIn: tokensIn ?? 0, tokensOut: tokensOut ?? 0 });
+        turn.finished = true;
         this._settle(turn);
         if (!turn.failed && !stopped && !message.text) {
           // The run ended on tool calls with no closing message. The trace above
@@ -763,7 +870,13 @@ export class ChatController {
     if (!this.isStreaming || turn !== this._activeTurn) return;
     this._store.set({ streaming: false, stopping: false });
     turn.message.setWaiting(false);
-    turn.message.reasoning.finish(undefined, this._transcript.isFollowing());
+    // No `done` and the socket closed anyway: the turn may still be running
+    // on the server, so its trace stays live until the page attaches again
+    // (resumeLive) and either finds it running or finds it stored.
+    if (turn.done && !turn.finished) {
+      turn.finished = true;
+      turn.message.reasoning.finish(undefined, this._transcript.isFollowing());
+    }
     this._transcript.follow();
     this._connection?.close();
     this._connection = null;
@@ -784,14 +897,16 @@ export class ChatController {
    * The runtime may post-process a turn (memory writes, trimming). Re-render
    * only when the stored conversation no longer matches what is on screen, so
    * an expanded reasoning panel is not collapsed for no reason.
+   * @returns {Promise<?object>} the conversation read, or null when it could
+   *   not be read - present or not, the reason a resync retries.
    */
   async _reconcile(contextId, { force = false } = {}) {
-    if (contextId !== this._store.get().contextId) return;
-    if (!this._transcript) return;
+    if (contextId !== this._store.get().contextId) return null;
+    if (!this._transcript) return null;
     try {
       // Null when the reader moved to another chat while it loaded.
       const payload = await this._fetchConversation(contextId);
-      if (!payload) return;
+      if (!payload) return null;
       // Same messages on screen: only take their ids and versions, so an
       // expanded reasoning panel stays as it is.
       if (force || !this._transcript.adopt(payload.messages)) {
@@ -802,8 +917,10 @@ export class ChatController {
       this._syncResumable();
       // The queue started the next waiting message: follow that turn too.
       if (payload.active_turn && !this.isStreaming) await this._attachToRunningTurn(payload.id, payload.active_turn);
+      return payload;
     } catch (error) {
       console.warn("Could not reconcile the conversation", error);
+      return null;
     }
   }
 
