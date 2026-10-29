@@ -23,9 +23,10 @@ import asyncio
 import json
 import time
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 from agents import FunctionTool, RunContextWrapper, RunItemStreamEvent, function_tool
+from agents.tool import ToolOutputFileContent, ToolOutputImage, ToolOutputText
 from agents.tool_context import ToolContext
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,6 +38,14 @@ PARALLEL = "parallel"
 #: Calls one parallel call may hold; more is a plan to split into waves.
 MAX_CALLS = 16
 DEFAULT_MAX_PARALLEL = 4
+
+#: A part of a tool's output beside text: a picture, a recording, a document.
+MediaPart = Union[ToolOutputText, ToolOutputImage, ToolOutputFileContent]
+#: A batch's answer: the JSON text of its results, or that text and the media parts after it.
+ParallelOutput = Union[str, List[MediaPart]]
+
+_STRUCTURED = (ToolOutputText, ToolOutputImage, ToolOutputFileContent)
+_JSON_SCALARS = (str, int, float, bool, type(None))
 
 
 class ParallelCall(BaseModel):
@@ -67,13 +76,18 @@ def parallel_tool(siblings: Iterable[Any], *, max_parallel: int = DEFAULT_MAX_PA
     }
 
     @function_tool(name_override=PARALLEL)
-    async def parallel(context: RunContextWrapper, calls: List[ParallelCall]) -> str:
+    async def parallel(
+        context: RunContextWrapper, calls: List[ParallelCall]
+    ) -> ParallelOutput:
         """Run several of your own tool calls at the same time; their results come back together, in call order.
 
         Use it for two or more calls that do not depend on each other's
         results: launching independent agents, searches, reads. A single call
         is made directly, not through parallel. A call that needs another's
         result goes into the next parallel call or a plain call after it.
+
+        A call that reads a picture, a recording or a document brings it back
+        as itself: the text names the file, and the media follows it.
 
         Every call is judged by the policy as if you made it directly. Calls
         that read run freely; calls that change something (files, the tracker,
@@ -87,7 +101,7 @@ def parallel_tool(siblings: Iterable[Any], *, max_parallel: int = DEFAULT_MAX_PA
 
 async def run_parallel(
     context: Any, calls: List[ParallelCall], tools: Dict[str, Any], *, max_parallel: int
-) -> str:
+) -> ParallelOutput:
     started = time.monotonic()
     raw_ctx = getattr(context, "context", None)
     try:
@@ -100,7 +114,9 @@ async def run_parallel(
     view = observer.nested("Parallel calls", call_id=parent_id) if hasattr(observer, "nested") else observer
     gate = asyncio.Semaphore(max(1, max_parallel))
 
-    async def one(index: int, call: ParallelCall, lane: parallel_lanes.Lane) -> Dict[str, Any]:
+    async def one(
+        index: int, call: ParallelCall, lane: parallel_lanes.Lane
+    ) -> tuple[Dict[str, Any], List[MediaPart]]:
         call_id = f"{parent_id}:{index}"
         async with gate:
             _show(view, "tool_called", call_id, call.tool, call.arguments)
@@ -111,11 +127,12 @@ async def run_parallel(
                 )
             seconds = round(time.monotonic() - began, 1)
             _show(view, "tool_output", call_id, call.tool, output)
-        return {"tool": call.tool, "seconds": seconds, "output": _as_data(output)}
+        data, media = _split_output(output, f"Call {index} ({call.tool})")
+        return {"tool": call.tool, "seconds": seconds, "output": data}, media
 
     error: Optional[str] = None
     try:
-        results = await asyncio.gather(
+        answers = await asyncio.gather(
             *(one(index, call, lane) for index, (call, lane) in enumerate(zip(calls, lanes)))
         )
     except BaseException as exc:
@@ -124,7 +141,8 @@ async def run_parallel(
     finally:
         if view is not observer and hasattr(view, "finish"):
             view.finish(error=error)
-    return json.dumps(
+    results = [result for result, _ in answers]
+    text = json.dumps(
         {
             "results": results,
             "wall_seconds": round(time.monotonic() - started, 1),
@@ -133,6 +151,9 @@ async def run_parallel(
         },
         ensure_ascii=False,
     )
+    media = [part for _, parts in answers for part in parts]
+    # The SDK hands a list of parts to the model as it is; text alone stays a plain string.
+    return [ToolOutputText(text=text), *media] if media else text
 
 
 def _plan(raw_ctx: Any, calls: List[ParallelCall], tools: Dict[str, Any]) -> List[parallel_lanes.Lane]:
@@ -212,14 +233,83 @@ def _show(view: Any, name: str, call_id: str, tool: str, value: Any) -> None:
     view.handle_event(RunItemStreamEvent(name=name, item=item))
 
 
-def _as_data(output: Any) -> Any:
+def _split_output(output: Any, call: str) -> tuple[Any, List[MediaPart]]:
+    """The call's answer as JSON data, and the media parts to hand beside it.
+
+    Media is not JSON: core.media gives a picture, a recording or a document as
+    a line naming the file and then a ToolOutputImage / ToolOutputFileContent
+    part. The line stays in the data in that part's place, and the part itself
+    comes back after the text, so the model sees the picture instead of a
+    serialization error.
+    """
+    parts: Optional[List[Any]] = None
+    if isinstance(output, _STRUCTURED):
+        parts = [output]
+    elif isinstance(output, (list, tuple)) and any(isinstance(part, _STRUCTURED) for part in output):
+        parts = list(output)
+    if parts is None:
+        return _as_data(output, call), []
+
+    lines: List[str] = []
+    media: List[MediaPart] = []
+    for part in parts:
+        if isinstance(part, ToolOutputText):
+            lines.append(part.text)
+        elif isinstance(part, (ToolOutputImage, ToolOutputFileContent)):
+            media.append(part)
+        elif isinstance(part, str):
+            lines.append(part)
+        else:
+            raise TypeError(_refusal(call, part))
+    text = "\n".join(line for line in lines if line)
+    # Media that came without a line of its own is still named in the answer.
+    return (text or "\n".join(_heading(part) for part in media)), media
+
+
+def _heading(part: MediaPart) -> str:
+    """The line that stands for a media part the call gave no text for."""
+    if isinstance(part, ToolOutputText):
+        return part.text
+    if isinstance(part, ToolOutputFileContent):
+        return f"📎 {part.filename}" if part.filename else "📎 file"
+    return "📎 image"
+
+
+def _as_data(output: Any, call: str) -> Any:
     """A JSON answer as data, so it is not escaped a second time in the result."""
-    if isinstance(output, str) and output[:1] in "{[":
-        try:
-            return json.loads(output)
-        except ValueError:
-            return output
-    return output if isinstance(output, (str, int, float, bool, list, dict, type(None))) else str(output)
+    if isinstance(output, str):
+        if output[:1] in "{[":
+            try:
+                return json.loads(output)
+            except ValueError:
+                return output
+        return output
+    _check_json(output, call)
+    return output
+
+
+def _check_json(value: Any, call: str) -> None:
+    """Refuse, naming the call, what json.dumps could only pass on as text."""
+    if isinstance(value, _JSON_SCALARS):
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(_refusal(call, key))
+            _check_json(item, call)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _check_json(item, call)
+        return
+    raise TypeError(_refusal(call, value))
+
+
+def _refusal(call: str, value: Any) -> str:
+    return (
+        f"{call}: a result of type {type(value).__name__} is neither JSON data nor media "
+        "(ToolOutputText, ToolOutputImage, ToolOutputFileContent)."
+    )
 
 
 def _error(message: str, **extra: Any) -> str:

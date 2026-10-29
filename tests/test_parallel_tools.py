@@ -1,12 +1,14 @@
 """parallel: an agent's own calls side by side, in lanes (core.parallel_lanes)."""
 
 import asyncio
+import io
 import json
 from types import SimpleNamespace
 
 import pytest
 import yaml
 from agents import FunctionTool
+from agents.tool import ToolOutputImage, ToolOutputText
 from agents.tool_context import ToolContext
 from agents.usage import Usage
 
@@ -78,6 +80,77 @@ async def test_independent_calls_run_side_by_side_and_answer_in_call_order(tmp_p
 
     assert [result["output"] for result in out["results"]] == [{"answer": "a"}, {"answer": "b"}]
     assert out["wall_seconds"] <= out["sum_seconds"] + 0.1
+
+
+async def test_a_calls_media_comes_back_as_media_beside_the_answer(tmp_path):
+    image = ToolOutputImage(image_url="data:image/jpeg;base64,AAAA", detail="auto")
+
+    async def body(ctx, args):
+        return [ToolOutputText(text="📎 shot.jpg: image, image/jpeg, 8 KB, 8x8"), image]
+
+    out = await asyncio.wait_for(
+        parallel_tool([_tool("look", read(), body)]).on_invoke_tool(
+            _context(tmp_path),
+            json.dumps({"calls": [{"tool": "look", "arguments": "{}", "write_paths": []}]}),
+        ),
+        5,
+    )
+
+    # The SDK gets a list of parts: the batch's text first, the picture itself after it.
+    assert isinstance(out, list) and isinstance(out[0], ToolOutputText)
+    assert out[1] is image
+    result = json.loads(out[0].text)["results"][0]
+    assert result["tool"] == "look"
+    assert result["output"] == "📎 shot.jpg: image, image/jpeg, 8 KB, 8x8"
+
+
+async def test_file_read_of_a_jpg_through_parallel_keeps_the_image(tmp_path, monkeypatch):
+    from PIL import Image
+
+    from tools.file_tools import read_file
+
+    monkeypatch.chdir(tmp_path)
+    shot = tmp_path / "shot.jpg"
+    with io.BytesIO() as out:
+        Image.new("RGB", (8, 8), (20, 40, 60)).save(out, format="JPEG")
+        shot.write_bytes(out.getvalue())
+
+    out = await asyncio.wait_for(
+        parallel_tool([read_file]).on_invoke_tool(
+            _context(tmp_path),
+            json.dumps(
+                {
+                    "calls": [
+                        {
+                            "tool": "read_file",
+                            "arguments": json.dumps({"filepath": "shot.jpg"}),
+                            "write_paths": [],
+                        }
+                    ]
+                }
+            ),
+        ),
+        10,
+    )
+
+    assert isinstance(out, list) and isinstance(out[1], ToolOutputImage)
+    assert out[1].image_url.startswith("data:image/jpeg;base64,")
+    assert "📎 shot.jpg: image, image/jpeg" in json.loads(out[0].text)["results"][0]["output"]
+
+
+async def test_a_result_that_is_neither_json_nor_media_is_named_as_an_error(tmp_path):
+    async def body(ctx, args):
+        return object()
+
+    out = await asyncio.wait_for(
+        parallel_tool([_tool("odd", read(), body)]).on_invoke_tool(
+            _context(tmp_path),
+            json.dumps({"calls": [{"tool": "odd", "arguments": "{}", "write_paths": []}]}),
+        ),
+        5,
+    )
+
+    assert "Call 0 (odd): a result of type object is neither JSON data nor media" in out
 
 
 async def test_calls_that_change_something_take_turns(tmp_path):
