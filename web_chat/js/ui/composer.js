@@ -26,6 +26,9 @@ import { toast } from "./toast.js";
 
 const MAX_HEIGHT_PX = 240;
 
+/** A finger-first device, where Enter belongs to the text and not to Send. */
+const touchPrimary = () => globalThis.matchMedia?.("(pointer: coarse)")?.matches === true;
+
 export function createComposer({
   input,
   sendButton,
@@ -164,11 +167,15 @@ export function createComposer({
     sync();
   });
 
+  // Key events do not identify a soft keyboard. On touch-primary devices,
+  // leave plain Enter to the textarea; Send and Ctrl/⌘+Enter remain explicit.
+  // keyCode 229 also protects IMEs that report isComposing=false on Enter.
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-      event.preventDefault();
-      submit();
-    }
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+    const chord = event.metaKey || event.ctrlKey;
+    if (!chord && touchPrimary()) return;
+    event.preventDefault();
+    submit();
   });
 
   // Pasted files are attachments; a plain text paste stays text.
