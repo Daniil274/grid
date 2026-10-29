@@ -181,8 +181,8 @@ class UserCredentials:
             if not self._local_cli_login:
                 return (
                     "This model runs on the Claude Code CLI login of this machine's operator, which "
-                    "is not a credential a user account may spend. It is available only on the "
-                    "local, single-user server."
+                    "is not a credential a user account may spend. It is available only to admins "
+                    "and on the local, single-user server."
                 )
             return (
                 "This model runs on the Claude Code CLI's own login. Sign in on the host with "
@@ -217,8 +217,8 @@ class UserCredentials:
             if not self._local_cli_login:
                 raise CredentialError(
                     "The Claude subscription runs on the Claude Code CLI login of this machine's "
-                    "operator. It is available only on the local, single-user server, not to a "
-                    "user account on a shared server.",
+                    "operator. It is available only to admins and on the local, single-user "
+                    "server, not to a user account on a shared server.",
                     details={"provider": getattr(provider, "name", "")},
                 )
             return Credential("", CLAUDE, charged=False, subscription=True)

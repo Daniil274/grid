@@ -225,7 +225,7 @@ def test_what_a_model_accepts_comes_from_its_config_then_the_catalog(monkeypatch
     assert provider.input_modalities("glm-seeing") == {TEXT, IMAGE}
     assert provider.input_modalities("gemini-blind") == {TEXT, AUDIO, VIDEO, PDF}
     assert provider.input_modalities("declared") == {TEXT, AUDIO}
-    assert provider.input_modalities("claude") == {TEXT}  # the CLI takes text only
+    assert provider.input_modalities("claude") == {TEXT, IMAGE}  # the CLI reads images, not audio or files
     assert provider.input_modalities("unknown") is None
 
 

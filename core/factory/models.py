@@ -170,7 +170,8 @@ class ModelProvider:
 
         Its config's ``input_modalities``, else ``vision`` over what the model
         catalog knows (core.model_catalog), else the catalog alone. The Claude
-        Code CLI takes text only, whatever the model behind it could read.
+        Code CLI takes text and images (core.claude_model sends them as
+        stream-json input), unless the config says ``vision: false``.
         """
         try:
             model_config = self.config.get_model(model_key)
@@ -181,7 +182,7 @@ class ModelProvider:
         except Exception:  # noqa: BLE001 - an unknown provider is reported where the model is built
             provider = None
         if getattr(provider, "auth", None) == "claude":
-            return TEXT_ONLY
+            return TEXT_ONLY if getattr(model_config, "vision", None) is False else TEXT_ONLY | {IMAGE}
         declared = getattr(model_config, "input_modalities", None)
         if declared:
             return frozenset(declared) | TEXT_ONLY
@@ -209,7 +210,9 @@ class ModelProvider:
         provider_config = self.config.get_provider(model_config.provider)
         if getattr(provider_config, "auth", "api_key") == "claude":
             # The Claude Code CLI holds the login; Grid never builds a keyed
-            # client for it and never sees a Claude credential.
+            # client for it and never sees a Claude credential. Whether this
+            # user may spend that login is still asked, as a key would be.
+            self.access.check_cli_login(self.config, model_config.provider)
             return self.claude_model(model_key, model_config, provider_config), model_config
         api_key = self.access.api_key(self.config, model_config.provider)
 
@@ -278,18 +281,9 @@ class ModelProvider:
         tools, MCP servers and host settings are disabled from the command line.
         """
         from core.bounded_model import BoundedModel
-        from core.claude_cli import ClaudeCodeRunner
         from core.claude_model import ClaudeCodeModel
 
-        try:
-            working_directory = self.config.get_working_directory()
-        except Exception:  # noqa: BLE001 - a config without one runs in the current directory
-            working_directory = None
-        runner = ClaudeCodeRunner(
-            binary=getattr(provider_config, "claude_binary", None),
-            working_directory=working_directory,
-            model=model_config.name,
-        )
+        runner = self.claude_runner(model_config, provider_config)
         model: Any = ClaudeCodeModel(runner, model_config.name)
         # The CLI enforces no output cap of its own, and one runaway answer
         # would hold a run; bound it the way every plan-backed model is bound.
@@ -299,6 +293,23 @@ class ModelProvider:
             model = BoundedModel(model, key=model_key, timeout=timeout, max_output_tokens=cap)
         return model
 
+    def claude_runner(self, model_config: Any, provider_config: Any) -> Any:
+        """The locked-down Claude Code runner for *model_config* (core.claude_cli)."""
+        from core.claude_cli import ClaudeCodeRunner
+
+        try:
+            working_directory = self.config.get_working_directory()
+        except Exception:  # noqa: BLE001 - a config without one runs in the current directory
+            working_directory = None
+        provider_key = model_config.provider
+        return ClaudeCodeRunner(
+            binary=getattr(provider_config, "claude_binary", None),
+            working_directory=working_directory,
+            model=model_config.name,
+            # Each run's tokens go to the user's usage, as a metered HTTP call's do.
+            on_usage=lambda model, usage: self.access.record_cli_call(self.config, provider_key, model, usage),
+        )
+
     def compact_client_and_model(
         self, key: Optional[str]
     ) -> tuple[Optional[AsyncOpenAI], Optional[str]]:
@@ -307,7 +318,20 @@ class ModelProvider:
         return client, model
 
     def model_request(self, model_key: str) -> tuple[Any, str, Optional[dict]]:
-        """(client, model, Responses API options or None) for a one-off request to *model_key*."""
+        """(client, model, Responses API options or None) for a one-off request to *model_key*.
+
+        A Claude Code model has no keyed client: its requests go through the CLI
+        (core.claude_model.ClaudeCodeChatClient), over Chat Completions.
+        """
+        model_config = self.config.get_model(model_key)
+        provider_config = self.config.get_provider(model_config.provider)
+        if getattr(provider_config, "auth", "api_key") == "claude":
+            from core.claude_model import ClaudeCodeChatClient
+
+            self.access.check_model(self.config, model_key)
+            self.access.check_cli_login(self.config, model_config.provider)
+            runner = self.claude_runner(model_config, provider_config)
+            return ClaudeCodeChatClient(runner), model_config.name, None
         client, model = self.client_for(model_key)
         cfg = self.config.get_model(model_key)
         options = {"store": False, "max_output_tokens": None} if self._uses_plan(cfg) else ({} if getattr(cfg, "use_responses_api", False) else None)

@@ -15,7 +15,7 @@ import contextvars
 import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional
 
 import httpx
 from openai import AsyncOpenAI
@@ -135,6 +135,30 @@ class ModelAccess:
         return self._signature() if self._signature is not None else ""
 
     # -- credentials ------------------------------------------------------------
+    def check_cli_login(self, config: Any, provider_key: str) -> None:
+        """Raise CredentialError unless this user may spend the machine's Claude Code login.
+
+        A Claude Code model has no key to look up, so :meth:`api_key` is never
+        asked for it; this is its credential check. Unmanaged (a local run) it
+        is the operator's own CLI; managed, the credential source decides (on
+        a server with accounts: admins only, web_chat.entitlements).
+        """
+        if self._credentials is None:
+            # Unmanaged, or only metered: the operator's own environment, and
+            # the CLI login is the operator's own.
+            return
+        provider = config.get_provider(provider_key)
+        if self.credentials.available(provider):
+            return
+        problem = getattr(self.credentials, "problem", None)
+        reason = problem(provider) if callable(problem) else None
+        raise CredentialError(
+            (reason if isinstance(reason, str) else None)
+            or f"Provider '{provider_key}' runs on this machine's Claude Code CLI login, which this "
+            "account may not use.",
+            details={"provider": provider_key},
+        )
+
     def api_key(self, config: Any, provider_key: str) -> str:
         """The key to build a client with; AgentError when the provider has none for this user.
 
@@ -209,6 +233,21 @@ class ModelAccess:
         return AsyncOpenAI(**kwargs)
 
     # -- spend ------------------------------------------------------------------
+    def record_cli_call(self, config: Any, provider_key: str, model: str, usage: Mapping[str, Any]) -> None:
+        """Book one Claude Code CLI run: the machine's subscription, nothing billed.
+
+        A CLI model has no HTTP client for MeteredTransport to read, so the
+        runner reports each run's usage here (core.claude_cli) - it then counts
+        in the user's usage, their plan's limits and a turn's tally like any
+        other call.
+        """
+        if self._on_spend is None:
+            return
+        self._spend(
+            config, provider_key,
+            MeteredCall(provider_key, model, usage, source="claude", charged=False, subscription=True),
+        )
+
     def _spend(self, config: Any, provider_key: Optional[str], call: MeteredCall) -> None:
         provider = config.get_provider(provider_key) if provider_key else None
         usage = TokenUsage.from_payload(call.usage)

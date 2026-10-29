@@ -31,10 +31,13 @@ here; an operator who needs a hard guarantee must disable them for the host.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import shutil
+import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -94,17 +97,54 @@ CREDENTIAL_ENVIRONMENT_PREFIXES: tuple[str, ...] = ("AWS_", "GOOGLE_", "AZURE_")
 
 #: Seconds a CLI process is given to exit on ``terminate`` before it is killed.
 TERMINATE_GRACE_SECONDS = 5.0
+#: How long a launch waits for a binary that is not there. Claude Code's
+#: auto-update reinstalls it in place, and for some seconds there is none.
+BINARY_WAIT_SECONDS = 20.0
 
 #: The internal tool Claude Code uses to satisfy ``--json-schema``: it emits an
 #: ``assistant`` ``tool_use`` named ``StructuredOutput``. It is the only native
 #: tool the model adapter accepts, and only on a turn that asked for a schema.
 CLI_STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
 
+#: ``--disallowedTools`` deny rule that takes every MCP tool out of the CLI's
+#: context. ``--tools ""`` covers built-in tools only - the CLI reference says
+#: so and names this flag for MCP - and a bare ``"*"`` would also remove the
+#: internal ``StructuredOutput`` tool that ``--json-schema`` relies on, so the
+#: deny is scoped to MCP. See docs/claude-subscription.md.
+DENIED_TOOL_FLAGS: tuple[str, ...] = ("--disallowedTools", "mcp__*")
+
+#: The words a ``tool_result`` uses when the CLI held no such tool: it answered
+#: instead of running anything, so a call answered this way never executed.
+NO_SUCH_TOOL = "no such tool"
+
 #: Flags that keep host ``user``/``project``/``local`` settings - hooks,
-#: plugins, ``env`` overrides and an ``apiKeyHelper`` - from running. Passed to
-#: generation *and* the auth-status probe, so no host helper can pay or run for
-#: either. The empty value means "load none"; see docs/claude-subscription.md.
+#: plugins, ``env`` overrides and an ``apiKeyHelper`` - from running during
+#: generation. The empty value means "load none"; see docs/claude-subscription.md.
+#: ``claude auth status`` rejects them (2.1.310 takes only ``--json``/``--text``).
 SETTING_SOURCES_FLAGS: tuple[str, ...] = ("--setting-sources", "")
+
+#: How the CLI shows the model's thinking. Over a subscription the thinking
+#: text is withheld (empty ``thinking_delta``s) unless summaries are asked for;
+#: ``summarized`` streams them, as a ChatGPT plan streams reasoning summaries.
+#: Not in ``--help``: it is the flag the Agent SDK's ``thinkingDisplay`` sets.
+THINKING_DISPLAY = "summarized"
+
+#: The levels ``--effort`` takes.
+CLI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def cli_effort(value: Optional[str]) -> Optional[str]:
+    """*value* (an OpenAI reasoning effort) as an ``--effort`` level, or None.
+
+    ``minimal`` and ``none`` have no CLI counterpart and become ``low``; an
+    unknown value is dropped rather than rejected by the CLI.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    if value in ("minimal", "none"):
+        return "low"
+    return value if value in CLI_EFFORTS else None
 
 
 class ClaudeCliError(AgentError):
@@ -228,16 +268,140 @@ def text_deltas(event: ClaudeEvent) -> List[str]:
     return []
 
 
+def chat_usage(usage: Mapping[str, Any]) -> Dict[str, Any]:
+    """A ``result`` event's ``usage`` in Chat Completions terms, for Grid's metering.
+
+    The CLI counts cache reads and writes apart from ``input_tokens``; the
+    Chat Completions ``prompt_tokens`` holds them all, with the cached share
+    in its details (core.pricing.TokenUsage).
+    """
+
+    def number(name: str) -> int:
+        value = usage.get(name)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+    details = usage.get("output_tokens_details")
+    thinking = details.get("thinking_tokens") if isinstance(details, Mapping) else 0
+    cached, written = number("cache_read_input_tokens"), number("cache_creation_input_tokens")
+    return {
+        "prompt_tokens": number("input_tokens") + cached + written,
+        "completion_tokens": number("output_tokens"),
+        "prompt_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written},
+        "completion_tokens_details": {"reasoning_tokens": thinking if isinstance(thinking, int) else 0},
+    }
+
+
+def thinking_deltas(event: ClaudeEvent) -> List[str]:
+    """Thinking-summary fragments carried by a partial ``thinking_delta``.
+
+    Only partial messages carry them (``--include-partial-messages``); the
+    completed ``thinking`` block repeats the same text and is not read.
+    """
+    if event.kind != "stream_event":
+        return []
+    inner = event.data.get("event") or {}
+    if inner.get("type") != "content_block_delta":
+        return []
+    delta = inner.get("delta") or {}
+    text = delta.get("thinking")
+    return [text] if delta.get("type") == "thinking_delta" and isinstance(text, str) and text else []
+
+
+def _block_index(inner: Mapping[str, Any]) -> Optional[int]:
+    index = inner.get("index")
+    return index if isinstance(index, int) and not isinstance(index, bool) else None
+
+
+def tool_input_start(event: ClaudeEvent) -> Optional[tuple[int, str]]:
+    """``(index, name)`` of a ``tool_use`` block a partial message opens, or None.
+
+    Only partial messages (``--include-partial-messages``) carry it; the index
+    names the block within its assistant message, so it restarts per message.
+    """
+    if event.kind != "stream_event":
+        return None
+    inner = event.data.get("event") or {}
+    if inner.get("type") != "content_block_start":
+        return None
+    block = inner.get("content_block") or {}
+    index = _block_index(inner)
+    if block.get("type") != "tool_use" or index is None:
+        return None
+    return index, str(block.get("name") or "")
+
+
+def tool_input_delta(event: ClaudeEvent) -> Optional[tuple[int, str]]:
+    """``(index, partial_json)`` of a partial ``input_json_delta``, or None."""
+    if event.kind != "stream_event":
+        return None
+    inner = event.data.get("event") or {}
+    if inner.get("type") != "content_block_delta":
+        return None
+    delta = inner.get("delta") or {}
+    text = delta.get("partial_json")
+    index = _block_index(inner)
+    if delta.get("type") != "input_json_delta" or not isinstance(text, str) or index is None:
+        return None
+    return index, text
+
+
+def block_stop(event: ClaudeEvent) -> Optional[int]:
+    """The index of the content block a partial ``content_block_stop`` closes, or None."""
+    if event.kind != "stream_event":
+        return None
+    inner = event.data.get("event") or {}
+    if inner.get("type") != "content_block_stop":
+        return None
+    return _block_index(inner)
+
+
 def tool_uses(event: ClaudeEvent) -> List[Dict[str, Any]]:
     """Tool calls a complete ``assistant`` message announces.
 
     This bridge never surfaces them: with the CLI's own tools disabled a tool
-    call here means something bypassed the command line, and it is refused
-    rather than run a second time by Grid.
+    call here means something bypassed the command line. An announcement alone
+    runs nothing, though - only a matching ``tool_result`` (:func:`tool_results`)
+    shows that the CLI actually ran it.
     """
     if event.kind != "assistant":
         return []
     return [block for block in _content_blocks(event) if block.get("type") == "tool_use"]
+
+
+def init_tools(event: ClaudeEvent) -> Optional[List[str]]:
+    """The tools the CLI says it holds, from its ``system``/``init`` event.
+
+    None means "not announced" - an event other than ``init``, or one without a
+    ``tools`` array - not an empty set of tools. The CLI lists the internal
+    ``StructuredOutput`` tool here when it was asked for ``--json-schema``.
+    """
+    if event.kind != "system" or event.subtype != "init":
+        return None
+    tools = event.data.get("tools")
+    if not isinstance(tools, list):
+        return None
+    return [str(name) for name in tools]
+
+
+def tool_results(event: ClaudeEvent) -> List[Dict[str, Any]]:
+    """``tool_result`` blocks a ``user`` event carries.
+
+    Each answers one ``tool_use`` by ``tool_use_id`` - the block itself names no
+    tool - which is what makes it evidence that a call actually ran.
+    """
+    if event.kind != "user":
+        return []
+    return [block for block in _content_blocks(event) if block.get("type") == "tool_result"]
+
+
+def ran_nothing(result: Mapping[str, Any]) -> bool:
+    """Whether *result* is the CLI saying it held no such tool (nothing ran)."""
+    content = result.get("content")
+    if isinstance(content, list):
+        text = " ".join(str(part.get("text", "")) for part in content if isinstance(part, Mapping))
+    else:
+        text = str(content or "")
+    return NO_SUCH_TOOL in text.lower()
 
 
 def final_result(event: ClaudeEvent) -> Optional[Dict[str, Any]]:
@@ -290,9 +454,12 @@ class ClaudeCodeRunner:
     protocol without the binary present.
 
     Every launch is locked down: the CLI's built-in tools are disabled
-    (``--tools ""``), MCP servers are ignored (``--strict-mcp-config``), and
-    the host's user, project and local settings - hooks, plugins, ``env``
-    overrides and key helpers - are not read (``--setting-sources ""``).
+    (``--tools ""``), MCP tools are denied outright
+    (``--disallowedTools "mcp__*"``) and MCP servers are ignored
+    (``--strict-mcp-config``), the host's user, project and local settings -
+    hooks, plugins, ``env`` overrides and key helpers - are not read
+    (``--setting-sources ""``), and skills and slash commands are off
+    (``--disable-slash-commands``).
     """
 
     def __init__(
@@ -303,23 +470,32 @@ class ClaudeCodeRunner:
         environ: Optional[Mapping[str, str]] = None,
         model: Optional[str] = None,
         spawn: Optional[Spawn] = None,
+        on_usage: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> None:
         self.binary = binary or os.environ.get("GRID_CLAUDE_BINARY") or DEFAULT_BINARY
         self.working_directory = working_directory
         self._environ = environ
         self.model = model
         self._spawn = spawn or default_spawn
+        #: Called with (model, Chat Completions usage) when a run reports its
+        #: tokens: there is no HTTP client to meter, so this is the metering.
+        self._on_usage = on_usage
 
     def command(
         self,
         *,
         json_schema: Optional[Mapping[str, Any]] = None,
         partials: bool = False,
+        system_prompt_file: Optional[str] = None,
+        effort: Optional[str] = None,
+        stream_input: bool = False,
     ) -> List[str]:
         """The argv that answers one prompt, reading it from stdin.
 
-        The prompt is never an argument; only the flags that lock the CLI down
-        and the ``--json-schema`` (when a turn needs one) are.
+        The prompt is never an argument; only the flags that lock the CLI down,
+        the ``--json-schema`` (when a turn needs one), the file holding the
+        system prompt and the effort are. With *stream_input* stdin carries one
+        ``stream-json`` user message (text and images) instead of plain text.
         """
         argv: List[str] = [
             self.binary,
@@ -331,12 +507,27 @@ class ClaudeCodeRunner:
             # No built-in tools: this bridge is Grid's model, not a second agent.
             "--tools",
             "",
+            # No MCP tools either: ``--tools`` does not touch them, and a rule
+            # scoped to MCP leaves the internal StructuredOutput tool alone.
+            *DENIED_TOOL_FLAGS,
             # No MCP servers, whatever the host has configured.
             "--strict-mcp-config",
             # No user, project or local settings: no hooks, plugins, env
             # overrides or apiKeyHelper from the host can run or pay.
             *SETTING_SOURCES_FLAGS,
+            # No skills or slash commands: their listing is not Grid's context.
+            "--disable-slash-commands",
+            "--thinking-display",
+            THINKING_DISPLAY,
         ]
+        if system_prompt_file:
+            # Replaces Claude Code's own system prompt (its identity, memory
+            # and skill instructions) with Grid's.
+            argv += ["--system-prompt-file", system_prompt_file]
+        if effort:
+            argv += ["--effort", effort]
+        if stream_input:
+            argv += ["--input-format", "stream-json"]
         if partials:
             argv.append("--include-partial-messages")
         if json_schema is not None:
@@ -354,16 +545,13 @@ class ClaudeCodeRunner:
     async def auth_status(self) -> Optional[str]:
         """The CLI's own ``authMethod``, or None when the CLI cannot be run.
 
-        ``claude auth status`` prints JSON and exits 1 when signed out; a missing
-        binary is reported as :class:`ClaudeCliError` so it is never mistaken for
-        a signed-out user.
-
-        The same host-settings lockdown generation gets is passed here too, so a
-        host ``apiKeyHelper`` or settings ``env`` cannot run (or pay) merely to
-        answer the status check.
+        ``claude auth status`` prints JSON and exits 1 when signed out. A missing
+        binary, or an exit 1 with no JSON (the CLI refusing the command, such as
+        an unknown flag), is reported as :class:`ClaudeCliError` with the CLI's
+        stderr, so it is never mistaken for a signed-out user.
         """
         process = await self._spawn(
-            [self.binary, "auth", "status", *SETTING_SOURCES_FLAGS],
+            [self.binary, "auth", "status"],
             cwd=self.working_directory,
             env=self._env(),
         )
@@ -374,7 +562,8 @@ class ClaudeCodeRunner:
         except ValueError:
             payload = None
         method = auth_method(payload) if payload is not None else None
-        if method is None and process.returncode not in (0, 1, None):
+        failed = process.returncode not in (0, 1, None) or (process.returncode == 1 and payload is None)
+        if method is None and failed:
             raise ClaudeCliError(
                 f"Could not run the Claude Code CLI ('{self.binary} auth status'): {stderr.strip()[:400]}",
                 details={"binary": self.binary, "returncode": process.returncode},
@@ -396,22 +585,57 @@ class ClaudeCodeRunner:
         *,
         json_schema: Optional[Mapping[str, Any]] = None,
         partials: bool = False,
+        system_prompt: Optional[str] = None,
+        effort: Optional[str] = None,
+        images: Sequence[Mapping[str, Any]] = (),
     ) -> AsyncIterator[ClaudeEvent]:
         """Run one prompt, yielding each parsed ``stream-json`` event as it arrives.
 
         The subscription login is checked first, then the CLI is launched with
         the credential-free environment and the prompt on stdin, so a large
-        conversation is not limited by the command line. If the consumer stops
-        early, the process is terminated rather than waited on forever.
+        conversation is not limited by the command line. *system_prompt*, when
+        given, replaces the CLI's own; it goes through a private temporary file
+        (removed after the run) for the same reason. *images* (Messages API
+        ``image`` blocks) go after the prompt in one ``stream-json`` user
+        message. If the consumer stops early, the process is terminated rather
+        than waited on forever.
         """
-        if not self._available():
+        if not await self._wait_available():
             raise ClaudeCliError(
                 f"Claude Code CLI '{self.binary}' was not found on PATH. Install it and sign in "
                 "with 'claude auth login' to use a Claude subscription.",
                 details={"binary": self.binary},
             )
         await self.require_subscription()
-        argv = self.command(json_schema=json_schema, partials=partials)
+        system_prompt_file = _write_private(system_prompt) if system_prompt is not None else None
+        try:
+            argv = self.command(
+                json_schema=json_schema,
+                partials=partials,
+                system_prompt_file=system_prompt_file,
+                effort=effort,
+                stream_input=bool(images),
+            )
+            if images:
+                message = {
+                    "type": "user",
+                    "message": {"role": "user", "content": [{"type": "text", "text": prompt}, *images]},
+                }
+                prompt = json.dumps(message, ensure_ascii=False) + "\n"
+            # aclosing: a consumer that stops early must reach _run's cleanup
+            # (terminate and reap the child) now, not whenever it is collected.
+            async with contextlib.aclosing(self._run(argv, prompt)) as events:
+                async for event in events:
+                    yield event
+        finally:
+            if system_prompt_file is not None:
+                try:
+                    os.unlink(system_prompt_file)
+                except FileNotFoundError:
+                    pass
+
+    async def _run(self, argv: List[str], prompt: str) -> AsyncIterator[ClaudeEvent]:
+        """Launch *argv*, write *prompt* on its stdin and yield its events."""
         process = await self._spawn(argv, cwd=self.working_directory, env=self._env())
         # Start draining stderr and arm the cleanup *before* touching stdin: a
         # write/drain that fails or is cancelled must still terminate and reap
@@ -431,6 +655,8 @@ class ClaudeCodeRunner:
                         # How much of the plan's windows is used: for whoever
                         # plans around the limits (core.quota_telemetry).
                         report_claude(event.get("rate_limit_info"))
+                    elif event.get("type") == "result" and isinstance(event.get("usage"), Mapping):
+                        self._report_usage(event)
                     yield _event(event)
             # A normal stdout EOF means the turn is over: wait for the CLI's
             # real exit code instead of racing it with a terminate. Terminating
@@ -449,11 +675,42 @@ class ClaudeCodeRunner:
                 details={"binary": self.binary, "returncode": returncode},
             )
 
+    def _report_usage(self, result: Mapping[str, Any]) -> None:
+        if self._on_usage is None:
+            return
+        models = result.get("modelUsage")
+        model = self.model or (next(iter(models), "") if isinstance(models, Mapping) else "") or "claude"
+        try:
+            self._on_usage(str(model), chat_usage(result["usage"]))
+        except Exception:  # noqa: BLE001 - accounting must never break a call
+            logger.exception("Recording the usage of a Claude Code run failed")
+
+    async def _wait_available(self, timeout: float = BINARY_WAIT_SECONDS) -> bool:
+        """Whether the binary is there, waiting up to *timeout* for one being reinstalled."""
+        deadline = time.monotonic() + timeout
+        while not self._available():
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.5)
+        return True
+
     def _available(self) -> bool:
         binary = self.binary
         if os.sep in binary or (os.altsep and os.altsep in binary):
             return os.path.exists(binary)
         return shutil.which(binary) is not None
+
+
+def _write_private(text: str) -> str:
+    """*text* in a new file only this user can read; the caller removes it."""
+    descriptor, path = tempfile.mkstemp(prefix="grid-claude-", suffix=".md")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    except BaseException:
+        os.unlink(path)
+        raise
+    return path
 
 
 async def _read_stderr(process: Any, sink: List[str]) -> None:

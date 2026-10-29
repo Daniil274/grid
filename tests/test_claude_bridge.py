@@ -7,6 +7,7 @@ anywhere but an explicit local single-user server.
 """
 
 import asyncio
+import os
 import sys
 import time
 from types import SimpleNamespace
@@ -16,18 +17,20 @@ from pydantic import BaseModel
 
 from agents import AgentOutputSchema, ModelSettings, function_tool
 from agents.models.interface import ModelTracing
+from openai.types.shared import Reasoning
 
 from core.claude_cli import (
     ClaudeCliError,
     ClaudeCodeRunner,
     ClaudeEvent,
     auth_method,
+    cli_effort,
     claude_environment,
     is_subscription,
     parse_stream_line,
     require_subscription,
 )
-from core.claude_model import ClaudeCodeModel
+from core.claude_model import BRIDGE_PREAMBLE, ClaudeCodeModel
 from core.credentials import CredentialError
 from core.factory.models import ModelProvider
 from schemas.schemas import GridConfig, ProviderConfig
@@ -186,6 +189,9 @@ def test_the_command_disables_tools_mcp_and_host_settings():
     assert argv[0] == "claude" and "-p" in argv
     assert argv[argv.index("--output-format") + 1] == "stream-json"
     assert argv[argv.index("--tools") + 1] == ""
+    # ``--tools`` leaves MCP alone; the deny rule removes those tools from the
+    # context entirely, and is scoped so the internal StructuredOutput survives.
+    assert argv[argv.index("--disallowedTools") + 1] == "mcp__*"
     assert "--strict-mcp-config" in argv
     assert argv[argv.index("--setting-sources") + 1] == ""
     assert "--include-partial-messages" not in argv  # only plain streaming asks
@@ -193,14 +199,32 @@ def test_the_command_disables_tools_mcp_and_host_settings():
     assert argv[-1] != ""
 
 
-def test_auth_status_disables_host_settings_like_generation():
+def test_auth_status_passes_no_flags_the_subcommand_rejects():
     spawner = _Spawner()
     spawner.auth_processes.append(_FakeProcess(stdout_data=b'{"authMethod": "claude.ai"}'))
     runner = _runner(spawner)
     assert asyncio.run(runner.auth_status()) == "claude.ai"
     argv = spawner.auth_calls[0]["argv"]
-    assert argv[1:3] == ["auth", "status"]
-    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert argv[1:] == ["auth", "status"]
+
+
+def test_a_refused_auth_status_reports_the_cli_stderr_not_a_logout():
+    spawner = _Spawner()
+    spawner.auth_processes.append(
+        _FakeProcess(stderr=b"error: unknown option '--setting-sources'\n", returncode=1)
+    )
+    runner = _runner(spawner)
+    with pytest.raises(ClaudeCliError, match="unknown option"):
+        asyncio.run(runner.auth_status())
+
+
+def test_a_signed_out_cli_is_reported_as_no_login():
+    spawner = _Spawner()
+    spawner.auth_processes.append(
+        _FakeProcess(stdout_data=b'{"loggedIn": false, "authMethod": "none"}', returncode=1)
+    )
+    runner = _runner(spawner)
+    assert asyncio.run(runner.auth_status()) == "none"
 
 
 def test_a_json_schema_and_partials_reach_the_command():
@@ -288,10 +312,13 @@ class _FakeRunner:
     def __init__(self, events):
         self.events = events
         self.calls = []
+        self.consumed = 0
 
-    async def stream(self, prompt, *, json_schema=None, partials=False):
-        self.calls.append({"prompt": prompt, "json_schema": json_schema, "partials": partials})
+    async def stream(self, prompt, *, json_schema=None, partials=False, system_prompt=None, effort=None, images=()):
+        self.calls.append({"prompt": prompt, "json_schema": json_schema, "partials": partials,
+                           "system": system_prompt, "effort": effort, "images": list(images)})
         for event in self.events:
+            self.consumed += 1
             yield event
 
 
@@ -346,15 +373,88 @@ def test_text_streams_as_deltas_without_duplicating_the_completed_block():
     assert _text(response) == "Hello"  # not "HelloHello"
 
 
-def test_an_unexpected_native_tool_call_is_refused():
+def test_a_native_tool_call_without_a_tool_result_is_only_a_proposal():
+    # An ``assistant`` tool_use is a suggestion; unless the CLI answers it with a
+    # tool_result for that id, nothing ran and the turn must not be refused.
+    events = [
+        ClaudeEvent("assistant", "", {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}},
+            {"type": "text", "text": "Hello"},
+        ]}}),
+        ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False,
+                                          "result": "Hello"}),
+    ]
+    model, _ = _model(events)
+    assert _text(asyncio.run(_get(model))) == "Hello"
+
+
+def test_a_native_tool_call_the_cli_answered_is_refused():
+    # A tool_result carrying the call's id is proof the CLI ran it.
     events = [
         ClaudeEvent("assistant", "", {"type": "assistant", "message": {"content": [
             {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}},
         ]}}),
+        ClaudeEvent("user", "", {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "is_error": False, "content": "a.txt"},
+        ]}}),
         ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": ""}),
     ]
     model, _ = _model(events)
-    with pytest.raises(ClaudeCliError, match="ran a tool"):
+    with pytest.raises(ClaudeCliError, match=r"ran a tool it was not given \(Bash\)"):
+        asyncio.run(_get(model))
+
+
+def test_a_tool_result_for_another_call_does_not_convict_this_one():
+    events = [
+        ClaudeEvent("assistant", "", {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}},
+        ]}}),
+        ClaudeEvent("user", "", {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "other", "is_error": False, "content": "a.txt"},
+        ]}}),
+        ClaudeEvent("assistant", "", {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Hello"},
+        ]}}),
+        ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False,
+                                          "result": "Hello"}),
+    ]
+    model, _ = _model(events)
+    assert _text(asyncio.run(_get(model))) == "Hello"
+
+
+def test_init_with_tools_other_than_the_schema_tool_is_refused_before_generation():
+    # The CLI says which tools it holds at ``init``; anything but the internal
+    # StructuredOutput tool means the lockdown did not take, so the turn fails
+    # on the first event instead of generating.
+    events = [
+        ClaudeEvent("system", "init", {"type": "system", "subtype": "init", "tools": ["Bash", "mcp__x__y"]}),
+        ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": ""}),
+    ]
+    model, runner = _model(events)
+    with pytest.raises(ClaudeCliError, match=r"holds tools this bridge did not give it \(Bash, mcp__x__y\)"):
+        asyncio.run(_get(model))
+    assert runner.consumed == 1  # stopped at init, before the rest of the run
+
+
+def test_init_announcing_only_the_schema_tool_is_accepted_on_a_schema_turn():
+    events = [
+        ClaudeEvent("system", "init", {"type": "system", "subtype": "init", "tools": ["StructuredOutput"]}),
+        _structured_output_tool_event(),
+        ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False,
+                                          "result": "", "structured_output": {"answer": "42"}}),
+    ]
+    model, _ = _model(events)
+    response = asyncio.run(_get(model, output_schema=AgentOutputSchema(_Out)))
+    assert _text(response) == '{"answer": "42"}'
+
+
+def test_init_announcing_the_schema_tool_on_a_plain_turn_is_refused():
+    events = [
+        ClaudeEvent("system", "init", {"type": "system", "subtype": "init", "tools": ["StructuredOutput"]}),
+        ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": ""}),
+    ]
+    model, _ = _model(events)
+    with pytest.raises(ClaudeCliError, match="holds tools this bridge did not give it"):
         asyncio.run(_get(model))
 
 
@@ -393,16 +493,96 @@ def test_the_cli_structured_output_tool_input_is_used_when_the_result_omits_it()
     assert _text(response) == '{"answer": "42"}'
 
 
-def test_the_cli_structured_output_tool_is_still_refused_in_plain_mode():
+def test_the_cli_structured_output_tool_result_is_refused_in_plain_mode():
     events = [
         _structured_output_tool_event(),
+        ClaudeEvent("user", "", {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "s1", "is_error": False,
+             "content": "Structured output provided successfully"},
+        ]}}),
         ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": ""}),
     ]
     model, runner = _model(events)
-    with pytest.raises(ClaudeCliError, match="ran a tool"):
+    with pytest.raises(ClaudeCliError, match=r"ran a tool it was not given \(StructuredOutput\)"):
         asyncio.run(_get(model))
     # Plain mode never asked for a schema, so nothing is exempted.
     assert runner.calls[0]["json_schema"] is None
+
+
+def test_grid_instructions_replace_the_cli_system_prompt():
+    events = [ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": ""})]
+    model, runner = _model(events)
+    asyncio.run(_get(model, input=({"role": "user", "content": "hello there"},)))
+    call = runner.calls[0]
+    assert call["system"].startswith(BRIDGE_PREAMBLE)
+    assert "You are a test." in call["system"]
+    # The conversation is the prompt; the instructions are not repeated in it.
+    assert "hello there" in call["prompt"] and "You are a test." not in call["prompt"]
+
+
+def test_thinking_summaries_stream_as_reasoning_before_the_answer():
+    def delta(kind, **fields):
+        return ClaudeEvent("stream_event", "", {"event": {"type": "content_block_delta",
+                                                          "delta": {"type": kind, **fields}}})
+    events = [
+        delta("thinking_delta", thinking="", estimated_tokens=50),  # withheld text: nothing to show
+        delta("thinking_delta", thinking="Checking the sums."),
+        delta("text_delta", text="42"),
+        ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": "42"}),
+    ]
+    model, _ = _model(events)
+    kinds = [getattr(e, "type", "") for e in asyncio.run(_stream(model))]
+    reasoning = [e.delta for e in asyncio.run(_stream(model)) if getattr(e, "type", "") == "response.reasoning_summary_text.delta"]
+    assert reasoning == ["Checking the sums."]
+    assert kinds.index("response.reasoning_summary_text.delta") < kinds.index("response.output_text.delta")
+    assert _text(asyncio.run(_get(model))) == "42"
+
+
+def test_the_reasoning_effort_becomes_the_cli_effort():
+    events = [ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": ""})]
+    model, runner = _model(events)
+    asyncio.run(model.get_response(
+        "You are a test.", [{"role": "user", "content": "hi"}], ModelSettings(reasoning=Reasoning(effort="minimal")),
+        [], None, [], ModelTracing.DISABLED,
+    ))
+    assert runner.calls[0]["effort"] == "low"
+    assert [cli_effort(v) for v in ("high", "xhigh", "medium", "bogus", None)] == ["high", "xhigh", "medium", None, None]
+
+
+def test_a_cli_error_result_is_reported_in_the_cli_words():
+    events = [ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": True,
+                                                "result": "Claude AI usage limit reached|1792882200"})]
+    model, _ = _model(events)
+    with pytest.raises(ClaudeCliError, match="usage limit reached"):
+        asyncio.run(_get(model, tools=[grid_echo]))
+
+
+def test_the_command_takes_the_system_prompt_file_and_effort():
+    argv = ClaudeCodeRunner(binary="claude").command(system_prompt_file="/tmp/s.md", effort="high")
+    assert argv[argv.index("--system-prompt-file") + 1] == "/tmp/s.md"
+    assert argv[argv.index("--effort") + 1] == "high"
+    assert "--disable-slash-commands" in argv
+    assert argv[argv.index("--thinking-display") + 1] == "summarized"
+
+
+def test_the_system_prompt_file_is_private_and_removed_after_the_run():
+    seen = {}
+    spawner = _Spawner()
+
+    async def spawn(argv, *, cwd, env):
+        if "--system-prompt-file" in argv:
+            path = argv[argv.index("--system-prompt-file") + 1]
+            seen["path"] = path
+            seen["mode"] = os.stat(path).st_mode & 0o777
+            with open(path, encoding="utf-8") as handle:  # noqa: ASYNC230 - a test's tiny file
+                seen["text"] = handle.read()
+        return await spawner(argv, cwd=cwd, env=env)
+
+    spawner.generation_processes.append(_FakeProcess(stdout_lines=[b'{"type":"result","subtype":"success"}']))
+    runner = ClaudeCodeRunner(binary=sys.executable, spawn=spawn)
+    asyncio.run(_collect(runner.stream("hi", system_prompt="Секрет оператора")))
+    assert seen["text"] == "Секрет оператора" and seen["mode"] == 0o600
+    assert not os.path.exists(seen["path"])
 
 
 def test_usage_is_taken_from_the_result():
@@ -432,6 +612,34 @@ def _stub_handoff():
     )
 
 
+def test_a_grid_tool_called_by_name_that_the_cli_refused_does_not_end_the_turn():
+    # What Sonnet does through Claude Code 2.1.310: it calls the Grid tool as a
+    # native tool_use first, the CLI answers "No such tool available" (nothing
+    # runs), and then it answers with the envelope.
+    events = [
+        ClaudeEvent("system", "init", {"type": "system", "subtype": "init", "tools": ["StructuredOutput"]}),
+        ClaudeEvent("assistant", "", {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "grid_echo", "input": {"x": 1}},
+        ]}}),
+        ClaudeEvent("user", "", {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "is_error": True,
+             "content": "<tool_use_error>Error: No such tool available: grid_echo</tool_use_error>"},
+        ]}}),
+        ClaudeEvent("assistant", "", {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "s1", "name": "StructuredOutput", "input": {
+                "message": "", "tool_calls": [{"name": "grid_echo", "arguments": {"x": 1}}]}},
+        ]}}),
+        ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False,
+                                          "result": "",
+                                          "structured_output": {"message": "", "tool_calls": [
+                                              {"name": "grid_echo", "arguments": {"x": 1}},
+                                          ]}}),
+    ]
+    model, _ = _model(events)
+    response = asyncio.run(_get(model, tools=[grid_echo]))
+    assert [call.name for call in _calls(response)] == ["grid_echo"]
+
+
 def test_the_tool_schema_is_visible_to_the_cli_and_the_envelope_offers_it():
     events = [
         ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False,
@@ -444,13 +652,13 @@ def test_the_tool_schema_is_visible_to_the_cli_and_the_envelope_offers_it():
     response = asyncio.run(_get(model, tools=[grid_echo], handoffs=[_stub_handoff()]))
 
     call = runner.calls[0]
-    assert call["partials"] is False
+    assert call["partials"] is True  # the thinking summaries stream on tool turns too
     assert call["json_schema"]["properties"]["tool_calls"]["items"]["properties"]["name"]["enum"] == [
         "grid_echo",
         "hand_off_to_expert",
     ]
-    # The prompt carries each tool's name and parameter schema for the model.
-    assert "grid_echo" in call["prompt"] and '"x"' in call["prompt"]
+    # The system prompt carries each tool's name and parameter schema for the model.
+    assert "grid_echo" in call["system"] and '"x"' in call["system"]
 
     calls = _calls(response)
     assert [(c.name, c.arguments) for c in calls] == [("grid_echo", '{"x": 1}')]
@@ -532,15 +740,55 @@ def test_prior_tool_calls_and_results_survive_in_the_prompt():
     assert "what is 2+2?" in prompt and "thanks" in prompt
 
 
-def test_an_image_input_is_refused_rather_than_dropped():
+def test_images_go_to_the_cli_as_image_blocks_marked_in_the_prompt():
+    events = [ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": "ok"})]
+    model, runner = _model(events)
+    history = [
+        {"role": "user", "content": [
+            {"type": "input_text", "text": "what is this?"},
+            {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=", "detail": "auto"},
+        ]},
+        {"type": "function_call", "name": "screenshot", "call_id": "c1", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": [
+            {"type": "image_url", "image_url": {"url": "https://example.test/screen.jpg"}},
+        ]},
+    ]
+    asyncio.run(_get(model, input=history))
+    call = runner.calls[0]
+    assert "what is this?\n[image 1]" in call["prompt"] and "[image 2]" in call["prompt"]
+    assert call["images"] == [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+        {"type": "image", "source": {"type": "url", "url": "https://example.test/screen.jpg"}},
+    ]
+
+
+def test_an_image_the_cli_cannot_take_is_refused_rather_than_dropped():
     events = [ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": "ok"})]
     model, _ = _model(events)
-    history = [{"role": "user", "content": [
-        {"type": "input_text", "text": "what is this?"},
-        {"type": "input_image", "image_url": "https://example.test/cat.png"},
-    ]}]
-    with pytest.raises(ClaudeCliError, match="cannot send input_image"):
-        asyncio.run(_get(model, input=history))
+    for part, reason in (
+        ({"type": "input_image", "image_url": "data:image/tiff;base64,AAAA"}, "image/tiff"),
+        ({"type": "input_image", "file_id": "file-1"}, "file_id"),
+        ({"type": "input_file", "file_data": "x"}, "cannot send input_file"),
+    ):
+        with pytest.raises(ClaudeCliError, match=reason):
+            asyncio.run(_get(model, input=[{"role": "user", "content": [part]}]))
+
+
+def test_images_make_the_prompt_one_stream_json_user_message():
+    import json
+
+    spawner = _Spawner()
+    process = _FakeProcess(stdout_lines=[b'{"type":"result","subtype":"success"}'])
+    spawner.generation_processes.append(process)
+    runner = _runner(spawner)
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+    asyncio.run(_collect(runner.stream("look [image 1]", images=[image])))
+    argv = spawner.generation_calls[0]["argv"]
+    assert argv[argv.index("--input-format") + 1] == "stream-json"
+    message = json.loads(process.stdin.data.decode("utf-8"))
+    assert message == {"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": "look [image 1]"}, image]}}
+    assert "--input-format" not in runner.command()  # a text-only turn stays plain stdin
 
 
 def test_a_hosted_tool_is_refused_rather_than_dropped():
@@ -588,6 +836,48 @@ def test_the_factory_bounds_the_cli_model_like_other_plan_models():
     assert isinstance(model.inner, ClaudeCodeModel)
 
 
+def test_a_summary_request_on_a_cli_model_runs_through_the_cli():
+    from core.claude_model import ClaudeCodeChatClient
+
+    provider = SimpleNamespace(auth="claude", claude_binary=None)
+    model_config = SimpleNamespace(name="sonnet", provider="claude-code", response_timeout=None, max_tokens=None)
+    config = SimpleNamespace(
+        get_model=lambda key: model_config,
+        get_provider=lambda key: provider,
+        get_working_directory=lambda: "/tmp/ws",
+    )
+    client, model, options = ModelProvider(config, None, None).model_request("claude-sonnet")
+    assert isinstance(client, ClaudeCodeChatClient) and model == "sonnet" and options is None
+    assert client._runner.working_directory == "/tmp/ws"
+
+
+def test_the_cli_chat_client_answers_like_chat_completions():
+    from core.claude_model import ClaudeCodeChatClient
+
+    runner = _FakeRunner([
+        ClaudeEvent("assistant", "", {"type": "assistant", "message": {"content": [{"type": "text", "text": "Summary."}]}}),
+        ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False, "result": "Summary."}),
+    ])
+    response = asyncio.run(ClaudeCodeChatClient(runner).chat.completions.create(
+        model="sonnet", max_tokens=10, temperature=0.0,
+        messages=[{"role": "system", "content": "Summarize."}, {"role": "user", "content": "a long talk"},
+                  {"role": "user", "content": "Write the summary."}],
+    ))
+    assert response.choices[0].message.content == "Summary."
+    call = runner.calls[0]
+    assert call["system"].startswith(BRIDGE_PREAMBLE) and call["system"].endswith("Summarize.")
+    assert "a long talk" in call["prompt"] and "Summarize." not in call["prompt"]
+
+
+def test_the_cli_chat_client_reports_a_cli_error():
+    from core.claude_model import ClaudeCodeChatClient
+
+    runner = _FakeRunner([ClaudeEvent("result", "success", {"type": "result", "subtype": "success",
+                                                            "is_error": True, "result": "Prompt is too long"})])
+    with pytest.raises(ClaudeCliError, match="Prompt is too long"):
+        asyncio.run(ClaudeCodeChatClient(runner).chat.completions.create(model="sonnet", messages=[{"role": "user", "content": "x"}]))
+
+
 # -- the local single-user boundary ------------------------------------------
 
 def _claude_provider():
@@ -599,9 +889,35 @@ def test_a_remote_user_may_not_spend_the_host_cli_login():
     provider = _claude_provider()
     remote = UserCredentials("u1", lambda: plans.resolve(admin=True), plans, None, environ={})
     assert remote.available(provider) is False
-    assert "local, single-user server" in remote.problem(provider)
-    with pytest.raises(CredentialError, match="local, single-user server"):
+    assert "only to admins and on the local, single-user server" in remote.problem(provider)
+    with pytest.raises(CredentialError, match="only to admins and on the local, single-user"):
         asyncio.run(remote.credential(provider))
+
+
+def test_the_factory_asks_whether_this_user_may_spend_the_cli_login():
+    # sdk_model used to build the CLI model before any credential check, so on
+    # a server with accounts every user could spend the operator's login.
+    from core.model_access import ModelAccess
+
+    plans = Plans(lambda: GridConfig(user_limits={"turns_per_day": 1}))
+    provider = _claude_provider()
+    config = SimpleNamespace(get_provider=lambda key: provider)
+    remote = UserCredentials("u1", lambda: plans.resolve(admin=False), plans, None, environ={})
+    with pytest.raises(CredentialError, match="only to admins"):
+        ModelAccess(remote).check_cli_login(config, "claude-code")
+    admin = UserCredentials("u2", lambda: plans.resolve(admin=True), plans, None, environ={}, local_cli_login=True)
+    ModelAccess(admin).check_cli_login(config, "claude-code")
+    ModelAccess().check_cli_login(config, "claude-code")  # a local run: the operator's own CLI
+    ModelAccess(on_spend=lambda event: None).check_cli_login(config, "claude-code")  # metered, still the operator's
+
+    model_config = SimpleNamespace(name="sonnet", provider="claude-code", response_timeout=None, max_tokens=None)
+    grid = SimpleNamespace(get_model=lambda key: model_config, get_provider=lambda key: provider,
+                           get_working_directory=lambda: "/tmp/ws")
+    factory = ModelProvider(grid, SimpleNamespace(access=ModelAccess(remote)), None)
+    with pytest.raises(CredentialError, match="only to admins"):
+        factory.sdk_model("claude-sonnet")
+    with pytest.raises(CredentialError, match="only to admins"):
+        factory.model_request("claude-sonnet")
 
 
 def test_the_explicit_local_single_user_may_use_the_cli_login():
@@ -718,3 +1034,162 @@ def test_a_stdin_write_error_still_cleans_up_a_real_child():
     with pytest.raises(BrokenPipeError):
         asyncio.run(_collect(runner.stream("hi")))
     assert procs[-1].returncode is not None  # the failed write did not orphan it
+
+
+def test_a_binary_being_reinstalled_is_waited_for(tmp_path):
+    binary = tmp_path / "claude"
+    runner = ClaudeCodeRunner(binary=str(binary))
+
+    async def reinstall_then_check():
+        async def reinstall():
+            await asyncio.sleep(0.3)
+            binary.write_text("#!/bin/sh\n")
+        task = asyncio.ensure_future(reinstall())
+        found = await runner._wait_available(timeout=5)
+        await task
+        return found
+
+    assert asyncio.run(reinstall_then_check()) is True
+    assert asyncio.run(ClaudeCodeRunner(binary=str(tmp_path / "gone"))._wait_available(timeout=0.2)) is False
+
+
+# -- streaming the envelope message on tool turns ------------------------------
+
+from core.claude_model import _MessageField  # noqa: E402
+
+
+def _feed_all(fragments):
+    field = _MessageField()
+    seen = []
+    for fragment in fragments:
+        text = field.feed(fragment)
+        if text is not None:
+            seen.append(text)
+    return seen
+
+
+def test_the_message_field_is_read_as_it_arrives():
+    seen = _feed_all(['{"mes', 'sage": "Hel', 'lo, ', 'world", "tool_calls": []}'])
+    assert seen == ["Hel", "Hello, ", "Hello, world"]
+
+
+def test_the_message_field_holds_back_a_torn_escape():
+    seen = _feed_all(['{"message": "a\\', 'nb \\u04', '1f"}'])
+    assert seen[-1] == "a\nb П"
+    assert all(not text.endswith("\\") for text in seen)
+
+
+def test_a_nested_message_key_is_not_the_envelope_message():
+    seen = _feed_all([
+        '{"tool_calls": [{"name": "x", "arguments": {"message": "inner"}}], ',
+        '"message": "outer"}',
+    ])
+    assert seen == ["outer"]
+
+
+def _envelope_events(fragments, message, *, index=0):
+    events = [
+        ClaudeEvent("system", "init", {"type": "system", "subtype": "init", "tools": ["StructuredOutput"]}),
+        ClaudeEvent("stream_event", "", {"event": {"type": "content_block_start", "index": index,
+                                                   "content_block": {"type": "tool_use", "id": "s1",
+                                                                     "name": "StructuredOutput", "input": {}}}}),
+    ]
+    for fragment in fragments:
+        events.append(ClaudeEvent("stream_event", "", {"event": {
+            "type": "content_block_delta", "index": index,
+            "delta": {"type": "input_json_delta", "partial_json": fragment}}}))
+    events.append(ClaudeEvent("stream_event", "", {"event": {"type": "content_block_stop", "index": index}}))
+    envelope = {"message": message, "tool_calls": [{"name": "grid_echo", "arguments": {"x": 1}}]}
+    events.append(ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False,
+                                                    "result": "", "structured_output": envelope}))
+    return events
+
+
+def _text_deltas_of(events):
+    return [e.delta for e in events if getattr(e, "type", "") == "response.output_text.delta"]
+
+
+def test_a_tool_turn_streams_its_message_before_the_result():
+    fragments = ['{"message": "Let me ', 'check.", "tool_calls": [{"name": "grid_echo", ', '"arguments": {"x": 1}}]}']
+    model, _ = _model(_envelope_events(fragments, "Let me check."))
+    events = asyncio.run(_stream(model, tools=[grid_echo]))
+    assert _text_deltas_of(events) == ["Let me ", "check."]
+
+    model, _ = _model(_envelope_events(fragments, "Let me check."))
+    response = asyncio.run(_get(model, tools=[grid_echo]))
+    assert _text(response) == "Let me check."  # streamed once, not repeated by the result
+    assert [c.name for c in _calls(response)] == ["grid_echo"]
+
+
+def test_a_validated_message_that_differs_from_the_draft_follows_it():
+    fragments = ['{"message": "Draft", "tool_calls": []}']
+    model, _ = _model(_envelope_events(fragments, "Final"))
+    response = asyncio.run(_get(model, tools=[grid_echo]))
+    assert _text(response) == "Draft\n\nFinal"
+
+
+def test_a_structured_final_turn_does_not_stream_the_message():
+    class Final(BaseModel):
+        answer: str
+
+    fragments = ['{"message": "hi", "tool_calls": [], "final": {"answer": "done"}}']
+    events = _envelope_events(fragments, "hi")
+    events[-1] = ClaudeEvent("result", "success", {"type": "result", "subtype": "success", "is_error": False,
+                                                   "result": "", "structured_output": {
+                                                       "message": "hi", "tool_calls": [], "final": {"answer": "done"}}})
+    model, _ = _model(events)
+    response = asyncio.run(_get(model, tools=[grid_echo], output_schema=AgentOutputSchema(Final)))
+    assert _text(response) == '{"answer": "done"}'
+
+
+# -- metering: a CLI run counts in the user's usage --------------------------
+
+def test_the_cli_usage_reads_as_chat_completions_usage():
+    from core.claude_cli import chat_usage
+    from core.pricing import TokenUsage
+
+    usage = chat_usage({"input_tokens": 3, "cache_read_input_tokens": 4000, "cache_creation_input_tokens": 600,
+                        "output_tokens": 50, "output_tokens_details": {"thinking_tokens": 20}})
+    tokens = TokenUsage.from_payload(usage)
+    assert (tokens.input, tokens.cached, tokens.cache_write, tokens.output, tokens.reasoning) == (4603, 4000, 600, 50, 20)
+
+
+def test_each_run_reports_its_usage_to_the_meter():
+    reported = []
+    spawner = _Spawner()
+    spawner.generation_processes.append(_FakeProcess(stdout_lines=[
+        b'{"type":"result","subtype":"success","usage":{"input_tokens":10,"output_tokens":5}}',
+    ]))
+    runner = ClaudeCodeRunner(binary=sys.executable, spawn=spawner, model="claude-sonnet-5-5",
+                              on_usage=lambda model, usage: reported.append((model, usage["prompt_tokens"], usage["completion_tokens"])))
+    asyncio.run(_collect(runner.stream("hi")))
+    assert reported == [("claude-sonnet-5-5", 10, 5)]
+
+
+def test_a_failing_meter_never_breaks_the_run():
+    spawner = _Spawner()
+    spawner.generation_processes.append(_FakeProcess(stdout_lines=[
+        b'{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":1}}',
+    ]))
+
+    def broken(model, usage):
+        raise RuntimeError("ledger down")
+
+    runner = ClaudeCodeRunner(binary=sys.executable, spawn=spawner, on_usage=broken)
+    assert [e.kind for e in asyncio.run(_collect(runner.stream("hi")))] == ["result"]
+
+
+def test_a_cli_run_is_booked_as_a_subscription_call_of_the_user():
+    from core.model_access import ModelAccess
+
+    events = []
+    provider = SimpleNamespace(auth="claude", claude_binary=None, base_url="cli://claude", price_source=None)
+    model_config = SimpleNamespace(name="claude-sonnet-5-5", provider="claude-code", response_timeout=None, max_tokens=None)
+    grid = SimpleNamespace(get_model=lambda key: model_config, get_provider=lambda key: provider,
+                           get_working_directory=lambda: "/tmp/ws", config=SimpleNamespace(models={}))
+    access = ModelAccess(on_spend=events.append)
+    runner = ModelProvider(grid, SimpleNamespace(access=access), None).claude_runner(model_config, provider)
+    runner._report_usage({"usage": {"input_tokens": 100, "output_tokens": 20}})
+    [event] = events
+    assert (event.provider, event.model, event.usage.input, event.usage.output) == ("claude-code", "claude-sonnet-5-5", 100, 20)
+    assert event.subscription and not event.charged and event.source == "claude"
