@@ -11,7 +11,13 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents import function_tool
-from utils.path_utils import display_agent_path_auto, get_current_factory, resolve_agent_path_auto
+from utils.path_utils import (
+    CONTAINER_WORKDIR,
+    container_path,
+    display_agent_path_auto,
+    get_current_factory,
+    resolve_agent_path_auto,
+)
 from utils.process_limits import run_host_command
 
 
@@ -97,18 +103,18 @@ def _detect_encoding() -> str:
     return "utf-8"
 
 
-#: Where the host workspace is mounted in a run's container.
-CONTAINER_ROOT = "/workspace"
-
-
 def _container_command(command: str, container_id: str, relative_dir: str, timeout: int) -> list:
     """``docker exec`` of *command* in the container, in the workspace
-    directory *relative_dir*; ``timeout`` ends it inside the container too."""
-    # An absolute one is a container path already: /project/src, /user.
+    directory *relative_dir*; ``timeout`` ends it inside the container too.
+
+    A relative *relative_dir* is under the workspace mount; an absolute one is
+    a container path already (/project/src, /user). The tool itself asks
+    utils.path_utils.container_path for the directory it runs in.
+    """
     if relative_dir.startswith("/"):
         workdir = relative_dir
     else:
-        workdir = CONTAINER_ROOT if relative_dir in ("", ".") else f"{CONTAINER_ROOT}/{relative_dir}"
+        workdir = CONTAINER_WORKDIR if relative_dir in ("", ".") else f"{CONTAINER_WORKDIR}/{relative_dir}"
     return [
         "docker", "exec", "-i", "-w", workdir, container_id,
         "timeout", "-k", "5", str(timeout), "sh", "-c", command,
@@ -203,11 +209,16 @@ def bash_tool(
         return f"❌ Path is not a directory: {visible_dir}"
 
     # --- Execute: in the run's container when it has one, else here -------
-    container_id = getattr(get_current_factory(), "container_id", None)
+    factory = get_current_factory()
+    container_id = getattr(factory, "container_id", None)
     try:
         if container_id:
-            relative_dir = display_agent_path_auto(working_dir)
-            returncode, stdout, stderr = _run_in_container(command, container_id, relative_dir, timeout)
+            # The directory's path in the container comes from one mapper
+            # (utils.path_utils.container_path), never from gluing the mount
+            # prefix onto a display path: /user and /project are mounted at
+            # their own paths, not under /workspace.
+            container_dir = container_path(resolved_dir, factory)
+            returncode, stdout, stderr = _run_in_container(command, container_id, container_dir, timeout)
         else:
             returncode, stdout, stderr = _run_command(command, work_path, timeout)
     except TimeoutError as exc:

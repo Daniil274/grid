@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from agents import function_tool, RunContextWrapper
 from pydantic import BaseModel, ConfigDict, Field
-from utils.path_utils import container_path, resolve_agent_path_from_ctx, sanitize_text_for_agent_from_ctx
+from utils.path_utils import (
+    CONTAINER_WORKDIR,
+    container_path,
+    resolve_agent_path_from_ctx,
+    sanitize_text_for_agent_from_ctx,
+)
 from utils.tool_requirements import Requires
 
 logger = logging.getLogger(__name__)
@@ -61,9 +66,6 @@ def _get_container_id(context: Any) -> Optional[str]:
 
         factory = get_current_factory()
     return getattr(factory, "container_id", None)
-
-# Container path for workspace (Docker forbids bind to "/"). Agent sees root as "/".
-_CONTAINER_ROOT = "/workspace"
 
 #: A bead id as bd mints them (``grid-a1b``, a child ``grid-a1b.1``). It never
 #: starts with ``-``, so bd cannot read an id as a flag.
@@ -114,7 +116,9 @@ def _run_bd_via_docker_run(args: List[str], cwd: str, context: Any) -> Dict[str,
     host_cwd_vol = host_cwd.replace("\\", "/")
 
     bd_path = "/usr/local/bin/bd"
-    cmd = ["docker", "run", "--rm", "-i", "-e", "BEADS_DAEMON=0", "-v", f"{host_cwd_vol}:{_CONTAINER_ROOT}", "-w", _CONTAINER_ROOT, image, bd_path] + args
+    # Docker forbids a bind to "/": the workspace is mounted at CONTAINER_WORKDIR,
+    # the one place that names the mount (utils.path_utils).
+    cmd = ["docker", "run", "--rm", "-i", "-e", "BEADS_DAEMON=0", "-v", f"{host_cwd_vol}:{CONTAINER_WORKDIR}", "-w", CONTAINER_WORKDIR, image, bd_path] + args
 
     # Add --json if not already present and likely supported
     if "--json" not in cmd and args and args[0] in ["ready", "create", "show", "update", "list", "search", "close", "agent", "mol", "wisp", "pour"]:

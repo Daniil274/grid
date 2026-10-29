@@ -16,7 +16,13 @@ _GRID_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_GRID_ROOT))
 
 from agents import function_tool
-from utils.path_utils import container_path, display_agent_path_auto, get_current_factory, resolve_agent_path_auto
+from utils.path_utils import (
+    CONTAINER_WORKDIR,
+    container_path,
+    display_agent_path_auto,
+    get_current_factory,
+    resolve_agent_path_auto,
+)
 from utils.process_limits import run_host_command
 
 
@@ -201,8 +207,6 @@ RG_THREADS = 2
 GREP_TIMEOUT = 30
 #: Exit code of `timeout` when it ended the command.
 _TIMED_OUT = 124
-#: Where a run's container mounts its workspace.
-CONTAINER_ROOT = "/workspace"
 
 
 def _ripgrep_args(
@@ -295,7 +299,7 @@ def _grep_in_container(
     CPUs, not the server's (core.managers.container_manager). *target* is the
     directory's path in the container (utils.path_utils.container_path)."""
     cmd = [
-        "docker", "exec", "-w", CONTAINER_ROOT, container_id,
+        "docker", "exec", "-w", CONTAINER_WORKDIR, container_id,
         # `timeout` ends the search inside the container too.
         "timeout", "-k", "5", str(GREP_TIMEOUT),
         *_ripgrep_args(pattern, target, file_extensions, case_sensitive, use_regex),
