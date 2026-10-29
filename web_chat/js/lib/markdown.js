@@ -27,6 +27,10 @@ const MARK = '&#0;';
 /** The same for extracted formulas. */
 const MATH_MARK = '&#1;';
 
+/** An open fence longer than this waits for its closing fence to be coloured
+ * (see the fence case below): per-frame highlighting does not scale. */
+const STREAM_HL_CHARS = 4000;
+
 /**
  * Formulas within a line: \( \) inline, \[ \] and $$ $$ display, and $ $ by
  * Pandoc's rule - the opening $ is followed and the closing one preceded by a
@@ -188,16 +192,56 @@ function displayMath(lines, start, open, rest) {
 const cells = (match) => match[1].split("|").map((cell) => cell.trim());
 const isDivider = (row) => row.length > 0 && row.every((cell) => /^:?-{2,}:?$/.test(cell));
 
+/** Rendered documents, by source: a stored chat is parsed once per session. */
+const DOC_ENTRIES = 24;
+const DOC_CHARS = 4_000_000;
+const documents = new Map();
+let documentChars = 0;
+
+function rememberDocument(source, html) {
+  documents.set(source, html);
+  documentChars += source.length;
+  while (documents.size > DOC_ENTRIES || documentChars > DOC_CHARS) {
+    const oldest = documents.keys().next().value;
+    if (oldest === undefined || oldest === source) break;
+    documents.delete(oldest);
+    documentChars -= oldest.length;
+  }
+}
+
 /**
  * @param {string} source raw markdown
  * @returns {string} HTML, safe to assign to innerHTML
  */
 export function renderMarkdown(source) {
-  return blocks(escapeHtml(source ?? "").replace(/\r\n?/g, "\n").split("\n"));
+  const text = String(source ?? "").replace(/\r\n?/g, "\n");
+  // A missing highlighter (a blocked script, a test without the vendor files)
+  // renders plain text; that answer is never worth remembering.
+  if (!globalThis.hljs) return blocks(escapeHtml(text).split("\n"));
+  const cached = documents.get(text);
+  if (cached !== undefined) {
+    documents.delete(text);
+    documents.set(text, cached);
+    return cached;
+  }
+  const html = blocks(escapeHtml(text).split("\n"));
+  rememberDocument(text, html);
+  return html;
 }
 
 /** Render already-escaped lines. All recursion goes through here. */
 function blocks(lines) {
+  return blockList(lines).join("\n");
+}
+
+/**
+ * The top-level blocks of already-escaped lines, as separate HTML strings.
+ *
+ * One entry per block is what makes a streaming answer cheap to repaint: a
+ * closed block's HTML does not change when more text arrives, so its DOM node
+ * can be kept and only the block still being written is rebuilt.
+ */
+function blockList(lines) {
   const out = [];
   const pending = [];
   let index = 0;
@@ -231,10 +275,16 @@ function blocks(lines) {
         const language = match[1] ? ` data-language="${match[1]}"` : "";
         const done = closed ? ' data-closed="true"' : "";
         const source = body.join("\n");
-        // Round trip: the escaped fence body is restored with the exact
-        // inverse of escapeHtml, and the highlighter re-escapes its own
-        // output — the value still cannot contain a live tag.
-        out.push(`<pre${language}${done}><code>${highlight(unescapeHtml(source), match[1])}</code></pre>`);
+        // An open fence is highlighted only while that is cheap: it is rebuilt
+        // on every token, and past a few thousand characters the highlighter
+        // alone costs more than the rest of a frame (measured: ~3 ms at 8k). A
+        // growing block therefore stays its own escaped text and takes its
+        // colours when the closing fence arrives - one highlight, then cached.
+        // Round trip for the closed case: the escaped body is restored with the
+        // exact inverse of escapeHtml and the highlighter re-escapes its own
+        // output, so no live tag can reach the DOM either way.
+        const code = !closed && source.length > STREAM_HL_CHARS ? source : highlight(unescapeHtml(source), match[1]);
+        out.push(`<pre${language}${done}><code>${code}</code></pre>`);
         break;
       }
 
@@ -301,7 +351,85 @@ function blocks(lines) {
   }
 
   flush();
-  return out.join("\n");
+  return out;
+}
+
+/**
+ * Streaming renderers, by owner - one slot per message being written.
+ *
+ * A key is whatever the caller uses to tell one growing document from another
+ * (ui/message.js passes the message's element id). Two answers streaming at
+ * once must not evict each other's work on every frame.
+ */
+const STREAM_SLOTS = 4;
+const streams = new Map();
+
+/**
+ * The blocks of *source*, re-rendering only the tail that is still open.
+ *
+ * A blank line outside a fence ends every block before it: from there on the
+ * earlier blocks can never change, so their HTML is kept and only the text
+ * after the last such line is rendered again. That is what keeps a frame of a
+ * 40k-character answer at the cost of its last paragraph instead of the whole
+ * document, and what makes a closed fence highlight exactly once.
+ *
+ * @param {string} source raw markdown, growing as tokens arrive
+ * @param {string} [key] which document this is; "" when there is only one
+ * @returns {string[]} one HTML string per top-level block
+ */
+export function renderMarkdownBlocks(source, key = "") {
+  const text = String(source ?? "").replace(/\r\n?/g, "\n");
+  let state = streams.get(key);
+  if (!state || !text.startsWith(state.source)) {
+    state = { source: "", escaped: "", stable: 0, fence: false, closed: [] };
+  }
+  // Escaping is per character, so only the new suffix needs it.
+  if (text.length > state.source.length) state.escaped += escapeHtml(text.slice(state.source.length));
+  state.source = text;
+
+  const boundary = stableBoundary(state.escaped, state.stable, state.fence);
+  if (boundary.offset > state.stable) {
+    const segment = state.escaped.slice(state.stable, boundary.offset);
+    state.closed = state.closed.concat(blockList(segment.split("\n")));
+    state.stable = boundary.offset;
+  }
+  state.fence = boundary.fence;
+
+  streams.delete(key);
+  streams.set(key, state);
+  while (streams.size > STREAM_SLOTS) streams.delete(streams.keys().next().value);
+
+  const tail = state.escaped.slice(state.stable);
+  return tail ? state.closed.concat(blockList(tail.split("\n"))) : state.closed.slice();
+}
+
+/**
+ * Where the text that can still change begins: just after the last blank line
+ * that is not inside an open fence. Everything before *offset* renders the
+ * same however the answer continues; *fence* is the fence state at that point.
+ */
+function stableBoundary(text, from, fenceOpen) {
+  let offset = from;
+  let boundary = from;
+  let fence = fenceOpen;
+  while (offset < text.length) {
+    let end = text.indexOf("\n", offset);
+    const last = end === -1;
+    if (last) end = text.length;
+    const line = text.slice(offset, end);
+    if (fence) {
+      if (BLOCK.fenceEnd.test(line)) fence = false;
+    } else if (BLOCK.fence.test(line)) {
+      fence = true;
+    } else if (!line.trim() && !last) {
+      // Only a line the newline has closed is final: a chunk boundary can cut
+      // a whitespace-only line in half, and the rest of it may not be blank.
+      boundary = end + 1;
+    }
+    if (last) break;
+    offset = end + 1;
+  }
+  return { offset: boundary, fence };
 }
 
 /** Consume one list, recursing into deeper indentation. Returns the next index. */

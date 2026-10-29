@@ -44,6 +44,42 @@ function getLibrary() {
     : null;
 }
 
+/**
+ * Results by ``(language, source)``.
+ *
+ * A fence that is already written is highlighted once: a later paint of the
+ * same answer, a reloaded chat, or a tool payload carrying the same code reuses
+ * the markup instead of running the grammar again. Plain LRU over entries and
+ * total characters, so a long chat cannot grow it without bound.
+ */
+const CACHE_ENTRIES = 128;
+const CACHE_CHARS = 4_000_000;
+const cache = new Map();
+let cachedChars = 0;
+
+const cacheKey = (language, raw) => `${language}\u0000${raw}`;
+
+function cacheGet(key) {
+  const hit = cache.get(key);
+  if (hit === undefined) return undefined;
+  // Touch: the entry used now is the last to be evicted.
+  cache.delete(key);
+  cache.set(key, hit);
+  return hit;
+}
+
+function cacheSet(key, html) {
+  if (cache.has(key)) return;
+  cache.set(key, html);
+  cachedChars += key.length;
+  while (cache.size > CACHE_ENTRIES || cachedChars > CACHE_CHARS) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+    cachedChars -= oldest.length;
+  }
+}
+
 /** True when text is a unified diff even without a language hint. */
 export function looksLikeDiff(text) {
   const t = String(text ?? "");
@@ -107,6 +143,19 @@ export function highlight(rawCode, lang) {
   if (!raw) return raw;
 
   const language = String(lang ?? "").trim().toLowerCase();
+  // Without the library every result is plain escaped text; caching that would
+  // poison the cache once the library arrives (a blocked script, then loaded).
+  if (!getLibrary()) return compute(raw, language);
+  const key = cacheKey(language, raw);
+  const cached = cacheGet(key);
+  if (cached !== undefined) return cached;
+  const html = compute(raw, language);
+  cacheSet(key, html);
+  return html;
+}
+
+/** The real work behind ``highlight``, once per ``(language, source)``. */
+function compute(raw, language) {
   if (DIFF_LANGS.has(language) || looksLikeDiff(raw)) return highlightDiff(raw);
   if (!language) return escapeHtml(raw);
 
