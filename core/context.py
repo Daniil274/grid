@@ -2,8 +2,10 @@
 Advanced context management for Grid agents with memory and persistence.
 """
 
+import atexit
 import os
 import re
+import threading
 from typing import Callable, Iterable, Iterator, List, Dict, Optional, Any, Tuple, Union
 from datetime import datetime
 from threading import Lock
@@ -31,6 +33,9 @@ from core import revisions as revision_contracts
 # Tracing is handled automatically by Agents SDK
 
 logger = Logger.get_logger("context")
+
+#: The parts of a conversation's JSON document, encoded and reused one by one.
+_DOCUMENT_PARTS = ("conversation", "executions", "metadata")
 
 #: Statuses of ``pending_agent_run`` while its turn has not ended.
 ACTIVE_RUN_STATUSES = ("running", "retrying")
@@ -168,6 +173,24 @@ class ContextManager:
         self._lock = Lock()
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._encoded: Dict[str, str] = {}  # context id -> JSON, for unchanged contexts
+        # Encoded parts of a conversation (its messages, its executions, its
+        # metadata), reused while that part is unchanged: a tool call writes the
+        # run record only, and must not re-encode the messages of the whole chat.
+        self._parts: Dict[str, Dict[str, str]] = {}
+        self._versions: Dict[str, int] = {}
+        self._parts_lock = Lock()
+        # The store writes files in a thread of its own; the encoding goes there
+        # too, so neither a tool call nor a message waits for the JSON of a big
+        # conversation (see _request_save).
+        self._save_gate = Lock()
+        self._save_cond = threading.Condition()
+        self._save_requested = False
+        # How many saves were asked for, and how many of them are on disk: a
+        # strict save records the second one, so a background run woken by a
+        # request it already carried finds nothing left to write (see _save_async).
+        self._save_seq = 0
+        self._save_written_seq = 0
+        self._saver: Optional[threading.Thread] = None
         self.store = store
         self._dirty: set = set()  # contexts changed since the store last got them
         # Conversations created in this process and not pinned yet: only those
@@ -304,6 +327,14 @@ class ContextManager:
         if bucket is not None:
             bucket["updated_at"] = datetime.now().isoformat()
             self._mark_changed(target)
+
+    def _touch_metadata(self, context_id: Optional[str] = None) -> None:
+        """Mark only the metadata of a conversation changed (see _touch)."""
+        target = self._target_id(context_id)
+        bucket = self._contexts.get(target) if target is not None else None
+        if bucket is not None:
+            bucket["updated_at"] = datetime.now().isoformat()
+            self._mark_metadata_changed(target)
 
     @property
     def _conversation_history(self) -> List[ContextMessage]:
@@ -636,8 +667,8 @@ class ContextManager:
 
                     self._touch(context_id)
 
-                    # Persist if configured
-                    self._save_to_file()
+                    # Persist if configured (in the background for a store)
+                    self._request_save()
 
                 except Exception as e:
                     raise ContextError(f"Failed to add message: {e}")
@@ -658,7 +689,7 @@ class ContextManager:
                 conversation.clear()
                 conversation.extend(messages[-self.max_history:])
                 self._touch()
-                self._save_to_file()
+                self._request_save()
         except ContextError as exc:
             logger.error("Lock timeout in replace_conversation_history", exc_info=exc)
             raise
@@ -676,8 +707,8 @@ class ContextManager:
 
                 self._touch(context_id)
 
-                # Persist if configured
-                self._save_to_file()
+                # Persist if configured (in the background for a store)
+                self._request_save()
         except ContextError:
             logger.warning(
                 "Execution history record dropped due to lock timeout",
@@ -906,9 +937,10 @@ class ContextManager:
         """
         with safe_lock(self._lock, timeout=5.0):
             self._target_bucket(context_id)["metadata"][key] = value
-            self._touch(context_id)
+            # Only the metadata part is re-encoded: the messages stay as they are.
+            self._touch_metadata(context_id)
             if persist:
-                self._save_to_file()
+                self._request_save()
 
     def get_metadata(self, key: str, default: Any = None, *, context_id: Optional[str] = None) -> Any:
         """Metadata of *context_id*, by default this task's conversation."""
@@ -938,8 +970,8 @@ class ContextManager:
                 return False
             self._create_context(context_id)
             self._contexts[context_id]["metadata"].update(updates)
-            self._mark_changed(context_id)
-            self._save_to_file()
+            self._mark_metadata_changed(context_id)
+            self._request_save()
             return True
 
     def ensure_context(self, context_id: str) -> None:
@@ -996,7 +1028,7 @@ class ContextManager:
             last = conversation[-1]
             last.metadata = {**(last.metadata or {}), **updates}
             self._mark_changed(context_id)
-            self._save_to_file()
+            self._request_save()
             return True
 
     def append_message_to(
@@ -1024,7 +1056,7 @@ class ContextManager:
                 del conversation[: len(conversation) - self.max_history]
             bucket["updated_at"] = datetime.now().isoformat()
             self._mark_changed(context_id)
-            self._save_to_file()
+            self._request_save()
             return True
 
     # -- branches --------------------------------------------------------------
@@ -1359,8 +1391,8 @@ class ContextManager:
                 items = items[-max_items:]
 
             metadata[key] = items
-            self._touch()
-            self._save_to_file()
+            self._touch_metadata()
+            self._request_save()
             return list(items)
 
     def _normalize_message_content(self, content: Union[str, List[Any]]) -> Union[str, List[Any]]:
@@ -1875,24 +1907,243 @@ class ContextManager:
         """Re-encode *context_id* on the next save; unchanged contexts reuse their JSON."""
         self._encoded.pop(context_id, None)
         if context_id is not None:
+            with self._parts_lock:
+                self._versions[context_id] = self._versions.get(context_id, 0) + 1
+                self._parts.pop(context_id, None)
             self._dirty.add(context_id)
 
-    def _save_to_store(self, *, strict: bool) -> None:
-        """Hand the changed conversations to the store; it writes them in the background."""
-        self._mark_changed(self._current_context_id)
+    def _mark_metadata_changed(self, context_id: Optional[str]) -> None:
+        """Only the metadata of *context_id* changed: its messages stay encoded.
+
+        A turn writes the run record of every tool call, and re-encoding the
+        messages of the whole conversation for each of them is what made a chat
+        of tens of megabytes slow.
+        """
+        self._encoded.pop(context_id, None)
+        if context_id is not None:
+            with self._parts_lock:
+                self._versions[context_id] = self._versions.get(context_id, 0) + 1
+                parts = self._parts.get(context_id)
+                if parts is not None:
+                    parts.pop("metadata", None)
+            self._dirty.add(context_id)
+
+    # -- saving: what is encoded, and by whom ---------------------------------
+
+    def _fill_parts(self, parts: Dict[str, str], source: Dict[str, Any]) -> Dict[str, str]:
+        """Encode the parts *parts* lacks; the ones it has are reused as they are."""
+        for name in _DOCUMENT_PARTS:
+            if name not in parts:
+                default = {} if name == "metadata" else []
+                parts[name] = self._encode_part(name, source.get(name) or default)
+        return parts
+
+    @staticmethod
+    def _encode_part(name: str, values: Any) -> str:
+        """The JSON of one part of a conversation."""
+        if name == "conversation":
+            values = [msg.model_dump() if hasattr(msg, "model_dump") else msg for msg in values]
+        elif name == "executions":
+            values = [ex.model_dump() if hasattr(ex, "model_dump") else ex for ex in values]
+        return json.dumps(values, ensure_ascii=False, default=str)
+
+    def _compose(self, parts: Dict[str, str], source: Dict[str, Any]) -> str:
+        """A conversation's JSON document from its encoded parts."""
+        document = "".join(
+            (
+                '{"conversation_history":',
+                parts["conversation"],
+                ',"execution_history":',
+                parts["executions"],
+                ',"metadata":',
+                parts["metadata"],
+                ',"created_at":',
+                json.dumps(source.get("created_at"), ensure_ascii=False, default=str),
+                ',"updated_at":',
+                json.dumps(source.get("updated_at"), ensure_ascii=False, default=str),
+            )
+        )
+        revision = source.get("revision")
+        if isinstance(revision, dict):
+            # A pinned conversation carries its manifest; a legacy one gains none.
+            document += ',"revision":' + json.dumps(revision, ensure_ascii=False, default=str)
+        return document + "}"
+
+    def _encoded_context(self, context_id: str, bucket: Dict[str, Any]) -> str:
+        """The JSON of *context_id*, encoding only the parts that changed."""
+        with self._parts_lock:
+            parts = dict(self._parts.get(context_id) or {})
+        parts = self._fill_parts(parts, bucket)
+        with self._parts_lock:
+            self._parts.setdefault(context_id, {}).update(parts)
+        return self._compose(parts, bucket)
+
+    def _request_save(self) -> None:
+        """Save what changed - now for a plain file, in the background for a store.
+
+        Called with the manager lock held, like :meth:`_save_to_file`. The store
+        writes in a thread of its own already; the encoding of the conversation
+        goes to a thread as well, so the caller - the event loop of a chat turn -
+        gets on with its work instead of waiting for tens of megabytes of JSON.
+        """
+        if self.store is None or self.read_only:
+            self._save_to_file()
+            return
+        with self._save_cond:
+            self._save_seq += 1
+            self._save_requested = True
+            self._start_saver()
+            self._save_cond.notify()
+
+    def _start_saver(self) -> None:
+        if self._saver is None:
+            # Whatever is still only in memory is written when the process ends.
+            atexit.register(self._flush_at_exit)
+        if self._saver is None or not self._saver.is_alive():
+            self._saver = threading.Thread(target=self._saver_loop, name="context-saver", daemon=True)
+            self._saver.start()
+
+    def _saver_loop(self) -> None:
+        """Write what was asked for, until the process ends (the thread is a daemon)."""
+        while True:
+            with self._save_cond:
+                self._save_cond.wait_for(lambda: self._save_requested)
+                self._save_requested = False
+                seq = self._save_seq
+            try:
+                self._save_async(seq)
+            except Exception:
+                logger.exception("Saving conversations in the background failed")
+            with self._save_cond:
+                # This run - or a strict save that overtook it - has every change
+                # asked for up to *seq*; a later request carries the rest.
+                self._save_written_seq = max(self._save_written_seq, seq)
+
+    def _flush_at_exit(self) -> None:
+        try:
+            self.save()
+        except Exception:
+            logger.exception("Could not save conversations at exit")
+
+    def _snapshot_jobs(self) -> List[Tuple[str, Optional[Dict[str, Any]], Dict[str, str], int]]:
+        """What to write, from the state as it is now; the caller holds the manager lock.
+
+        The messages are encoded outside the lock, so a job carries the parts it
+        already has and the version they were taken at: a newer change of that
+        conversation bumps the version and leaves its write to a later run.
+        """
+        if self._current_context_id is not None:
+            self._dirty.add(self._current_context_id)
+        jobs: List[Tuple[str, Optional[Dict[str, Any]], Dict[str, str], int]] = []
         for context_id in list(self._dirty):
             bucket = self._contexts.get(context_id)
             if bucket is None:
+                jobs.append((context_id, None, {}, 0))
+                continue
+            with self._parts_lock:
+                version = self._versions.get(context_id, 0)
+                parts = dict(self._parts.get(context_id) or {})
+            if "metadata" not in parts:
+                parts["metadata"] = self._encode_part("metadata", bucket.get("metadata") or {})
+            snapshot = {
+                "conversation": list(bucket.get("conversation") or []),
+                "executions": list(bucket.get("executions") or []),
+                "created_at": bucket.get("created_at"),
+                "updated_at": bucket.get("updated_at"),
+                "revision": bucket.get("revision"),
+            }
+            jobs.append((context_id, snapshot, parts, version))
+        self._dirty.clear()
+        return jobs
+
+    def _save_async(self, seq: int) -> None:
+        """Encode the changed conversations and hand them to the store, in this thread.
+
+        The state is snapshotted under the lock and the messages are encoded
+        outside it: the JSON of a big conversation takes tens of milliseconds to
+        make, and a thread that only wanted to change one field must not wait.
+        The metadata is encoded under the lock - it is small, and it is the one
+        part another thread may edit in place.
+
+        The save gate is held from the snapshot to the last write, so a strict
+        save (:meth:`save`) waits for this run rather than overtaking it: no
+        snapshot taken before that save can then land in the store behind it.
+        """
+        jobs: Optional[List[Tuple[str, Optional[Dict[str, Any]], Dict[str, str], int]]] = None
+        with safe_lock(self._lock, timeout=5.0):
+            # Taken under the manager lock - the one every other holder of the
+            # gate holds too - so it cannot wait here for a save that needs the lock.
+            self._save_gate.acquire()
+            keeping = False
+            try:
+                with self._save_cond:
+                    covered = self._save_written_seq >= seq
+                if not covered:
+                    jobs = self._snapshot_jobs()
+                    keeping = True
+            finally:
+                if not keeping:
+                    self._save_gate.release()
+            if jobs is None:
+                # A strict save carried this request while this thread waited.
+                return
+        try:
+            self._write_jobs(jobs)
+        finally:
+            self._save_gate.release()
+
+    def _write_jobs(self, jobs: List[Tuple[str, Optional[Dict[str, Any]], Dict[str, str], int]]) -> None:
+        """Hand the snapshots to the store; the caller holds the save gate."""
+        for context_id, snapshot, parts, version in jobs:
+            if snapshot is None:
                 self.store.remove(context_id)
                 continue
-            encoded = self._encoded.get(context_id)
-            if encoded is None:
-                encoded = self._encoded[context_id] = self._encode_context(bucket)
-            self.store.put(context_id, encoded)
-        self._dirty.clear()
+            with self._parts_lock:
+                if self._versions.get(context_id, 0) != version:
+                    # Changed (or saved) meanwhile: a newer save carries it.
+                    continue
+            parts = self._fill_parts(parts, snapshot)
+            with self._parts_lock:
+                if self._versions.get(context_id, 0) == version:
+                    self._parts.setdefault(context_id, {}).update(parts)
+            self.store.put(context_id, self._compose(parts, snapshot))
         self.store.set_manifest({"version": 1, "active_context_id": self._current_context_id})
-        if strict and not self.store.flush(durable=True):
-            raise RuntimeError(f"Conversations could not be written to {self.store.directory}")
+
+    def _save_to_store(self, *, strict: bool) -> None:
+        """Write the changed conversations to the store; it puts them on disk in a thread.
+
+        With ``strict`` the call is a barrier: it waits for a background save
+        that started earlier (see _save_async) and marks every request made so
+        far as carried, so nothing that was pending can be written behind it.
+        """
+        with self._save_gate:
+            with self._save_cond:
+                # Everything asked for up to here is written by this save.
+                carried = self._save_seq
+            if self._current_context_id is not None:
+                # Its updated_at may have moved without anything else changing.
+                self._dirty.add(self._current_context_id)
+            written = []
+            for context_id in list(self._dirty):
+                bucket = self._contexts.get(context_id)
+                if bucket is None:
+                    self.store.remove(context_id)
+                    continue
+                self.store.put(context_id, self._encoded_context(context_id, bucket))
+                written.append(context_id)
+            self._dirty.clear()
+            if written:
+                with self._parts_lock:
+                    for context_id in written:
+                        # A snapshot taken before this save is stale now; the
+                        # background writer checks the version right before put.
+                        self._versions[context_id] = self._versions.get(context_id, 0) + 1
+            self.store.set_manifest({"version": 1, "active_context_id": self._current_context_id})
+            if strict and not self.store.flush(durable=True):
+                raise RuntimeError(f"Conversations could not be written to {self.store.directory}")
+            with self._save_cond:
+                self._save_written_seq = max(self._save_written_seq, carried)
+                self._save_cond.notify_all()
 
     def _load_from_store(self) -> None:
         """Every conversation of the store; its JSON stays cached until it changes."""
@@ -1952,24 +2203,8 @@ class ContextManager:
         return execution
 
     def _encode_context(self, bucket: Dict[str, Any]) -> str:
-        document = {
-            "conversation_history": [
-                msg.model_dump() if hasattr(msg, "model_dump") else msg
-                for msg in bucket.get("conversation", [])
-            ],
-            "execution_history": [
-                ex.model_dump() if hasattr(ex, "model_dump") else ex
-                for ex in bucket.get("executions", [])
-            ],
-            "metadata": bucket.get("metadata", {}),
-            "created_at": bucket.get("created_at"),
-            "updated_at": bucket.get("updated_at"),
-        }
-        manifest = bucket.get("revision")
-        if isinstance(manifest, dict):
-            # A pinned conversation carries its manifest; a legacy one gains none.
-            document["revision"] = manifest
-        return json.dumps(document, ensure_ascii=False, default=str)
+        """A conversation's whole JSON document (see _encoded_context)."""
+        return self._compose(self._fill_parts({}, bucket), bucket)
 
     def _save_to_file(self, *, strict: bool = False) -> None:
         """Write every context to the persistence file, atomically.
@@ -2023,7 +2258,13 @@ class ContextManager:
             logger.error(f"Failed to save context to {self.persist_path}: {e}")
 
     def save(self, *, strict: bool = False) -> None:
-        """Persist the current state now."""
+        """Persist the current state now.
+
+        ``strict`` is a barrier, not only a durable write: it waits for a
+        background save that started earlier, and once it has returned no
+        snapshot taken before it can still be written (see _save_async and
+        _save_to_store). What a restart reads is the state at this call.
+        """
         with safe_lock(self._lock, timeout=5.0):
             self._save_to_file(strict=strict)
 

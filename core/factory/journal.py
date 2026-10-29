@@ -37,15 +37,15 @@ class RunJournal:
         self.context_manager = context_manager
         self.config = config
 
-    def _preview_limit(self) -> Optional[int]:
-        """Max length for tool_events in context metadata; None = keep full payloads."""
-        settings = getattr(self.config.config.settings, "agent_logging", None)
-        if not settings or not getattr(settings, "enabled", True):
-            return 700
-        level = (getattr(settings, "level", "full") or "full").lower()
-        if level in ("full", "detailed"):
-            return None
-        return 700
+    #: Characters of an argument or an output kept in the run record. The full
+    #: payloads belong to the trace (web_chat steps); the run record only has to
+    #: tell what was called, so that a crashed turn can be recovered - and a
+    #: turn of hundreds of calls must not grow it into megabytes.
+    PREVIEW_LIMIT = 700
+
+    def _preview_limit(self) -> int:
+        """Max length of a preview in the run record's tool_events."""
+        return self.PREVIEW_LIMIT
 
     def update_pending_run(
         self,
@@ -114,10 +114,12 @@ class RunJournal:
         """Append a compact runtime event to durable context metadata.
 
         Events are written with the next status change, not one file write per
-        event - except with ``persist``: a tool call about to run is saved at
-        once, so a process that dies during it still leaves the call on record
-        (ContextManager.recover_abandoned_turn). *context_id* names the turn's
-        conversation; without it, the one the running turn bound.
+        event - except with ``persist``: a tool call about to run is handed to
+        the background writer at once, so a process that dies during it still
+        leaves the call on record (ContextManager.recover_abandoned_turn). The
+        call itself never waits for that write: an event is a reference to its
+        step of the trace and a preview, never the payload. *context_id* names
+        the turn's conversation; without it, the one the running turn bound.
         """
         event: Dict[str, Any] = {
             "event_type": event_type,
@@ -126,6 +128,12 @@ class RunJournal:
         if tool_name:
             event["tool_name"] = tool_name
         preview_limit = self._preview_limit()
+        if extra:
+            call_id = extra.get("call_id")
+            if call_id:
+                # The step of the trace this event belongs to: the record points
+                # at it instead of carrying the whole arguments and output.
+                event["step"] = safe_preview(call_id, max_length=300)
         if arguments is not None:
             event["arguments"] = safe_preview(arguments, max_length=preview_limit)
         if output is not None:
@@ -134,11 +142,12 @@ class RunJournal:
             for key, value in extra.items():
                 if value is not None:
                     event[key] = safe_preview(
-                        value, max_length=preview_limit or 300
+                        value, max_length=min(preview_limit, 300)
                     )
         pending = self.context_manager.get_metadata("pending_agent_run", context_id=context_id)
-        if not isinstance(pending, dict):
-            pending = {}
+        # A copy: the stored record is replaced, never edited in place, so a
+        # saver encoding it in another thread always sees a whole object.
+        pending = dict(pending) if isinstance(pending, dict) else {}
         tool_events = pending.get("tool_events")
         if not isinstance(tool_events, list):
             tool_events = []
