@@ -1,6 +1,7 @@
 """init_codegraph builds or updates the workspace's CodeGraph index where the run's commands run."""
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,11 +29,18 @@ def _invoke(context) -> str:
     return asyncio.run(codegraph_tools.init_codegraph.on_invoke_tool(context, "{}"))
 
 
-def _fake_run(monkeypatch, returncode=0, stdout=""):
+def _status(files=3, nodes=10, edges=20) -> str:
+    return json.dumps({"fileCount": files, "nodeCount": nodes, "edgeCount": edges})
+
+
+def _fake_run(monkeypatch, returncode=0, stdout="", status=None):
+    """Fake `codegraph`: *stdout* for init/sync, *status* (JSON text) for `status --json`."""
     calls = []
 
     def run(cmd, **kwargs):
         calls.append((cmd, kwargs))
+        if "status" in cmd:
+            return SimpleNamespace(returncode=0, stdout=status if status is not None else _status(), stderr="")
         return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
 
     monkeypatch.setattr(codegraph_tools.subprocess, "run", run)
@@ -50,12 +58,13 @@ def test_in_a_container_it_runs_there_in_the_workspace_and_is_ended_there(tmp_pa
 
     result = _invoke(_context(tmp_path, container_id="c0ffee"))
 
-    [(cmd, kwargs)] = calls
+    (cmd, kwargs), status_call = calls
+    assert "status" in status_call[0] and "--json" in status_call[0]
     assert cmd[:4] == ["docker", "exec", "-w", "/workspace"]
     assert "CODEGRAPH_TELEMETRY=0" in cmd
     assert cmd[cmd.index("c0ffee") + 1:][:4] == ["timeout", "-k", "5", str(codegraph_tools.CODEGRAPH_TIMEOUT_SECONDS)]
     assert kwargs["stdin"] is codegraph_tools.subprocess.DEVNULL
-    assert result.startswith("✅") and "Indexed 3 files" in result
+    assert result.startswith("✅") and "3 files, 10 nodes, 20 edges" in result and "Indexed 3 files" in result
 
 
 def test_a_failure_says_codegraph_is_not_available(tmp_path, monkeypatch):
@@ -79,3 +88,42 @@ def test_console_output_is_plain_text():
     )
 
     assert codegraph_tools._summary(output) == "Scanning files - 1 found\nIndexed 1 files"
+
+
+def test_an_index_of_no_files_is_not_reported_as_ready(tmp_path, monkeypatch):
+    _fake_run(monkeypatch, stdout="No files found to index", status=_status(0, 0, 0))
+
+    result = _invoke(_context(tmp_path))
+
+    assert not result.startswith("✅") and "ready" not in result
+    assert "is empty: 0 files indexed" in result and "grep_tool" in result
+
+
+def test_an_index_that_cannot_be_read_back_is_not_reported_as_ready(tmp_path, monkeypatch):
+    _fake_run(monkeypatch, status="not json")
+
+    result = _invoke(_context(tmp_path))
+
+    assert not result.startswith("✅") and "unknown whether" in result
+
+
+def test_a_locked_index_is_retried_until_the_other_codegraph_lets_go(tmp_path, monkeypatch):
+    results = [
+        SimpleNamespace(returncode=1, stdout="", stderr="Failed to sync: database is locked"),
+        SimpleNamespace(returncode=0, stdout="Indexed 3 files", stderr=""),
+    ]
+
+    def run(cmd, **kwargs):
+        if "status" in cmd:
+            return SimpleNamespace(returncode=0, stdout=_status(), stderr="")
+        return results.pop(0)
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(codegraph_tools.subprocess, "run", run)
+    monkeypatch.setattr(codegraph_tools.asyncio, "sleep", no_sleep)
+
+    result = _invoke(_context(tmp_path))
+
+    assert result.startswith("\u2705") and not results

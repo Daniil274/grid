@@ -9,6 +9,7 @@ after it started.
 """
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -31,6 +32,14 @@ _ENV = {"CODEGRAPH_TELEMETRY": "0", "NO_COLOR": "1"}
 
 #: Exit code of `timeout` when it ended the command.
 _TIMED_OUT = 124
+
+#: What codegraph prints when another codegraph process holds the index; it passes in seconds.
+_LOCKED = "database is locked"
+_LOCK_RETRIES = 3
+_LOCK_PAUSE_SECONDS = 2.0
+
+#: What `codegraph status --json` calls the counts of the index.
+_COUNTS = {"files": "fileCount", "nodes": "nodeCount", "edges": "edgeCount"}
 
 #: Colour and cursor codes, which codegraph 0.9 writes despite NO_COLOR.
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -55,6 +64,11 @@ def _command(project: Path) -> List[str]:
     if (project / ".codegraph").is_dir():
         return ["codegraph", "sync", "."]
     return ["codegraph", "init", "-i", "."]
+
+
+def _status_command() -> List[str]:
+    """The index's own account of itself: files, nodes, edges, as JSON."""
+    return ["codegraph", "status", "--json", "."]
 
 
 def _run(command: List[str], project: Path, container_id: Optional[str], context: Any) -> subprocess.CompletedProcess:
@@ -108,12 +122,53 @@ async def init_codegraph(context: RunContextWrapper, directory: str = ".") -> st
         return f"❌ CodeGraph indexing did not finish within {CODEGRAPH_TIMEOUT_SECONDS} s; CodeGraph is not available."
     except (OSError, ValueError) as exc:
         return f"❌ CodeGraph is not available: {exc}"
+    for _ in range(_LOCK_RETRIES):
+        if result.returncode == 0 or _LOCKED not in result.stdout + result.stderr:
+            break
+        await asyncio.sleep(_LOCK_PAUSE_SECONDS)
+        result = await asyncio.to_thread(_run, _command(project), project, _container_id(context), context)
     output = sanitize_text_for_agent_from_ctx(_summary(result.stdout + "\n" + result.stderr), context)
     if result.returncode == _TIMED_OUT and _container_id(context):
         return f"❌ CodeGraph indexing did not finish within {CODEGRAPH_TIMEOUT_SECONDS} s; CodeGraph is not available."
     if result.returncode != 0:
         return f"❌ CodeGraph is not available (exit {result.returncode}): {output}"
-    return f"✅ CodeGraph index is ready; use the codegraph tools for this project.\n{output}"
+    try:
+        status = await asyncio.to_thread(_run, _status_command(), project, _container_id(context), context)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        status = None
+    return sanitize_text_for_agent_from_ctx(_report(_index_counts(status), project, output), context)
+
+
+def _index_counts(status: Optional[subprocess.CompletedProcess]) -> Optional[dict]:
+    """Files, nodes and edges of the index from `codegraph status --json`; None when unreadable."""
+    if status is None or status.returncode != 0:
+        return None
+    try:
+        document = json.loads(status.stdout)
+        return {key: int(document[name]) for key, name in _COUNTS.items()}
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def _report(counts: Optional[dict], project: Path, output: str) -> str:
+    """What the agent is told: ready only when the index holds code, else what is true instead."""
+    where = str(project)
+    if counts is None:
+        return (
+            f"CodeGraph ran in {where}, but its index could not be read back, so it is unknown whether "
+            f"the index holds any code. Check with codegraph_status before relying on CodeGraph.\n{output}"
+        )
+    if counts["files"] == 0:
+        return (
+            f"ℹ CodeGraph index of {where} is empty: 0 files indexed, so CodeGraph has nothing to answer with. "
+            "The index covers source code only; it says nothing about the other files of the directory. "
+            "Use grep_tool/glob_tool/file_read here, and call init_codegraph again once source files exist, "
+            "or point CodeGraph tools at another indexed project with projectPath.\n" + output
+        )
+    return (
+        f"✅ CodeGraph index of {where} is ready: {counts['files']} files, {counts['nodes']} nodes, "
+        f"{counts['edges']} edges; use the codegraph tools for this project.\n{output}"
+    )
 
 
 def _codegraph_problem() -> Optional[str]:
