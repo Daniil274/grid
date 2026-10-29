@@ -42,6 +42,77 @@ from core.run_stream import field_of
 DETAIL_LIMIT = 4000
 #: Longest single context-chip label.
 LABEL_LIMIT = 48
+#: A step's big fields (what a call took, what it returned, its prose) are
+#: fetched on demand instead of being sent with every frame. One rule for the
+#: live stream and for a stored conversation (see ``slim_steps``).
+LAZY_STEP_FIELDS = ("input_payload", "result_payload", "body", "detail")
+#: A field this small stays where it is: fetching it would cost more than it saves.
+LAZY_FIELD_BYTES = 2048
+#: How much of a trimmed ``detail`` still rides along (the agent row reads its task).
+LAZY_DETAIL_PREVIEW = 400
+#: Steps whose ``body`` is their content, not a copy of a payload: thinking,
+#: narration between actions, a failure. Trimming it would delete the step.
+PROSE_KINDS = frozenset({"reasoning", "message", "error"})
+
+
+def _size(value: Any) -> int:
+    """Cost of a field on the wire, in bytes of UTF-8 JSON."""
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    try:
+        return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return len(str(value).encode("utf-8"))
+
+
+def slim_step(step: dict[str, Any]) -> dict[str, Any]:
+    """*step* without the payloads it can be asked for later; ``lazy`` when cut.
+
+    The same projection serves a live ``step`` frame and a stored conversation:
+    identity, labels and status always travel, big fields do not. A prose step
+    keeps its ``body`` - that text is the step, and the live client already
+    renders it from the reasoning deltas.
+    """
+    heavy = [name for name in LAZY_STEP_FIELDS if _size(step.get(name)) > LAZY_FIELD_BYTES]
+    if step.get("kind") in PROSE_KINDS and "body" in heavy:
+        heavy.remove("body")
+    if not heavy:
+        return step
+    light = {key: value for key, value in step.items() if key not in heavy}
+    # The agent row reads its task from ``detail``: keep the start of it.
+    if "detail" in heavy and isinstance(step.get("detail"), str):
+        light["detail"] = step["detail"][:LAZY_DETAIL_PREVIEW]
+    light["lazy"] = True
+    return light
+
+
+def slim_steps(steps: Optional[list]) -> Optional[list]:
+    """*steps* without their large payloads; each step that lost one is ``lazy``."""
+    if not steps:
+        return steps
+    return [slim_step(step) if isinstance(step, dict) else step for step in steps]
+
+
+def redundant_with_payload(body: str, payload: Any, *, limit: int = LAZY_FIELD_BYTES) -> bool:
+    """Whether *body* is exactly the text *payload* already carries.
+
+    Small bodies stay: old clients read ``body`` and the duplicate is cheap.
+    A long one is dropped, so a stored or streamed step holds its output once.
+    A payload truncates its source at its own limit, so a prefix counts too.
+    """
+    if not isinstance(body, str) or len(body) <= limit or not isinstance(payload, dict):
+        return False
+    if payload.get("version") != 1:
+        return False
+    raw = payload.get("raw_text")
+    if isinstance(raw, str) and raw:
+        if raw == body or body.startswith(raw) or raw.startswith(body):
+            return True
+    parts = payload.get("parts") or []
+    texts = [part.get("data") for part in parts if isinstance(part, dict)]
+    return len(texts) == 1 and isinstance(texts[0], str) and texts[0] == body
 
 
 class StepKind(str, Enum):
@@ -387,9 +458,16 @@ class TraceRecorder:
         """The turn's timeline, for storing alongside the assistant message."""
         return [step.as_dict() for step in self._steps.values()]
 
+    def step_record(self, step_id: str) -> Optional[dict[str, Any]]:
+        """One step with everything it holds, or None: what a lazy frame left out."""
+        step = self._steps.get(step_id)
+        return step.as_dict() if step is not None else None
+
     # -- internals ---------------------------------------------------------
     def _publish(self, step: Step) -> None:
-        self._emit({"type": "step", "step": step.as_dict()})
+        # The wire carries the lean step; the recorder keeps the whole one, so
+        # the stored trace and the step endpoint can still serve its payloads.
+        self._emit({"type": "step", "step": slim_step(step.as_dict())})
 
     def _discard(self, step: Step) -> None:
         self._steps.pop(step.id, None)

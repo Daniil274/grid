@@ -8,6 +8,10 @@ from web_chat.views import LAZY_FIELD_BYTES
 async def test_a_chat_answers_304_until_it_changes_and_steps_load_on_demand(factory):
     context_id = await three_turns(factory)
     manager = factory.context_manager
+    # The lazy step's big field is not in the list view any more, so the answer
+    # itself must be well over the gzip minimum (2048 bytes) for the transport
+    # the test is about: a long answer of the assistant's own does that.
+    manager.append_message_to(context_id, "assistant", "z" * 4000, {"type": "assistant_message"})
     big = "y" * (LAZY_FIELD_BYTES * 4)
     manager.update_last_message_metadata(
         context_id,

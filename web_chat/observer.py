@@ -31,6 +31,7 @@ from web_chat.trace import (
     TraceRecorder,
     clip,
     context_refs,
+    redundant_with_payload,
     summarize,
 )
 
@@ -368,18 +369,23 @@ class WebStreamObserver:
         step = waiting.popleft() if waiting else None
         text = output if isinstance(output, str) else str(output if output is not None else "")
         blocked = is_policy_block(text)
-        failed = blocked or text.lstrip().startswith(("❌", "Error", "error:"))
         payload = normalize_payload(output, tool=name)
+        # A tool that reports a failure in its payload (MCP `isError`, or a
+        # memory tool's soft `{"error": ...}`) is an error even without a prefix.
+        failed = blocked or bool(payload.get("is_error")) or text.lstrip().startswith(("❌", "Error", "error:"))
         status = StepStatus.ERROR if failed else StepStatus.DONE
         if blocked:
             self._held[0] += 1
+        # The typed payload already carries this text: keep it once.
+        raw = output if isinstance(output, str) else ""
+        body = "" if redundant_with_payload(raw, payload) else summarize(output)
         if step is None:
             self._recorder.note(
-                StepKind.TOOL, tool_title(name, None) or name, tool=name, body=summarize(output),
+                StepKind.TOOL, tool_title(name, None) or name, tool=name, body=body,
                 result_payload=payload, status=status, parent_id=self._parent_id,
             )
             return
-        self._recorder.close(step, body=summarize(output), result_payload=payload, status=status)
+        self._recorder.close(step, body=body, result_payload=payload, status=status)
 
     # -- entry point -------------------------------------------------------
     def handle_event(
@@ -592,6 +598,9 @@ class WebStreamObserver:
             value, tool=tool_name,
             markdown=bool(step and step.kind is StepKind.AGENT) or tool_name in {"Agent", "WebSpider"}
         )
+        # The typed payload already carries this text: keep it once.
+        raw = value if isinstance(value, str) else ""
+        body = "" if redundant_with_payload(raw, result_payload) else output
         status = (
             StepStatus.ERROR
             if result_payload.get("is_error")
@@ -606,11 +615,11 @@ class WebStreamObserver:
                 or name
             )
             self._recorder.note(
-                StepKind.TOOL, title, tool=name, body=output,
+                StepKind.TOOL, title, tool=name, body=body,
                 result_payload=result_payload, status=status, parent_id=self._parent_id
             )
             return
-        self._recorder.close(step, body=output, result_payload=result_payload, status=status)
+        self._recorder.close(step, body=body, result_payload=result_payload, status=status)
 
     def _on_handoff_requested(self, item: Any, agent_key: Optional[str]) -> None:
         target = field_of(getattr(item, "raw_item", None), "name") or "agent"

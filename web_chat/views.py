@@ -6,7 +6,6 @@ route and the voice control describe things the same way.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Callable, Optional
 
@@ -15,7 +14,12 @@ from core.interruption import CONTINUATION_TYPE, interruption_of
 from core.tool_check import summarize
 from schemas.schemas import ImageContent
 from web_chat.systems import SystemRegistry
-from web_chat.trace import normalize_steps
+from web_chat.trace import (  # noqa: F401 - the lazy rule is shared with the live stream
+    LAZY_FIELD_BYTES,
+    LAZY_STEP_FIELDS,
+    normalize_steps,
+    slim_steps,
+)
 
 logger = logging.getLogger("grid.web_chat.views")
 
@@ -24,6 +28,35 @@ UNTITLED = "New chat"
 #: The metadata type of a message that carries context into a fresh chat
 #: (web_chat.projects_api.SEED_TYPE, restated here to keep views import-light).
 CONTEXT_SEED_TYPE = "context_seed"
+
+#: Conversation metadata the chat itself reads (see web_chat/js/chat.js) plus
+#: the fields the history and revision APIs need. Everything else in the
+#: record - queued payloads, checkpoints, whatever a tool left - stays server
+#: side: a conversation's ``metadata`` must not grow a second copy of its trace.
+CONVERSATION_METADATA_FIELDS = (
+    "title",
+    "system_key",
+    "agent_key",
+    "routed_system",
+    "routed_agent",
+    "workspace",
+    "project_id",
+    "project",
+    "created_by_web",
+    "branch_root",
+    "branch_slot",
+    "branch_parent",
+    "active_branch",
+    "migration",
+    "origin",
+)
+
+
+def project_metadata(metadata: Optional[dict]) -> dict[str, Any]:
+    """The conversation metadata the client may see, by explicit whitelist."""
+    if not metadata:
+        return {}
+    return {key: metadata[key] for key in CONVERSATION_METADATA_FIELDS if key in metadata}
 
 
 def conversation_title(view: dict[str, Any]) -> str:
@@ -37,47 +70,6 @@ def conversation_title(view: dict[str, Any]) -> str:
             text = " ".join(text.split())
             return text[:42] + ("..." if len(text) > 42 else "")
     return UNTITLED
-
-
-#: Step fields that hold what a call took and returned: shown only when the
-#: step is opened, so a long trace loads without them (``lazy``) and the
-#: chat fetches a step's whole record on demand.
-LAZY_STEP_FIELDS = ("input_payload", "result_payload", "body", "detail")
-#: A field this small stays in the trace: fetching it would cost more than it saves.
-LAZY_FIELD_BYTES = 2048
-
-
-def _size(value: Any) -> int:
-    if value is None:
-        return 0
-    if isinstance(value, str):
-        return len(value)
-    try:
-        return len(json.dumps(value, ensure_ascii=False))
-    except (TypeError, ValueError):
-        return len(str(value))
-
-
-def slim_steps(steps: Optional[list]) -> Optional[list]:
-    """*steps* without their large payloads; each step that lost one is ``lazy``."""
-    if not steps:
-        return steps
-    slim = []
-    for step in steps:
-        if not isinstance(step, dict):
-            slim.append(step)
-            continue
-        heavy = [name for name in LAZY_STEP_FIELDS if _size(step.get(name)) > LAZY_FIELD_BYTES]
-        if not heavy:
-            slim.append(step)
-            continue
-        light = {key: value for key, value in step.items() if key not in heavy}
-        # The agent row reads its task from ``detail``: keep the start of it.
-        if "detail" in heavy and isinstance(step.get("detail"), str):
-            light["detail"] = step["detail"][:400]
-        light["lazy"] = True
-        slim.append(light)
-    return slim
 
 
 def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[dict] = None) -> dict[str, Any]:

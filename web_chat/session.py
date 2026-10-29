@@ -51,14 +51,27 @@ from web_chat.observer import WebStreamObserver
 from web_chat.plan_board import PlanBoard
 from web_chat.spend import TurnSpend, tracking
 from web_chat.systems import Resolution
-from web_chat.trace import StepKind, TraceRecorder, is_tool_result
+from web_chat.trace import StepKind, TraceRecorder, is_tool_result, slim_step
 
 logger = logging.getLogger(__name__)
 
 #: Internal sentinel marking the end of a turn's event stream.
 _FINISHED = "_finished"
+#: An internal nudge that makes the consumer send its held text deltas.
+_TICK = "_tick"
 #: Conversation metadata: turn id -> the workspace checkpoint taken before it.
 CHECKPOINTS_KEY = "checkpoints"
+#: Text deltas are glued on the server: a frame leaves at most this often and
+#: once this many characters are waiting. A 9,000-delta answer becomes tens of
+#: frames, not thousands, and a reloaded page replays the whole text at once.
+DELTA_FLUSH_MS = 60
+DELTA_FLUSH_BYTES = 1536
+#: One-shot frames kept for a socket that attaches later (routing, tool issues,
+#: images, ...). Pin their bounded number: a busy turn cannot grow without end.
+MAX_REPLAY_NOTES = 100
+_DELTA_TYPES = frozenset({"token", "reasoning"})
+#: Frames rebuilt from accumulated state instead of being kept one by one.
+_STATEFUL_TYPES = frozenset({"token", "reasoning", "step", "step_removed", "answer_reset", "final_output", "done"})
 
 
 def revision_error_event(exc: revisions.ContextCompatibilityError) -> dict[str, Any]:
@@ -112,7 +125,13 @@ class AgentTurn:
         self._answer_tail = ""  # the agent's latest words, for delivery decisions
         self.run_id = uuid.uuid4().hex
         self._started = time.monotonic()
-        self._log: list[dict[str, Any]] = []
+        #: The answer so far, rebuilt as one ``token`` frame on attach.
+        self._answer = ""
+        #: One-shot frames a late socket still needs (routing, issues, images, ...).
+        self._notes: list[dict[str, Any]] = []
+        #: Text deltas not sent yet, in arrival order.
+        self._pending: list[dict[str, Any]] = []
+        self._pending_bytes = 0
         self._subscribers: set["ChatSession"] = {session}
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._recorder = TraceRecorder(self._queue.put_nowait, on_usage=self._check_token_budget)
@@ -161,6 +180,10 @@ class AgentTurn:
         """Titles of the turn's latest timeline steps."""
         return [step.get("title", "") for step in self._recorder.snapshot()][-8:]
 
+    def step_record(self, step_id: str) -> Optional[dict[str, Any]]:
+        """A step of this turn with its payloads, for a lazy step opened live."""
+        return self._recorder.step_record(step_id)
+
     def steer(self, item: dict[str, Any], queue: "MessageQueue") -> bool:
         """Hand a queued message to the running agent for its next step.
 
@@ -200,14 +223,16 @@ class AgentTurn:
         return int((time.monotonic() - self._started) * 1000)
 
     async def attach(self, session: "ChatSession") -> None:
-        """Replay the turn so far to *session*, then stream to it live.
+        """Replay the turn's state to *session*, then stream to it live.
 
-        Snapshotting the log and subscribing happen with no await in between,
-        so every event lands exactly once: in the replay or in the live stream.
-        The session's send lock keeps live events queued behind the replay.
+        The replay is a snapshot - the steps as they are now, the answer so
+        far, the few one-shot notices - not the frame journal: a page that
+        comes back mid-turn pays for what is on screen, not for every delta
+        that produced it. Snapshotting and subscribing happen with no await in
+        between, so every event lands exactly once: in the replay or live.
         """
         async with session.send_lock:
-            replay = list(self._log)
+            replay = self._snapshot_frames()
             self._subscribers.add(session)
             header = {
                 "type": "attached",
@@ -534,15 +559,103 @@ class AgentTurn:
 
     # -- consumer ----------------------------------------------------------
     async def _consume(self) -> None:
+        ticker = asyncio.create_task(self._ticks())
+        try:
+            while True:
+                event = await self._queue.get()
+                if event["type"] == _TICK:
+                    await self._flush_deltas()
+                    continue
+                if event["type"] == _FINISHED:
+                    await self._flush_deltas()
+                    return
+                if event["type"] in _DELTA_TYPES:
+                    self._buffer_delta(event)
+                    if self._pending_bytes >= DELTA_FLUSH_BYTES:
+                        await self._flush_deltas()
+                    continue
+                # A step or a notice is a boundary: the text before it goes first.
+                await self._flush_deltas()
+                await self._emit(event)
+        finally:
+            ticker.cancel()
+            with suppress(asyncio.CancelledError):
+                await ticker
+            # A turn stopped here - cancelled, out of budget, shut down - has
+            # already produced text the tabs have not seen: the queued deltas
+            # are taken into the buffer and the buffer is sent, before run()
+            # says "done". Losing that tail made a stopped answer appear cut.
+            self._drain_deltas()
+            await self._flush_deltas()
+
+    async def _ticks(self) -> None:
+        """Nudge the consumer every :data:`DELTA_FLUSH_MS`, so text flows while the stream is quiet."""
         while True:
-            event = await self._queue.get()
-            if event["type"] == _FINISHED:
+            await asyncio.sleep(DELTA_FLUSH_MS / 1000)
+            self._queue.put_nowait({"type": _TICK})
+
+    def _buffer_delta(self, event: dict[str, Any]) -> None:
+        """Hold a text fragment, merging it with the one before when they match."""
+        kind = event["type"]
+        text = str(event.get("delta") if kind == "reasoning" else event.get("content") or "")
+        if not text:
+            return
+        key = (kind, event.get("id"))
+        last = self._pending[-1] if self._pending else None
+        if last is not None and (last["type"], last.get("id")) == key:
+            field = "delta" if kind == "reasoning" else "content"
+            last[field] += text
+        else:
+            frame = {"type": kind, **({"id": event["id"]} if kind == "reasoning" else {}),
+                     ("delta" if kind == "reasoning" else "content"): text}
+            self._pending.append(frame)
+        self._pending_bytes += len(text)
+        if kind == "token":
+            self._answer += text
+
+    def _drain_deltas(self) -> None:
+        """Move the text still waiting in the queue into the buffer (the rest is
+        the recorder's business: its state is replayed, not its frames)."""
+        while True:
+            try:
+                event = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
                 return
-            await self._emit(event)
+            if event.get("type") in _DELTA_TYPES:
+                self._buffer_delta(event)
+
+    async def _flush_deltas(self) -> None:
+        """Send the held text fragments as one frame per run of same-purpose text.
+
+        Frame by frame, the one being sent leaving the buffer first: a flush
+        cancelled in the middle of a send neither sends a frame twice nor loses
+        the frames behind it - the flush in :meth:`_consume`'s finally has them.
+        """
+        while self._pending:
+            await self._emit(self._pending.pop(0))
+        self._pending_bytes = 0
+
+    def _snapshot_frames(self) -> list[dict[str, Any]]:
+        """What a socket attaching now needs: the state, not how it was reached."""
+        frames = [dict(note) for note in self._notes]
+        for step in self._recorder.snapshot():
+            frames.append({"type": "step", "step": slim_step(step)})
+        if self._answer:
+            frames.append({"type": "token", "content": self._answer})
+        return [{**frame, "run_id": self.run_id} for frame in frames]
 
     async def _emit(self, event: dict[str, Any]) -> None:
         frame = {**event, "run_id": self.run_id}
-        self._log.append(frame)
+        # What a late socket is rebuilt from: the answer and one-shot notices.
+        # Steps come from the recorder's current state; deltas are glued above.
+        if frame["type"] == "answer_reset":
+            self._answer = ""
+        elif frame["type"] == "final_output":
+            self._answer = str(frame.get("content") or "")
+        elif frame["type"] not in _STATEFUL_TYPES and frame["type"] != "token":
+            self._notes.append({key: value for key, value in event.items()})
+            if len(self._notes) > MAX_REPLAY_NOTES:
+                del self._notes[:-MAX_REPLAY_NOTES]
         for session in list(self._subscribers):
             try:
                 await session.send(frame)
