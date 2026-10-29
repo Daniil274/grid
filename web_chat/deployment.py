@@ -18,6 +18,7 @@ import io
 import logging
 from pathlib import Path
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
@@ -85,6 +86,8 @@ class Deployment:
         server; spaces with a workspace of their own ignore it."""
         self._price_stamp: Any = None
         self._price_book = PriceBook()
+        #: System files read for usage_config: path -> (mtime, models, providers).
+        self._usage_files: Dict[Path, Tuple[int, Dict[str, Any], Dict[str, Any]]] = {}
         self.requested_config_path = config_path
         self.routing_path = resolve_path(routing_path) if routing_path else None
         self.working_directory = working_directory
@@ -247,6 +250,60 @@ class Deployment:
                 seen.add(path)
                 files.append(ConfigFile(manifest.key, manifest.name, "system", path))
         return files
+
+    def usage_config(self) -> Any:
+        """The models and providers of the catalog and of every system, as one config.
+
+        The Usage page shows a subscription when a model the user may use runs
+        on it (web_chat.usage_snapshot). Those models live in the systems'
+        configs - a catalog names only its router and policy models - so they
+        are gathered here: the catalog first, then each system file; the first
+        file that names a model or a provider wins. Only the fields the page
+        reads are kept, and a file is re-read only after it changes.
+        """
+        base = (self.catalog or self.config).config
+        models: Dict[str, Any] = dict(getattr(base, "models", {}) or {})
+        providers: Dict[str, Any] = dict(getattr(base, "providers", {}) or {})
+        for file in self.config_files():
+            if file.kind != "system":
+                continue
+            found_models, found_providers = self._models_and_providers(file.path)
+            for key, model in found_models.items():
+                models.setdefault(key, model)
+            for key, provider in found_providers.items():
+                providers.setdefault(key, provider)
+        return SimpleNamespace(models=models, providers=providers)
+
+    def _models_and_providers(self, path: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            return {}, {}
+        cached = self._usage_files.get(path)
+        if cached is not None and cached[0] == stamp:
+            return cached[1], cached[2]
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return {}, {}
+        models = {
+            str(key): SimpleNamespace(name=str(spec.get("name") or key), provider=spec.get("provider"))
+            for key, spec in (raw.get("models") or {}).items()
+            if isinstance(spec, dict)
+        }
+        providers = {
+            str(key): SimpleNamespace(
+                name=str(spec.get("name") or key),
+                auth=spec.get("auth") or "api_key",
+                base_url=spec.get("base_url") or "",
+                api_key_env=spec.get("api_key_env"),
+                claude_binary=spec.get("claude_binary"),
+            )
+            for key, spec in (raw.get("providers") or {}).items()
+            if isinstance(spec, dict)
+        }
+        self._usage_files[path] = (stamp, models, providers)
+        return models, providers
 
     def _system_paths(self) -> Dict[str, Path]:
         """The config file of each system, by key; one system without a catalog."""

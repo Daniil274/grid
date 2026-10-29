@@ -3,12 +3,15 @@ import { h } from "../lib/dom.js";
 import { createThemeToggle } from "../ui/theme.js";
 import { number, dateRange, modelKey, csv } from "./data.js";
 import { timeline, distribution } from "./charts.js";
+import { renderQuotas } from "./quotas.js";
 
 const $ = (id) => document.getElementById(id);
 createThemeToggle($("theme"));
 let report = null;
 let controller = null;
 let earliest = null;
+let quotas = null;
+let quotaBusy = null;
 function setDates() {
   if ($("period").value === "custom") return;
   const range = dateRange($("period").value, new Date(), earliest);
@@ -95,13 +98,36 @@ async function load() {
   }
 }
 $("filters").addEventListener("submit", event => { event.preventDefault(); void load(); });
+async function loadQuotas() {
+  try {
+    quotas = await api.usageSnapshot();
+    renderQuotas($("quotas"), quotas, { onRefresh: refreshSource, busy: quotaBusy });
+  } catch (error) {
+    $("quotas").replaceChildren(h("p", { class: "usageEmpty" }, `Cannot read subscriptions and keys: ${error.message}`));
+  }
+}
+async function refreshSource(source) {
+  const action = source.action;
+  if (!action) return;
+  if (action.costs_quota && !window.confirm(action.confirm || "This spends a little of the plan's quota. Continue?")) return;
+  quotaBusy = source.id;
+  renderQuotas($("quotas"), quotas, { onRefresh: refreshSource, busy: quotaBusy });
+  try {
+    quotas = await api.refreshUsage(action.source, Boolean(action.costs_quota));
+    renderQuotas($("quotas"), quotas, { onRefresh: refreshSource });
+  } catch (error) {
+    renderQuotas($("quotas"), quotas, { onRefresh: refreshSource, error: error.message });
+  } finally {
+    quotaBusy = null;
+  }
+}
 $("period").addEventListener("change", () => { setDates(); if ($("period").value !== "custom") void load(); });
 for (const id of ["start", "end"]) $(id).addEventListener("change", () => { $("period").value = "custom"; });
 for (const id of ["model", "bucket", "scope"]) $(id).addEventListener("change", () => {
   if (id === "scope") { earliest = null; $("model").value = ""; }
   void load();
 });
-$("refresh").addEventListener("click", () => { setDates(); void load(); });
+$("refresh").addEventListener("click", () => { setDates(); void load(); void loadQuotas(); });
 $("clear-model").addEventListener("click", () => { $("model").value = ""; void load(); });
 $("sort").addEventListener("change", () => { if (report) table(); });
 function download(kind) {
@@ -122,5 +148,6 @@ window.addEventListener("resize", () => {
   cancelAnimationFrame(resizeFrame);
   resizeFrame = requestAnimationFrame(() => { if (report) timeline($("timeline"), report.series, report.bucket, $("timeline-detail")); });
 });
-setInterval(() => { if ($("auto-refresh").checked && !document.hidden && !$("refresh").disabled) { setDates(); void load(); } }, 30000);
+setInterval(() => { if ($("auto-refresh").checked && !document.hidden && !$("refresh").disabled) { setDates(); void load(); void loadQuotas(); } }, 30000);
 void load();
+void loadQuotas();
