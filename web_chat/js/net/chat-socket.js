@@ -7,7 +7,7 @@
  * caller registers, so no component has to parse raw frames.
  */
 
-/** @typedef {"token"|"step"|"step_removed"|"reasoning"|"routed"|"tool_issues"|"final_output"|"answer_reset"|"attached"|"stopping"|"interrupted"|"image"|"delivery"|"queue"|"steered"|"error"|"busy"|"done"|"policy_filter"|"policy_review"} ChatEventType */
+/** @typedef {"token"|"step"|"step_removed"|"reasoning"|"routed"|"tool_issues"|"final_output"|"answer_reset"|"attached"|"stopping"|"interrupted"|"image"|"delivery"|"queue"|"steered"|"revision_notice"|"error"|"busy"|"done"|"policy_filter"|"policy_review"} ChatEventType */
 
 export class ChatConnection {
   /**

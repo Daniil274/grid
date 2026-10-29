@@ -22,6 +22,13 @@ const RESUME_RETRIES = 2;
 /** Base delay between those retries; the second waits twice as long. */
 const RESUME_RETRY_MS = 300;
 
+/**
+ * Revision frames carry a machine code (`revision.*`); the text is only for
+ * people and is never what the client decides on.
+ */
+const REVISION_CODE_PREFIX = "revision.";
+const isRevisionCode = (code) => typeof code === "string" && code.startsWith(REVISION_CODE_PREFIX);
+
 export class ChatController {
   /**
    * @param {object} deps
@@ -830,10 +837,24 @@ export class ChatController {
         turn.spoken = false;
         message.setInterrupted(interruption, { summary: content, resumable: interruption.resumable });
       })
-      .on("error", ({ content }) => {
+      // The conversation was pinned to another Grid version, system
+      // configuration or runtime and has been re-pinned to this one: the turn
+      // goes on, so this is a quiet line, not an error. Keyed on the typed
+      // code (`revision.*`), never on the sentence.
+      .on("revision_notice", ({ code, content }) => {
+        message.addRevisionNotice({ code, content });
+      })
+      .on("error", ({ content, code }) => {
         turn.failed = true;
         turn.spoken = false;
-        message.setFailed(content);
+        // A real incompatibility keeps the turn refused; the client can still
+        // carry the conversation into a new chat on the current configuration.
+        if (isRevisionCode(code)) {
+          message.setRevisionRefusal(content, {
+            code,
+            onContinue: () => void this.continueInNewChat("tail"),
+          });
+        } else message.setFailed(content);
       })
       .on("busy", ({ content }) => {
         turn.failed = true;

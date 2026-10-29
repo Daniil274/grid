@@ -182,6 +182,12 @@ export function createMessage({
   // kept in the text the agent reads, and put back when the text is edited.
   const ownWords = () => (role === "user" ? splitFiles(text) : { text, files: [] });
   let interruptBox = null;
+  // Revision notices, one line per machine code: a re-pin is not an error.
+  const revisionNotes = new Map();
+  // Under the author line, above the trace and the answer: a notice describes
+  // the request, not the answer it produced.
+  const revisionLines = h("div.msg__revisions", { hidden: true });
+  let refusalBox = null;
   let resumable = false;
   let storedId = messageId;
   let editing = false;
@@ -289,6 +295,7 @@ export function createMessage({
     "article.msg",
     { id, dataset: { role } },
     h("div.msg__meta", {}, authorNode, timestamp ? h("span.msg__time", { text: clock(timestamp) }) : null, switcher),
+    revisionLines,
     reasoning?.el,
     reasoning?.planEl,
     isAssistant ? null : gallery,
@@ -511,6 +518,65 @@ export function createMessage({
     retireContinue() {
       resumable = false;
       interruptBox?.querySelector(".msg__continue")?.remove();
+    },
+
+    /**
+     * The conversation was pinned to another Grid version or system
+     * configuration and this turn continues on the current one: one quiet
+     * line, not an error - nothing failed and the answer follows.
+     * `code` is the machine reason (`revision.*`); the text is only for people.
+     */
+    addRevisionNotice({ code = null, content = "" } = {}) {
+      if (!content) return;
+      const key = code ?? content;
+      const known = revisionNotes.get(key);
+      if (known) {
+        known.textContent = content;
+        return;
+      }
+      const line = h("p.msg__notice.msg__revision", {
+        text: content,
+        title: code ?? "",
+        dataset: { code: code ?? "" },
+      });
+      revisionNotes.set(key, line);
+      revisionLines.append(line);
+      revisionLines.hidden = false;
+    },
+
+    /**
+     * A turn this runtime cannot continue: the reason, and - when the caller
+     * knows a way out - the button that carries the conversation into a new
+     * chat on the current configuration.
+     * @param {string} reason the server's sentence
+     * @param {{code?: ?string, onContinue?: ?Function}} [options]
+     */
+    setRevisionRefusal(reason, { code = null, onContinue = null } = {}) {
+      root.classList.add("is-failed");
+      root.classList.remove("is-waiting");
+      body.querySelector(".typing")?.remove();
+      const action = onContinue
+        ? h(
+            "button.btn.btn--primary.msg__continue",
+            {
+              type: "button",
+              title: "Carry this conversation's history into a new chat on the current configuration",
+              on: { click: () => onContinue() },
+            },
+            icon(ICONS.resume, { size: 13 }),
+            "Continue in new configuration",
+          )
+        : null;
+      refusalBox?.remove();
+      refusalBox = h(
+        "div.msg__error",
+        { role: "alert", dataset: { code: code ?? "" } },
+        h("strong", { text: "Cannot continue here" }),
+        h("p", { text: reason }),
+        action,
+      );
+      if (text) body.append(refusalBox);
+      else body.replaceChildren(refusalBox);
     },
 
     /** Offer "Continue in new chat" - the transcript shows it on the last answer. */
