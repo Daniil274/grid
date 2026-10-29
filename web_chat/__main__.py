@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import re
 import secrets
@@ -145,8 +146,13 @@ def main() -> None:
     from web_chat.deployment import Deployment
     from web_chat.server import create_app
 
-    # Match CLI credentials without requiring a separate shell export.
-    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    # Match CLI credentials without requiring a separate shell export. A .env
+    # this process may not read (another owner, mode 600) is skipped: the
+    # server runs on the environment it was given, as the CLI does.
+    try:
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    except PermissionError as exc:
+        logging.getLogger("grid.web_chat").warning(".env is not readable, skipped: %s", exc)
 
     deployment = Deployment(
         config_path=args.config,
@@ -263,7 +269,11 @@ def single_user_options(deployment, args: argparse.Namespace) -> dict:
         "submissions_dir": records / "system_submissions",
         "restart_path": records / "server_restart.json",
         "lazy_path": records / "lazy.db",
+        "telegram_path": records / "telegram.db",
         "identify": single_user(args.user_id),
+        # The Usage page may show and read the machine's Claude Code login here,
+        # because this is the explicit local, single-user server (see below).
+        "local_cli_login": True,
         "action_review_token": action_review_token,
         "warm_user": args.user_id,
         # Beside the single user's own records (web_chat.space.single_user_records).
@@ -368,6 +378,10 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
         "devices_dir": data_dir / "devices",
         "browser_machines": args.browser_machines,
         "lazy_path": data_dir / "lazy.db",
+        "telegram_path": data_dir / "telegram.db",
+        # The Usage page shows the machine's Claude Code login to admins only
+        # (web_chat.usage_snapshot): here, as for models, it is an admin's alone.
+        "local_cli_login": True,
     }
 
 

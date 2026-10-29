@@ -57,7 +57,15 @@ from core import migration
 from web_chat.trace import is_tool_result
 from core.checkpoints import CheckpointError
 from web_chat.session import CHECKPOINTS_KEY
-from web_chat.views import UNTITLED, agent_options, conversation_title, serialize_message, slim_steps, system_options
+from web_chat.views import (
+    UNTITLED,
+    agent_options,
+    conversation_title,
+    project_metadata,
+    serialize_message,
+    slim_steps,
+    system_options,
+)
 
 logger = logging.getLogger("grid.web_chat.server")
 ROOT = Path(__file__).resolve().parent
@@ -145,6 +153,9 @@ class WebChatServer:
         devices_dir: Optional[Path] = None,
         browser_machines: int = 0,
         lazy_path: Optional[Path] = None,
+        telegram_path: Optional[Path] = None,
+        snapshot: Optional[Any] = None,
+        local_cli_login: bool = False,
     ) -> None:
         """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
         accounts; without it ``identify`` decides, by default the single local
@@ -160,7 +171,10 @@ class WebChatServer:
         keeps the devices users pair (core.devices.pairing); ``browser_machines``
         is how many browser machines the server runs at once, 0 for none
         (core.devices.machines). ``lazy_path`` is the store of the lazy agents
-        (web_chat.lazy); None runs none."""
+        (web_chat.lazy); None runs none. ``local_cli_login``: this is the local,
+        single-user server, so the Claude Code CLI login of the machine is that
+        one user's own and the Usage page may show and read it; a server with
+        accounts leaves it False and never offers the machine login."""
         if auth is not None and identify is not None:
             raise ValueError("Pass auth or identify, not both")
         self.deployment = deployment
@@ -175,6 +189,17 @@ class WebChatServer:
         from web_chat.usage import UsageStore
 
         self.usage = usage if usage is not None else UsageStore()
+        from web_chat.usage_snapshot import UsageSnapshot
+
+        # One picture of subscriptions and keys, shared by the Usage page and lazy agents.
+        self.usage_snapshot = snapshot if snapshot is not None else UsageSnapshot(
+            lambda: deployment.plans,
+            # Every system's models and providers: the catalog names only its router.
+            getattr(deployment, "usage_config", None) or (lambda: (deployment.catalog or deployment.config).config),
+            vault=vault,
+            spent_micro=self.usage.spent_micro,
+            local_cli_login=lambda: local_cli_login,
+        )
         self._mutations = 0
         from web_chat.restart import ServerRestart
 
@@ -305,13 +330,49 @@ class WebChatServer:
         )
         # Lazy agents: results by a deadline on a small share of a subscription.
         self.lazy = None
+        self.digest = None
+        self.telegram = None
         if lazy_path is not None:
             from core.lazy.store import LazyStore
             from web_chat.lazy.http import register_lazy_routes
             from web_chat.lazy.service import LazyAgents
 
-            self.lazy = LazyAgents(LazyStore(lazy_path), spaces, usage=self.usage)
+            self.lazy = LazyAgents(
+                LazyStore(lazy_path), spaces, usage=self.usage, snapshot=self.usage_snapshot
+            )
             register_lazy_routes(api, self.current_user, self.current_space, self.lazy)
+            from web_chat.digest import DailyDigest, DigestStore, register_digest_routes
+
+            self.digest = DailyDigest(
+                DigestStore(lazy_path.with_name("daily-digest.db")), spaces, allowed=may_resume,
+            )
+            register_digest_routes(api, self.current_user, self.digest)
+        # The Telegram channel: off unless a bot token says on - the one in the
+        # environment, or the one an admin sealed in the vault from the web
+        # interface. The manager starts and stops it without a restart; its
+        # routes are always there, and say the channel is off when it is.
+        if telegram_path is not None:
+            from web_chat.telegram import TelegramManager
+
+            def telegram_voice() -> Any:
+                from web_chat.voice import VoiceService
+
+                return VoiceService(self.deployment)
+
+            self.telegram = TelegramManager(
+                telegram_path, spaces, vault=vault, allowed=may_resume, voice_factory=telegram_voice
+            )
+        else:
+            self.telegram = None
+        from web_chat.telegram.http import (
+            register_telegram_admin_routes,
+            register_telegram_page,
+            register_telegram_routes,
+        )
+
+        register_telegram_routes(api, self.current_user, self.telegram)
+        register_telegram_admin_routes(api, admins_only(self.current_user), self.telegram)
+        register_telegram_page(self.app, self.current_user, self.telegram)
         if auth is not None:
             auth.register_routes(self.app, guard=self._guard, current_user=self.current_user)
         else:
@@ -371,8 +432,16 @@ class WebChatServer:
             await self.restart.recover()
             if self.lazy is not None:
                 await self.lazy.start()
+            if self.digest is not None:
+                await self.digest.start()
+            if self.telegram is not None:
+                await self.telegram.start()
             yield
         finally:
+            if self.telegram is not None:
+                await self.telegram.close()
+            if self.digest is not None:
+                await self.digest.close()
             if self.lazy is not None:
                 await self.lazy.close()
             if self.machines is not None:
@@ -591,6 +660,25 @@ class WebChatServer:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return JSONResponse({**report, "scope": scope, "can_view_all": user.is_admin}, headers={"Cache-Control": "no-store"})
+
+        @api.get("/api/usage/snapshot")
+        async def usage_snapshot(user: User = Depends(current_user)) -> JSONResponse:
+            # Subscriptions, keys and the plan's own limits: opening the page reads the
+            # free sources that are older than their TTL, so it never shows stale numbers
+            # for a whole visit. Paid reads stay behind the explicit button.
+            return JSONResponse(await self.usage_snapshot.snapshot_live(user), headers={"Cache-Control": "no-store"})
+
+        @api.post("/api/usage/refresh")
+        async def refresh_usage(body: dict, user: User = Depends(current_user)) -> JSONResponse:
+            from web_chat.usage_snapshot import SnapshotError
+
+            try:
+                state = await self.usage_snapshot.refresh(
+                    user, str(body.get("source") or ""), confirm=bool(body.get("confirm"))
+                )
+            except SnapshotError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            return JSONResponse(state, headers={"Cache-Control": "no-store"})
 
         @api.get("/api/server/status")
         async def server_status() -> dict:
@@ -1061,7 +1149,9 @@ class WebChatServer:
                 "messages": messages,
                 # Messages waiting for their turn (web_chat.delivery).
                 "pending": MessageQueue(manager, context_id).public(),
-                "metadata": view["metadata"],
+                # A whitelist, not the whole record: checkpoints and anything a
+                # tool left in the metadata stay server side.
+                "metadata": project_metadata(view["metadata"]),
                 "active_turn": active_turn,
                 # What this conversation is pinned to, when the manager keeps
                 # revisions: read-only, secret-free, and absent for legacy chats.
@@ -1088,6 +1178,14 @@ class WebChatServer:
                 for step in serialize_message(msg)["trace"] or []:
                     if isinstance(step, dict) and step.get("id") == step_id:
                         return JSONResponse(step)
+            # A turn still running has not stored its trace yet: its recorder is
+            # the source, so a live lazy step opens exactly like a stored one.
+            turns = getattr(space, "turns", None)
+            active = turns.get(context_id) if turns is not None else None
+            if active is not None:
+                step = active[0].step_record(step_id)
+                if step is not None:
+                    return JSONResponse(step)
             raise HTTPException(status_code=404, detail="Step not found")
 
         # The system configs are shared by every user: only admins see or edit them.

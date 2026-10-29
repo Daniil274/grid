@@ -363,8 +363,9 @@ class UserSpace:
 
         ``local_cli_login``: this space is the explicit local, single-user
         server, so the machine's Claude Code CLI login is that one user's own
-        credential (web_chat.entitlements). A server with accounts leaves it
-        False and refuses the Claude provider.
+        credential (web_chat.entitlements). On a server with accounts it is
+        False, and the Claude provider is an admin's alone: the operator runs
+        and debugs it there before it is opened to every user.
 
         ``chat_spaces``: every new chat works in a space of its own, beside its
         project's and the user's (see the module docs). Needs a layout with
@@ -431,7 +432,8 @@ class UserSpace:
                 entitlement,
                 self.deployment.plans,
                 own,
-                local_cli_login=self.local_cli_login,
+                # The machine's CLI login: the local user's, or else an admin's.
+                local_cli_login=self.local_cli_login or bool(self.admin),
             )
             if entitlement is not None
             else None
