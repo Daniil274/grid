@@ -87,11 +87,17 @@ class Task:
     size: str = "M"
     system: Optional[str] = None
     agent: Optional[str] = None
+    #: The subscription the task spends - its agent's - when it is not the
+    #: settings' own; None spends the settings' one (web_chat.lazy.service).
+    account: Optional[str] = None
     status: str = "active"
     #: "Do it now": the task goes first and may run in the user's hours - never over budget.
     run_now: bool = False
     #: Weekly points this task may use in all, beyond the pool's share; None for no cap.
     cap: Optional[float] = None
+    #: Seconds between rounds: a task that is done sets up its next round with
+    #: fresh steps, due this long after; None runs once.
+    repeat: Optional[float] = None
     conversation_id: Optional[str] = None
     #: No step starts before this: a refused or failed step backs off.
     retry_at: Optional[float] = None

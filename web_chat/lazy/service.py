@@ -5,7 +5,11 @@ Between steps nothing runs: the loop sleeps until the earliest planned step
 then plans again and starts that step if it is still due. Planning is
 arithmetic (core.lazy.planner); the only model calls are the steps' own.
 
-One step runs at a time per user. When it ends the service
+A task spends its agent's subscription. The user's tasks form one pool per
+subscription - the settings' own, and one for each other subscription their
+agents run on - each planned on its own windows. One step runs at a time per
+pool, so a ChatGPT task and a Claude Code task go side by side. When a step
+ends the service
 
 - writes what it took to the ledger: measured from the provider's readings
   before and after it when they are fresh, else estimated from its tokens -
@@ -14,6 +18,9 @@ One step runs at a time per user. When it ends the service
   failed verification adds a fix and a second verification;
 - or, for a step stopped short, keeps it pending to continue later, and backs
   off one that could not start.
+
+A task done with a ``repeat`` sets up its next round: the same work with
+fresh steps and a new chat, due that long after the last deadline.
 
 The provider's readings also teach the user's own rates (core.lazy.forecast):
 use between two readings that the pool's runs do not explain is the user's.
@@ -36,7 +43,7 @@ from core.lazy.store import LazyStore
 from core.lazy.windows import DAY, HOUR, WINDOWS
 from core.quota_telemetry import CLAUDE_CODE, QuotaReading, QuotaTelemetry, telemetry
 from web_chat.lazy.accounts import (
-    LABELS, agent_choice, agent_choices, estimated_reading, pool_key, reports_windows,
+    CHATGPT, LABELS, agent_choice, agent_choices, estimated_reading, pool_key, reports_windows,
 )
 from web_chat.lazy.runner import StepOutcome, StepRunner
 
@@ -77,6 +84,7 @@ class LazyAgents:
         usage: Any = None,
         quota: Optional[QuotaTelemetry] = None,
         runner: Optional[Any] = None,
+        snapshot: Optional[Any] = None,
         clock: Callable[[], float] = time.time,
         tick: float = TICK,
     ) -> None:
@@ -85,9 +93,13 @@ class LazyAgents:
         self.usage = usage
         self.quota = quota or telemetry()
         self.runner = runner or StepRunner(spaces, clock=clock)
+        #: The server's one picture of subscriptions (web_chat.usage_snapshot); its
+        #: ChatGPT reading replaces the token estimate as soon as one is fetched.
+        self.snapshot = snapshot
         self.clock = clock
         self.tick = tick
-        self._running: Dict[str, Running] = {}
+        #: The step running in each pool: (user, subscription) -> its run.
+        self._running: Dict[Tuple[str, str], Running] = {}
         #: Stops the user asked for, by task: read by the running step's watcher.
         self._stops: Dict[str, str] = {}
         self._learned: Dict[Tuple[str, str], Tuple[float, float, Optional[float]]] = {}
@@ -154,18 +166,39 @@ class LazyAgents:
         now = self.clock()
         delay = self.tick
         for user_id in self.store.users():
-            if user_id in self._running:
-                continue
             settings = self.store.settings(user_id)
-            current = self.plan_for(user_id, settings, offer=False)
-            upcoming = current.next_placement()
-            if upcoming is None:
-                continue
-            if upcoming.start <= now + 1.0:
-                self._launch(user_id, upcoming.task_id, upcoming.step_id, settings)
-            else:
-                delay = min(delay, upcoming.start - now)
+            for account, tasks in self.pools(settings, self.store.tasks(user_id, finished=False)).items():
+                if not tasks or (user_id, account) in self._running:
+                    continue
+                pool = self.pool_settings(settings, account)
+                current = self.plan_for(user_id, pool, tasks=tasks, offer=False)
+                upcoming = current.next_placement()
+                if upcoming is None:
+                    continue
+                if upcoming.start <= now + 1.0:
+                    await self._read_reading(user_id, pool)
+                    self._launch(user_id, upcoming.task_id, upcoming.step_id, pool)
+                else:
+                    delay = min(delay, upcoming.start - now)
         return max(1.0, delay)
+
+    async def _read_reading(self, user_id: str, settings: Settings) -> None:
+        """A ChatGPT pool plans on the plan's own windows: read them when they are due."""
+        if self.snapshot is None or settings.account != CHATGPT:
+            return
+        ensure = getattr(self.snapshot, "ensure_reading", None)
+        if ensure is not None:
+            with suppress(Exception):  # a failed read plans on the estimate, as before
+                await ensure(user_id, CHATGPT)
+
+    async def ensure_fresh(self, user: Any) -> None:
+        """Before the page shows a picture, read the free sources this user may see."""
+        if self.snapshot is None:
+            return
+        refresh = getattr(self.snapshot, "refresh_free", None)
+        if refresh is not None:
+            with suppress(Exception):  # the page still shows cached numbers and their age
+                await refresh(user)
 
     # -- the picture ---------------------------------------------------------------------
     def situation(self, user_id: str, settings: Settings) -> Situation:
@@ -174,11 +207,15 @@ class LazyAgents:
         if reports_windows(settings.account):
             reading = self.quota.latest(CLAUDE_CODE) or self.store.latest_reading(CLAUDE_CODE)
             estimate = False
+        elif self.snapshot is not None:
+            # The server's one picture answers for a ChatGPT pool; a pool of any
+            # other subscription keeps its token estimate until it reports windows.
+            reading, estimate = self.snapshot.reading_for(user_id, settings, self.usage, now)
         else:
             reading = estimated_reading(self.usage, user_id, settings, now)
             estimate = True
         reserved: Dict[str, float] = {}
-        running = self._running.get(user_id)
+        running = self._running.get((user_id, settings.account))
         if running is not None:
             task = self.store.task(user_id, running.task_id)
             step = task.step(running.step_id) if task else None
@@ -192,8 +229,34 @@ class LazyAgents:
     def calibration(self, account: str, user_id: str) -> Calibration:
         return self.store.calibration(pool_key(account, user_id))
 
+    # -- pools: one per subscription the user's tasks spend ------------------------------
+    @staticmethod
+    def pools(settings: Settings, tasks: List[Task]) -> Dict[str, List[Task]]:
+        """*tasks* by the subscription each spends, the settings' own first.
+
+        A task spends its agent's subscription (``Task.account``); one created
+        before tasks had their own, or on the settings' subscription, has none
+        and spends the settings' one. Each pool is planned on its own windows
+        and runs one step at a time, beside the others.
+        """
+        pools: Dict[str, List[Task]] = {settings.account: []}
+        for task in tasks:
+            pools.setdefault(task.account or settings.account, []).append(task)
+        return pools
+
+    @staticmethod
+    def pool_settings(settings: Settings, account: str) -> Settings:
+        """*settings* for the pool of *account*: the same hours, shares and pause."""
+        return settings if account == settings.account else replace(settings, account=account)
+
     def plan_for(self, user_id: str, settings: Settings, *, tasks: Optional[List[Task]] = None, offer: bool = True) -> Plan:
-        tasks = self.store.tasks(user_id, finished=False) if tasks is None else tasks
+        """The plan of the pool *settings* names; its tasks unless *tasks* are given."""
+        if tasks is None:
+            primary = self.store.settings(user_id).account
+            tasks = [
+                task for task in self.store.tasks(user_id, finished=False)
+                if (task.account or primary) == settings.account
+            ]
         return plan(
             tasks, settings, self.situation(user_id, settings), self.store.rates(user_id),
             self.calibration(settings.account, user_id), offer=offer,
@@ -215,13 +278,62 @@ class LazyAgents:
     def state(self, user_id: str, space: Any, *, timezone: Optional[str] = None) -> dict:
         """Everything the page shows: settings, the windows now, the plan, the tasks, the agents."""
         settings = self.settings_for(user_id, space, timezone)
-        situation = self.situation(user_id, settings)
         tasks = self.store.tasks(user_id)
-        current = plan(
-            [task for task in tasks if not task.finished], settings, situation,
-            self.store.rates(user_id), self.calibration(settings.account, user_id),
-        )
+        pictures = []
+        for account, pool_tasks in self.pools(settings, [task for task in tasks if not task.finished]).items():
+            pool = self.pool_settings(settings, account)
+            pool_situation = self.situation(user_id, pool)
+            pool_plan = plan(
+                pool_tasks, pool, pool_situation, self.store.rates(user_id), self.calibration(account, user_id),
+            )
+            pictures.append((pool, pool_situation, pool_plan))
+        _, situation, current = pictures[0]
         calibration = self.calibration(settings.account, user_id)
+        merged = current.to_dict()
+        for _, _, other in pictures[1:]:
+            extra = other.to_dict()
+            merged["placements"] = sorted([*merged["placements"], *extra["placements"]], key=lambda p: p.get("start") or 0)
+            merged["tasks"] = {**merged["tasks"], **extra["tasks"]}
+        running = next((run for (owner, _), run in self._running.items() if owner == user_id), None)
+        return {
+            "now": self.clock(),
+            "settings": settings.to_dict(),
+            "account": self._account_view(user_id, settings, situation),
+            "windows": self._windows_view(settings, situation, current),
+            # The other subscriptions the user's tasks spend, each with its own windows.
+            "pools": [
+                {"account": self._account_view(user_id, pool, pool_situation),
+                 "windows": self._windows_view(pool, pool_situation, pool_plan)}
+                for pool, pool_situation, pool_plan in pictures[1:]
+                if pool_plan.tasks
+            ],
+            "plan": merged,
+            # The user's hours over the chart, in their own zone: the page draws them as they are.
+            "my_hours": [list(span) for span in settings.routine.intervals(situation.now - HOUR, situation.now + CHART_SPAN)],
+            "tasks": [
+                self._task_view(task, self.calibration(task.account or settings.account, user_id))
+                for task in reversed(tasks)
+            ],
+            "running": {"task_id": running.task_id, "step_id": running.step_id, "started_at": running.started_at} if running else None,
+            "agents": [choice.to_dict() for choice in agent_choices(space)],
+            "sizes": {size: {kind: {"tokens": t, "minutes": m} for kind, (t, m) in kinds.items()} for size, kinds in SIZES.items()},
+        }
+
+    def _account_view(self, user_id: str, settings: Settings, situation: Situation) -> dict:
+        calibration = self.calibration(settings.account, user_id)
+        return {
+            "key": settings.account,
+            "label": LABELS.get(settings.account, settings.account),
+            "mode": situation.mode,
+            "observed_at": situation.observed_at,
+            "status": situation.status,
+            "overage_allowed": situation.overage_allowed,
+            "calibrated_runs": calibration.samples,
+            "learned_readings": self.store.rates(user_id).samples,
+        }
+
+    @staticmethod
+    def _windows_view(settings: Settings, situation: Situation, current: Plan) -> dict:
         windows = {}
         for name, spec in WINDOWS.items():
             now_window = situation.windows[name]
@@ -235,33 +347,12 @@ class LazyAgents:
                 "forecast": round(max(0.0, projected.get("user", now_window.user) - now_window.user), 2),
                 "room": projected.get("room", 0.0),
             }
-        running = self._running.get(user_id)
-        return {
-            "now": self.clock(),
-            "settings": settings.to_dict(),
-            "account": {
-                "key": settings.account,
-                "label": LABELS.get(settings.account, settings.account),
-                "mode": situation.mode,
-                "observed_at": situation.observed_at,
-                "status": situation.status,
-                "overage_allowed": situation.overage_allowed,
-                "calibrated_runs": calibration.samples,
-                "learned_readings": self.store.rates(user_id).samples,
-            },
-            "windows": windows,
-            "plan": current.to_dict(),
-            # The user's hours over the chart, in their own zone: the page draws them as they are.
-            "my_hours": [list(span) for span in settings.routine.intervals(situation.now - HOUR, situation.now + CHART_SPAN)],
-            "tasks": [self._task_view(task, calibration) for task in reversed(tasks)],
-            "running": {"task_id": running.task_id, "step_id": running.step_id, "started_at": running.started_at} if running else None,
-            "agents": [choice.to_dict() for choice in agent_choices(space)],
-            "sizes": {size: {kind: {"tokens": t, "minutes": m} for kind, (t, m) in kinds.items()} for size, kinds in SIZES.items()},
-        }
+        return windows
 
     @staticmethod
     def _task_view(task: Task, calibration: Calibration) -> dict:
         data = task.to_dict()
+        data["account_label"] = LABELS.get(task.account, task.account) if task.account else None
         for step, view in zip(task.steps, data["steps"]):
             view["title"] = step.title
             view["estimate"] = {name: round(points, 2) for name, points in calibration.cost(step.tokens).items()}
@@ -278,12 +369,8 @@ class LazyAgents:
         choice = agent_choice(space, system, agent)
         if choice.problem:
             raise LazyError(choice.problem)
-        if choice.account != settings.account:
-            raise LazyError(
-                f"{choice.label} runs on the {LABELS.get(choice.account or '', choice.account)}, "
-                f"but the lazy agents spend your {LABELS.get(settings.account, settings.account)}. "
-                "Pick another agent or switch the subscription in the settings."
-            )
+        if choice.account not in LABELS:
+            raise LazyError(f"{choice.label} does not run on a subscription lazy agents can spend.")
         size = payload.get("size") if payload.get("size") in SIZES else "M"
         task = Task(
             id=new_id("lazy"),
@@ -298,6 +385,9 @@ class LazyAgents:
             system=system,
             agent=agent,
             cap=_points(payload.get("cap")),
+            repeat=_repeat(payload.get("repeat_hours")),
+            # The agent's subscription; None when it is the settings' own.
+            account=None if choice.account == settings.account else choice.account,
             created_at=self.clock(),
             updated_at=self.clock(),
         )
@@ -318,7 +408,8 @@ class LazyAgents:
         """Where a task like this would land among the others - nothing is saved."""
         task = self.draft(user_id, space, payload)
         settings = self.store.settings(user_id)
-        tasks = self.store.tasks(user_id, finished=False)
+        settings = self.pool_settings(settings, task.account or settings.account)
+        tasks = self.pools(self.store.settings(user_id), self.store.tasks(user_id, finished=False)).get(settings.account, [])
         before = self.plan_for(user_id, settings, tasks=tasks, offer=False)
         after = self.plan_for(user_id, settings, tasks=[*tasks, task])
         calibration = self.calibration(settings.account, user_id)
@@ -347,8 +438,10 @@ class LazyAgents:
 
     def preview(self, user_id: str, task_id: str, changes: dict) -> dict:
         """What *changes* would do to this task's plan and to the others' - nothing is saved."""
-        settings = self.store.settings(user_id)
-        tasks = self.store.tasks(user_id, finished=False)
+        primary = self.store.settings(user_id)
+        current = self.store.task(user_id, task_id)
+        settings = self.pool_settings(primary, (current.account if current else None) or primary.account)
+        tasks = self.pools(primary, self.store.tasks(user_id, finished=False)).get(settings.account, [])
         before = self.plan_for(user_id, settings, tasks=tasks)
         trial_tasks, trial_settings = list(tasks), settings
         if "task" in changes or any(key in changes for key in EDITABLE):
@@ -425,6 +518,17 @@ class LazyAgents:
         settings = Settings.from_dict(merged)
         if settings.account not in LABELS:
             raise LazyError("Unknown subscription.")
+        if settings.account != current.account:
+            # A task without its own subscription spent the settings' one: it
+            # keeps spending that one, not the one picked now.
+            for task in self.store.tasks(user_id, finished=False):
+                if task.account is None:
+                    task.account = current.account
+                elif task.account == settings.account:
+                    task.account = None
+                else:
+                    continue
+                self.store.save_task(task)
         if settings.paused and not current.paused:
             for running in self._running.values():
                 if self.store.task(user_id, running.task_id) is not None:
@@ -434,8 +538,7 @@ class LazyAgents:
         return settings
 
     def _is_running(self, user_id: str, task_id: str) -> bool:
-        running = self._running.get(user_id)
-        return running is not None and running.task_id == task_id
+        return any(owner == user_id and run.task_id == task_id for (owner, _), run in self._running.items())
 
     # -- running a step -----------------------------------------------------------------
     def _launch(self, user_id: str, task_id: str, step_id: str, settings: Settings) -> None:
@@ -455,10 +558,11 @@ class LazyAgents:
         account = pool_key(settings.account, user_id)
         baseline = self.quota.latest(CLAUDE_CODE) if reports_windows(settings.account) else None
         job = asyncio.create_task(self._run(user_id, task, step, settings), name=f"lazy-{task_id}-{step_id}")
-        self._running[user_id] = Running(task_id, step_id, job, now, baseline, account)
+        key = (user_id, settings.account)
+        self._running[key] = Running(task_id, step_id, job, now, baseline, account)
 
         def finished(_job: asyncio.Task) -> None:
-            self._running.pop(user_id, None)
+            self._running.pop(key, None)
             self._stops.pop(task_id, None)
             self.wake()
 
@@ -497,7 +601,7 @@ class LazyAgents:
             return self._stops[task_id]
         if self.store.settings(user_id).paused:
             return "Lazy agents were paused"
-        running = self._running.get(user_id)
+        running = self._running.get((user_id, settings.account))
         if running is None or not reports_windows(settings.account):
             return None
         reading = self.quota.latest(CLAUDE_CODE)
@@ -506,12 +610,16 @@ class LazyAgents:
         if reading.status == "rejected":
             return "The subscription refused: its limit is reached"
         situation = self.situation(user_id, settings)
+        # Only a baseline read just before the start tells this run's use from
+        # the user's: an old one would book everything since it to the agents
+        # (the same rule measure() keeps).
+        fresh = running.baseline is not None and running.started_at - running.baseline.observed_at <= FRESH
         for name, spec in WINDOWS.items():
             window = reading.windows.get(name)
             if window is None:
                 continue
             allowance = settings.allowance(name)
-            before = running.baseline.windows.get(name) if running.baseline else None
+            before = running.baseline.windows.get(name) if fresh else None
             this_run = window.used - before.used if before is not None and before.resets_at == window.resets_at else 0.0
             if situation.windows[name].agents + max(0.0, this_run) > allowance.share + TOLERANCE:
                 return f"Reached the agents' share of the {spec.label.lower()}"
@@ -547,7 +655,7 @@ class LazyAgents:
 
     def finish(self, user_id: str, task_id: str, step_id: str, outcome: StepOutcome, settings: Settings) -> Optional[Task]:
         """Record a step's run and move its task on."""
-        running = self._running.get(user_id)
+        running = self._running.get((user_id, settings.account))
         mine = running is not None and running.task_id == task_id
         baseline = running.baseline if mine else None
         started_at = running.started_at if mine else outcome.started_at
@@ -596,9 +704,28 @@ class LazyAgents:
         if task.status == "active" and not task.open_steps:
             task.status = "done"
             task.note("Done", kind="done")
+            if task.repeat:
+                following = self._next_round(task, now)
+                self.store.save_task(following)
+                task.note(f"The next round is {following.id}", kind="info")
         task.updated_at = now
         self.store.save_task(task)
         return task
+
+    def _next_round(self, task: Task, now: float) -> Task:
+        """The round after a repeating *task*: the same work, fresh steps, a new chat."""
+        repeat = float(task.repeat or 0)
+        following = Task(
+            id=new_id("lazy"), user_id=task.user_id, title=task.title, brief=task.brief,
+            acceptance=task.acceptance, optional=task.optional,
+            deadline=max(now, task.deadline or now) + repeat, priority=task.priority, size=task.size,
+            system=task.system, agent=task.agent, account=task.account, cap=task.cap, repeat=task.repeat,
+            created_at=now, updated_at=now,
+        )
+        for index, kind in enumerate(kinds_for(following.optional), start=1):
+            following.steps.append(Step.make(kind, following.size, index, optional=kind == "extra"))
+        following.note(f"Next round of {task.id}; repeats every {_hours(repeat)}")
+        return following
 
     def _answered(self, task: Task, step: Step, answer: str) -> None:
         step.status = "done"
@@ -638,7 +765,7 @@ class LazyAgents:
             settings = self.store.settings(user_id)
             if pool_key(settings.account, user_id) != reading.account:
                 continue
-            if user_id in self._running:
+            if (user_id, settings.account) in self._running:
                 continue  # the step's own use would pass for the user's
             rates = self.store.rates(user_id)
             changed = False
@@ -674,6 +801,20 @@ def _deadline(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         raise LazyError("The deadline is not a moment in time.") from None
+
+
+def _repeat(hours: Any) -> Optional[float]:
+    """Seconds between rounds from hours; None (once) for nothing, zero or a bad value."""
+    try:
+        value = float(hours)
+    except (TypeError, ValueError):
+        return None
+    return value * HOUR if value >= 1 else None
+
+
+def _hours(seconds: float) -> str:
+    hours = seconds / HOUR
+    return f"{hours / 24:g} day(s)" if hours >= 24 and hours % 24 == 0 else f"{hours:g} h"
 
 
 def _points(value: Any) -> Optional[float]:

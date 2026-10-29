@@ -79,10 +79,18 @@ def last_answer(space: Any, context_id: str) -> str:
     return ""
 
 
-def ensure_conversation(space: Any, task: Task) -> str:
-    """The task's conversation, made on its first step (or again, if the user deleted it)."""
+#: How a refusal names a conversation pinned to another revision (core.revisions).
+REVISION_REFUSAL = "(revision."
+
+
+def ensure_conversation(space: Any, task: Task, *, fresh: bool = False) -> str:
+    """The task's conversation, made on its first step (or again, if the user deleted it).
+
+    *fresh* makes a new one even when the task has one: the old one cannot be
+    continued (see :meth:`StepRunner.run`).
+    """
     manager = space.context_manager()
-    if task.conversation_id and manager.has_context(task.conversation_id):
+    if not fresh and task.conversation_id and manager.has_context(task.conversation_id):
         return task.conversation_id
     context_id = manager.start_new_context()
     space.update_conversation_metadata(
@@ -130,7 +138,20 @@ class StepRunner:
                 socket = HeadlessSocket()
                 session = ChatSession(space, socket, context_id)
                 message = None if resume else step_message(task, step)
-                if not await session._start(message, task.system, task.agent):
+                started_turn = await session._start(message, task.system, task.agent)
+                if not started_turn and REVISION_REFUSAL in socket.refusal():
+                    # The chat is pinned to a system config that changed since
+                    # (agents edit configs too): it can be read, not continued,
+                    # and every retry would be refused the same way. The step
+                    # goes on in a new chat, from the checkpoint its message
+                    # carries; the old chat stays as it was.
+                    logger.info("Lazy task %s continues in a new chat: %s", task.id, socket.refusal())
+                    context_id = ensure_conversation(space, task, fresh=True)
+                    on_conversation(context_id)
+                    socket = HeadlessSocket()
+                    session = ChatSession(space, socket, context_id)
+                    started_turn = await session._start(step_message(task, step), task.system, task.agent)
+                if not started_turn:
                     return StepOutcome(
                         "refused", started, self._clock(),
                         reason=socket.refusal() or "The turn did not start", conversation_id=context_id,

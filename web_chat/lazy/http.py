@@ -38,6 +38,9 @@ def register_lazy_routes(api: APIRouter, current_user: Callable, current_space: 
 
     @api.get("/api/lazy")
     async def lazy_state(tz: Optional[str] = None, user: Any = Depends(current_user), space: Any = Depends(current_space)) -> JSONResponse:
+        # The page plans on current windows: read the free sources this user may see
+        # when they are older than their TTL; a failure leaves the estimate in place.
+        await lazy.ensure_fresh(user)
         return state(user, space, tz)
 
     @api.post("/api/lazy/tasks")

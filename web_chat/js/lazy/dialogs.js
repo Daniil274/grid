@@ -99,7 +99,12 @@ function othersSummary(state, others) {
 // -- a new task ---------------------------------------------------------------------------------
 export function openTaskDialog(state, act) {
   state.loadedAt ??= Date.now() / 1000;
-  const usable = state.agents.filter((choice) => choice.account === state.account.key && !choice.problem);
+  // Every subscription agent is usable: a task spends its own agent's subscription,
+  // planned in that subscription's pool. The settings' subscription comes first.
+  const usable = state.agents.filter((choice) => choice.account && !choice.problem)
+    .sort((a, b) => Number(b.account === state.account.key) - Number(a.account === state.account.key));
+  const accountLabel = (key) => (key === state.account.key ? state.account.label
+    : state.pools?.find((pool) => pool.account.key === key)?.account.label ?? key);
   const draft = {
     title: "", brief: "", acceptance: "", optional: "", deadline: null, size: "M", priority: "normal",
     system: usable[0]?.system ?? null, agent: usable[0]?.agent ?? null, cap: null,
@@ -131,12 +136,19 @@ export function openTaskDialog(state, act) {
   const agentSelect = h("select.control", {},
     state.agents.map((choice) => h("option", {
       value: `${choice.system}/${choice.agent}`,
-      disabled: choice.account !== state.account.key || !!choice.problem,
+      disabled: !choice.account || !!choice.problem,
       selected: choice.system === draft.system && choice.agent === draft.agent,
       title: choice.problem ?? "",
-    }, `${choice.label} · ${choice.system_label}${choice.problem ? " — unavailable" : choice.account !== state.account.key ? " — another subscription" : ""}`)));
+    }, `${choice.label} · ${choice.system_label}${choice.problem ? " — unavailable" : choice.account !== state.account.key ? ` · ${accountLabel(choice.account)}` : ""}`)));
+  const agentHint = h("span.field__hint");
+  const showAccount = () => {
+    const choice = state.agents.find((c) => c.system === draft.system && c.agent === draft.agent);
+    agentHint.textContent = choice ? `Runs on your ${accountLabel(choice.account)}.` : "No agent of yours runs on a subscription.";
+  };
+  showAccount();
   agentSelect.addEventListener("change", () => {
     [draft.system, draft.agent] = agentSelect.value.split("/");
+    showAccount();
     refresh();
   });
   const sizes = state.sizes;
@@ -155,7 +167,7 @@ export function openTaskDialog(state, act) {
           "Verification checks exactly this, and its budget is set aside up front."),
         field("Optional part", text("optional", "Charts, extra examples - first to go when time runs short"),
           "Kept as a step of its own, dropped first when the deadline is near."),
-        field("Agent", agentSelect, usable.length ? `Runs on your ${state.account.label}.` : `No agent of yours runs on the ${state.account.label}: switch it in the settings.`),
+        h("label.field", {}, h("span.field__label", { text: "Agent" }), agentSelect, agentHint),
         field("Deadline", deadlinePicker(state, null, (t) => { draft.deadline = t; refresh(); }),
           "Leave it open and the task runs whenever there is room."),
         h("div.field__pair", {},

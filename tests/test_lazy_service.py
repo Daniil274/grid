@@ -144,12 +144,13 @@ async def run_due(world):
 
 
 # -- creating ------------------------------------------------------------------------------
-def test_a_task_is_cut_into_steps_and_runs_on_the_pools_subscription(world):
+def test_a_task_is_cut_into_steps_and_runs_on_its_agents_subscription(world):
     task = new_task(world, optional="charts")
     assert [step.kind for step in task.steps] == ["scout", "work", "extra", "verify"]
     assert task.steps[2].optional
-    with pytest.raises(LazyError, match="ChatGPT plan"):
-        new_task(world, agent="chatter")
+    assert task.account is None  # the settings' own subscription
+    # An agent on another subscription gets a pool of its own instead of a refusal.
+    assert new_task(world, agent="chatter").account == "chatgpt"
     with pytest.raises(LazyError, match="pay-per-use"):
         new_task(world, agent="payg")
     with pytest.raises(LazyError, match="title"):
@@ -237,6 +238,20 @@ async def test_the_quota_stops_a_step_that_passes_the_agents_share(world):
     world.quota.publish(reading(20 + 11, 21, at=NOW + 1))  # the run took 11 of a 10-point share
     await asyncio.sleep(0.05)
     assert world.runner.stop_seen == "Reached the agents' share of the 5-hour window"
+    world.runner.hold.set()
+    await asyncio.gather(*(r.job for r in world.lazy._running.values()))
+
+
+async def test_an_old_reading_does_not_book_the_users_use_since_to_the_running_step(world):
+    # The last reading before the start is 40 minutes old; the user spent 30
+    # points since, in a session of their own. That is not the step's.
+    world.clock.now += 40 * 60  # the fixture's reading at NOW is now 40 minutes old
+    new_task(world)
+    world.runner.hold = asyncio.Event()
+    await world.lazy._tick()
+    world.quota.publish(reading(50, 22, at=world.clock.now + 1))
+    await asyncio.sleep(0.05)
+    assert world.runner.stop_seen is None
     world.runner.hold.set()
     await asyncio.gather(*(r.job for r in world.lazy._running.values()))
 
@@ -329,3 +344,55 @@ def test_the_routes_act_for_the_signed_in_user(world):
     assert paused["settings"]["paused"] is True
     assert client.post(f"/api/lazy/tasks/{task_id}/cancel").json()["tasks"][0]["status"] == "cancelled"
     assert client.delete(f"/api/lazy/tasks/{task_id}").json()["tasks"] == []
+
+
+# -- a pool per subscription ---------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_tasks_on_two_subscriptions_run_side_by_side_each_on_its_own_pool(world):
+    claude = new_task(world, title="On Claude")
+    chatgpt = new_task(world, title="On ChatGPT", agent="chatter")
+    await world.lazy._tick()
+    running = {account: run.task_id for (_, account), run in world.lazy._running.items()}
+    assert running == {"claude-code": claude.id, "chatgpt": chatgpt.id}
+    for run in list(world.lazy._running.values()):
+        await run.job
+    # Each run is booked to its own subscription's ledger (the host login is one, a plan each user's).
+    runs = {run.task_id: run.account for run in world.store.runs("claude-code", 0) + world.store.runs("chatgpt:u", 0)}
+    assert runs == {claude.id: "claude-code", chatgpt.id: "chatgpt:u"}
+
+
+def test_the_page_shows_the_other_pool_beside_the_settings_one(world):
+    new_task(world, title="On Claude")
+    other = new_task(world, title="On ChatGPT", agent="chatter")
+    state = world.lazy.state("u", world.space)
+    assert state["account"]["key"] == "claude-code"
+    assert [pool["account"]["key"] for pool in state["pools"]] == ["chatgpt"]
+    assert set(state["pools"][0]["windows"]) == {"five_hour", "seven_day"}
+    assert other.id in state["plan"]["tasks"]
+    view = next(task for task in state["tasks"] if task["id"] == other.id)
+    assert view["account"] == "chatgpt" and view["account_label"]
+
+
+def test_switching_the_settings_subscription_keeps_every_task_on_its_own(world):
+    claude = new_task(world, title="On Claude")
+    chatgpt = new_task(world, title="On ChatGPT", agent="chatter")
+    world.lazy.update_settings("u", {"account": "chatgpt"})
+    assert world.store.task("u", claude.id).account == "claude-code"
+    assert world.store.task("u", chatgpt.id).account is None  # now the settings' own
+
+
+@pytest.mark.asyncio
+async def test_a_repeating_task_sets_up_its_next_round_when_done(world):
+    task = new_task(world, title="Review the chats", repeat_hours=24)
+    assert task.repeat == 24 * HOUR
+    for _ in range(len(task.steps)):
+        await run_due(world)
+    done = world.store.task("u", task.id)
+    assert done.status == "done"
+    rounds = [t for t in world.store.tasks("u", finished=False) if t.title == "Review the chats"]
+    assert len(rounds) == 1 and rounds[0].id != task.id
+    following = rounds[0]
+    assert following.repeat == task.repeat and following.agent == task.agent
+    assert following.deadline >= task.deadline + 24 * HOUR  # a day after the round it follows
+    assert all(step.status == "pending" for step in following.steps) and following.conversation_id is None
+    assert new_task(world, repeat_hours=0).repeat is None  # zero or nothing runs once

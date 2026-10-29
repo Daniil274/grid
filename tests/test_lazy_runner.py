@@ -151,6 +151,36 @@ async def test_a_refused_start_says_why(world):
     assert outcome.outcome == "refused" and outcome.reason == "Daily turn limit reached"
 
 
+async def test_a_chat_pinned_to_a_changed_system_goes_on_in_a_new_one(world):
+    # Agents edit the system configs too: the task's chat, pinned before the
+    # edit, is refused on every retry - the task used to fail on it.
+    old = world.space.conversations.start_new_context()
+    world.task.conversation_id = old
+    world.task.steps[0].status, world.task.steps[0].summary = "done", "Scouted: three files to change."
+    refusals = ["Conversation x cannot be continued: the resolved system configuration changed since it "
+                "was pinned. Start a new conversation. (revision.system_config_changed)"]
+    session = session_module.ChatSession
+    original = session._start
+
+    async def start_once_refused(self, message, system_key, agent_key):
+        if refusals:
+            await self.socket.send_json({"type": "error", "content": refusals.pop()})
+            return False
+        return await original(self, message, system_key, agent_key)
+
+    session._start = start_once_refused
+    seen = []
+    step = world.task.steps[1]
+    run = asyncio.create_task(world.runner.run(world.task, step, world.settings, on_conversation=seen.append))
+    while not world.space.turns.running_turns():
+        await asyncio.sleep(0.01)
+    current_turn(world.space).finish.set()
+    outcome = await run
+    assert outcome.outcome == "answered"
+    assert outcome.conversation_id != old and seen[-1] == outcome.conversation_id
+    assert "Scouted: three files to change." in world.space.started[-1]  # the checkpoint carries the work
+
+
 async def test_a_turn_already_running_after_a_restart_is_followed_not_restarted(world):
     context_id = world.space.conversations.start_new_context()
     world.task.conversation_id = context_id

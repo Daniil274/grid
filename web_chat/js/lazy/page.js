@@ -154,17 +154,28 @@ function windowCard(name, window) {
   );
 }
 
-function renderQuota() {
-  const { account, windows } = state;
+function poolQuota(account, windows, secondary = false) {
   const calibrated = account.calibrated_runs
     ? `Prices calibrated by ${account.calibrated_runs} run${account.calibrated_runs === 1 ? "" : "s"}`
     : "Prices are first guesses until a run is measured";
-  replace($("quota"),
+  const mode = MODES[account.mode] ?? MODES.unknown;
+  return [
     h("header.lazyQuota__head", {},
       h("div", {},
         h("h2", { text: account.label }),
-        h("p", { text: `${calibrated} · your rates learned from ${account.learned_readings} interval${account.learned_readings === 1 ? "" : "s"}` }))),
+        h("p", { text: secondary
+          ? `${mode.text(account)} · ${calibrated} · the tasks of agents on this subscription spend it, beside the one above`
+          : `${calibrated} · your rates learned from ${account.learned_readings} interval${account.learned_readings === 1 ? "" : "s"}` }))),
     h("div.lazyQuota__windows", {}, windowCard("five_hour", windows.five_hour), windowCard("seven_day", windows.seven_day)),
+  ];
+}
+
+function renderQuota() {
+  const { account, windows } = state;
+  // Every other subscription the tasks spend has a pool of its own: its windows follow.
+  replace($("quota"),
+    ...poolQuota(account, windows),
+    ...(state.pools ?? []).flatMap((pool) => poolQuota(pool.account, pool.windows, true)),
   );
 }
 
@@ -346,10 +357,13 @@ function taskCard(task) {
   const agent = state.agents.find((choice) => choice.system === task.system && choice.agent === task.agent);
   const meta = [
     agent ? `${agent.label} · ${agent.system_label}` : `${task.agent} · ${task.system}`,
+    // A task on another subscription than the settings' says which one it spends.
+    task.account_label ? `On ${task.account_label}` : null,
     `Size ${task.size}`,
     task.priority !== "normal" ? `${task.priority} priority` : null,
     task.deadline ? `Deadline ${moment(task.deadline, now())} (${relative(task.deadline, now())})` : "No deadline",
     task.run_now ? "Do it now" : null,
+    task.repeat ? `Repeats every ${task.repeat >= 86400 && task.repeat % 86400 === 0 ? `${task.repeat / 86400} d` : `${task.repeat / 3600} h`}` : null,
   ].filter(Boolean);
   return h("article.taskCard", { dataset: { task: task.id, state: key }, class: `c${colorSlot(task.id)}` },
     h("header.taskCard__head", {},
