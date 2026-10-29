@@ -467,6 +467,7 @@ async function boot() {
       refreshButton: $("#admin-refresh"),
       restartButton: $("#admin-restart"),
       serverStatus: $("#admin-server-status"),
+      build: $("#admin-build"),
       reviews: $("#admin-reviews"),
       users: $("#admin-users"),
       invites: $("#admin-invites"),

@@ -35,6 +35,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import HTTPConnection
 
+from web_chat.build_info import read_build_info
 from web_chat.delivery import MessageQueue
 from web_chat.deployment import Deployment
 from web_chat.identity import DEFAULT_USER, Identify, User, admins_only, single_user
@@ -186,6 +187,9 @@ class WebChatServer:
         self._warm_user = warm_user
         self._sweeper: Optional[asyncio.Task] = None
         self.reviews = reviews
+        # Which code this process runs, read once: a restart that seems to change
+        # nothing can then be checked against the commit the server actually loaded.
+        self.build_info = read_build_info()
         from web_chat.usage import UsageStore
 
         self.usage = usage if usage is not None else UsageStore()
@@ -687,12 +691,12 @@ class WebChatServer:
 
         @api.get("/api/admin/server", dependencies=[Depends(admin)])
         async def admin_server_status() -> dict:
-            return self.restart.status()
+            return {**self.restart.status(), "build": self.build_info}
 
         @api.post("/api/admin/server/restart", dependencies=[Depends(admin)])
         async def restart_server() -> JSONResponse:
             try:
-                return JSONResponse(self.restart.request(), status_code=202)
+                return JSONResponse({**self.restart.request(), "build": self.build_info}, status_code=202)
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             except OSError as exc:

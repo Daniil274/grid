@@ -14,6 +14,7 @@ import { api } from "../net/api.js";
 import { hideOverlay, showOverlay } from "../ui/overlay.js";
 import { copyText } from "../ui/toast.js";
 import { tokens } from "../lib/format.js";
+import { buildLabel, buildTitle } from "./build-info.js";
 
 const when = (seconds) => new Date(seconds * 1000).toLocaleString();
 
@@ -90,6 +91,12 @@ export class AccountsDrawer {
   _renderServer(server) {
     const pending = ["preparing", "restarting"].includes(server.phase);
     this.nodes.restartButton.disabled = !server.enabled || pending;
+    const build = buildLabel(server.build);
+    if (this.nodes.build) {
+      this.nodes.build.textContent = build;
+      this.nodes.build.title = buildTitle(server.build);
+      this.nodes.build.hidden = !build;
+    }
     this.nodes.serverStatus.textContent = server.error || (server.recovery_errors
       ? "Some requests could not resume. Check the affected chats and the server log."
       : server.phase === "preparing" ? `Saving progress. Waiting for ${server.active_turns ?? 0} active request(s) and background work…`
