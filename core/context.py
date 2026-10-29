@@ -258,6 +258,7 @@ class ContextManager:
                 "conversation": [],
                 "executions": [],
                 "metadata": {},
+                "revision_history": [],
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
             }
@@ -423,7 +424,8 @@ class ContextManager:
 
         None means the conversation carries no manifest: either it was created
         in this process and no turn has pinned it yet, or it was stored before
-        revisions existed (legacy, read-only).
+        revisions existed (legacy; a turn adopts it by re-pinning, see
+        :meth:`repin_revision`).
         """
         with safe_lock(self._lock, timeout=5.0):
             bucket = self._contexts.get(context_id)
@@ -447,10 +449,12 @@ class ContextManager:
         """Pin a conversation created here to *manifest*, and persist it.
 
         Immutable: a conversation that already has a manifest is never re-pinned
-        (returns False), and a legacy one is never adopted. A manifest whose
-        digest does not match its content, or that belongs to another
-        conversation, is refused. The pin is saved strictly: a pin this process
-        cannot persist is rolled back rather than believed.
+        (returns False); a legacy conversation is not adopted by *this* call -
+        :meth:`repin_revision` is the graded path that does that, with a record
+        of what it left behind. A manifest whose digest does not match its
+        content, or that belongs to another conversation, is refused. The pin is
+        saved strictly: a pin this process cannot persist is rolled back rather
+        than believed.
         """
         if not isinstance(manifest, dict) or not revision_contracts.manifest_digest_ok(manifest):
             raise ContextError("A revision manifest must match its own digest")
@@ -479,6 +483,86 @@ class ContextManager:
                 self._mark_changed(context_id)
                 raise
             return True
+
+    def repin_revision(
+        self,
+        context_id: str,
+        manifest: Dict[str, Any],
+        *,
+        code: str,
+        expected_digest: Optional[str] = None,
+    ) -> bool:
+        """Re-pin a conversation to *manifest*, appending the previous pin to its history.
+
+        This is the graded continuation path (core.revisions): a conversation
+        survives a Grid version, Python runtime or resolved system configuration
+        change, and a legacy conversation is adopted, without ever losing what
+        it was pinned to. The previous manifest - or its absence, for a legacy
+        conversation - is appended to ``revision_history``, which is never
+        rewritten or pruned; only the current pin changes. ``code`` is the
+        machine reason of the change and is stored with the entry.
+
+        ``expected_digest`` is optimistic concurrency: when given, the current
+        pin must still be the one the caller judged, else nothing is written
+        and False is returned (another turn re-pinned it first). The write is
+        strict, and a failed write rolls the pin and the history back.
+        """
+        if not isinstance(manifest, dict) or not revision_contracts.manifest_digest_ok(manifest):
+            raise ContextError("A revision manifest must match its own digest")
+        if manifest.get("context_id") != context_id:
+            raise ContextError("A revision manifest must belong to the conversation it pins")
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return False
+            previous = bucket.get("revision")
+            if isinstance(previous, dict):
+                if expected_digest is not None and previous.get("digest") != expected_digest:
+                    return False
+                status = "pinned"
+            else:
+                # A legacy conversation: there is a previous state, it just has
+                # no manifest. Adopting it is recorded, never silent.
+                if expected_digest is not None:
+                    return False
+                status = "legacy"
+            entry = {
+                "superseded_at": datetime.now().isoformat(),
+                "code": code,
+                "status": status,
+                "manifest": copy.deepcopy(previous) if isinstance(previous, dict) else None,
+                "digest": previous.get("digest") if isinstance(previous, dict) else None,
+                "grid_version": previous.get("grid_version") if isinstance(previous, dict) else None,
+            }
+            history = bucket.get("revision_history")
+            if not isinstance(history, list):
+                history = bucket["revision_history"] = []
+            history.append(entry)
+            bucket["revision"] = copy.deepcopy(manifest)
+            self._new_contexts.discard(context_id)
+            self._mark_changed(context_id)
+            try:
+                self._save_to_file(strict=True)
+            except Exception:
+                # Never leave in memory a pin or a history entry a restart
+                # would not find.
+                history.pop()
+                if isinstance(previous, dict):
+                    bucket["revision"] = previous
+                else:
+                    bucket.pop("revision", None)
+                self._mark_changed(context_id)
+                raise
+            return True
+
+    def revision_history(self, context_id: str) -> List[Dict[str, Any]]:
+        """The append-only history of a conversation's previous pins, oldest first."""
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            if bucket is None:
+                return []
+            history = bucket.get("revision_history")
+            return copy.deepcopy(history) if isinstance(history, list) else []
 
     def list_context_summaries(self) -> List[Dict[str, Any]]:
         """Return safe, read-only summaries for all known context buckets."""
@@ -1972,6 +2056,10 @@ class ContextManager:
         if isinstance(revision, dict):
             # A pinned conversation carries its manifest; a legacy one gains none.
             document += ',"revision":' + json.dumps(revision, ensure_ascii=False, default=str)
+        history = source.get("revision_history")
+        if isinstance(history, list) and history:
+            # Append-only: every superseded pin stays, oldest first.
+            document += ',"revision_history":' + json.dumps(history, ensure_ascii=False, default=str)
         return document + "}"
 
     def _encoded_context(self, context_id: str, bucket: Dict[str, Any]) -> str:
@@ -2066,6 +2154,7 @@ class ContextManager:
                 "created_at": bucket.get("created_at"),
                 "updated_at": bucket.get("updated_at"),
                 "revision": bucket.get("revision"),
+                "revision_history": list(bucket.get("revision_history") or []),
             }
             jobs.append((context_id, snapshot, parts, version))
         self._dirty.clear()
@@ -2220,6 +2309,7 @@ class ContextManager:
             for ex in data.get("execution_history", [])
         ]
         manifest = data.get("revision")
+        history = data.get("revision_history")
         return {
             "conversation": conversation,
             "executions": executions,
@@ -2228,6 +2318,9 @@ class ContextManager:
             "updated_at": data.get("updated_at"),
             # Absent on a conversation stored before revisions existed: legacy.
             "revision": copy.deepcopy(manifest) if isinstance(manifest, dict) else None,
+            # Every pin this conversation had before the current one, oldest
+            # first; empty for a conversation that was pinned only once.
+            "revision_history": copy.deepcopy(history) if isinstance(history, list) else [],
         }
 
     @staticmethod

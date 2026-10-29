@@ -1,17 +1,29 @@
-"""Immutable revision manifests for conversations.
+"""Versioned revision manifests for conversations.
 
 A stored conversation is only meaningful to a runtime that reads its history the
-same way, runs under the same version of the code, and serves the same resolved
-system configuration it was written with. This module makes that statement
-explicit and checkable: a conversation is *pinned* to a manifest the first time
-a turn writes into it, and every later turn verifies the manifest before any
-external operation happens (a model call, a tool, a sub-agent).
+same way, runs under a version of the code that still speaks its contracts, and
+serves the resolved system configuration it was written with. This module makes
+that statement explicit and checkable: a conversation is *pinned* to a manifest
+the first time a turn writes into it, and every later turn judges the manifest
+before any external operation happens (a model call, a tool, a sub-agent).
 
 The manifest is content addressed (``digest`` over everything else) so a hand
-edited file is refused rather than obeyed, and it is immutable: a pinned
-conversation is never re-pinned, and a conversation loaded without a manifest
-holds history that cannot be pinned - it is *legacy*, read-only, never adopted.
-Even an empty stored legacy conversation is not silently adopted.
+edited file is refused rather than obeyed. Admission is *graded*: only a real
+incompatibility is a refusal - a manifest this runtime cannot read (unknown
+format version, unsupported contract version, malformed), one altered after
+pinning, a contract changed at the same version, a manifest of another
+conversation, or an unresolved system. A Grid version, Python runtime or
+resolved system configuration that moved on, and a conversation stored before
+pinning existed at all (*legacy*), are not incompatibilities: the stored history
+is intact and readable, so the conversation continues, is re-pinned to the
+current revision, and the previous manifest is appended to an append-only
+history in the conversation (``ContextManager.repin_revision``). Each re-pin
+comes with a typed notice (code plus the sentence a person reads) that the
+transport shows without treating it as an error.
+
+A first pin stays immutable: only :func:`admit_turn` re-pins, only along this
+graded path, and only by appending to that history - a pin is never rewritten
+in place.
 
 The four contracts are versioned apart because their compatibility questions
 differ: ``history`` (how messages and executions are serialized), ``checkpoint``
@@ -39,7 +51,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from core import __version__ as GRID_VERSION
 from utils.exceptions import AgentError
@@ -105,6 +117,38 @@ NOT_IMMUTABLE = "revision.manifest_immutable"
 NO_CONTEXT = "revision.context_unknown"
 MANIFEST_MALFORMED = "revision.manifest_malformed"
 CONTEXT_MISMATCH = "revision.context_mismatch"
+
+#: Differences a conversation *survives*: its stored history is intact and
+#: readable, so the turn continues on this runtime and the conversation is
+#: re-pinned to the current revision. Every other difference is a refusal.
+CONTINUABLE_CODES = frozenset(
+    {LEGACY, GRID_VERSION_CHANGED, RUNTIME_CHANGED, SYSTEM_CONFIG_CHANGED}
+)
+
+#: The graded outcomes of :func:`review`.
+REFUSE = "refuse"
+CONTINUE = "continue"
+PIN = "pin"
+
+#: The human sentence of a re-pin notice, one per continuable difference.
+_NOTICE_TEXT = {
+    LEGACY: (
+        "This conversation was stored before revision pinning. Its history is intact, "
+        "so it continues and has been pinned to the current revision."
+    ),
+    GRID_VERSION_CHANGED: (
+        "This conversation was pinned by another Grid version. Its history is intact, "
+        "so it continues on {current} and has been re-pinned to this revision."
+    ),
+    SYSTEM_CONFIG_CHANGED: (
+        "The system configuration changed since this conversation was pinned. Its history "
+        "is intact, so it continues on the current configuration and has been re-pinned."
+    ),
+    RUNTIME_CHANGED: (
+        "The Python runtime changed since this conversation was pinned. Its history is "
+        "intact, so it continues and has been re-pinned to this revision."
+    ),
+}
 
 #: Keys whose *values* are redacted before hashing: rotating a
 #: credential must not invalidate a conversation, changing a prompt must.
@@ -457,12 +501,6 @@ def verify_integrity(manifest: Any) -> Dict[str, Any]:
     pinned_grid = manifest.get("grid_version")
     if not isinstance(pinned_grid, str):
         return _decision(False, MANIFEST_MALFORMED, "its revision manifest records no Grid version")
-    if pinned_grid != GRID_VERSION:
-        return _decision(
-            False,
-            GRID_VERSION_CHANGED,
-            f"it was pinned by Grid {pinned_grid!r} and this runtime is {GRID_VERSION!r}",
-        )
 
     pinned_contracts = manifest.get("contracts")
     if not isinstance(pinned_contracts, Mapping):
@@ -493,6 +531,18 @@ def verify_integrity(manifest: Any) -> Dict[str, Any]:
     series = pinned_platform.get("python_series")
     if not isinstance(series, str):
         return _decision(False, MANIFEST_MALFORMED, "its revision manifest records no Python version")
+
+    # A version difference is checked only after every *shape* and contract
+    # question is answered: a Grid upgrade must not hide a changed contract
+    # behind its own, harmless difference. The difference itself is returned as
+    # a decision code; whether it is a refusal or a re-pin is decided by
+    # :func:`review`, which is the only place that knows the graded policy.
+    if pinned_grid != GRID_VERSION:
+        return _decision(
+            False,
+            GRID_VERSION_CHANGED,
+            f"it was pinned by Grid {pinned_grid!r} and this runtime is {GRID_VERSION!r}",
+        )
     current_series = runtime_info()["python_series"]
     if series != current_series:
         return _decision(
@@ -503,17 +553,8 @@ def verify_integrity(manifest: Any) -> Dict[str, Any]:
     return _decision(True, OK, "its pinned revision is intact and this runtime reads it")
 
 
-def verify_manifest(manifest: Mapping[str, Any], environment: Mapping[str, Any]) -> Dict[str, Any]:
-    """Whether a pinned manifest is compatible with *environment* now.
-
-    Returns ``{"ok": bool, "code": str, "reason": str}`` - the reason is written
-    for a person and ends with the machine code. Malformed input (any level,
-    any type) is a decision, never an exception.
-    """
-    integrity = verify_integrity(manifest)
-    if not integrity["ok"]:
-        return integrity
-
+def _system_verdict(manifest: Mapping[str, Any], environment: Mapping[str, Any]) -> Dict[str, Any]:
+    """Whether the system *manifest* was pinned to is the one *environment* resolves now."""
     pinned_system = manifest.get("system")
     if not isinstance(pinned_system, Mapping):
         return _decision(False, MANIFEST_MALFORMED, "its revision manifest records no system")
@@ -534,6 +575,24 @@ def verify_manifest(manifest: Mapping[str, Any], environment: Mapping[str, Any])
             "the resolved system configuration changed since it was pinned",
         )
     return _decision(True, OK, "its pinned revision matches this runtime")
+
+
+def verify_manifest(manifest: Mapping[str, Any], environment: Mapping[str, Any]) -> Dict[str, Any]:
+    """Whether a pinned manifest is compatible with *environment* now.
+
+    Returns ``{"ok": bool, "code": str, "reason": str}`` - the reason is written
+    for a person and ends with the machine code. Malformed input (any level,
+    any type) is a decision, never an exception.
+
+    This is the *strict* verdict: any difference at all is ``ok`` False. A turn
+    is admitted by :func:`review`, which grades these codes into a refusal and a
+    difference the conversation survives (it is re-pinned). Inspectors and the
+    migration planner keep using this one, so "compatible" stays exact.
+    """
+    integrity = verify_integrity(manifest)
+    if not integrity["ok"]:
+        return integrity
+    return _system_verdict(manifest, environment)
 
 
 def _refuse(decision: Mapping[str, Any], context_id: str, *, status: str) -> None:
@@ -601,18 +660,113 @@ def _bound(manifest: Mapping[str, Any], context_id: str) -> Mapping[str, Any]:
     return manifest
 
 
-def preflight(context_manager: Any, context_id: str) -> Optional[Mapping[str, Any]]:
-    """The checks that need no system configuration, before routing and warm-up.
+def review(
+    manifest: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    *,
+    context_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The graded verdict on a pinned manifest: refuse, or continue with drift.
 
-    Returns the pinned manifest, or None for a conversation created here that
-    has not been pinned yet. Raises with a machine-readable reason otherwise:
-    an unknown conversation, a legacy one, a tampered or future manifest.
+    A conversation is refused only for a *real* incompatibility - a manifest
+    this runtime cannot read (unsupported or malformed), an altered manifest, a
+    changed contract at the same version, or an unresolved system. A Grid
+    version, Python runtime or resolved system configuration that moved on is
+    not an incompatibility: the stored history is readable, so the conversation
+    continues and :func:`admit_turn` re-pins it.
+
+    Returns ``{"ok", "action", "code", "reason", "changes"}`` where ``action``
+    is :data:`REFUSE` or :data:`CONTINUE` and ``changes`` lists every graded
+    difference (``[{"code", "reason"}]``). Integrity is checked before the
+    version differences are graded, so an upgrade cannot hide a changed
+    contract (see :func:`verify_integrity`).
+    """
+    integrity = verify_integrity(manifest)
+    changes: List[Dict[str, str]] = []
+    if not integrity["ok"]:
+        if integrity["code"] not in CONTINUABLE_CODES:
+            return {
+                "ok": False,
+                "action": REFUSE,
+                "code": integrity["code"],
+                "reason": integrity["reason"],
+                "changes": [],
+            }
+        changes.append({"code": integrity["code"], "reason": integrity["reason"]})
+
+    system = _system_verdict(manifest, environment)
+    if not system["ok"]:
+        if system["code"] not in CONTINUABLE_CODES:
+            return {
+                "ok": False,
+                "action": REFUSE,
+                "code": system["code"],
+                "reason": system["reason"],
+                "changes": changes,
+            }
+        changes.append({"code": system["code"], "reason": system["reason"]})
+
+    if not changes:
+        return {
+            "ok": True,
+            "action": CONTINUE,
+            "code": OK,
+            "reason": "its pinned revision matches this runtime",
+            "changes": [],
+        }
+    return {
+        "ok": True,
+        "action": CONTINUE,
+        "code": changes[0]["code"],
+        "reason": " and ".join(change["reason"] for change in changes),
+        "changes": changes,
+    }
+
+
+def _notice(
+    code: str,
+    previous: Optional[Mapping[str, Any]],
+    environment: Mapping[str, Any],
+    context_id: str,
+    changes: List[str],
+) -> Dict[str, Any]:
+    """A typed re-pin notice: a machine code and the sentence a person reads.
+
+    This is the domain object; the transport spells it out as a non-error
+    event (``web_chat.session.revision_notice_event``). No credential, prompt
+    or environment value enters it.
+    """
+    text = _NOTICE_TEXT.get(code, "This conversation was re-pinned to the current revision.")
+    text = text.format(current=environment.get("grid_version"))
+    return {
+        "code": code,
+        "reason": text,
+        "context_id": context_id,
+        "details": {
+            "revision_status": "legacy" if previous is None else "pinned",
+            "changes": list(changes),
+            "previous_digest": (previous or {}).get("digest"),
+            "previous_grid_version": (previous or {}).get("grid_version"),
+            "grid_version": environment.get("grid_version"),
+            "system_digest": (environment.get("system") or {}).get("digest"),
+        },
+    }
+
+
+def context_state(context_manager: Any, context_id: str) -> Dict[str, Any]:
+    """Where a conversation stands before a turn: new, legacy, pinned, ephemeral.
+
+    ``{"status": ..., "manifest": ...}``. Raises with a machine-readable reason
+    for an unknown conversation, a manifest of another conversation, or a
+    record this runtime cannot read at all (tampered, malformed, future format,
+    changed contract). A *version* difference is not decided here: the
+    environment is not known yet, and :func:`review` grades it.
     """
     if getattr(context_manager, "revision_trusted_ephemeral", False) is True and not callable(
         getattr(context_manager, "revision_manifest", None)
     ):
         # The explicit opt-out: a caller with no conversations at all.
-        return None
+        return {"status": "ephemeral", "manifest": None}
     manifest = context_manifest(context_manager, context_id)
     if manifest is None:
         is_new = getattr(context_manager, "is_new_context", None)
@@ -624,53 +778,38 @@ def preflight(context_manager: Any, context_id: str) -> Optional[Mapping[str, An
                 context_id=context_id,
                 details={"revision_status": "unknown"},
             )
-        if not is_new(context_id):
-            raise ContextCompatibilityError(
-                LEGACY,
-                f"Conversation {context_id} was stored before revision pinning and is read-only: "
-                f"its history can be read, but it cannot be continued. Start a new conversation. "
-                f"({LEGACY})",
-                context_id=context_id,
-                details={"revision_status": "legacy"},
-            )
-        return None
+        return {"status": "new" if is_new(context_id) else "legacy", "manifest": None}
     _bound(manifest, context_id)
     integrity = verify_integrity(manifest)
-    if not integrity["ok"]:
-        _refuse(integrity, context_id, status="tampered")
-    return manifest
+    if not integrity["ok"] and integrity["code"] not in CONTINUABLE_CODES:
+        _refuse(
+            integrity,
+            context_id,
+            status="tampered" if integrity["code"] == TAMPERED else "pinned",
+        )
+    return {"status": "pinned", "manifest": manifest}
 
 
-def compatible(manifest: Mapping[str, Any], config: Any, context_id: str) -> Mapping[str, Any]:
-    """Refuse a pinned conversation whose resolved system differs from *config*."""
-    manifest = _bound(manifest, context_id)
-    decision = verify_manifest(manifest, environment_of(config))
-    if not decision["ok"]:
-        _refuse(decision, context_id, status="pinned")
-    return manifest
+def assess(context_manager: Any, context_id: str, config: Any) -> Dict[str, Any]:
+    """The graded admission of one turn, changing nothing.
 
-
-def admit_turn(context_manager: Any, context_id: str, config: Any) -> Optional[Dict[str, Any]]:
-    """Gate one turn on the conversation's revision, before any external operation.
-
-    A conversation created in this process is pinned here - once, with the
-    environment this turn actually runs in. A conversation loaded from
-    persistence without a manifest is legacy: readable, never adopted, and a
-    turn on it is refused. A pinned conversation is verified against the same
-    environment and refused with a machine-readable reason on any difference.
-
-    The environment is validated *before* pinning: an unresolved system is
-    never written into a manifest. The pin is persisted strictly and read back;
-    the stored manifest is what every later turn is judged by.
-
-    Returns the manifest the turn runs under (None only for an explicitly
-    ephemeral manager that keeps no conversations).
+    ``{"status", "manifest", "environment", "action", "notice"}``. The action is
+    :data:`PIN` for a chat created here, or :data:`CONTINUE` - with a notice
+    when the conversation is legacy or the environment moved on. Raises with a
+    machine-readable reason only for a real incompatibility (and for a turn
+    with no resolved system, which cannot be pinned or judged). The transport
+    uses this to tell the client before the turn starts; :func:`admit_turn`
+    makes the same decision and then writes it.
     """
-    manifest = preflight(context_manager, context_id)
-    if getattr(context_manager, "revision_trusted_ephemeral", False) is True and not callable(
-        getattr(context_manager, "revision_manifest", None)
-    ):
-        return None
+    state = context_state(context_manager, context_id)
+    if state["status"] == "ephemeral":
+        return {
+            "status": "ephemeral",
+            "manifest": None,
+            "environment": None,
+            "action": CONTINUE,
+            "notice": None,
+        }
     environment = environment_of(config)
     if environment["system"].get("status") != "resolved":
         raise ContextCompatibilityError(
@@ -680,19 +819,123 @@ def admit_turn(context_manager: Any, context_id: str, config: Any) -> Optional[D
             context_id=context_id,
             details={"revision_status": "unresolved"},
         )
+    if state["status"] == "new":
+        return {
+            "status": "new",
+            "manifest": None,
+            "environment": environment,
+            "action": PIN,
+            "notice": None,
+        }
+    if state["status"] == "legacy":
+        return {
+            "status": "legacy",
+            "manifest": None,
+            "environment": environment,
+            "action": CONTINUE,
+            "notice": _notice(LEGACY, None, environment, context_id, [LEGACY]),
+        }
+    decision = review(state["manifest"], environment, context_id=context_id)
+    if decision["action"] == REFUSE:
+        _refuse(decision, context_id, status="pinned")
+    notice = (
+        _notice(
+            decision["code"],
+            state["manifest"],
+            environment,
+            context_id,
+            [change["code"] for change in decision["changes"]],
+        )
+        if decision["changes"]
+        else None
+    )
+    return {
+        "status": "pinned",
+        "manifest": state["manifest"],
+        "environment": environment,
+        "action": CONTINUE,
+        "notice": notice,
+    }
 
-    if manifest is None:
-        pin = getattr(context_manager, "pin_revision", None)
-        revision_manifest = getattr(context_manager, "revision_manifest", None)
-        if not callable(pin) or not callable(revision_manifest):
-            raise ContextCompatibilityError(
-                NO_CONTEXT,
-                f"Conversation {context_id} cannot be pinned: this context manager has no revision "
-                f"store. ({NO_CONTEXT})",
-                context_id=context_id,
-                details={"revision_status": "new"},
-            )
-        pin(context_id, build_manifest(context_id, environment))
+
+def preflight(context_manager: Any, context_id: str) -> Optional[Mapping[str, Any]]:
+    """The checks that need no system configuration, before routing and warm-up.
+
+    Returns the pinned manifest, or None for a conversation that has none - a
+    new chat *or* a legacy one. Use :func:`context_state` when the two must be
+    told apart. Raises with a machine-readable reason for an unknown
+    conversation, a manifest of another conversation, or a record this runtime
+    cannot read (tampered, malformed, future format, changed contract).
+    """
+    return context_state(context_manager, context_id)["manifest"]
+
+
+def compatible(manifest: Mapping[str, Any], config: Any, context_id: str) -> Mapping[str, Any]:
+    """Refuse a pinned conversation only for a *real* incompatibility.
+
+    A Grid version, runtime or resolved-system difference is admitted here: the
+    turn's own gate (:func:`admit_turn`) re-pins the conversation and reports
+    it. A transport uses this before warming anything; it never writes.
+    """
+    manifest = _bound(manifest, context_id)
+    decision = review(manifest, environment_of(config), context_id=context_id)
+    if decision["action"] == REFUSE:
+        _refuse(decision, context_id, status="pinned")
+    return manifest
+
+
+def _revision_store(context_manager: Any, context_id: str, *, status: str) -> Any:
+    """``revision_manifest`` of a manager that can keep revisions, or a refusal."""
+    pin = getattr(context_manager, "pin_revision", None)
+    revision_manifest = getattr(context_manager, "revision_manifest", None)
+    if not callable(pin) or not callable(revision_manifest):
+        raise ContextCompatibilityError(
+            NO_CONTEXT,
+            f"Conversation {context_id} cannot be pinned: this context manager has no revision "
+            f"store. ({NO_CONTEXT})",
+            context_id=context_id,
+            details={"revision_status": status},
+        )
+    return revision_manifest
+
+
+def admit_turn(
+    context_manager: Any,
+    context_id: str,
+    config: Any,
+    *,
+    notices: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Gate one turn on the conversation's revision, before any external operation.
+
+    A conversation created in this process is pinned here - once, with the
+    environment this turn actually runs in. A conversation whose revision is
+    only *older* - pinned by another Grid version, under another system
+    configuration or Python runtime, or stored before pinning existed at all -
+    continues: it is re-pinned to the current revision and the previous
+    manifest is appended to the conversation's revision history. Only a real
+    incompatibility is refused, with a machine-readable reason.
+
+    The environment is validated *before* pinning: an unresolved system is
+    never written into a manifest. Every write is persisted strictly and read
+    back; the stored manifest is what every later turn is judged by.
+
+    ``notices``, when given, collects the typed notice of each re-pin (see
+    :func:`_notice`), so a transport can tell the client the turn continues.
+
+    Returns the manifest the turn runs under (None only for an explicitly
+    ephemeral manager that keeps no conversations).
+    """
+    state = assess(context_manager, context_id, config)
+    if state["status"] == "ephemeral":
+        return None
+    environment = state["environment"]
+    revision_manifest = _revision_store(
+        context_manager, context_id, status="new" if state["status"] == "new" else "pinned"
+    )
+
+    if state["action"] == PIN:
+        getattr(context_manager, "pin_revision")(context_id, build_manifest(context_id, environment))
         # Another turn of the same conversation may have pinned it in between,
         # and the pin must actually be stored: judge what is stored, never a
         # manifest this call only holds in memory.
@@ -705,9 +948,47 @@ def admit_turn(context_manager: Any, context_id: str, config: Any) -> Optional[D
                 context_id=context_id,
                 details={"revision_status": "new"},
             )
-        manifest = installed
+        return installed
 
-    return compatible(manifest, config, context_id)
+    notice = state["notice"]
+    if notice is None:
+        # Pinned and matching this runtime: nothing to write.
+        return state["manifest"]
+
+    repin = getattr(context_manager, "repin_revision", None)
+    if not callable(repin):
+        raise ContextCompatibilityError(
+            NO_CONTEXT,
+            f"Conversation {context_id} cannot be re-pinned: this context manager keeps no "
+            f"revision history. ({NO_CONTEXT})",
+            context_id=context_id,
+            details={"revision_status": state["status"]},
+        )
+    previous = state["manifest"]
+    expected = previous.get("digest") if isinstance(previous, Mapping) else None
+    repin(
+        context_id,
+        build_manifest(context_id, environment),
+        code=str(notice["code"]),
+        expected_digest=expected if isinstance(expected, str) else None,
+    )
+    installed = revision_manifest(context_id)
+    if not isinstance(installed, Mapping):
+        raise ContextCompatibilityError(
+            NO_CONTEXT,
+            f"Conversation {context_id} could not be re-pinned: no revision manifest was stored. "
+            f"({NO_CONTEXT})",
+            context_id=context_id,
+            details={"revision_status": state["status"]},
+        )
+    # Judge what is stored: a concurrent turn may have re-pinned it already, or
+    # to another configuration; this turn runs only on a manifest that matches.
+    settled = review(installed, environment, context_id=context_id)
+    if settled["action"] == REFUSE:
+        _refuse(settled, context_id, status="pinned")
+    if notices is not None:
+        notices.append(notice)
+    return installed
 
 
 def manifest_summary(manifest: Optional[Mapping[str, Any]]) -> Dict[str, Any]:

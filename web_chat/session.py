@@ -83,6 +83,29 @@ def revision_error_event(exc: revisions.ContextCompatibilityError) -> dict[str, 
         "context_id": exc.context_id,
         "details": exc.details,
     }
+
+
+def revision_notice_event(notice: dict[str, Any]) -> dict[str, Any]:
+    """A re-pin the client is told about: the turn continues, so it is not an error.
+
+    ``type`` is ``revision_notice`` - a client keys on it, never on the text.
+    ``code`` is the machine reason (one of ``revisions.CONTINUABLE_CODES``):
+    ``revision.legacy_context``, ``revision.grid_version_changed``,
+    ``revision.system_config_changed`` or ``revision.runtime_changed``.
+    ``content`` is the sentence to show, ``details.changes`` every graded
+    difference and ``details.previous_digest`` / ``details.grid_version`` what
+    the conversation came from and now runs on.
+    """
+    details = dict(notice.get("details") or {})
+    return {
+        "type": "revision_notice",
+        "code": notice.get("code"),
+        "content": notice.get("reason") or "",
+        "context_id": notice.get("context_id"),
+        "details": details,
+    }
+
+
 #: Checkpoints a conversation keeps, newest first; files listed per turn.
 MAX_CHECKPOINTS = 40
 MAX_LISTED_CHANGES = 200
@@ -381,8 +404,9 @@ class AgentTurn:
             )
             # Routing may land on another system than the one the conversation
             # is pinned to. That is refused here - explicitly, with its code -
-            # before an MCP server is warmed or any model call is made. A new
-            # conversation has nothing pinned yet: its turn pins it below.
+            # before an MCP server is warmed or any model call is made. A
+            # conversation with nothing pinned (a new or a legacy one) is
+            # pinned or re-pinned by its turn below.
             manifest = revisions.preflight(self._session.manager, self._session.context_id)
             if manifest is not None and getattr(resolution.config, "config", None) is not None:
                 revisions.compatible(manifest, resolution.config, self._session.context_id)
@@ -1022,11 +1046,12 @@ class ChatSession:
             await self.send({"type": "error", "content": "Unknown system or agent"})
             await self.send({"type": "done"})
             return False
-        # A conversation pinned to another revision is refused before routing,
+        # A conversation this runtime cannot continue is refused before routing,
         # warm-up, the daily-turn quota and any metadata write: the client gets
-        # the machine code, not a generic failure after work has begun.
+        # the machine code, not a generic failure after work has begun. One that
+        # only drifted re-pins and continues, with a notice instead.
         try:
-            await self._check_revision(system_key)
+            notices = await self._check_revision(system_key)
         except revisions.ContextCompatibilityError as exc:
             await self.send(revision_error_event(exc))
             await self.send({"type": "done"})
@@ -1044,6 +1069,12 @@ class ChatSession:
             await self.send({"type": "error", "content": refusal})
             await self.send({"type": "done"})
             return False
+        # The conversation continues on a revision this runtime re-pinned it to
+        # (a Grid version, a different system configuration, or a conversation
+        # stored before pinning existed). Tell the client before the turn runs,
+        # with a typed event that is not an error: nothing failed.
+        for notice in notices:
+            await self.send(revision_notice_event(notice))
         turn = AgentTurn(
             self,
             message,
@@ -1066,19 +1097,26 @@ class ChatSession:
         task.add_done_callback(ended)
         return True
 
-    async def _check_revision(self, system_key: Any) -> None:
-        """Refuse a pinned conversation that cannot run here, before any work.
+    async def _check_revision(self, system_key: Any) -> list[dict[str, Any]]:
+        """Judge a conversation that cannot run here, before any work.
 
-        The checks that need no configuration (unknown conversation, legacy,
-        tampered or future manifest) run first. Then the system the conversation
-        last ran on - the selection the client sent, else what the stored
-        metadata records, else the default system - is resolved to a config and
-        compared with the pinned digest. An explicit selection of another
-        system is therefore refused here rather than silently re-pinned.
+        The checks that need no configuration (unknown conversation, a manifest
+        of another conversation, one this runtime cannot read) run first. Then
+        the system the conversation last ran on - the selection the client sent,
+        else what the stored metadata records, else the default system - is
+        resolved and graded. A real incompatibility is refused with a machine
+        code. A Grid version, runtime or resolved system configuration that
+        moved on, and a conversation stored before pinning existed, are
+        admitted: the turn's own gate re-pins it, and the client is told with a
+        typed notice (not an error). An explicit selection of another system is
+        still refused here rather than silently re-pinned.
+
+        Returns the notices to send; raises ContextCompatibilityError on a
+        refusal. Nothing is written here.
         """
-        manifest = revisions.preflight(self.manager, self.context_id)
-        if manifest is None:
-            return
+        state = revisions.context_state(self.manager, self.context_id)
+        if state["status"] in ("new", "ephemeral"):
+            return []
         metadata = self.manager.get_context_metadata(self.context_id)
         requested = system_key if isinstance(system_key, str) and system_key else None
         pinned_system = requested or metadata.get("routed_system") or metadata.get("system_key")
@@ -1086,12 +1124,13 @@ class ChatSession:
         config_of = getattr(registry, "config", None)
         if not callable(config_of):
             # A transport without configs (tests, a future backend): the turn's
-            # own gate still refuses before any model call.
-            return
+            # own gate still judges before any model call.
+            return []
         config = config_of(pinned_system or registry.default_key())
         if getattr(config, "config", None) is None:
-            return
-        revisions.compatible(manifest, config, self.context_id)
+            return []
+        decision = revisions.assess(self.manager, self.context_id, config)
+        return [decision["notice"]] if decision.get("notice") else []
 
     @staticmethod
     async def _cancel(task: asyncio.Task) -> None:

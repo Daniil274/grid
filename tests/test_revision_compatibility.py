@@ -1,9 +1,14 @@
-"""Revision compatibility: pinned conversations, fail-closed gates.
+"""Revision compatibility: pinned conversations, graded admission.
 
-A conversation is pinned to an immutable revision the first time a turn writes
-into it, verified before every later turn, refused with a machine-readable
-reason when the runtime or the resolved system configuration changed, and never
-adopted when it carries no manifest (legacy = read-only).
+A conversation is pinned to a revision the first time a turn writes into it and
+judged before every later turn. Only a real incompatibility is refused with a
+machine-readable reason (a manifest this runtime cannot read, an altered one, a
+changed contract, an unresolved system). A Grid version, Python runtime or
+resolved system configuration that moved on, and a conversation stored before
+pinning existed (legacy), are continuations: the turn runs on the stored
+history, the conversation is re-pinned to the current revision, the previous
+pin is appended to an append-only ``revision_history``, and the client is told
+with a typed notice that is not an error.
 """
 
 from __future__ import annotations
@@ -180,35 +185,51 @@ async def test_pinning_is_immutable(factory):
     assert factory.context_manager.revision_manifest(context_id) == pinned
 
 
-# -- fail-closed gates ---------------------------------------------------------
+# -- graded admission: continuations -------------------------------------------
 
 
-async def test_a_changed_system_configuration_fails_closed_before_external_operations(factory):
+async def test_a_changed_system_configuration_continues_on_the_stored_history(factory):
+    """A moved-on configuration is not incompatibility: the next turn runs.
+
+    Only a real incompatibility is refused before external operations. A
+    configuration change is a continuation: the stored history is kept, the
+    conversation is re-pinned and the previous pin is appended to its history.
+    """
     with use(ScriptedRunner("One.")):
         await factory.run_agent("worker", "First")
     context_id = factory.context_manager.get_current_context_id()
     before = _message_count(factory.context_manager, context_id)
+    pinned_before = factory.context_manager.revision_manifest(context_id)
 
     factory.config.config.settings.max_turns = 6  # resolved configuration changed
 
-    runner = ScriptedRunner("Never reached.")
+    runner = ScriptedRunner("Second answer.")
     with use(runner):
-        with pytest.raises(revisions.ContextCompatibilityError) as refused:
-            await factory.run_agent("worker", "Second", context_id=context_id)
+        await factory.run_agent("worker", "Second", context_id=context_id)
 
-    assert refused.value.code == revisions.SYSTEM_CONFIG_CHANGED
-    assert revisions.SYSTEM_CONFIG_CHANGED in str(refused.value)
-    assert refused.value.details["code"] == revisions.SYSTEM_CONFIG_CHANGED
-    # Nothing external happened and the turn stored no request.
-    assert runner.calls == []
-    assert _message_count(factory.context_manager, context_id) == before
+    # The turn ran, on the history it already had, and stored its request.
+    assert runner.calls
+    assert _message_count(factory.context_manager, context_id) > before
+
+    # Re-pinned to this configuration, with the previous pin kept, not lost.
+    pinned_after = factory.context_manager.revision_manifest(context_id)
+    assert pinned_after["system"]["digest"] != pinned_before["system"]["digest"]
+    assert revisions.verify_manifest(
+        pinned_after, revisions.environment_of(factory.config)
+    )["ok"] is True
+    history = factory.context_manager.revision_history(context_id)
+    assert [entry["code"] for entry in history] == [revisions.SYSTEM_CONFIG_CHANGED]
+    assert history[0]["status"] == "pinned"
+    assert history[0]["manifest"] == pinned_before
 
 
-async def test_a_changed_prompt_fails_closed(tmp_path):
+async def test_a_changed_prompt_continues_and_is_repinned(tmp_path):
+    """The prompt is part of the system digest: a new one re-pins, never refuses."""
     factory = make_factory(tmp_path)
     with use(ScriptedRunner("One.")):
         await factory.run_agent("worker", "First")
     context_id = factory.context_manager.get_current_context_id()
+    pinned_before = factory.context_manager.revision_manifest(context_id)
 
     config_file = Path(factory.config.config_path)
     document = yaml.safe_load(config_file.read_text(encoding="utf-8"))
@@ -217,10 +238,16 @@ async def test_a_changed_prompt_fails_closed(tmp_path):
     factory.config = Config(str(config_file))
     factory._agent_sessions = {}
 
-    with use(ScriptedRunner("Never reached.")):
-        with pytest.raises(revisions.ContextCompatibilityError) as refused:
-            await factory.run_agent("worker", "Second", context_id=context_id)
-    assert refused.value.code == revisions.SYSTEM_CONFIG_CHANGED
+    runner = ScriptedRunner("Second answer.")
+    with use(runner):
+        await factory.run_agent("worker", "Second", context_id=context_id)
+
+    assert runner.calls
+    pinned_after = factory.context_manager.revision_manifest(context_id)
+    assert pinned_after["system"]["digest"] != pinned_before["system"]["digest"]
+    assert [
+        entry["code"] for entry in factory.context_manager.revision_history(context_id)
+    ] == [revisions.SYSTEM_CONFIG_CHANGED]
 
 
 async def test_a_tampered_manifest_is_refused(factory):
@@ -239,7 +266,6 @@ async def test_a_tampered_manifest_is_refused(factory):
 @pytest.mark.parametrize(
     "changes, code",
     [
-        ({"grid_version": "0.0.1"}, revisions.GRID_VERSION_CHANGED),
         ({"manifest_version": 99}, revisions.UNKNOWN_MANIFEST),
         (
             {
@@ -256,7 +282,8 @@ async def test_a_tampered_manifest_is_refused(factory):
         ),
     ],
 )
-async def test_an_unknown_version_fails_closed(factory, changes, code):
+async def test_a_manifest_this_runtime_cannot_read_fails_closed(factory, changes, code):
+    """A future format version or an unsupported contract is a real refusal."""
     with use(ScriptedRunner("One.")):
         await factory.run_agent("worker", "First")
     context_id = factory.context_manager.get_current_context_id()
@@ -268,12 +295,44 @@ async def test_an_unknown_version_fails_closed(factory, changes, code):
         with pytest.raises(revisions.ContextCompatibilityError) as refused:
             await factory.run_agent("worker", "Second", context_id=context_id)
     assert refused.value.code == code
+    # A refusal writes nothing: no re-pin, no history entry.
+    assert factory.context_manager.revision_history(context_id) == []
+
+
+async def test_a_pinned_grid_version_change_continues(factory):
+    """Another Grid version pinned the conversation, but its history is readable."""
+    with use(ScriptedRunner("One.")):
+        await factory.run_agent("worker", "First")
+    context_id = factory.context_manager.get_current_context_id()
+    before = _message_count(factory.context_manager, context_id)
+    factory.context_manager._contexts[context_id]["revision"] = _resigned(
+        _stored_manifest(factory, context_id), grid_version="0.0.1"
+    )
+
+    runner = ScriptedRunner("Second answer.")
+    with use(runner):
+        await factory.run_agent("worker", "Second", context_id=context_id)
+
+    assert runner.calls
+    assert _message_count(factory.context_manager, context_id) > before
+    pinned_after = factory.context_manager.revision_manifest(context_id)
+    assert pinned_after["grid_version"] == GRID_VERSION
+    history = factory.context_manager.revision_history(context_id)
+    assert [entry["code"] for entry in history] == [revisions.GRID_VERSION_CHANGED]
+    assert history[0]["grid_version"] == "0.0.1"
 
 
 # -- legacy conversations ------------------------------------------------------
 
 
-async def test_a_legacy_conversation_is_readable_but_never_pinned_or_continued(tmp_path):
+async def test_a_legacy_conversation_is_readable_and_adopted_by_a_turn(tmp_path):
+    """A conversation stored before pinning existed continues, and is pinned.
+
+    Its history was written by a runtime that kept no manifest, but the history
+    itself is intact, so the next turn runs on it. Adoption is explicit: the
+    conversation is pinned to the current revision and the legacy state is
+    recorded in the append-only history rather than forgotten.
+    """
     path = tmp_path / "context.json"
     context_id = _seeded_legacy(path)
     manager = ContextManager(max_history=15, persist_path=str(path), create_initial_context=False)
@@ -284,38 +343,71 @@ async def test_a_legacy_conversation_is_readable_but_never_pinned_or_continued(t
     assert history["messages"][0]["content"] == "Read me"
     assert manager.revision_status(context_id) == "legacy"
 
-    runner = ScriptedRunner("Never reached.")
+    runner = ScriptedRunner("Answer for old history.")
     with use(runner):
-        with pytest.raises(revisions.ContextCompatibilityError) as refused:
-            await factory.run_agent("worker", "Continue this", context_id=context_id)
-    assert refused.value.code == revisions.LEGACY
-    assert "read-only" in str(refused.value).lower()
-    assert runner.calls == []
+        await factory.run_agent("worker", "Continue this", context_id=context_id)
 
-    # Never adopted: no manifest appears, in memory or on disk.
-    assert manager.revision_manifest(context_id) is None
-    assert manager.revision_status(context_id) == "legacy"
+    # The turn ran, and the stored history is still the one it started from.
+    assert runner.calls
+    assert manager.get_context_messages(context_id, include_full=True)["messages"][0]["content"] == "Read me"
+    assert manager.revision_status(context_id) == "pinned"
+    manifest = manager.revision_manifest(context_id)
+    assert manifest is not None
+    assert revisions.manifest_digest_ok(manifest)
+    assert manifest["grid_version"] == GRID_VERSION
+
+    # The legacy state is recorded, "no manifest" included.
+    entries = manager.revision_history(context_id)
+    assert [entry["code"] for entry in entries] == [revisions.LEGACY]
+    assert entries[0]["status"] == "legacy"
+    assert entries[0]["manifest"] is None
+    assert entries[0]["digest"] is None
+
+    # Persisted with the conversation, not only in memory.
     stored = json.loads(path.read_text(encoding="utf-8"))
-    assert "revision" not in stored["contexts"][context_id]
+    assert stored["contexts"][context_id]["revision"] == manifest
+    assert stored["contexts"][context_id]["revision_history"] == entries
 
 
-async def test_continue_cannot_bypass_the_gate(tmp_path):
+async def test_continue_runs_through_the_same_gate(tmp_path):
+    """The Continue button is judged like any other turn, never exempt from it.
+
+    A legacy conversation is a continuation, so it is admitted and pinned; a
+    conversation with a changed contract is refused on this path too.
+    """
+    from utils.exceptions import AgentError
+
     path = tmp_path / "context.json"
     context_id = _seeded_legacy(path)
     manager = ContextManager(max_history=15, persist_path=str(path), create_initial_context=False)
     factory = make_factory(tmp_path, manager=manager)
 
+    # Not a revision refusal: the gate admits the legacy conversation *before*
+    # the turn finds that there is no interrupted turn to continue.
+    with pytest.raises(AgentError):
+        await factory.continue_agent("worker", context_id)
+    assert manager.revision_status(context_id) == "pinned"
+    assert [entry["code"] for entry in manager.revision_history(context_id)] == [revisions.LEGACY]
+
+    # A real incompatibility is still refused here, with its machine code.
+    contracts = {
+        **{name: revisions.contract_section(name) for name in revisions.CONTRACTS if name != "history"},
+        "history": {**revisions.contract_section("history"), "digest": "sha256:" + "0" * 64},
+    }
+    manager._contexts[context_id]["revision"] = _resigned(
+        manager.revision_manifest(context_id), contracts=contracts
+    )
     with pytest.raises(revisions.ContextCompatibilityError) as refused:
         await factory.continue_agent("worker", context_id)
-    assert refused.value.code == revisions.LEGACY
+    assert refused.value.code == revisions.CONTRACT_CHANGED
 
 
-async def test_an_empty_conversation_loaded_from_storage_stays_legacy(tmp_path):
-    """A stored conversation is never adopted, empty or not.
+async def test_an_empty_stored_conversation_is_adopted_by_a_turn(tmp_path):
+    """An empty chat reopened after a restart is legacy, and one turn pins it.
 
-    An empty chat reopened after a restart was not created in this process:
-    its missing manifest is stored state, so it stays read-only like any other
-    legacy conversation. A new chat (created here) is the one that pins.
+    Its missing manifest is stored state, so the conversation is not silently
+    treated as new: the adoption goes through the graded path and is recorded
+    in its revision history. A chat created in this process pins as usual.
     """
     path = tmp_path / "context.json"
     context_id = "ctx-empty01"
@@ -340,17 +432,24 @@ async def test_an_empty_conversation_loaded_from_storage_stays_legacy(tmp_path):
     factory = make_factory(tmp_path, manager=manager)
     assert manager.revision_status(context_id) == "legacy"
 
-    runner = ScriptedRunner("Never reached.")
+    runner = ScriptedRunner("Hi there.")
     with use(runner):
-        with pytest.raises(revisions.ContextCompatibilityError) as refused:
-            await factory.run_agent("worker", "Hi", context_id=context_id)
-    assert refused.value.code == revisions.LEGACY
-    assert runner.calls == []
-    assert manager.revision_status(context_id) == "legacy"
-    assert manager.revision_manifest(context_id) is None
+        await factory.run_agent("worker", "Hi", context_id=context_id)
+    assert runner.calls
+    assert manager.revision_status(context_id) == "pinned"
+    assert revisions.manifest_digest_ok(manager.revision_manifest(context_id))
+    entries = manager.revision_history(context_id)
+    assert [entry["code"] for entry in entries] == [revisions.LEGACY]
+    assert entries[0]["status"] == "legacy"
 
 
-async def test_a_branch_cannot_bypass_an_incompatible_parent(factory):
+async def test_a_branch_is_judged_on_its_own_inherited_revision(factory):
+    """A branch carries the parent's pin and continues on it, on its own.
+
+    The branch is not silently re-pinned at the fork (it inherits the parent's
+    manifest byte for byte), and a turn on it continues: the branch - never the
+    parent - is re-pinned, and the parent is left exactly as it was.
+    """
     with use(ScriptedRunner("One.")):
         await factory.run_agent("worker", "First")
     parent = factory.context_manager.get_current_context_id()
@@ -370,12 +469,19 @@ async def test_a_branch_cannot_bypass_an_incompatible_parent(factory):
     assert branch_manifest["grid_version"] == parent_manifest["grid_version"]
     assert branch_manifest["system"] == parent_manifest["system"]
     assert revisions.manifest_digest_ok(branch_manifest)
-    runner = ScriptedRunner("Never reached.")
+    runner = ScriptedRunner("Edited answer.")
     with use(runner):
-        with pytest.raises(revisions.ContextCompatibilityError) as refused:
-            await factory.run_agent("worker", "Edited", context_id=branch)
-    assert refused.value.code == revisions.SYSTEM_CONFIG_CHANGED
-    assert runner.calls == []
+        await factory.run_agent("worker", "Edited", context_id=branch)
+    assert runner.calls
+
+    # The branch continued on the history it inherited and was re-pinned;
+    # the parent was not touched by its child's turn.
+    assert factory.context_manager.revision_manifest(parent) == parent_manifest
+    assert factory.context_manager.revision_history(parent) == []
+    assert [
+        entry["code"] for entry in factory.context_manager.revision_history(branch)
+    ] == [revisions.SYSTEM_CONFIG_CHANGED]
+    assert factory.context_manager.revision_manifest(branch)["system"]["digest"] != parent_manifest["system"]["digest"]
 
 
 def test_the_gate_sits_before_any_external_operation():
@@ -609,7 +715,8 @@ def _config_with_external_sources(tmp_path: Path, skill_text: str = "Skill v1", 
     return str(path)
 
 
-async def test_a_changed_skill_instruction_fails_closed(tmp_path):
+async def test_a_changed_skill_instruction_continues(tmp_path):
+    """External sources are part of the system digest: a new skill re-pins."""
     path = _config_with_external_sources(tmp_path)
     factory = AgentFactory(Config(path), tracing_level=None)
     factory._get_agent_session = lambda agent_key, context_id: SQLiteSession(f"{agent_key}-{context_id}")
@@ -620,13 +727,17 @@ async def test_a_changed_skill_instruction_fails_closed(tmp_path):
     (tmp_path / "skills" / "guide.md").write_text("Skill v2, different instructions", encoding="utf-8")
     factory.config = Config(path)
     factory._agent_sessions = {}
-    with use(ScriptedRunner("Never reached.")):
-        with pytest.raises(revisions.ContextCompatibilityError) as refused:
-            await factory.run_agent("worker", "Second", context_id=context_id)
-    assert refused.value.code == revisions.SYSTEM_CONFIG_CHANGED
+    runner = ScriptedRunner("Second answer.")
+    with use(runner):
+        await factory.run_agent("worker", "Second", context_id=context_id)
+    assert runner.calls
+    assert [
+        entry["code"] for entry in factory.context_manager.revision_history(context_id)
+    ] == [revisions.SYSTEM_CONFIG_CHANGED]
 
 
-async def test_a_changed_local_tool_source_fails_closed(tmp_path):
+async def test_a_changed_local_tool_source_continues(tmp_path):
+    """A changed local tool source is a configuration change, not a refusal."""
     path = _config_with_external_sources(tmp_path)
     factory = AgentFactory(Config(path), tracing_level=None)
     factory._get_agent_session = lambda agent_key, context_id: SQLiteSession(f"{agent_key}-{context_id}")
@@ -637,10 +748,13 @@ async def test_a_changed_local_tool_source_fails_closed(tmp_path):
     (tmp_path / "tools" / "pkg" / "impl.py").write_text("x = 2", encoding="utf-8")
     factory.config = Config(path)
     factory._agent_sessions = {}
-    with use(ScriptedRunner("Never reached.")):
-        with pytest.raises(revisions.ContextCompatibilityError) as refused:
-            await factory.run_agent("worker", "Second", context_id=context_id)
-    assert refused.value.code == revisions.SYSTEM_CONFIG_CHANGED
+    runner = ScriptedRunner("Second answer.")
+    with use(runner):
+        await factory.run_agent("worker", "Second", context_id=context_id)
+    assert runner.calls
+    assert [
+        entry["code"] for entry in factory.context_manager.revision_history(context_id)
+    ] == [revisions.SYSTEM_CONFIG_CHANGED]
 
 
 def test_external_sources_are_hashed_but_never_stored(tmp_path):
@@ -704,8 +818,15 @@ def _web_space(manager, config):
     return space, calls
 
 
-async def test_the_web_gate_refuses_before_routing_warmup_and_quota(tmp_path):
-    """C2: the socket's refusal comes before any routing or accounted work."""
+async def test_the_web_gate_sends_a_notice_and_still_refuses_incompatibility(tmp_path):
+    """C2: a drifted conversation starts with a typed notice, not an error.
+
+    A real incompatibility is still refused on the same path, before routing,
+    warm-up, the daily-turn quota and any metadata write.
+    """
+    import asyncio
+    import contextlib
+
     from web_chat.session import ChatSession
 
     factory = make_factory(tmp_path)
@@ -713,6 +834,7 @@ async def test_the_web_gate_refuses_before_routing_warmup_and_quota(tmp_path):
         await factory.run_agent("worker", "First")
     manager = factory.context_manager
     context_id = manager.get_current_context_id()
+    pinned_before = manager.revision_manifest(context_id)
     # A config that differs from the pinned one, without a model call.
     factory.config.config.settings.max_turns = 6
     changed = factory.config
@@ -721,11 +843,48 @@ async def test_the_web_gate_refuses_before_routing_warmup_and_quota(tmp_path):
     socket = _Socket()
     session = ChatSession(space, socket, context_id)
 
-    assert await session._start("Second", None, None) is False
+    # The turn starts: the conversation is admitted, and the client is told
+    # with a non-error event carrying the machine code.
+    started = await session._start("Second", None, None)
+    try:
+        assert started is True
+        assert not [event for event in socket.sent if event["type"] == "error"]
+        notice = next(event for event in socket.sent if event["type"] == "revision_notice")
+        assert notice["code"] == revisions.SYSTEM_CONFIG_CHANGED
+        assert notice["context_id"] == context_id
+        assert notice["content"]
+        assert notice["details"]["revision_status"] == "pinned"
+        assert notice["details"]["previous_digest"] == pinned_before["digest"]
+        # Admission was decided before any accounted work, and the turn runs.
+        assert calls["quota"] == 1
+        assert calls["warm"] == 0  # the background turn warms, not the gate
+    finally:
+        running = session._turns.running(context_id)
+        if running is not None:
+            _turn, task = running
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    # A really incompatible conversation is refused on this path, before any
+    # routing, warm-up, quota or metadata write.
+    contracts = {
+        **{name: revisions.contract_section(name) for name in revisions.CONTRACTS if name != "history"},
+        "history": {**revisions.contract_section("history"), "digest": "sha256:" + "0" * 64},
+    }
+    factory.context_manager._contexts[context_id]["revision"] = _resigned(
+        _stored_manifest(factory, context_id), contracts=contracts
+    )
+    space, calls = _web_space(manager, factory.config)
+    socket = _Socket()
+    session = ChatSession(space, socket, context_id)
+
+    assert await session._start("Third", None, None) is False
     error = next(event for event in socket.sent if event["type"] == "error")
-    assert error["code"] == revisions.SYSTEM_CONFIG_CHANGED
+    assert error["code"] == revisions.CONTRACT_CHANGED
     assert error["context_id"] == context_id
     assert error["details"]["revision_status"] == "pinned"
+    assert not [event for event in socket.sent if event["type"] == "revision_notice"]
     assert calls == {"quota": 0, "warm": 0, "metadata": 0, "resolve": 0}
 
 
