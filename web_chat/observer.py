@@ -10,11 +10,17 @@ step-by-step reasoning timeline alongside a clean response.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import time
 from collections import deque
-from typing import Any, Callable, Optional
+from dataclasses import dataclass, replace
+from enum import Enum
+from typing import Any, Callable, Iterable, Optional
 
 from core.action_policy import is_policy_block
+from core.context import is_tool_result
+from core.interruption import COMPACTED_TYPE, CONTINUATION_TYPE, INTERRUPTED_TYPE
 from core.run_stream import (
     REASONING_DELTA_EVENTS,
     field_of,
@@ -31,11 +37,586 @@ from web_chat.trace import (
     TraceRecorder,
     clip,
     context_refs,
+    normalize_steps,
     redundant_with_payload,
     summarize,
 )
 
 logger = logging.getLogger("grid.web_chat.observer")
+
+
+# -- typed communication events --------------------------------------------
+#
+# The timeline says what an agent *did*; these events say what it *said*, and
+# who may read it. Three kinds: a ``message`` is meant for people, a ``status``
+# is the short "what is happening" line around it, and a ``report`` is an
+# internal work product - thinking, a sub-agent's result, a tool's output.
+# Visibility is an explicit field, never inferred at the edge: an internal
+# event stays internal even when it is serialized, and ``public_events`` is the
+# one gate the wire and the history API pass through. That is what keeps a
+# reasoning body or a tool payload from leaking by being labelled otherwise.
+#
+# The events are durable with the conversation: a turn that stores an explicit
+# list keeps it on its assistant message (``metadata["events"]``), and a turn
+# from before the contract derives the same events from its stored trace and
+# message body. Replay and history therefore stay compatible without a second
+# copy having to exist. Ids are derived from the kind, the step (or role) and the
+# text, which is what a live frame and a later replay of the same turn share.
+
+EVENTS_KEY = "events"
+EVENT_VERSION = 1
+MAX_EVENT_CHARS = 20_000
+MAX_STATUS_CHARS = 500
+USER_AUTHOR = "user"
+SYSTEM_AUTHOR = "system"
+
+
+class EventKind(str, Enum):
+    """What a communication is; ``kind`` alone does not decide visibility."""
+
+    MESSAGE = "message"
+    STATUS = "status"
+    REPORT = "report"
+
+
+class EventVisibility(str, Enum):
+    """Who may read an event: everyone in the chat, or nobody outside the server."""
+
+    PUBLIC = "public"
+    INTERNAL = "internal"
+
+
+def _event_text(value: Any, limit: int) -> str:
+    text = value if isinstance(value, str) else ("" if value is None else str(value))
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def stable_event_id(kind: EventKind | str, origin: Any, content: Any = "") -> str:
+    """A short id that is the same for the same event on every replay.
+
+    It is built from what identifies the event at its source - its kind, the
+    step or role that produced it, and its text - never from a counter that a
+    reload would reset differently.
+    """
+    kind = kind.value if isinstance(kind, EventKind) else str(kind)
+    raw = "|".join((kind, str(origin or "event"), _event_text(content, 256)))
+    return "ev-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass(frozen=True, slots=True)
+class CommunicationEvent:
+    """One typed communication; immutable so a stored copy cannot be mutated."""
+
+    id: str
+    kind: EventKind
+    author: str
+    content: str
+    visibility: EventVisibility = EventVisibility.PUBLIC
+    author_key: str = ""
+    status: str = "done"
+    at: Optional[str] = None
+    at_ms: int = 0
+    turn_id: Optional[str] = None
+    message_id: Optional[str] = None
+    step_id: Optional[str] = None
+    parent_id: Optional[str] = None
+    version: int = EVENT_VERSION
+
+    @property
+    def is_public(self) -> bool:
+        return self.visibility is EventVisibility.PUBLIC
+
+    def as_dict(self) -> dict[str, Any]:
+        """The wire/storage form. Keeps ``visibility``, so a reader cannot guess wrong."""
+        return {
+            "v": self.version,
+            "id": self.id,
+            "kind": self.kind.value,
+            "visibility": self.visibility.value,
+            "author": self.author,
+            "author_key": self.author_key,
+            "content": self.content,
+            "status": self.status,
+            "at": self.at,
+            "at_ms": self.at_ms,
+            "turn_id": self.turn_id,
+            "message_id": self.message_id,
+            "step_id": self.step_id,
+            "parent_id": self.parent_id,
+        }
+
+    def public_dict(self) -> Optional[dict[str, Any]]:
+        """The event as a reader may see it; None for an internal one."""
+        return self.as_dict() if self.is_public else None
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["CommunicationEvent"]:
+        """Read one stored event, tolerating an unknown or damaged field."""
+        if not isinstance(data, dict):
+            return None
+        try:
+            version = int(data.get("v") or EVENT_VERSION)
+            kind = EventKind(str(data.get("kind") or ""))
+        except (TypeError, ValueError):
+            return None
+        if version != EVENT_VERSION:
+            return None
+        try:
+            visibility = EventVisibility(str(data.get("visibility") or EventVisibility.INTERNAL.value))
+        except ValueError:
+            visibility = EventVisibility.INTERNAL
+        event_id = data.get("id")
+        if not isinstance(event_id, str) or not event_id:
+            return None
+        return cls(
+            id=event_id,
+            kind=kind,
+            author=str(data.get("author") or ""),
+            content=_event_text(data.get("content"), MAX_EVENT_CHARS),
+            visibility=visibility,
+            author_key=str(data.get("author_key") or ""),
+            status=str(data.get("status") or "done"),
+            at=data.get("at") if isinstance(data.get("at"), str) else None,
+            at_ms=data.get("at_ms") if isinstance(data.get("at_ms"), int) else 0,
+            turn_id=data.get("turn_id") if isinstance(data.get("turn_id"), str) else None,
+            message_id=data.get("message_id") if isinstance(data.get("message_id"), str) else None,
+            step_id=data.get("step_id") if isinstance(data.get("step_id"), str) else None,
+            parent_id=data.get("parent_id") if isinstance(data.get("parent_id"), str) else None,
+            version=version,
+        )
+
+
+def serialize_events(events: Iterable[CommunicationEvent], *, public_only: bool = False) -> list[dict[str, Any]]:
+    """The stored/wire form; ``public_only`` applies the visibility gate."""
+    return [event.as_dict() for event in events if not public_only or event.is_public]
+
+
+def deserialize_events(raw: Any) -> list[CommunicationEvent]:
+    """Read a stored event list, dropping what cannot be trusted."""
+    if not isinstance(raw, list):
+        return []
+    return [event for item in raw if (event := CommunicationEvent.from_dict(item)) is not None]
+
+
+def public_events(events: Iterable[CommunicationEvent]) -> list[CommunicationEvent]:
+    """The one gate public surfaces use: internal events never pass it."""
+    return [event for event in events if event.is_public]
+
+
+class EventLog:
+    """The public events of one turn, in order and safe to store.
+
+    Only public events belong here by default: what the agent said to people
+    and the statuses around it. ``author`` and ``author_key`` may be callables
+    because a turn learns which agent runs it after the log exists.
+    """
+
+    def __init__(
+        self,
+        *,
+        turn_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        author: str | Callable[[], str] = "",
+        author_key: str | Callable[[], str] = "",
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.turn_id = turn_id
+        self.message_id = message_id
+        self._author = author
+        self._author_key = author_key
+        self._clock = clock
+        self._events: list[CommunicationEvent] = []
+        self._by_id: dict[str, CommunicationEvent] = {}
+
+    def _resolve(self, value: str | Callable[[], str]) -> str:
+        try:
+            return value() if callable(value) else str(value or "")
+        except Exception:  # noqa: BLE001 - a label lookup must never cost the turn
+            return ""
+
+    @property
+    def events(self) -> list[CommunicationEvent]:
+        return list(self._events)
+
+    def add(
+        self,
+        kind: EventKind | str,
+        content: Any,
+        *,
+        visibility: EventVisibility | str = EventVisibility.PUBLIC,
+        status: str = "done",
+        author: Optional[str] = None,
+        author_key: Optional[str] = None,
+        message_id: Optional[str] = None,
+        step_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        at: Optional[str] = None,
+        at_ms: int = 0,
+        event_id: Optional[str] = None,
+        limit: int = MAX_EVENT_CHARS,
+    ) -> CommunicationEvent:
+        """Record one event; the same id twice records it once."""
+        kind = kind if isinstance(kind, EventKind) else EventKind(kind)
+        visibility = visibility if isinstance(visibility, EventVisibility) else EventVisibility(visibility)
+        bounded = _event_text(content, limit)
+        origin = step_id or f"{kind.value}:{len(self._events)}"
+        event_id = event_id or stable_event_id(kind, origin, bounded)
+        existing = self._by_id.get(event_id)
+        if existing is not None:
+            return existing
+        event = CommunicationEvent(
+            id=event_id,
+            kind=kind,
+            author=author if author is not None else self._resolve(self._author) or SYSTEM_AUTHOR,
+            author_key=author_key if author_key is not None else self._resolve(self._author_key),
+            content=bounded,
+            visibility=visibility,
+            status=status,
+            at=at,
+            at_ms=at_ms,
+            turn_id=self.turn_id,
+            message_id=message_id or self.message_id,
+            step_id=step_id,
+            parent_id=parent_id,
+            version=EVENT_VERSION,
+        )
+        self._events.append(event)
+        self._by_id[event_id] = event
+        return event
+
+    def message(self, content: Any, **fields: Any) -> CommunicationEvent:
+        """What the agent says to people."""
+        return self.add(EventKind.MESSAGE, content, **fields)
+
+    def status(self, content: Any, **fields: Any) -> CommunicationEvent:
+        """What happens around the words; kept short."""
+        fields.setdefault("limit", MAX_STATUS_CHARS)
+        return self.add(EventKind.STATUS, content, **fields)
+
+    def report(self, content: Any, **fields: Any) -> CommunicationEvent:
+        """An internal work product; internal unless a caller says otherwise."""
+        fields.setdefault("visibility", EventVisibility.INTERNAL)
+        return self.add(EventKind.REPORT, content, **fields)
+
+    def snapshot(self, *, public_only: bool = False) -> list[dict[str, Any]]:
+        return serialize_events(self._events, public_only=public_only)
+
+
+#: Steps whose title is a status a person may read. Their body is not.
+PUBLIC_STATUS_STEP_KINDS = frozenset(
+    {
+        StepKind.PREPARE.value,
+        StepKind.ROUTING.value,
+        StepKind.TOOL.value,
+        StepKind.COMPACT.value,
+        StepKind.PLAN.value,
+        StepKind.HANDOFF.value,
+        StepKind.MCP.value,
+    }
+)
+
+
+def _step_field(step: Any, name: str) -> Any:
+    return step.get(name) if isinstance(step, dict) else getattr(step, name, None)
+
+
+def _payload_text(step: Any) -> str:
+    """A report's text from a step, without ever spreading a whole payload."""
+    body = _step_field(step, "body")
+    if isinstance(body, str) and body.strip():
+        return body
+    for name in ("result_payload", "input_payload"):
+        payload = _step_field(step, name)
+        if isinstance(payload, dict):
+            raw = payload.get("raw_text")
+            if isinstance(raw, str) and raw:
+                return raw
+    return ""
+
+
+def event_from_step(
+    step: Any,
+    *,
+    turn_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+    author: str = "",
+    author_key: str = "",
+    at: Optional[str] = None,
+) -> Optional[CommunicationEvent]:
+    """One typed event for a stored timeline step, or None for a silent step.
+
+    This mapping is the privacy boundary: only top-level narration becomes a
+    public message; thinking and everything a sub-agent does is an internal
+    report; a tool step becomes a public status that carries its title, never
+    its arguments or output.
+    """
+    kind = str(_step_field(step, "kind") or "")
+    step_id = _step_field(step, "id")
+    parent_id = _step_field(step, "parent_id")
+    at_ms = _step_field(step, "at_ms")
+    at_ms = at_ms if isinstance(at_ms, int) else 0
+    status = str(_step_field(step, "status") or StepStatus.DONE.value)
+    title = str(_step_field(step, "title") or "")
+    subtitle = str(_step_field(step, "subtitle") or "")
+    nested = bool(parent_id)
+
+    def make(
+        event_kind: EventKind,
+        content: str,
+        *,
+        visibility: EventVisibility = EventVisibility.PUBLIC,
+        event_status: str = status,
+        limit: int = MAX_EVENT_CHARS,
+    ) -> CommunicationEvent:
+        bounded = _event_text(content, limit)
+        origin = step_id or title or "step"
+        return CommunicationEvent(
+            id=stable_event_id(event_kind, origin, bounded),
+            kind=event_kind,
+            author=author or SYSTEM_AUTHOR,
+            author_key=author_key,
+            content=bounded,
+            visibility=visibility,
+            status=event_status,
+            at=at,
+            at_ms=at_ms,
+            turn_id=turn_id,
+            message_id=message_id,
+            step_id=step_id if isinstance(step_id, str) else None,
+            parent_id=parent_id if isinstance(parent_id, str) else None,
+            version=EVENT_VERSION,
+        )
+
+    if kind == StepKind.MESSAGE.value:
+        content = _step_field(step, "body") or subtitle
+        if nested:
+            return make(
+                EventKind.REPORT,
+                content,
+                visibility=EventVisibility.INTERNAL,
+                limit=MAX_STATUS_CHARS,
+            )
+        return make(EventKind.MESSAGE, content)
+
+    if kind == StepKind.REASONING.value:
+        return make(
+            EventKind.REPORT,
+            _step_field(step, "body") or subtitle,
+            visibility=EventVisibility.INTERNAL,
+            event_status=StepStatus.DONE.value,
+            limit=MAX_STATUS_CHARS,
+        )
+
+    if kind == StepKind.AGENT.value:
+        return make(
+            EventKind.REPORT,
+            _payload_text(step) or subtitle or title,
+            visibility=EventVisibility.INTERNAL,
+            limit=MAX_STATUS_CHARS,
+        )
+
+    if kind == StepKind.ERROR.value:
+        return make(
+            EventKind.STATUS,
+            _payload_text(step) or title,
+            visibility=EventVisibility.INTERNAL if nested else EventVisibility.PUBLIC,
+            event_status=StepStatus.ERROR.value,
+            limit=MAX_STATUS_CHARS,
+        )
+
+    if kind in PUBLIC_STATUS_STEP_KINDS:
+        if nested:
+            return make(
+                EventKind.REPORT,
+                _payload_text(step) or title,
+                visibility=EventVisibility.INTERNAL,
+                limit=MAX_STATUS_CHARS,
+            )
+        content = f"{title} · {subtitle}" if subtitle and subtitle not in title else title
+        return make(EventKind.STATUS, content, event_status=status, limit=MAX_STATUS_CHARS)
+
+    return None
+
+
+def events_from_trace(
+    steps: Any,
+    *,
+    turn_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+    author: str = "",
+    author_key: str = "",
+    at: Optional[str] = None,
+) -> list[CommunicationEvent]:
+    """Typed events for a stored trace (current steps or the legacy flat form)."""
+    events: list[CommunicationEvent] = []
+    for step in normalize_steps(steps or []) if steps else []:
+        event = event_from_step(
+            step,
+            turn_id=turn_id,
+            message_id=message_id,
+            author=author,
+            author_key=author_key,
+            at=at,
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _message_text(message: Any) -> str:
+    getter = getattr(message, "get_text_content", None)
+    if callable(getter):
+        try:
+            return str(getter() or "")
+        except Exception:  # noqa: BLE001 - a broken getter must not hide the message
+            return ""
+    content = getattr(message, "content", "")
+    return content if isinstance(content, str) else ""
+
+
+def _message_meta(message: Any) -> dict[str, Any]:
+    metadata = getattr(message, "metadata", None)
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _message_event(
+    kind: EventKind,
+    origin: str,
+    content: Any,
+    *,
+    status: str = "done",
+    visibility: EventVisibility = EventVisibility.PUBLIC,
+    author: str,
+    author_key: str,
+    at: Optional[str],
+    turn_id: Optional[str],
+    message_id: Optional[str],
+    limit: int = MAX_EVENT_CHARS,
+) -> CommunicationEvent:
+    text = _event_text(content, limit)
+    return CommunicationEvent(
+        id=stable_event_id(kind, origin, text),
+        kind=kind,
+        author=author,
+        author_key=author_key,
+        content=text,
+        visibility=visibility,
+        status=status,
+        at=at,
+        turn_id=turn_id,
+        message_id=message_id,
+        version=EVENT_VERSION,
+    )
+
+
+def message_events(
+    message: Any,
+    *,
+    author_label: Optional[str] = None,
+    public_only: bool = False,
+) -> list[CommunicationEvent]:
+    """Every typed event a stored message carries, derived when it stored none.
+
+    Stored events are authoritative (an explicitly empty list means none). An
+    old message is read through its trace; a sub-agent report message becomes
+    one internal report and nothing else. ``public_only`` applies the gate at
+    the end, so a caller cannot accidentally surface an internal event.
+    """
+    metadata = _message_meta(message)
+    message_id = metadata.get("message_id")
+    message_id = message_id if isinstance(message_id, str) else None
+    turn_id = metadata.get("turn_id")
+    turn_id = turn_id if isinstance(turn_id, str) else None
+    author_key = str(metadata.get("agent") or metadata.get("agent_key") or "")
+    author = author_label or str(metadata.get("agent_name") or "") or author_key or "assistant"
+    at = getattr(message, "timestamp", None)
+    at = at if isinstance(at, str) else None
+
+    if EVENTS_KEY in metadata:
+        stored = deserialize_events(metadata.get(EVENTS_KEY))
+        if stored or metadata.get(EVENTS_KEY) == []:
+            return public_events(stored) if public_only else stored
+
+    role = str(getattr(message, "role", "") or "")
+    message_type = str(metadata.get("type") or "")
+    text = _message_text(message)
+
+    if is_tool_result(message):
+        events = [
+            _message_event(
+                EventKind.REPORT, "tool-result", text,
+                visibility=EventVisibility.INTERNAL,
+                author=author, author_key=author_key, at=at,
+                turn_id=turn_id, message_id=message_id, limit=MAX_STATUS_CHARS,
+            )
+        ]
+    elif message_type == CONTINUATION_TYPE:
+        events = [
+            _message_event(
+                EventKind.STATUS, "continuation", text or "Continued", status="continued",
+                author=USER_AUTHOR, author_key=USER_AUTHOR, at=at,
+                turn_id=turn_id, message_id=message_id, limit=MAX_STATUS_CHARS,
+            )
+        ]
+    elif message_type == COMPACTED_TYPE:
+        events = [
+            _message_event(
+                EventKind.STATUS, "compacted", "Context compacted",
+                author=SYSTEM_AUTHOR, author_key=SYSTEM_AUTHOR, at=at,
+                turn_id=turn_id, message_id=message_id, limit=MAX_STATUS_CHARS,
+            )
+        ]
+    elif role == "user":
+        events = [
+            _message_event(
+                EventKind.MESSAGE, "user", text,
+                author=USER_AUTHOR, author_key=USER_AUTHOR, at=at,
+                turn_id=turn_id, message_id=message_id,
+            )
+        ]
+    elif role != "assistant":
+        events = []
+    else:
+        events = events_from_trace(
+            metadata.get("trace") or metadata.get("trace_events"),
+            turn_id=turn_id,
+            message_id=message_id,
+            author=author,
+            author_key=author_key,
+            at=at,
+        )
+        if message_type == INTERRUPTED_TYPE:
+            if text:
+                events.append(
+                    _message_event(
+                        EventKind.STATUS, "interrupted", text, status="interrupted",
+                        author=author, author_key=author_key, at=at,
+                        turn_id=turn_id, message_id=message_id, limit=MAX_STATUS_CHARS,
+                    )
+                )
+        elif text:
+            # The answer itself is the last public message of the turn.
+            events.append(
+                _message_event(
+                    EventKind.MESSAGE, "final", text,
+                    author=author, author_key=author_key, at=at,
+                    turn_id=turn_id, message_id=message_id,
+                )
+            )
+    return public_events(events) if public_only else events
+
+
+def public_message_events(message: Any, *, author_label: Optional[str] = None) -> list[dict[str, Any]]:
+    """The public events of one history entry, ready for the wire."""
+    return serialize_events(
+        message_events(message, author_label=author_label, public_only=True),
+        public_only=True,
+    )
+
+
+def with_author(event: CommunicationEvent, author: str, author_key: str = "") -> CommunicationEvent:
+    """A copy of *event* under another display author (the registry knows the label)."""
+    return replace(event, author=author or event.author, author_key=author_key or event.author_key)
 
 
 def _tokens(count: Any) -> str:
@@ -96,15 +677,29 @@ class WebStreamObserver:
         emit_image: Optional[Callable[[str], None]] = None,
         agent_label: str = "",
         plan: Optional[PlanBoard] = None,
+        emit_event: Optional[Callable[[dict[str, Any]], None]] = None,
+        events: Optional[EventLog] = None,
+        turn_id: Optional[str] = None,
     ) -> None:
         self._recorder = recorder
         self._emit_token = emit_token
         self._reset_answer = reset_answer
         self._emit_image = emit_image
+        self._emit_event = emit_event
         # Text streamed since the last action. If another action follows, it was
         # narration ("let me check the diff"), not the answer, and moves to the trace.
         self._narration = ""
         self.agent_label = agent_label
+        # Typed public events of this run. A sub-agent's view gets None: what it
+        # says is a report for its caller, never a message to the user.
+        self.events: Optional[EventLog] = (
+            events
+            if events is not None
+            else EventLog(
+                turn_id=turn_id,
+                author=lambda: self.agent_label or SYSTEM_AUTHOR,
+            )
+        )
         self._calls_by_id: dict[str, Step] = {}
         self._calls_in_order: deque[Step] = deque()
         # The validator judges a call while it executes, which can be before the
@@ -143,6 +738,53 @@ class WebStreamObserver:
     def policy_blocks(self) -> int:
         return self._held[0]
 
+    # -- typed public events ----------------------------------------------
+    def _publish_event(self, event: Optional[CommunicationEvent]) -> None:
+        """Hand a public event to the transport; an internal one never leaves."""
+        if event is None or not event.is_public or self._emit_event is None:
+            return
+        frame = event.public_dict()
+        if frame is not None:
+            self._emit_event({"type": "event", "event": frame})
+
+    def record_message(
+        self, text: Any, *, step_id: Optional[str] = None, at_ms: int = 0, status: str = "done"
+    ) -> Optional[CommunicationEvent]:
+        """Say something to people, now and in the stored record."""
+        if self.events is None:
+            return None
+        event = self.events.message(text, step_id=step_id, at_ms=at_ms, status=status)
+        self._publish_event(event)
+        return event
+
+    def record_status(
+        self,
+        text: Any,
+        *,
+        step_id: Optional[str] = None,
+        at_ms: int = 0,
+        status: str = "done",
+        author: Optional[str] = None,
+    ) -> Optional[CommunicationEvent]:
+        """Record a short public status around the agent's words."""
+        if self.events is None:
+            return None
+        event = self.events.status(text, step_id=step_id, at_ms=at_ms, status=status, author=author)
+        self._publish_event(event)
+        return event
+
+    def record_report(self, text: Any, **fields: Any) -> Optional[CommunicationEvent]:
+        """Keep an internal work product; it is never published."""
+        if self.events is None:
+            return None
+        return self.events.report(text, **fields)
+
+    def turn_events(self, *, public_only: bool = True) -> list[dict[str, Any]]:
+        """The events of this run so far, ready to store or replay."""
+        if self.events is None:
+            return []
+        return self.events.snapshot(public_only=public_only)
+
     def nested(
         self, agent_label: str, call_id: Optional[str] = None
     ) -> "WebStreamObserver":
@@ -157,6 +799,9 @@ class WebStreamObserver:
         child = WebStreamObserver(
             self._recorder, emit_token=lambda _text: None, agent_label=agent_label
         )
+        # A sub-agent narrates for its caller: its words become part of the
+        # internal report, never a public message of this turn.
+        child.events = None
         child._calls_by_id = self._calls_by_id
         child._calls_in_order = self._calls_in_order
         child._pending_by_call = self._pending_by_call
@@ -513,13 +1158,15 @@ class WebStreamObserver:
         text, self._narration = self._narration.strip(), ""
         if not text:
             return
-        self._recorder.note(
+        step = self._recorder.note(
             StepKind.MESSAGE,
             "Message",
             subtitle=clip(text, 120),
             body=text,
             parent_id=self._parent_id,
         )
+        # The same words are a typed public message, with an id a replay keeps.
+        self.record_message(text, step_id=step.id, at_ms=step.at_ms)
         if self._reset_answer is not None:
             self._reset_answer()
 

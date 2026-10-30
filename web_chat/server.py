@@ -58,6 +58,7 @@ from core import migration
 from web_chat.trace import is_tool_result
 from core.checkpoints import CheckpointError
 from web_chat.session import CHECKPOINTS_KEY
+from web_chat.observer import public_message_events
 from web_chat.views import (
     UNTITLED,
     agent_options,
@@ -1146,6 +1147,11 @@ class WebChatServer:
             checkpoints = view["metadata"].get(CHECKPOINTS_KEY) or {}
             for message, stored in zip(messages, shown):
                 message["trace"] = slim_steps(message.get("trace"))
+                # Typed public communication, durable with the message: the turn's
+                # stored events when it has them, else the same events derived from
+                # its trace (an older chat replays unchanged). Internal reports and
+                # thinking never pass this gate (web_chat.observer.public_events).
+                message["events"] = public_message_events(stored)
                 # The request of a turn that changed files: Restore goes back to before it.
                 turn_id = (stored.metadata or {}).get("turn_id")
                 kept = checkpoints.get(turn_id) if message["role"] == "user" and turn_id else None

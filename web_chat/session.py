@@ -171,6 +171,12 @@ class AgentTurn:
             emit_token=self._token,
             reset_answer=lambda: self._queue.put_nowait({"type": "answer_reset"}),
             emit_image=lambda url: self._queue.put_nowait({"type": "image", "url": url}),
+            # A public typed event of this turn, live: the page draws it at once
+            # (web_chat.observer builds the frame; chat.js listens for "event").
+            emit_event=lambda frame: self._queue.put_nowait(frame),
+            # Every event of the turn carries the id a replay and a stored
+            # message agree on (the same turn_id keys the checkpoints).
+            turn_id=self.run_id,
             plan=PlanBoard.continuing(self._recorder, self._stored_messages()),
         )
 
@@ -761,7 +767,14 @@ class AgentTurn:
         # assistant entries are sub-agent reports, which are not answers.
         self._session.manager.update_last_message_metadata(
             self._session.context_id,
-            {"trace": self._recorder.snapshot()},
+            {
+                "trace": self._recorder.snapshot(),
+                # The turn's public communication, durable with the message: a
+                # reconnect (or a reload) replays the sentences and statuses
+                # instead of deriving them again from the trace, and the same
+                # event ids make a live frame and its stored twin one thing.
+                "events": self._observer.turn_events(public_only=True),
+            },
             when=lambda last: last.role == "assistant" and not is_tool_result(last),
         )
 
