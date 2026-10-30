@@ -794,7 +794,11 @@ def test_the_map_reads_a_real_tracker_through_the_servers_own_app(tmp_path):
     tasks = body["tasks"]
     assert tasks["available"] is True, tasks
     assert tasks["reason"] is None and tasks["reason_code"] is None
-    assert [item["id"] for item in tasks["items"]] == [created[0]["id"], created[1]["id"]]
+    # The map's own rule: oldest first, ties by id. bd keeps created_at to the
+    # second, so two tasks made in one second are ordered by their (random) ids.
+    assert sorted(item["id"] for item in tasks["items"]) == sorted(task["id"] for task in created)
+    order = [(item["created_at"] or "", item["id"]) for item in tasks["items"]]
+    assert order == sorted(order), "the map must keep tasks oldest first, ties by id"
     dependent = next(item for item in tasks["items"] if item["id"] == created[1]["id"])
     assert dependent["depends_on"] == [created[0]["id"]]
     assert [item["name"] for item in body["files"]["items"]] == ["notes.md"]
