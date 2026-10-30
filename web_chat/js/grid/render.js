@@ -63,7 +63,7 @@ export function fileHref(filesUrl, entry) {
   return `${pathname}?${params.toString()}`;
 }
 
-export const projectHref = (id) => `/grid?project=${encodeURIComponent(text(id))}`;
+export const projectHref = (id) => `/map?project=${encodeURIComponent(text(id))}`;
 export const taskHref = (projectId, taskId) =>
   `/tasks?project=${encodeURIComponent(text(projectId))}&task=${encodeURIComponent(text(taskId))}`;
 export const chatHref = (chatId) => `/?conversation=${encodeURIComponent(text(chatId))}`;
@@ -420,7 +420,7 @@ export function renderOverview(container, map, { projectId = "" } = {}) {
   return container;
 }
 
-/** The picker shown by /grid with no ?project: every project is a way in. */
+/** The picker shown by /map with no ?project: every project is a way in. */
 export function renderProjectPicker(container, projects = []) {
   const items = Array.isArray(projects) ? projects : [];
   if (!items.length) {

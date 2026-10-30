@@ -1,5 +1,5 @@
 /**
- * The page behind /grid?project=<id>: one project on a map.
+ * The page behind /map?project=<id>: one project on a map.
  *
  * Three things it does, and nothing else: it takes the snapshot the projects
  * API answers with (GET /api/projects/{id}/map), it draws it through
@@ -135,7 +135,7 @@ export class GridPage {
     }
   }
 
-  /** The picker: /grid with no project named. */
+  /** The picker: /map with no project named. */
   async loadPicker() {
     this.setStatus("Loading projects…");
     try {

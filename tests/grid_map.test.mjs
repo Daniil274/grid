@@ -278,7 +278,7 @@ test("the breadcrumb links the path, the project last and unlinked", () => {
   const crumb = el("div");
   renderBreadcrumb(crumb, sampleMap(), { projectId: "p1" });
   const links = crumb.querySelectorAll("a").map((node) => `${node.textContent}:${node.getAttribute("href")}`);
-  assert.deepEqual(links, ["Studio:/grid?project=p0"]);
+  assert.deepEqual(links, ["Studio:/map?project=p0"]);
   const current = crumb.find("gridBreadcrumb__current");
   assert.equal(current.textContent, "Grid");
   assert.equal(current.getAttribute("aria-current"), "page");
@@ -292,7 +292,7 @@ test("a path of parents only still ends on the project itself", () => {
   renderBreadcrumb(crumb, map, { projectId: "p1" });
   assert.deepEqual(
     crumb.querySelectorAll("a").map((node) => node.getAttribute("href")),
-    ["/grid?project=p0"],
+    ["/map?project=p0"],
   );
   assert.equal(crumb.find("gridBreadcrumb__current").textContent, "Grid");
 });
@@ -302,7 +302,7 @@ test("with no project the page is a picker of projects", () => {
   renderProjectPicker(overview, [{ id: "p1", title: "Grid" }, { id: "p2", title: "Backend" }]);
   assert.deepEqual(
     overview.querySelectorAll("a").map((node) => `${node.textContent}:${node.getAttribute("href")}`),
-    ["Grid:/grid?project=p1", "Backend:/grid?project=p2"],
+    ["Grid:/map?project=p1", "Backend:/map?project=p2"],
   );
   renderProjectPicker(overview, []);
   assert.match(textOf(overview), /There are no projects yet/);
@@ -518,7 +518,7 @@ test("with no ?project the page offers the projects it can open", async () => {
   });
   await page.load();
   assert.equal(nodes.map.hidden, true);
-  assert.deepEqual(nodes.overview.querySelectorAll("a").map((node) => node.getAttribute("href")), ["/grid?project=p1"]);
+  assert.deepEqual(nodes.overview.querySelectorAll("a").map((node) => node.getAttribute("href")), ["/map?project=p1"]);
   assert.match(nodes.status.textContent, /choose one/);
 });
 test("a refreshed map is cleared on authorization and missing-project errors", async () => {
@@ -624,8 +624,8 @@ test("grid.html asks for nothing from outside the server", () => {
 
 test("the chat's rail has a Map link, and it follows the active project", () => {
   const html = readFileSync(INDEX_HTML, "utf8");
-  assert.match(html, /id="open-grid" href="\/grid"/);
+  assert.match(html, /id="open-grid" href="\/map"/);
   const main = readFileSync(fileURLToPath(new URL("../web_chat/js/main.js", import.meta.url)), "utf8");
-  assert.match(main, /gridLink\.href = activeProject \? `\/grid\?project=/);
+  assert.match(main, /gridLink\.href = activeProject \? `\/map\?project=/);
   assert.match(main, /store\.watch\(\["activeProject"\], syncGridLink\)/);
 });

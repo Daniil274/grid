@@ -724,7 +724,7 @@ async function boot() {
   const gridLink = $("#open-grid");
   if (gridLink) {
     const syncGridLink = ({ activeProject }) => {
-      gridLink.href = activeProject ? `/grid?project=${encodeURIComponent(activeProject)}` : "/grid";
+      gridLink.href = activeProject ? `/map?project=${encodeURIComponent(activeProject)}` : "/map";
     };
     syncGridLink(store.get());
     store.watch(["activeProject"], syncGridLink);

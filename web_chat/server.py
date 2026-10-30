@@ -618,7 +618,7 @@ class WebChatServer:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(TASKS_HTML)
 
-        @app.get("/grid", response_class=HTMLResponse)
+        @app.get("/map", response_class=HTMLResponse)
         async def grid_page(request: Request) -> Any:
             # A shell: what it shows comes through the API, which checks who asks.
             if auth is not None and auth.user_of(request) is None:

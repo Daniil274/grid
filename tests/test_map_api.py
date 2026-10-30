@@ -556,7 +556,7 @@ def test_the_grid_page_serves_its_shell(tmp_path, monkeypatch, space):
     shell.write_text("<!doctype html><title>GRID</title>", encoding="utf-8")
     monkeypatch.setattr(server_module, "GRID_HTML", shell)
 
-    page = TestClient(_server().app).get("/grid")
+    page = TestClient(_server().app).get("/map")
 
     assert page.status_code == 200
     assert "GRID" in page.text
@@ -569,7 +569,7 @@ def test_the_grid_page_says_so_when_its_file_is_missing(tmp_path, monkeypatch, s
 
     monkeypatch.setattr(server_module, "GRID_HTML", tmp_path / "not-written-yet.html")
 
-    page = TestClient(_server().app).get("/grid")
+    page = TestClient(_server().app).get("/map")
 
     assert page.status_code == 503
     assert "not-written-yet.html" in page.text
