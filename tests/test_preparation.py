@@ -4,11 +4,12 @@ The steps are an agent's auto_run_tools and a caller's init_tools
 (core.factory.auto_run). A batch stays a plain sequence unless a step opts in
 with ``parallel``; ``depends_on`` orders what reads another step's result.
 
-Run explicitly: ``pytest core/factory/tests/test_preparation.py``.
+Run explicitly: ``pytest tests/test_preparation.py``.
 """
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,7 @@ from core.factory.preparation import (
     is_concurrent,
     plan_steps,
     run_steps,
+    timings,
 )
 
 
@@ -268,6 +270,101 @@ async def test_cancellation_cancels_in_flight_steps_and_propagates():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert probe.cancelled == ["slow"]
+
+
+# --------------------------------------------------------------------------
+# Durations: a step's seconds is its own call, never its time in the queue
+# --------------------------------------------------------------------------
+
+
+async def test_a_dependent_steps_duration_excludes_the_wait_for_its_dependency():
+    async def run_one(step):
+        await asyncio.sleep(0.2 if step.name == "a" else 0.01)
+        return f"{step.name} done", DONE
+
+    steps = plan_steps(
+        [{"name": "a", "parallel": True}, {"name": "b", "parallel": True, "depends_on": ["a"]}]
+    )
+    started = time.perf_counter()
+    outcomes = await run_steps(steps, run_one)
+    wall = time.perf_counter() - started
+    a, b = outcomes
+
+    # b waited for a's 200ms but only worked for its own 10ms.
+    assert a.seconds >= 0.15
+    assert b.seconds < 0.1
+    assert b.waited_seconds >= 0.15
+    record = timings(outcomes, wall)
+    assert record["serial_ms"] == pytest.approx(
+        sum(outcome.seconds for outcome in outcomes) * 1000, abs=0.2
+    )
+    # A chain's execution time cannot be larger than the wall time it fits in.
+    assert record["serial_ms"] <= record["wall_ms"] + 20
+
+
+async def test_independent_parallel_steps_report_their_own_time_not_the_batch_wall():
+    delay = 0.1
+
+    async def run_one(step):
+        await asyncio.sleep(delay)
+        return f"{step.name} done", DONE
+
+    steps = plan_steps([{"name": name, "parallel": True} for name in ("a", "b", "c")])
+    started = time.perf_counter()
+    outcomes = await run_steps(steps, run_one)
+    wall = time.perf_counter() - started
+    record = timings(outcomes, wall)
+
+    # Three overlapping 100ms calls ran in about 100ms of wall time...
+    assert wall < 0.25
+    # ...and each one is charged its own duration, no more.
+    assert all(delay * 0.8 <= outcome.seconds <= delay * 3 for outcome in outcomes)
+    # Serial time is the sum of the calls, each counted exactly once.
+    assert record["serial_ms"] >= 3 * delay * 1000 * 0.9
+    assert record["serial_ms"] <= 3 * delay * 1000 * 1.5 + 20
+
+
+async def test_a_skipped_step_has_no_duration_and_does_not_inflate_serial_time():
+    async def run_one(step):
+        if step.name == "a":
+            await asyncio.sleep(0.05)
+            raise RuntimeError("boom")
+        await asyncio.sleep(0.02)
+        return f"{step.name} done", DONE
+
+    steps = plan_steps(
+        [
+            {"name": "a", "parallel": True},
+            {"name": "b", "parallel": True, "depends_on": ["a"]},
+            {"name": "c", "parallel": True},
+        ]
+    )
+    started = time.perf_counter()
+    outcomes = await run_steps(steps, run_one)
+    wall = time.perf_counter() - started
+    skipped = outcomes[1]
+
+    assert skipped.status == SKIPPED
+    assert skipped.seconds == 0.0  # never invoked, so it did not last
+    record = timings(outcomes, wall)
+    assert record["serial_ms"] == pytest.approx(
+        (outcomes[0].seconds + outcomes[2].seconds) * 1000, abs=0.2
+    )
+    assert next(e for e in record["steps"] if e["name"] == "b")["seconds"] == 0.0
+
+
+async def test_a_legacy_step_skipped_for_an_unknown_dependency_has_no_duration():
+    async def run_one(step):
+        await asyncio.sleep(0.02)
+        return f"{step.name} done", DONE
+
+    steps = plan_steps([{"name": "a"}, {"name": "b", "depends_on": ["ghost"]}])
+    outcomes = await run_steps(steps, run_one)
+
+    assert [outcome.status for outcome in outcomes] == [DONE, SKIPPED]
+    assert outcomes[1].seconds == 0.0
+    record = timings(outcomes, 0.02)
+    assert record["serial_ms"] == pytest.approx(outcomes[0].seconds * 1000, abs=0.2)
 
 
 # --------------------------------------------------------------------------

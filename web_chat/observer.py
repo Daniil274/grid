@@ -470,6 +470,64 @@ def events_from_trace(
     return events
 
 
+def event_key(event: CommunicationEvent) -> tuple[str, str, str]:
+    """The identity a live event and its stored twin share.
+
+    Mirrors ``communicationKey`` in web_chat/js/ui/activity.js: the step a
+    communication happened on, else its id, else its words.
+    """
+    if event.step_id:
+        return (event.kind.value, "step", event.step_id)
+    if event.id:
+        return (event.kind.value, "id", event.id)
+    return (event.kind.value, "text", event.content)
+
+
+def _chronological_position(events: list[CommunicationEvent], at_ms: int) -> int:
+    """Where an event stamped *at_ms* belongs in a list already in that order."""
+    for position, event in enumerate(events):
+        if event.at_ms > at_ms:
+            return position
+    return len(events)
+
+
+def merge_trace_statuses(
+    stored: Iterable[CommunicationEvent], derived: Iterable[CommunicationEvent]
+) -> list[CommunicationEvent]:
+    """*stored* events, plus the public statuses only the trace still holds.
+
+    A turn stores what it said (its narration) beside the answer, while the
+    work around those words - a tool call, preparation, a failure - lives in
+    the trace as a step. The live page draws both from the step frames, so a
+    replay that took only the stored list would forget the work and show a
+    different timeline after a reload.
+
+    Stored events stay the authority: their content, author and id are kept,
+    and a derived twin of one is not added (identity is :func:`event_key`, the
+    same rule the page dedupes live and replay by). A stored status still marked
+    ``running`` takes the terminal status its step settled on, because that is
+    what the live page last showed. Only missing public statuses are inserted,
+    in the order their steps happened; a derived message would be a second copy
+    of words the store already has, so messages are never added.
+    """
+    merged = list(stored)
+    index_of = {event_key(event): position for position, event in enumerate(merged)}
+    for event in derived:
+        if event.kind is not EventKind.STATUS or not event.is_public:
+            continue
+        key = event_key(event)
+        position = index_of.get(key)
+        if position is None:
+            position = _chronological_position(merged, event.at_ms)
+            merged.insert(position, event)
+            index_of = {event_key(item): index for index, item in enumerate(merged)}
+            continue
+        known = merged[position]
+        if known.status == StepStatus.RUNNING.value and event.status != known.status:
+            merged[position] = replace(known, status=event.status)
+    return merged
+
+
 def _message_text(message: Any) -> str:
     getter = getattr(message, "get_text_content", None)
     if callable(getter):
@@ -524,10 +582,13 @@ def message_events(
 ) -> list[CommunicationEvent]:
     """Every typed event a stored message carries, derived when it stored none.
 
-    Stored events are authoritative (an explicitly empty list means none). An
-    old message is read through its trace; a sub-agent report message becomes
-    one internal report and nothing else. ``public_only`` applies the gate at
-    the end, so a caller cannot accidentally surface an internal event.
+    Stored events are authoritative for what was said (an explicitly empty list
+    means none of it). The trace still supplies the public statuses a stored
+    turn never kept - the work around the words - and never repeats one it did
+    (:func:`merge_trace_statuses`). An old message with no stored events is read
+    through its trace; a sub-agent report message becomes one internal report
+    and nothing else. ``public_only`` applies the gate at the end, so a caller
+    cannot accidentally surface an internal event.
     """
     metadata = _message_meta(message)
     message_id = metadata.get("message_id")
@@ -542,7 +603,18 @@ def message_events(
     if EVENTS_KEY in metadata:
         stored = deserialize_events(metadata.get(EVENTS_KEY))
         if stored or metadata.get(EVENTS_KEY) == []:
-            return public_events(stored) if public_only else stored
+            events = merge_trace_statuses(
+                stored,
+                events_from_trace(
+                    metadata.get("trace") or metadata.get("trace_events"),
+                    turn_id=turn_id,
+                    message_id=message_id,
+                    author=author,
+                    author_key=author_key,
+                    at=at,
+                ),
+            )
+            return public_events(events) if public_only else events
 
     role = str(getattr(message, "role", "") or "")
     message_type = str(metadata.get("type") or "")

@@ -161,6 +161,29 @@ test("narration without an author takes the agent the turn was routed to", () =>
   assert.equal(message.el.find("msg__activityAuthor").hidden, false);
 });
 
+test("a reload's statuses match the live ones and are drawn once", () => {
+  const live = createActivityView();
+  live.observeStep(step("s1", { title: "Read config.yaml" }));
+  live.observeStep(step("s2", { title: "Ran tests", status: "error" }));
+  const settled = [live.statusText, live.statusCount];
+  assert.deepEqual(settled, ["Ran tests", 2]);
+
+  // History replays the same work as typed status events (the server fills the
+  // statuses its stored turn never kept in from the trace).
+  const replayed = createActivityView();
+  replayed.apply([
+    event("e1", { kind: "status", step_id: "s1", content: "Read config.yaml" }),
+    event("e2", { kind: "status", step_id: "s2", content: "Ran tests", status: "error" }),
+  ]);
+  assert.deepEqual([replayed.statusText, replayed.statusCount], settled);
+  assert.equal(replayed.el.find("msg__activityStatus").dataset.status, "error");
+
+  // The turn then reconnects and its step frames arrive again: same rows.
+  replayed.observeStep(step("s1", { title: "Read config.yaml" }));
+  replayed.observeStep(step("s2", { title: "Ran tests", status: "error" }));
+  assert.deepEqual([replayed.statusText, replayed.statusCount], settled);
+});
+
 test("the compact status keeps the latest step and counts the work", () => {
   const view = createActivityView();
   view.observeStep(step("s1", { title: "Read config.yaml" }));

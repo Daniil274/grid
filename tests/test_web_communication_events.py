@@ -209,6 +209,79 @@ def test_a_stored_event_and_its_live_twin_share_an_id():
     assert replayed.id == live.id
 
 
+def statuses(events):
+    """The public statuses of an event list, as a reload and the live page see them."""
+    return [(e["step_id"], e["status"], e["content"]) for e in events if e["kind"] == "status"]
+
+
+def test_a_reload_keeps_the_work_the_stored_events_never_kept():
+    # A turn stores what it said; the work around those words is only a step.
+    trace = [
+        step("prepare", id="p1", title="Preparing the runtime", at_ms=10),
+        step("tool", id="t1", title="Read config.yaml", at_ms=20),
+        step("message", id="m1", body="Let me check the diff.", at_ms=30),
+        step("tool", id="t2", title="Ran tests", status="error", at_ms=40),
+    ]
+    stored = EventLog(turn_id="t1", author="coder")
+    stored.message("Let me check the diff.", step_id="m1", at_ms=30)
+    metadata = {EVENTS_KEY: stored.snapshot(public_only=True), "trace": trace}
+    live = public_message_events(message("assistant", "Done.", metadata={"trace": trace}))
+    replayed = public_message_events(message("assistant", "Done.", metadata=metadata))
+
+    # After a reload the statuses are exactly the live ones: same steps, same
+    # terminal statuses, same order of work.
+    assert statuses(replayed) == statuses(live)
+    assert [content for _, _, content in statuses(replayed)] == [
+        "Preparing the runtime",
+        "Read config.yaml",
+        "Ran tests",
+    ]
+    # The stored narration is replayed once, in its place in the timeline; the
+    # answer is not derived a second time.
+    assert [(e["kind"], e["content"]) for e in replayed] == [
+        ("status", "Preparing the runtime"),
+        ("status", "Read config.yaml"),
+        ("message", "Let me check the diff."),
+        ("status", "Ran tests"),
+    ]
+    ids = [e["id"] for e in replayed]
+    assert len(ids) == len(set(ids))
+
+
+def test_a_stored_status_and_its_trace_twin_are_one_event():
+    trace = [
+        step("tool", id="t1", title="Read config.yaml", at_ms=20),
+        step("message", id="m1", body="Checking.", at_ms=30),
+    ]
+    stored = EventLog(turn_id="t1", author="coder")
+    # A build that recorded the status when the call opened: still "running".
+    stored.status("Read config.yaml", step_id="t1", at_ms=20, status="running")
+    stored.message("Checking.", step_id="m1", at_ms=30)
+    metadata = {EVENTS_KEY: stored.snapshot(public_only=True), "trace": trace}
+
+    replayed = public_message_events(message("assistant", "Done.", metadata=metadata))
+    # One status, not two, and it settles on what the live page last showed.
+    assert statuses(replayed) == [("t1", "done", "Read config.yaml")]
+
+
+def test_only_public_statuses_are_filled_in_from_the_trace():
+    trace = [
+        step("tool", id="t1", title="Read config.yaml", at_ms=10),
+        step("tool", id="t2", title="Run the tests", parent_id="a1", at_ms=20),
+        step("reasoning", id="r1", body="internal", at_ms=30),
+        step("message", id="m1", body="Checking.", at_ms=40),
+    ]
+    stored = EventLog(turn_id="t1", author="coder")
+    stored.message("Checking.", step_id="m1", at_ms=40)
+    metadata = {EVENTS_KEY: stored.snapshot(public_only=True), "trace": trace}
+
+    replayed = public_message_events(message("assistant", "Done.", metadata=metadata))
+    assert statuses(replayed) == [("t1", "done", "Read config.yaml")]
+    # The stored list stays the authority for what was said: the answer is not
+    # derived on top of it.
+    assert [e["content"] for e in replayed if e["kind"] == "message"] == ["Checking."]
+
+
 # -- the live wire and the stored record ------------------------------------
 
 
@@ -332,6 +405,25 @@ async def test_narration_reaches_the_page_live_and_is_stored_with_the_answer():
     stored = space.context_manager().get_context_messages("ctx")["messages"][-1]["metadata"]
     assert stored[EVENTS_KEY], "the turn's public events are stored with its answer"
     assert [e["content"] for e in stored[EVENTS_KEY] if e["kind"] == "message"] == ["Let me check the diff."]
+
+    # A reload rebuilds the same activity. The tool call was never a stored
+    # event - live it is a step frame - so the history fills that status in
+    # from the trace, once, and keeps the narration where it was said.
+    answer = space.context_manager().conversation_view("ctx")["messages"][-1]
+    replayed = public_message_events(answer)
+    live = public_message_events(
+        SimpleNamespace(
+            role="assistant",
+            content="",
+            timestamp=answer.timestamp,
+            metadata={"trace": answer.metadata.get("trace")},
+        )
+    )
+    assert statuses(replayed) == statuses(live), "the reload's statuses match the live ones"
+    assert statuses(replayed), "the tool call is still shown as work after a reload"
+    assert [e["content"] for e in replayed if e["kind"] == "message"] == ["Let me check the diff."]
+    ids = [e["id"] for e in replayed]
+    assert len(ids) == len(set(ids))
 
     await socket.incoming.put(None)
     await session

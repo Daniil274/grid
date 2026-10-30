@@ -64,13 +64,21 @@ class Step:
 
 @dataclass
 class StepOutcome:
-    """What became of one step: its status, text, reason and duration."""
+    """What became of one step: its status, text, reason and duration.
+
+    ``seconds`` is the time the step's call itself took, never the time it sat
+    waiting for an ordering or dependency barrier: queueing is not execution.
+    A step that was never invoked (skipped, cancelled before it started) keeps
+    0.0, so a batch's serial time stays comparable to its wall time.
+    ``waited_seconds`` records that queueing separately, for observability.
+    """
 
     step: Step
     status: str
     value: str = ""
     detail: str = ""
     seconds: float = 0.0
+    waited_seconds: float = 0.0
 
 
 def plan_steps(specs: Sequence[Mapping[str, Any]]) -> List[Step]:
@@ -170,7 +178,8 @@ async def run_steps(
 
     async def one(index: int) -> None:
         step = steps[index]
-        started = time.perf_counter()
+        arrived = time.perf_counter()
+        executed: Optional[float] = None
         try:
             required = data_dependencies(steps, index)
             wait_for = sorted(set(required) | set(ordering(steps, index)))
@@ -190,6 +199,9 @@ async def run_steps(
                     step, SKIPPED, detail=f"skipped: its dependency {reason}"
                 )
                 return
+            # Only the call itself counts as execution: everything above is
+            # queueing in this batch, not work done for the caller.
+            executed = time.perf_counter()
             value, status = await run_one(step)
             outcomes[index] = StepOutcome(step, status, value=value)
         except asyncio.CancelledError:
@@ -204,7 +216,12 @@ async def run_steps(
         finally:
             outcome = outcomes[index]
             if outcome is not None:
-                outcome.seconds = time.perf_counter() - started
+                finished_at = time.perf_counter()
+                if executed is not None:
+                    outcome.seconds = finished_at - executed
+                outcome.waited_seconds = (
+                    executed if executed is not None else finished_at
+                ) - arrived
             finished[index].set()
 
     tasks = [asyncio.create_task(one(index)) for index in range(len(steps))]
@@ -232,12 +249,10 @@ async def _run_sequential(
 ) -> List[StepOutcome]:
     """The legacy path: one call after another, in the batch's order."""
     for index, step in enumerate(steps):
-        started = time.perf_counter()
         try:
             required = data_dependencies(steps, index)
         except PreparationError as exc:
             outcomes[index] = StepOutcome(step, SKIPPED, detail=f"skipped: {exc}")
-            outcomes[index].seconds = time.perf_counter() - started
             continue
         blocked = [
             earlier
@@ -252,8 +267,8 @@ async def _run_sequential(
             outcomes[index] = StepOutcome(
                 step, SKIPPED, detail=f"skipped: its dependency {reason}"
             )
-            outcomes[index].seconds = time.perf_counter() - started
             continue
+        started = time.perf_counter()
         try:
             value, status = await run_one(step)
             outcomes[index] = StepOutcome(step, status, value=value)
@@ -272,7 +287,12 @@ async def _run_sequential(
 
 
 def timings(outcomes: Sequence[StepOutcome], wall_seconds: float) -> Dict[str, Any]:
-    """A record of the batch for logs and for the run's metadata."""
+    """A record of the batch for logs and for the run's metadata.
+
+    ``serial_ms`` is the sum of the steps' own execution time, so it never
+    includes queueing behind an ordering barrier or a ``depends_on`` edge; a
+    skipped step contributes nothing because it was never invoked.
+    """
     return {
         "wall_ms": round(wall_seconds * 1000, 1),
         "serial_ms": round(sum(outcome.seconds for outcome in outcomes) * 1000, 1),
@@ -281,6 +301,7 @@ def timings(outcomes: Sequence[StepOutcome], wall_seconds: float) -> Dict[str, A
                 "name": outcome.step.name,
                 "status": outcome.status,
                 "seconds": round(outcome.seconds, 4),
+                "waited_seconds": round(outcome.waited_seconds, 4),
                 "detail": outcome.detail,
             }
             for outcome in outcomes
