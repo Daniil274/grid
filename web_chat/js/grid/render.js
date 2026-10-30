@@ -193,6 +193,28 @@ export const REASON_HINTS = {
   files_timeout: "the files did not answer in time",
 };
 
+/**
+ * The build the server runs, as the map header shows it: a short commit, or
+ * the server's own reason why it cannot name one. `server` is the map answer's
+ * `server` object - never a full hash, never a path.
+ */
+export function buildLabel(server) {
+  const commit = text(server?.commit);
+  if (commit) {
+    const source = text(server?.source);
+    const version = text(server?.version);
+    const details = [version && `version ${version}`, source && source !== "unknown" && `from ${source}`]
+      .filter(Boolean).join(", ");
+    return {
+      text: `build ${commit}`,
+      title: `This server runs commit ${commit}${details ? ` (${details})` : ""}`,
+      known: true,
+    };
+  }
+  const reason = text(server?.reason) || "The server did not name the commit it runs.";
+  return { text: "build unknown", title: `No commit: ${reason}`, known: false };
+}
+
 /** "No data: <reason>" plus a hint per code - never a fake for an unreadable section. */
 const unavailableNote = (section) => {
   const hint = REASON_HINTS[text(section?.reason_code)];

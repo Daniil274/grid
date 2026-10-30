@@ -13,6 +13,8 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -106,7 +108,7 @@ def issue(task_id, *, created_at="2026-01-01T00:00:00Z", status="open", **extra)
     }
 
 
-def make_app(spaces):
+def make_app(spaces, build=None):
     """An app whose space is chosen by the ``x-user`` header (one per user)."""
     app = FastAPI()
     api = APIRouter()
@@ -117,7 +119,7 @@ def make_app(spaces):
             raise HTTPException(status_code=401, detail="Sign in")
         return spaces[user]
 
-    register_map_routes(api, current_space)
+    register_map_routes(api, current_space, build=build)
     app.include_router(api)
     return app
 
@@ -209,6 +211,49 @@ def test_the_map_has_the_page_contract(client, space, bd):
     assert bd.calls[0][1] == space.layout.project_spaces / root.id
     assert bd.calls[0][0][0] == "--readonly"
     assert body["files_url"] == "/files?context=chat-1&path=project"
+
+
+def test_the_map_names_the_running_commit_and_nothing_more(space, bd):
+    root = project(space)
+    full = "abcdef0" + "1" * 33
+    build = {"version": "1.2.3", "commit": "abcdef0", "commit_full": full, "source": "git"}
+    app = make_app({"u1": space}, build=lambda: build)
+
+    response = TestClient(app).get(f"/api/projects/{root.id}/map")
+
+    assert response.status_code == 200
+    # A website-only operator sees which code is live: the short commit, not a path.
+    assert response.json()["server"] == {
+        "version": "1.2.3", "commit": "abcdef0", "source": "git",
+        "reason_code": None, "reason": None,
+    }
+    assert full not in response.text
+
+
+def test_an_unknown_build_carries_a_typed_reason(space, bd):
+    root = project(space)
+    build = {"version": "1.2.3", "commit": "unknown", "commit_full": "unknown", "source": "unknown"}
+    app = make_app({"u1": space}, build=lambda: build)
+
+    server = TestClient(app).get(f"/api/projects/{root.id}/map").json()["server"]
+
+    assert server["commit"] is None and server["source"] == "unknown"
+    assert server["reason_code"] == map_api.BUILD_UNKNOWN
+    assert server["reason"] == map_api.BUILD_UNKNOWN_TEXT
+    assert server["version"] == "1.2.3"
+
+
+def test_a_build_value_that_is_not_a_commit_is_never_shown(space, bd):
+    """An environment stamp is not trusted as a hash: no paths or secrets leak."""
+    root = project(space)
+    build = {"version": "1.2.3", "commit": "/srv/secret", "commit_full": "/srv/secret", "source": "env"}
+    body = TestClient(make_app({"u1": space}, build=lambda: build)).get(
+        f"/api/projects/{root.id}/map"
+    ).json()
+
+    assert body["server"]["commit"] is None
+    assert body["server"]["reason_code"] == map_api.BUILD_UNKNOWN
+    assert "/srv/secret" not in json.dumps(body)
 
 
 def test_the_path_is_the_ancestors_from_the_root(client, space):
@@ -536,6 +581,106 @@ def test_a_docker_read_mounts_the_project_read_only_and_pins_the_copy(space, mon
     assert "env" not in seen["kwargs"] and "cwd" not in seen["kwargs"]
 
 
+def _copy_mount_source(command):
+    """The host directory the read mounts at /tracker, from the built command."""
+    mount = next(arg for arg in command if arg.endswith(f":{map_api.CONTAINER_TRACKER_DIR}"))
+    return Path(mount.rsplit(":", 1)[0])
+
+
+def _assert_owner_only(copied, uid):
+    """Every entry of the copy belongs to *uid* and to nobody else."""
+    for path in [copied, *copied.rglob("*")]:
+        info = path.lstat()
+        assert info.st_uid == uid, f"{path} is not owned by {uid}"
+        expected = 0o700 if stat.S_ISDIR(info.st_mode) else 0o600
+        assert stat.S_IMODE(info.st_mode) == expected, f"{path} is not {expected:o}"
+
+
+def test_the_docker_copy_is_the_image_users_owner_only(space, monkeypatch):
+    """The copy is handed to the uid bd runs as; the server's temp tree stays 0700.
+
+    A bind mount keeps host owners: a root server's copy is root's, and uid 1000
+    cannot open it. Here the image's uid is this process's uid (the one the test
+    may chown to), which is enough to prove the copy is given to the image and
+    narrowed to owner-only rather than widened to the world.
+    """
+    root = project(space)
+    directory = space.layout.project_spaces / root.id
+    uid = os.geteuid()
+    monkeypatch.setattr(map_api, "_bd_executable", lambda: None)
+    monkeypatch.setattr(map_api, "_docker_bd_available", lambda: True)
+    monkeypatch.setattr(map_api, "_get_isolation_image", lambda context=None: "grid-agent:test")
+    monkeypatch.setattr(map_api, "_container_uid", lambda image: uid)
+    seen = {}
+
+    def run(command, **kwargs):
+        copied = _copy_mount_source(command)
+        seen["copied"] = copied
+        # Production-like temp tree: the server's temporary root is owner-only.
+        assert stat.S_IMODE(copied.parents[1].stat().st_mode) == 0o700
+        assert copied.is_dir() and (copied / ".beads" / "beads.db").is_file()
+        _assert_owner_only(copied, uid)
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(map_api.subprocess, "run", run)
+    assert map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS)) == {"success": True, "data": []}
+    assert seen["copied"].parents[1].name.startswith("grid-map-")
+
+
+def test_a_copy_that_cannot_be_handed_over_runs_as_its_owner(space, monkeypatch):
+    """A non-root server cannot chown to uid 1000: bd runs as the copy's owner.
+
+    Owner-only modes still admit that uid, and the copy is never world-writable.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("as root the copy can be handed to the image user instead")
+    root = project(space)
+    directory = space.layout.project_spaces / root.id
+    monkeypatch.setattr(map_api, "_bd_executable", lambda: None)
+    monkeypatch.setattr(map_api, "_docker_bd_available", lambda: True)
+    monkeypatch.setattr(map_api, "_get_isolation_image", lambda context=None: "grid-agent:test")
+    monkeypatch.setattr(map_api, "_container_uid", lambda image: os.geteuid() + 1)
+    seen = {}
+
+    def run(command, **kwargs):
+        seen["command"] = list(command)
+        copied = _copy_mount_source(command)
+        # The copy keeps its owner; only that owner's bits are set.
+        _assert_owner_only(copied, os.geteuid())
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(map_api.subprocess, "run", run)
+    assert map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS)) == {"success": True, "data": []}
+    command = seen["command"]
+    assert command[command.index("--user") + 1] == f"{os.geteuid()}:{os.getegid()}"
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not available here")
+def test_a_real_isolation_image_reads_the_ephemeral_copy(tmp_path, monkeypatch):
+    """End to end through Docker: build a tracker, then read its temporary copy.
+
+    This is the regression itself where Docker exists: the host may run as root
+    while the image runs as uid 1000, and the read must still answer.
+    """
+    image = map_api._get_isolation_image(None)
+    if not image or map_api._bd_executable() is None:
+        pytest.skip("needs the isolation image and a host bd to build a tracker")
+    if map_api._container_uid(image) is None:
+        pytest.skip(f"the isolation image {image} is not available locally")
+    directory = tmp_path / "prjreal"
+    directory.mkdir()
+    env = _bd_env(tmp_path)
+    created = _real_tracker(directory, "prjreal", env, ["Docker copy read"])
+
+    monkeypatch.setattr(map_api, "_bd_executable", lambda: None)  # force the docker runner
+    monkeypatch.setattr(map_api, "_docker_bd_available", lambda: True)
+    monkeypatch.setattr(map_api, "_get_isolation_image", lambda context=None: image)
+    answer = map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS))
+
+    assert answer.get("success") is True, answer
+    assert {issue["id"] for issue in answer["data"]} == {task["id"] for task in created}
+
+
 def test_a_bd_failure_is_logged_but_never_returned(space, monkeypatch, caplog):
     root = project(space)
     directory = space.layout.project_spaces / root.id
@@ -683,6 +828,36 @@ def test_the_grid_page_says_so_when_its_file_is_missing(tmp_path, monkeypatch, s
 
 
 # -- typed reasons ---------------------------------------------------------------
+
+
+def test_map_identifies_the_commit_the_server_loaded(space):
+    root = project(space)
+    build = {"version": "1.2.3", "commit": "abcdef0123456789", "source": "git",
+             "commit_full": "abcdef0123456789"}
+
+    body = TestClient(make_app({"u1": space}, build=lambda: build)).get(
+        f"/api/projects/{root.id}/map"
+    ).json()
+
+    assert body["server"] == {
+        "version": "1.2.3", "commit": "abcdef0", "source": "git",
+        "reason_code": None, "reason": None,
+    }
+    assert "commit_full" not in json.dumps(body)
+
+
+def test_map_names_unknown_or_untrusted_commit_without_leaking_it(space):
+    root = project(space)
+    build = {"version": "1.2.3", "commit": "../private/path", "source": "env"}
+
+    body = TestClient(make_app({"u1": space}, build=lambda: build)).get(
+        f"/api/projects/{root.id}/map"
+    ).json()
+
+    assert body["server"]["commit"] is None
+    assert body["server"]["reason_code"] == map_api.BUILD_UNKNOWN
+    assert body["server"]["reason"] == map_api.BUILD_UNKNOWN_TEXT
+    assert "private" not in json.dumps(body)
 
 
 def test_each_unavailable_section_carries_the_code_of_its_sentence(tmp_path, bd):

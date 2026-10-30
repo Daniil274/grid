@@ -5,6 +5,16 @@
 
 import { GridPage, projectFromSearch } from "./page.js";
 
+// The build badge lives in the header, beside Refresh: the page sets its words
+// once it has the map's `server` object (a short commit, or a reason).
+const actions = document.querySelector(".gridActions");
+const build = document.createElement("span");
+build.id = "grid-build";
+build.className = "gridBrand gridBuild";
+build.setAttribute("role", "status");
+build.setAttribute("aria-live", "polite");
+actions?.prepend(build);
+
 const page = new GridPage(
   {
     status: document.getElementById("grid-status"),
@@ -13,6 +23,7 @@ const page = new GridPage(
     map: document.getElementById("grid-map"),
     overview: document.getElementById("grid-overview"),
     refresh: document.getElementById("grid-refresh"),
+    build,
   },
   { projectId: projectFromSearch(location.search) },
 );

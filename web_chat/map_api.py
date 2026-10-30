@@ -39,6 +39,7 @@ that already has this map revalidates it with ``If-None-Match`` and gets
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -51,7 +52,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
 
 import yaml
@@ -59,6 +60,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import Response
 
 from tools.beads_tools import _docker_fallback_enabled, _find_bd, _get_isolation_image
+from web_chat.build_info import SHORT as BUILD_COMMIT_SHORT
+from web_chat.build_info import UNKNOWN, read_build_info
 from web_chat.explorer_api import list_folder
 from web_chat.space import SPACE_ID
 from web_chat.tasks_api import _counts, _issues, _task
@@ -86,6 +89,9 @@ MAX_TRACKER_COPY_ENTRIES = 20_000
 #: read-only beside it and is never the database bd opens.
 CONTAINER_TRACKER_DIR = "/tracker"
 CONTAINER_PROJECT_DIR = "/project"
+
+#: How long reading the image's user may take before the copy is run as its owner.
+IMAGE_USER_TIMEOUT_SECONDS = 10.0
 
 #: How much of bd's own message a log line keeps.
 LOG_LIMIT = 800
@@ -153,6 +159,35 @@ REASON_TEXT = {
 
 #: The files section names the same missing space with the same words.
 NO_SPACE = REASON_TEXT[ReasonCode.NO_SPACE]
+
+#: The server section: a short commit, or the one reason it cannot be named.
+BUILD_UNKNOWN = "build_commit_unknown"
+BUILD_UNKNOWN_TEXT = "This server does not know which commit of the code it runs."
+_HEX = frozenset("0123456789abcdef")
+
+
+@functools.lru_cache(maxsize=1)
+def _build_info() -> dict[str, Any]:
+    """Which code this process runs, read once: it cannot change under it."""
+    return read_build_info()
+
+
+def _public_build(info: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """The build identity a page may show: a short commit or a typed reason.
+
+    No full hash, no checkout path and no environment value beyond a validated
+    short commit: either ``commit`` names the code, or ``reason_code`` names the
+    one honest answer - this server cannot tell. ``version`` is always there.
+    """
+    info = _build_info() if info is None else info
+    version = str(info.get("version") or UNKNOWN)
+    commit = str(info.get("commit") or "").strip().lower()
+    if len(commit) < BUILD_COMMIT_SHORT or not set(commit) <= _HEX:
+        return {"version": version, "commit": None, "source": "unknown",
+                "reason_code": BUILD_UNKNOWN, "reason": BUILD_UNKNOWN_TEXT}
+    return {"version": version, "commit": commit[:BUILD_COMMIT_SHORT],
+            "source": str(info.get("source") or UNKNOWN),
+            "reason_code": None, "reason": None}
 
 
 def _canonical(payload: dict[str, Any]) -> str:
@@ -455,6 +490,72 @@ def _tracker_copy(directory: Path, beads: Path, work: Path) -> tuple[Optional[Pa
         return None, ReasonCode.BD_FAILED
 
 
+@functools.lru_cache(maxsize=8)
+def _container_uid(image: str) -> Optional[int]:
+    """The uid the isolation image runs as, or None when it cannot be read.
+
+    A bind mount keeps the host's owners: a root server's copy is root's, and
+    the image (``USER grid``, uid 1000) cannot even open it. The image knows its
+    own user, so ask it once per image rather than guess a number.
+    """
+    try:
+        done = subprocess.run(
+            ["docker", "run", "--rm", "--entrypoint", "id", image, "-u"],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+            timeout=IMAGE_USER_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("map: the user of image %s could not be read: %s", image, exc)
+        return None
+    if done.returncode:
+        return None
+    try:
+        return int((done.stdout or "").strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _host_ids() -> Optional[tuple[int, int]]:
+    """This process's uid and gid, or None where the host has no such ids.
+
+    A Windows Docker Desktop bind mount does not carry Unix owners, so there is
+    nothing to hand over there and the image's own user reads the copy.
+    """
+    getuid, getgid = getattr(os, "geteuid", None), getattr(os, "getegid", None)
+    if not callable(getuid) or not callable(getgid):
+        return None
+    return int(getuid()), int(getgid())
+
+
+def _owner_only(path: Path, uid: int) -> None:
+    """Give one path to *uid* and to nobody else: 0700 for a directory, 0600 otherwise."""
+    info = os.lstat(path)
+    if info.st_uid != uid:
+        os.lchown(path, uid, -1)
+    if stat.S_ISLNK(info.st_mode):
+        return  # a link has no mode of its own; the copy holds none anyway
+    os.chmod(path, 0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
+
+
+def _hand_over_copy(copied: Path, uid: int) -> bool:
+    """Make the ephemeral copy *uid*'s own, owner-only, top to bottom.
+
+    The copy lives inside the server's 0700 temporary root, which no other host
+    user can enter; inside it, only the uid that bd runs as may read or write.
+    False means this process may not give it away (it is not root): the caller
+    then runs bd as the copy's own owner instead.
+    """
+    try:
+        _owner_only(copied, uid)
+        for parent, dirs, files in os.walk(copied):
+            for name in dirs + files:
+                _owner_only(Path(parent) / name, uid)
+    except OSError as exc:
+        logger.warning("map: the tracker copy could not be handed to uid %s: %s", uid, exc)
+        return False
+    return True
+
+
 def _answer(result: Any, trace: Optional[ReadTrace] = None) -> dict[str, Any]:
     """bd's exit as a typed answer; the real failure goes to the log, not out."""
     if trace is not None:
@@ -498,12 +599,15 @@ def _run_on_host(bd: str, cwd: Path, database: Path, args: List[str], home: Path
 
 
 def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
-                      args: List[str], trace: Optional[ReadTrace] = None) -> dict[str, Any]:
+                      args: List[str], trace: Optional[ReadTrace] = None,
+                      user: Optional[str] = None) -> dict[str, Any]:
     """One pinned read in the isolation image, when this host has no bd.
 
     Same command as ``tools.beads_tools._run_bd_via_docker_run`` builds, but
     the database is the temporary copy: the project is mounted read-only as a
-    guard, and bd cannot write to it even if it tried.
+    guard, and bd cannot write to it even if it tried. *user* is only given when
+    the copy cannot be handed to the image's own user: then bd runs as the
+    copy's owner, so owner-only modes still let it in.
     """
     # Docker on Windows generally accepts forward slashes in volume specs.
     pinned = Path(CONTAINER_TRACKER_DIR) / database.relative_to(cwd)
@@ -519,11 +623,15 @@ def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
         "-v", f"{str(project).replace(os.sep, '/')}:{CONTAINER_PROJECT_DIR}:ro",
         "-v", f"{str(cwd).replace(os.sep, '/')}:{CONTAINER_TRACKER_DIR}",
         "-w", CONTAINER_TRACKER_DIR,
+    ]
+    if user:
+        command.extend(["--user", user])
+    command.extend([
         image,
         # Stopping the client alone would leave bd running, holding the database.
         "timeout", "-k", "5", str(int(BD_TIMEOUT_SECONDS)),
         "/usr/local/bin/bd", "--db", str(pinned), *args,
-    ]
+    ])
     if trace is not None:
         trace.command = command
     try:
@@ -590,7 +698,23 @@ def _read_tracker(directory: Path, args: List[str],
                 return _failure(ReasonCode.BD_FAILED)
             if runner.kind == "host":
                 return _run_on_host(runner.executable or "", copied, pinned, args, home, trace)
-            return _run_in_container(runner.image or "", directory, copied, pinned, args, trace)
+            image = runner.image or ""
+            # A bind mount keeps host owners: hand the copy to the image's user,
+            # owner-only. If this process cannot (it is neither root nor that
+            # user), run bd as the copy's owner instead of widening its modes.
+            host = _host_ids()
+            if host is None:
+                return _run_in_container(image, directory, copied, pinned, args, trace)
+            uid = _container_uid(image)
+            if (uid is not None and (uid == host[0] or host[0] == 0)
+                    and _hand_over_copy(copied, uid)):
+                return _run_in_container(image, directory, copied, pinned, args, trace)
+            # Still owner-only: bd will run as that owner, never as the world.
+            _hand_over_copy(copied, host[0])
+            return _run_in_container(
+                image, directory, copied, pinned, args, trace,
+                user=f"{host[0]}:{host[1]}",
+            )
     except OSError as exc:
         logger.warning("map: the tracker read of %s could not start: %s", directory.name, exc)
         if trace is not None:
@@ -850,8 +974,15 @@ def _files_url(space: Any, project_id: str, chats: List[str]) -> Optional[str]:
     return f"/files?context={quote(chats[0], safe='')}&path=project"
 
 
-def register_map_routes(api: APIRouter, current_space: Any) -> None:
-    """Mount the map route on *api*; it resolves the space itself."""
+def register_map_routes(api: APIRouter, current_space: Any,
+                        build: Optional[Callable[[], dict[str, Any]]] = None) -> None:
+    """Mount the map route on *api*; it resolves the space itself.
+
+    *build* returns the build identity the server read at startup (a dict from
+    :func:`web_chat.build_info.read_build_info`); without it the map reads the
+    checkout itself, once per process.
+    """
+    read_build = build or _build_info
 
     @api.get("/api/projects/{project_id}/map")
     async def project_map(
@@ -872,6 +1003,7 @@ def register_map_routes(api: APIRouter, current_space: Any) -> None:
             "project": _project_payload(project),
             "path": _ancestors(store, project),
             "children": _children(store, project_id),
+            "server": _public_build(read_build()),
             "tasks": tasks.payload,
             "processes": processes,
             "files": files,

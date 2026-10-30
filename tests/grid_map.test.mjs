@@ -24,6 +24,7 @@ const {
   renderOverview,
   renderBreadcrumb,
   renderProjectPicker,
+  buildLabel,
   taskHref,
   chatHref,
   fileHref,
@@ -75,6 +76,7 @@ function sampleMap(overrides = {}) {
       truncated: false,
     },
     files_url: "/files?context=p1&path=project",
+    server: { version: "1.2.3", commit: "abcdef0", source: "git", reason_code: null, reason: null },
     ...overrides,
   };
 }
@@ -437,6 +439,7 @@ function pageNodes() {
     map: el("div"),
     overview: el("aside"),
     refresh: el("button"),
+    build: el("span"),
   };
 }
 
@@ -470,6 +473,55 @@ test("the page shows a map, then revalidates it with the ETag it got", async () 
 
   await page.load({ force: true });
   assert.equal(calls[2].etag, "", "a manual refresh asks for the map itself");
+});
+
+test("the header names the short commit the server runs", async () => {
+  const nodes = pageNodes();
+  const page = new GridPage(nodes, {
+    projectId: "p1",
+    doc: fakeDocument(),
+    timers: fakeTimers(),
+    loadMap: async () => ({ notModified: false, etag: "", map: sampleMap() }),
+    listProjects: async () => [],
+  });
+
+  await page.load();
+
+  assert.equal(nodes.build.textContent, "build abcdef0");
+  assert.match(nodes.build.title, /commit abcdef0/);
+  assert.equal(nodes.build.dataset.state, "known");
+  // Nothing but the short commit: no full hash, no checkout path.
+  assert.doesNotMatch(nodes.build.textContent, /[0-9a-f]{8,}/);
+});
+
+test("an unknown build says so with the server's own reason", async () => {
+  const nodes = pageNodes();
+  const unknown = sampleMap({
+    server: {
+      version: "1.2.3", commit: null, source: "unknown",
+      reason_code: "build_commit_unknown",
+      reason: "This server does not know which commit of the code it runs.",
+    },
+  });
+  const page = new GridPage(nodes, {
+    projectId: "p1",
+    doc: fakeDocument(),
+    timers: fakeTimers(),
+    loadMap: async () => ({ notModified: false, etag: "", map: unknown }),
+    listProjects: async () => [],
+  });
+
+  await page.load();
+  assert.equal(nodes.build.textContent, "build unknown");
+  assert.match(nodes.build.title, /does not know which commit/);
+  assert.equal(nodes.build.dataset.state, "unknown");
+});
+
+test("buildLabel never shows a long value as a commit", () => {
+  const full = buildLabel({ commit: "abcdef0" });
+  assert.equal(full.text, "build abcdef0");
+  assert.equal(buildLabel({ commit: null, reason: "no .git here" }).text, "build unknown");
+  assert.match(buildLabel({ commit: null, reason: "no .git here" }).title, /no \.git here/);
 });
 
 test("a manual Refresh button asks again", async () => {

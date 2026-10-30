@@ -15,7 +15,7 @@
 import { h, replace } from "../lib/dom.js";
 import { fetchProjectMap, fetchProjects } from "./api.js";
 import { REFRESH_MS, createPoller } from "./live.js";
-import { renderBreadcrumb, renderMap, renderOverview, renderProjectPicker } from "./render.js";
+import { buildLabel, renderBreadcrumb, renderMap, renderOverview, renderProjectPicker } from "./render.js";
 
 /** The ?project=<id> of a URL, or "" when the page is the picker. */
 export function projectFromSearch(search) {
@@ -80,6 +80,27 @@ export class GridPage {
     if (!node) return;
     node.textContent = text;
     if (node.dataset) node.dataset.tone = error ? "error" : "";
+  }
+
+  /**
+   * The commit the server runs, in the header: an operator restarts the site
+   * and needs to see that the running code is the code they deployed - or the
+   * server's reason why it cannot say. Nothing else is shown, and no path.
+   */
+  renderBuild() {
+    const node = this.nodes.build;
+    if (!node) return;
+    const server = this.map?.server;
+    if (!server) {
+      node.textContent = "";
+      if ("title" in node) node.title = "";
+      if (node.dataset) node.dataset.state = "";
+      return;
+    }
+    const label = buildLabel(server);
+    node.textContent = label.text;
+    if ("title" in node) node.title = label.title;
+    if (node.dataset) node.dataset.state = label.known ? "known" : "unknown";
   }
 
   async load({ force = false } = {}) {
@@ -154,6 +175,7 @@ export class GridPage {
 
   render() {
     const { title, breadcrumb, map, overview } = this.nodes;
+    this.renderBuild();
     if (!this.projectId) {
       if (map) map.hidden = true;
       if (title) title.textContent = "Grid map";

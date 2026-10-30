@@ -291,7 +291,8 @@ class WebChatServer:
         from web_chat.map_api import register_map_routes
 
         # The visual GRID: one project as a map - its place, tasks, chats and results.
-        register_map_routes(api, self.current_space)
+        # The commit it shows is the one this process read at startup, not a new read.
+        register_map_routes(api, self.current_space, build=lambda: self.build_info)
         from web_chat.system_hub import register_system_routes
 
         register_system_routes(api, self.systems, self.current_user, self.current_space, admins_only(self.current_user))
