@@ -751,6 +751,11 @@ export function createReasoningPanel() {
         plan.update(step);
         return;
       }
+      // A top-level message is public communication, not process: the message
+      // shows it in its own words (ui/activity.js), so the panel would be a
+      // second copy of the same sentence. A nested message stays: it is part
+      // of the sub-agent's report and never a message of this turn.
+      if (step.kind === "message" && !step.parent_id) return;
       root.hidden = false;
       const existing = index.get(step.id);
       if (existing && (existing.row.kind === "agent") === (step.kind === "agent")) {

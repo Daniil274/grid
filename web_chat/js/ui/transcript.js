@@ -192,6 +192,8 @@ export function createTranscript({
           messageId: message.id,
           versions: message.versions,
           checkpoint: message.checkpoint ?? null,
+          // Public typed events of the turn: narration and compact statuses.
+          events: message.events ?? [],
         });
         handle.reasoning?.hydrate(message.trace, {
           loadStep: loadStep && message.id ? (stepId) => loadStep(message.id, stepId) : null,
@@ -245,6 +247,7 @@ export function createTranscript({
       }
       handles.forEach((handle, index) => handle.adopt({
         id: stored[index].id, versions: stored[index].versions, checkpoint: stored[index].checkpoint ?? null,
+        events: stored[index].events ?? [],
       }));
       return true;
     },

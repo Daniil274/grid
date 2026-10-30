@@ -14,6 +14,7 @@ import { renderMarkdown, renderMarkdownBlocks } from "../lib/markdown.js";
 import { decorateMath } from "../lib/math.js";
 import { scopeWorkspaceLinks } from "../lib/workspace-links.js";
 import { ICONS } from "./icons.js";
+import { createActivityView } from "./activity.js";
 import { createReasoningPanel } from "./reasoning.js";
 import { copyText, toast } from "./toast.js";
 
@@ -156,11 +157,13 @@ function actionButton(label, path, onClick, extraClass = "") {
  * @param {?{turn_id: string, files: number}} [options.checkpoint] user messages only:
  *   the turn changed files, and `onRestore` brings them back to before it
  * @param {(checkpoint: {turn_id: string, files: number}) => void} [options.onRestore]
+ * @param {object[]} [options.events] assistant messages only: the public typed
+ *   events the server stored with the message (`message.events`)
  */
 export function createMessage({
   role, content = "", author = "", timestamp, onEdit, onSpeak, onReport, onContinue, onSwitchVersion, onDelete, onFork,
   onContinueInNewChat, onRestore, kind = null, compaction = null, context = null, images = [], messageId = null, versions = null,
-  checkpoint = null,
+  checkpoint = null, events = [],
 }) {
   if (kind === "continuation") return createContinuationMarker({ timestamp });
   if (kind === "compaction") return createCompactionMarker({ timestamp, compaction });
@@ -176,6 +179,9 @@ export function createMessage({
     }
   });
   const reasoning = isAssistant ? createReasoningPanel() : null;
+  // What the agent said around its work and the compact status of that work:
+  // public events only, and the answer itself stays the message body below.
+  const activity = isAssistant ? createActivityView().setAuthor(author) : null;
 
   let text = content;
   // A user's uploaded files close their text (lib/files.js): shown as files,
@@ -298,6 +304,7 @@ export function createMessage({
     revisionLines,
     reasoning?.el,
     reasoning?.planEl,
+    activity?.el,
     isAssistant ? null : gallery,
     isAssistant ? null : fileList,
     body,
@@ -307,6 +314,8 @@ export function createMessage({
   );
 
   const view = createBlockView(body, id);
+
+  if (activity && events?.length) activity.apply(events);
 
   const paint = () => {
     const { text: words, files } = ownWords();
@@ -379,6 +388,7 @@ export function createMessage({
     role,
     kind: null,
     reasoning,
+    activity,
 
     get text() {
       return text;
@@ -410,10 +420,12 @@ export function createMessage({
       showCheckpoint(next);
     },
 
-    adopt({ id: nextId, versions: nextVersions, checkpoint: nextCheckpoint }) {
+    adopt({ id: nextId, versions: nextVersions, checkpoint: nextCheckpoint, events: nextEvents }) {
       storedId = nextId ?? storedId;
       renderVersions(nextVersions);
       showCheckpoint(nextCheckpoint ?? null);
+      // A reconnect redraws nothing twice: the activity view dedupes by step.
+      if (nextEvents?.length) activity?.apply(nextEvents);
     },
 
     /** Show an image the model generated, once. */
@@ -441,6 +453,17 @@ export function createMessage({
     /** Name the agent that took the turn, once routing has decided. */
     setAuthor(name) {
       authorNode.textContent = name;
+      activity?.setAuthor(name);
+    },
+
+    /** One live step frame: narration and statuses join the activity view. */
+    observeStep(step) {
+      activity?.observeStep(step);
+    },
+
+    /** One live typed event (`event` frames of a running turn, when sent). */
+    applyEvent(event) {
+      activity?.add(event);
     },
 
     /** Replace the answer (final output, or a restored message). */

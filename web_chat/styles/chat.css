@@ -1615,3 +1615,31 @@
   .diagramModal { padding: 0; }
   .diagramModal__panel { border-radius: 0; border-width: 0; }
 }
+
+/* -- the public communication of a message (ui/activity.js) ----------------
+   What the agent said between its actions and one compact line of what it did;
+   both stay above the answer. Colours are the chat's tokens only. */
+.msg__activity { display: grid; gap: 10px; margin-bottom: 8px; }
+.msg__activity[hidden] { display: none; }
+.msg__activityMessages { display: grid; gap: 10px; }
+.msg__activityMessage { overflow-wrap: anywhere; }
+.msg__activityAuthor {
+  display: block; margin-bottom: 1px; color: var(--text-3);
+  font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em;
+}
+.msg__activityAuthor[hidden] { display: none; }
+.msg__activityText { color: var(--text); }
+.msg__activityText > * + * { margin-top: 0.7em; }
+.msg__activityText p { margin: 0; }
+.msg__activityStatus {
+  display: flex; gap: 5px; align-items: baseline; min-width: 0;
+  color: var(--text-3); font-size: 12.5px;
+}
+.msg__activityStatus[hidden] { display: none; }
+.msg__activityMark { color: var(--text-3); font-size: 11px; }
+.msg__activityLabel {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.msg__activityCount { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.msg__activityStatus[data-status="error"] .msg__activityLabel,
+.msg__activityStatus[data-status="error"] .msg__activityMark { color: var(--danger); }

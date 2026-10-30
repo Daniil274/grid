@@ -823,8 +823,14 @@ export class ChatController {
       })
       .on("step", ({ step }) => {
         message.reasoning.upsert(step);
+        // Narration and tool titles are public events too: the message keeps
+        // them when the trace folds, the answer replaces the stream, or the
+        // page attaches again and the stored events replay them.
+        message.observeStep(step);
         this._transcript.follow();
       })
+      // A typed public event of the running turn, when the server sends one.
+      .on("event", ({ event }) => message.applyEvent(event))
       .on("step_removed", ({ id }) => message.reasoning.remove(id))
       .on("reasoning", ({ id, delta }) => {
         message.reasoning.appendReasoning(id, delta);
