@@ -739,6 +739,10 @@ _FAILURE_CASES = [
         map_api.Diagnosis.PERMISSION_DENIED,
     ),
     (
+        "Dolt failed to open database: permission denied at /srv/secret token=abc\n",
+        map_api.Diagnosis.PERMISSION_DENIED,
+    ),
+    (
         "Error: token=abc rejected at /home/secret/tracker\n",
         map_api.Diagnosis.EXIT_UNKNOWN,
     ),

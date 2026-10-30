@@ -224,18 +224,17 @@ DIAGNOSIS_PATTERNS = (
         "database locked",
         "another process is using",
     )),
+    (Diagnosis.PERMISSION_DENIED, (
+        "permission denied",
+        "eacces",
+        "operation not permitted",
+    )),
     (Diagnosis.DATABASE_ERROR, (
-        "dolt",
         "failed to open database",
         "error opening database",
         "corrupt",
         "no such table",
         "migration",
-    )),
-    (Diagnosis.PERMISSION_DENIED, (
-        "permission denied",
-        "eacces",
-        "operation not permitted",
     )),
 )
 
