@@ -76,6 +76,7 @@ REVIEW_HTML = ROOT / "review.html"
 SYSTEMS_HTML = ROOT / "systems.html"
 USAGE_HTML = ROOT / "usage.html"
 TASKS_HTML = ROOT / "tasks.html"
+GRID_HTML = ROOT / "grid.html"
 FILES_HTML = ROOT / "files.html"
 DEVICES_HTML = ROOT / "devices.html"
 LAZY_HTML = ROOT / "lazy.html"
@@ -287,6 +288,10 @@ class WebChatServer:
 
         # The projects: the hierarchy over the user's conversations.
         register_project_routes(api, self.current_space)
+        from web_chat.map_api import register_map_routes
+
+        # The visual GRID: one project as a map - its place, tasks, chats and results.
+        register_map_routes(api, self.current_space)
         from web_chat.system_hub import register_system_routes
 
         register_system_routes(api, self.systems, self.current_user, self.current_space, admins_only(self.current_user))
@@ -612,6 +617,13 @@ class WebChatServer:
             if auth is not None and auth.user_of(request) is None:
                 return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
             return page(TASKS_HTML)
+
+        @app.get("/grid", response_class=HTMLResponse)
+        async def grid_page(request: Request) -> Any:
+            # A shell: what it shows comes through the API, which checks who asks.
+            if auth is not None and auth.user_of(request) is None:
+                return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+            return page(GRID_HTML)
 
         if self.reviews is not None:
 
