@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -87,6 +88,7 @@ class Bd:
 
 
 def issue(task_id, *, created_at="2026-01-01T00:00:00Z", status="open", **extra):
+    """One bd issue, with the secret fields the map must never pass on."""
     return {
         "id": task_id,
         "title": f"Task {task_id}",
@@ -118,6 +120,14 @@ def make_app(spaces):
     register_map_routes(api, current_space)
     app.include_router(api)
     return app
+
+
+def state(root: Path) -> dict[str, tuple]:
+    """Every path of *root* with its size and moment: a tree, byte for byte."""
+    return {
+        str(path.relative_to(root)): (path.stat().st_size, path.stat().st_mtime_ns, path.is_dir())
+        for path in sorted(root.rglob("*"))
+    }
 
 
 @pytest.fixture
@@ -380,7 +390,7 @@ def test_unsafe_or_absent_tracker_never_invokes_bd(space, client, bd, tmp_path, 
                 (beads / "beads.db-wal").symlink_to(target / "beads.db")
 
     body = client.get(f"/api/projects/{root.id}/map").json()
-    assert body["tasks"] == map_api._no_tasks(map_api.NO_TRACKER)
+    assert body["tasks"] == map_api._no_tasks(map_api.ReasonCode.NO_TRACKER)
     assert bd.calls == [], "Reject unsafe discovery BEFORE executing any bd command"
     if kind == "missing-space":
         assert not directory.exists(), "GET must not create a space"
@@ -391,7 +401,7 @@ def test_foreign_or_mixed_ids_are_not_exposed(client, space, bd):
     for issues in ([issue("foreign-secret")], [issue(f"{root.id}-own"), issue("foreign-secret")]):
         bd.answer = {"success": True, "data": issues}
         tasks = client.get(f"/api/projects/{root.id}/map").json()["tasks"]
-        assert tasks == map_api._no_tasks(map_api.FOREIGN_TRACKER)
+        assert tasks == map_api._no_tasks(map_api.ReasonCode.FOREIGN_TRACKER)
 
 
 def test_tracker_lstat_failure_is_closed(space, monkeypatch):
@@ -402,25 +412,35 @@ def test_tracker_lstat_failure_is_closed(space, monkeypatch):
     assert map_api._own_tracker(space.layout.project_spaces / root.id) is None
 
 
-def test_tracker_process_pins_existing_db_and_strips_ambient_selectors(space, monkeypatch):
+def test_tracker_process_pins_a_copy_and_strips_ambient_selectors(space, monkeypatch):
     root = project(space)
     directory = space.layout.project_spaces / root.id
     monkeypatch.setenv("BEADS_DIR", "/not-the-project")
     monkeypatch.setenv("BEADS_DOLT_SERVER_DATABASE", "foreign")
     monkeypatch.setenv("BD_DB", "/foreign")
+    monkeypatch.setattr(map_api, "_bd_executable", lambda: "/usr/bin/bd")
+    seen = {}
     def run(command, **kwargs):
-        database = directory / ".beads" / "beads.db"
+        copied = Path(kwargs["cwd"])
+        database = copied / ".beads" / "beads.db"
+        seen["copied"] = copied
+        assert command[0] == "/usr/bin/bd"
         assert command[1:3] == ["--db", str(database)]
-        assert kwargs["cwd"] == directory
+        # The database read is a copy of the project's, never the project's own.
+        assert database.is_file()
+        assert directory not in database.parents
         env = kwargs["env"]
         assert env["BEADS_DIR"] == str(database.parent)
         assert env["BEADS_DB"] == str(database)
         assert "BD_DB" not in env and "BEADS_DOLT_SERVER_DATABASE" not in env
-        assert env["HOME"] == str(directory)
-        assert env["XDG_CONFIG_HOME"] == str(directory / ".beads")
+        # Every home bd and Dolt may write to is the temporary tree, not the project.
+        home = Path(env["HOME"])
+        assert home == Path(env["XDG_CONFIG_HOME"]) == Path(env["APPDATA"]) == Path(env["USERPROFILE"])
+        assert not home.is_relative_to(directory) and not home.is_relative_to(copied)
         return SimpleNamespace(returncode=0, stdout="[]")
     monkeypatch.setattr(map_api.subprocess, "run", run)
     assert map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS)) == {"success": True, "data": []}
+    assert not seen["copied"].exists(), "the copy is temporary and goes with the read"
 
 
 def test_real_bd_discovery_and_project_isolation(tmp_path, monkeypatch):
@@ -456,7 +476,9 @@ def test_real_bd_discovery_and_project_isolation(tmp_path, monkeypatch):
             (directory / ".beads").mkdir(exist_ok=True)
         if marker == "marker":
             (directory / ".beads" / "marker").touch()
-        assert client.get(f"/api/projects/{root.id}/map").json()["tasks"] == map_api._no_tasks(map_api.NO_TRACKER)
+        assert client.get(f"/api/projects/{root.id}/map").json()["tasks"] == map_api._no_tasks(
+            map_api.ReasonCode.NO_TRACKER
+        )
     # A project git boundary lets bd init create a new tracker, not reuse its parent.
     subprocess.run(["git", "init", str(directory)], env=env, check=True, capture_output=True)
     init(directory, root.id)
@@ -472,37 +494,123 @@ def test_real_bd_discovery_and_project_isolation(tmp_path, monkeypatch):
 # -- the tracker's own failures --------------------------------------------------
 
 
-def test_a_workspace_without_a_tracker_still_answers_the_map(client, space, bd):
+def test_a_bd_refusal_answers_generically(client, space, bd):
     root = project(space)
-    bd.answer = {"success": False, "output": "no beads database", "error": ""}
+    bd.answer = {"success": False, "code": map_api.ReasonCode.BD_FAILED,
+                 "error": "SECRET /srv/private: token=abc"}
 
     response = client.get(f"/api/projects/{root.id}/map")
 
     assert response.status_code == 200
-    tasks = response.json()["tasks"]
-    assert tasks == {
-        "available": False,
-        "reason": "no beads database",
-        "items": [],
-        "total": 0,
-        "truncated": False,
-        "counts": {"ready": 0, "waiting": 0, "in_progress": 0, "blocked": 0, "closed": 0},
-    }
+    assert response.json()["tasks"] == map_api._no_tasks(map_api.ReasonCode.BD_FAILED)
+    # bd's own message may name paths or credentials: it never reaches the browser.
+    assert "SECRET" not in response.text and "token" not in response.text
 
 
-def test_a_missing_bd_degrades_instead_of_failing(monkeypatch, client, space, bd):
+def test_a_docker_read_mounts_the_project_read_only_and_pins_the_copy(space, monkeypatch):
     root = project(space)
+    directory = space.layout.project_spaces / root.id
+    monkeypatch.setattr(map_api, "_bd_executable", lambda: None)
+    monkeypatch.setattr(map_api, "_docker_bd_available", lambda: True)
+    monkeypatch.setattr(map_api, "_get_isolation_image", lambda context=None: "grid-agent:test")
+    seen = {}
 
-    async def missing(directory, args):
-        raise HTTPException(status_code=503, detail="The tracker is unavailable: bd not found")
+    def run(command, **kwargs):
+        seen["command"], seen["kwargs"] = list(command), kwargs
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
 
-    monkeypatch.setattr(map_api, "_bd_in", missing)
-    response = client.get(f"/api/projects/{root.id}/map")
+    monkeypatch.setattr(map_api.subprocess, "run", run)
+    assert map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS)) == {"success": True, "data": []}
 
-    assert response.status_code == 200
-    tasks = response.json()["tasks"]
-    assert tasks["available"] is False
-    assert "bd not found" in tasks["reason"]
+    command = seen["command"]
+    assert command[:4] == ["docker", "run", "--rm", "-i"]
+    assert "grid-agent:test" in command
+    project_mount = f"{directory}:{map_api.CONTAINER_PROJECT_DIR}:ro"
+    assert project_mount in command
+    copy_mount = command[command.index(project_mount) + 2]  # past the "-v" before it
+    assert copy_mount.endswith(f":{map_api.CONTAINER_TRACKER_DIR}")
+    assert "-w" in command and command[command.index("-w") + 1] == map_api.CONTAINER_TRACKER_DIR
+    pinned = command[command.index("--db") + 1]
+    assert pinned == f"{map_api.CONTAINER_TRACKER_DIR}/.beads/beads.db"
+    # The command carries only explicit values; the server's environment stays home.
+    assert "env" not in seen["kwargs"] and "cwd" not in seen["kwargs"]
+
+
+def test_a_bd_failure_is_logged_but_never_returned(space, monkeypatch, caplog):
+    root = project(space)
+    directory = space.layout.project_spaces / root.id
+    monkeypatch.setattr(map_api, "_bd_executable", lambda: "/usr/bin/bd")
+
+    def run(command, **kwargs):
+        return SimpleNamespace(returncode=3, stdout="", stderr="Error: /home/secret/tracker: token=abc\n")
+
+    monkeypatch.setattr(map_api.subprocess, "run", run)
+    with caplog.at_level(logging.WARNING, logger="web_chat.map_api"):
+        answer = map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS))
+
+    assert answer["code"] is map_api.ReasonCode.BD_FAILED
+    assert answer["error"] == map_api.REASON_TEXT[map_api.ReasonCode.BD_FAILED]
+    assert "secret" not in json.dumps(answer, default=str).lower()
+    logged = [record.getMessage() for record in caplog.records]
+    assert any("exited 3" in line and "/home/secret/tracker" in line for line in logged)
+
+
+def test_a_read_on_this_host_writes_nothing_into_the_project(tmp_path):
+    """The real CLI, on a synthetic tracker: the project's tree is untouched."""
+    bd = map_api._bd_executable()
+    if bd is None:
+        pytest.skip("bd is not installed on this host")
+    directory = tmp_path / "synthetic" / "prjtest"
+    directory.mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if k in {"PATH", "LANG", "SYSTEMROOT", "WINDIR"}}
+    env.update(HOME=str(home), XDG_CONFIG_HOME=str(home), BD_DISABLE_METRICS="1",
+               GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    subprocess.run(["git", "init", str(directory)], env=env, check=True, capture_output=True)
+    subprocess.run([bd, "init", "--prefix", "prjtest", "--skip-agents", "--skip-hooks"], cwd=directory,
+                   env=env, check=True, capture_output=True)
+    created = subprocess.run([bd, "create", "ONLY THIS TASK", "--json"], cwd=directory, env=env,
+                             check=True, capture_output=True, text=True)
+    assert json.loads(created.stdout)["id"].startswith("prjtest-")
+    before = state(directory)
+
+    answer = map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS))
+
+    assert answer["success"] is True, answer
+    assert [item["title"] for item in answer["data"]] == ["ONLY THIS TASK"]
+    assert state(directory) == before, "the map changed the project it read"
+    # The read used to put Dolt's own config here, through HOME=<project>.
+    assert not (directory / ".dolt").exists()
+
+
+def test_no_bd_and_no_docker_says_the_runtime_is_missing(space, monkeypatch):
+    root = project(space)
+    monkeypatch.setattr(map_api, "_bd_executable", lambda: None)
+    monkeypatch.setattr(map_api, "_docker_bd_available", lambda: False)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("bd must not run when this server has no runtime for it")
+
+    monkeypatch.setattr(map_api.subprocess, "run", forbidden)
+    tasks = TestClient(make_app({"u1": space})).get(f"/api/projects/{root.id}/map").json()["tasks"]
+
+    assert tasks == map_api._no_tasks(map_api.ReasonCode.BD_UNAVAILABLE)
+    assert "runtime" in tasks["reason"]
+
+
+def test_a_tracker_too_large_to_copy_is_not_read(space, monkeypatch):
+    root = project(space)
+    directory = space.layout.project_spaces / root.id
+    monkeypatch.setattr(map_api, "MAX_TRACKER_COPY_BYTES", 0)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("bd must not run on a tracker the map refuses to copy")
+
+    monkeypatch.setattr(map_api.subprocess, "run", forbidden)
+    answer = map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS))
+
+    assert answer["code"] is map_api.ReasonCode.TRACKER_TOO_LARGE
 
 
 def test_a_tracker_that_does_not_answer_in_time(monkeypatch, client, space):
@@ -517,8 +625,7 @@ def test_a_tracker_that_does_not_answer_in_time(monkeypatch, client, space):
 
     tasks = client.get(f"/api/projects/{root.id}/map").json()["tasks"]
 
-    assert tasks["available"] is False
-    assert "did not answer in time" in tasks["reason"]
+    assert tasks == map_api._no_tasks(map_api.ReasonCode.TIMEOUT)
 
 
 # -- revalidation ----------------------------------------------------------------

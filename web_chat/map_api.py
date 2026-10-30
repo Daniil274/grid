@@ -16,7 +16,12 @@ what it reads stays bounded:
   project's space. A project without one answers ``available: false``; the
   user's tracker is never opened in its place. Only a self-contained local
   database is admitted, explicitly pinned with --db in a clean environment.
-  Every returned id must additionally carry the project's prefix;
+  Every returned id must additionally carry the project's prefix. bd opens a
+  bounded temporary copy of that tracker, with its home in the same temporary
+  tree - embedded Dolt writes lock and journal files even for a ``--readonly``
+  list - so neither bd nor Dolt writes inside the project. Without a host bd
+  the same copy is opened by the isolation image, and the project itself is
+  only ever mounted read-only;
 * processes are the chats of the project, with the run state the rail shows;
 * files are the top level of the project's space, without the tool state
   that lives there (``.beads``, ``.git``, ``.codegraph``, ``.grid``, every
@@ -36,10 +41,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
+import shutil
 import stat
 import subprocess
+import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -48,11 +58,13 @@ import yaml
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import Response
 
-from tools.beads_tools import _bd_problem, _find_bd
+from tools.beads_tools import _docker_fallback_enabled, _find_bd, _get_isolation_image
 from web_chat.explorer_api import list_folder
 from web_chat.space import SPACE_ID
-from web_chat.tasks_api import _counts, _issues, _reason, _task
+from web_chat.tasks_api import _counts, _issues, _task
 from web_chat.views import conversation_title
+
+logger = logging.getLogger(__name__)
 
 #: How many tasks, chats and file entries one map shows at most.
 TASKS_LIMIT = 300
@@ -62,6 +74,21 @@ FILES_LIMIT = 100
 #: How long bd and the folder listing may take before the map says so.
 BD_TIMEOUT_SECONDS = 20.0
 FOLDER_TIMEOUT_SECONDS = 10.0
+
+#: What of the server's environment bd may inherit; everything else is dropped.
+INHERITED_ENV = ("PATH", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL", "TMPDIR")
+
+#: The bounds of the tracker copy one read is allowed to make.
+MAX_TRACKER_COPY_BYTES = 128 * 1024 * 1024
+MAX_TRACKER_COPY_ENTRIES = 20_000
+
+#: Where the copy appears inside the isolation image; the project is mounted
+#: read-only beside it and is never the database bd opens.
+CONTAINER_TRACKER_DIR = "/tracker"
+CONTAINER_PROJECT_DIR = "/project"
+
+#: How much of bd's own message a log line keeps.
+LOG_LIMIT = 800
 
 #: What the map reads of a tracker: a list, and nothing that writes.
 BD_LIST_ARGS = ("--readonly", "list", "--limit", "0", "--all", "--json", "--sort", "created")
@@ -84,9 +111,39 @@ TASK_FIELDS = (
 #: The kinds of a file entry: a link is a link, never passed off as a file.
 FILE_KINDS = ("dir", "file", "link", "other")
 
-NO_TRACKER = "This project has no tracker of its own yet."
-NO_SPACE = "This project has no space of its own on this server."
-FOREIGN_TRACKER = "The tracker bd found is not this project's own; its tasks are not shown."
+
+class ReasonCode(str, Enum):
+    """Why the map shows no tasks: a code to branch on, never a sentence.
+
+    The browser gets the prose of :data:`REASON_TEXT` and nothing else; the code
+    stays on this side, where a diagnostic can name the cause without parsing
+    text. New causes get a new member - never a new sentence in a caller.
+    """
+
+    NO_SPACE = "no_space"
+    NO_TRACKER = "no_tracker"
+    FOREIGN_TRACKER = "foreign_tracker"
+    BD_UNAVAILABLE = "bd_unavailable"
+    BD_FAILED = "bd_failed"
+    TIMEOUT = "timeout"
+    INVALID_ANSWER = "invalid_answer"
+    TRACKER_TOO_LARGE = "tracker_too_large"
+
+
+#: What the map tells the browser about each cause: no paths, no bd stderr.
+REASON_TEXT = {
+    ReasonCode.NO_SPACE: "This project has no space of its own on this server.",
+    ReasonCode.NO_TRACKER: "This project has no tracker of its own yet.",
+    ReasonCode.FOREIGN_TRACKER: "The tracker bd found is not this project's own; its tasks are not shown.",
+    ReasonCode.BD_UNAVAILABLE: "No issue tracker runtime is available on this server.",
+    ReasonCode.BD_FAILED: "The project's local tracker could not be read.",
+    ReasonCode.TIMEOUT: "The tracker did not answer in time.",
+    ReasonCode.INVALID_ANSWER: "The project's local tracker answered with something the map cannot read.",
+    ReasonCode.TRACKER_TOO_LARGE: "The project's tracker is too large to read on the map.",
+}
+
+#: The files section names the same missing space with the same words.
+NO_SPACE = REASON_TEXT[ReasonCode.NO_SPACE]
 
 
 def _canonical(payload: dict[str, Any]) -> str:
@@ -178,8 +235,8 @@ def _own_tracker(directory: Optional[Path]) -> Optional[Path]:
     directory = directory.absolute()
     beads = directory / ".beads"
     try:
-        # HOME is rebound to the project for Dolt (it needs a directory).
-        # Do not admit additional user-config roots beneath that HOME/XDG.
+        # A user-config root in the project would be read through HOME/XDG.
+        # Do not admit one: the read binds its own home outside the project.
         if os.path.lexists(directory / ".config") or os.path.lexists(beads / "bd"):
             return None
         if directory.resolve() != directory or not stat.S_ISDIR(os.lstat(directory).st_mode):
@@ -243,79 +300,261 @@ def _own_tracker(directory: Optional[Path]) -> Optional[Path]:
     return database
 
 
+def _failure(code: ReasonCode) -> dict[str, Any]:
+    """A typed refusal: the code branches, the text is all the browser sees."""
+    return {"success": False, "code": code, "error": REASON_TEXT[code]}
+
+
+def _logged(text: Optional[str]) -> str:
+    """bd's own message, one line and bounded: a log line, never a payload."""
+    collapsed = " ".join((text or "").split())
+    return collapsed[:LOG_LIMIT] + ("..." if len(collapsed) > LOG_LIMIT else "")
+
+
+def _bd_executable() -> Optional[str]:
+    """The host's bd when it is a real executable, else None (fallback territory).
+
+    ``_find_bd`` answers bare ``bd`` when nothing is installed; that string is
+    not a program, and asking subprocess for it is how the map used to lose the
+    tracker on a server without bd.
+    """
+    found = _find_bd()
+    if os.path.isfile(found) and os.access(found, os.X_OK):
+        return found
+    return shutil.which(found)
+
+
+def _docker_bd_available() -> bool:
+    """Whether bd may be run in the isolation image instead of on this host."""
+    return _docker_fallback_enabled() and shutil.which("docker") is not None
+
+
+def _tracker_env(home: Path, database: Path) -> dict[str, str]:
+    """The environment of one read: the tracker pinned, every home in *home*."""
+    env = {key: value for key, value in os.environ.items() if key in INHERITED_ENV}
+    env.update({
+        "BEADS_DIR": str(database.parent),
+        "BEADS_DB": str(database),
+        "BEADS_DAEMON": "0",
+        "BD_DISABLE_METRICS": "1",
+        "BD_DISABLE_EVENT_FLUSH": "1",
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home),
+        "APPDATA": str(home),
+        "USERPROFILE": str(home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+    })
+    return env
+
+
+def _tracker_copy(directory: Path, beads: Path, work: Path) -> tuple[Optional[Path], Optional[ReasonCode]]:
+    """A bounded copy of *beads*, in a work dir named as the project.
+
+    Embedded Dolt opens its store for writing even for a ``--readonly`` read:
+    measured on bd 1.3.0, a list run creates ``.beads.gate.lock`` in its cwd
+    and rewrites ``last-touched`` and the noms journal. A read-only mount is
+    not an option either - Dolt then cannot open the database at all
+    (``openat LOCK: permission denied``). So bd opens this copy, and runs with
+    its cwd in the same temporary tree: the project's own files never change.
+
+    The work dir keeps the project's name, because bd normalizes the database
+    name from the directory it sits in and the copy must validate as the same
+    self-contained store.
+    """
+    total = 0
+    entries = 0
+    try:
+        for parent, dirs, files in os.walk(beads, followlinks=False):
+            for name in dirs + files:
+                entries += 1
+                info = os.lstat(Path(parent) / name)
+                if stat.S_ISLNK(info.st_mode):
+                    # A link is not a byte of this tracker: refuse, never follow it.
+                    return None, ReasonCode.BD_FAILED
+                total += info.st_size
+                if entries > MAX_TRACKER_COPY_ENTRIES or total > MAX_TRACKER_COPY_BYTES:
+                    return None, ReasonCode.TRACKER_TOO_LARGE
+        copied = work / directory.name
+        shutil.copytree(beads, copied / ".beads", symlinks=True)
+        # The copy is ours: Dolt may write to it whatever the source mode was.
+        for parent, dirs, files in os.walk(copied):
+            for name in dirs + files:
+                path = Path(parent) / name
+                try:
+                    os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) | stat.S_IRUSR | stat.S_IWUSR)
+                except OSError as exc:
+                    logger.warning("map: tracker copy of %s is not writable: %s", directory.name, exc)
+                    return None, ReasonCode.BD_FAILED
+        return copied, None
+    except OSError as exc:
+        logger.warning("map: could not copy the tracker of %s: %s", directory.name, exc)
+        return None, ReasonCode.BD_FAILED
+
+
+def _answer(result: Any) -> dict[str, Any]:
+    """bd's exit as a typed answer; the real failure goes to the log, not out."""
+    if result.returncode:
+        # bd errors may contain absolute paths or remote credentials.
+        logger.warning("map: bd exited %s: %s", result.returncode, _logged(result.stderr))
+        return _failure(ReasonCode.BD_FAILED)
+    try:
+        return {"success": True, "data": json.loads(result.stdout)}
+    except ValueError:
+        logger.warning("map: bd answered with what is not JSON: %s", _logged(result.stdout))
+        return _failure(ReasonCode.INVALID_ANSWER)
+
+
+def _run_on_host(bd: str, cwd: Path, database: Path, args: List[str], home: Path) -> dict[str, Any]:
+    """One pinned read with the host's bd, against the copy in *cwd*."""
+    try:
+        result = subprocess.run([bd, "--db", str(database), *args], cwd=cwd, check=False,
+                                env=_tracker_env(home, database), capture_output=True, text=True,
+                                timeout=BD_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.warning("map: bd %s did not answer in %ss", " ".join(args), BD_TIMEOUT_SECONDS)
+        return _failure(ReasonCode.TIMEOUT)
+    except OSError as exc:
+        logger.warning("map: bd could not run: %s", exc)
+        return _failure(ReasonCode.BD_UNAVAILABLE)
+    return _answer(result)
+
+
+def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
+                      args: List[str]) -> dict[str, Any]:
+    """One pinned read in the isolation image, when this host has no bd.
+
+    Same command as ``tools.beads_tools._run_bd_via_docker_run`` builds, but
+    the database is the temporary copy: the project is mounted read-only as a
+    guard, and bd cannot write to it even if it tried.
+    """
+    # Docker on Windows generally accepts forward slashes in volume specs.
+    pinned = Path(CONTAINER_TRACKER_DIR) / database.relative_to(cwd)
+    command = [
+        "docker", "run", "--rm", "-i",
+        # Only these values reach the container: no ambient BEADS/BD selectors.
+        "-e", "BEADS_DAEMON=0",
+        "-e", "BD_DISABLE_METRICS=1",
+        "-e", "BD_DISABLE_EVENT_FLUSH=1",
+        "-e", f"BEADS_DIR={Path(CONTAINER_TRACKER_DIR) / '.beads'}",
+        "-e", f"BEADS_DB={pinned}",
+        "-e", "HOME=/tmp",
+        "-v", f"{str(project).replace(os.sep, '/')}:{CONTAINER_PROJECT_DIR}:ro",
+        "-v", f"{str(cwd).replace(os.sep, '/')}:{CONTAINER_TRACKER_DIR}",
+        "-w", CONTAINER_TRACKER_DIR,
+        image,
+        # Stopping the client alone would leave bd running, holding the database.
+        "timeout", "-k", "5", str(int(BD_TIMEOUT_SECONDS)),
+        "/usr/local/bin/bd", "--db", str(pinned), *args,
+    ]
+    try:
+        logger.debug("map: reading the tracker via docker: %s", " ".join(command))
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                                check=False, timeout=BD_TIMEOUT_SECONDS + 10)
+    except subprocess.TimeoutExpired:
+        logger.warning("map: bd in the isolation image did not answer in %ss", BD_TIMEOUT_SECONDS)
+        return _failure(ReasonCode.TIMEOUT)
+    except OSError as exc:
+        logger.warning("map: docker could not run: %s", exc)
+        return _failure(ReasonCode.BD_UNAVAILABLE)
+    return _answer(result)
+
+
 def _read_tracker(directory: Path, args: List[str]) -> dict[str, Any]:
-    """Run only an explicitly pinned read, with no ambient database selectors.
+    """Read the project's tracker through bd, writing nothing into the project.
+
+    Only an explicitly pinned read runs, and it runs on a temporary copy:
 
     Do not use run_bd here: it inherits BEADS/BD selectors and user config.
     --db alone is insufficient: bd 1.3 treats a missing path as a DB *name*.
     """
     database = _own_tracker(directory)
     if database is None:
-        return {"success": False, "error": NO_TRACKER}
-    env = {key: value for key, value in os.environ.items()
-           if key in {"PATH", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL", "TMPDIR"}}
-    env.update({"BEADS_DIR": str(database.parent), "BEADS_DB": str(database),
-                "BEADS_DAEMON": "0", "BD_DISABLE_METRICS": "1", "BD_DISABLE_EVENT_FLUSH": "1",
-                "HOME": str(directory), "XDG_CONFIG_HOME": str(directory / ".beads"),
-                "APPDATA": str(directory / ".beads"), "USERPROFILE": str(directory),
-                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+        return _failure(ReasonCode.NO_TRACKER)
+    host_bd = _bd_executable()
+    image = _get_isolation_image(None) if host_bd is None and _docker_bd_available() else None
+    if host_bd is None and image is None:
+        logger.warning("map: no bd on this host and no docker fallback for %s", directory.name)
+        return _failure(ReasonCode.BD_UNAVAILABLE)
     try:
-        result = subprocess.run([_find_bd(), "--db", str(database), *args], cwd=directory, check=False,
-                                env=env, capture_output=True, text=True, timeout=BD_TIMEOUT_SECONDS)
-        if result.returncode:
-            # bd errors may contain absolute paths or remote credentials.
-            return {"success": False, "error": "The project's local tracker could not be read."}
-        return {"success": True, "data": json.loads(result.stdout)}
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": "The tracker did not answer in time."}
-    except (OSError, ValueError):
-        return {"success": False, "error": "The project's local tracker could not be read."}
+        with tempfile.TemporaryDirectory(prefix="grid-map-") as root:
+            base = Path(root).resolve()
+            home, work = base / "home", base / "work"
+            home.mkdir()
+            work.mkdir()
+            copied, code = _tracker_copy(directory, database.parent, work)
+            if copied is None:
+                logger.warning("map: tracker of %s was not copied (%s)",
+                               directory.name, code.value if code else "?")
+                return _failure(code or ReasonCode.BD_FAILED)
+            pinned = _own_tracker(copied)
+            if pinned is None:
+                logger.warning("map: the copy of %s is not a self-contained local database", directory.name)
+                return _failure(ReasonCode.BD_FAILED)
+            if host_bd is not None:
+                return _run_on_host(host_bd, copied, pinned, args, home)
+            return _run_in_container(image or "", directory, copied, pinned, args)
+    except OSError as exc:
+        logger.warning("map: the tracker read of %s could not start: %s", directory.name, exc)
+        return _failure(ReasonCode.BD_FAILED)
 
 
 async def _bd_in(directory: Path, args: List[str]) -> dict[str, Any]:
-    """One bd command in *directory*; 503 when bd cannot run here at all."""
-    problem = _bd_problem()
-    if problem:
-        raise HTTPException(status_code=503, detail=f"The tracker is unavailable: {problem}")
+    """One bd read in *directory*, off the event loop; it never raises."""
     return await asyncio.to_thread(_read_tracker, directory, args)
 
 
-def _no_tasks(reason: str) -> dict[str, Any]:
-    return {"available": False, "reason": reason, "items": [], "total": 0,
+@dataclass(frozen=True)
+class TasksSlice:
+    """The tasks section of the map and, beside it, why it is empty.
+
+    The payload is the browser's: prose only. The code stays here, so a
+    diagnostic surface can name the cause without parsing that prose.
+    """
+
+    payload: dict[str, Any]
+    reason: Optional[ReasonCode] = None
+
+
+def _no_tasks(code: ReasonCode) -> dict[str, Any]:
+    return {"available": False, "reason": REASON_TEXT[code], "items": [], "total": 0,
             "truncated": False, "counts": _counts([])}
 
 
-async def _tasks(space: Any, project_id: str) -> dict[str, Any]:
+async def _tasks(space: Any, project_id: str) -> TasksSlice:
     """The project's own tracker as the map's task items, bounded and sorted by age."""
     directory = _project_space(space, project_id)
     if directory is None:
-        return _no_tasks(NO_SPACE)
+        return TasksSlice(_no_tasks(ReasonCode.NO_SPACE), ReasonCode.NO_SPACE)
     tracker = await asyncio.to_thread(_own_tracker, directory)
     if tracker is None:
-        return _no_tasks(NO_TRACKER)
+        return TasksSlice(_no_tasks(ReasonCode.NO_TRACKER), ReasonCode.NO_TRACKER)
     try:
         answer = await asyncio.wait_for(_bd_in(directory, list(BD_LIST_ARGS)), BD_TIMEOUT_SECONDS + 1)
     except asyncio.TimeoutError:
-        return _no_tasks("The tracker did not answer in time.")
-    except HTTPException as exc:
-        return _no_tasks(str(exc.detail))
+        return TasksSlice(_no_tasks(ReasonCode.TIMEOUT), ReasonCode.TIMEOUT)
     if not answer.get("success"):
-        return _no_tasks(_reason(answer))
+        code = answer.get("code")
+        if not isinstance(code, ReasonCode):
+            code = ReasonCode.BD_FAILED
+        return TasksSlice(_no_tasks(code), code)
     try:
         issues = _issues(answer)
-    except HTTPException as exc:
-        return _no_tasks(str(exc.detail))
+    except HTTPException:
+        # bd's own words are not a task list; they were logged where bd ran.
+        logger.warning("map: bd answered without a task list for %s", project_id)
+        return TasksSlice(_no_tasks(ReasonCode.INVALID_ANSWER), ReasonCode.INVALID_ANSWER)
     # Defense in depth, not discovery isolation: the local database may have
     # been populated with issues belonging to a different project.
     prefix = f"{project_id}-"
     if any(not str(issue.get("id") or "").startswith(prefix) for issue in issues):
-        return _no_tasks(FOREIGN_TRACKER)
+        return TasksSlice(_no_tasks(ReasonCode.FOREIGN_TRACKER), ReasonCode.FOREIGN_TRACKER)
     statuses = {issue.get("id"): issue.get("status") for issue in issues}
     mapped = [_task(issue, statuses) for issue in issues]
     # Oldest first: a task keeps its place on the map as newer ones arrive.
     mapped.sort(key=lambda task: (task.get("created_at") or "", task.get("id") or ""))
     items = [{name: task.get(name) for name in TASK_FIELDS} for task in mapped]
-    return {
+    return TasksSlice({
         "available": True,
         "reason": None,
         "items": items[:TASKS_LIMIT],
@@ -323,7 +562,7 @@ async def _tasks(space: Any, project_id: str) -> dict[str, Any]:
         "truncated": len(items) > TASKS_LIMIT,
         # Over every task of the tracker, not over the shown items.
         "counts": _counts(mapped),
-    }
+    })
 
 
 def _processes(space: Any, project_id: str) -> dict[str, Any]:
@@ -501,7 +740,7 @@ def register_map_routes(api: APIRouter, current_space: Any) -> None:
             "project": _project_payload(project),
             "path": _ancestors(store, project),
             "children": _children(store, project_id),
-            "tasks": tasks,
+            "tasks": tasks.payload,
             "processes": processes,
             "files": files,
             "files_url": _files_url(space, project_id, [item["chat_id"] for item in processes["items"]]),
