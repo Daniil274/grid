@@ -512,12 +512,17 @@ agents:
       - name: beads_init
         parameters:
           directory: ${working_directory}
+      # These two read the workspace independently and both run every request:
+      # they opt in to overlap so the index and the file list cost one wait,
+      # not two. Every other step above stays a plain sequence.
       - name: init_codegraph
         every_run: true
+        parallel: true
         parameters:
           directory: ${working_directory}
       - name: workspace_overview
         every_run: true
+        parallel: true
         parameters:
           directory: ${working_directory}
     tools:

@@ -247,7 +247,13 @@ class AgentConfig(BaseModel):
         default=None, 
         description=(
             "Tools to run automatically on agent startup. Each item: {'name': 'tool_name', 'parameters': {}}. "
-            "A function tool of the config runs even when it is not among the agent's tools."
+            "A function tool of the config runs even when it is not among the agent's tools. "
+            "The batch runs in order, one step at a time, unless a step opts in to overlap: "
+            "an item may add {'parallel': true} to run alongside the other opted-in steps "
+            "(a step without it is a barrier - nothing runs while it does), and "
+            "{'depends_on': ['earlier_step_name', ...]} to wait for earlier steps of the same "
+            "batch and be skipped, with a reason, when one of them failed or was blocked. "
+            "Results are injected in the batch's order, not in completion order."
         ),
     )
     parallel_tool_calls: bool = Field(

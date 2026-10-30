@@ -10,11 +10,23 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Dict, List, Tuple
 
 from agents import Agent
 
 from core.action_policy import is_policy_block
+from core.factory.preparation import (
+    BLOCKED,
+    DONE,
+    FAILED,
+    Step,
+    StepOutcome,
+    is_concurrent,
+    plan_steps,
+    run_steps,
+    timings,
+)
 from core.factory.run_context import AutoRunToolContext, GridRunContext
 from schemas import AgentConfig
 from utils.exceptions import ConfigError
@@ -65,13 +77,16 @@ class AutoRunTools:
             a call the action policy blocked is neither injected nor counted
             as done, so one-time tools are tried again on the next run.
         """
-        result_parts: List[str] = []
-        complete = True
+        specs = [
+            spec
+            for spec in agent_config.auto_run_tools or []
+            if bool(spec.get("every_run", False)) == every_run
+        ]
+        steps = plan_steps(specs)
         observer = getattr(run_context, "stream_observer", None) or self._stream_observer
-        for auto_tool in agent_config.auto_run_tools or []:
-            tool_every_run = bool(auto_tool.get("every_run", False))
-            if tool_every_run != every_run:
-                continue
+
+        async def run_one(step: Step) -> Tuple[str, str]:
+            auto_tool = step.spec
             tool_name = auto_tool.get("name")
             tool_params = self._substitute_tool_params(
                 dict(auto_tool.get("parameters", {})), working_dir, user_message
@@ -108,16 +123,16 @@ class AutoRunTools:
                         ),
                     )
                     if is_policy_block(tool_result):
-                        complete = False
                         logger.warning(
                             f"⚠️ Auto-run tool '{tool_name}' blocked by action policy"
                         )
-                        continue
-                    result_parts.append(
-                        f"\n\n=== AUTO-RUN TOOL RESULT '{tool_name}' ===\n{tool_result}\n"
-                    )
+                        return "", BLOCKED
                     logger.debug(
                         f"Injected auto-run result of '{tool_name}' into instructions"
+                    )
+                    return (
+                        f"\n\n=== AUTO-RUN TOOL RESULT '{tool_name}' ===\n{tool_result}\n",
+                        DONE,
                     )
                 except Exception as tool_err:
                     logger.warning(
@@ -127,15 +142,28 @@ class AutoRunTools:
                         observer.tool_call_finished(
                             agent_key, tool_name, f"❌ {type(tool_err).__name__}: {tool_err}"
                         )
-            else:
-                logger.warning(
-                    f"⚠️ Auto-run tool '{tool_name}' of agent '{agent_key}' is not a function tool of this system"
+                    return "", FAILED
+            logger.warning(
+                f"⚠️ Auto-run tool '{tool_name}' of agent '{agent_key}' is not a function tool of this system"
+            )
+            if hasattr(observer, "tool_call_finished"):
+                observer.tool_call_finished(
+                    agent_key, tool_name,
+                    f"❌ Auto-run tool '{tool_name}' is not a function tool of this system",
                 )
-                if hasattr(observer, "tool_call_finished"):
-                    observer.tool_call_finished(
-                        agent_key, tool_name,
-                        f"❌ Auto-run tool '{tool_name}' is not a function tool of this system",
-                    )
+            return "", FAILED
+
+        started = time.perf_counter()
+        outcomes = await run_steps(steps, run_one)
+        self._log_preparation(
+            f"auto_run_tools(every_run={every_run})", outcomes,
+            time.perf_counter() - started, run_context,
+        )
+        result_parts = [outcome.value for outcome in outcomes if outcome.status == DONE]
+        # Legacy meaning: a call the action policy blocked did not run, so a
+        # one-time tool is tried again on the next request. A tool that raised
+        # or is unknown counts as run, as it always did.
+        complete = all(outcome.status != BLOCKED for outcome in outcomes)
         return "".join(result_parts), complete
 
     def _unlisted_auto_run_tool(self, tool_name: str) -> Any:
@@ -168,7 +196,6 @@ class AutoRunTools:
         Returns:
             Combined result string ready to be prepended to agent instructions.
         """
-        result_parts: List[str] = []
         observer = getattr(run_context, "stream_observer", None) or self._stream_observer
         working_dir = (
             "/"
@@ -184,7 +211,10 @@ class AutoRunTools:
             or getattr(getattr(run_context, "context", None), "agent_key", None)
             or "dynamic-agent"
         )
-        for spec in init_tools:
+        steps = plan_steps(init_tools)
+
+        async def run_one(step: Step) -> Tuple[str, str]:
+            spec = step.spec
             tool_name = spec.get("name")
             tool_params = self._substitute_tool_params(
                 dict(spec.get("parameters", {})), working_dir, ""
@@ -218,26 +248,69 @@ class AutoRunTools:
                         logger.warning(
                             f"⚠️ init_tool '{tool_name}' blocked by action policy"
                         )
-                        continue
-                    result_parts.append(
-                        f"\n\n=== CONTEXT [{tool_name}] ===\n{result}\n"
-                    )
+                        return "", BLOCKED
+                    return f"\n\n=== CONTEXT [{tool_name}] ===\n{result}\n", DONE
                 except Exception as e:
                     logger.warning(f"⚠️ init_tool '{tool_name}' error: {e}")
                     if hasattr(observer, "tool_call_finished"):
                         observer.tool_call_finished(
                             agent_key, tool_name, f"❌ {type(e).__name__}: {e}"
                         )
-            else:
-                logger.warning(
-                    f"⚠️ init_tool '{tool_name}' not found in agent's tool list"
+                    return "", FAILED
+            logger.warning(
+                f"⚠️ init_tool '{tool_name}' not found in agent's tool list"
+            )
+            if hasattr(observer, "tool_call_finished"):
+                observer.tool_call_finished(
+                    agent_key, tool_name,
+                    f"❌ init_tool '{tool_name}' not found in the agent's tool list",
                 )
-                if hasattr(observer, "tool_call_finished"):
-                    observer.tool_call_finished(
-                        agent_key, tool_name,
-                        f"❌ init_tool '{tool_name}' not found in the agent's tool list",
-                    )
-        return "".join(result_parts)
+            return "", FAILED
+
+        started = time.perf_counter()
+        outcomes = await run_steps(steps, run_one)
+        self._log_preparation(
+            "init_tools", outcomes, time.perf_counter() - started, run_context
+        )
+        return "".join(
+            outcome.value for outcome in outcomes if outcome.status == DONE
+        )
+
+    def _log_preparation(
+        self,
+        phase: str,
+        outcomes: List[StepOutcome],
+        wall_seconds: float,
+        run_context: Any,
+    ) -> None:
+        """Record what the preparation cost: per step, and the batch's total.
+
+        The serial sum beside the wall time is what dependency-aware
+        concurrency saved; the record also goes to the run's metadata, where
+        a caller (and the tests) can read it.
+        """
+        if not outcomes:
+            return
+        record = timings(outcomes, wall_seconds)
+        mode = "parallel" if is_concurrent([o.step for o in outcomes]) else "sequential"
+        logger.info(
+            "preparation: %s %s, %d step(s) in %.0f ms (serial %.0f ms): %s",
+            phase,
+            mode,
+            len(outcomes),
+            record["wall_ms"],
+            record["serial_ms"],
+            ", ".join(
+                f"{entry['name']}={entry['status']} {entry['seconds'] * 1000:.0f}ms"
+                + (f" ({entry['detail']})" if entry["detail"] else "")
+                for entry in record["steps"]
+            ),
+        )
+        metadata = getattr(run_context, "metadata", None)
+        if isinstance(metadata, dict):
+            metadata.setdefault("preparation_timings", []).append(
+                {"phase": phase, "mode": mode, **record}
+            )
 
     async def _auto_run_preamble(
         self,
