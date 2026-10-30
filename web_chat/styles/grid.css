@@ -1,0 +1,142 @@
+/**
+ * The map page (web_chat/grid.html).
+ *
+ * A restrained TRON: dark surfaces, thin cyan lines, no glow. The map is a
+ * fixed virtual canvas (js/grid/layout.js) that the page scales to the width
+ * it has; on a phone the overview stacks under it and the nodes keep a 44px
+ * touch target. Nothing here animates except a short colour transition, which
+ * prefers-reduced-motion turns off.
+ */
+
+.gridPage { overflow: auto; height: auto; min-height: 100%; }
+.gridShell { max-width: 1500px; margin: 0 auto; padding: 32px 36px 48px; }
+
+.gridHeader { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 18px; }
+.gridBrand { font-size: 11px; letter-spacing: .16em; color: var(--text-3); text-decoration: none; }
+.gridBrand:hover { color: var(--text-2); }
+.gridHeader h1 { font-size: 34px; margin: 10px 0 6px; overflow-wrap: anywhere; }
+.gridHeader p { color: var(--text-3); font-size: 12px; max-width: 68ch; line-height: 1.6; }
+.gridActions { display: flex; gap: 10px; align-items: center; flex: none; }
+.gridActions .btn { min-height: 44px; }
+
+/* -- the project's path ----------------------------------------------------- */
+.gridCrumbs { margin: 4px 0 6px; }
+.gridBreadcrumb { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.gridBreadcrumb__item { display: flex; align-items: center; gap: 6px; color: var(--text-3); }
+.gridBreadcrumb__item + .gridBreadcrumb__item::before { content: "/"; color: var(--text-3); opacity: .6; }
+.gridBreadcrumb__link { color: var(--text-2); text-decoration: none; padding: 4px 2px; }
+.gridBreadcrumb__link:hover { color: var(--text); }
+.gridBreadcrumb__current { color: var(--text); }
+
+.gridStatus { font-size: 12px; color: var(--text-3); min-height: 34px; padding: 6px 0 10px; font-variant-numeric: tabular-nums; }
+.gridStatus[data-tone=error] { color: var(--danger); }
+
+/* -- the two columns ------------------------------------------------------- */
+.gridBody { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 22px; align-items: start; }
+.gridMap__viewport { position: relative; overflow: auto; max-width: 100%; border: 1px solid var(--line); border-radius: 16px; background: var(--bg-inset); }
+/* The plane is the canvas as it is really painted: a transform does not change
+   an element's box, and the viewport must not scroll to that phantom width. */
+.gridMap__plane { position: relative; overflow: hidden; }
+
+.gridMap__canvas {
+  position: relative; transform-origin: top left;
+  /* The faint grid of the plane the regions sit on; it never draws attention. */
+  background-image:
+    linear-gradient(to right, rgb(255 255 255 / 3%) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 3%) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* -- regions --------------------------------------------------------------- */
+.gridMap__region { position: absolute; box-sizing: border-box; border: 1px solid var(--line-strong); border-radius: 14px; background: rgb(23 26 34 / 55%); }
+.gridMap__region[data-region=tasks] { border-color: var(--accent-line); }
+.gridMap__region[data-region=processes] { border-color: rgb(53 195 214 / 34%); }
+.gridMap__region[data-region=results] { border-color: var(--line-strong); }
+.gridMap__regionTitle { position: absolute; top: 11px; left: 14px; margin: 0; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-2); font-weight: 600; }
+.gridMap__note { margin: 0; padding: 0 14px 10px; font-size: 11px; line-height: 1.5; color: var(--text-3); }
+.gridMap__region > .gridMap__note { position: absolute; top: 40px; left: 0; right: 0; }
+.gridMap__note--foot { top: auto; bottom: 6px; padding-bottom: 0; }
+.gridMap__note--off { color: var(--warn); }
+
+/* -- edges: real dependencies, and only those ------------------------------ */
+.gridMap__edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.gridMap__edge { stroke: var(--tool-search); stroke-width: 1; opacity: .5; stroke-linecap: round; }
+
+/* -- nodes ----------------------------------------------------------------- */
+.gridNode {
+  position: absolute; box-sizing: border-box; display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px; min-height: 44px; overflow: hidden; text-decoration: none;
+  border: 1px solid var(--line-strong); border-radius: 9px;
+  background: var(--bg-1); color: var(--text);
+  transition: border-color .12s ease, background-color .12s ease;
+}
+.gridNode:hover { border-color: var(--tool-search); background: var(--bg-2); }
+.gridNode:focus-visible { outline: 2px solid var(--tool-search); outline-offset: 1px; }
+.gridNode__mark { font-size: 11px; line-height: 1.1; color: var(--text-3); }
+.gridNode__title { font-size: 12px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.gridNode__meta { font-size: 10px; letter-spacing: .04em; color: var(--text-3); text-transform: uppercase; }
+
+.gridNode--task[data-state=ready] { border-color: var(--line-strong); }
+.gridNode--task[data-state=ready] .gridNode__mark { color: var(--text-2); }
+.gridNode--task[data-state=waiting] .gridNode__mark, .gridNode--task[data-state=waiting] .gridNode__meta { color: var(--warn); }
+.gridNode--task[data-state=in_progress] { border-color: rgb(53 195 214 / 55%); }
+.gridNode--task[data-state=in_progress] .gridNode__mark, .gridNode--task[data-state=in_progress] .gridNode__meta { color: var(--tool-search); }
+.gridNode--task[data-state=blocked] { border-color: rgb(255 125 125 / 55%); }
+.gridNode--task[data-state=blocked] .gridNode__mark, .gridNode--task[data-state=blocked] .gridNode__meta { color: var(--danger); }
+.gridNode--task[data-state=closed] { opacity: .62; }
+.gridNode--task[data-state=closed] .gridNode__mark { color: var(--ok); }
+
+.gridNode--process[data-active=true] { border-color: rgb(53 195 214 / 55%); }
+.gridNode--process[data-active=true] .gridNode__mark { color: var(--tool-search); }
+.gridNode--process[data-awaiting=true] { border-color: rgb(240 177 61 / 70%); }
+.gridNode--process[data-awaiting=true] .gridNode__mark, .gridNode--process[data-awaiting=true] .gridNode__meta { color: var(--warn); }
+
+.gridNode--result[data-kind=dir] .gridNode__mark { color: var(--text-2); }
+.gridNode--result:not(a) { cursor: default; background: var(--bg-inset); }
+
+/* -- the overview panel ---------------------------------------------------- */
+.gridOverview { display: flex; flex-direction: column; gap: 16px; padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-1); }
+.gridOverview__title { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-2); margin: 0; }
+.gridOverview__description { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-3); overflow-wrap: anywhere; }
+.gridOverview__section { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.gridOverview__heading { margin: 0; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); font-weight: 600; }
+.gridOverview__note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-3); }
+.gridOverview__chips { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0; padding: 0; }
+.gridOverview__chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; color: var(--text-2); }
+.gridOverview__chip--total { color: var(--text-3); }
+.gridOverview__chip[data-state=blocked] { color: var(--danger); border-color: rgb(255 125 125 / 35%); }
+.gridOverview__chip[data-state=waiting] { color: var(--warn); }
+.gridOverview__chip[data-state=in_progress] { color: var(--tool-search); }
+.gridOverview__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.gridOverview__item { display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: 12px; }
+.gridOverview__mark { color: var(--text-3); font-size: 11px; flex: none; }
+.gridOverview__link { color: var(--text); text-decoration: none; overflow-wrap: anywhere; padding: 6px 0; }
+.gridOverview__link:hover { color: var(--tool-search); }
+.gridOverview__link--button { align-self: flex-start; min-height: 44px; display: inline-flex; align-items: center; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--text-2); }
+.gridOverview__link--button:hover { border-color: var(--tool-search); }
+.gridOverview__meta { margin-left: auto; font-size: 10px; color: var(--text-3); flex: none; font-variant-numeric: tabular-nums; }
+
+.gridPicker__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.gridPicker__link { display: flex; align-items: center; min-height: 44px; color: var(--text); text-decoration: none; border-bottom: 1px solid var(--line); padding: 8px 2px; }
+.gridPicker__link:hover { color: var(--tool-search); }
+
+/* Author display rules must not override the browser's hidden attribute. */
+.gridPage [hidden] { display: none !important; }
+
+/* -- narrower screens ------------------------------------------------------- */
+@media (max-width: 1060px) {
+  .gridBody { grid-template-columns: minmax(0, 1fr); }
+  .gridOverview { order: 2; }
+  .gridHeader { flex-direction: column; gap: 14px; }
+}
+@media (max-width: 720px) {
+  .gridShell { padding: 20px 14px 40px; }
+  .gridHeader h1 { font-size: 26px; }
+  .gridMap__viewport { border-radius: 12px; }
+  .gridOverview { padding: 14px; }
+  .gridNode { padding: 7px 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gridNode, .gridOverview__link { transition: none; }
+}

@@ -720,6 +720,16 @@ async function boot() {
     store.watch(["activeProject"], syncTasksLink);
   }
 
+  // The rail's "Map" link is that same project, drawn as a map.
+  const gridLink = $("#open-grid");
+  if (gridLink) {
+    const syncGridLink = ({ activeProject }) => {
+      gridLink.href = activeProject ? `/grid?project=${encodeURIComponent(activeProject)}` : "/grid";
+    };
+    syncGridLink(store.get());
+    store.watch(["activeProject"], syncGridLink);
+  }
+
   // The rail's "Files" link opens the directory the chat on screen works in.
   const filesLink = $("#open-files");
   if (filesLink) {
