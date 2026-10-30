@@ -1,6 +1,6 @@
 /**
  * The map page (web_chat/grid.html): the geography of js/grid/layout.js, how
- * js/grid/render.js shows a project's tasks, chats and results, the refresh
+ * js/grid/render.js shows a project's tasks, chats and files, the refresh
  * rhythm of js/grid/live.js and the page itself over a stubbed API.
  *
  * The two things worth guarding here are promises to the reader: the map does
@@ -26,7 +26,7 @@ const {
   renderProjectPicker,
   taskHref,
   chatHref,
-  resultHref,
+  fileHref,
   stateOf,
 } = await import("../web_chat/js/grid/render.js");
 const { createPoller } = await import("../web_chat/js/grid/live.js");
@@ -64,7 +64,7 @@ function sampleMap(overrides = {}) {
       total: 3,
       truncated: false,
     },
-    results: {
+    files: {
       available: true,
       reason: null,
       items: [
@@ -140,14 +140,14 @@ test("edges exist only between tasks that are on the map", () => {
   }
 });
 
-test("three fixed regions: tasks, processes and results", () => {
+test("three fixed regions: tasks, processes and files", () => {
   const geometry = layoutMap(sampleMap());
-  assert.deepEqual(Object.keys(geometry.regions), ["tasks", "processes", "results"]);
-  const { tasks, processes, results } = geometry.regions;
+  assert.deepEqual(Object.keys(geometry.regions), ["tasks", "processes", "files"]);
+  const { tasks, processes, files } = geometry.regions;
   assert.ok(tasks.x < processes.x, "processes sit beside the tasks");
-  assert.ok(results.y > processes.y, "results sit under the processes");
+  assert.ok(files.y > processes.y, "files sit under the processes");
   // The regions do not move when the project has more or fewer items.
-  const empty = layoutMap({ tasks: { available: true, items: [] }, processes: { items: [] }, results: { available: true, items: [] } });
+  const empty = layoutMap({ tasks: { available: true, items: [] }, processes: { items: [] }, files: { available: true, items: [] } });
   assert.deepEqual(empty.regions.tasks.x, tasks.x);
   assert.deepEqual(empty.regions.processes.y, processes.y);
 });
@@ -195,7 +195,7 @@ test("a node is placed inside its region, at the spot the layout gave it", () =>
   assert.equal(first.style.top, `${node.y - geometry.regions.tasks.y}px`);
 
   // No node may leave its own region, whatever the project holds.
-  for (const key of ["tasks", "processes", "results"]) {
+  for (const key of ["tasks", "processes", "files"]) {
     const box = geometry.regions[key];
     for (const item of geometry.nodes[key]) {
       assert.ok(item.x >= box.x && item.x + item.width <= box.x + box.width, `${key}: ${item.id} fits horizontally`);
@@ -204,7 +204,7 @@ test("a node is placed inside its region, at the spot the layout gave it", () =>
   }
 });
 
-test("chats link into the chat, results into the project's files", () => {
+test("chats link into the chat, files into the project's files", () => {
   const root = el("div");
   renderMap(root, sampleMap(), { projectId: "p1" });
   assert.deepEqual(
@@ -215,7 +215,7 @@ test("chats link into the chat, results into the project's files", () => {
   assert.equal(active.length, 2);
   assert.equal(nodesOf(root, "gridNode--process").filter((node) => node.dataset.awaiting === "true").length, 1);
   assert.deepEqual(
-    nodesOf(root, "gridNode--result").map((node) => node.getAttribute("href")),
+    nodesOf(root, "gridNode--file").map((node) => node.getAttribute("href")),
     ["/files?context=p1&path=project%2Fdocs", "/files?context=p1&path=project&file=project%2FREADME.md"],
   );
 });
@@ -223,16 +223,16 @@ test("chats link into the chat, results into the project's files", () => {
 test("a result is not a link when the server names no files_url", () => {
   const root = el("div");
   renderMap(root, sampleMap({ files_url: null }), { projectId: "p1" });
-  const results = nodesOf(root, "gridNode--result");
-  assert.equal(results.length, 2);
-  assert.deepEqual(results.map((node) => node.getAttribute("href")), [null, null]);
-  assert.match(textOf(results[0]), /docs/);
+  const files = nodesOf(root, "gridNode--file");
+  assert.equal(files.length, 2);
+  assert.deepEqual(files.map((node) => node.getAttribute("href")), [null, null]);
+  assert.match(textOf(files[0]), /docs/);
 });
 
 test("an unreadable section says no data and why, in the map and in the overview", () => {
   const map = sampleMap();
   map.tasks = { available: false, reason: "bd is not installed", items: [], total: 0, truncated: false, counts: {} };
-  map.results = { available: false, reason: "the project space is unavailable", items: [], total: 0, truncated: false };
+  map.files = { available: false, reason: "the project space is unavailable", items: [], total: 0, truncated: false };
 
   const root = el("div");
   renderMap(root, map, { projectId: "p1" });
@@ -328,10 +328,10 @@ test("helpers: a state, a task link, a query parameter", () => {
   assert.equal(stateOf(null).key, "unknown");
   assert.equal(taskHref("p 1", "bd/2"), "/tasks?project=p%201&task=bd%2F2");
   assert.equal(chatHref("c1"), "/?conversation=c1");
-  assert.equal(resultHref("/files?context=c&path=project", { path: "a b", kind: "dir" }), "/files?context=c&path=project%2Fa+b");
-  assert.equal(resultHref("/files?context=c&path=project", { path: "a.md", kind: "file" }), "/files?context=c&path=project&file=project%2Fa.md");
-  assert.equal(resultHref("/files", { path: "a.md", kind: "file" }), "/files?file=a.md");
-  assert.equal(resultHref("", { path: "a.md", kind: "file" }), "");
+  assert.equal(fileHref("/files?context=c&path=project", { path: "a b", kind: "dir" }), "/files?context=c&path=project%2Fa+b");
+  assert.equal(fileHref("/files?context=c&path=project", { path: "a.md", kind: "file" }), "/files?context=c&path=project&file=project%2Fa.md");
+  assert.equal(fileHref("/files", { path: "a.md", kind: "file" }), "/files?file=a.md");
+  assert.equal(fileHref("", { path: "a.md", kind: "file" }), "");
   assert.equal(projectFromSearch("?project=p1"), "p1");
   assert.equal(projectFromSearch(""), "");
 });
@@ -520,6 +520,71 @@ test("with no ?project the page offers the projects it can open", async () => {
   assert.equal(nodes.map.hidden, true);
   assert.deepEqual(nodes.overview.querySelectorAll("a").map((node) => node.getAttribute("href")), ["/grid?project=p1"]);
   assert.match(nodes.status.textContent, /choose one/);
+});
+test("a refreshed map is cleared on authorization and missing-project errors", async () => {
+  for (const status of [401, 403, 404]) {
+    const nodes = pageNodes();
+    let loads = 0;
+    const page = new GridPage(nodes, {
+      projectId: "p1", doc: fakeDocument(), timers: fakeTimers(),
+      loadMap: async () => {
+        loads += 1;
+        if (loads === 1) return { notModified: false, etag: '"old"', map: sampleMap() };
+        const error = new Error(`HTTP ${status}`);
+        error.status = status;
+        throw error;
+      },
+    });
+    await page.load();
+    assert.equal(nodes.map.hidden, false);
+    await page.load();
+    assert.equal(nodes.map.hidden, true, `${status} hides the old map`);
+    assert.equal(nodes.map.findAll("gridNode__title").length, 0, "old nodes are removed, not just hidden");
+    assert.equal(textOf(nodes.breadcrumb), "", "old project path is cleared too");
+    assert.match(textOf(nodes.overview), new RegExp(`No data: HTTP ${status}`));
+    assert.equal(page.etag, "", "a subsequent request must not validate the old snapshot");
+  }
+});
+
+test("a transient refresh failure keeps old data but marks it stale", async () => {
+  const nodes = pageNodes();
+  let loads = 0;
+  const page = new GridPage(nodes, {
+    projectId: "p1", doc: fakeDocument(), timers: fakeTimers(),
+    loadMap: async () => {
+      loads += 1;
+      if (loads === 1) return { notModified: false, etag: '"old"', map: sampleMap() };
+      throw new Error("network down");
+    },
+  });
+  await page.load();
+  await page.load();
+  assert.equal(nodes.map.hidden, false);
+  assert.match(nodes.status.textContent, /stale data/i);
+  assert.match(textOf(nodes.overview), /Stale data · last successful update/);
+});
+
+test("stale time is the last success and a 304 clears the stale warning", async () => {
+  const nodes = pageNodes();
+  let loads = 0;
+  const page = new GridPage(nodes, {
+    projectId: "p1", doc: fakeDocument(), timers: fakeTimers(),
+    loadMap: async () => {
+      loads += 1;
+      if (loads === 1) return { etag: '"old"', map: sampleMap() };
+      if (loads === 2) throw new Error("offline");
+      return { notModified: true };
+    },
+  });
+  await page.load();
+  page.checkedAt = "01:02:03";
+  await page.load();
+  assert.equal(page.staleAt, "01:02:03");
+  assert.match(nodes.status.textContent, /stale data from 01:02:03/);
+  await page.load();
+  assert.equal(page.staleAt, "");
+  assert.doesNotMatch(textOf(nodes.overview), /Stale data/);
+  assert.match(nodes.status.textContent, /Unchanged/);
 });
 
 test("starting the page loads once and then keeps the rhythm", async () => {

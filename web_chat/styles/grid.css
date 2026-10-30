@@ -51,7 +51,7 @@
 .gridMap__region { position: absolute; box-sizing: border-box; border: 1px solid var(--line-strong); border-radius: 14px; background: rgb(23 26 34 / 55%); }
 .gridMap__region[data-region=tasks] { border-color: var(--accent-line); }
 .gridMap__region[data-region=processes] { border-color: rgb(53 195 214 / 34%); }
-.gridMap__region[data-region=results] { border-color: var(--line-strong); }
+.gridMap__region[data-region=files] { border-color: var(--line-strong); }
 .gridMap__regionTitle { position: absolute; top: 11px; left: 14px; margin: 0; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-2); font-weight: 600; }
 .gridMap__note { margin: 0; padding: 0 14px 10px; font-size: 11px; line-height: 1.5; color: var(--text-3); }
 .gridMap__region > .gridMap__note { position: absolute; top: 40px; left: 0; right: 0; }
@@ -91,8 +91,8 @@
 .gridNode--process[data-awaiting=true] { border-color: rgb(240 177 61 / 70%); }
 .gridNode--process[data-awaiting=true] .gridNode__mark, .gridNode--process[data-awaiting=true] .gridNode__meta { color: var(--warn); }
 
-.gridNode--result[data-kind=dir] .gridNode__mark { color: var(--text-2); }
-.gridNode--result:not(a) { cursor: default; background: var(--bg-inset); }
+.gridNode--file[data-kind=dir] .gridNode__mark { color: var(--text-2); }
+.gridNode--file:not(a) { cursor: default; background: var(--bg-inset); }
 
 /* -- the overview panel ---------------------------------------------------- */
 .gridOverview { display: flex; flex-direction: column; gap: 16px; padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-1); }

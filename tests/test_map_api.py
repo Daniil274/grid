@@ -2,7 +2,7 @@
 
 The tracker is stubbed where a test is about the route's own behaviour (the
 items it makes of bd's issues, the bounds it holds, what it does when bd is
-gone); the project's space is a real directory, so the results are listed by
+gone); the project's space is a real directory, so the files are listed by
 the same code the files page uses. Two spaces stand behind one app for the
 isolation test: a project of one is not found by the other.
 """
@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +20,7 @@ import pytest
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
-import web_chat.map_api as map_api
+from web_chat import map_api
 from web_chat.map_api import register_map_routes
 from web_chat.projects import ProjectStore
 from web_chat.turns import TurnBoard
@@ -38,7 +40,7 @@ class FakeManager:
 
 
 class FakeSpace:
-    """A space with a real project store and a real folder of results."""
+    """A space with a real project store and a real folder of files."""
 
     def __init__(self, root: Path, *, project_spaces=True):
         root.mkdir(parents=True, exist_ok=True)
@@ -73,15 +75,15 @@ def view(chat_id: str, project_id, *, title=None, updated_at="2026-01-01T00:00:0
 
 
 class Bd:
-    """A stand-in for ``web_chat.tasks_api._bd_for``: canned answers, what was asked."""
+    """A stand-in for bd execution: canned answers, what was asked."""
 
     def __init__(self, answer):
         self.answer = answer
         self.calls = []
 
-    async def __call__(self, space, args, *, project=None, task_id=None):
-        self.calls.append((list(args), project))
-        return self.answer(args, project) if callable(self.answer) else self.answer
+    async def __call__(self, directory, args):
+        self.calls.append((list(args), Path(directory)))
+        return self.answer(args, Path(directory)) if callable(self.answer) else self.answer
 
 
 def issue(task_id, *, created_at="2026-01-01T00:00:00Z", status="open", **extra):
@@ -121,7 +123,7 @@ def make_app(spaces):
 @pytest.fixture
 def bd(monkeypatch):
     stub = Bd({"success": True, "data": []})
-    monkeypatch.setattr(map_api, "_bd_for", stub)
+    monkeypatch.setattr(map_api, "_bd_in", stub)
     return stub
 
 
@@ -136,7 +138,12 @@ def client(space, bd):
 
 
 def project(space, title="Grid", parent_id=None, description=""):
-    return space.project_store.create(title, parent_id=parent_id, description=description)
+    result = space.project_store.create(title, parent_id=parent_id, description=description)
+    tracker = space.layout.project_spaces / result.id / ".beads"
+    tracker.mkdir(parents=True, exist_ok=True)
+    (tracker / "beads.db").touch()  # local database witness; bd itself is stubbed
+    (tracker / "config.yaml").write_text("# Local config blocks ancestor lookup\n")
+    return result
 
 
 # -- the map ---------------------------------------------------------------------
@@ -152,8 +159,8 @@ def test_the_map_has_the_page_contract(client, space, bd):
         view("chat-2", root.id, title="Second chat", updated_at="2026-01-01T00:00:00Z"),
         view("chat-other", "prj-other", title="Elsewhere"),
     ]
-    bd.answer = {"success": True, "data": [issue("prj-1-a", status="in_progress", dependencies=[
-        {"depends_on_id": "prj-1-b", "type": "blocks", "title": "Other"},
+    bd.answer = {"success": True, "data": [issue(f"{root.id}-a", status="in_progress", dependencies=[
+        {"depends_on_id": f"{root.id}-b", "type": "blocks", "title": "Other"},
     ])]}
     (space.space_dir(root.id) / "notes.md").write_text("hi", encoding="utf-8")
 
@@ -174,7 +181,7 @@ def test_the_map_has_the_page_contract(client, space, bd):
     assert tasks["total"] == 1 and tasks["truncated"] is False
     task = tasks["items"][0]
     assert set(task) == set(map_api.TASK_FIELDS)
-    assert (task["id"], task["state"], task["depends_on"]) == ("prj-1-a", "in_progress", ["prj-1-b"])
+    assert (task["id"], task["state"], task["depends_on"]) == (f"{root.id}-a", "in_progress", [f"{root.id}-b"])
     # The map shows where a task is, never what it says.
     assert "SECRET" not in json.dumps(body)
     assert tasks["counts"]["in_progress"] == 1
@@ -183,14 +190,15 @@ def test_the_map_has_the_page_contract(client, space, bd):
     assert [item["chat_id"] for item in body["processes"]["items"]] == ["chat-1", "chat-2"]
     assert body["processes"]["total"] == 2
 
-    results = body["results"]
-    assert results["available"] is True
-    assert [item["name"] for item in results["items"]] == ["notes.md"]
-    assert results["items"][0]["kind"] == "file" and results["items"][0]["size"] == 2
+    files = body["files"]
+    assert files["available"] is True
+    assert [item["name"] for item in files["items"]] == ["notes.md"]
+    assert files["items"][0]["kind"] == "file" and files["items"][0]["size"] == 2
 
     # bd ran in the project's tracker, not the user's.
-    assert bd.calls[0][1] == root.id
-    assert body["files_url"] == f"/files?context=chat-1&path=project"
+    assert bd.calls[0][1] == space.layout.project_spaces / root.id
+    assert bd.calls[0][0][0] == "--readonly"
+    assert body["files_url"] == "/files?context=chat-1&path=project"
 
 
 def test_the_path_is_the_ancestors_from_the_root(client, space):
@@ -229,7 +237,7 @@ def test_tasks_are_bounded_and_come_oldest_first(client, space, bd):
     root = project(space)
     bd.answer = {
         "success": True,
-        "data": [issue(f"prj-1-t{index:03d}", created_at=f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}Z")
+        "data": [issue(f"{root.id}-t{index:03d}", created_at=f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}Z")
                  for index in range(map_api.TASKS_LIMIT + 5)],
     }
 
@@ -239,7 +247,7 @@ def test_tasks_are_bounded_and_come_oldest_first(client, space, bd):
     assert tasks["total"] == map_api.TASKS_LIMIT + 5
     assert tasks["truncated"] is True
     assert len(tasks["items"]) == map_api.TASKS_LIMIT
-    assert tasks["items"][0]["id"] == "prj-1-t000"
+    assert tasks["items"][0]["id"] == f"{root.id}-t000"
     created = [task["created_at"] for task in tasks["items"]]
     assert created == sorted(created)
 
@@ -273,49 +281,192 @@ class _Running:
         return False
 
 
-def test_results_are_bounded_hidden_entries_excluded(client, space, bd):
+def test_files_are_bounded_hidden_entries_excluded(client, space, bd):
     root = project(space)
     directory = space.space_dir(root.id)
-    for index in range(map_api.RESULTS_LIMIT + 1):
+    for index in range(map_api.FILES_LIMIT + 1):
         (directory / f"file-{index:03d}.txt").write_text("x", encoding="utf-8")
 
-    results = client.get(f"/api/projects/{root.id}/map").json()["results"]
+    files = client.get(f"/api/projects/{root.id}/map").json()["files"]
 
-    assert results["available"] is True
-    assert results["total"] == map_api.RESULTS_LIMIT + 1
-    assert results["truncated"] is True
-    assert len(results["items"]) == map_api.RESULTS_LIMIT
+    assert files["available"] is True
+    assert files["total"] == map_api.FILES_LIMIT + 1
+    assert files["truncated"] is True
+    assert len(files["items"]) == map_api.FILES_LIMIT
 
 
-def test_results_are_the_projects_space_without_tool_state(client, space, bd):
+def test_files_are_the_projects_space_without_tool_state(client, space, bd):
     root = project(space)
     directory = space.space_dir(root.id)
     for name in (".beads", ".git", ".codegraph", ".grid"):
-        (directory / name).mkdir()
+        (directory / name).mkdir(exist_ok=True)
     (directory / "docs").mkdir()
     (directory / "report.md").write_text("done", encoding="utf-8")
 
     body = client.get(f"/api/projects/{root.id}/map").json()
-    results = body["results"]
+    files = body["files"]
 
-    assert [item["name"] for item in results["items"]] == ["docs", "report.md"]
-    assert [item["kind"] for item in results["items"]] == ["dir", "file"]
-    assert results["items"][0]["size"] is None
+    assert [item["name"] for item in files["items"]] == ["docs", "report.md"]
+    assert [item["kind"] for item in files["items"]] == ["dir", "file"]
+    assert files["items"][0]["size"] is None
     # No absolute path anywhere in the answer.
     assert str(directory) not in json.dumps(body)
-    assert all(not str(item["path"]).startswith("/") for item in results["items"])
+    assert all(not str(item["path"]).startswith("/") for item in files["items"])
 
 
-def test_a_project_without_a_space_answers_no_results(tmp_path, bd):
+def test_a_project_without_a_space_answers_no_files(tmp_path, bd):
     space = FakeSpace(tmp_path / "u1", project_spaces=False)
     root = project(space)
     client = TestClient(make_app({"u1": space}))
 
     body = client.get(f"/api/projects/{root.id}/map").json()
 
-    assert body["results"]["available"] is False
-    assert body["results"]["reason"] and body["results"]["items"] == []
+    assert body["files"]["available"] is False
+    assert body["files"]["reason"] and body["files"]["items"] == []
     assert body["files_url"] is None
+
+
+@pytest.mark.parametrize("kind", [
+    "missing-space", "missing", "empty", "marker", "beads-link", "space-link",
+    "db-link", "redirect", "env", "config", "metadata", "remote", "dolt-link",
+    "missing-config", "local-config", "legacy-config", "wal-link",
+])
+def test_unsafe_or_absent_tracker_never_invokes_bd(space, client, bd, tmp_path, kind):
+    root = space.project_store.create("No safe local tracker")
+    directory = space.layout.project_spaces / root.id
+    target = tmp_path / "foreign"
+    target.mkdir()
+    (target / "beads.db").touch()
+    if kind != "missing-space":
+        directory.mkdir(parents=True)
+    beads = directory / ".beads"
+    if kind == "space-link":
+        directory.rmdir()
+        directory.symlink_to(target, target_is_directory=True)
+    elif kind == "beads-link":
+        beads.symlink_to(target, target_is_directory=True)
+    elif kind not in {"missing", "missing-space"}:
+        beads.mkdir()
+        if kind not in {"empty", "marker"}:
+            (beads / "config.yaml").write_text("# Local config\n")
+        if kind == "marker":
+            (beads / "marker").touch()
+        elif kind == "db-link":
+            (beads / "beads.db").symlink_to(target / "beads.db")
+        elif kind not in {"empty"}:
+            (beads / "beads.db").touch()
+            if kind == "redirect":
+                (beads / "redirect").write_text(str(target))
+            elif kind == "env":
+                (beads / ".env").write_text(f"BEADS_DIR={target}\n")
+            elif kind == "config":
+                (beads / "config.yaml").write_text(f"db: {target}\n")
+            elif kind == "metadata":
+                (beads / "metadata.json").write_text("not json")
+            elif kind in {"remote", "dolt-link"}:
+                (beads / "metadata.json").write_text(json.dumps({
+                    "backend": "dolt", "database": "dolt", "dolt_database": root.id,
+                    "dolt_mode": "server" if kind == "remote" else "embedded",
+                }))
+                if kind == "dolt-link":
+                    (beads / "embeddeddolt").symlink_to(target, target_is_directory=True)
+            elif kind == "missing-config":
+                (beads / "config.yaml").unlink()
+            elif kind == "local-config":
+                (beads / "config.local.yaml").write_text(f"db: {target}\n")
+            elif kind == "legacy-config":
+                (beads / "config.json").write_text(json.dumps({"database": str(target)}))
+            elif kind == "wal-link":
+                (beads / "beads.db-wal").symlink_to(target / "beads.db")
+
+    body = client.get(f"/api/projects/{root.id}/map").json()
+    assert body["tasks"] == map_api._no_tasks(map_api.NO_TRACKER)
+    assert bd.calls == [], "Reject unsafe discovery BEFORE executing any bd command"
+    if kind == "missing-space":
+        assert not directory.exists(), "GET must not create a space"
+
+
+def test_foreign_or_mixed_ids_are_not_exposed(client, space, bd):
+    root = project(space)
+    for issues in ([issue("foreign-secret")], [issue(f"{root.id}-own"), issue("foreign-secret")]):
+        bd.answer = {"success": True, "data": issues}
+        tasks = client.get(f"/api/projects/{root.id}/map").json()["tasks"]
+        assert tasks == map_api._no_tasks(map_api.FOREIGN_TRACKER)
+
+
+def test_tracker_lstat_failure_is_closed(space, monkeypatch):
+    root = project(space)
+    def denied(path):
+        raise PermissionError("unreadable")
+    monkeypatch.setattr(map_api.os, "lstat", denied)
+    assert map_api._own_tracker(space.layout.project_spaces / root.id) is None
+
+
+def test_tracker_process_pins_existing_db_and_strips_ambient_selectors(space, monkeypatch):
+    root = project(space)
+    directory = space.layout.project_spaces / root.id
+    monkeypatch.setenv("BEADS_DIR", "/not-the-project")
+    monkeypatch.setenv("BEADS_DOLT_SERVER_DATABASE", "foreign")
+    monkeypatch.setenv("BD_DB", "/foreign")
+    def run(command, **kwargs):
+        database = directory / ".beads" / "beads.db"
+        assert command[1:3] == ["--db", str(database)]
+        assert kwargs["cwd"] == directory
+        env = kwargs["env"]
+        assert env["BEADS_DIR"] == str(database.parent)
+        assert env["BEADS_DB"] == str(database)
+        assert "BD_DB" not in env and "BEADS_DOLT_SERVER_DATABASE" not in env
+        assert env["HOME"] == str(directory)
+        assert env["XDG_CONFIG_HOME"] == str(directory / ".beads")
+        return SimpleNamespace(returncode=0, stdout="[]")
+    monkeypatch.setattr(map_api.subprocess, "run", run)
+    assert map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS)) == {"success": True, "data": []}
+
+
+def test_real_bd_discovery_and_project_isolation(tmp_path, monkeypatch):
+    """Exercise the installed CLI, exclusively within a synthetic git boundary."""
+    parent = tmp_path / "synthetic-repo"
+    parent.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if k in {"PATH", "LANG", "SYSTEMROOT", "WINDIR"}}
+    env.update(HOME=str(home), XDG_CONFIG_HOME=str(home), BD_DISABLE_METRICS="1",
+               GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    subprocess.run(["git", "init", str(parent)], env=env, check=True, capture_output=True)
+    def run(directory, *args):
+        # Pin config discovery during init too: no inherited ancestor config/remote.
+        selected_env = env | {"BEADS_DIR": str(directory / ".beads")} if args[0] == "init" else env
+        result = subprocess.run([map_api._find_bd(), *args], cwd=directory, env=selected_env, check=False,
+                                capture_output=True, text=True, timeout=40)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+    def init(directory, prefix):
+        run(directory, "init", "--prefix", prefix, "--skip-agents", "--skip-hooks")
+    init(parent, "synthetic")
+    run(parent, "create", "SYNTHETIC PARENT ONLY", "--json")
+    space = FakeSpace(parent / "space")
+    root = space.project_store.create("Synthetic project")
+    directory = space.space_dir(root.id)
+    # Prove the real danger: a plain child cwd discovers the synthetic parent.
+    discovered = json.loads(run(directory, "--readonly", "list", "--json"))
+    assert discovered[0]["title"] == "SYNTHETIC PARENT ONLY"
+    client = TestClient(make_app({"u1": space}))
+    for marker in (None, "empty", "marker"):
+        if marker:
+            (directory / ".beads").mkdir(exist_ok=True)
+        if marker == "marker":
+            (directory / ".beads" / "marker").touch()
+        assert client.get(f"/api/projects/{root.id}/map").json()["tasks"] == map_api._no_tasks(map_api.NO_TRACKER)
+    # A project git boundary lets bd init create a new tracker, not reuse its parent.
+    subprocess.run(["git", "init", str(directory)], env=env, check=True, capture_output=True)
+    init(directory, root.id)
+    created = json.loads(run(directory, "create", "SYNTHETIC PROJECT ONLY", "--json"))
+    monkeypatch.setenv("BEADS_DIR", str(parent / ".beads"))
+    monkeypatch.setenv("BEADS_DOLT_SERVER_DATABASE", "synthetic")
+    tasks = client.get(f"/api/projects/{root.id}/map").json()["tasks"]
+    assert tasks["available"] is True, tasks
+    assert [item["id"] for item in tasks["items"]] == [created["id"]]
+    assert tasks["items"][0]["title"] == "SYNTHETIC PROJECT ONLY"
 
 
 # -- the tracker's own failures --------------------------------------------------
@@ -339,18 +490,14 @@ def test_a_workspace_without_a_tracker_still_answers_the_map(client, space, bd):
     }
 
 
-def test_a_missing_bd_degrades_instead_of_failing(client, space, bd):
+def test_a_missing_bd_degrades_instead_of_failing(monkeypatch, client, space, bd):
     root = project(space)
 
-    async def missing(space, args, *, project=None, task_id=None):
+    async def missing(directory, args):
         raise HTTPException(status_code=503, detail="The tracker is unavailable: bd not found")
 
-    bd.answer = None
-    map_api._bd_for = missing  # replaced for this app's module, restored by pytest
-    try:
-        response = client.get(f"/api/projects/{root.id}/map")
-    finally:
-        map_api._bd_for = bd
+    monkeypatch.setattr(map_api, "_bd_in", missing)
+    response = client.get(f"/api/projects/{root.id}/map")
 
     assert response.status_code == 200
     tasks = response.json()["tasks"]
@@ -361,11 +508,11 @@ def test_a_missing_bd_degrades_instead_of_failing(client, space, bd):
 def test_a_tracker_that_does_not_answer_in_time(monkeypatch, client, space):
     root = project(space)
 
-    async def slow(space, args, *, project=None, task_id=None):
+    async def slow(directory, args):
         await asyncio.sleep(5)
         return {"success": True, "data": []}
 
-    monkeypatch.setattr(map_api, "_bd_for", slow)
+    monkeypatch.setattr(map_api, "_bd_in", slow)
     monkeypatch.setattr(map_api, "BD_TIMEOUT_SECONDS", 0.01)
 
     tasks = client.get(f"/api/projects/{root.id}/map").json()["tasks"]
@@ -382,7 +529,7 @@ def test_the_etag_revalidates_the_map(client, space):
     first = client.get(f"/api/projects/{root.id}/map")
     assert first.status_code == 200
     etag = first.headers["etag"]
-    assert first.headers["cache-control"] == "no-cache"
+    assert first.headers["cache-control"] == "private, no-cache"
 
     again = client.get(f"/api/projects/{root.id}/map")
     assert again.headers["etag"] == etag

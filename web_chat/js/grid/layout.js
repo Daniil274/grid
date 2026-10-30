@@ -2,7 +2,7 @@
  * The geography of the project map (web_chat/grid.html).
  *
  * Three regions never move: goals/tasks on the left, processes on the right,
- * results under them. Inside a region a node's place is a pure function of the
+ * files under them. Inside a region a node's place is a pure function of the
  * set of items - not of their state, their priority or the order the server
  * happened to answer in:
  *
@@ -28,14 +28,14 @@ const MARGIN = 28;
 export const NODE_SIZE = {
   tasks: { width: 156, height: 64 },
   processes: { width: 184, height: 56 },
-  results: { width: 184, height: 52 },
+  files: { width: 184, height: 52 },
 };
 
-/** The three fixed anchors. The results region follows the processes one down. */
+/** The three fixed anchors. The files region follows the processes one down. */
 export const REGIONS = {
   tasks: { x: MARGIN, y: MARGIN, width: 740 },
   processes: { x: 796, y: MARGIN, width: 416 },
-  results: { x: 796, width: 416 },
+  files: { x: 796, width: 416 },
   /** The height the processes region keeps even with a few items. */
   minProcessesHeight: 300,
 };
@@ -56,8 +56,8 @@ export function orderProcesses(items = []) {
   );
 }
 
-/** Results with the directories first, then by name. */
-export function orderResults(items = []) {
+/** Files with the directories first, then by name. */
+export function orderFiles(items = []) {
   return [...items].sort(
     (a, b) =>
       (a?.kind === "dir" ? 0 : 1) - (b?.kind === "dir" ? 0 : 1) || text(a?.name).localeCompare(text(b?.name)),
@@ -103,11 +103,11 @@ function place(count, columns, size, origin) {
 export function layoutMap(map = {}) {
   const tasks = orderTasks(Array.isArray(map?.tasks?.items) ? map.tasks.items : []);
   const processes = orderProcesses(Array.isArray(map?.processes?.items) ? map.processes.items : []);
-  const results = orderResults(Array.isArray(map?.results?.items) ? map.results.items : []);
+  const files = orderFiles(Array.isArray(map?.files?.items) ? map.files.items : []);
 
   const taskColumns = columnsFor(REGIONS.tasks.width, NODE_SIZE.tasks);
   const processColumns = columnsFor(REGIONS.processes.width, NODE_SIZE.processes);
-  const resultColumns = columnsFor(REGIONS.results.width, NODE_SIZE.results);
+  const fileColumns = columnsFor(REGIONS.files.width, NODE_SIZE.files);
 
   const tasksRegion = {
     region: "tasks",
@@ -125,13 +125,13 @@ export function layoutMap(map = {}) {
     width: REGIONS.processes.width,
     height: Math.max(regionHeight(processes.length, processColumns, NODE_SIZE.processes), REGIONS.minProcessesHeight),
   };
-  const resultsRegion = {
-    region: "results",
-    label: "Results",
-    x: REGIONS.results.x,
+  const filesRegion = {
+    region: "files",
+    label: "Files",
+    x: REGIONS.files.x,
     y: processesRegion.y + processesRegion.height + MARGIN,
-    width: REGIONS.results.width,
-    height: regionHeight(results.length, resultColumns, NODE_SIZE.results),
+    width: REGIONS.files.width,
+    height: regionHeight(files.length, fileColumns, NODE_SIZE.files),
   };
 
   const taskCells = place(tasks.length, taskColumns, NODE_SIZE.tasks, tasksRegion);
@@ -149,9 +149,9 @@ export function layoutMap(map = {}) {
     title: text(chat?.title) || text(chat?.chat_id),
     item: chat,
   }));
-  const resultCells = place(results.length, resultColumns, NODE_SIZE.results, resultsRegion);
-  const resultNodes = results.map((entry, index) => ({
-    ...resultCells[index],
+  const fileCells = place(files.length, fileColumns, NODE_SIZE.files, filesRegion);
+  const fileNodes = files.map((entry, index) => ({
+    ...fileCells[index],
     id: text(entry?.path) || text(entry?.name),
     title: text(entry?.name),
     item: entry,
@@ -159,11 +159,11 @@ export function layoutMap(map = {}) {
 
   return {
     width: CANVAS.width,
-    height: Math.max(CANVAS.minHeight, tasksRegion.height, resultsRegion.y + resultsRegion.height) + MARGIN,
-    regions: { tasks: tasksRegion, processes: processesRegion, results: resultsRegion },
-    nodes: { tasks: taskNodes, processes: processNodes, results: resultNodes },
+    height: Math.max(CANVAS.minHeight, tasksRegion.height, filesRegion.y + filesRegion.height) + MARGIN,
+    regions: { tasks: tasksRegion, processes: processesRegion, files: filesRegion },
+    nodes: { tasks: taskNodes, processes: processNodes, files: fileNodes },
     edges: taskEdges(taskNodes),
-    columns: { tasks: taskColumns, processes: processColumns, results: resultColumns },
+    columns: { tasks: taskColumns, processes: processColumns, files: fileColumns },
   };
 }
 

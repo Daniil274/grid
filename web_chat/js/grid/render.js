@@ -49,7 +49,7 @@ const priorityTag = (task) => (task?.priority == null ? "" : `P${task.priority}`
  * folder by `path`, a file by `file`. The entry's own path in the answer is
  * relative to the project's space, so the root's name goes in front of it.
  */
-export function resultHref(filesUrl, entry) {
+export function fileHref(filesUrl, entry) {
   const base = text(filesUrl);
   if (!base) return "";
   const [pathname, query = ""] = base.split("?");
@@ -150,13 +150,14 @@ export function processNode(node, origin) {
 }
 
 /** One top-level entry of the project's space; a link only when files_url is known. */
-export function resultNode(node, filesUrl, origin) {
+export function fileNode(node, filesUrl, origin) {
   const entry = node.item ?? {};
   const isDir = entry.kind === "dir";
-  const href = resultHref(filesUrl, entry);
-  const spec = href ? "a.gridNode.gridNode--result" : "div.gridNode.gridNode--result";
+  const isFile = entry.kind === "file";
+  const href = fileHref(filesUrl, entry);
+  const spec = href ? "a.gridNode.gridNode--file" : "div.gridNode.gridNode--file";
   const props = {
-    dataset: { kind: isDir ? "dir" : "file" },
+    dataset: { kind: entry.kind || "other" },
     title: `${node.title}${isDir ? "/" : ""}${entry.size == null ? "" : ` · ${entry.size} B`}${when(entry.modified) ? ` · ${when(entry.modified)}` : ""}`,
   };
   if (href) props.href = href;
@@ -165,7 +166,7 @@ export function resultNode(node, filesUrl, origin) {
     props,
     h("span.gridNode__mark", { "aria-hidden": "true", text: isDir ? "▸" : "·" }),
     h("span.gridNode__title", { text: node.title }),
-    h("span.gridNode__meta", { text: isDir ? "Folder" : "File" }),
+    h("span.gridNode__meta", { text: isDir ? "Folder" : isFile ? "File" : entry.kind === "link" ? "Symbolic link" : "Other" }),
   );
   return place(box, node, origin);
 }
@@ -213,7 +214,7 @@ function regionFrame(region, geometry, map, projectId) {
     const origin = { x: spec.x, y: spec.y };
     if (region === "tasks") box.append(taskNode(node, projectId, origin));
     else if (region === "processes") box.append(processNode(node, origin));
-    else box.append(resultNode(node, map?.files_url, origin));
+    else box.append(fileNode(node, map?.files_url, origin));
   }
   const note = truncatedNote(section);
   if (note) box.append(note);
@@ -263,7 +264,7 @@ export function renderMap(container, map, { projectId = "", geometry = null } = 
     dataset: { map: projectId },
   });
   canvas.append(edgesLayer(placed));
-  for (const region of ["tasks", "processes", "results"]) canvas.append(regionFrame(region, placed, map, projectId));
+  for (const region of ["tasks", "processes", "files"]) canvas.append(regionFrame(region, placed, map, projectId));
   const plane = h("div.gridMap__plane", {}, canvas);
   replace(container, plane);
   fitMap(container, plane, placed);
@@ -331,13 +332,13 @@ const chatLine = (chat) =>
 
 /**
  * The compact panel beside the map: the counts, what is blocked, what is
- * working right now, the results, the sub-projects - and, where a section
+ * working right now, the files, the sub-projects - and, where a section
  * could not be read, the reason instead of an empty pretence.
  */
 export function renderOverview(container, map, { projectId = "" } = {}) {
   const tasks = Array.isArray(map?.tasks?.items) ? map.tasks.items : [];
   const processes = Array.isArray(map?.processes?.items) ? map.processes.items : [];
-  const results = Array.isArray(map?.results?.items) ? map.results.items : [];
+  const files = Array.isArray(map?.files?.items) ? map.files.items : [];
   const parts = [h("h2.gridOverview__title", { text: "Overview" })];
 
   if (text(map?.project?.description)) {
@@ -348,7 +349,7 @@ export function renderOverview(container, map, { projectId = "" } = {}) {
   if (map?.tasks?.available === false) {
     parts.push(overviewSection("Tasks", unavailableNote(map.tasks)));
   } else {
-    const counts = stateCounts(tasks);
+    const counts = map?.tasks?.counts ?? stateCounts(tasks);
     const chips = STATE_ORDER.filter((key) => counts[key]).map((key) =>
       h("li.gridOverview__chip", { dataset: { state: key } }, h("span.gridOverview__mark", { "aria-hidden": "true", text: STATES[key].mark }), `${counts[key]} ${STATES[key].label.toLowerCase()}`),
     );
@@ -382,18 +383,19 @@ export function renderOverview(container, map, { projectId = "" } = {}) {
     );
   }
 
-  // Results: how many top-level entries, and the way into the space.
-  if (map?.results?.available === false) {
-    parts.push(overviewSection("Results", unavailableNote(map.results)));
+  // Files: how many top-level entries, and the way into the space.
+  if (map?.files?.available === false) {
+    parts.push(overviewSection("Files", unavailableNote(map.files)));
   } else {
-    const dirs = results.filter((entry) => entry.kind === "dir").length;
-    const total = Number(map?.results?.total ?? results.length);
+    const counts = map?.files?.counts ?? {};
+    const dirs = counts.dir ?? files.filter((entry) => entry.kind === "dir").length;
+    const total = Number(map?.files?.total ?? files.length);
     parts.push(
       overviewSection(
-        "Results",
-        h("p.gridOverview__note", { text: `${total} top-level ${total === 1 ? "entry" : "entries"} · ${dirs} ${dirs === 1 ? "folder" : "folders"}` }),
+        "Files",
+        h("p.gridOverview__note", { text: `${total} top-level ${total === 1 ? "entry" : "entries"} · ${dirs} ${dirs === 1 ? "folder" : "folders"} · files are not verified artifacts` }),
         map?.files_url ? h("a.gridOverview__link.gridOverview__link--button", { href: text(map.files_url), text: "Open the files" }) : h("p.gridOverview__note", { text: "The files of this project are not open to you." }),
-        truncatedNote(map.results),
+        truncatedNote(map.files),
       ),
     );
   }

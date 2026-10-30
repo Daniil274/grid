@@ -50,6 +50,8 @@ export class GridPage {
     this.projects = null;
     this.etag = "";
     this.error = "";
+    this.staleAt = "";
+    this.checkedAt = "";
     this.loading = false;
     this._abort = null;
 
@@ -96,12 +98,19 @@ export class GridPage {
       });
       if (answer?.notModified) {
         this.error = "";
-        this.setStatus(`Unchanged · checked at ${clock()}`);
+        this.checkedAt = clock();
+        if (this.staleAt) {
+          this.staleAt = "";
+          this.render();
+        }
+        this.setStatus(`Unchanged · checked at ${this.checkedAt}`);
         return this.map;
       }
+      this.checkedAt = clock();
       this.map = answer?.map ?? answer ?? null;
       this.etag = answer?.etag ?? "";
       this.error = "";
+      this.staleAt = "";
       this.render();
       const seconds = Math.round(this.intervalMs / 1000);
       this.setStatus(`Updated ${clock()} · refreshes every ${seconds} s while this page is open`);
@@ -109,8 +118,15 @@ export class GridPage {
     } catch (error) {
       if (error?.name === "AbortError") return this.map;
       this.error = error?.message || "The map could not be loaded";
+      if ([401, 403, 404].includes(error?.status)) {
+        this.map = null;
+        this.etag = "";
+        this.staleAt = "";
+      } else if (this.map) {
+        this.staleAt = this.checkedAt;
+      }
       this.render();
-      this.setStatus(this.error, { error: true });
+      this.setStatus(this.map ? `Offline · showing stale data from ${this.staleAt} · ${this.error}` : this.error, { error: true });
       return null;
     } finally {
       this.loading = false;
@@ -146,8 +162,13 @@ export class GridPage {
       return;
     }
     if (!this.map) {
-      if (map) map.hidden = true;
+      if (map) {
+        map.hidden = true;
+        replace(map);
+      }
+      if (breadcrumb) replace(breadcrumb);
       if (title) title.textContent = "Project map";
+      if (this.doc && "title" in this.doc) this.doc.title = "Project map · Grid";
       if (overview) {
         replace(
           overview,
@@ -164,5 +185,8 @@ export class GridPage {
     if (breadcrumb) renderBreadcrumb(breadcrumb, this.map, { projectId: this.projectId });
     if (map) renderMap(map, this.map, { projectId: this.projectId });
     if (overview) renderOverview(overview, this.map, { projectId: this.projectId });
+    if (this.staleAt && overview) {
+      overview.append(h("p.gridOverview__note.gridOverview__note--off", { text: `Stale data · last successful update ${this.staleAt}` }));
+    }
   }
 }
