@@ -352,10 +352,15 @@ async def test_real_factory_assembly_gives_tools_only_to_the_key_agent(runtime):
     factory.bind_system_access(runtime.broker, "main")
     key = await factory._get_agent_tools(config.config.agents["coordinator"], "coordinator")
     other = await factory._get_agent_tools(config.config.agents["helper"], "helper")
-    assert {tool.name for tool in key} == {"systems_list", "system_delegate"}
-    assert other == []
+    # The broker's tools go to the key agent only; saying something to people
+    # (tools.message_tools) is every agent's, whoever it is.
+    assert {tool.name for tool in key} == {"systems_list", "system_delegate", "say_public"}
+    assert [tool.name for tool in other] == ["say_public"]
     factory.bind_system_access(None, "main")
-    assert await factory._get_agent_tools(config.config.agents["coordinator"], "coordinator") == []
+    assert [
+        tool.name
+        for tool in await factory._get_agent_tools(config.config.agents["coordinator"], "coordinator")
+    ] == ["say_public"]
 
 
 async def test_registry_binds_its_own_broker_and_lists_user_systems(tmp_path):

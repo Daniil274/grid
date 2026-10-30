@@ -227,6 +227,9 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         # core.system_store.BuilderAccess, set by an admin's web chat space: the
         # system builder's tools act only with it (tools/system_builder_tools.py).
         self.system_builder = None
+        # The web chat user's ProjectStore, set by their space: the project tools
+        # (tools/project_tools.py) act only on it, never on a model-named user or path.
+        self.project_store = None
         if working_directory:
             self.config.set_working_directory(working_directory)
 
@@ -653,6 +656,11 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
                 )
                 if server in unavailable_servers and requested not in missing_tool_names:
                     missing_tool_names.append(requested)
+
+        # A dynamic agent (an orchestrate executor, a delegated worker) speaks to
+        # people the same way a configured one does: through the tool, never by
+        # its prose, which is a report to whoever called it.
+        tools = self._with_public_message_tool(tools)
 
         # Add prompt_addition from tool configuration to instructions
         enhanced_instructions = self._build_dynamic_agent_instructions(

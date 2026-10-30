@@ -34,6 +34,7 @@ from core.tool_packages import build_package_function_tool
 from core.run_stream import interrupted_run_report, run_output_text
 from schemas import AgentConfig, AgentExecution
 from tools import resolve_tool, tool_isolation
+from tools.message_tools import SAY_PUBLIC, say_public
 from tools.parallel_tools import DEFAULT_MAX_PARALLEL, PARALLEL, parallel_tool
 from utils.exceptions import ConfigError
 from utils.logger import Logger
@@ -307,6 +308,28 @@ class ToolAssembly:
             parallel_tool(siblings, max_parallel=max_parallel), PARALLEL, limit_output=False
         )
 
+    def _with_public_message_tool(self, tools: List[Any]) -> List[Any]:
+        """Add the one explicit way a run speaks to people, beside *tools*.
+
+        A run's answer is its last message and a sub-agent's prose is a tool
+        result its caller reads: neither reaches the conversation by itself.
+        ``say_public`` does, on every provider alike, because it is a tool call
+        and not a message phase (``web_chat.observer.record_public_message``);
+        the native ``commentary`` mark of the Responses API keeps working as it
+        did. Every agent gets it, since the same agent can run at the top of a
+        turn or as somebody's child, and a view with no public channel answers
+        that nothing was sent. It says something and changes nothing, so the
+        gate reads its declared effect and lets it through.
+        """
+        if any(getattr(tool, "name", None) == SAY_PUBLIC for tool in tools):
+            return tools
+        # A copy per agent, as for every function tool: the wrapper replaces the
+        # tool's own invoke, and the objects in the registry are shared.
+        # Its answer is a one-line receipt and it changes nothing, so it is not
+        # limited; it is gated like every other call, with the effect its module
+        # declares (utils.tool_effects: a read, never an action to ask about).
+        return [*tools, self._wrap_tool_with_policy(copy.copy(say_public), SAY_PUBLIC, "function")]
+
     def _resolve_function_tools(self, tool_keys: List[str]) -> List[Any]:
         """Each function tool by key, from this factory's own config: its project
         tools first, then the system's. An unknown key is logged and left out;
@@ -417,6 +440,9 @@ class ToolAssembly:
             tools.extend(access_tools)
         if PARALLEL in function_tools:
             tools.append(self._parallel_tool(tools))
+
+        # Every agent can say something to people mid-run, on any provider.
+        tools = self._with_public_message_tool(tools)
 
         # Cache tools
         self._tool_cache[cache_key] = tools

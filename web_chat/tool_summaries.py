@@ -477,6 +477,7 @@ TOOL_TITLES: dict[str, str] = {
     "codegraph_files": "Indexed files",
     "codegraph_status": "Index status",
     "todo_write": "Update todo list",
+    "say_public": "Send message",
     # files
     "read_file": "Read file",
     "write_file": "Write file",
@@ -546,6 +547,11 @@ TOOL_TITLES: dict[str, str] = {
     "memory_overview": "Memory overview",
     "memory_remember": "Remember",
     "memory_forget": "Forget memory",
+    # projects
+    "project_list": "List projects",
+    "project_get": "Read project",
+    "project_ensure": "Ensure project",
+    "project_add_notes": "Add project notes",
     # vision
     "crop_image": "Crop image",
     # common shell / screen tools (robustness; not in the local registry)
@@ -573,6 +579,7 @@ TOOL_SUBTITLES: dict[str, Callable[[dict[str, Any]], Optional[str]]] = {
     "pipeline_inspect": _no_subtitle,
     # orchestration / pipeline
     "orchestrate": _orchestrate,
+    "say_public": _no_subtitle,
     "parallel": _parallel,
     "pipeline_start": _orchestrate,
     "pipeline_task": _pipeline_task,
@@ -627,6 +634,10 @@ TOOL_SUBTITLES: dict[str, Callable[[dict[str, Any]], Optional[str]]] = {
     "memory_overview": _memory_overview,
     "memory_remember": _memory_remember,
     "memory_forget": _memory_forget,
+    "project_list": _no_subtitle,
+    "project_get": _no_subtitle,
+    "project_ensure": _no_subtitle,
+    "project_add_notes": _no_subtitle,
     # vision
     "crop_image": _crop_image,
     # common shell / screen tools

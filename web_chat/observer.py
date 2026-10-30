@@ -903,6 +903,11 @@ class WebStreamObserver:
             return None
         author = self.agent_label or SYSTEM_AUTHOR
         key = self._author_key or author
+        if origin is None:
+            # A call the run made itself (``say_public``): the same words twice
+            # are two messages, so the id is the call's own, not its text.
+            self._commentary_seq += 1
+            origin = f"call-{self._commentary_seq}"
         event_id = stable_event_id(EventKind.MESSAGE, f"{key}:{origin or text}", text)
         for known in log.events:
             if known.id == event_id:
@@ -928,6 +933,32 @@ class WebStreamObserver:
         )
         self._publish_event(event)
         return event
+
+    def record_public_message(
+        self, text: Any, *, at_ms: int = 0
+    ) -> Optional[CommunicationEvent]:
+        """A message this run sent to people through its ``say_public`` tool.
+
+        A run at the top of a turn speaks into its own public log, as its
+        narration does; a sub-agent has no log of its own, so the same call
+        goes into the turn's log under the child's author and block
+        (:meth:`record_commentary`). ``tools.message_tools`` is the only
+        caller: a tool call is the explicit signal, where a model's prose
+        carries none.
+        """
+        if self.events is None:
+            return self.record_commentary(text, at_ms=at_ms)
+        text = text if isinstance(text, str) else ("" if text is None else str(text))
+        if not text.strip():
+            return None
+        step = self._recorder.note(
+            StepKind.MESSAGE,
+            "Message",
+            subtitle=clip(text, 120),
+            body=text,
+            parent_id=self._parent_id,
+        )
+        return self.record_message(text, step_id=step.id, at_ms=at_ms or step.at_ms)
 
     def record_status(
         self,
