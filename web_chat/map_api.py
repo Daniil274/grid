@@ -128,6 +128,11 @@ class ReasonCode(str, Enum):
     TIMEOUT = "timeout"
     INVALID_ANSWER = "invalid_answer"
     TRACKER_TOO_LARGE = "tracker_too_large"
+    # The sections the map reads without bd name their own causes.
+    NO_CHATS = "no_chats"
+    UNREADABLE = "unreadable"
+    NOT_A_FOLDER = "not_a_folder"
+    FILES_TIMEOUT = "files_timeout"
 
 
 #: What the map tells the browser about each cause: no paths, no bd stderr.
@@ -140,6 +145,10 @@ REASON_TEXT = {
     ReasonCode.TIMEOUT: "The tracker did not answer in time.",
     ReasonCode.INVALID_ANSWER: "The project's local tracker answered with something the map cannot read.",
     ReasonCode.TRACKER_TOO_LARGE: "The project's tracker is too large to read on the map.",
+    ReasonCode.NO_CHATS: "This project's chats cannot be listed on this server.",
+    ReasonCode.UNREADABLE: "This project's space cannot be read.",
+    ReasonCode.NOT_A_FOLDER: "This project's space is not a folder; it is not read.",
+    ReasonCode.FILES_TIMEOUT: "The project's files did not answer in time.",
 }
 
 #: The files section names the same missing space with the same words.
@@ -329,6 +338,60 @@ def _docker_bd_available() -> bool:
     return _docker_fallback_enabled() and shutil.which("docker") is not None
 
 
+@dataclass(frozen=True)
+class Runner:
+    """Which bd runtime one read uses, and the fact that chose it.
+
+    ``kind`` is ``"host"`` when this server has a real bd, ``"docker"`` when
+    the isolation image runs it, and ``None`` when there is no runtime at all.
+    A diagnostic prints this; the map itself never does.
+    """
+
+    kind: Optional[str]
+    executable: Optional[str] = None
+    image: Optional[str] = None
+    why: str = ""
+
+
+@dataclass
+class ReadTrace:
+    """What one read did, for a human at a terminal - never for the browser."""
+
+    runner: Runner = Runner(None, why="no runtime has been chosen yet")
+    command: Optional[List[str]] = None
+    returncode: Optional[int] = None
+    stderr: str = ""
+    reason: Optional[ReasonCode] = None
+
+    def record(self, code: Optional[ReasonCode], **fields: Any) -> None:
+        """Keep the cause of a refusal and what the run reported."""
+        self.reason = code
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+
+def _resolve_runner() -> Runner:
+    """Choose the bd runtime of one read, and say why, in one place.
+
+    Both the map and ``python -m web_chat.map_check`` go through here, so a
+    diagnostic cannot disagree with what the server would do.
+    """
+    host = _bd_executable()
+    if host is not None:
+        return Runner("host", executable=host, why=f"an executable bd on this host: {host}")
+    if not _docker_bd_available():
+        if not _docker_fallback_enabled():
+            why = "no executable bd on PATH and the docker fallback is disabled (BEADS_DISABLE_DOCKER_FALLBACK)"
+        else:
+            why = "no executable bd on PATH and no docker on PATH to run the isolation image"
+        return Runner(None, why=why)
+    image = _get_isolation_image(None) or ""
+    if not image:
+        return Runner(None, why="no executable bd on PATH and the isolation image is not configured")
+    return Runner("docker", image=image,
+                  why=f"no executable bd on PATH; bd runs in the isolation image {image}")
+
+
 def _tracker_env(home: Path, database: Path) -> dict[str, str]:
     """The environment of one read: the tracker pinned, every home in *home*."""
     env = {key: value for key, value in os.environ.items() if key in INHERITED_ENV}
@@ -392,36 +455,50 @@ def _tracker_copy(directory: Path, beads: Path, work: Path) -> tuple[Optional[Pa
         return None, ReasonCode.BD_FAILED
 
 
-def _answer(result: Any) -> dict[str, Any]:
+def _answer(result: Any, trace: Optional[ReadTrace] = None) -> dict[str, Any]:
     """bd's exit as a typed answer; the real failure goes to the log, not out."""
+    if trace is not None:
+        trace.record(None, returncode=result.returncode, stderr=result.stderr or "")
     if result.returncode:
         # bd errors may contain absolute paths or remote credentials.
         logger.warning("map: bd exited %s: %s", result.returncode, _logged(result.stderr))
+        if trace is not None:
+            trace.reason = ReasonCode.BD_FAILED
         return _failure(ReasonCode.BD_FAILED)
     try:
         return {"success": True, "data": json.loads(result.stdout)}
     except ValueError:
         logger.warning("map: bd answered with what is not JSON: %s", _logged(result.stdout))
+        if trace is not None:
+            trace.reason = ReasonCode.INVALID_ANSWER
         return _failure(ReasonCode.INVALID_ANSWER)
 
 
-def _run_on_host(bd: str, cwd: Path, database: Path, args: List[str], home: Path) -> dict[str, Any]:
+def _run_on_host(bd: str, cwd: Path, database: Path, args: List[str], home: Path,
+                 trace: Optional[ReadTrace] = None) -> dict[str, Any]:
     """One pinned read with the host's bd, against the copy in *cwd*."""
+    command = [bd, "--db", str(database), *args]
+    if trace is not None:
+        trace.command = command
     try:
-        result = subprocess.run([bd, "--db", str(database), *args], cwd=cwd, check=False,
+        result = subprocess.run(command, cwd=cwd, check=False,
                                 env=_tracker_env(home, database), capture_output=True, text=True,
                                 timeout=BD_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         logger.warning("map: bd %s did not answer in %ss", " ".join(args), BD_TIMEOUT_SECONDS)
+        if trace is not None:
+            trace.reason = ReasonCode.TIMEOUT
         return _failure(ReasonCode.TIMEOUT)
     except OSError as exc:
         logger.warning("map: bd could not run: %s", exc)
+        if trace is not None:
+            trace.record(ReasonCode.BD_UNAVAILABLE, stderr=str(exc))
         return _failure(ReasonCode.BD_UNAVAILABLE)
-    return _answer(result)
+    return _answer(result, trace)
 
 
 def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
-                      args: List[str]) -> dict[str, Any]:
+                      args: List[str], trace: Optional[ReadTrace] = None) -> dict[str, Any]:
     """One pinned read in the isolation image, when this host has no bd.
 
     Same command as ``tools.beads_tools._run_bd_via_docker_run`` builds, but
@@ -447,34 +524,50 @@ def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
         "timeout", "-k", "5", str(int(BD_TIMEOUT_SECONDS)),
         "/usr/local/bin/bd", "--db", str(pinned), *args,
     ]
+    if trace is not None:
+        trace.command = command
     try:
         logger.debug("map: reading the tracker via docker: %s", " ".join(command))
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
                                 check=False, timeout=BD_TIMEOUT_SECONDS + 10)
     except subprocess.TimeoutExpired:
         logger.warning("map: bd in the isolation image did not answer in %ss", BD_TIMEOUT_SECONDS)
+        if trace is not None:
+            trace.reason = ReasonCode.TIMEOUT
         return _failure(ReasonCode.TIMEOUT)
     except OSError as exc:
         logger.warning("map: docker could not run: %s", exc)
+        if trace is not None:
+            trace.record(ReasonCode.BD_UNAVAILABLE, stderr=str(exc))
         return _failure(ReasonCode.BD_UNAVAILABLE)
-    return _answer(result)
+    return _answer(result, trace)
 
 
-def _read_tracker(directory: Path, args: List[str]) -> dict[str, Any]:
+def _read_tracker(directory: Path, args: List[str],
+                  trace: Optional[ReadTrace] = None) -> dict[str, Any]:
     """Read the project's tracker through bd, writing nothing into the project.
 
     Only an explicitly pinned read runs, and it runs on a temporary copy:
 
     Do not use run_bd here: it inherits BEADS/BD selectors and user config.
     --db alone is insufficient: bd 1.3 treats a missing path as a DB *name*.
+
+    *trace*, when given, collects what a terminal diagnostic needs: the runner
+    and why it was chosen, the command, the exit, bd's own stderr and the
+    reason code. The route never passes one.
     """
     database = _own_tracker(directory)
     if database is None:
+        if trace is not None:
+            trace.record(ReasonCode.NO_TRACKER)
         return _failure(ReasonCode.NO_TRACKER)
-    host_bd = _bd_executable()
-    image = _get_isolation_image(None) if host_bd is None and _docker_bd_available() else None
-    if host_bd is None and image is None:
+    runner = _resolve_runner()
+    if trace is not None:
+        trace.runner = runner
+    if runner.kind is None:
         logger.warning("map: no bd on this host and no docker fallback for %s", directory.name)
+        if trace is not None:
+            trace.record(ReasonCode.BD_UNAVAILABLE)
         return _failure(ReasonCode.BD_UNAVAILABLE)
     try:
         with tempfile.TemporaryDirectory(prefix="grid-map-") as root:
@@ -486,22 +579,29 @@ def _read_tracker(directory: Path, args: List[str]) -> dict[str, Any]:
             if copied is None:
                 logger.warning("map: tracker of %s was not copied (%s)",
                                directory.name, code.value if code else "?")
+                if trace is not None:
+                    trace.record(code or ReasonCode.BD_FAILED)
                 return _failure(code or ReasonCode.BD_FAILED)
             pinned = _own_tracker(copied)
             if pinned is None:
                 logger.warning("map: the copy of %s is not a self-contained local database", directory.name)
+                if trace is not None:
+                    trace.record(ReasonCode.BD_FAILED)
                 return _failure(ReasonCode.BD_FAILED)
-            if host_bd is not None:
-                return _run_on_host(host_bd, copied, pinned, args, home)
-            return _run_in_container(image or "", directory, copied, pinned, args)
+            if runner.kind == "host":
+                return _run_on_host(runner.executable or "", copied, pinned, args, home, trace)
+            return _run_in_container(runner.image or "", directory, copied, pinned, args, trace)
     except OSError as exc:
         logger.warning("map: the tracker read of %s could not start: %s", directory.name, exc)
+        if trace is not None:
+            trace.record(ReasonCode.BD_FAILED, stderr=str(exc))
         return _failure(ReasonCode.BD_FAILED)
 
 
-async def _bd_in(directory: Path, args: List[str]) -> dict[str, Any]:
+async def _bd_in(directory: Path, args: List[str],
+                 trace: Optional[ReadTrace] = None) -> dict[str, Any]:
     """One bd read in *directory*, off the event loop; it never raises."""
-    return await asyncio.to_thread(_read_tracker, directory, args)
+    return await asyncio.to_thread(_read_tracker, directory, args, trace)
 
 
 @dataclass(frozen=True)
@@ -517,37 +617,54 @@ class TasksSlice:
 
 
 def _no_tasks(code: ReasonCode) -> dict[str, Any]:
-    return {"available": False, "reason": REASON_TEXT[code], "items": [], "total": 0,
+    return {"available": False, "reason": REASON_TEXT[code], "reason_code": code.value,
+            "items": [], "total": 0,
             "truncated": False, "counts": _counts([])}
 
 
-async def _tasks(space: Any, project_id: str) -> TasksSlice:
+async def _tasks(space: Any, project_id: str, trace: Optional[ReadTrace] = None) -> TasksSlice:
     """The project's own tracker as the map's task items, bounded and sorted by age."""
     directory = _project_space(space, project_id)
     if directory is None:
+        if trace is not None:
+            trace.record(ReasonCode.NO_SPACE)
         return TasksSlice(_no_tasks(ReasonCode.NO_SPACE), ReasonCode.NO_SPACE)
     tracker = await asyncio.to_thread(_own_tracker, directory)
     if tracker is None:
+        if trace is not None:
+            trace.record(ReasonCode.NO_TRACKER)
         return TasksSlice(_no_tasks(ReasonCode.NO_TRACKER), ReasonCode.NO_TRACKER)
     try:
-        answer = await asyncio.wait_for(_bd_in(directory, list(BD_LIST_ARGS)), BD_TIMEOUT_SECONDS + 1)
+        if trace is None:
+            read = _bd_in(directory, list(BD_LIST_ARGS))
+        else:
+            read = _bd_in(directory, list(BD_LIST_ARGS), trace)
+        answer = await asyncio.wait_for(read, BD_TIMEOUT_SECONDS + 1)
     except asyncio.TimeoutError:
+        if trace is not None:
+            trace.record(ReasonCode.TIMEOUT)
         return TasksSlice(_no_tasks(ReasonCode.TIMEOUT), ReasonCode.TIMEOUT)
     if not answer.get("success"):
         code = answer.get("code")
         if not isinstance(code, ReasonCode):
             code = ReasonCode.BD_FAILED
+        if trace is not None:
+            trace.reason = code
         return TasksSlice(_no_tasks(code), code)
     try:
         issues = _issues(answer)
     except HTTPException:
         # bd's own words are not a task list; they were logged where bd ran.
         logger.warning("map: bd answered without a task list for %s", project_id)
+        if trace is not None:
+            trace.reason = ReasonCode.INVALID_ANSWER
         return TasksSlice(_no_tasks(ReasonCode.INVALID_ANSWER), ReasonCode.INVALID_ANSWER)
     # Defense in depth, not discovery isolation: the local database may have
     # been populated with issues belonging to a different project.
     prefix = f"{project_id}-"
     if any(not str(issue.get("id") or "").startswith(prefix) for issue in issues):
+        if trace is not None:
+            trace.reason = ReasonCode.FOREIGN_TRACKER
         return TasksSlice(_no_tasks(ReasonCode.FOREIGN_TRACKER), ReasonCode.FOREIGN_TRACKER)
     statuses = {issue.get("id"): issue.get("status") for issue in issues}
     mapped = [_task(issue, statuses) for issue in issues]
@@ -557,6 +674,7 @@ async def _tasks(space: Any, project_id: str) -> TasksSlice:
     return TasksSlice({
         "available": True,
         "reason": None,
+        "reason_code": None,
         "items": items[:TASKS_LIMIT],
         "total": len(items),
         "truncated": len(items) > TASKS_LIMIT,
@@ -573,13 +691,22 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
     or the first words of the chat's first user message, as the rail shows it.
     """
     manager = getattr(space, "context_manager", None)
-    empty = {"items": [], "total": 0, "truncated": False, "counts": {"active": 0, "awaiting_approval": 0}}
+    unavailable = {
+        "available": False,
+        "reason": REASON_TEXT[ReasonCode.NO_CHATS],
+        "reason_code": ReasonCode.NO_CHATS.value,
+        "items": [],
+        "total": 0,
+        "truncated": False,
+        "counts": {"active": 0, "awaiting_approval": 0},
+    }
     if manager is None:
-        return empty
+        return unavailable
     try:
         views = manager().conversation_views()
     except Exception:  # noqa: BLE001 - a map without chats is still a map
-        views = []
+        logger.warning("map: the chats of %s could not be listed", project_id)
+        return unavailable
     awaiting: Dict[str, list] = {}
     of_approvals = getattr(space, "awaiting_approval", None)
     if callable(of_approvals):
@@ -622,6 +749,9 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
     items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
     items.sort(key=lambda item: not item["active"])
     return {
+        "available": True,
+        "reason": None,
+        "reason_code": None,
         "items": items[:PROCESSES_LIMIT],
         "total": len(items),
         "truncated": len(items) > PROCESSES_LIMIT,
@@ -646,8 +776,9 @@ def _file_counts(items: List[dict[str, Any]]) -> dict[str, int]:
     return {kind: sum(item["kind"] == kind for item in items) for kind in FILE_KINDS}
 
 
-def _no_files(reason: str) -> dict[str, Any]:
-    return {"available": False, "reason": reason, "items": [], "total": 0, "truncated": False,
+def _no_files(code: ReasonCode) -> dict[str, Any]:
+    return {"available": False, "reason": REASON_TEXT[code], "reason_code": code.value,
+            "items": [], "total": 0, "truncated": False,
             "counts": _file_counts([])}
 
 
@@ -672,6 +803,7 @@ def _listing(entries: List[dict[str, Any]]) -> dict[str, Any]:
     return {
         "available": True,
         "reason": None,
+        "reason_code": None,
         "items": items[:FILES_LIMIT],
         "total": len(items),
         "truncated": len(items) > FILES_LIMIT,
@@ -684,24 +816,24 @@ async def _files(space: Any, project_id: str) -> dict[str, Any]:
     """The top level of the project's space: what is on disk there, nothing more."""
     directory = _project_space(space, project_id)
     if directory is None:
-        return _no_files(NO_SPACE)
+        return _no_files(ReasonCode.NO_SPACE)
     try:
         info = os.lstat(directory)
     except FileNotFoundError:
         # Nothing written there yet: an empty space, and the map does not make it.
         return _listing([])
     except OSError:
-        return _no_files("This project's space cannot be read.")
+        return _no_files(ReasonCode.UNREADABLE)
     if not stat.S_ISDIR(info.st_mode):
-        return _no_files("This project's space is not a folder; it is not read.")
+        return _no_files(ReasonCode.NOT_A_FOLDER)
     try:
         listing = await asyncio.wait_for(
             asyncio.to_thread(list_folder, directory, ""), FOLDER_TIMEOUT_SECONDS
         )
     except asyncio.TimeoutError:
-        return _no_files("The project's files did not answer in time.")
+        return _no_files(ReasonCode.FILES_TIMEOUT)
     except Exception:  # noqa: BLE001 - gone meanwhile, refused: no files, not a 500
-        return _no_files("This project's space cannot be read.")
+        return _no_files(ReasonCode.UNREADABLE)
     return _listing([entry for entry in listing.get("entries") or [] if isinstance(entry, dict)])
 
 

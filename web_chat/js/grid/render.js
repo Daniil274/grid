@@ -173,11 +173,33 @@ export function fileNode(node, filesUrl, origin) {
 
 const sectionOf = (map, region) => map?.[region] ?? null;
 
-/** "No data: <reason>" - what an unreadable section says instead of a fake. */
-const unavailableNote = (section) =>
-  h("p.gridMap__note.gridMap__note--off", {
-    text: `No data: ${text(section?.reason) || "unavailable"}`,
+/**
+ * What an operator can do about each cause, keyed by the server's typed
+ * `reason_code`. The sentence in `reason` is the server's own and is shown
+ * as it comes; this is only the extra line, and an unknown code adds none.
+ */
+export const REASON_HINTS = {
+  no_space: "the project has no space of its own here",
+  no_tracker: "it has no tracker of its own yet",
+  foreign_tracker: "the tracker found belongs to another project",
+  bd_unavailable: "no bd runtime here; the operator can run the map check",
+  bd_failed: "the server log has bd's own message",
+  timeout: "the tracker did not answer in time",
+  invalid_answer: "the tracker answered with something unreadable",
+  tracker_too_large: "the tracker is too large to read here",
+  no_chats: "the server cannot list this project's chats",
+  unreadable: "the project's space cannot be read",
+  not_a_folder: "the project's space is not a folder",
+  files_timeout: "the files did not answer in time",
+};
+
+/** "No data: <reason>" plus a hint per code - never a fake for an unreadable section. */
+const unavailableNote = (section) => {
+  const hint = REASON_HINTS[text(section?.reason_code)];
+  return h("p.gridMap__note.gridMap__note--off", {
+    text: `No data: ${text(section?.reason) || "unavailable"}${hint ? ` (${hint})` : ""}`,
   });
+};
 
 const truncatedNote = (section) =>
   section?.truncated && Array.isArray(section.items) && section.items.length < Number(section.total ?? 0)

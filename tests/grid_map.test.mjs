@@ -231,18 +231,22 @@ test("a result is not a link when the server names no files_url", () => {
 
 test("an unreadable section says no data and why, in the map and in the overview", () => {
   const map = sampleMap();
-  map.tasks = { available: false, reason: "bd is not installed", items: [], total: 0, truncated: false, counts: {} };
+  map.tasks = { available: false, reason: "bd is not installed", reason_code: "bd_unavailable", items: [], total: 0, truncated: false, counts: {} };
   map.files = { available: false, reason: "the project space is unavailable", items: [], total: 0, truncated: false };
 
   const root = el("div");
   renderMap(root, map, { projectId: "p1" });
   assert.match(textOf(root.findAll("gridMap__region").find((region) => region.dataset.region === "tasks")), /No data: bd is not installed/);
+  // The hint is chosen by the typed code, never by parsing the sentence.
+  assert.match(textOf(root.findAll("gridMap__region").find((region) => region.dataset.region === "tasks")), /no bd runtime here/);
   assert.equal(nodesOf(root, "gridNode--task").length, 0);
 
   const overview = el("div");
   renderOverview(overview, map, { projectId: "p1" });
   assert.match(textOf(overview), /No data: bd is not installed/);
   assert.match(textOf(overview), /No data: the project space is unavailable/);
+  // A section without a code reads exactly as before: no hint is invented.
+  assert.doesNotMatch(textOf(overview), /the project space is unavailable \(/);
   // It never invents progress: no counts chip for a section it could not read.
   assert.equal(nodesOf(overview, "gridOverview__chip").length, 0);
 });

@@ -680,3 +680,189 @@ def test_the_grid_page_says_so_when_its_file_is_missing(tmp_path, monkeypatch, s
 
     assert page.status_code == 503
     assert "not-written-yet.html" in page.text
+
+
+# -- typed reasons ---------------------------------------------------------------
+
+
+def test_each_unavailable_section_carries_the_code_of_its_sentence(tmp_path, bd):
+    """A client branches on ``reason_code``; the sentence is only for a person."""
+    space = FakeSpace(tmp_path / "u1", project_spaces=False)
+    root = space.project_store.create("No space")
+
+    body = TestClient(make_app({"u1": space})).get(f"/api/projects/{root.id}/map").json()
+
+    for section in ("tasks", "files"):
+        assert body[section]["available"] is False
+        assert body[section]["reason_code"] == map_api.ReasonCode.NO_SPACE.value
+        assert body[section]["reason"] == map_api.REASON_TEXT[map_api.ReasonCode.NO_SPACE]
+    # An available section says so with a null code, never with an absent key.
+    assert body["processes"]["available"] is True
+    assert body["processes"]["reason_code"] is None
+
+
+def test_processes_that_cannot_be_listed_name_their_code(tmp_path, bd):
+    space = FakeSpace(tmp_path / "u1")
+    space.context_manager = None
+    root = project(space)
+
+    processes = TestClient(make_app({"u1": space})).get(f"/api/projects/{root.id}/map").json()["processes"]
+
+    assert processes["available"] is False
+    assert processes["reason_code"] == map_api.ReasonCode.NO_CHATS.value
+    assert processes["reason"] == map_api.REASON_TEXT[map_api.ReasonCode.NO_CHATS]
+    assert processes["items"] == [] and processes["total"] == 0
+
+
+def test_files_that_are_not_a_folder_name_their_code(tmp_path, bd):
+    space = FakeSpace(tmp_path / "u1")
+    root = space.project_store.create("Not a folder")
+    space.layout.project_spaces.mkdir(parents=True, exist_ok=True)
+    (space.layout.project_spaces / root.id).write_text("not a directory", encoding="utf-8")
+
+    files = TestClient(make_app({"u1": space})).get(f"/api/projects/{root.id}/map").json()["files"]
+
+    assert files["available"] is False
+    assert files["reason_code"] == map_api.ReasonCode.NOT_A_FOLDER.value
+    assert files["reason"] == map_api.REASON_TEXT[map_api.ReasonCode.NOT_A_FOLDER]
+
+
+# -- end to end: the server's own app, a real tracker ----------------------------
+
+
+def _bd_env(tmp_path: Path) -> dict:
+    """A bd environment of its own: no inherited tracker selector or user config."""
+    home = tmp_path / "bd-home"
+    home.mkdir(exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if k in {"PATH", "LANG", "SYSTEMROOT", "WINDIR"}}
+    env.update(HOME=str(home), XDG_CONFIG_HOME=str(home), BD_DISABLE_METRICS="1",
+               GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    return env
+
+
+def _bd_run(directory: Path, env: dict, *args: str, timeout: int = 60) -> str:
+    """One successful bd command in *directory*: its stdout."""
+    executable = map_api._bd_executable()
+    assert executable is not None
+    result = subprocess.run([executable, *args], cwd=directory, env=env, check=False,
+                            capture_output=True, text=True, timeout=timeout)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def _real_tracker(directory: Path, project_id: str, env: dict, tasks: list[str]) -> list[dict]:
+    """A real local tracker with *tasks*, the second depending on the first."""
+    directory.mkdir(parents=True, exist_ok=True)
+    # A git boundary of its own: bd must not adopt an ancestor's tracker.
+    subprocess.run(["git", "init", str(directory)], env=env, check=True, capture_output=True)
+    _bd_run(directory, env, "init", "--prefix", project_id, "--skip-agents", "--skip-hooks")
+    created = []
+    for title in tasks:
+        created.append(json.loads(_bd_run(directory, env, "create", title, "--json")))
+    if len(created) > 1:
+        _bd_run(directory, env, "dep", "add", created[1]["id"], created[0]["id"])
+    return created
+
+
+def test_the_map_reads_a_real_tracker_through_the_servers_own_app(tmp_path):
+    """bd init, two tasks and a dependency, read by the app the server builds."""
+    if map_api._bd_executable() is None:
+        pytest.skip("bd is not installed on this host: the end-to-end map test needs the real bd")
+    from tests.test_web_ui_routes import _DummySpace, _server
+
+    root = tmp_path / "server"
+    store = ProjectStore(root / "projects.json")
+    record = store.create("End to end")
+    space = _DummySpace()
+    space.project_store = store
+    space.project_exists = store.exists
+    space.chat_spaces = True
+    space.layout = SimpleNamespace(project_spaces=root / "spaces")
+    space.context_manager = lambda: FakeManager([view("chat-e2e", record.id, title="Map chat")])
+    space.awaiting_approval = lambda: {}
+
+    env = _bd_env(tmp_path)
+    directory = root / "spaces" / record.id
+    created = _real_tracker(directory, record.id, env, ["First task", "Second task"])
+    (directory / "notes.md").write_text("a file of the project", encoding="utf-8")
+    before = state(directory)
+
+    response = TestClient(_server(space).app).get(f"/api/projects/{record.id}/map")
+
+    assert response.status_code == 200
+    body = response.json()
+    tasks = body["tasks"]
+    assert tasks["available"] is True, tasks
+    assert tasks["reason"] is None and tasks["reason_code"] is None
+    assert [item["id"] for item in tasks["items"]] == [created[0]["id"], created[1]["id"]]
+    dependent = next(item for item in tasks["items"] if item["id"] == created[1]["id"])
+    assert dependent["depends_on"] == [created[0]["id"]]
+    assert [item["name"] for item in body["files"]["items"]] == ["notes.md"]
+    assert [item["chat_id"] for item in body["processes"]["items"]] == ["chat-e2e"]
+    # The read went through a temporary copy: the project is as it was.
+    assert state(directory) == before, "the map changed the project it read"
+    assert not (directory / ".dolt").exists()
+
+
+def test_without_a_host_bd_the_map_takes_the_isolation_image_path(space, monkeypatch):
+    """No bd on PATH and docker mocked: the fallback runs, with the project read-only."""
+    root = project(space)
+    monkeypatch.setattr(map_api, "_bd_executable", lambda: None)
+    monkeypatch.setattr(map_api, "_docker_bd_available", lambda: True)
+    monkeypatch.setattr(map_api, "_get_isolation_image", lambda context=None: "grid-agent:test")
+    answer = [issue(f"{root.id}-1", status="open")]
+    seen = {}
+
+    def run(command, **kwargs):
+        seen["command"] = list(command)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(answer), stderr="")
+
+    monkeypatch.setattr(map_api.subprocess, "run", run)
+    body = TestClient(make_app({"u1": space})).get(f"/api/projects/{root.id}/map").json()
+
+    assert body["tasks"]["available"] is True, body["tasks"]
+    assert body["tasks"]["reason_code"] is None
+    assert [item["id"] for item in body["tasks"]["items"]] == [f"{root.id}-1"]
+    assert seen["command"][:3] == ["docker", "run", "--rm"]
+    assert f"{space.layout.project_spaces / root.id}:{map_api.CONTAINER_PROJECT_DIR}:ro" in seen["command"]
+
+
+# -- the diagnostic command ------------------------------------------------------
+
+
+def test_map_check_reads_a_copy_and_leaves_it_alone(tmp_path, capsys):
+    """The operator's command: the server's path, a report, and no write."""
+    from web_chat import map_check
+
+    if map_api._bd_executable() is None:
+        pytest.skip("bd is not installed on this host: map_check needs the real bd")
+    directory = tmp_path / "copy" / "prjmapcheck"
+    _real_tracker(directory, "prjmapcheck", _bd_env(tmp_path), ["Only task", "Second task"])
+    before = state(directory)
+
+    code = map_check.main([str(directory), "--json"])
+
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["runner"]["kind"] == "host"
+    assert report["runner"]["executable"] == map_api._bd_executable()
+    assert report["reason_code"] is None
+    assert report["tasks"] == 2
+    assert report["project_tree"]["changed"] is False
+    assert state(directory) == before
+
+
+def test_map_check_fails_loudly_when_there_is_no_tracker(tmp_path, capsys):
+    from web_chat import map_check
+
+    directory = tmp_path / "prjempty"
+    directory.mkdir()
+    (directory / "notes.md").write_text("kept", encoding="utf-8")
+
+    code = map_check.main([str(directory)])
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "reason_code:  no_tracker" in out
+    assert "project_tree: unchanged" in out
+    assert (directory / "notes.md").read_text(encoding="utf-8") == "kept"
