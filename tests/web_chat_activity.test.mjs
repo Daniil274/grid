@@ -235,3 +235,56 @@ test("the public list keeps order and drops duplicates by step", () => {
   ]);
   assert.deepEqual(list.map((item) => item.content), ["first", "second"]);
 });
+
+test("a real child's explicit commentary is drawn once with its author, run and parent", () => {
+  const view = createActivityView();
+  // What web_chat/observer.py publishes for a nested agent's commentary: a
+  // public message with the child's own author and the parent block it ran in.
+  const live = event("child-1", {
+    step_id: "s-child-1",
+    author: "researcher",
+    author_key: "researcher",
+    parent_id: "call-1",
+    turn_id: "run-1",
+    content: "Checking the **router** now.",
+  });
+
+  assert.equal(view.add(live), true);
+  assert.equal(view.size, 1);
+  assert.equal(view.el.find("msg__activityAuthor").textContent, "researcher");
+  assert.match(view.el.find("msg__activityText").innerHTML, /<strong>router<\/strong>/);
+
+  // Replay is the same stored event under the same run and step id: no duplicate.
+  view.apply([{ ...live }]);
+  assert.equal(view.size, 1);
+
+  // A grandchild's commentary has its own author and parent but the same run.
+  const grandchild = event("child-2", {
+    step_id: "s-child-2",
+    author: "coder",
+    author_key: "coder",
+    parent_id: "call-2",
+    turn_id: "run-1",
+    content: "I am the nested coder.",
+  });
+  view.add(grandchild);
+  const authors = view.el.findAll("msg__activityAuthor").map((node) => node.textContent);
+  assert.deepEqual(authors, ["researcher", "coder"]);
+  assert.equal(view.size, 2);
+});
+
+test("a child's internal output, report and thinking are never drawn", () => {
+  const view = createActivityView();
+  // The same child block, but these are internal work products of the run.
+  for (const internal of [
+    { id: "r1", kind: "report", visibility: "internal", parent_id: "call-1", content: "private thinking" },
+    { id: "r2", kind: "report", visibility: "internal", parent_id: "call-1", content: "sub-agent answer" },
+    { id: "r3", kind: "status", visibility: "internal", parent_id: "call-1", content: "Ran a tool" },
+  ]) {
+    assert.equal(view.add(event(internal.id, internal)), false);
+  }
+  // A nested trace row stays internal even when it is shaped like narration.
+  assert.equal(view.observeStep(step("s-nested", { kind: "message", body: "child prose", parent_id: "call-1" })), false);
+  assert.equal(view.size, 0);
+  assert.equal(view.statusCount, 0);
+});

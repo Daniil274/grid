@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import WebSocketDisconnect
+from agents import RawResponsesStreamEvent, RunItemStreamEvent
 
 from core.context import ContextManager
 from web_chat.observer import (
@@ -21,6 +22,7 @@ from web_chat.observer import (
     EventKind,
     EventLog,
     EventVisibility,
+    WebStreamObserver,
     event_from_step,
     events_from_trace,
     message_events,
@@ -28,6 +30,7 @@ from web_chat.observer import (
     stable_event_id,
 )
 from web_chat.session import chat_session
+from web_chat.trace import TraceRecorder
 from web_chat.turns import TurnBoard
 
 
@@ -332,3 +335,140 @@ async def test_narration_reaches_the_page_live_and_is_stored_with_the_answer():
 
     await socket.incoming.put(None)
     await session
+
+
+# -- explicit public speech of a real child ---------------------------------
+
+
+def commentary_message(text, *, item_id="msg-1", phase="commentary"):
+    """One ``message_output_created`` run item, as the Responses API sends it."""
+    return RunItemStreamEvent(
+        name="message_output_created",
+        item=SimpleNamespace(
+            raw_item=SimpleNamespace(
+                type="message",
+                id=item_id,
+                phase=phase,
+                content=[SimpleNamespace(text=text)],
+            )
+        ),
+    )
+
+
+def reasoning_delta(text):
+    return RawResponsesStreamEvent(
+        data=SimpleNamespace(type="response.reasoning_text.delta", delta=text)
+    )
+
+
+class EventHarness:
+    """A turn observer with a real public event log and a live frame sink."""
+
+    def __init__(self, turn_id="run-1"):
+        self.trace: list[dict] = []
+        self.frames: list[dict] = []
+        self.log = EventLog(turn_id=turn_id, author="Coder")
+        self.recorder = TraceRecorder(self.trace.append)
+        self.observer = WebStreamObserver(
+            self.recorder,
+            emit_token=lambda _text: None,
+            agent_label="Coder",
+            emit_event=self.frames.append,
+            events=self.log,
+            turn_id=turn_id,
+        )
+
+    def steps(self):
+        return self.recorder.snapshot()
+
+
+def test_explicit_commentary_of_a_real_child_is_public_with_author_run_and_parent():
+    harness = EventHarness()
+    harness.observer.handle_event(
+        RunItemStreamEvent(
+            name="tool_called",
+            item=SimpleNamespace(
+                raw_item=SimpleNamespace(
+                    name="Agent", call_id="call-1", arguments='{"input": "look"}',
+                    type="function_call",
+                )
+            ),
+        )
+    )
+    child = harness.observer.nested("researcher", call_id="call-1")
+    child.handle_event(commentary_message("I found the route through the router."))
+
+    public = harness.observer.turn_events(public_only=True)
+    assert [event["content"] for event in public] == [
+        "I found the route through the router."
+    ]
+    event = public[0]
+    assert event["kind"] == "message" and event["visibility"] == "public"
+    # Who said it, which run it belongs to, and where in the trace it happened.
+    assert event["author"] == "researcher"
+    assert event["author_key"] == "researcher"
+    assert event["turn_id"] == "run-1"
+    assert event["parent_id"] == child._parent_id
+    assert event["step_id"]
+    # The same public event went out live, under the same id.
+    assert harness.frames == [{"type": "event", "event": event}]
+    # A real trace row exists, nested under the child's block, and is internal
+    # when derived - only the typed event is public.
+    row = next(step for step in harness.steps() if step["id"] == event["step_id"])
+    assert row["kind"] == "message" and row["parent_id"] == child._parent_id
+    derived = event_from_step(row)
+    assert derived.kind == EventKind.REPORT and not derived.is_public
+
+
+def test_child_thinking_output_and_reports_never_reach_the_public_channel():
+    harness = EventHarness()
+    child = harness.observer.nested("researcher")
+    child.handle_event(reasoning_delta("the user's secret token is in .env"))
+    # The child's own answer is a tool result for its caller, not public prose.
+    child.handle_event(commentary_message("internal answer", item_id="msg-final", phase="final_answer"))
+    # A provider that marks no phase publishes nothing from inside the run.
+    child.handle_event(
+        RunItemStreamEvent(
+            name="message_output_created",
+            item=SimpleNamespace(
+                raw_item=SimpleNamespace(
+                    type="message", id="msg-none", content=[SimpleNamespace(text="unlabelled")]
+                )
+            ),
+        )
+    )
+    assert child.record_report("internal work product") is None
+
+    assert harness.observer.turn_events(public_only=True) == []
+    assert harness.frames == []
+
+
+def test_a_grandchild_speaks_into_the_same_turn_with_its_own_identity():
+    harness = EventHarness()
+    child = harness.observer.nested("researcher")
+    grandchild = child.nested("coder")
+    grandchild.handle_event(commentary_message("I am the nested coder.", item_id="msg-gc"))
+
+    public = harness.observer.turn_events(public_only=True)
+    assert [(event["author"], event["content"]) for event in public] == [
+        ("coder", "I am the nested coder.")
+    ]
+    assert public[0]["turn_id"] == "run-1"
+    assert public[0]["parent_id"] == grandchild._parent_id
+
+
+def test_child_commentary_replays_from_the_stored_turn_with_the_same_id():
+    harness = EventHarness()
+    child = harness.observer.nested("researcher")
+    child.handle_event(commentary_message("Checking the second route.", item_id="msg-2"))
+    stored = harness.observer.turn_events(public_only=True)
+
+    replayed_message = message(
+        "assistant", "Done.",
+        metadata={"turn_id": "run-1", EVENTS_KEY: stored},
+    )
+    replayed = message_events(replayed_message, public_only=True)
+    assert [event.id for event in replayed] == [stored[0]["id"]]
+    assert replayed[0].author == "researcher"
+    assert replayed[0].turn_id == "run-1"
+    assert replayed[0].parent_id == stored[0]["parent_id"]

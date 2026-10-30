@@ -70,6 +70,13 @@ MAX_STATUS_CHARS = 500
 USER_AUTHOR = "user"
 SYSTEM_AUTHOR = "system"
 
+#: What a provider calls a message that is intermediate commentary for people
+#: rather than the agent's answer (the Responses API's ``ResponseOutputMessage
+#: .phase``). It is the one explicit signal a sub-agent can give that its words
+#: are meant to be read, so it opens the public channel below - and nothing else
+#: does. A provider that marks no phase publishes nothing from inside a run.
+COMMENTARY_PHASE = "commentary"
+
 
 class EventKind(str, Enum):
     """What a communication is; ``kind`` alone does not decide visibility."""
@@ -654,6 +661,39 @@ def _delta_text(event: Any) -> tuple[Optional[str], Optional[str]]:
     return None, data_type
 
 
+def _message_phase(item: Any) -> Optional[str]:
+    """The provider's explicit label on an output message, if it has one."""
+    raw = getattr(item, "raw_item", item)
+    phase = getattr(raw, "phase", None)
+    if phase is None and isinstance(raw, dict):
+        phase = raw.get("phase")
+    return phase if isinstance(phase, str) else None
+
+
+def _message_output_text(item: Any) -> str:
+    """The prose of a ``message_output_created`` item, never its structure."""
+    raw = getattr(item, "raw_item", item)
+    getter = getattr(raw, "get_text_content", None)
+    if callable(getter):
+        try:
+            text = getter()
+            if isinstance(text, str):
+                return text
+        except Exception:  # noqa: BLE001 - a broken getter must not cost the turn
+            pass
+    content = getattr(raw, "content", None)
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for part in content or []:
+        text = getattr(part, "text", None)
+        if text is None and isinstance(part, dict):
+            text = part.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+    return "".join(parts)
+
+
 #: Who decided a call, as the policy badge says it (core.action_policy sources).
 _POLICY_SOURCES = {
     "filter": "decided by the filter",
@@ -700,6 +740,16 @@ class WebStreamObserver:
                 author=lambda: self.agent_label or SYSTEM_AUTHOR,
             )
         )
+        # The turn's event log a *sub-agent* may speak into, and only through
+        # ``record_commentary``: a separate channel from ``events``, so a
+        # child's narration, thinking and output stay internal while a message
+        # the provider explicitly marked as commentary still reaches people.
+        # ``nested`` hands the child the turn's own log; None means no channel.
+        self._commentary_log: Optional[EventLog] = None
+        #: Which agent's words these are, when the view is not the turn's own.
+        self._author_key = ""
+        #: Commentary messages seen in this view, for an id that survives a replay.
+        self._commentary_seq = 0
         self._calls_by_id: dict[str, Step] = {}
         self._calls_in_order: deque[Step] = deque()
         # The validator judges a call while it executes, which can be before the
@@ -757,6 +807,56 @@ class WebStreamObserver:
         self._publish_event(event)
         return event
 
+    def record_commentary(
+        self,
+        text: Any,
+        *,
+        origin: Optional[str] = None,
+        at_ms: int = 0,
+        status: str = "done",
+    ) -> Optional[CommunicationEvent]:
+        """An explicit public remark by a *sub-agent*, in the turn's own log.
+
+        A sub-agent's output is a tool result for its caller, so its view has no
+        ``events`` of its own. The one exception is a message the provider
+        labelled ``commentary``: that is the child speaking to people, and it
+        goes into the turn's public log (and out as a live frame) under the
+        child's own author and block. Everything else stays internal.
+        """
+        log = self._commentary_log
+        if log is None:
+            return None
+        text = text if isinstance(text, str) else ("" if text is None else str(text))
+        if not text.strip():
+            return None
+        author = self.agent_label or SYSTEM_AUTHOR
+        key = self._author_key or author
+        event_id = stable_event_id(EventKind.MESSAGE, f"{key}:{origin or text}", text)
+        for known in log.events:
+            if known.id == event_id:
+                return known
+        step = self._recorder.note(
+            StepKind.MESSAGE,
+            "Message",
+            subtitle=clip(text, 120),
+            body=text,
+            parent_id=self._parent_id,
+        )
+        event = log.add(
+            EventKind.MESSAGE,
+            text,
+            visibility=EventVisibility.PUBLIC,
+            status=status,
+            author=author,
+            author_key=key,
+            step_id=step.id,
+            parent_id=self._parent_id,
+            at_ms=at_ms or step.at_ms,
+            event_id=event_id,
+        )
+        self._publish_event(event)
+        return event
+
     def record_status(
         self,
         text: Any,
@@ -786,7 +886,11 @@ class WebStreamObserver:
         return self.events.snapshot(public_only=public_only)
 
     def nested(
-        self, agent_label: str, call_id: Optional[str] = None
+        self,
+        agent_label: str,
+        call_id: Optional[str] = None,
+        *,
+        author_key: Optional[str] = None,
     ) -> "WebStreamObserver":
         """A view for a sub-agent run inside this turn.
 
@@ -802,6 +906,13 @@ class WebStreamObserver:
         # A sub-agent narrates for its caller: its words become part of the
         # internal report, never a public message of this turn.
         child.events = None
+        # The turn's own public log is the one channel a child may speak into,
+        # and only through an explicitly labelled commentary message. A
+        # grandchild inherits the same log, so any real child reaches the same
+        # live UI and history.
+        child._commentary_log = self.events if self.events is not None else self._commentary_log
+        child._emit_event = self._emit_event
+        child._author_key = author_key or agent_label or ""
         child._calls_by_id = self._calls_by_id
         child._calls_in_order = self._calls_in_order
         child._pending_by_call = self._pending_by_call
@@ -1145,6 +1256,7 @@ class WebStreamObserver:
         if name in {"tool_called", "handoff_requested"}:
             self._flush_narration()
         handler = {
+            "message_output_created": self._on_message_output,
             "tool_called": self._on_tool_called,
             "tool_output": self._on_tool_output,
             "handoff_requested": self._on_handoff_requested,
@@ -1153,6 +1265,29 @@ class WebStreamObserver:
         }.get(name)
         if handler is not None:
             handler(item, agent_key)
+
+    def _on_message_output(self, item: Any, agent_key: Optional[str]) -> None:
+        """A whole output message: public only when the provider called it commentary.
+
+        The provider is the only party that knows whether a child's words were
+        meant for people, and it says so once, on the finished message item. A
+        view without a public log (anything but a real sub-agent) has no
+        channel, and a message with no phase or ``final_answer`` stays internal.
+        """
+        if _message_phase(item) != COMMENTARY_PHASE or self._commentary_log is None:
+            return
+        text = _message_output_text(item)
+        if not text.strip():
+            return
+        # The trace row is opened with the event below; the buffered deltas are
+        # the same words, so they must not become a second row at the next call.
+        self._narration = ""
+        raw = getattr(item, "raw_item", item)
+        item_id = field_of(raw, "id") or field_of(item, "id")
+        if not item_id:
+            self._commentary_seq += 1
+            item_id = f"commentary-{self._commentary_seq}"
+        self.record_commentary(text, origin=str(item_id))
 
     def _flush_narration(self) -> None:
         text, self._narration = self._narration.strip(), ""
