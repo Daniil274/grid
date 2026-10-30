@@ -183,7 +183,7 @@ export const REASON_HINTS = {
   no_tracker: "it has no tracker of its own yet",
   foreign_tracker: "the tracker found belongs to another project",
   bd_unavailable: "no bd runtime here; the operator can run the map check",
-  bd_failed: "the server log has bd's own message",
+  bd_failed: "the server names the cause when it can recognize it",
   timeout: "the tracker did not answer in time",
   invalid_answer: "the tracker answered with something unreadable",
   tracker_too_large: "the tracker is too large to read here",
@@ -215,11 +215,26 @@ export function buildLabel(server) {
   return { text: "build unknown", title: `No commit: ${reason}`, known: false };
 }
 
+/**
+ * The server's safe cause of a failed read, as one sentence: a typed code and
+ * its allowlisted message, with a bare exit status. The server never sends
+ * bd's stderr, a path or a command here, so nothing else is shown.
+ */
+const diagnosisNote = (section) => {
+  const diagnosis = section?.diagnosis;
+  const message = text(diagnosis?.message);
+  if (!message) return "";
+  const exit = Number.isInteger(diagnosis?.exit_code) ? ` (exit ${diagnosis.exit_code})` : "";
+  return ` Diagnosis: ${message}${exit}`;
+};
+
 /** "No data: <reason>" plus a hint per code - never a fake for an unreadable section. */
 const unavailableNote = (section) => {
   const hint = REASON_HINTS[text(section?.reason_code)];
+  const diagnosis = diagnosisNote(section);
+  const base = `No data: ${text(section?.reason) || "unavailable"}${hint ? ` (${hint})` : ""}`;
   return h("p.gridMap__note.gridMap__note--off", {
-    text: `No data: ${text(section?.reason) || "unavailable"}${hint ? ` (${hint})` : ""}`,
+    text: diagnosis ? `${base}.${diagnosis}` : base,
   });
 };
 

@@ -105,8 +105,15 @@ embedded Dolt пишет служебные файлы даже при `--readon
 Причина отказа хранится внутри типизированно (`web_chat.map_api.ReasonCode`:
 `no_space`, `no_tracker`, `foreign_tracker`, `bd_unavailable`, `bd_failed`,
 `timeout`, `invalid_answer`, `tracker_too_large`), а в браузер уходит только
-её текст из `REASON_TEXT`. Настоящая ошибка bd (код возврата и усечённый
-stderr) пишется в журнал сервера через `logger.warning` и в ответ не попадает.
+её текст из `REASON_TEXT`. Рядом с `bd_failed` уходит безопасный разбор
+`diagnosis` (`web_chat.map_api.Diagnosis`): allowlist-код
+(`docker_image_missing`, `docker_permission`, `docker_unavailable`,
+`bd_missing`, `database_locked`, `database_error`, `permission_denied`,
+`exit_unknown`), фиксированная фраза из `DIAGNOSIS_TEXT` и, если это обычный
+код возврата, целое `exit_code`. Классификация читает stderr только внутри
+процесса; сам stderr, команда, токены и абсолютные пути в ответ не попадают.
+Настоящая ошибка bd (код возврата и усечённый stderr) по-прежнему пишется в
+журнал сервера через `logger.warning`.
 В `bd 1.3.0` несуществующий `--db` может быть истолкован как имя БД и не
 исключает discovery родителя; поэтому одного флага или проверки ID недостаточно.
 Регрессионный тест создаёт только синтетические трекеры за отдельной git-границей,
@@ -218,6 +225,10 @@ stderr) пишется в журнал сервера через `logger.warning
   области `reason_code: null` (ключ есть всегда, но не абсолютный путь и не
   stderr bd). `files.available` различает отсутствие пространства и
   существующее пустое пространство.
+- `tasks.diagnosis` — `null`, когда чтение удалось, иначе объект
+  `{code, message, exit_code}`: allowlist-код причины сбоя bd/docker,
+  фиксированная фраза и целый код возврата (или `null`). Это единственное,
+  что карта сообщает о сбое; stderr, команда и пути остаются в журнале.
 - Лимиты: `tasks` — 300, `processes` — 50, `files` — 100. Порядок стабильный:
   задачи — по `created_at`, `id`; чаты — по `updated_at` убыванием, `chat_id`;
   файлы — каталоги первыми, затем по имени без учёта регистра.

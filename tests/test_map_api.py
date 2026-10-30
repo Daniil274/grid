@@ -190,6 +190,7 @@ def test_the_map_has_the_page_contract(client, space, bd):
 
     tasks = body["tasks"]
     assert tasks["available"] is True and tasks["reason"] is None
+    assert tasks["diagnosis"] is None
     assert tasks["total"] == 1 and tasks["truncated"] is False
     task = tasks["items"][0]
     assert set(task) == set(map_api.TASK_FIELDS)
@@ -698,6 +699,104 @@ def test_a_bd_failure_is_logged_but_never_returned(space, monkeypatch, caplog):
     assert "secret" not in json.dumps(answer, default=str).lower()
     logged = [record.getMessage() for record in caplog.records]
     assert any("exited 3" in line and "/home/secret/tracker" in line for line in logged)
+
+
+# Each case is a real shape of bd/docker failure, carrying a secret, a token and
+# absolute paths. The map may name only the allowlisted code and its sentence.
+_FAILURE_CASES = [
+    (
+        "docker: Error response from daemon: pull access denied for grid-agent, "
+        "repository does not exist or may require authorization: token=abc\n"
+        "Unable to find image 'grid-agent:38236e2' locally\n",
+        map_api.Diagnosis.DOCKER_IMAGE_MISSING,
+    ),
+    (
+        "permission denied while trying to connect to the Docker daemon socket at "
+        "unix:///var/run/docker.sock: Post \"http://%2Fvar%2Frun%2Fdocker.sock\": "
+        "dial unix /var/run/docker.sock: connect: permission denied token=abc\n",
+        map_api.Diagnosis.DOCKER_PERMISSION,
+    ),
+    (
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+        "Is the docker daemon running? /srv/secret\n",
+        map_api.Diagnosis.DOCKER_UNAVAILABLE,
+    ),
+    (
+        "OCI runtime create failed: exec: \"/usr/local/bin/bd\": stat "
+        "/usr/local/bin/bd: no such file or directory: unknown token=abc\n",
+        map_api.Diagnosis.BD_MISSING,
+    ),
+    (
+        "Error: opening database: database is locked (/srv/secret/beads.db) token=abc\n",
+        map_api.Diagnosis.DATABASE_LOCKED,
+    ),
+    (
+        "Error: failed to open database: dolt: invalid chunk at /srv/secret token=abc\n",
+        map_api.Diagnosis.DATABASE_ERROR,
+    ),
+    (
+        "Error: openat LOCK: permission denied: /home/secret/tracker token=abc\n",
+        map_api.Diagnosis.PERMISSION_DENIED,
+    ),
+    (
+        "Error: token=abc rejected at /home/secret/tracker\n",
+        map_api.Diagnosis.EXIT_UNKNOWN,
+    ),
+]
+
+
+@pytest.mark.parametrize("stderr,expected", _FAILURE_CASES)
+def test_a_failed_read_names_only_a_safe_diagnosis(space, monkeypatch, stderr, expected):
+    """Every representative failure gets an actionable code, never its own text."""
+    root = project(space)
+    directory = space.layout.project_spaces / root.id
+    monkeypatch.setattr(map_api, "_bd_executable", lambda: "/usr/bin/bd")
+
+    def run(command, **kwargs):
+        return SimpleNamespace(returncode=125, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(map_api.subprocess, "run", run)
+    answer = map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS))
+
+    assert answer["code"] is map_api.ReasonCode.BD_FAILED
+    diagnosis = answer["diagnosis"]
+    assert diagnosis.code is expected
+    assert diagnosis.exit_code == 125
+    body = json.dumps(answer, default=str).lower()
+    for leak in ("secret", "token=abc", "/home", "/srv", "unix://", "docker.sock", "grid-agent"):
+        assert leak not in body, f"{leak!r} leaked into the map answer"
+    # The prose is the allowlisted sentence for the code, nothing derived from stderr.
+    assert diagnosis.payload()["message"] == map_api.DIAGNOSIS_TEXT[expected]
+
+
+def test_an_unrecognized_failure_keeps_its_bare_exit_code():
+    """A signal end has no safe status to show; an ordinary exit keeps its number."""
+    unknown = map_api._diagnose(SimpleNamespace(returncode=3, stderr="odd"), "host")
+    assert unknown.code is map_api.Diagnosis.EXIT_UNKNOWN
+    assert unknown.exit_code == 3
+    killed = map_api._diagnose(SimpleNamespace(returncode=-9, stderr="Killed"), "host")
+    assert killed.code is map_api.Diagnosis.EXIT_UNKNOWN
+    assert killed.exit_code is None
+
+
+def test_the_map_response_names_a_safe_cause_for_a_failed_read(space, monkeypatch):
+    """The route itself, not only the runner: the browser gets a typed diagnosis."""
+    root = project(space)
+    monkeypatch.setattr(map_api, "_bd_executable", lambda: "/usr/bin/bd")
+
+    def run(command, **kwargs):
+        return SimpleNamespace(returncode=125, stdout="",
+                               stderr="Unable to find image 'grid-agent:38236e2' locally token=abc\n")
+
+    monkeypatch.setattr(map_api.subprocess, "run", run)
+    response = TestClient(make_app({"u1": space})).get(f"/api/projects/{root.id}/map")
+
+    assert response.status_code == 200
+    tasks = response.json()["tasks"]
+    assert tasks["reason_code"] == map_api.ReasonCode.BD_FAILED.value
+    assert tasks["diagnosis"]["code"] == map_api.Diagnosis.DOCKER_IMAGE_MISSING.value
+    assert tasks["diagnosis"]["exit_code"] == 125
+    assert "token" not in response.text and "grid-agent" not in response.text
 
 
 def test_a_read_on_this_host_writes_nothing_into_the_project(tmp_path):

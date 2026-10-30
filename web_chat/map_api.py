@@ -141,6 +141,105 @@ class ReasonCode(str, Enum):
     FILES_TIMEOUT = "files_timeout"
 
 
+class Diagnosis(str, Enum):
+    """A safe explanation of a failed bd/docker run: a code and fixed prose.
+
+    bd's own stderr may name absolute paths, registry credentials or tokens, so
+    it never leaves this process. What the browser gets is one of these members
+    and the allowlisted sentence of :data:`DIAGNOSIS_TEXT`; classification reads
+    stderr here, the payload never carries it.
+    """
+
+    DOCKER_IMAGE_MISSING = "docker_image_missing"
+    DOCKER_PERMISSION = "docker_permission"
+    DOCKER_UNAVAILABLE = "docker_unavailable"
+    BD_MISSING = "bd_missing"
+    DATABASE_LOCKED = "database_locked"
+    DATABASE_ERROR = "database_error"
+    PERMISSION_DENIED = "permission_denied"
+    EXIT_UNKNOWN = "exit_unknown"
+
+
+#: What each diagnosis tells a user who has only the website. Fixed sentences:
+#: no stderr, no path, no command and no exit text is ever interpolated here.
+DIAGNOSIS_TEXT = {
+    Diagnosis.DOCKER_IMAGE_MISSING: (
+        "The isolation image is missing on this server; pull or build it, then reload the map."
+    ),
+    Diagnosis.DOCKER_PERMISSION: (
+        "This server's user may not use the Docker daemon; grant Docker access to that user."
+    ),
+    Diagnosis.DOCKER_UNAVAILABLE: (
+        "Docker is not reachable on this server, so the isolation image cannot run."
+    ),
+    Diagnosis.BD_MISSING: (
+        "bd is not installed where the read looks for it; install bd or rebuild the isolation image."
+    ),
+    Diagnosis.DATABASE_LOCKED: (
+        "The tracker database is locked by another process; stop it or retry later."
+    ),
+    Diagnosis.DATABASE_ERROR: (
+        "The tracker database could not be opened; it may be corrupt or need a migration."
+    ),
+    Diagnosis.PERMISSION_DENIED: (
+        "The tracker copy cannot be opened by the user bd runs as; check the copy's ownership."
+    ),
+    Diagnosis.EXIT_UNKNOWN: (
+        "bd failed for a cause the map cannot classify; the server log has bd's own message."
+    ),
+}
+
+
+#: How a run's stderr is folded into one allowlisted diagnosis, most specific
+#: first. Matching is case-insensitive and only decides *which* fixed sentence
+#: is used - the matched text itself is never returned.
+DIAGNOSIS_PATTERNS = (
+    (Diagnosis.DOCKER_IMAGE_MISSING, (
+        "unable to find image",
+        "no such image",
+        "manifest unknown",
+        "pull access denied",
+        "image not found",
+    )),
+    (Diagnosis.DOCKER_PERMISSION, (
+        "permission denied while trying to connect",
+        "docker.sock: permission denied",
+        "got permission denied while trying",
+    )),
+    (Diagnosis.DOCKER_UNAVAILABLE, (
+        "cannot connect to the docker daemon",
+        "is the docker daemon running",
+        "docker daemon is not running",
+        "error during connect",
+    )),
+    (Diagnosis.BD_MISSING, (
+        "executable file not found",
+        "bd: not found",
+        'exec: "bd"',
+        "/usr/local/bin/bd: no such file",
+        "stat /usr/local/bin/bd",
+    )),
+    (Diagnosis.DATABASE_LOCKED, (
+        "database is locked",
+        "database locked",
+        "another process is using",
+    )),
+    (Diagnosis.DATABASE_ERROR, (
+        "dolt",
+        "failed to open database",
+        "error opening database",
+        "corrupt",
+        "no such table",
+        "migration",
+    )),
+    (Diagnosis.PERMISSION_DENIED, (
+        "permission denied",
+        "eacces",
+        "operation not permitted",
+    )),
+)
+
+
 #: What the map tells the browser about each cause: no paths, no bd stderr.
 REASON_TEXT = {
     ReasonCode.NO_SPACE: "This project has no space of its own on this server.",
@@ -344,9 +443,15 @@ def _own_tracker(directory: Optional[Path]) -> Optional[Path]:
     return database
 
 
-def _failure(code: ReasonCode) -> dict[str, Any]:
-    """A typed refusal: the code branches, the text is all the browser sees."""
-    return {"success": False, "code": code, "error": REASON_TEXT[code]}
+def _failure(code: ReasonCode,
+             diagnosis: Optional[DiagnosisReport] = None) -> dict[str, Any]:
+    """A typed refusal: the code branches, the text is all the browser sees.
+
+    *diagnosis*, when a subprocess failed, is the safe cause derived from its
+    result; it carries fixed prose, never stderr.
+    """
+    return {"success": False, "code": code, "error": REASON_TEXT[code],
+            "diagnosis": diagnosis}
 
 
 def _logged(text: Optional[str]) -> str:
@@ -397,12 +502,64 @@ class ReadTrace:
     returncode: Optional[int] = None
     stderr: str = ""
     reason: Optional[ReasonCode] = None
+    diagnosis: Optional[DiagnosisReport] = None
 
     def record(self, code: Optional[ReasonCode], **fields: Any) -> None:
         """Keep the cause of a refusal and what the run reported."""
         self.reason = code
         for name, value in fields.items():
             setattr(self, name, value)
+
+
+@dataclass(frozen=True)
+class DiagnosisReport:
+    """One safe diagnosis: an allowlisted code, its fixed sentence, an exit code.
+
+    ``exit_code`` is a bare process status (a small integer), which names no
+    path and carries no message; it is omitted when the status is not one.
+    """
+
+    code: Diagnosis
+    exit_code: Optional[int] = None
+
+    def payload(self) -> dict[str, Any]:
+        return {"code": self.code.value, "message": DIAGNOSIS_TEXT[self.code],
+                "exit_code": self.exit_code}
+
+
+def _exit_code(result: Any) -> Optional[int]:
+    """The process status when it is a plain small integer, else None."""
+    code = getattr(result, "returncode", None)
+    if isinstance(code, int) and not isinstance(code, bool) and 0 < code <= 255:
+        return code
+    return None
+
+
+def _diagnose(result: Any, runner_kind: Optional[str]) -> DiagnosisReport:
+    """Classify a failed run into one allowlisted diagnosis; never echo stderr.
+
+    *result* is the ``subprocess.run`` answer; only its exit status and stderr
+    are read, and only to choose a member of :class:`Diagnosis`. The text is
+    not returned, logged here, or stored in the report.
+    """
+    text = str(getattr(result, "stderr", "") or "").lower()
+    for code, patterns in DIAGNOSIS_PATTERNS:
+        if any(pattern in text for pattern in patterns):
+            # A docker-socket refusal is about Docker even when its text also
+            # says "permission denied"; the order above keeps that specific.
+            if code is Diagnosis.DOCKER_PERMISSION and runner_kind != "docker" and "docker" not in text:
+                continue
+            return DiagnosisReport(code, _exit_code(result))
+    return DiagnosisReport(Diagnosis.EXIT_UNKNOWN, _exit_code(result))
+
+
+def _os_error_diagnosis(exc: OSError) -> DiagnosisReport:
+    """A local ``OSError`` as one allowlisted diagnosis: the exception is not shown."""
+    if isinstance(exc, FileNotFoundError):
+        return DiagnosisReport(Diagnosis.BD_MISSING)
+    if isinstance(exc, PermissionError):
+        return DiagnosisReport(Diagnosis.PERMISSION_DENIED)
+    return DiagnosisReport(Diagnosis.EXIT_UNKNOWN)
 
 
 def _resolve_runner() -> Runner:
@@ -556,16 +713,23 @@ def _hand_over_copy(copied: Path, uid: int) -> bool:
     return True
 
 
-def _answer(result: Any, trace: Optional[ReadTrace] = None) -> dict[str, Any]:
-    """bd's exit as a typed answer; the real failure goes to the log, not out."""
+def _answer(result: Any, trace: Optional[ReadTrace] = None,
+            runner_kind: Optional[str] = None) -> dict[str, Any]:
+    """bd's exit as a typed answer; the real failure goes to the log, not out.
+
+    A non-zero exit gains a safe :class:`DiagnosisReport`, classified from the
+    run's own result. Its sentence is allowlisted; bd's stderr is only logged.
+    """
     if trace is not None:
         trace.record(None, returncode=result.returncode, stderr=result.stderr or "")
     if result.returncode:
         # bd errors may contain absolute paths or remote credentials.
         logger.warning("map: bd exited %s: %s", result.returncode, _logged(result.stderr))
+        diagnosis = _diagnose(result, runner_kind)
         if trace is not None:
             trace.reason = ReasonCode.BD_FAILED
-        return _failure(ReasonCode.BD_FAILED)
+            trace.diagnosis = diagnosis
+        return _failure(ReasonCode.BD_FAILED, diagnosis)
     try:
         return {"success": True, "data": json.loads(result.stdout)}
     except ValueError:
@@ -592,10 +756,11 @@ def _run_on_host(bd: str, cwd: Path, database: Path, args: List[str], home: Path
         return _failure(ReasonCode.TIMEOUT)
     except OSError as exc:
         logger.warning("map: bd could not run: %s", exc)
+        diagnosis = _os_error_diagnosis(exc)
         if trace is not None:
-            trace.record(ReasonCode.BD_UNAVAILABLE, stderr=str(exc))
-        return _failure(ReasonCode.BD_UNAVAILABLE)
-    return _answer(result, trace)
+            trace.record(ReasonCode.BD_UNAVAILABLE, stderr=str(exc), diagnosis=diagnosis)
+        return _failure(ReasonCode.BD_UNAVAILABLE, diagnosis)
+    return _answer(result, trace, "host")
 
 
 def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
@@ -645,10 +810,11 @@ def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
         return _failure(ReasonCode.TIMEOUT)
     except OSError as exc:
         logger.warning("map: docker could not run: %s", exc)
+        diagnosis = _os_error_diagnosis(exc)
         if trace is not None:
-            trace.record(ReasonCode.BD_UNAVAILABLE, stderr=str(exc))
-        return _failure(ReasonCode.BD_UNAVAILABLE)
-    return _answer(result, trace)
+            trace.record(ReasonCode.BD_UNAVAILABLE, stderr=str(exc), diagnosis=diagnosis)
+        return _failure(ReasonCode.BD_UNAVAILABLE, diagnosis)
+    return _answer(result, trace, "docker")
 
 
 def _read_tracker(directory: Path, args: List[str],
@@ -717,9 +883,10 @@ def _read_tracker(directory: Path, args: List[str],
             )
     except OSError as exc:
         logger.warning("map: the tracker read of %s could not start: %s", directory.name, exc)
+        diagnosis = _os_error_diagnosis(exc)
         if trace is not None:
-            trace.record(ReasonCode.BD_FAILED, stderr=str(exc))
-        return _failure(ReasonCode.BD_FAILED)
+            trace.record(ReasonCode.BD_FAILED, stderr=str(exc), diagnosis=diagnosis)
+        return _failure(ReasonCode.BD_FAILED, diagnosis)
 
 
 async def _bd_in(directory: Path, args: List[str],
@@ -738,10 +905,13 @@ class TasksSlice:
 
     payload: dict[str, Any]
     reason: Optional[ReasonCode] = None
+    diagnosis: Optional[DiagnosisReport] = None
 
 
-def _no_tasks(code: ReasonCode) -> dict[str, Any]:
+def _no_tasks(code: ReasonCode,
+              diagnosis: Optional[DiagnosisReport] = None) -> dict[str, Any]:
     return {"available": False, "reason": REASON_TEXT[code], "reason_code": code.value,
+            "diagnosis": diagnosis.payload() if diagnosis is not None else None,
             "items": [], "total": 0,
             "truncated": False, "counts": _counts([])}
 
@@ -772,9 +942,13 @@ async def _tasks(space: Any, project_id: str, trace: Optional[ReadTrace] = None)
         code = answer.get("code")
         if not isinstance(code, ReasonCode):
             code = ReasonCode.BD_FAILED
+        diagnosis = answer.get("diagnosis")
+        if not isinstance(diagnosis, DiagnosisReport):
+            diagnosis = None
         if trace is not None:
             trace.reason = code
-        return TasksSlice(_no_tasks(code), code)
+            trace.diagnosis = diagnosis
+        return TasksSlice(_no_tasks(code, diagnosis), code, diagnosis)
     try:
         issues = _issues(answer)
     except HTTPException:
@@ -799,6 +973,7 @@ async def _tasks(space: Any, project_id: str, trace: Optional[ReadTrace] = None)
         "available": True,
         "reason": None,
         "reason_code": None,
+        "diagnosis": None,
         "items": items[:TASKS_LIMIT],
         "total": len(items),
         "truncated": len(items) > TASKS_LIMIT,

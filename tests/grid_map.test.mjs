@@ -253,6 +253,35 @@ test("an unreadable section says no data and why, in the map and in the overview
   assert.equal(nodesOf(overview, "gridOverview__chip").length, 0);
 });
 
+test("a failed tracker read shows the server's safe diagnosis, never its stderr", () => {
+  const map = sampleMap();
+  map.tasks = {
+    available: false,
+    reason: "The project's local tracker could not be read.",
+    reason_code: "bd_failed",
+    diagnosis: {
+      code: "docker_image_missing",
+      message: "The isolation image is missing on this server; pull or build it, then reload the map.",
+      exit_code: 125,
+    },
+    items: [],
+    total: 0,
+    truncated: false,
+    counts: {},
+  };
+
+  const root = el("div");
+  renderMap(root, map, { projectId: "p1" });
+  const tasks = root.findAll("gridMap__region").find((region) => region.dataset.region === "tasks");
+  assert.match(textOf(tasks), /Diagnosis: The isolation image is missing on this server/);
+  assert.match(textOf(tasks), /\(exit 125\)/);
+  assert.doesNotMatch(textOf(tasks), /stderr|token=|\/srv\//);
+
+  const overview = el("div");
+  renderOverview(overview, map, { projectId: "p1" });
+  assert.match(textOf(overview), /Diagnosis: The isolation image is missing on this server/);
+});
+
 test("a truncated section says how much of it is shown", () => {
   const map = sampleMap();
   map.tasks = { ...map.tasks, total: 512, truncated: true };
