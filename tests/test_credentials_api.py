@@ -15,7 +15,7 @@ from web_chat.vault import Cipher, Vault
 CONFIG = GridConfig(
     pools={"starter": {"K": "K2"}},
     tiers={
-        "byok": {"own_credentials": ["openrouter", "openai", "chatgpt"], "limits": {"usd_per_day": 3}},
+        "byok": {"own_credentials": ["kimi", "openrouter", "openai", "chatgpt"], "limits": {"usd_per_day": 3}},
         "new": {"pool": "starter"},
     },
     default_tier="new",
@@ -56,7 +56,7 @@ def test_the_plan_lists_what_the_user_may_connect_what_they_spent_and_never_a_se
     assert plan["tier"] == "byok" and plan["limits"]["usd_per_day"] == 3
     assert plan["spent"]["day_usd"] == 2.5
     by_kind = {entry["kind"]: entry for entry in plan["credentials"]}
-    assert set(by_kind) == {"openrouter", "openai", "chatgpt"}
+    assert set(by_kind) == {"kimi", "openrouter", "openai", "chatgpt"}
     assert by_kind["openrouter"]["connected"] and by_kind["openrouter"]["hint"] == "…ijkl"
     assert not by_kind["openai"]["connected"]
     assert "abcdefghijkl" not in client.get("/api/plan").text
@@ -126,6 +126,8 @@ async def test_verification_goes_to_the_presets_address_and_follows_no_redirect(
     transport = httpx.MockTransport(handler)
     await credentials_api.verify_key("openrouter", "good", transport)
     assert str(seen[0].url) == "https://openrouter.ai/api/v1/key"
+    await credentials_api.verify_key("kimi", "good", transport)
+    assert str(seen[-1].url) == "https://api.moonshot.ai/v1/models"
     with pytest.raises(credentials_api.KeyRejected):
         await credentials_api.verify_key("openai", "nope", transport)
     redirecting = httpx.MockTransport(lambda r: httpx.Response(302, headers={"location": "https://evil.test/"}))

@@ -110,6 +110,12 @@ compact:
       - web_spider
 
 providers:
+  kimi:
+    name: "kimi"
+    base_url: "https://api.moonshot.ai/v1"
+    api_key_env: "MOONSHOT_API_KEY"
+    timeout: 300
+    max_retries: 3
   opencode:
     name: "opencode"
     base_url: "https://opencode.ai/zen/go/v1"
@@ -133,19 +139,7 @@ providers:
     price_source: openai
     timeout: 300
     max_retries: 2
-  claude-code:
-    name: claude-code
-    base_url: cli://claude  # unused: the Claude Code CLI is the endpoint
-    auth: claude
-    timeout: 300
-    max_retries: 0  # the CLI retries itself
 models:
-  claude-sonnet-5.5:
-    name: anthropic/claude-sonnet-5.5
-    provider: openrouter
-    context_window: 1000000
-    max_tokens: 128000
-    temperature: 0.5
   policy-validator-jev:
     name: "typesafe/jev-1.13"
     context_window: 32000
@@ -244,28 +238,16 @@ models:
     max_tokens: 32000
     context_window: 258000
     request_timeout: 300
-  claude-opus-5.5:
-    name: anthropic/claude-sonnet-5.5
-    provider: openrouter
-    temperature: 0.5
-    max_tokens: 128000
-    context_window: 256000
-  sonnet-5-5:
-    name: claude-sonnet-5-5
-    provider: claude-code
+  kimi-k3.1-pro:
+    name: kimi-k3.1-pro
+    provider: kimi
+    streaming_enabled: true
+    preserve_reasoning_content: true
     # The model reads 1M; the window is declared so that compaction starts
     # near 200k: 272000 - 64000 answer - 8000 reserves (compact.auto).
     max_tokens: 64000
     context_window: 272000
-    description: "Claude Sonnet 5.5 through the Claude Code subscription"
-  opus-5-5:
-    name: claude-opus-5-5
-    provider: claude-code
-    # The model reads 1M; the window is declared so that compaction starts
-    # near 200k: 272000 - 64000 answer - 8000 reserves (compact.auto).
-    max_tokens: 64000
-    context_window: 272000
-    description: "Claude Opus 5.5 through the Claude Code subscription"
+    description: "Kimi K3.1 Pro through the direct Moonshot API"
 tools:
   bash_tool:
     type: "function"
@@ -447,6 +429,18 @@ tools:
   memory_forget:
     type: "function"
     description: "Delete a memory by id."
+  project_list:
+    type: "function"
+    description: "List the user's GRID projects (id, title, parent_id). Call before creating any project."
+  project_get:
+    type: "function"
+    description: "Read one GRID project by id, including its shared notes."
+  project_ensure:
+    type: "function"
+    description: "Create a GRID project only if none with that title exists under the same parent. Idempotent; never overwrites an existing project."
+  project_add_notes:
+    type: "function"
+    description: "Add shared context to a project's notes without silently replacing existing notes (mode if_empty or append)."
   init_codegraph:
     type: "function"
     description: "Builds the CodeGraph index of the workspace, or updates it. Idempotent."
@@ -499,7 +493,10 @@ tools:
 agents:
   engineer:
     name: "Engineer"
-    model: opus-5-5
+    # The strong model is Kimi K3.1 Pro on the direct Kimi API. ChatGPT is the plan that
+    # usually follows, and OpenCode is what keeps the engineer working when both
+    # paid routes are out of quota: three providers, so no single one ends the run.
+    model: [kimi-k3.1-pro, gpt-6-luna, deepseek-flash-latest]
     timeout: 0
     max_turns: 0
     mcp_enabled: true
@@ -510,8 +507,8 @@ agents:
       - memory
     auto_run_tools:
       - name: beads_init
-        parameters:
-          directory: ${working_directory}
+        # The default "." resolves to the chat's shared tracker, as in the
+        # other beads tools; the workspace itself would get a new database.
       # These two read the workspace independently and both run every request:
       # they opt in to overlap so the index and the file list cost one wait,
       # not two. Every other step above stays a plain sequence.
@@ -555,6 +552,10 @@ agents:
       - memory_remember
       - memory_overview
       - memory_forget
+      - project_list
+      - project_get
+      - project_ensure
+      - project_add_notes
       - chat_history
       - init_codegraph
       - codegraph
@@ -586,6 +587,7 @@ agents:
       - Do not create files unless they are actually necessary.
       - Avoid speculative abstractions, extra configurability, and side quests that were not requested.
       - Prefer minimal, direct implementations that fully complete the requested work.
+      - Projects: when asked to organize GRID projects, call `project_list` first and use `project_ensure` only for projects that are missing (it is idempotent and never overwrites). Put shared context via `project_add_notes` (mode `if_empty`, or `append`). Never invent user ids or paths; do not duplicate existing projects.
       - Be careful not to introduce security vulnerabilities.
       - If an approach fails, diagnose why before switching tactics.
       - Report outcomes faithfully: if you did not verify something, say so plainly.
@@ -672,6 +674,8 @@ agents:
       - notebook_create
       - memory_recall
       - memory_overview
+      - project_list
+      - project_get
       - beads_init
       - beads_ready
       - beads_list

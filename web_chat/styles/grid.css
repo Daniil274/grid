@@ -137,6 +137,37 @@
   .gridNode { padding: 7px 8px; }
 }
 
+/* A scaled virtual canvas made 11px error prose only 6.8px on a phone and
+   retained a large empty plane. Use document flow, not zoom, at this width.
+   Important overrides only cancel the desktop geometry's inline pixels. */
+@media (max-width: 720px) {
+  .gridMap__viewport { height: auto !important; overflow: visible; min-width: 0; }
+  .gridMap__plane, .gridMap__canvas {
+    width: 100% !important; height: auto !important;
+  }
+  .gridMap__canvas {
+    transform: none !important; display: flex; flex-direction: column; gap: 12px;
+  }
+  .gridMap__edges { display: none; }
+  .gridMap__region {
+    position: relative; left: auto !important; top: auto !important;
+    width: 100% !important; height: auto !important; min-height: 0;
+    padding: 44px 14px 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .gridMap__regionTitle { font-size: 12px; }
+  .gridMap__region > .gridMap__note {
+    position: static; padding: 0; font-size: 14px; overflow-wrap: anywhere;
+  }
+  .gridNode {
+    position: relative; left: auto !important; top: auto !important;
+    width: 100% !important; height: auto !important; min-height: 70px;
+  }
+  .gridNode__title { font-size: 14px; }
+  .gridOverview__note, .gridOverview .gridMap__note {
+    font-size: 14px; overflow-wrap: anywhere;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .gridNode, .gridOverview__link { transition: none; }
 }

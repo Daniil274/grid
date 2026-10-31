@@ -35,6 +35,12 @@ compact:
       - builder_read
       - builder_check
 providers:
+  kimi:
+    name: kimi
+    base_url: https://api.moonshot.ai/v1
+    api_key_env: MOONSHOT_API_KEY
+    timeout: 300
+    max_retries: 2
   opencode:
     name: opencode
     base_url: https://opencode.ai/zen/go/v1
@@ -73,10 +79,11 @@ models:
     preserve_reasoning_content: true
     reasoning:
       effort: low
-  claude-sonnet-5.5:
-    name: anthropic/claude-sonnet-5.5
-    provider: openrouter
-    temperature: 0.2
+  kimi-k3.1-pro:
+    name: kimi-k3.1-pro
+    provider: kimi
+    streaming_enabled: true
+    preserve_reasoning_content: true
     max_tokens: 128000
     context_window: 1000000
     reasoning:
@@ -131,7 +138,7 @@ tools:
 agents:
   builder:
     name: System builder
-    model: glm-latest
+    model: [glm-latest, glm-flash, kimi-k3.1-pro]
     description: >-
       Creates new Grid systems for this server from a description of what they
       should do: designs their agents, writes their configs, prompts and skills,

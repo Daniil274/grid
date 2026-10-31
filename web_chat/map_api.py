@@ -20,8 +20,9 @@ what it reads stays bounded:
   bounded temporary copy of that tracker, with its home in the same temporary
   tree - embedded Dolt writes lock and journal files even for a ``--readonly``
   list - so neither bd nor Dolt writes inside the project. Without a host bd
-  the same copy is opened by the isolation image, and the project itself is
-  only ever mounted read-only;
+  the same copy is opened by the isolation image. If bd explicitly refuses
+  historical SQLite, a bounded read-only SQLite adapter reads the admitted
+  copy without migrating it. The project itself is only ever mounted read-only;
 * processes are the chats of the project, with the run state the rail shows;
 * files are the top level of the project's space, without the tool state
   that lives there (``.beads``, ``.git``, ``.codegraph``, ``.grid``, every
@@ -45,9 +46,12 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import stat
 import subprocess
 import tempfile
+import time
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -156,6 +160,7 @@ class Diagnosis(str, Enum):
     BD_MISSING = "bd_missing"
     DATABASE_LOCKED = "database_locked"
     DATABASE_ERROR = "database_error"
+    LEGACY_SQLITE = "legacy_sqlite"
     PERMISSION_DENIED = "permission_denied"
     EXIT_UNKNOWN = "exit_unknown"
 
@@ -179,7 +184,10 @@ DIAGNOSIS_TEXT = {
         "The tracker database is locked by another process; stop it or retry later."
     ),
     Diagnosis.DATABASE_ERROR: (
-        "The tracker database could not be opened; it may be corrupt or need a migration."
+        "The tracker database could not be opened. This alone does not establish corruption; check the server diagnostic."
+    ),
+    Diagnosis.LEGACY_SQLITE: (
+        "This bd version cannot open the legacy SQLite tracker, and the map could not read its schema. The tracker has not been migrated."
     ),
     Diagnosis.PERMISSION_DENIED: (
         "The tracker copy cannot be opened by the user bd runs as; check the copy's ownership."
@@ -228,6 +236,9 @@ DIAGNOSIS_PATTERNS = (
         "permission denied",
         "eacces",
         "operation not permitted",
+    )),
+    (Diagnosis.LEGACY_SQLITE, (
+        "historical sqlite workspace detected",
     )),
     (Diagnosis.DATABASE_ERROR, (
         "failed to open database",
@@ -738,6 +749,76 @@ def _answer(result: Any, trace: Optional[ReadTrace] = None,
         return _failure(ReasonCode.INVALID_ANSWER)
 
 
+def _legacy_sqlite_answer(answer: dict[str, Any], database: Path,
+                          trace: Optional[ReadTrace]) -> dict[str, Any]:
+    """Read only a rejected legacy SQLite *copy*, never migrate the workspace.
+
+    bd 1.3 explicitly rejects historical SQLite even for readonly list. Only
+    that specific refusal enables this adapter, not an arbitrary bd failure.
+    Unknown schemas fail closed. No descriptions, notes or extension code are
+    loaded, and the existing project-prefix check still validates every id.
+    """
+    diagnosis = answer.get("diagnosis")
+    if (database.name != "beads.db" or not isinstance(diagnosis, DiagnosisReport)
+            or diagnosis.code is not Diagnosis.LEGACY_SQLITE):
+        return answer
+    fields = ("id", "title", "status", "priority", "issue_type", "assignee",
+              "created_at", "updated_at", "close_reason")
+    deadline = time.monotonic() + BD_TIMEOUT_SECONDS
+    try:
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True,
+                                     timeout=1)) as connection:
+            connection.execute("PRAGMA trusted_schema=OFF")
+            connection.execute("PRAGMA query_only=ON")
+            connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+            tables = {row[0]: row[1] for row in connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE name IN ('issues', 'dependencies')"
+            )}
+            if ("issues" not in tables or
+                    any(not str(sql).lstrip().upper().startswith("CREATE TABLE") for sql in tables.values())):
+                return answer
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(issues)")}
+            if not {"id", "title", "status"} <= columns:
+                return answer
+            selected = [field for field in fields if field in columns]
+            order = '"created_at", "id"' if "created_at" in columns else '"id"'
+            rows = connection.execute(
+                'SELECT ' + ', '.join(f'"{field}"' for field in selected)
+                + f' FROM issues ORDER BY {order} LIMIT ?', (MAX_TRACKER_COPY_ENTRIES + 1,)
+            ).fetchall()
+            if len(rows) > MAX_TRACKER_COPY_ENTRIES:
+                return _failure(ReasonCode.TRACKER_TOO_LARGE)
+            issues = [dict(zip(selected, row)) for row in rows]
+            if (any(not all(value is None or isinstance(value, (str, int)) for value in issue.values())
+                    or not all(isinstance(issue[key], str) for key in ("id", "title", "status"))
+                    for issue in issues)
+                    or len({issue["id"] for issue in issues}) != len(issues)):
+                return answer
+            if "dependencies" in tables:
+                dep_columns = {row[1] for row in connection.execute("PRAGMA table_info(dependencies)")}
+                if not {"issue_id", "depends_on_id", "type"} <= dep_columns:
+                    return answer
+                deps = connection.execute(
+                    'SELECT issue_id, depends_on_id, type FROM dependencies LIMIT ?',
+                    (MAX_TRACKER_COPY_ENTRIES + 1,),
+                ).fetchall()
+                if len(deps) > MAX_TRACKER_COPY_ENTRIES:
+                    return _failure(ReasonCode.TRACKER_TOO_LARGE)
+                by_id = {issue["id"]: issue for issue in issues}
+                for issue_id, depends_on_id, kind in deps:
+                    if not all(isinstance(value, str) for value in (issue_id, depends_on_id, kind)):
+                        return answer
+                    if issue_id in by_id:
+                        by_id[issue_id].setdefault("dependencies", []).append(
+                            {"depends_on_id": depends_on_id, "type": kind})
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        return answer
+    if trace is not None:
+        # Keep the subprocess exit/stderr as evidence; the adapter resolved it.
+        trace.record(None, diagnosis=None)
+    return {"success": True, "data": issues}
+
+
 def _run_on_host(bd: str, cwd: Path, database: Path, args: List[str], home: Path,
                  trace: Optional[ReadTrace] = None) -> dict[str, Any]:
     """One pinned read with the host's bd, against the copy in *cwd*."""
@@ -759,7 +840,8 @@ def _run_on_host(bd: str, cwd: Path, database: Path, args: List[str], home: Path
         if trace is not None:
             trace.record(ReasonCode.BD_UNAVAILABLE, stderr=str(exc), diagnosis=diagnosis)
         return _failure(ReasonCode.BD_UNAVAILABLE, diagnosis)
-    return _answer(result, trace, "host")
+    answer = _answer(result, trace, "host")
+    return _legacy_sqlite_answer(answer, database, trace) if tuple(args) == BD_LIST_ARGS else answer
 
 
 def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
@@ -813,7 +895,8 @@ def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
         if trace is not None:
             trace.record(ReasonCode.BD_UNAVAILABLE, stderr=str(exc), diagnosis=diagnosis)
         return _failure(ReasonCode.BD_UNAVAILABLE, diagnosis)
-    return _answer(result, trace, "docker")
+    answer = _answer(result, trace, "docker")
+    return _legacy_sqlite_answer(answer, database, trace) if tuple(args) == BD_LIST_ARGS else answer
 
 
 def _read_tracker(directory: Path, args: List[str],

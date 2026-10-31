@@ -45,6 +45,13 @@ settings:
  
 # API Providers
 providers:
+  kimi:
+    name: "kimi"
+    base_url: "https://api.moonshot.ai/v1"
+    api_key_env: "MOONSHOT_API_KEY"
+    timeout: 300
+    max_retries: 3
+
   lm-studio:
     name: "lm-studio"
     base_url: "http://192.168.3.2:1234/v1"
@@ -60,28 +67,15 @@ providers:
     max_retries: 3
     streaming_enabled: true
 
-  # A Claude subscription, run through the official Claude Code CLI. Sign in on
-  # the host first ("claude auth login", choosing the subscription). Grid stores
-  # no Claude credential: the CLI's login authorizes every call, and API-key and
-  # cloud-provider variables are stripped from its environment. See
-  # docs/claude-subscription.md.
-  claude-code:
-    name: "claude-code"
-    base_url: "cli://claude"          # unused; the CLI is the endpoint
-    auth: "claude"
-    timeout: 300
-    max_retries: 0                    # the CLI retries itself
-
-
-
 # Models
 models:
-  claude-sonnet:
-    name: "sonnet"                    # a Claude Code model alias, or a full model id
-    provider: "claude-code"
-    max_tokens: 8000
-    context_window: 200000
-    description: "Claude subscription via the Claude Code CLI"
+  kimi-k3.1-pro:
+    name: "kimi-k3.1-pro"
+    provider: "kimi"
+    max_tokens: 64000
+    context_window: 272000
+    preserve_reasoning_content: true
+    description: "Kimi K3.1 Pro, Moonshot's flagship reasoning model"
 
   gemini-3-pro:
     name: "google/gemini-3-pro-preview"

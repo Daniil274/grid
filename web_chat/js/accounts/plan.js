@@ -142,6 +142,9 @@ export class PlanDrawer {
               on: { click: () => input.value.trim() && this._act(() => api.storeKey(entry.kind, input.value.trim()), `${entry.label} key saved`) },
             }),
           ),
+      entry.kind === "kimi"
+        ? h("span.field__hint", { text: "Direct Kimi API. Moonshot Open Platform usage is billed separately from Kimi Plus." })
+        : null,
     );
   }
 

@@ -23,6 +23,7 @@ const PLAN = {
   vault_enabled: true,
   chatgpt_available: true,
   credentials: [
+    { kind: "kimi", label: "Kimi (Moonshot AI)", connected: false },
     { kind: "openrouter", label: "OpenRouter", connected: true, hint: "…mnop", status: "ok" },
     { kind: "openai", label: "OpenAI API", connected: false },
     { kind: "chatgpt", label: "ChatGPT subscription", connected: false },
@@ -47,6 +48,8 @@ test("the drawer shows the plan, what was spent against its budgets and the keys
   assert.match(text, /This month: \$12\.50 \(no limit\)/);
   assert.match(text, /…mnop/);
   assert.match(text, /Check and save/);
+  assert.match(text, /Kimi \(Moonshot AI\)/);
+  assert.match(text, /billed separately from Kimi Plus/);
   assert.match(text, /Sign in with ChatGPT/);
   assert.ok(!text.includes("sk-"), "no secret is ever shown");
 });
@@ -59,10 +62,11 @@ test("a key is sent once and the list is read again after it", async () => {
   const drawer = new PlanDrawer(view);
   await drawer.open();
 
-  const input = view.body.querySelector("input");
+  const openaiField = view.body.querySelectorAll(".field").find((field) => field.textContent.includes("OpenAI API"));
+  const input = openaiField.querySelector("input");
   assert.ok(input, "the key field is rendered");
   input.value = "  sk-aaaaaaaaaaaaaaaa ";
-  buttonLabelled(view.body, "Check and save").click();
+  buttonLabelled(openaiField, "Check and save").click();
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.ok(calls.includes("store openai sk-aaaaaaaaaaaaaaaa"), "the key is trimmed and sent to its provider");

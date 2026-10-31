@@ -43,7 +43,10 @@ def _blocks(value: Any) -> bool:
 # These tools report their own expected failures as {"error": "..."} instead of
 # raising, so the step must still be marked as an error. Kept narrow on purpose:
 # other tools may legitimately return an `error` field as data.
-_SOFT_ERROR_TOOLS = {"memory_recall", "memory_overview", "memory_remember", "memory_forget"}
+_SOFT_ERROR_TOOLS = {
+    "memory_recall", "memory_overview", "memory_remember", "memory_forget",
+    "project_list", "project_get", "project_ensure", "project_add_notes",
+}
 
 
 def _soft_error(tool: str, value: Any) -> bool:

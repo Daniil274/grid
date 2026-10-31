@@ -15,6 +15,7 @@ Old chats have no ``project_id`` and need no migration: they simply show as
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -41,7 +42,47 @@ MAX_DEPTH = 3
 
 
 class ProjectError(ValueError):
-    """A project cannot be stored as asked for (bad parent, cycle, too deep)."""
+    """A project cannot be stored as asked for (bad parent, cycle, too deep).
+
+    ``code`` is the stable, machine-readable kind; subclasses set it.
+    """
+
+    code = "invalid"
+
+
+class ProjectTitleRequired(ProjectError):
+    code = "title_required"
+
+
+class ProjectParentNotFound(ProjectError):
+    code = "parent_not_found"
+
+
+class ProjectCycle(ProjectError):
+    code = "cycle"
+
+
+class ProjectTooDeep(ProjectError):
+    code = "too_deep"
+
+
+class ProjectNotFound(ProjectError, KeyError):
+    code = "not_found"
+
+    def __str__(self) -> str:  # KeyError.__str__ would wrap the message in quotes
+        return str(self.args[0]) if self.args else "Project not found"
+
+
+class ProjectUnavailable(ProjectError):
+    """The project store cannot be reached or written right now (no store, I/O failure)."""
+
+    code = "unavailable"
+
+
+class ProjectConflict(ProjectError):
+    """The write would replace what the project already holds; nothing was changed."""
+
+    code = "conflict"
 
 
 def _now() -> str:
@@ -51,7 +92,7 @@ def _now() -> str:
 def _clean_title(title: Any) -> str:
     clean = " ".join(str(title).split())
     if not clean:
-        raise ProjectError("A project needs a title")
+        raise ProjectTitleRequired("A project needs a title")
     return clean[:MAX_TITLE]
 
 
@@ -107,9 +148,48 @@ class ProjectStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._depth_count = 0
         self._projects: Dict[str, Project] = {}
         self._load_failed = False
         self._load()
+
+    @contextlib.contextmanager
+    def _txn(self):
+        """One read-modify-write: the thread lock, then an advisory file lock
+        (``<file>.lock``, ``fcntl.flock``) so a second *process* writing the same
+        file cannot interleave; the state is re-read from disk once the lock is
+        held, so its write never drops the other's. Re-entrant within a thread.
+        Where ``fcntl`` is missing only the in-process guarantee remains."""
+        with self._lock:
+            if self._depth_count:
+                self._depth_count += 1
+                try:
+                    yield
+                finally:
+                    self._depth_count -= 1
+                return
+            handle = None
+            try:
+                try:
+                    import fcntl
+
+                    handle = open(self.path.with_name(self.path.name + ".lock"), "a")
+                    fcntl.flock(handle, fcntl.LOCK_EX)
+                except (ImportError, OSError) as exc:
+                    logger.warning("No inter-process lock for %s (%s)", self.path.name, type(exc).__name__)
+                    if handle is not None:
+                        handle.close()
+                        handle = None
+                if handle is not None and self.path.exists():
+                    self._load()
+                self._depth_count = 1
+                try:
+                    yield
+                finally:
+                    self._depth_count = 0
+            finally:
+                if handle is not None:
+                    handle.close()
 
     # -- reading ------------------------------------------------------------------
     def get(self, project_id: str) -> Optional[Project]:
@@ -151,7 +231,7 @@ class ProjectStore:
     # -- writing ------------------------------------------------------------------
     def create(self, title: str, parent_id: Optional[str] = None, description: str = "") -> Project:
         """Add a project; raise :class:`ProjectError` for a bad parent or too deep."""
-        with self._lock:
+        with self._txn():
             parent_id = parent_id or None
             self._validate_parent(parent_id, moving_id=None)
             now = _now()
@@ -167,13 +247,68 @@ class ProjectStore:
             self._write()
             return _copy(project)
 
+    def ensure(self, title: str, parent_id: Optional[str] = None, description: str = "") -> Tuple[Project, bool]:
+        """The project titled *title* under *parent_id*, created only if absent.
+
+        Returns ``(project, created)``. A match is by the collapsed, case-folded
+        title among the same parent's children (archived ones too), so a retry
+        or a concurrent twin never makes a duplicate. An existing project is
+        returned untouched: its description is never overwritten here.
+        """
+        with self._txn():
+            parent_id = parent_id or None
+            key = _clean_title(title).casefold()
+            if parent_id is not None and parent_id not in self._projects:
+                raise ProjectParentNotFound("The parent project does not exist")
+            for project in self._projects.values():
+                if project.parent_id == parent_id and project.title.casefold() == key:
+                    return _copy(project), False
+            return self.create(title, parent_id=parent_id, description=description), True
+
+    def add_notes(self, project_id: str, text: str, mode: str = "if_empty") -> Tuple[Project, bool]:
+        """Put shared context into a project's notes without silently replacing any.
+
+        ``if_empty``: write only when the notes are empty; identical notes are a
+        no-op, different ones raise :class:`ProjectConflict`. ``append``: add
+        *text* after the existing notes unless a whole blank-line-separated block of
+        them already equals it (a retry is a no-op, a substring is not).
+        Returns ``(project, changed)``.
+        """
+        text = str(text or "").strip()
+        if not text:
+            raise ProjectError("There are no notes to add")
+        if mode not in ("if_empty", "append"):
+            raise ProjectError("mode must be 'if_empty' or 'append'")
+        with self._txn():
+            project = self._projects.get(project_id)
+            if project is None:
+                raise ProjectNotFound("Project not found")
+            current = project.notes.strip()
+            if mode == "if_empty":
+                if current == text:
+                    return _copy(project), False
+                if current:
+                    raise ProjectConflict("The project already has different notes; use mode 'append' to add to them")
+                merged = text
+            else:
+                # Idempotent only for the exact block (blank-line separated), never a substring.
+                if text in [block.strip() for block in current.split("\n\n")]:
+                    return _copy(project), False
+                merged = f"{current}\n\n{text}" if current else text
+            if len(merged) > MAX_NOTES:
+                raise ProjectError(f"Notes are limited to {MAX_NOTES} characters")
+            project.notes = merged
+            project.updated_at = _now()
+            self._write()
+            return _copy(project), True
+
     def update(self, project_id: str, **fields: Any) -> Project:
         """Change a project's fields; ``KeyError`` if unknown, :class:`ProjectError` on a bad move.
 
         Only the keys given are touched, so ``parent_id=None`` moves it to the
         root while an absent ``parent_id`` leaves it where it is.
         """
-        with self._lock:
+        with self._txn():
             project = self._projects.get(project_id)
             if project is None:
                 raise KeyError(project_id)
@@ -201,7 +336,7 @@ class ProjectStore:
         the caller, its chats) moved to, and the ids of those children. A chat
         re-parenting is the API's, which alone owns the conversations.
         """
-        with self._lock:
+        with self._txn():
             project = self._projects.pop(project_id, None)
             if project is None:
                 raise KeyError(project_id)
@@ -222,17 +357,17 @@ class ProjectStore:
         if parent_id is None:
             return
         if parent_id not in self._projects:
-            raise ProjectError("The parent project does not exist")
+            raise ProjectParentNotFound("The parent project does not exist")
         if moving_id is not None:
             ancestor: Optional[Project] = self._projects[parent_id]
             while ancestor is not None:
                 if ancestor.id == moving_id:
-                    raise ProjectError("A project cannot be nested inside itself")
+                    raise ProjectCycle("A project cannot be nested inside itself")
                 ancestor = self._projects.get(ancestor.parent_id) if ancestor.parent_id else None
         base = self._depth(parent_id) + 1
         below = self._subtree_height(moving_id) if moving_id is not None else 1
         if base + below - 1 > MAX_DEPTH:
-            raise ProjectError(f"Projects nest at most {MAX_DEPTH} levels deep")
+            raise ProjectTooDeep(f"Projects nest at most {MAX_DEPTH} levels deep")
 
     def _depth(self, project_id: str) -> int:
         """The project's depth: a root is 1."""
@@ -261,8 +396,8 @@ class ProjectStore:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            self._load_failed = False
             self._projects = {}
+            self._load_failed = False
             return
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
             self._set_aside(exc)
@@ -279,10 +414,10 @@ class ProjectStore:
         self._load_failed = False
 
     def _set_aside(self, exc: BaseException) -> None:
-        self._load_failed = True
         """A damaged file: kept beside as ``.unreadable`` and logged, and the space
         starts with no projects - its chats show as "no project" - instead of
         every project route and every chat with a project failing."""
+        self._load_failed = True
         kept = self.path.with_name(f"{self.path.name}.unreadable-{datetime.now():%Y%m%d-%H%M%S}")
         logger.error("The projects file %s cannot be read (%s); kept as %s", self.path, exc, kept.name)
         try:
@@ -294,8 +429,13 @@ class ProjectStore:
     def _write(self) -> None:
         document = {"version": VERSION, "projects": [project.to_dict() for project in self._projects.values()]}
         temporary = self.path.with_name(self.path.name + ".tmp")
-        temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, self.path)
+        try:
+            temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temporary, self.path)
+        except OSError as exc:
+            # Only the file name and the error kind: no path, no content.
+            logger.error("Could not write %s: %s (errno %s)", self.path.name, type(exc).__name__, exc.errno)
+            raise ProjectUnavailable("Projects cannot be saved right now") from exc
 
 
 def _copy(project: Project) -> Project:

@@ -35,8 +35,14 @@ NO_VAULT = (
 
 #: What each provider preset answers when its key is good. OpenRouter's model list
 #: is public, so its key is checked on the endpoint that describes the key.
-VERIFY_PATHS = {"openrouter": "/key", "openai": "/models", "opencode-go": "/models"}
-LABELS = {"openrouter": "OpenRouter", "openai": "OpenAI API", "opencode-go": "OpenCode Go", "chatgpt": "ChatGPT subscription"}
+VERIFY_PATHS = {"kimi": "/models", "openrouter": "/key", "openai": "/models", "opencode-go": "/models"}
+LABELS = {
+    "kimi": "Kimi (Moonshot AI)",
+    "openrouter": "OpenRouter",
+    "openai": "OpenAI API",
+    "opencode-go": "OpenCode Go",
+    "chatgpt": "ChatGPT subscription",
+}
 #: Key checks one user may make per minute.
 CHECKS_PER_MINUTE = 10
 
