@@ -69,17 +69,29 @@ class ToolIssue:
         }
 
 
-def diagnose(config: Config, *, requires: Iterable[str] = (), confined: bool = False) -> List[ToolIssue]:
+def diagnose(
+    config: Config,
+    *,
+    requires: Iterable[str] = (),
+    confined: bool = False,
+    credentials: Optional[Any] = None,
+) -> List[ToolIssue]:
     """Every problem of one system, config and environment alike.
 
     ``confined``: the system runs in a space that isolates its agents whatever
     the config says (a server with accounts, AgentFactory ``confine_tools``):
     commands run in the user's container, and tools that act on the host are
-    withheld."""
+    withheld.
+
+    ``credentials``: the credential source a user's runs are served from
+    (``web_chat.entitlements.UserCredentials``). Given it, a provider counts as
+    ready when that source can serve it - a key the user stored in their own
+    settings counts exactly like one exported in the environment. Without it the
+    check reads the operator's environment only, which is what a CLI run has."""
     previous_loader = get_project_loader()
     set_project_loader(config.project_tools_loader)
     try:
-        return _Diagnosis(config, confined=confined).run(requires)
+        return _Diagnosis(config, confined=confined, credentials=credentials).run(requires)
     finally:
         set_project_loader(previous_loader)
 
@@ -133,11 +145,12 @@ def summarize(issues: Iterable[ToolIssue]) -> List[str]:
 
 
 class _Diagnosis:
-    def __init__(self, config: Config, *, confined: bool = False) -> None:
+    def __init__(self, config: Config, *, confined: bool = False, credentials: Optional[Any] = None) -> None:
         self.config = config
         self.grid = config.config
         self.confined = confined
         self.isolated = confined or bool(getattr(self.grid.isolation, "enabled", False))
+        self.credentials = credentials
         # A package is read once, however many agents use its tool.
         self._packages_checked: Dict[str, Any] = {}
         self.loader = config.project_tools_loader
@@ -197,17 +210,34 @@ class _Diagnosis:
         if len(missing) == len(keys):
             reasons = "; ".join(self._model_key_problem(key) for key in missing)
             self.add(ENVIRONMENT, f"cannot run, no model is usable: {reasons}", agent=agent_key,
-                     hint="Export the API key in the environment or .env")
+                     hint=self._model_hint())
         elif keys[0] in missing:
             self.add(ENVIRONMENT, f"primary model unusable ({self._model_key_problem(keys[0])}); fallback models will answer",
-                     agent=agent_key, hint="Export the API key in the environment or .env")
+                     agent=agent_key, hint=self._model_hint())
+
+    def _model_hint(self) -> str:
+        if self.credentials is None:
+            return "Export the API key in the environment or .env"
+        return "Add your own key in the settings, or export the provider's key in the environment or .env"
 
     def _model_key_problem(self, model_key: str) -> Optional[str]:
         model = self.grid.models.get(model_key)
         if model is None:
             return None  # an unknown model is rejected when the config loads
         provider = self.grid.providers.get(model.provider)
-        if provider is None or provider.api_key or not provider.api_key_env:
+        if provider is None:
+            return None
+        if self.credentials is not None:
+            # The same source the agents are built from: a key the user stored
+            # is a credential, and its absence is the source's own to explain.
+            if self.credentials.available(provider):
+                return None
+            problem = getattr(self.credentials, "problem", None)
+            reason = problem(provider) if callable(problem) else None
+            return reason if isinstance(reason, str) and reason else (
+                f"model '{model_key}' has no usable credential (provider '{model.provider}')"
+            )
+        if provider.api_key or not provider.api_key_env:
             return None
         if os.environ.get(provider.api_key_env):
             return None

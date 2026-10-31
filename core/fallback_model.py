@@ -13,6 +13,7 @@ fail the request, the others get it with the same kind of note.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import deque
@@ -20,8 +21,10 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, FrozenSet, Optional, Sequence
 
 from agents.models.interface import Model
+import httpx
+from openai import APIConnectionError, APIStatusError
 
-from core.credentials import credential_error_in
+from core.credentials import CredentialError, credential_error_in
 from core.modalities import IMAGE, MEDIA, NAMES, PDF, replace_modalities, request_modalities
 
 
@@ -92,6 +95,60 @@ def failed_note(modality: str, model: str, able: Sequence[str]) -> str:
     )
 
 
+#: A status a backend reports in words rather than in a typed error.
+_STATUS_IN_TEXT = re.compile(r"\b(?:408|409|425|429|5\d\d)\b")
+
+
+def can_fallback(exc: BaseException) -> bool:
+    """Only technical unavailability, never a policy refusal or a bad request.
+
+    CLI backends report quota errors as text; API backends have typed errors.
+    Unknown failures fail closed rather than moving a denied request elsewhere.
+    """
+    text = str(exc).lower()
+    if any(marker in text for marker in (
+        "policy_deny", "policy deny", "policy_filter", "declined",
+        "content_filter", "content filter", "content_policy", "safety",
+        "permission denied", "not authorized", "not allowed", "refusal",
+    )):
+        return False
+    if refused_modality(exc) is not None:
+        return True
+    if credential_error_in(exc) is not None or isinstance(exc, CredentialError):
+        return True
+    if isinstance(exc, APIStatusError):
+        return exc.status_code in {408, 409, 425, 429, 500, 502, 503, 504}
+    if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException,
+                        httpx.NetworkError, httpx.RemoteProtocolError, APIConnectionError)):
+        return True
+    # A backend that reports its refusal in words names the status there too: a
+    # 5xx, 429 or 408 in the text is an outage of that model, whichever
+    # exception type carried it. Policy refusals were already turned away above.
+    if _STATUS_IN_TEXT.search(text):
+        return True
+    return any(marker in text for marker in (
+        "rate limit", "rate_limit", "usage limit", "usage_limit",
+        "session limit", "quota exceeded", "quota exhausted", "insufficient_quota",
+        "you've hit your limit", "you have hit your limit",
+        "connection error", "connection reset", "timed out", "timeout",
+        "temporarily unavailable", "service unavailable", "primary unavailable",
+        "upstream_unavailable", "upstream unavailable", "server_error",
+        "server error", "bad gateway", "overloaded",
+        # The Claude Code CLI as a process: a crash or a binary the updater
+        # removed is an outage of that backend, not a refusal.
+        "cli exited with status", "was not found on path",
+    ))
+
+
+def _stream_failure(event: Any) -> BaseException:
+    """Retain the provider's reason: failed/incomplete alone is not retryable."""
+    response = getattr(event, "response", None)
+    detail = getattr(response, "error", None) or getattr(response, "incomplete_details", None)
+    code = getattr(detail, "code", None) or getattr(detail, "reason", None)
+    message = getattr(detail, "message", None)
+    return _StreamFailure(f"{getattr(event, 'type', 'response.failed')}: {code or ''} {message or ''}")
+
+
 class _StreamFailure(Exception):
     """An in-stream provider failure event, raised before anything committed."""
 
@@ -139,10 +196,15 @@ class FallbackModel(Model):
     second model cannot silently duplicate text or tool calls.
     """
 
-    def __init__(self, candidates: Sequence[ModelCandidate]) -> None:
+    def __init__(self, candidates: Sequence[ModelCandidate], skipped: Sequence[tuple[str, str]] = ()) -> None:
         if not candidates:
             raise ValueError("FallbackModel requires at least one candidate")
         self.candidates = tuple(candidates)
+        #: (model key, why it is not a candidate): models the config named but
+        #: the plan or a missing credential kept out of the chain. They are
+        #: named in the final error, so "no model left" never reads as "the
+        #: only model failed" when the truth is "the good ones were skipped".
+        self.skipped = tuple(skipped)
 
     @staticmethod
     def _with_settings(
@@ -219,12 +281,15 @@ class FallbackModel(Model):
         attempts.append((candidate, leave_out | {modality}))
         return True
 
-    @staticmethod
-    def _give_up(errors: list[str], originals: list[BaseException]) -> BaseException:
-        # One model, one failure: its own error, not a wrapper around it.
-        if len(originals) == 1:
+    def _give_up(self, errors: list[str], originals: list[BaseException]) -> BaseException:
+        # One model, one failure: its own error, not a wrapper around it - unless
+        # the chain was already shortened, which the reader has to see too.
+        if len(originals) == 1 and not self.skipped:
             return originals[0]
-        return AllModelsFailedError("All configured models failed: " + " | ".join(errors))
+        message = "All configured models failed: " + " | ".join(errors or ["no model was tried"])
+        if self.skipped:
+            message += ". Not tried: " + "; ".join(f"{key} ({why})" for key, why in self.skipped)
+        return AllModelsFailedError(message)
 
     async def get_response(self, *args: Any, **kwargs: Any) -> Any:
         errors: list[str] = []
@@ -237,6 +302,8 @@ class FallbackModel(Model):
                 call_args, call_kwargs = self._call(candidate, leave_out, args, kwargs)
                 return await candidate.model.get_response(*call_args, **call_kwargs)
             except Exception as exc:
+                if not can_fallback(exc):
+                    raise
                 if self._refused(candidate, leave_out, exc, attempts, items):
                     continue
                 # A credential refused while signing the request, not a network failure.
@@ -268,7 +335,7 @@ class FallbackModel(Model):
                     if not committed:
                         event_type = getattr(event, "type", None)
                         if event_type in _FAILURE_EVENT_TYPES:
-                            raise _StreamFailure(event_type)
+                            raise _stream_failure(event)
                         events.append(event)
                         if event_type in _LIFECYCLE_EVENT_TYPES:
                             continue
@@ -279,6 +346,8 @@ class FallbackModel(Model):
                     else:
                         yield event
             except _StreamFailure as failure:
+                if not can_fallback(failure):
+                    raise
                 errors.append(f"{candidate.key}: {failure}")
                 originals.append(failure)
                 logger.warning(
@@ -290,6 +359,8 @@ class FallbackModel(Model):
                 continue
             except Exception as exc:
                 if committed:
+                    raise
+                if not can_fallback(exc):
                     raise
                 if self._refused(candidate, leave_out, exc, attempts, items):
                     continue

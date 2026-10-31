@@ -29,6 +29,7 @@ from core.factory.preparation import (
 )
 from core.factory.run_context import AutoRunToolContext, GridRunContext
 from schemas import AgentConfig
+from utils.path_utils import CONTAINER_WORKDIR
 from utils.exceptions import ConfigError
 from utils.logger import Logger
 
@@ -327,7 +328,10 @@ class AutoRunTools:
         """
         if not agent_config.auto_run_tools:
             return ""
-        working_dir = "/" if self.container_id else self.config.get_working_directory()
+        # A container's workspace is CONTAINER_WORKDIR, not "/": an agent told
+        # its directory is the filesystem root indexes and lists the whole
+        # container instead of the workspace it is meant to work in.
+        working_dir = CONTAINER_WORKDIR if self.container_id else self.config.get_working_directory()
         init_key = f"{agent_key}:{run_ctx.user_id or 'default'}"
         parts: List[str] = []
         phases = [(False, init_key not in self._initialized_agents), (True, True)]

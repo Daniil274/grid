@@ -10,9 +10,11 @@ Run explicitly: ``pytest tests/test_preparation.py``.
 import asyncio
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from core.agent_factory import AgentFactory
 from core.factory.preparation import (
@@ -73,6 +75,27 @@ def make_factory():
 
 def auto_config(*specs):
     return SimpleNamespace(auto_run_tools=list(specs))
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    ["examples/coder/config.yaml", "examples/coordinator-pipeline/config.yaml"],
+)
+def test_shipped_agents_initialize_the_shared_tracker(config_path):
+    """A new chat must not pay for a fresh Dolt database in its workspace."""
+    root = Path(__file__).resolve().parent.parent
+    agents = yaml.safe_load((root / config_path).read_text(encoding="utf-8"))["agents"]
+    init_steps = [
+        step
+        for agent in agents.values()
+        for step in agent.get("auto_run_tools", [])
+        if step.get("name") == "beads_init"
+    ]
+
+    assert init_steps
+    # beads_init's default resolves through factory.tracker_directory, just as
+    # explicit beads calls do. ${working_directory} would bypass that mapping.
+    assert all(step.get("parameters", {}).get("directory", ".") == "." for step in init_steps)
 
 
 # --------------------------------------------------------------------------
@@ -523,3 +546,35 @@ async def test_init_tools_without_opt_in_stay_sequential():
 
     assert probe.max_in_flight == 1
     assert probe.started == ["a", "b"]
+
+
+async def test_a_containers_working_directory_is_the_mounted_workspace():
+    """`${working_directory}` names the workspace, not the filesystem root.
+
+    An isolated agent's shell starts in /workspace; telling init_codegraph to
+    index "/" makes it read the whole container instead, and workspace_overview
+    lists the container root rather than the files the agent was given.
+    """
+    seen = []
+
+    async def invoke(_ctx, args):
+        seen.append(json.loads(args)["directory"])
+        return "ok"
+
+    factory = make_factory()
+    factory.container_id = "grid-test-container"
+    factory._initialized_agents = set()
+    config = auto_config(
+        {"name": "init_codegraph", "every_run": True, "parameters": {"directory": "${working_directory}"}}
+    )
+    agent = SimpleNamespace(tools=[SimpleNamespace(name="init_codegraph", on_invoke_tool=invoke)])
+
+    await factory._auto_run_preamble(
+        "engineer",
+        config,
+        agent,
+        SimpleNamespace(stream_observer=None, user_id="u1", metadata={}),
+        "привет",
+    )
+
+    assert seen == ["/workspace"]

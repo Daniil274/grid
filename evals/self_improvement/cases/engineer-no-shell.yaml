@@ -11,47 +11,17 @@ request: |
   выполнять команды, хотя раньше выполнял. Разберись и почини.
 sabotage:
   - file: examples/coder/config.yaml
-    find: "    timeout: 0
-    max_turns: 0
-    mcp_enabled: true
-    parallel_tool_calls: true
-    system_skills:
-      - beads
-      - codegraph
-      - memory
-    auto_run_tools:
-      - name: beads_init
-        parameters:
-          directory: ${working_directory}
-      - name: init_codegraph
+    find: "      - name: workspace_overview
         every_run: true
-        parameters:
-          directory: ${working_directory}
-      - name: workspace_overview
-        every_run: true
+        parallel: true
         parameters:
           directory: ${working_directory}
     tools:
       - bash_tool
       - file_read"
-    replace: "    timeout: 0
-    max_turns: 0
-    mcp_enabled: true
-    parallel_tool_calls: true
-    system_skills:
-      - beads
-      - codegraph
-      - memory
-    auto_run_tools:
-      - name: beads_init
-        parameters:
-          directory: ${working_directory}
-      - name: init_codegraph
+    replace: "      - name: workspace_overview
         every_run: true
-        parameters:
-          directory: ${working_directory}
-      - name: workspace_overview
-        every_run: true
+        parallel: true
         parameters:
           directory: ${working_directory}
     tools:

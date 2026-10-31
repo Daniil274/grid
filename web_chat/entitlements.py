@@ -203,6 +203,7 @@ class UserCredentials:
 
     # -- the CredentialSource protocol -------------------------------------------
     def available(self, provider: object) -> bool:
+        """Whether this user has a credential for *provider* now."""
         entitlement = self._entitlement()
         if _is_claude(provider):
             # The CLI's login is the operator's own, on the operator's machine.
@@ -210,6 +211,19 @@ class UserCredentials:
             # server with accounts no user may reach the host login.
             return self._local_cli_login
         return self._own_kind(provider, entitlement) is not None or self._pool_credential(provider, entitlement) is not None
+
+    def signature(self) -> str:
+        """Which own credentials exist now, for whoever caches work built from them.
+
+        The environment cannot change while the process lives; the vault can -
+        a key pasted into the settings appears at once. Agents are built for
+        the credentials in hand (core.agent_factory skips a model whose provider
+        has none), so this belongs in their access signature: otherwise a saved
+        key is only picked up after a restart, and the chain quietly stays short.
+        """
+        if self._own is None:
+            return ""
+        return ",".join(sorted(kind for kind in ALL_OWN_CREDENTIALS if self._own.has(self._user_id, kind)))
 
     async def credential(self, provider: object) -> Credential:
         entitlement = self._entitlement()

@@ -456,8 +456,9 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
                 raise unavailable[0]
             model_config = self.config.get_model(candidates[0].key)
             # Even one model goes through FallbackModel: it keeps images away
-            # from a model that cannot see them.
-            model = FallbackModel(candidates)
+            # from a model that cannot see them, and it names the models the
+            # plan or a missing key kept out of the chain when all fail.
+            model = FallbackModel(candidates, skipped)
 
             # Build instructions with context (include conversation context for agents)
             instructions = self._build_agent_instructions(
@@ -584,16 +585,22 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         # with the caller's fallbacks behind it as in create_agent.
         candidates: List[ModelCandidate] = []
         unavailable: List[Exception] = []
+        skipped: List[tuple[str, str]] = []
         model_cfg = None
         for candidate_key in dict.fromkeys([resolved_model_key, *(fallback_model_keys or [])]):
             try:
                 if candidate_key != resolved_model_key:
                     candidate_key = self.resolve_model_key(candidate_key)
-                    if candidate_key in {c.key for c in candidates} or not self.models.is_allowed(candidate_key):
+                    if candidate_key in {c.key for c in candidates}:
+                        continue
+                    if not self.models.is_allowed(candidate_key):
+                        skipped.append((candidate_key, "not in this user's plan"))
+                        logger.warning("Skipping model %s for '%s': not in this user's plan", candidate_key, name)
                         continue
                 candidate_model, candidate_cfg = self.models.sdk_model(candidate_key)
             except (ModelNotInPlan, CredentialError, ConfigError) as refusal:
                 unavailable.append(refusal)
+                skipped.append((candidate_key, str(refusal)))
                 logger.warning("Skipping unavailable model %s for '%s': %s", candidate_key, name, refusal)
                 continue
             if model_cfg is None:
@@ -610,7 +617,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         if not candidates:
             raise unavailable[0]
         resolved_model_key = candidates[0].key
-        model = FallbackModel(candidates)
+        model = FallbackModel(candidates, skipped)
 
         tools: List[Any] = []
         mcp_servers_list: List[Any] = []

@@ -126,6 +126,16 @@ async def test_a_user_key_is_sent_only_to_its_providers_own_address():
 
 
 @pytest.mark.asyncio
+async def test_a_kimi_key_is_bound_to_the_official_moonshot_api():
+    plan = plans(tiers={"byok": {"own_credentials": ["kimi"]}, "new": {}})
+    provider = SimpleNamespace(name="kimi", base_url="https://api.moonshot.ai/v1", api_key=None, api_key_env="MOONSHOT_API_KEY")
+    credential = await credentials(plan, "byok", own=Vault(kimi="user-kimi-key")).credential(provider)
+    assert (credential.secret, credential.source, credential.charged) == ("user-kimi-key", "own", False)
+    elsewhere = SimpleNamespace(**{**vars(provider), "base_url": "https://evil.test/v1"})
+    assert not credentials(plan, "byok", own=Vault(kimi="user-kimi-key")).available(elsewhere)
+
+
+@pytest.mark.asyncio
 async def test_an_own_credential_that_stopped_working_is_reported_not_replaced_by_the_pool():
     class Dead(Vault):
         async def credential(self, user_id, kind):
@@ -203,3 +213,18 @@ def test_an_expired_own_login_is_named_as_such():
     source = UserCredentials("u", lambda: entitlement, plans=None, own=Own(), environ={})
     problem = source.problem(SimpleNamespace(auth="chatgpt", name="chatgpt", base_url=""))
     assert "expired" in problem and "Reconnect" in problem
+
+
+def test_the_access_signature_changes_when_a_key_is_saved_or_removed():
+    """Agents are built for the credentials in hand; a key pasted into the
+    settings must rebuild them, or the model it unlocks never joins the chain."""
+    plan = plans()
+    empty = credentials(plan, "byok", own=Vault())
+    with_key = credentials(plan, "byok", own=Vault(kimi="user-kimi-key"))
+    both = credentials(plan, "byok", own=Vault(kimi="user-kimi-key", openai="user-openai-key"))
+
+    assert empty.signature() == ""
+    assert with_key.signature() == "kimi"
+    assert both.signature() == "kimi,openai"
+    # No vault at all (a CLI run, or a space without one) has nothing to report.
+    assert UserCredentials("u1", lambda: plan.resolve(admin=False, tier="byok"), plan).signature() == ""

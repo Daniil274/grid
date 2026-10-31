@@ -438,13 +438,26 @@ class UserSpace:
             if entitlement is not None
             else None
         )
+
+        def access_signature() -> str:
+            """What the built agents depend on: the plan, and the keys in hand.
+
+            The vault can gain a key while the server runs (Settings →
+            Credentials). Without it here, an agent built before that key keeps
+            the chain it could build then - a model skipped for want of a key
+            never comes back before a restart.
+            """
+            plan = entitlement().signature() if entitlement is not None else ""
+            extra = getattr(credentials, "signature", None)
+            return f"{plan}|{extra()}" if callable(extra) else plan
+
         return ModelAccess(
             credentials,
             on_spend=SpaceMeter(self.user_id, self.usage),
             prices=self.deployment.price_book(),
             unknown_price=self.deployment.unknown_price(),
             permits=(lambda key, name: entitlement().permits_model(key, name)) if entitlement is not None else None,
-            signature=(lambda: entitlement().signature()) if entitlement is not None else None,
+            signature=access_signature if entitlement is not None else None,
         )
 
     def _build(self) -> None:
@@ -553,6 +566,7 @@ class UserSpace:
             working_directory=workdir,
             customize=self.personal_agents.apply if self.personal_agents is not None else None,
             confined=self.require_isolation,
+            credentials=lambda: self.model_access.credentials,
             extras=functools.partial(self._extra_systems, workdir),
             admin=self.admin,
         )

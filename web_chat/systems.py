@@ -114,21 +114,26 @@ class SystemRegistry:
         working_directory: Optional[str] = None,
         customize: Optional[Callable[[str, Config], set[str]]] = None,
         confined: bool = False,
+        credentials: Optional[Callable[[], Any]] = None,
         extras: Optional[Callable[[], List[ExtraSystem]]] = None,
         admin: bool = True,
     ) -> None:
         """``customize(system_key, config)`` adjusts a system's config once, when
         it is first loaded - the space's personal agents (web_chat.personal_agents) -
         and returns the agent keys it changed. ``confined``: the space isolates
-        its agents whatever a config says (core.tool_check.diagnose). ``extras()``
-        lists the systems of this space only (:class:`ExtraSystem`); it is asked
-        again by :meth:`refresh_extras`. ``admin`` False hides the catalog's
-        ``admins_only`` systems: they are not listed, pinned or routed to."""
+        its agents whatever a config says (core.tool_check.diagnose).
+        ``credentials()`` is the space's credential source: the health check asks
+        it, so a key the user stored counts as a key, not a missing one.
+        ``extras()`` lists the systems of this space only (:class:`ExtraSystem`);
+        it is asked again by :meth:`refresh_extras`. ``admin`` False hides the
+        catalog's ``admins_only`` systems: they are not listed, pinned or routed
+        to."""
         self._base_config = base_config
         self._build_factory = build_factory
         self._build_factory_for_key = build_factory_for_key
         self._customize = customize
         self._confined = confined
+        self._credentials = credentials
         # The configs customized so far, by system key.
         self._customized: Dict[str, Config] = {}
         self._catalog = catalog
@@ -327,7 +332,12 @@ class SystemRegistry:
             requires = list(extra.requires)
         else:
             requires = self._router.system_requires(system_key) if self.has_catalog else []
-        issues = diagnose(self.config(system_key), requires=requires, confined=self._confined)
+        issues = diagnose(
+            self.config(system_key),
+            requires=requires,
+            confined=self._confined,
+            credentials=self._credentials() if self._credentials is not None else None,
+        )
         self._issues[system_key] = (time.monotonic(), issues)
         return issues
 

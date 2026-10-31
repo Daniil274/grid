@@ -218,7 +218,8 @@ def test_every_configured_subscription_and_key_is_listed_and_unreadable_ones_say
     vault = Vault(stored=("openrouter", "openai"))
     sources = by_id(snapshot_of(vault).snapshot(admin()))
     assert set(sources) == {
-        "claude-code", "chatgpt", "key:openrouter", "key:openai", "key:opencode-go", "server:engine",
+        "claude-code", "chatgpt", "key:kimi", "key:openrouter", "key:openai", "key:opencode-go",
+        "server:engine",
     }  # an admin may bring any credential, so every preset key is listed
     assert sources["claude-code"]["status"] == "unknown"
     assert sources["claude-code"]["action"]["costs_quota"] is True
@@ -681,21 +682,25 @@ async def test_a_probe_closes_the_cli_stream_as_soon_as_it_has_the_report():
     assert runner.closed  # its process is terminated now, not at garbage collection
 
 
-def test_the_shipped_catalog_hands_the_usage_page_its_systems_claude_code_models():
-    # The catalog names only its router and policy models: the Claude Code
-    # models live in the systems' configs, and without them the page never
-    # showed the Claude Code subscription at all.
+def test_the_shipped_catalog_hands_the_usage_page_its_systems_models():
+    # The catalog names only its router and policy models: the systems' own
+    # models live in their configs, and without them the page never showed the
+    # providers those systems run on.
     from pathlib import Path
 
     from web_chat.deployment import Deployment
 
     routing = Path(__file__).resolve().parents[1] / "deploy" / "routing.yaml"
     merged = Deployment(routing_path=str(routing)).usage_config()
-    assert merged.providers["claude-code"].auth == "claude"
-    assert merged.models["sonnet-5-5"].provider == "claude-code"
+    # The engineer runs Kimi on its own API now, not through OpenRouter: the page
+    # must show the provider whose key actually pays for it.
+    assert merged.models["kimi-k3.1-pro"].provider == "kimi"
+    assert merged.providers["kimi"].name == "kimi"
+    # OpenCode is the systems' own provider: the catalog alone does not name it.
+    assert merged.providers["opencode"].name == "opencode"
+    assert merged.models["deepseek-flash-latest"].provider == "opencode"
     snapshot = UsageSnapshot(
         lambda: Plans(lambda: CONFIG), lambda: merged, vault=Vault(), clock=lambda: NOW,
         local_cli_login=lambda: True,
     )
-    assert "claude-code" in by_id(snapshot.snapshot(admin()))
-    assert "claude-code" not in by_id(snapshot.snapshot(user()))
+    assert "server:opencode" in by_id(snapshot.snapshot(admin()))

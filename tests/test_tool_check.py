@@ -247,3 +247,49 @@ def test_beads_directory_is_relative_to_the_working_directory(tmp_path):
     assert _resolve_directory(context, "sub") == str((tmp_path / "sub").resolve())
     with pytest.raises(ValueError):
         _resolve_directory(context, "../outside")
+
+
+def test_beads_default_directory_uses_the_chats_shared_tracker(tmp_path):
+    workspace = tmp_path / "chat"
+    tracker = tmp_path / "shared"
+    factory = SimpleNamespace(
+        config=SimpleNamespace(get_working_directory=lambda: str(workspace)),
+        tracker_directory=str(tracker),
+        container_id=None,
+    )
+    context = SimpleNamespace(context=SimpleNamespace(factory=factory))
+
+    assert _resolve_directory(context, ".") == str(tracker)
+    # The former auto-run setting bypassed the shared tracker and initialized
+    # a fresh embedded Dolt database in every new chat's workspace.
+    assert _resolve_directory(context, "/") == str(workspace.resolve())
+
+
+def test_the_health_check_asks_who_can_actually_serve_the_model(tmp_path):
+    """A key the user stored (Settings → Credentials) is a credential: the
+    check must ask the same source the agents are built from, or it warns about
+    a missing environment variable while the model works fine."""
+    config = _config(tmp_path, agents={"a": []}, tools={}, api_key=None)
+
+    class Source:
+        def __init__(self, ready, reason=""):
+            self.ready = ready
+            self.reason = reason
+
+        def available(self, provider):
+            return self.ready
+
+        def problem(self, provider):
+            return self.reason
+
+    [environment] = [issue for issue in diagnose(config) if issue.kind == ENVIRONMENT]
+    assert "GRID_TEST_MISSING_KEY" in environment.problem
+    assert environment.hint == "Export the API key in the environment or .env"
+
+    assert diagnose(config, credentials=Source(True)) == []
+
+    # Without a credential the reason is the source's own, and the fix names
+    # the place a user can actually put the key.
+    [environment] = diagnose(config, credentials=Source(False, "No credential for provider 'p' on your plan."))
+    assert "No credential for provider 'p' on your plan." in environment.problem
+    assert "Add your own key in the settings" in environment.hint
