@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim AS node-tools
 ARG CODEGRAPH_VERSION=1.6.0
 RUN npm install --global "@colbymchenry/codegraph@${CODEGRAPH_VERSION}"
 
-FROM python:3.11-slim
+FROM python:3.15-slim
 
 ARG GRID_UID=1000
 ARG GRID_GID=1000
