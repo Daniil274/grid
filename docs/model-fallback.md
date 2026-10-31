@@ -46,11 +46,11 @@
 
 | Система | Агент | Цепочка |
 |---|---|---|
-| engineering (`examples/coder/config.yaml`) | engineer | `kimi-k3.1-pro` (Kimi, прямой Moonshot API) → `gpt-6-luna` (ChatGPT) → `deepseek-flash-latest` (OpenCode) |
+| engineering (`examples/coder/config.yaml`) | engineer | `kimi-k3.1-pro` (Kimi Code, подписка Kimi Plus) → `gpt-6-luna` (ChatGPT) → `deepseek-flash-latest` (OpenCode) |
 | engineering | general_purpose | `deepseek-flash-latest` (OpenCode) → `gpt-6-luna` (ChatGPT) |
 | engineering | web_spider | `glm-flash` (OpenCode) → `gpt-6-luna` (ChatGPT) |
-| pipeline (`examples/coordinator-pipeline/config.yaml`) | coordinator | `gpt-6-astra` (ChatGPT) → `kimi-k3.1-pro` (Kimi) → `gemini-4-argon` (OpenRouter) |
-| builder (`examples/system-builder/config.yaml`) | builder | `glm-latest` → `glm-flash` (OpenCode) → `kimi-k3.1-pro` (Kimi) |
+| pipeline (`examples/coordinator-pipeline/config.yaml`) | coordinator | `gpt-6-astra` (ChatGPT) → `kimi-k3.1-pro` (Kimi Code) → `gemini-4-argon` (OpenRouter) |
+| builder (`examples/system-builder/config.yaml`) | builder | `glm-latest` → `glm-flash` (OpenCode) → `kimi-k3.1-pro` (Kimi Code) |
 | artex-explorer (`systems/artex-explorer/config.yaml`) | main, worker, verifier | `deepseek-flash-latest` → `glm-flash` (OpenCode) → `kimi-k3.1-pro` (OpenRouter) |
 | artex-explorer | decomposer | `glm-flash` → `deepseek-flash-latest` (OpenCode) → `kimi-k3.1-pro` (OpenRouter) |
 
@@ -62,7 +62,8 @@
 
 | Провайдер в конфиге | `api_key_env` | Чем закрывается |
 |---|---|---|
-| `kimi` | `MOONSHOT_API_KEY` | свой ключ в Settings → Credentials (тип `kimi`) или переменная окружения |
+| `kimi-code` | `KIMI_CODE_API_KEY` | ключ из консоли Kimi Code (kimi.com/code/console) в Settings → Credentials (тип `kimi-code`) или переменная окружения; его оплачивает подписка Kimi Plus |
+| `kimi` | `MOONSHOT_API_KEY` | ключ Open Platform: отдельный предоплаченный баланс, подписка Kimi Plus его не покрывает |
 | `opencode` | `OPENCODE_API_KEY` | свой ключ в Settings → Credentials (тип `opencode-go`) или переменная окружения |
 | `openrouter` | `OPENROUTER_API_KEY` | то же для `openrouter` |
 | `chatgpt` | — (`auth: chatgpt`) | вход по подписке ChatGPT; API-ключа у этого маршрута нет |
@@ -98,9 +99,33 @@ after their usage limit resets or use an API key instead.» Квота план�
 Практический вывод: в цепочке, где резерв — подписка ChatGPT, резерва нет.
 Он остаётся в конфигах как второй маршрут (`tests/test_fallback_config.py`
 требует трёх разных провайдеров у инженера), но полагаться на него нельзя:
-рабочий резерв — ключи `kimi` и `opencode`. Если подписка не нужна вовсе,
+рабочий резерв — ключи `kimi-code` и `opencode`. Если подписка не нужна вовсе,
 её строку в цепочке и блок `chatgpt` в `providers` можно убрать — тогда
 цепочка обязана пересекать границу провайдера другими моделями.
+
+### Kimi Plus и Kimi Open Platform — разные счета
+
+Подписка Kimi Plus (и любая платная подписка kimi.com) оплачивает **Kimi
+Code**: `https://api.kimi.ai/coding/v1`, ключ из консоли Kimi Code, модель
+называется коротким id `k3.1-pro`. Open Platform (`https://api.moonshot.ai/v1`,
+ключ из platform.kimi.ai) — отдельный предоплаченный баланс: ключ подписки там
+отвечает 401, а ключ Open Platform с нулевым балансом отвечает на каждый
+запрос `429 exceeded_current_quota_error` («account is suspended due to
+insufficient balance»). Поэтому провайдер в конфигах — `kimi-code`, а не
+`kimi`: маршрут обязан совпадать с тем счётом, который у пользователя есть.
+
+`k3.1-pro` работает только с включённым thinking (`low`/`high`/`max`, по
+умолчанию `high`): запрос с выключенным thinking отклоняется (400), а
+неверный id модели молча откатывается на другую модель — поэтому id в конфиге
+короткий и точный. Окно в 1M открывается на старших планах; в конфиге
+объявлено 262144, чтобы сжатие начиналось раньше, чем ответ упрётся в предел
+плана.
+
+Проверка ключа в Settings → Credentials для `kimi-code` — не только
+`GET /models`: после него уходит один короткий запрос к `k3.1-pro`
+(`web_chat/credentials_api.py`, `VERIFY_MODELS`), и «ключ сохранён» значит,
+что модель действительно отвечает. Отказ по балансу возвращается как
+`402` с `code: quota_exceeded`, а не как «connected».
 
 ### Что конфиг не доказывает
 

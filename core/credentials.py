@@ -129,6 +129,9 @@ def pool_environment(pool: Mapping[str, str], environ: Optional[Mapping[str, str
 #: provider or points it at.
 PROVIDER_PRESETS: Dict[str, str] = {
     "kimi": "https://api.moonshot.ai/v1",
+    # The Kimi Plus membership pays for Kimi Code, not for the Open Platform:
+    # a key made in the Kimi Code console works here and nowhere else.
+    "kimi-code": "https://api.kimi.ai/coding/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "openai": "https://api.openai.com/v1",
     "opencode-go": "https://opencode.ai/zen/go/v1",

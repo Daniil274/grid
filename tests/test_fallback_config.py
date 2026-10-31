@@ -76,15 +76,28 @@ def test_a_paid_openrouter_route_is_never_the_only_way_out(relative_path, agents
 
 
 def test_engineer_chain_crosses_three_providers():
-    """Direct Kimi, then ChatGPT, then OpenCode: no single provider ends a run."""
+    """Kimi Code, then ChatGPT, then OpenCode: no single provider ends a run."""
     config = _config("examples/coder/config.yaml")
     keys, providers = _chain(config, "engineer")
 
     assert keys == ["kimi-k3.1-pro", "gpt-6-luna", "deepseek-flash-latest"]
-    assert providers == ["kimi", "chatgpt", "opencode"]
+    assert providers == ["kimi-code", "chatgpt", "opencode"]
     assert len(set(providers)) == len(providers), (
         "each engineer model must belong to its own provider"
     )
+
+
+def test_the_kimi_route_is_the_one_a_plus_membership_pays_for():
+    """A Kimi Plus subscription covers Kimi Code, not the Open Platform: the
+    provider a config names must be the account the user can actually spend."""
+    config = _config("examples/coder/config.yaml")
+    provider = config.get_provider(config.get_model("kimi-k3.1-pro").provider)
+
+    assert provider.base_url.rstrip("/") == "https://api.kimi.ai/coding/v1"
+    assert provider.api_key_env == "KIMI_CODE_API_KEY"
+    # The Kimi Code API takes the short id; the version name falls back to
+    # another model there without an error.
+    assert config.get_model("kimi-k3.1-pro").name == "k3.1-pro"
 
 
 def test_builder_reserve_crosses_providers():
@@ -93,7 +106,7 @@ def test_builder_reserve_crosses_providers():
 
     assert keys[0] == "glm-latest", "the primary model stays as it was"
     assert providers[0] == "opencode"
-    assert "kimi" in providers, "the last resort crosses the OpenCode provider"
+    assert "kimi-code" in providers, "the last resort crosses the OpenCode provider"
 
 
 def test_artex_chains_start_on_opencode_and_keep_a_cross_provider_reserve():

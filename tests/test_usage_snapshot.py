@@ -218,7 +218,7 @@ def test_every_configured_subscription_and_key_is_listed_and_unreadable_ones_say
     vault = Vault(stored=("openrouter", "openai"))
     sources = by_id(snapshot_of(vault).snapshot(admin()))
     assert set(sources) == {
-        "claude-code", "chatgpt", "key:kimi", "key:openrouter", "key:openai", "key:opencode-go",
+        "claude-code", "chatgpt", "key:kimi", "key:kimi-code", "key:openrouter", "key:openai", "key:opencode-go",
         "server:engine",
     }  # an admin may bring any credential, so every preset key is listed
     assert sources["claude-code"]["status"] == "unknown"
@@ -692,10 +692,10 @@ def test_the_shipped_catalog_hands_the_usage_page_its_systems_models():
 
     routing = Path(__file__).resolve().parents[1] / "deploy" / "routing.yaml"
     merged = Deployment(routing_path=str(routing)).usage_config()
-    # The engineer runs Kimi on its own API now, not through OpenRouter: the page
-    # must show the provider whose key actually pays for it.
-    assert merged.models["kimi-k3.1-pro"].provider == "kimi"
-    assert merged.providers["kimi"].name == "kimi"
+    # The engineer runs Kimi on Kimi Code (what the Plus membership pays for),
+    # not through OpenRouter: the page must show the provider whose key pays.
+    assert merged.models["kimi-k3.1-pro"].provider == "kimi-code"
+    assert merged.providers["kimi-code"].name == "kimi-code"
     # OpenCode is the systems' own provider: the catalog alone does not name it.
     assert merged.providers["opencode"].name == "opencode"
     assert merged.models["deepseek-flash-latest"].provider == "opencode"

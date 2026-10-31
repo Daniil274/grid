@@ -191,7 +191,7 @@ pools:                                   # пул = замена перемен�
 tiers:
   friend:  {pool: friends, limits: {usd_per_day: 5, usd_per_month: 60}}
   new:     {pool: starter, models: ["glm-*", "kimi-*"], limits: {usd_per_day: 0.5, usd_per_turn: 0.1}}
-  byok:    {own_credentials: [openrouter, openai, opencode-go]}
+  byok:    {own_credentials: [openrouter, openai, opencode-go, kimi-code]}
   chatgpt: {own_credentials: [chatgpt], models: ["gpt-*"]}
 default_tier: new
 pricing: {prices_file: prices.json, unknown_price: {input: 5, output: 15}}

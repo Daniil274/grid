@@ -45,12 +45,15 @@ settings:
  
 # API Providers
 providers:
-  kimi:
-    name: "kimi"
-    base_url: "https://api.moonshot.ai/v1"
-    api_key_env: "MOONSHOT_API_KEY"
+  # A Kimi Plus membership pays for Kimi Code, not for the Open Platform: the
+  # key is made in the Kimi Code console (kimi.com/code/console). The Open
+  # Platform (api.moonshot.ai) is a separate, prepaid balance.
+  kimi-code:
+    name: "kimi-code"
+    base_url: "https://api.kimi.ai/coding/v1"
+    api_key_env: "KIMI_CODE_API_KEY"
     timeout: 300
-    max_retries: 3
+    max_retries: 1
 
   lm-studio:
     name: "lm-studio"
@@ -70,12 +73,14 @@ providers:
 # Models
 models:
   kimi-k3.1-pro:
-    name: "kimi-k3.1-pro"
-    provider: "kimi"
+    # The short model id the Kimi Code API takes; a wrong id there falls back
+    # to another model without saying so.
+    name: "k3.1-pro"
+    provider: "kimi-code"
     max_tokens: 64000
-    context_window: 272000
+    context_window: 262144
     preserve_reasoning_content: true
-    description: "Kimi K3.1 Pro, Moonshot's flagship reasoning model"
+    description: "Kimi K3.1 Pro over Kimi Code (Kimi Plus membership)"
 
   gemini-3-pro:
     name: "google/gemini-3-pro-preview"

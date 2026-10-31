@@ -199,6 +199,20 @@ class TestAgentFactory:
 
     def test_all_models_failed_is_not_retried(self):
         assert not is_retriable(AllModelsFailedError("all failed"))
+
+    def test_a_spent_account_is_not_retried(self):
+        """A 429 that names a spent account does not clear by waiting: the same
+        model would answer the same way, and the chain behind it can work."""
+        assert not is_retriable(
+            AgentError(
+                "Error code: 429 - {'error': {'type': 'exceeded_current_quota_error', "
+                "'message': 'Your account is suspended due to insufficient balance, "
+                "please recharge your account or check your plan and billing details'}}"
+            )
+        )
+        assert not is_retriable(Exception("Error code: 429 - insufficient_quota"))
+        # A bare 429 is still a burst of traffic, and is worth waiting out.
+        assert is_retriable(Exception("Error code: 429 - rate limit reached for requests"))
     
     def test_is_reasoning_model_name(self, config_file):
         """Test reasoning model detection."""

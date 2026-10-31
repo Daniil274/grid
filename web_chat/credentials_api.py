@@ -35,9 +35,21 @@ NO_VAULT = (
 
 #: What each provider preset answers when its key is good. OpenRouter's model list
 #: is public, so its key is checked on the endpoint that describes the key.
-VERIFY_PATHS = {"kimi": "/models", "openrouter": "/key", "openai": "/models", "opencode-go": "/models"}
+VERIFY_PATHS = {
+    "kimi": "/models",
+    "kimi-code": "/models",
+    "openrouter": "/key",
+    "openai": "/models",
+    "opencode-go": "/models",
+}
+#: A key can be accepted and still run nothing: the account is out of balance,
+#: the plan does not include the model, the model id is wrong. A model list
+#: answers none of that, so for these presets one tiny completion is sent as
+#: well, and "saved" then means the model the systems use actually answers.
+VERIFY_MODELS = {"kimi-code": "k3.1-pro"}
 LABELS = {
     "kimi": "Kimi (Moonshot AI)",
+    "kimi-code": "Kimi Code (Kimi Plus)",
     "openrouter": "OpenRouter",
     "openai": "OpenAI API",
     "opencode-go": "OpenCode Go",
@@ -46,9 +58,36 @@ LABELS = {
 #: Key checks one user may make per minute.
 CHECKS_PER_MINUTE = 10
 
+#: The provider's own words for "the key is fine, the account is not": an empty
+#: balance, a suspended account, a plan without the model.
+_QUOTA_MARKERS = (
+    "insufficient balance",
+    "insufficient_quota",
+    "exceeded_current_quota",
+    "suspended",
+    "quota exceeded",
+    "credit",
+    "billing",
+)
+_MODEL_MARKERS = ("model_not_found", "model not found", "does not exist", "no access to the model")
+_PLAN_MARKERS = ("doesn't have access", "does not have access", "plan does not", "upgrade")
+
 
 class KeyRejected(Exception):
-    pass
+    """The provider does not know this key: nothing to store."""
+
+
+class KeyUnusable(Exception):
+    """The key is real, but it cannot run the model the systems ask for.
+
+    Carries a machine-readable ``code`` (``quota_exceeded``,
+    ``model_unavailable``, ``plan_lacks_model``, ``bad_request``) so the panel
+    says what to fix instead of "connected, and nothing works".
+    """
+
+    def __init__(self, message: str, code: str = "unusable") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class KeyBody(BaseModel):
@@ -63,16 +102,81 @@ async def verify_key(
     The address is the preset's, never the user's, and redirects are not followed,
     so the key cannot be sent anywhere else.
     """
-    url = PROVIDER_PRESETS[kind].rstrip("/") + VERIFY_PATHS[kind]
+    base = PROVIDER_PRESETS[kind].rstrip("/")
+    url = base + VERIFY_PATHS[kind]
+    headers = {"Authorization": f"Bearer {secret}"}
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False, transport=transport) as http:
-            response = await http.get(url, headers={"Authorization": f"Bearer {secret}"})
+            response = await http.get(url, headers=headers)
+            _refusal(kind, response)
+            model = VERIFY_MODELS.get(kind)
+            if model is not None:
+                probe = await http.post(
+                    base + "/chat/completions",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "max_tokens": 32,
+                        "stream": False,
+                    },
+                )
+                _refusal(kind, probe, model)
     except httpx.HTTPError as exc:
         raise ConnectionError(f"Could not reach {LABELS[kind]} to check the key: {type(exc).__name__}.") from exc
+
+
+def _error_of(response: httpx.Response) -> tuple[str, str]:
+    """The provider's error ``type``/``code`` and its message, as far as it gives them."""
+    try:
+        error = (response.json() or {}).get("error") or {}
+    except ValueError:
+        return "", response.text[:300]
+    kind = str(error.get("type") or error.get("code") or "")
+    return kind, str(error.get("message") or "")
+
+
+def _refusal(kind: str, response: httpx.Response, model: Optional[str] = None) -> None:
+    """Raise unless *response* says the key (and, for a probe, the model) works."""
+    if response.is_success:
+        return
+    error_kind, message = _error_of(response)
+    text = f"{error_kind} {message}".lower()
+    said = f" {message.strip()}" if message.strip() else ""
     if response.status_code in (401, 403):
-        raise KeyRejected(f"{LABELS[kind]} did not accept this key.")
-    if not response.is_success:  # redirects included: they are never followed
-        raise ConnectionError(f"{LABELS[kind]} answered {response.status_code} when checking the key.")
+        # Kimi Code answers 403 for a key whose plan lacks the model, so the
+        # body decides: a refusal of the key itself is not a plan problem.
+        if any(marker in text for marker in _PLAN_MARKERS) or "access to the model" in text:
+            raise KeyUnusable(
+                f"{LABELS[kind]} accepted the key, but this plan does not include {model or 'that model'}:{said}",
+                code="plan_lacks_model",
+            )
+        raise KeyRejected(f"{LABELS[kind]} did not accept this key.{said}")
+    if any(marker in text for marker in _QUOTA_MARKERS):
+        raise KeyUnusable(
+            f"{LABELS[kind]} accepted the key, but the account cannot run {model or 'the model'}:"
+            f"{said or ' no balance.'} Top up the account or use a key from a plan that includes it.",
+            code="quota_exceeded",
+        )
+    if any(marker in text for marker in _MODEL_MARKERS):
+        raise KeyUnusable(
+            f"{LABELS[kind]} accepted the key, but has no model '{model}':{said}",
+            code="model_unavailable",
+        )
+    if any(marker in text for marker in _PLAN_MARKERS):
+        raise KeyUnusable(
+            f"{LABELS[kind]} accepted the key, but this plan does not include {model or 'that model'}:{said}",
+            code="plan_lacks_model",
+        )
+    if response.status_code in (400, 404, 422) and model is not None:
+        raise KeyUnusable(
+            f"{LABELS[kind]} accepted the key, but refused a request for {model}:{said or f' HTTP {response.status_code}.'}",
+            code="bad_request",
+        )
+    if response.status_code == 429:
+        return  # a real rate limit: the key and the model are fine, try later
+    # redirects included: they are never followed
+    raise ConnectionError(f"{LABELS[kind]} answered {response.status_code} when checking the key.")
 
 
 def listed(kind: str, stored: Optional[dict]) -> dict:
@@ -133,6 +237,13 @@ def register_credential_routes(
             await (verify or verify_key)(kind, secret)
         except KeyRejected as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+        except KeyUnusable as exc:
+            # Typed: the panel shows what to fix, and the key is not stored as
+            # if it worked - a dead account must not look like a connection.
+            return JSONResponse(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                content={"detail": str(exc), "code": exc.code},
+            )
         except ConnectionError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from None
         try:

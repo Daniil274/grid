@@ -76,6 +76,19 @@ _TOOL_CALLS_AS_TEXT = (
     re.compile(r"<function=[^>]+>\s*<parameter="),  # <function=name><parameter=...>
 )
 
+#: A 429 that names a spent account, not a burst of traffic: Kimi answers
+#: ``exceeded_current_quota_error`` ("suspended due to insufficient balance"),
+#: OpenAI ``insufficient_quota``. Waiting does not clear it, so retrying the same
+#: model only delays the fallback to one that can answer. Falling back is still
+#: wanted - this decides retries, not which model runs next.
+_SPENT_ACCOUNT_MARKERS = (
+    "insufficient balance",
+    "insufficient_quota",
+    "exceeded_current_quota",
+    "suspended due to insufficient",
+    "billing details",
+)
+
 
 def is_transient_message(message: str) -> bool:
     """Whether an error's text says the failure will pass."""
@@ -86,6 +99,8 @@ def is_transient_message(message: str) -> bool:
 def is_retriable(exc: BaseException) -> bool:
     """Whether a failed model call is worth another attempt."""
     if isinstance(exc, (AllModelsFailedError, ModelRequestLimit)):
+        return False
+    if any(marker in str(exc).lower() for marker in _SPENT_ACCOUNT_MARKERS):
         return False
     if isinstance(exc, _TRANSIENT_ERRORS):
         return True

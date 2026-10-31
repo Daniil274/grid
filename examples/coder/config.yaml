@@ -110,12 +110,17 @@ compact:
       - web_spider
 
 providers:
-  kimi:
-    name: "kimi"
-    base_url: "https://api.moonshot.ai/v1"
-    api_key_env: "MOONSHOT_API_KEY"
+  # Kimi Code is what a Kimi Plus membership pays for (the Open Platform at
+  # api.moonshot.ai is a separate balance, and a Plus subscription does not
+  # cover it). The key is made in the Kimi Code console: kimi.com/code/console.
+  # One retry only: a spent account answers 429 with the same body every time,
+  # and the chain behind this model can already answer.
+  kimi-code:
+    name: "kimi-code"
+    base_url: "https://api.kimi.ai/coding/v1"
+    api_key_env: "KIMI_CODE_API_KEY"
     timeout: 300
-    max_retries: 3
+    max_retries: 1
   opencode:
     name: "opencode"
     base_url: "https://opencode.ai/zen/go/v1"
@@ -239,15 +244,17 @@ models:
     context_window: 258000
     request_timeout: 300
   kimi-k3.1-pro:
-    name: kimi-k3.1-pro
-    provider: kimi
+    # The Kimi Code API takes the short id, not the model's version name: a
+    # mistyped id there falls back to another model without saying so.
+    name: k3.1-pro
+    provider: kimi-code
     streaming_enabled: true
     preserve_reasoning_content: true
-    # The model reads 1M; the window is declared so that compaction starts
-    # near 200k: 272000 - 64000 answer - 8000 reserves (compact.auto).
+    # 1M is a higher-tier window; the Plus window is declared instead, so that
+    # compaction starts near 190k: 262144 - 64000 answer - 8000 reserves.
     max_tokens: 64000
-    context_window: 272000
-    description: "Kimi K3.1 Pro through the direct Moonshot API"
+    context_window: 262144
+    description: "Kimi K3.1 Pro through Kimi Code (Kimi Plus membership)"
 tools:
   bash_tool:
     type: "function"
@@ -493,7 +500,7 @@ tools:
 agents:
   engineer:
     name: "Engineer"
-    # The strong model is Kimi K3.1 Pro on the direct Kimi API. ChatGPT is the plan that
+    # The strong model is Kimi K3.1 Pro on Kimi Code. ChatGPT is the plan that
     # usually follows, and OpenCode is what keeps the engineer working when both
     # paid routes are out of quota: three providers, so no single one ends the run.
     model: [kimi-k3.1-pro, gpt-6-luna, deepseek-flash-latest]

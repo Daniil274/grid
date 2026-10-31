@@ -144,7 +144,9 @@ export class PlanDrawer {
           ),
       entry.kind === "kimi"
         ? h("span.field__hint", { text: "Direct Kimi API. Moonshot Open Platform usage is billed separately from Kimi Plus." })
-        : null,
+        : entry.kind === "kimi-code"
+          ? h("span.field__hint", { text: "Kimi Code, covered by the Kimi Plus membership. The key is made in the Kimi Code console (kimi.com/code/console); an Open Platform key does not work here." })
+          : null,
     );
   }
 
