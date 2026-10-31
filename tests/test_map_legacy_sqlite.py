@@ -116,13 +116,20 @@ def test_legacy_diagnosis_is_specific_and_safe():
 
 
 def test_container_refusal_uses_the_host_copy_adapter(legacy, monkeypatch):
+    """A container-side refusal is resolved by the host-side adapter on the copy.
+
+    The container is handed the tracker only as a stream; the adapter then
+    reads the host copy, never the project.
+    """
     def run(*args, **kwargs):
         return SimpleNamespace(returncode=1, stdout='', stderr='historical SQLite workspace detected')
     monkeypatch.setattr(map_api.subprocess, 'run', run)
     before = snapshot(legacy)
     trace = map_api.ReadTrace()
-    answer = map_api._run_in_container('synthetic-image', legacy, legacy,
-                                       legacy / '.beads/beads.db', list(map_api.BD_LIST_ARGS), trace)
+    with map_api._tracker_archive(legacy) as archive:
+        answer = map_api._run_in_container('synthetic-image', legacy,
+                                           legacy / '.beads/beads.db', archive,
+                                           list(map_api.BD_LIST_ARGS), trace)
     assert answer['success']
     assert len(answer['data']) == 2
     assert trace.returncode == 1 and trace.reason is None

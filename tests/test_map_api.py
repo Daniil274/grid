@@ -10,12 +10,15 @@ isolation test: a project of one is not found by the other.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
 import shutil
 import stat
 import subprocess
+import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -553,7 +556,7 @@ def test_a_bd_refusal_answers_generically(client, space, bd):
     assert "SECRET" not in response.text and "token" not in response.text
 
 
-def test_a_docker_read_mounts_the_project_read_only_and_pins_the_copy(space, monkeypatch):
+def test_a_docker_read_streams_the_copy_and_mounts_no_host_path(space, monkeypatch):
     root = project(space)
     directory = space.layout.project_spaces / root.id
     monkeypatch.setattr(map_api, "_bd_executable", lambda: None)
@@ -571,102 +574,120 @@ def test_a_docker_read_mounts_the_project_read_only_and_pins_the_copy(space, mon
     command = seen["command"]
     assert command[:4] == ["docker", "run", "--rm", "-i"]
     assert "grid-agent:test" in command
-    project_mount = f"{directory}:{map_api.CONTAINER_PROJECT_DIR}:ro"
-    assert project_mount in command
-    copy_mount = command[command.index(project_mount) + 2]  # past the "-v" before it
-    assert copy_mount.endswith(f":{map_api.CONTAINER_TRACKER_DIR}")
-    assert "-w" in command and command[command.index("-w") + 1] == map_api.CONTAINER_TRACKER_DIR
-    pinned = command[command.index("--db") + 1]
+    # Nothing of this server is mounted, named or made the workdir: the copy
+    # arrives on stdin, so a PrivateTmp /tmp the daemon cannot see is fine.
+    for forbidden in ("-v", "--volume", "--mount", "-w", "--workdir", "--user"):
+        assert forbidden not in command, f"the docker command still carries {forbidden}"
+    assert not any(str(directory) in argument for argument in command)
+    assert map_api.CONTAINER_UNPACK_SCRIPT in command
+    pinned = command[command.index("grid-map") + 1]
     assert pinned == f"{map_api.CONTAINER_TRACKER_DIR}/.beads/beads.db"
+    # The copy is a streamed archive on stdin - not a bytes buffer in memory.
+    stream = seen["kwargs"]["stdin"]
+    assert hasattr(stream, "fileno") and not isinstance(stream, (bytes, bytearray))
     # The command carries only explicit values; the server's environment stays home.
     assert "env" not in seen["kwargs"] and "cwd" not in seen["kwargs"]
 
 
-def _copy_mount_source(command):
-    """The host directory the read mounts at /tracker, from the built command."""
-    mount = next(arg for arg in command if arg.endswith(f":{map_api.CONTAINER_TRACKER_DIR}"))
-    return Path(mount.rsplit(":", 1)[0])
-
-
-def _assert_owner_only(copied, uid):
-    """Every entry of the copy belongs to *uid* and to nobody else."""
-    for path in [copied, *copied.rglob("*")]:
-        info = path.lstat()
-        assert info.st_uid == uid, f"{path} is not owned by {uid}"
-        expected = 0o700 if stat.S_ISDIR(info.st_mode) else 0o600
-        assert stat.S_IMODE(info.st_mode) == expected, f"{path} is not {expected:o}"
-
-
-def test_the_docker_copy_is_the_image_users_owner_only(space, monkeypatch):
-    """The copy is handed to the uid bd runs as; the server's temp tree stays 0700.
-
-    A bind mount keeps host owners: a root server's copy is root's, and uid 1000
-    cannot open it. Here the image's uid is this process's uid (the one the test
-    may chown to), which is enough to prove the copy is given to the image and
-    narrowed to owner-only rather than widened to the world.
-    """
-    root = project(space)
-    directory = space.layout.project_spaces / root.id
-    uid = os.geteuid()
+def _streamed_archive(space, monkeypatch, directory=None):
+    """Run one docker read and return the directory and the tar stdin carried."""
+    if directory is None:
+        directory = space.layout.project_spaces / project(space).id
     monkeypatch.setattr(map_api, "_bd_executable", lambda: None)
     monkeypatch.setattr(map_api, "_docker_bd_available", lambda: True)
     monkeypatch.setattr(map_api, "_get_isolation_image", lambda context=None: "grid-agent:test")
-    monkeypatch.setattr(map_api, "_container_uid", lambda image: uid)
     seen = {}
 
     def run(command, **kwargs):
-        copied = _copy_mount_source(command)
-        seen["copied"] = copied
-        # Production-like temp tree: the server's temporary root is owner-only.
-        assert stat.S_IMODE(copied.parents[1].stat().st_mode) == 0o700
-        assert copied.is_dir() and (copied / ".beads" / "beads.db").is_file()
-        _assert_owner_only(copied, uid)
+        seen["archive"] = kwargs["stdin"].read()
         return SimpleNamespace(returncode=0, stdout="[]", stderr="")
 
     monkeypatch.setattr(map_api.subprocess, "run", run)
     assert map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS)) == {"success": True, "data": []}
-    assert seen["copied"].parents[1].name.startswith("grid-map-")
+    return directory, seen["archive"]
 
 
-def test_a_copy_that_cannot_be_handed_over_runs_as_its_owner(space, monkeypatch):
-    """A non-root server cannot chown to uid 1000: bd runs as the copy's owner.
-
-    Owner-only modes still admit that uid, and the copy is never world-writable.
-    """
-    if os.geteuid() == 0:
-        pytest.skip("as root the copy can be handed to the image user instead")
+def test_the_streamed_archive_is_the_tracker_only_with_safe_names_and_modes(space, monkeypatch):
+    """The archive holds relative, owner-only entries of .beads and nothing else."""
     root = project(space)
     directory = space.layout.project_spaces / root.id
-    monkeypatch.setattr(map_api, "_bd_executable", lambda: None)
-    monkeypatch.setattr(map_api, "_docker_bd_available", lambda: True)
-    monkeypatch.setattr(map_api, "_get_isolation_image", lambda context=None: "grid-agent:test")
-    monkeypatch.setattr(map_api, "_container_uid", lambda image: os.geteuid() + 1)
-    seen = {}
+    (directory / "notes.md").write_text("a project file", encoding="utf-8")
+    before = state(directory)
+    directory, data = _streamed_archive(space, monkeypatch, directory)
+    # The read is read-only towards the project it serves.
+    assert state(directory) == before
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
+        members = archive.getmembers()
+        names = {member.name for member in members}
 
-    def run(command, **kwargs):
-        seen["command"] = list(command)
-        copied = _copy_mount_source(command)
-        # The copy keeps its owner; only that owner's bits are set.
-        _assert_owner_only(copied, os.geteuid())
-        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+    assert members, "the archive is empty"
+    for member in members:
+        name = member.name
+        assert not name.startswith("/") and "\\" not in name, name
+        assert ".." not in Path(name).parts, name
+        assert name.split("/")[0] == ".beads", name
+        # No link of any kind leaves this process, and no owner leaks either.
+        assert not member.issym() and not member.islnk()
+        assert member.uid == 0 and member.gid == 0
+        assert member.uname == "" and member.gname == ""
+        expected = 0o700 if member.isdir() else 0o600
+        assert stat.S_IMODE(member.mode) == expected, f"{name} is not {expected:o}"
+    # Only the tracker tree: the project's own files and tool state stay home.
+    beads = directory / ".beads"
+    assert names == {path.relative_to(directory).as_posix()
+                     for path in [beads, *beads.rglob("*")]}
 
-    monkeypatch.setattr(map_api.subprocess, "run", run)
-    assert map_api._read_tracker(directory, list(map_api.BD_LIST_ARGS)) == {"success": True, "data": []}
-    command = seen["command"]
-    assert command[command.index("--user") + 1] == f"{os.geteuid()}:{os.getegid()}"
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the unpack script runs in the Linux image")
+def test_the_unpack_script_needs_only_stdin_and_then_runs_bd(space, monkeypatch, tmp_path):
+    """The container-side contract, without Docker: stdin -> temp tree -> bd.
+
+    The shipped script itself runs on a fresh directory, with a stub standing in
+    for bd. That is everything the daemon has to deliver, so a host /tmp the
+    daemon cannot see cannot matter here either - the PrivateTmp regression.
+    """
+    real_run = subprocess.run  # the helper patches map_api.subprocess.run itself
+    _directory, data = _streamed_archive(space, monkeypatch)
+    stub = tmp_path / "bd"
+    stub.write_text(
+        '#!/bin/sh\nprintf \'{"cwd":"%s","args":"%s"}\' "$PWD" "$*"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    root = tmp_path / "container"
+    pinned = root / ".beads" / "beads.db"
+    script = map_api.CONTAINER_UNPACK_SCRIPT.replace("/usr/local/bin/bd", str(stub))
+
+    done = real_run(
+        ["sh", "-c", script, "grid-map", str(pinned), *map_api.BD_LIST_ARGS],
+        input=data, capture_output=True, check=False,
+    )
+
+    assert done.returncode == 0, done.stderr
+    seen = json.loads(done.stdout)
+    assert seen["cwd"] == str(root)
+    args = seen["args"].split()
+    assert args[:2] == ["--db", str(pinned)]
+    assert args[2:] == list(map_api.BD_LIST_ARGS)
+    # The database really was unpacked there, owner-only, from the stream alone.
+    assert pinned.is_file()
+    assert stat.S_IMODE(pinned.stat().st_mode) == 0o600
+    for path in root.rglob("*"):
+        assert path.stat().st_uid == os.geteuid()
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not available here")
 def test_a_real_isolation_image_reads_the_ephemeral_copy(tmp_path, monkeypatch):
     """End to end through Docker: build a tracker, then read its temporary copy.
 
-    This is the regression itself where Docker exists: the host may run as root
-    while the image runs as uid 1000, and the read must still answer.
+    This is the regression itself where Docker exists: the copy reaches the
+    image only as the stdin archive, unpacked into the container's own /tmp.
     """
     image = map_api._get_isolation_image(None)
     if not image or map_api._bd_executable() is None:
         pytest.skip("needs the isolation image and a host bd to build a tracker")
-    if map_api._container_uid(image) is None:
+    if subprocess.run(["docker", "image", "inspect", image],
+                      capture_output=True, check=False).returncode:
         pytest.skip(f"the isolation image {image} is not available locally")
     directory = tmp_path / "prjreal"
     directory.mkdir()
@@ -1106,7 +1127,9 @@ def test_without_a_host_bd_the_map_takes_the_isolation_image_path(space, monkeyp
     assert body["tasks"]["reason_code"] is None
     assert [item["id"] for item in body["tasks"]["items"]] == [f"{root.id}-1"]
     assert seen["command"][:3] == ["docker", "run", "--rm"]
-    assert f"{space.layout.project_spaces / root.id}:{map_api.CONTAINER_PROJECT_DIR}:ro" in seen["command"]
+    # The project is not mounted at all: the copy arrives on stdin.
+    assert "-v" not in seen["command"]
+    assert str(space.layout.project_spaces / root.id) not in " ".join(seen["command"])
 
 
 # -- the diagnostic command ------------------------------------------------------

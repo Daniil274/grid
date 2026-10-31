@@ -95,10 +95,18 @@ embedded Dolt пишет служебные файлы даже при `--readon
 вместе с временной папкой.
 
 Если на хосте нет bd (`_find_bd` → не исполняемый файл/не найден в PATH),
-та же копия монтируется в образ изоляции (`GRID_ISOLATION_IMAGE`, по умолчанию
-`grid-agent:latest`), проект монтируется туда только как `:ro`, контейнер
-запускается с `--rm` и ограниченным временем; окружение контейнера задаётся
-явно (`BEADS_DIR`, `BEADS_DB`, `BD_DISABLE_*`, `HOME=/tmp`), а не наследуется.
+та же копия **передаётся в образ изоляции (`GRID_ISOLATION_IMAGE`, по умолчанию
+`grid-agent:latest`) потоком на stdin**: `tar`-архив пишется в
+`tempfile.TemporaryFile` и стримится в контейнер, без большого буфера в памяти.
+Контейнер распаковывает его сам — только сгенерированное дерево `.beads` в
+своём временном каталоге `/tmp/grid-map-tracker`, с относительными именами и
+owner-only режимами (0700/0600) — и запускает закреплённый bd. Никакого
+host bind-mount нет: `docker run` не получает ни `-v`, ни `--mount`, ни `-w`,
+и путь сервера в команду не попадает. Поэтому `PrivateTmp=true` у юнита
+деплоя не ломает чтение: демону не нужно видеть `/tmp` сервера, он видит
+только stdin. Контейнер запускается с `--rm` и ограниченным временем;
+окружение задаётся явно (`BEADS_DIR`, `BEADS_DB`, `BD_DISABLE_*`, `HOME=/tmp`),
+а не наследуется.
 Если нет ни bd, ни docker-запасного пути, карта отвечает
 `tasks.available: false` с внятной причиной.
 
@@ -319,8 +327,14 @@ export PATH=/user/grid/.map-venv/bin:$PATH BD_BIN=/user/grid/.map-bd-runtime
 
 Вариант `test_without_a_host_bd_the_map_takes_the_isolation_image_path`
 убирает bd с PATH и подменяет docker: проверяется, что выбран именно
-fallback — команда `docker run --rm …`, проект смонтирован `:ro`, копия
-трекера смонтирована отдельно, и ответ разобран как обычные задачи.
+fallback — команда `docker run --rm …`, в ней **нет ни одного host mount**
+и ни одного пути сервера, а ответ разобран как обычные задачи. Рядом
+`test_the_streamed_archive_is_the_tracker_only_with_safe_names_and_modes`
+разбирает реальный архив со stdin: только `.beads`, относительные имена,
+owner-only режимы, без ссылок и владельцев; а
+`test_the_unpack_script_needs_only_stdin_and_then_runs_bd` прогоняет сам
+`CONTAINER_UNPACK_SCRIPT` на чистом каталоге с заглушкой вместо bd — это и
+есть регрессия `PrivateTmp`: контейнеру нужен только stdin.
 
 ### 6.4. `python -m web_chat.map_check` — для оператора и для агента
 

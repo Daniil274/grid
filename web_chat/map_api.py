@@ -20,9 +20,13 @@ what it reads stays bounded:
   bounded temporary copy of that tracker, with its home in the same temporary
   tree - embedded Dolt writes lock and journal files even for a ``--readonly``
   list - so neither bd nor Dolt writes inside the project. Without a host bd
-  the same copy is opened by the isolation image. If bd explicitly refuses
-  historical SQLite, a bounded read-only SQLite adapter reads the admitted
-  copy without migrating it. The project itself is only ever mounted read-only;
+  that copy is streamed to the isolation image as a bounded tar archive on
+  stdin and unpacked there into the container's own writable temporary
+  directory: no host path is mounted and the daemon never needs to see the
+  server's /tmp (which ``PrivateTmp=true`` makes private to the server). If bd
+  explicitly refuses historical SQLite, a bounded read-only SQLite adapter
+  reads the admitted
+  copy without migrating it. The project is never opened for writing;
 * processes are the chats of the project, with the run state the rail shows;
 * files are the top level of the project's space, without the tool state
   that lives there (``.beads``, ``.git``, ``.codegraph``, ``.grid``, every
@@ -49,6 +53,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import tarfile
 import tempfile
 import time
 from contextlib import closing
@@ -56,7 +61,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, BinaryIO, Callable, Dict, List, Optional
 from urllib.parse import quote
 
 import yaml
@@ -89,13 +94,25 @@ INHERITED_ENV = ("PATH", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL", "TMPDIR")
 MAX_TRACKER_COPY_BYTES = 128 * 1024 * 1024
 MAX_TRACKER_COPY_ENTRIES = 20_000
 
-#: Where the copy appears inside the isolation image; the project is mounted
-#: read-only beside it and is never the database bd opens.
-CONTAINER_TRACKER_DIR = "/tracker"
-CONTAINER_PROJECT_DIR = "/project"
+#: Where the streamed copy is unpacked inside the isolation image. The container
+#: has a temporary tree of its own; nothing of the host is mounted into it.
+CONTAINER_TRACKER_DIR = "/tmp/grid-map-tracker"
 
-#: How long reading the image's user may take before the copy is run as its owner.
-IMAGE_USER_TIMEOUT_SECONDS = 10.0
+#: What the isolation image runs before bd: unpack the archive it is given on
+#: stdin into that tree, keep every entry readable only by the image's own user,
+#: then exec bd in that directory with the pinned database and the read's args.
+#: ``$1`` is the database path inside the container; the rest is bd's argv.
+CONTAINER_UNPACK_SCRIPT = """\
+set -eu
+pinned=$1
+shift
+root=${pinned%/.beads/*}
+mkdir -p "$root"
+tar -xf - --no-same-owner -C "$root"
+chmod -R u+rwX "$root"
+cd "$root"
+exec /usr/local/bin/bd --db "$pinned" "$@"
+"""
 
 #: How much of bd's own message a log line keeps.
 LOG_LIMIT = 800
@@ -657,70 +674,46 @@ def _tracker_copy(directory: Path, beads: Path, work: Path) -> tuple[Optional[Pa
         return None, ReasonCode.BD_FAILED
 
 
-@functools.lru_cache(maxsize=8)
-def _container_uid(image: str) -> Optional[int]:
-    """The uid the isolation image runs as, or None when it cannot be read.
+def _tracker_archive(copied: Path) -> BinaryIO:
+    """The copy as a streamed tar archive, positioned at its first byte.
 
-    A bind mount keeps the host's owners: a root server's copy is root's, and
-    the image (``USER grid``, uid 1000) cannot even open it. The image knows its
-    own user, so ask it once per image rather than guess a number.
+    The isolation image gets this on stdin and unpacks it itself, so no host
+    path goes to the daemon: with ``PrivateTmp=true`` the server's ``/tmp`` is a
+    different view from the daemon's, and a bind mount of the copy would point
+    at nothing. Streaming keeps the read bounded - the copy is already checked
+    against :data:`MAX_TRACKER_COPY_BYTES` - and never builds the archive in
+    memory.
+
+    Only what :func:`_tracker_copy` admitted goes in: relative names under the
+    copy, no link and no absolute path. Modes are owner-only (0700 directories,
+    0600 files) and owners are reset, so the unpacked tree belongs to whatever
+    user the image runs as.
     """
+    stream = tempfile.TemporaryFile(prefix="grid-map-archive-")
     try:
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--entrypoint", "id", image, "-u"],
-            capture_output=True, text=True, encoding="utf-8", check=False,
-            timeout=IMAGE_USER_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.debug("map: the user of image %s could not be read: %s", image, exc)
-        return None
-    if done.returncode:
-        return None
-    try:
-        return int((done.stdout or "").strip().splitlines()[-1])
-    except (IndexError, ValueError):
-        return None
-
-
-def _host_ids() -> Optional[tuple[int, int]]:
-    """This process's uid and gid, or None where the host has no such ids.
-
-    A Windows Docker Desktop bind mount does not carry Unix owners, so there is
-    nothing to hand over there and the image's own user reads the copy.
-    """
-    getuid, getgid = getattr(os, "geteuid", None), getattr(os, "getegid", None)
-    if not callable(getuid) or not callable(getgid):
-        return None
-    return int(getuid()), int(getgid())
-
-
-def _owner_only(path: Path, uid: int) -> None:
-    """Give one path to *uid* and to nobody else: 0700 for a directory, 0600 otherwise."""
-    info = os.lstat(path)
-    if info.st_uid != uid:
-        os.lchown(path, uid, -1)
-    if stat.S_ISLNK(info.st_mode):
-        return  # a link has no mode of its own; the copy holds none anyway
-    os.chmod(path, 0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
-
-
-def _hand_over_copy(copied: Path, uid: int) -> bool:
-    """Make the ephemeral copy *uid*'s own, owner-only, top to bottom.
-
-    The copy lives inside the server's 0700 temporary root, which no other host
-    user can enter; inside it, only the uid that bd runs as may read or write.
-    False means this process may not give it away (it is not root): the caller
-    then runs bd as the copy's own owner instead.
-    """
-    try:
-        _owner_only(copied, uid)
-        for parent, dirs, files in os.walk(copied):
-            for name in dirs + files:
-                _owner_only(Path(parent) / name, uid)
-    except OSError as exc:
-        logger.warning("map: the tracker copy could not be handed to uid %s: %s", uid, exc)
-        return False
-    return True
+        with tarfile.open(fileobj=stream, mode="w", format=tarfile.GNU_FORMAT) as archive:
+            for parent, dirs, files in os.walk(copied):
+                dirs.sort()
+                for name in dirs + sorted(files):
+                    path = Path(parent) / name
+                    arcname = "/".join(path.relative_to(copied).parts)
+                    info = archive.gettarinfo(str(path), arcname=arcname)
+                    if not info.isdir() and not info.isreg():
+                        # _tracker_copy refuses links already; never ship else.
+                        raise OSError(f"refusing to archive {name}: not a plain file")
+                    info.uid, info.gid = 0, 0
+                    info.uname = info.gname = ""
+                    info.mode = 0o700 if info.isdir() else 0o600
+                    if info.isreg():
+                        with open(path, "rb") as handle:
+                            archive.addfile(info, handle)
+                    else:
+                        archive.addfile(info)
+        stream.seek(0)
+        return stream
+    except BaseException:
+        stream.close()
+        raise
 
 
 def _answer(result: Any, trace: Optional[ReadTrace] = None,
@@ -844,18 +837,17 @@ def _run_on_host(bd: str, cwd: Path, database: Path, args: List[str], home: Path
     return _legacy_sqlite_answer(answer, database, trace) if tuple(args) == BD_LIST_ARGS else answer
 
 
-def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
-                      args: List[str], trace: Optional[ReadTrace] = None,
-                      user: Optional[str] = None) -> dict[str, Any]:
+def _run_in_container(image: str, cwd: Path, database: Path, archive: BinaryIO,
+                      args: List[str], trace: Optional[ReadTrace] = None) -> dict[str, Any]:
     """One pinned read in the isolation image, when this host has no bd.
 
-    Same command as ``tools.beads_tools._run_bd_via_docker_run`` builds, but
-    the database is the temporary copy: the project is mounted read-only as a
-    guard, and bd cannot write to it even if it tried. *user* is only given when
-    the copy cannot be handed to the image's own user: then bd runs as the
-    copy's owner, so owner-only modes still let it in.
+    The command mounts nothing. The admitted copy arrives on stdin as the tar
+    archive of :func:`_tracker_archive`; :data:`CONTAINER_UNPACK_SCRIPT` unpacks
+    it into the container's own writable temporary directory, narrows the modes
+    and execs the pinned bd. So a host ``/tmp`` that the Docker daemon cannot
+    see (``PrivateTmp=true``) cannot break the read, and the project is never
+    mounted at all.
     """
-    # Docker on Windows generally accepts forward slashes in volume specs.
     pinned = Path(CONTAINER_TRACKER_DIR) / database.relative_to(cwd)
     command = [
         "docker", "run", "--rm", "-i",
@@ -866,23 +858,17 @@ def _run_in_container(image: str, project: Path, cwd: Path, database: Path,
         "-e", f"BEADS_DIR={Path(CONTAINER_TRACKER_DIR) / '.beads'}",
         "-e", f"BEADS_DB={pinned}",
         "-e", "HOME=/tmp",
-        "-v", f"{str(project).replace(os.sep, '/')}:{CONTAINER_PROJECT_DIR}:ro",
-        "-v", f"{str(cwd).replace(os.sep, '/')}:{CONTAINER_TRACKER_DIR}",
-        "-w", CONTAINER_TRACKER_DIR,
-    ]
-    if user:
-        command.extend(["--user", user])
-    command.extend([
         image,
         # Stopping the client alone would leave bd running, holding the database.
         "timeout", "-k", "5", str(int(BD_TIMEOUT_SECONDS)),
-        "/usr/local/bin/bd", "--db", str(pinned), *args,
-    ])
+        "/bin/sh", "-c", CONTAINER_UNPACK_SCRIPT, "grid-map", str(pinned), *args,
+    ]
     if trace is not None:
         trace.command = command
     try:
         logger.debug("map: reading the tracker via docker: %s", " ".join(command))
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+        result = subprocess.run(command, stdin=archive, capture_output=True,
+                                text=True, encoding="utf-8",
                                 check=False, timeout=BD_TIMEOUT_SECONDS + 10)
     except subprocess.TimeoutExpired:
         logger.warning("map: bd in the isolation image did not answer in %ss", BD_TIMEOUT_SECONDS)
@@ -947,22 +933,10 @@ def _read_tracker(directory: Path, args: List[str],
             if runner.kind == "host":
                 return _run_on_host(runner.executable or "", copied, pinned, args, home, trace)
             image = runner.image or ""
-            # A bind mount keeps host owners: hand the copy to the image's user,
-            # owner-only. If this process cannot (it is neither root nor that
-            # user), run bd as the copy's owner instead of widening its modes.
-            host = _host_ids()
-            if host is None:
-                return _run_in_container(image, directory, copied, pinned, args, trace)
-            uid = _container_uid(image)
-            if (uid is not None and (uid == host[0] or host[0] == 0)
-                    and _hand_over_copy(copied, uid)):
-                return _run_in_container(image, directory, copied, pinned, args, trace)
-            # Still owner-only: bd will run as that owner, never as the world.
-            _hand_over_copy(copied, host[0])
-            return _run_in_container(
-                image, directory, copied, pinned, args, trace,
-                user=f"{host[0]}:{host[1]}",
-            )
+            # The copy goes in as a stream on stdin, never as a host mount: the
+            # daemon sees no path of this server, so PrivateTmp cannot hide it.
+            with _tracker_archive(copied) as archive:
+                return _run_in_container(image, copied, pinned, archive, args, trace)
     except OSError as exc:
         logger.warning("map: the tracker read of %s could not start: %s", directory.name, exc)
         diagnosis = _os_error_diagnosis(exc)
