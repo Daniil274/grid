@@ -181,6 +181,7 @@ def test_publication_failure_rolls_back_seen_and_retries(store):
     """)
     assert store.run("alice", Space(), NOW)["status"] == "failed"
     assert store.db.execute("SELECT COUNT(*) FROM digest_seen").fetchone()[0] == 0
+    assert store.db.execute("SELECT COUNT(*) FROM digest_pending").fetchone()[0] == 0
     assert store.reports("alice")[0]["report"] is None
     store.db.execute("DROP TRIGGER fail_publish")
     assert report(store, now=NOW + BACKOFF)["coverage"]["processed"] == 3
@@ -376,6 +377,7 @@ def test_interruption_rolls_back_report_and_progress(store, monkeypatch):
         store.run("alice", Space(), NOW)
     assert store.reports("alice") == []
     assert store.db.execute("SELECT COUNT(*) FROM digest_seen").fetchone()[0] == 0
+    assert store.db.execute("SELECT COUNT(*) FROM digest_pending").fetchone()[0] == 0
     monkeypatch.setattr(digest, "analyze", real)
     assert report(store)["coverage"]["processed"] == 3
 
@@ -455,3 +457,213 @@ def test_real_context_schema_and_server_wiring(tmp_path):
         assert client.get("/api/daily-digest", headers=bob).json()["runs"] == []
         assert built == ["alice"]
     assert server.digest.task.done()
+
+
+# V28 regressions: use the production read path, not a fake list() failure.
+def snapshot_space(path):
+    from web_chat.space import UserSpace
+
+    space = Space()
+    space.layout = SimpleNamespace(projects=path)
+    space.project_snapshot = lambda: UserSpace.project_snapshot(space)
+    return space
+
+
+@pytest.mark.parametrize("payload", [b"{broken", b"\xff", b"[]", b'{"projects":{}}',
+                                     b'{"projects":[{}]}'])
+def test_v28_project_snapshot_errors_are_readonly_and_retryable(store, tmp_path, payload):
+    import json
+
+    enable(store)
+    path = tmp_path / "source" / "projects.json"
+    path.parent.mkdir()
+    path.write_bytes(payload)
+    space = snapshot_space(path)
+    assert store.run("alice", space, NOW)["status"] == "failed"
+    assert path.read_bytes() == payload
+    assert list(path.parent.iterdir()) == [path]  # no quarantine/lock/temp files
+    assert not hasattr(space, "_project_store")
+    failed = store.reports("alice")[0]
+    assert failed["report"] is None
+    assert failed["diagnostics"]["errors"] == [{"source": "projects", "code": "project_read_failed"}]
+    assert store.db.execute("SELECT COUNT(*) FROM digest_seen").fetchone()[0] == 0
+    assert store.db.execute("SELECT COUNT(*) FROM digest_pending").fetchone()[0] == 0
+    path.write_text(json.dumps({"projects": [Project("p", "Synthetic").to_dict()]}))
+    r = report(store, space, NOW + BACKOFF)
+    assert r["coverage"]["projects"] == 1
+    assert r["coverage"]["processed"] == 3
+    assert r["coverage"]["errors"] == []
+
+
+def test_v28_project_snapshot_io_failure_does_not_leak_or_create_files(store, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    enable(store)
+    path = tmp_path / "uncreated" / "projects.json"
+    space = snapshot_space(path)
+    read = Path.read_text
+
+    def denied(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("private source path and secret payload")
+        return read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    assert store.run("alice", space, NOW)["status"] == "failed"
+    assert "private" not in str(store.reports("alice"))
+    assert not path.parent.exists()
+    monkeypatch.setattr(Path, "read_text", read)
+    r = report(store, space, NOW + BACKOFF)
+    assert r["coverage"]["projects"] == 0  # missing inventory is healthy
+    assert not path.parent.exists()  # even an empty read does not mkdir
+
+
+def test_v28_already_quarantined_store_is_not_a_healthy_empty_inventory(store, tmp_path):
+    from web_chat.projects import ProjectStore
+
+    enable(store)
+    path = tmp_path / "projects.json"
+    path.write_text("{broken")
+    space = snapshot_space(path)
+    space._project_store = ProjectStore(path)  # pre-existing UI recovery
+    before = sorted(tmp_path.iterdir())
+    assert not path.exists()
+    assert store.run("alice", space, NOW)["status"] == "failed"
+    assert sorted(tmp_path.iterdir()) == before  # digest adds no recovery side effects
+    path.write_text('{"projects": []}')
+    assert report(store, space, NOW + BACKOFF)["coverage"]["projects"] == 0
+
+
+def test_v28_snapshot_reads_fresh_projects_not_cached_store(store, tmp_path):
+    from web_chat.projects import ProjectStore
+
+    enable(store)
+    path = tmp_path / "projects.json"
+    space = snapshot_space(path)
+    space._project_store = ProjectStore(path)
+    writer = ProjectStore(path)
+    writer.create("Written by another worker")
+    r = report(store, space)
+    assert r["coverage"]["projects"] == 1
+    path.write_text("{broken after a successful read")
+    assert store.run("alice", space, NOW + DAY)["status"] == "failed"
+    assert path.exists()
+    assert not list(tmp_path.glob("*.unreadable-*"))
+
+
+def test_v28_pending_fifo_prevents_chat_and_project_starvation_across_restarts(tmp_path):
+    path = tmp_path / "fifo.db"
+    space = Space()
+    space.manager.views = [
+        {"id": cid, "metadata": {}, "messages": [{"role": "user", "content": "wrong waiting"}]}
+        for cid in ("a-chat", "z-chat")]
+    space.projects = [Project("p", "P"), Project("q", "Q")]
+    expected = ["a-chat", "z-chat", "p", "q"]
+    store = DigestStore(path)
+    enable(store, max_records=1)
+    enable(store, "bob", max_records=1)
+    try:
+        for day, source in enumerate(expected):
+            if day:
+                space.manager.views[0]["messages"].append({"role": "user", "content": f"wrong new {day}"})
+                # Editing a waiting project must not lose its position.
+                space.projects[-1].notes = f"waiting edit {day}"
+            r = report(store, space, NOW + day * DAY)
+            assert r["findings"][0]["evidence"]["id"] == source
+            assert r["coverage"]["processed"] == 1
+            assert r["coverage"]["pending"] >= 1
+            store.close()
+            store = DigestStore(path)
+        bob = store.run("bob", Space("bob"), NOW)["report"]
+        assert bob["findings"][0]["evidence"]["id"] == "same-chat-id"
+        assert store.db.execute("SELECT COUNT(*) FROM digest_pending WHERE user_id='alice'").fetchone()[0] > 0
+    finally:
+        store.close()
+
+
+def test_v28_fifo_respects_total_char_budget_and_removed_keys(store):
+    enable(store, max_chars=1000)
+    space = Space()
+    space.projects = []
+    space.manager.views = [
+        {"id": cid, "metadata": {}, "messages": [{"role": "user", "content": "wrong " + "x" * 594}]}
+        for cid in ("a", "z")]
+    assert report(store, space)["findings"][0]["evidence"]["id"] == "a"
+    space.manager.views[0]["messages"].append({"role": "user", "content": "wrong " + "y" * 594})
+    r = report(store, space, NOW + DAY)
+    assert r["findings"][0]["evidence"]["id"] == "z"
+    assert r["coverage"]["processed_chars"] == 600
+    space.manager.views = []
+    assert report(store, space, NOW + 2 * DAY)["coverage"]["pending"] == 0
+    assert store.db.execute("SELECT COUNT(*) FROM digest_pending").fetchone()[0] == 0
+
+
+def test_v28_pending_queue_rolls_back_with_failed_publication(store):
+    enable(store, max_records=1)
+    space = Space()
+    report(store, space)
+    before = [tuple(row) for row in store.db.execute("SELECT * FROM digest_pending ORDER BY sequence")]
+    space.manager.views[0]["messages"].append({"role": "user", "content": "wrong new"})
+    store.db.executescript("""
+        CREATE TRIGGER fail_fifo_publish BEFORE UPDATE OF report ON digest_runs
+        WHEN NEW.report IS NOT NULL BEGIN SELECT RAISE(FAIL, 'synthetic publication failure'); END;
+    """)
+    assert store.run("alice", space, NOW + DAY)["status"] == "failed"
+    assert [tuple(row) for row in store.db.execute("SELECT * FROM digest_pending ORDER BY sequence")] == before
+    store.db.execute("DROP TRIGGER fail_fifo_publish")
+    r = report(store, space, NOW + DAY + BACKOFF)
+    assert r["coverage"]["processed"] == 1
+    assert store.db.execute("SELECT COUNT(*) FROM digest_seen").fetchone()[0] == 2
+
+
+def test_v28_upgrade_existing_ledger_preserves_reports_and_seen(tmp_path):
+    path = tmp_path / "legacy.db"
+    store = DigestStore(path)
+    enable(store)
+    space = Space()
+    first = report(store, space)
+    store.db.execute("DROP TABLE digest_pending")  # original schema without FIFO
+    store.db.commit()
+    store.close()
+    store = DigestStore(path)
+    try:
+        assert store.run("alice", space, NOW)["report"] == first
+        assert report(store, space, now=NOW + DAY)["coverage"]["processed"] == 0
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("char", ["x", "\x00", '"', "я"])
+def test_v28_valid_max_notes_fit_configurable_record_limit(store, tmp_path, char):
+    from web_chat.projects import MAX_DESCRIPTION, MAX_NOTES, MAX_TITLE, ProjectStore
+
+    path = tmp_path / "projects.json"
+    writer = ProjectStore(path)
+    project = writer.create("T" * MAX_TITLE)
+    writer.update(project.id, notes=char * MAX_NOTES)
+    space = snapshot_space(path)
+    space.manager.views = []
+    enable(store)
+    r = report(store, space)
+    assert r["coverage"]["oversized_pending"] == 1
+    enable(store, max_record_chars=262144, max_chars=1000000)
+    r = report(store, space, NOW + DAY)
+    assert r["status"] == "complete"
+    assert r["coverage"]["processed"] == 1
+    assert r["coverage"]["pending"] == 0
+    assert r["findings"][0]["evidence"]["id"] == project.id
+    assert r["coverage"]["processed_chars"] >= MAX_NOTES
+    # Include worst-case JSON escaping and a maximum-sized description as well.
+    writer.update(project.id, description="\x00" * MAX_DESCRIPTION, notes="\x00" * MAX_NOTES)
+    r = report(store, space, NOW + 2 * DAY)
+    assert r["status"] == "complete"
+    assert r["coverage"]["processed"] == 1
+    assert r["coverage"]["processed_chars"] <= 262144
+    assert r["findings"] == []
+
+
+def test_v28_record_limit_extension_keeps_old_settings_and_rejects_overflow():
+    assert Settings(max_record_chars=32000).max_record_chars == 32000
+    assert Settings(max_record_chars=262144).max_record_chars == 262144
+    with pytest.raises(ValueError):
+        Settings(max_record_chars=262145)

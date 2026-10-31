@@ -108,6 +108,7 @@ class ProjectStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._projects: Dict[str, Project] = {}
+        self._load_failed = False
         self._load()
 
     # -- reading ------------------------------------------------------------------
@@ -116,6 +117,27 @@ class ProjectStore:
         with self._lock:
             project = self._projects.get(project_id)
             return _copy(project) if project is not None else None
+
+    @staticmethod
+    def read_snapshot(path: Path, *, missing_ok: bool = True) -> list[Project]:
+        """Strict read-only inventory, without constructor/recovery side effects.
+
+        Writers publish with os.replace, so a reader sees one complete document.
+        Only a missing file means an empty inventory; all other failures propagate.
+        Do not reuse _load here: its UI recovery deliberately renames bad files.
+        """
+        try:
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            if not missing_ok:
+                raise OSError("Project inventory could not be loaded") from None
+            return []
+        if not isinstance(raw, dict) or not isinstance(raw.get("projects"), list):
+            raise TypeError("invalid project inventory")
+        projects = [Project.from_dict(item) for item in raw["projects"]]
+        if len({project.id for project in projects}) != len(projects):
+            raise ValueError("duplicate project identity")
+        return projects
 
     def list(self) -> List[Project]:
         """Every project, in creation order (the order they were written)."""
@@ -239,6 +261,7 @@ class ProjectStore:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
+            self._load_failed = False
             self._projects = {}
             return
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
@@ -253,8 +276,10 @@ class ProjectStore:
             self._set_aside(exc)
             return
         self._projects = projects
+        self._load_failed = False
 
     def _set_aside(self, exc: BaseException) -> None:
+        self._load_failed = True
         """A damaged file: kept beside as ``.unreadable`` and logged, and the space
         starts with no projects - its chats show as "no project" - instead of
         every project route and every chat with a project failing."""

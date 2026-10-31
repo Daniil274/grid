@@ -43,7 +43,7 @@ class Settings:
         if type(self.enabled) is not bool:
             raise ValueError("enabled must be a boolean")
         for name, low, high in (("hour_utc", 0, 23), ("max_records", 1, 2000),
-                                ("max_chars", 1000, 1000000), ("max_record_chars", 100, 32000)):
+                                ("max_chars", 1000, 1000000), ("max_record_chars", 100, 262144)):
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer in {low}..{high}")
@@ -109,7 +109,11 @@ def collect(space: Any) -> tuple[list[Episode], dict]:
         except Exception:  # noqa: BLE001 - record failure, never leak payloads
             coverage["errors"].append({"source": cid, "code": "conversation_read_failed"})
     try:
-        for project in sorted(space.project_store.list(), key=lambda p: p.id):
+        # Real UserSpace supplies a strict, side-effect-free disk snapshot. Keep
+        # the list-only adapter contract for existing embedded/test spaces.
+        snapshot = getattr(space, "project_snapshot", None)
+        projects = snapshot() if snapshot is not None else space.project_store.list()
+        for project in sorted(projects, key=lambda p: p.id):
             coverage["projects"] += 1
             records.append(episode("project", project.id, None, str(project.updated_at),
                                    encoded(project.to_dict())))
@@ -172,6 +176,9 @@ class DigestStore:
             CREATE TABLE IF NOT EXISTS digest_settings(user_id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS digest_seen(user_id TEXT, episode_key TEXT, fingerprint TEXT NOT NULL,
                 PRIMARY KEY(user_id, episode_key));
+            CREATE TABLE IF NOT EXISTS digest_pending(
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+                episode_key TEXT NOT NULL, UNIQUE(user_id, episode_key));
             CREATE TABLE IF NOT EXISTS digest_runs(user_id TEXT, day TEXT, attempts INTEGER NOT NULL DEFAULT 0,
                 next_try REAL NOT NULL DEFAULT 0, error TEXT, report TEXT, diagnostics TEXT,
                 PRIMARY KEY(user_id, day));
@@ -263,6 +270,22 @@ class DigestStore:
                         raise CollectionError(coverage)
                     seen = dict(self.db.execute("SELECT episode_key,fingerprint FROM digest_seen WHERE user_id=?", (user_id,)))
                     changed = [r for r in records if seen.get(r.key) != r.fingerprint]
+                    # Persistent FIFO of first-observed pending keys. New traffic
+                    # cannot jump ahead of yesterday's backlog, even on restart
+                    # or when a waiting episode is edited. Queue changes share
+                    # the report/seen savepoint, including publication rollback.
+                    waiting = dict(self.db.execute(
+                        "SELECT episode_key,sequence FROM digest_pending WHERE user_id=?", (user_id,)))
+                    changed_keys = {r.key for r in changed}
+                    self.db.executemany(
+                        "DELETE FROM digest_pending WHERE user_id=? AND episode_key=?",
+                        [(user_id, key) for key in waiting if key not in changed_keys])
+                    self.db.executemany(
+                        "INSERT OR IGNORE INTO digest_pending(user_id,episode_key) VALUES (?,?)",
+                        [(user_id, r.key) for r in changed if r.key not in waiting])
+                    order = dict(self.db.execute(
+                        "SELECT episode_key,sequence FROM digest_pending WHERE user_id=?", (user_id,)))
+                    changed.sort(key=lambda r: order[r.key])
                     selected: list[Episode] = []
                     chars = 0
                     oversized = 0
@@ -287,6 +310,8 @@ class DigestStore:
                               "notice": "No corrections found does not mean satisfaction. Recommendations require human review. Nothing was changed."}
                     for record in selected:
                         self.db.execute("INSERT OR REPLACE INTO digest_seen VALUES (?,?,?)", (user_id, record.key, record.fingerprint))
+                        self.db.execute("DELETE FROM digest_pending WHERE user_id=? AND episode_key=?",
+                                        (user_id, record.key))
                     self.db.execute("UPDATE digest_runs SET report=?,error=NULL,diagnostics=NULL,next_try=0,attempts=attempts+1 WHERE user_id=? AND day=?",
                                     (encoded(report), user_id, day))
                     result = {"status": "done", "report": report}

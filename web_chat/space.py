@@ -699,6 +699,7 @@ class UserSpace:
             model_access=self.model_access,
         )
         factory.system_builder = self._builder_access()
+        factory.project_store = self.project_store
         # A chat remembers at its own level, its project's and the user's (core.factory.memory),
         # in a file beside the workspace that the agents' commands cannot open.
         factory.memory_scopes = self.memory_scopes
@@ -1597,6 +1598,19 @@ class UserSpace:
         )
 
     # -- projects ---------------------------------------------------------
+    def project_snapshot(self):
+        """Read persisted projects without lazy store recovery or source writes."""
+        path = (
+            self.layout.projects
+            if self.layout is not None
+            else self.conversations_path.parent / "projects.json"
+        )
+        # A UI store may already have quarantined a corrupt file. Its absence
+        # must not turn that known load failure into a healthy empty inventory.
+        store = getattr(self, "_project_store", None)
+        return ProjectStore.read_snapshot(
+            path, missing_ok=not (store is not None and store._load_failed))
+
     @property
     def project_store(self) -> ProjectStore:
         """The space's projects, loaded lazily so a build without projects pays nothing."""
