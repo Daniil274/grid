@@ -60,15 +60,35 @@
 
 /* -- edges: real dependencies, and only those ------------------------------ */
 .gridMap__edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-.gridMap__edge { stroke: var(--tool-search); stroke-width: 1; opacity: .5; stroke-linecap: round; }
+.gridMap__edge { stroke: var(--tool-search); stroke-width: 1; fill: none; opacity: .5; stroke-linecap: round; stroke-linejoin: round; }
+/* The arrow is the direction of the relation, not another colour: a task
+   stands on the one its line starts at. */
+.gridMap__arrow { stroke: none; }
+.gridMap__arrow[data-relation=depends] { fill: var(--tool-search); }
 
 /* -- links: a chat working on a task, quieter than a dependency ------------ */
 .gridMap__links { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-.gridMap__link { stroke-width: 1; fill: none; stroke-linecap: round; opacity: .34; }
+.gridMap__link { stroke-width: 1; fill: none; stroke-linecap: round; stroke-linejoin: round; opacity: .34; }
 /* A last turn touched the task: a thin, solid thread. */
 .gridMap__link[data-relation=turn] { stroke: var(--tool-search); }
 /* A plan mentions it: the same thread, broken. */
 .gridMap__link[data-relation=plan] { stroke: var(--text-3); stroke-dasharray: 3 4; }
+.gridMap__arrow[data-relation=turn] { fill: var(--tool-search); }
+.gridMap__arrow[data-relation=plan] { fill: var(--text-3); }
+
+/* -- the key to the lines: read, never in the way of a node ---------------- */
+.gridMap__legend {
+  position: absolute; display: flex; align-items: center; gap: 12px; padding: 3px 8px;
+  border: 1px solid var(--line); border-radius: 999px; background: rgb(23 26 34 / 82%);
+  font-size: 10px; line-height: 1; color: var(--text-3); white-space: nowrap; pointer-events: none;
+}
+.gridMap__legendItem { display: inline-flex; align-items: center; gap: 5px; }
+.gridMap__legendSample { flex: none; overflow: visible; }
+.gridMap__legendLabel { letter-spacing: .04em; }
+.gridMap__legendLine { fill: none; stroke-width: 1.2; stroke-linecap: round; }
+.gridMap__legendLine[data-relation=turn] { stroke: var(--tool-search); }
+.gridMap__legendLine[data-relation=plan] { stroke: var(--text-3); stroke-dasharray: 3 4; }
+.gridMap__legendLine[data-relation=depends] { stroke: var(--tool-search); opacity: .6; }
 
 /* -- nodes ----------------------------------------------------------------- */
 .gridNode {
@@ -129,6 +149,14 @@
 .gridOverview__link--button:hover { border-color: var(--tool-search); }
 .gridOverview__meta { margin-left: auto; font-size: 10px; color: var(--text-3); flex: none; font-variant-numeric: tabular-nums; }
 
+/* A connection reads as one line: task -> chat, the relation last. */
+.gridOverview__connection { align-items: baseline; gap: 6px; }
+.gridOverview__connectionPair { display: flex; align-items: baseline; gap: 5px; min-width: 0; flex-wrap: wrap; overflow-wrap: anywhere; }
+.gridOverview__connection .gridOverview__link { padding: 4px 0; }
+.gridOverview__arrow { color: var(--text-3); flex: none; }
+.gridOverview__connection[data-relation=plan] .gridOverview__meta { color: var(--text-3); }
+.gridOverview__connection[data-relation=turn] .gridOverview__meta { color: var(--tool-search); }
+
 .gridOverview__body { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
 .gridOverview__detail { font-size: 11px; line-height: 1.35; color: var(--text-3); overflow-wrap: anywhere; }
 
@@ -168,6 +196,8 @@
   /* The canvas is a document at this width: a line between drawn boxes would
      only point at nothing, so the cards carry the step and the count instead. */
   .gridMap__links { display: none; }
+  /* No lines, no key to them; the overview's Connections list does this work. */
+  .gridMap__legend { display: none; }
   .gridMap__region {
     position: relative; left: auto !important; top: auto !important;
     width: 100% !important; height: auto !important; min-height: 0;

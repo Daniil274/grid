@@ -74,7 +74,46 @@ function svgEl(name, attributes = {}) {
   return node;
 }
 
-/** The dependency lines, under the nodes. */
+/** A title inside an SVG element: what a line means, in words. */
+function svgTitle(words) {
+  const node = svgEl("title");
+  node.textContent = words;
+  return node;
+}
+
+/**
+ * One arrowhead per relation, drawn in that relation's own stroke: a
+ * restrained mark at the end a route points at, so a line has a direction.
+ */
+function arrowDefs(markers) {
+  const defs = svgEl("defs");
+  for (const [id, relation] of Object.entries(markers)) {
+    const marker = svgEl("marker", {
+      id,
+      viewBox: "0 0 10 10",
+      refX: 9,
+      refY: 5,
+      markerWidth: 6,
+      markerHeight: 6,
+      markerUnits: "strokeWidth",
+      orient: "auto-start-reverse",
+    });
+    marker.append(svgEl("path", { class: "gridMap__arrow", "data-relation": relation, d: "M 1 1 L 9 5 L 1 9" }));
+    defs.append(marker);
+  }
+  return defs;
+}
+
+/** A routed line: its path, the two ends it joins, and what it means. */
+function routePath(className, route, attributes, words) {
+  const path = svgEl("path", { class: className, d: route.d, ...attributes });
+  path.append(svgTitle(words));
+  return path;
+}
+
+const nameOf = (nodes, id) => nodes.find((node) => node.id === id)?.title ?? id;
+
+/** The dependency routes, under the nodes: one task stands on another. */
 function edgesLayer(geometry) {
   const svg = svgEl("svg", {
     class: "gridMap__edges",
@@ -84,23 +123,26 @@ function edgesLayer(geometry) {
     "aria-hidden": "true",
     focusable: "false",
   });
+  svg.append(arrowDefs({ gridMapArrowDepends: "depends" }));
   for (const edge of geometry.edges) {
     svg.append(
-      svgEl("line", {
-        class: "gridMap__edge",
-        x1: edge.x1,
-        y1: edge.y1,
-        x2: edge.x2,
-        y2: edge.y2,
-        "data-from": edge.from,
-        "data-to": edge.to,
-      }),
+      routePath(
+        "gridMap__edge",
+        edge,
+        {
+          "data-from": edge.from,
+          "data-to": edge.to,
+          "data-relation": edge.relation,
+          "marker-end": "url(#gridMapArrowDepends)",
+        },
+        `${nameOf(geometry.nodes.tasks, edge.to)} depends on ${nameOf(geometry.nodes.tasks, edge.from)}`,
+      ),
     );
   }
   return svg;
 }
 
-/** The task -> chat lines, under the nodes too, each kind in its own stroke. */
+/** The task -> chat routes, under the nodes too, each kind in its own stroke. */
 function linksLayer(geometry) {
   if (!geometry.links?.length) return null;
   const svg = svgEl("svg", {
@@ -111,21 +153,80 @@ function linksLayer(geometry) {
     "aria-hidden": "true",
     focusable: "false",
   });
+  svg.append(arrowDefs({ gridMapArrowTurn: "turn", gridMapArrowPlan: "plan" }));
   for (const link of geometry.links) {
     svg.append(
-      svgEl("line", {
-        class: "gridMap__link",
-        x1: link.x1,
-        y1: link.y1,
-        x2: link.x2,
-        y2: link.y2,
-        "data-relation": link.relation,
-        "data-task": link.from,
-        "data-chat": link.to,
-      }),
+      routePath(
+        "gridMap__link",
+        link,
+        {
+          "data-relation": link.relation,
+          "data-task": link.from,
+          "data-chat": link.to,
+          "marker-end": link.relation === "turn" ? "url(#gridMapArrowTurn)" : "url(#gridMapArrowPlan)",
+        },
+        `${nameOf(geometry.nodes.tasks, link.from)} → ${nameOf(geometry.nodes.processes, link.to)} · ${relationLabel(link.relation)}`,
+      ),
     );
   }
   return svg;
+}
+
+/** The lines the map draws, each with the words it stands for. */
+export const LINE_KEY = [
+  {
+    relation: "turn",
+    label: "Last turn",
+    hint: "A solid line from a task to the chat whose last turn touched it",
+  },
+  {
+    relation: "plan",
+    label: "In plan",
+    hint: "A dashed line from a task to a chat that has it in its plan",
+  },
+  {
+    relation: "depends",
+    label: "Depends on",
+    hint: "An arrow from a task to the one that depends on it",
+  },
+];
+
+function legendSample(relation) {
+  const svg = svgEl("svg", {
+    class: "gridMap__legendSample",
+    width: 26,
+    height: 8,
+    viewBox: "0 0 26 8",
+    "aria-hidden": "true",
+    focusable: "false",
+  });
+  svg.append(svgEl("path", { class: "gridMap__legendLine", "data-relation": relation, d: "M 1 4 L 25 4" }));
+  return svg;
+}
+
+/**
+ * The key to the lines, at rest in the tasks region's title band: it names
+ * each stroke in words and moves no node.
+ */
+export function legendKey(geometry) {
+  return h(
+    "div.gridMap__legend",
+    {
+      "aria-label": "Line key",
+      style: {
+        left: `${geometry.regions.tasks.x + geometry.regions.tasks.width - 356}px`,
+        top: `${geometry.regions.tasks.y + 5}px`,
+      },
+    },
+    ...LINE_KEY.map((row) =>
+      h(
+        "span.gridMap__legendItem",
+        { dataset: { relation: row.relation }, title: row.hint },
+        legendSample(row.relation),
+        h("span.gridMap__legendLabel", { text: row.label }),
+      ),
+    ),
+  );
 }
 
 /**
@@ -196,6 +297,40 @@ export function linkedTaskCount(chat) {
 /** "3 tasks", "1 task", or "" for none: a number is never shown bare. */
 export const linkedTasksLabel = (count) => (count ? `${count} ${count === 1 ? "task" : "tasks"}` : "");
 
+/** The words of each relation, in the map's key and in the overview. */
+const RELATION_LABELS = { turn: "Last turn", plan: "In plan", depends: "Depends on" };
+export function relationLabel(relation) {
+  return RELATION_LABELS[text(relation)] ?? "";
+}
+
+/**
+ * The server's own split of a chat's links: `turn` is how many tasks the
+ * chat's last turn touched, `plan` how many are in its plan. A split it did
+ * not send - or did not send as two counts - is unknown, and unknown is not
+ * zero: nothing is invented about it.
+ */
+export function linkCounts(chat) {
+  const counts = chat?.task_link_counts;
+  if (!counts || typeof counts !== "object") return null;
+  const turn = Number(counts.turn);
+  const plan = Number(counts.plan);
+  if (!Number.isFinite(turn) || !Number.isFinite(plan) || turn < 0 || plan < 0) return null;
+  return { turn: Math.floor(turn), plan: Math.floor(plan) };
+}
+
+/**
+ * "2 touched · 1 planned" when the server split the links, the old total when
+ * it did not, "" when the chat touches nothing at all.
+ */
+export function linkedTasksLabelFor(chat) {
+  const counts = linkCounts(chat);
+  if (!counts) return linkedTasksLabel(linkedTaskCount(chat));
+  const parts = [];
+  if (counts.turn) parts.push(`${counts.turn} touched`);
+  if (counts.plan) parts.push(`${counts.plan} planned`);
+  return parts.join(" · ");
+}
+
 /**
  * One chat of the processes region: active and awaiting approval stand out,
  * and the card carries the last step the chat took and how many tasks it is
@@ -205,13 +340,13 @@ export function processNode(node, origin) {
   const chat = node.item ?? {};
   const status = chat.awaiting_approval ? "Awaiting approval" : chat.active ? "Active" : "Idle";
   const step = stepLabel(chat);
-  const linked = linkedTaskCount(chat);
+  const linked = linkedTasksLabelFor(chat);
   const box = h(
     "a.gridNode.gridNode--process",
     {
       href: chatHref(node.id),
       dataset: { active: String(Boolean(chat.active)), awaiting: String(Boolean(chat.awaiting_approval)) },
-      title: `${node.title} · ${status}${step ? ` · ${step}` : ""}${linked ? ` · ${linkedTasksLabel(linked)}` : ""}${when(chat.updated_at) ? ` · ${when(chat.updated_at)}` : ""}`,
+      title: `${node.title} · ${status}${step ? ` · ${step}` : ""}${linked ? ` · ${linked}` : ""}${when(chat.updated_at) ? ` · ${when(chat.updated_at)}` : ""}`,
     },
     h("span.gridNode__mark", { "aria-hidden": "true", text: chat.awaiting_approval ? "!" : chat.active ? "●" : "○" }),
     h("span.gridNode__title", { text: node.title }),
@@ -221,7 +356,7 @@ export function processNode(node, origin) {
           "span.gridNode__tail",
           {},
           h("span.gridNode__step", { text: step }),
-          linked ? h("span.gridNode__links", { text: linkedTasksLabel(linked) }) : null,
+          linked ? h("span.gridNode__links", { text: linked }) : null,
         )
       : null,
   );
@@ -405,6 +540,9 @@ export function renderMap(container, map, { projectId = "", geometry = null } = 
   const links = linksLayer(placed);
   if (links) canvas.append(links);
   for (const region of ["tasks", "processes", "files"]) canvas.append(regionFrame(region, placed, map, projectId));
+  // The key to the lines rests in the tasks region's title band: it names the
+  // strokes and moves no node.
+  if (placed.edges.length || placed.links.length) canvas.append(legendKey(placed));
   const plane = h("div.gridMap__plane", {}, canvas);
   replace(container, plane);
   fitMap(container, plane, placed);
@@ -464,7 +602,7 @@ const taskLine = (task, projectId) =>
 /** One working chat: where it goes, the last step it took, what that touched. */
 function chatLine(chat) {
   const step = stepLabel(chat);
-  const linked = linkedTaskCount(chat);
+  const linked = linkedTasksLabelFor(chat);
   return h(
     "li.gridOverview__item",
     {},
@@ -474,10 +612,66 @@ function chatLine(chat) {
       {},
       h("a.gridOverview__link", { href: chatHref(chat.chat_id), text: text(chat.title) || text(chat.chat_id) }),
       step || linked
-        ? h("span.gridOverview__detail", { text: [step, linkedTasksLabel(linked)].filter(Boolean).join(" · ") })
+        ? h("span.gridOverview__detail", { text: [step, linked].filter(Boolean).join(" · ") })
         : null,
     ),
     h("span.gridOverview__meta", { text: chat.awaiting_approval ? "Awaiting approval" : "Active" }),
+  );
+}
+
+/** How many connections the overview names before it says "showing X of Y". */
+export const CONNECTIONS_LIMIT = 12;
+
+/**
+ * The task -> chat relations the map really draws, in a stable order: a chat
+ * keeps its place (by id) and so does a task (by creation), so the list never
+ * reshuffles itself between two answers about the same project.
+ */
+export function visibleConnections(geometry) {
+  const tasks = new Map(geometry.nodes.tasks.map((node) => [node.id, node]));
+  const chats = new Map(geometry.nodes.processes.map((node) => [node.id, node]));
+  const chatOrder = new Map(geometry.nodes.processes.map((node, index) => [node.id, index]));
+  const taskOrder = new Map(geometry.nodes.tasks.map((node, index) => [node.id, index]));
+  return (geometry.links ?? [])
+    .filter((link) => tasks.has(link.from) && chats.has(link.to))
+    .map((link) => ({ relation: link.relation, task: tasks.get(link.from), chat: chats.get(link.to) }))
+    .sort((a, b) => chatOrder.get(a.chat.id) - chatOrder.get(b.chat.id) || taskOrder.get(a.task.id) - taskOrder.get(b.task.id));
+}
+
+/** "Task → Chat · Last turn": both ends are links, the relation is a word. */
+const connectionLine = ({ task, chat, relation }, projectId) =>
+  h(
+    "li.gridOverview__item.gridOverview__connection",
+    { dataset: { relation } },
+    h(
+      "span.gridOverview__connectionPair",
+      {},
+      h("a.gridOverview__link", { href: taskHref(projectId, task.id), text: task.title || task.id }),
+      h("span.gridOverview__arrow", { "aria-hidden": "true", text: "→" }),
+      h("a.gridOverview__link", { href: chatHref(chat.id), text: chat.title || chat.id }),
+    ),
+    h("span.gridOverview__meta", { text: relationLabel(relation) }),
+  );
+
+/**
+ * The same relations the lines draw, as words: the alternative to the map
+ * where the lines are hidden - on a phone - and a key to them where they are
+ * not. Dependencies are a different question and are not listed here.
+ */
+function connectionsSection(map, projectId) {
+  const connections = visibleConnections(layoutMap(map));
+  if (!connections.length) return null;
+  const shown = connections.slice(0, CONNECTIONS_LIMIT);
+  return overviewSection(
+    "Connections",
+    h(
+      "ul.gridOverview__list.gridOverview__connections",
+      { "aria-label": "Tasks and the chats that worked on them" },
+      ...shown.map((connection) => connectionLine(connection, projectId)),
+    ),
+    connections.length > shown.length
+      ? h("p.gridOverview__note", { text: `Showing ${shown.length} of ${connections.length}.` })
+      : null,
   );
 }
 
@@ -533,6 +727,11 @@ export function renderOverview(container, map, { projectId = "" } = {}) {
       ),
     );
   }
+
+  // Connections: the relations the lines draw, said in words - the same list
+  // that a phone has instead of the lines.
+  const connections = connectionsSection(map, projectId);
+  if (connections) parts.push(connections);
 
   // Files: how many top-level entries, and the way into the space.
   if (map?.files?.available === false) {

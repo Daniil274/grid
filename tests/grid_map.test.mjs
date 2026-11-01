@@ -107,6 +107,37 @@ const nodesOf = (root, className) => root.findAll(className);
 
 const textOf = (root) => root.textContent;
 
+/** Every straight segment of a routed line, in order. */
+const segmentsOf = (route) => {
+  const points = route.points ?? [];
+  const segments = [];
+  for (let index = 0; index < points.length - 1; index += 1) {
+    segments.push([points[index], points[index + 1]]);
+  }
+  return segments;
+};
+
+/** Whether a segment passes through the inside of a card (its edge is fine). */
+const crosses = (a, b, box) => {
+  const x0 = Math.min(a.x, b.x);
+  const x1 = Math.max(a.x, b.x);
+  const y0 = Math.min(a.y, b.y);
+  const y1 = Math.max(a.y, b.y);
+  return x1 > box.x && x0 < box.x + box.width && y1 > box.y && y0 < box.y + box.height;
+};
+
+/** Whether a point lies on the boundary of a card, not inside it. */
+const onBoundary = (point, box) => {
+  const inside =
+    point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
+  const edge =
+    Math.abs(point.y - box.y) < 1e-9 ||
+    Math.abs(point.y - (box.y + box.height)) < 1e-9 ||
+    Math.abs(point.x - box.x) < 1e-9 ||
+    Math.abs(point.x - (box.x + box.width)) < 1e-9;
+  return inside && edge;
+};
+
 // -- layout: the promise that the map does not rearrange itself ------------------
 
 test("the same task set always gives the same coordinates", () => {
@@ -120,6 +151,15 @@ test("the same task set always gives the same coordinates", () => {
   const shuffled = sampleMap();
   shuffled.tasks.items.reverse();
   assert.deepEqual(taskPlaces(layoutMap(shuffled)), taskPlaces(first));
+});
+
+test("dependency and work routes do not depend on input list order", () => {
+  const first = layoutMap(stressMap());
+  const reversed = stressMap();
+  reversed.tasks.items.forEach((task) => task.depends_on?.reverse());
+  reversed.processes.items.forEach((chat) => chat.task_links?.reverse());
+  assert.deepEqual(layoutMap(reversed).edges, first.edges);
+  assert.deepEqual(layoutMap(reversed).links, first.links);
 });
 
 test("a status change moves nothing", () => {
@@ -293,6 +333,73 @@ test("a new step changes the words of a card, never its place or size", () => {
   assert.match(textOf(processCard(root, "c1")), /40 tasks/);
 });
 
+test("a process card reads the server's own split of its links", () => {
+  const map = sampleMap();
+  map.processes.items[0].task_link_counts = { turn: 2, plan: 1 };
+  map.processes.items[1].task_link_counts = { turn: 1, plan: 0 };
+  const root = el("div");
+  renderMap(root, map, { projectId: "p1" });
+  const working = processCard(root, "c1");
+  assert.match(textOf(working), /2 touched · 1 planned/, "both kinds, in the server's numbers");
+  assert.match(working.getAttribute("title"), /2 touched · 1 planned/);
+  const waiting = processCard(root, "c2");
+  assert.match(textOf(waiting), /1 touched/, "a plan of none is not named");
+  assert.doesNotMatch(textOf(waiting), /planned/);
+  assert.doesNotMatch(textOf(waiting), /7 tasks/, "the split replaces the bare total");
+});
+
+test("unknown counts fall back to the total; a known empty split says nothing", () => {
+  const map = sampleMap();
+  // Half a split is not a split: nothing is invented about the missing half.
+  map.processes.items[0].task_link_counts = { turn: 2 };
+  map.processes.items[1].task_link_counts = null;
+  map.processes.items.push({
+    chat_id: "c4", title: "Chat four", active: false, awaiting_approval: false,
+    task_links: [], task_links_total: 5, task_link_counts: { turn: 0, plan: 0 },
+  });
+  const root = el("div");
+  renderMap(root, map, { projectId: "p1" });
+  assert.match(textOf(processCard(root, "c1")), /2 tasks/, "the old total when the split is unknown");
+  assert.match(textOf(processCard(root, "c2")), /7 tasks/);
+  const empty = processCard(root, "c4");
+  assert.doesNotMatch(textOf(empty), /\d+ (touched|planned|task)/, "an empty split is not dressed up");
+});
+
+test("the map carries a key to its lines, and every line has a direction", () => {
+  const root = el("div");
+  renderMap(root, sampleMap(), { projectId: "p1" });
+  const legend = root.find("gridMap__legend");
+  assert.ok(legend, "the key is there");
+  assert.deepEqual(
+    legend.findAll("gridMap__legendItem").map((item) => item.dataset.relation),
+    ["turn", "plan", "depends"],
+  );
+  assert.match(textOf(legend), /Last turn/);
+  assert.match(textOf(legend), /In plan/);
+  assert.match(textOf(legend), /Depends on/);
+  // The key sits in the title band, where no node can be.
+  const geometry = layoutMap(sampleMap());
+  const top = parseFloat(legend.style.top);
+  assert.ok(top >= geometry.regions.tasks.y && top < geometry.nodes.tasks[0].y, "above the first row of cards");
+
+  const deps = root.findAll("gridMap__edge");
+  assert.equal(deps.length, 2);
+  for (const path of deps) {
+    assert.equal(path.getAttribute("data-relation"), "depends");
+    assert.match(path.getAttribute("marker-end"), /^url\(#/, "a direction, as an arrow");
+    assert.match(path.querySelector("title").textContent, /depends on/);
+    assert.match(path.getAttribute("d"), /^M /);
+  }
+  const lines = root.findAll("gridMap__link");
+  for (const path of lines) {
+    assert.match(path.getAttribute("marker-end"), /^url\(#/);
+    assert.match(path.querySelector("title").textContent, /→|Last turn|In plan/);
+  }
+  const turn = lines.find((path) => path.getAttribute("data-relation") === "turn");
+  const plan = lines.find((path) => path.getAttribute("data-relation") === "plan");
+  assert.notEqual(turn.getAttribute("marker-end"), plan.getAttribute("marker-end"), "each kind points its own way");
+});
+
 test("links join a task to a chat only where both are on the map, once per pair", () => {
   const map = sampleMap();
   map.processes.items[0].task_links = [
@@ -316,12 +423,17 @@ test("links join a task to a chat only where both are on the map, once per pair"
     ["bd-1->bd-2", "bd-1->bd-3"],
   );
 
-  const centre = (node) => ({ x: node.x + node.width / 2, y: node.y + node.height / 2 });
+  // A route meets a card on its boundary, never at its centre: it leaves the
+  // task from its bottom edge and enters the chat through its top one.
   for (const link of geometry.links) {
     const task = geometry.nodes.tasks.find((node) => node.id === link.from);
     const chat = geometry.nodes.processes.find((node) => node.id === link.to);
-    assert.deepEqual({ x: link.x1, y: link.y1 }, centre(task), `${link.from} starts at its task`);
-    assert.deepEqual({ x: link.x2, y: link.y2 }, centre(chat), `${link.to} ends at its chat`);
+    assert.deepEqual(link.points[0], { x: link.x1, y: link.y1 });
+    assert.deepEqual(link.points.at(-1), { x: link.x2, y: link.y2 });
+    assert.equal(link.y1, task.y + task.height, `${link.from} leaves its task's bottom edge`);
+    assert.ok(link.x1 > task.x && link.x1 < task.x + task.width, `${link.from} leaves through a port, not a corner`);
+    assert.equal(link.y2, chat.y, `${link.to} is entered through its top edge`);
+    assert.ok(link.x2 > chat.x && link.x2 < chat.x + chat.width);
   }
 
   // A map whose chats name nothing gets no links at all.
@@ -337,9 +449,14 @@ test("links are drawn under the nodes, a turn and a plan as different lines", ()
   const order = canvas.childNodes.map((child) => {
     if (child.classList.contains("gridMap__edges")) return "edges";
     if (child.classList.contains("gridMap__links")) return "links";
+    if (child.classList.contains("gridMap__legend")) return "legend";
     return `region:${child.dataset.region}`;
   });
-  assert.deepEqual(order, ["edges", "links", "region:tasks", "region:processes", "region:files"], "under every node");
+  assert.deepEqual(
+    order,
+    ["edges", "links", "region:tasks", "region:processes", "region:files", "legend"],
+    "lines under every node, the key over them but in the title band",
+  );
 
   const lines = canvas.findAll("gridMap__link");
   assert.deepEqual(
@@ -354,6 +471,210 @@ test("links are drawn under the nodes, a turn and a plan as different lines", ()
   assert.match(css, /\.gridMap__link\[data-relation=turn\][^{]*\{[^}]*stroke:[^}]*\}/);
   assert.match(css, /\.gridMap__link\[data-relation=plan\][^{]*\{[^}]*stroke-dasharray:[^}]*\}/);
   assert.match(css, /@media \(max-width: 720px\)[^@]*\.gridMap__links \{ display: none; \}/, "the flow layout draws no lines");
+});
+
+/**
+ * A project that puts the routing under stress: several rows of tasks (so the
+ * gaps between them are real), chats in both process columns, and more
+ * relations than any one strip carries alone.
+ */
+function stressMap() {
+  const tasks = [];
+  for (let index = 0; index < 22; index += 1) {
+    tasks.push({
+      id: `bd-${index}`,
+      title: `Task ${index}`,
+      state: index % 5 === 0 ? "blocked" : "ready",
+      created_at: `2026-10-01T00:${String(index).padStart(2, "0")}:00Z`,
+      depends_on: index ? [`bd-${index - 1}`] : [],
+    });
+  }
+  tasks[7].depends_on = ["bd-0", "bd-2"];
+  // A dependency inside one row: it reaches the task's bottom edge, where the
+  // task's own links leave, so the two must not be given the same port.
+  tasks[6].depends_on = ["bd-4", "bd-5"];
+  tasks[21].depends_on = ["bd-1", "bd-9", "bd-14"];
+  const chats = [];
+  for (let index = 0; index < 9; index += 1) {
+    chats.push({
+      chat_id: `c${index}`,
+      title: `Chat ${index}`,
+      active: index % 2 === 0,
+      awaiting_approval: false,
+      steps: [`step ${index}`],
+      task_links: tasks
+        .slice(index, index + 6)
+        .map((task, offset) => ({ task_id: task.id, relation: offset % 2 ? "plan" : "turn" })),
+      task_links_total: 6,
+      task_link_counts: { turn: 3, plan: 3 },
+    });
+  }
+  return sampleMap({
+    tasks: { available: true, reason: null, items: tasks, total: tasks.length, truncated: false },
+    processes: { items: chats, total: chats.length, truncated: false },
+  });
+}
+
+test("every route is orthogonal and no segment crosses a card", () => {
+  const geometry = layoutMap(stressMap());
+  assert.ok(geometry.nodes.tasks.length > 8, "several rows of tasks");
+  assert.ok(geometry.nodes.processes.length > 4, "chats in both process columns");
+  assert.ok(geometry.regions.processes.height > 2 * (92 + 14), "more than one row of chats");
+  assert.ok(geometry.links.length > 15);
+  const boxes = [...geometry.nodes.tasks, ...geometry.nodes.processes, ...geometry.nodes.files];
+  for (const route of [...geometry.edges, ...geometry.links]) {
+    assert.ok(route.points.length >= 2, `${route.from}->${route.to} is a route`);
+    for (const [a, b] of segmentsOf(route)) {
+      assert.ok(a.x === b.x || a.y === b.y, `${route.relation} ${route.from}->${route.to} has a diagonal segment`);
+      for (const box of boxes) {
+        assert.ok(!crosses(a, b, box), `${route.relation} ${route.from}->${route.to} runs through ${box.id}`);
+      }
+    }
+    assert.match(route.d, /^M /, "the path the SVG is drawn from");
+  }
+});
+
+test("a route joins its cards on their boundary, and a turn and a plan keep apart", () => {
+  const geometry = layoutMap(stressMap());
+  const tasks = new Map(geometry.nodes.tasks.map((node) => [node.id, node]));
+  const chats = new Map(geometry.nodes.processes.map((node) => [node.id, node]));
+  for (const edge of geometry.edges) {
+    const from = tasks.get(edge.from);
+    const to = tasks.get(edge.to);
+    assert.ok(onBoundary(edge.points[0], from), `${edge.from} is left on its boundary`);
+    assert.ok(onBoundary(edge.points.at(-1), to), `${edge.to} is entered on its boundary`);
+    assert.equal(edge.relation, "depends", "a dependency is typed as one");
+  }
+  for (const link of geometry.links) {
+    const task = tasks.get(link.from);
+    const chat = chats.get(link.to);
+    assert.ok(onBoundary(link.points[0], task), `${link.from} is left on its boundary`);
+    assert.ok(onBoundary(link.points.at(-1), chat), `${link.to} is entered on its boundary`);
+  }
+  // The corridor between the regions: one lane for a turn, another for a plan.
+  const { tasks: tasksRegion, processes: processesRegion } = geometry.regions;
+  const right = tasksRegion.x + tasksRegion.width;
+  const left = processesRegion.x;
+  const laneOf = (link) => {
+    const point = link.points.find((candidate) => candidate.x > right && candidate.x < left);
+    assert.ok(point, `${link.from}->${link.to} passes through the corridor`);
+    return point.x;
+  };
+  const turns = new Set(geometry.links.filter((link) => link.relation === "turn").map(laneOf));
+  const plans = new Set(geometry.links.filter((link) => link.relation === "plan").map(laneOf));
+  assert.ok(turns.size && plans.size, "both kinds are drawn");
+  for (const turn of turns) {
+    for (const plan of plans) assert.notEqual(turn, plan, "a turn and a plan never share a lane");
+  }
+});
+
+test("no two routes meet one card at the same point of one edge", () => {
+  const geometry = layoutMap(stressMap());
+  const cards = [...geometry.nodes.tasks, ...geometry.nodes.processes];
+  // Every place where a route touches a card, grouped by the card and its edge.
+  const meeting = new Map();
+  const note = (box, point) => {
+    const bottom = Math.abs(point.y - (box.y + box.height)) < 1e-9;
+    const top = Math.abs(point.y - box.y) < 1e-9;
+    if (!bottom && !top) return;
+    const key = `${box.id}:${bottom ? "bottom" : "top"}`;
+    const list = meeting.get(key);
+    if (list) list.push(point.x);
+    else meeting.set(key, [point.x]);
+  };
+  for (const route of [...geometry.edges, ...geometry.links]) {
+    for (const box of cards) {
+      const first = route.points[0];
+      const last = route.points.at(-1);
+      if (onBoundary(first, box)) note(box, first);
+      if (onBoundary(last, box)) note(box, last);
+    }
+  }
+  assert.ok([...meeting.keys()].some((key) => key.endsWith(":bottom")), "routes do use the bottom edges");
+  assert.ok(
+    [...meeting.keys()].some((key) => key.startsWith("bd-6:")),
+    "the task with a same-row dependency and links meets both kinds on its bottom edge",
+  );
+  for (const [key, xs] of meeting) {
+    for (let left = 0; left < xs.length; left += 1) {
+      for (let right = left + 1; right < xs.length; right += 1) {
+        assert.ok(
+          Math.abs(xs[left] - xs[right]) >= 1,
+          `${key} has two routes at one point: ${xs[left]} and ${xs[right]}`,
+        );
+      }
+    }
+  }
+});
+
+test("a same-row dependency and a link out of one task leave by different ports", () => {
+  // The smallest reproducer of the report: two tasks in one row, the second
+  // depending on the first and a chat's last turn on the second.
+  const map = sampleMap({
+    tasks: {
+      available: true,
+      reason: null,
+      items: [
+        { id: "bd-0", title: "Zero", state: "ready", created_at: "2026-10-01T00:00:00Z", depends_on: [] },
+        { id: "bd-1", title: "One", state: "ready", created_at: "2026-10-01T00:01:00Z", depends_on: ["bd-0"] },
+      ],
+      total: 2,
+      truncated: false,
+    },
+    processes: {
+      items: [{ chat_id: "c0", title: "Chat", task_links: [{ task_id: "bd-1", relation: "turn" }] }],
+      total: 1,
+      truncated: false,
+    },
+  });
+  const geometry = layoutMap(map);
+  const task = geometry.nodes.tasks.find((node) => node.id === "bd-1");
+  const dependency = geometry.edges.find((edge) => edge.to === "bd-1");
+  const link = geometry.links.find((entry) => entry.from === "bd-1");
+  assert.ok(dependency && link, "both lines are drawn");
+  assert.equal(task.row, geometry.nodes.tasks.find((node) => node.id === "bd-0").row, "one row");
+
+  const dependencyPort = dependency.points.at(-1);
+  const linkPort = link.points[0];
+  assert.equal(dependencyPort.y, task.y + task.height, "the dependency enters by the bottom edge");
+  assert.equal(linkPort.y, task.y + task.height, "the link leaves by the bottom edge");
+  assert.ok(Math.abs(dependencyPort.x - linkPort.x) >= 1, "one card, two points on that edge");
+
+  // And the two runs along the strip under the row keep a gap: they must not
+  // read as one line that goes on from the dependency into the chat.
+  const stripY = dependency.points[1].y;
+  const dependencyRun = dependency.points.filter((point) => point.y === stripY).map((point) => point.x);
+  const linkRun = link.points.filter((point) => point.y === stripY).map((point) => point.x);
+  assert.ok(dependencyRun.length && linkRun.length, "both runs use the strip under the row");
+  assert.ok(
+    Math.max(...dependencyRun) < Math.min(...linkRun),
+    "the dependency's run ends before the link's begins",
+  );
+
+  // The same answer whatever order the server listed the cards in.
+  const shuffled = clone(map);
+  shuffled.tasks.items.reverse();
+  shuffled.processes.items.reverse();
+  assert.deepEqual(layoutMap(shuffled).edges, geometry.edges);
+  assert.deepEqual(layoutMap(shuffled).links, geometry.links);
+});
+
+test("the geometry of a stress map stays the same when a chat works", () => {
+  const before = layoutMap(stressMap());
+  const later = stressMap();
+  later.processes.items[0].active = true;
+  later.processes.items[0].steps.push("a much longer step that names three tasks at once");
+  const after = layoutMap(later);
+  assert.deepEqual(
+    after.nodes.tasks.map((node) => `${node.id}:${node.x},${node.y}`),
+    before.nodes.tasks.map((node) => `${node.id}:${node.x},${node.y}`),
+  );
+  assert.deepEqual(
+    after.nodes.processes.map((node) => `${node.id}:${node.x},${node.y}`),
+    before.nodes.processes.map((node) => `${node.id}:${node.x},${node.y}`),
+  );
+  assert.deepEqual(after.edges, before.edges);
+  assert.deepEqual(after.links, before.links);
 });
 
 test("no step and no link is invented for a chat that has none", () => {
@@ -379,6 +700,71 @@ test("the overview names the same last step and count for a working chat", () =>
   assert.match(textOf(overview), /7 tasks/);
   // The overview names what is working, not every chat of the project.
   assert.doesNotMatch(textOf(overview), /wrote the tests/);
+});
+
+test("the overview lists the real connections as words, and none it cannot draw", () => {
+  const map = sampleMap();
+  map.processes.items[0].task_links = [
+    ...map.processes.items[0].task_links,
+    { task_id: "bd-404", relation: "turn" },
+    { task_id: "bd-1", relation: "depends" },
+  ];
+  const overview = el("div");
+  renderOverview(overview, map, { projectId: "p1" });
+  const items = nodesOf(overview, "gridOverview__connection");
+  assert.deepEqual(
+    items.map((item) => item.dataset.relation),
+    ["turn", "plan", "turn"],
+    "a stable order - by chat, then by task - and nothing the map cannot draw",
+  );
+  const first = items[0];
+  assert.deepEqual(
+    first.querySelectorAll("a").map((node) => `${node.textContent}:${node.getAttribute("href")}`),
+    ["Alpha:/tasks?project=p1&task=bd-1", "Chat one:/?conversation=c1"],
+    "both ends are the links the rest of the page uses",
+  );
+  assert.match(textOf(first), /→/);
+  assert.match(textOf(first), /Last turn/);
+  assert.match(textOf(items[1]), /In plan/);
+  assert.doesNotMatch(textOf(overview), /bd-404/, "an unseen task is not named");
+  assert.doesNotMatch(textOf(overview), /Depends on/, "a dependency is not listed among the connections");
+});
+
+test("the connection list is bounded and says how much of it is shown", () => {
+  const map = sampleMap();
+  const tasks = Array.from({ length: 20 }, (_, index) => ({
+    id: `bd-t${index}`,
+    title: `Task ${index}`,
+    state: "ready",
+    created_at: `2026-10-01T00:${String(index).padStart(2, "0")}:00Z`,
+    depends_on: [],
+  }));
+  map.tasks = { available: true, items: tasks, total: 20, truncated: false };
+  map.processes.items = [
+    {
+      chat_id: "c1", title: "Chat one", active: true, awaiting_approval: false, steps: ["s"],
+      task_links: tasks.slice(0, 16).map((task) => ({ task_id: task.id, relation: "turn" })),
+      task_links_total: 16,
+    },
+    {
+      chat_id: "c2", title: "Chat two", active: true, awaiting_approval: false, steps: ["s"],
+      task_links: tasks.slice(16).map((task) => ({ task_id: task.id, relation: "plan" })),
+      task_links_total: 4,
+    },
+  ];
+  const overview = el("div");
+  renderOverview(overview, map, { projectId: "p1" });
+  assert.equal(nodesOf(overview, "gridOverview__connection").length, 12);
+  assert.match(textOf(overview), /Showing 12 of 20\./);
+});
+
+test("with no real connection the overview claims none", () => {
+  const map = sampleMap();
+  for (const chat of map.processes.items) chat.task_links = [];
+  const overview = el("div");
+  renderOverview(overview, map, { projectId: "p1" });
+  assert.doesNotMatch(textOf(overview), /Connections/);
+  assert.equal(nodesOf(overview, "gridOverview__connection").length, 0);
 });
 
 test("a result is not a link when the server names no files_url", () => {

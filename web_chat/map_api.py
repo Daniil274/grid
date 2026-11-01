@@ -1106,7 +1106,9 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
                 running = bool(turns.is_running(chat_id))
             except Exception:  # noqa: BLE001
                 running = False
-        steps, links, links_total = _activity(space, chat_id, project_id, running=running)
+        steps, links, links_total, link_counts = _activity(
+            space, chat_id, project_id, running=running
+        )
         items.append(
             {
                 "chat_id": chat_id,
@@ -1117,6 +1119,7 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
                 "steps": steps,
                 "task_links": links,
                 "task_links_total": links_total,
+                "task_link_counts": link_counts,
             }
         )
     # The running chats above the idle ones; newest first; the id breaks a tie.
@@ -1169,13 +1172,24 @@ def _stored_steps(messages: List[Any]) -> List[str]:
     return []
 
 
-def _task_links(plan: Optional[dict[str, Any]], project_id: str) -> tuple[List[dict[str, str]], int]:
-    """The plan's tasks of this project as typed links; the count before the bound.
+def _no_link_counts() -> dict[str, int]:
+    """No task of this project's plan is known to the chat."""
+    return {TURN_RELATION: 0, PLAN_RELATION: 0}
+
+
+def _task_links(
+    plan: Optional[dict[str, Any]], project_id: str
+) -> tuple[List[dict[str, str]], int, dict[str, int]]:
+    """The plan's tasks of this project as typed links; the counts before the bound.
 
     Only a task id that carries the project's own prefix is a link: a plan that
     names a task of another project (or a free-form id) never reaches the map.
     The relation says whether this turn touched the task, never what the task
     says - no title, description or note of a task leaves here.
+
+    The third answer counts the unique valid task ids of each relation over the
+    whole plan, before the :data:`TASK_LINKS_LIMIT` bound: a link is counted
+    once, under its stronger relation, whatever the bound shows.
     """
     prefix = f"{project_id}-"
     by_id: Dict[str, dict[str, str]] = {}
@@ -1191,27 +1205,36 @@ def _task_links(plan: Optional[dict[str, Any]], project_id: str) -> tuple[List[d
                 "relation": relation,
             }
     links = list(by_id.values())
-    return links[:TASK_LINKS_LIMIT], len(links)
+    counts = _no_link_counts()
+    for link in links:
+        counts[link["relation"]] += 1
+    return links[:TASK_LINKS_LIMIT], len(links), counts
 
 
-def _live_activity(turn: Any, project_id: str) -> tuple[List[str], List[dict[str, str]], int]:
+def _live_activity(
+    turn: Any, project_id: str
+) -> tuple[List[str], List[dict[str, str]], int, dict[str, int]]:
     """What a running turn did so far, read through its public methods only."""
     recent = getattr(turn, "recent_steps", None)
     steps = _step_titles(recent() if callable(recent) else [])
     snapshot = getattr(turn, "plan_snapshot", None)
-    links, total = _task_links(snapshot() if callable(snapshot) else None, project_id)
-    return steps, links, total
+    links, total, counts = _task_links(snapshot() if callable(snapshot) else None, project_id)
+    return steps, links, total, counts
 
 
-def _stored_activity(manager: Any, chat_id: str, project_id: str) -> tuple[List[str], List[dict[str, str]], int]:
+def _stored_activity(
+    manager: Any, chat_id: str, project_id: str
+) -> tuple[List[str], List[dict[str, str]], int, dict[str, int]]:
     """What an idle chat's newest stored turn and plan hold, from one read."""
     snapshot = manager.get_context_messages(chat_id, limit=40)
     messages = list((snapshot or {}).get("messages") or [])
-    links, total = _task_links(latest_plan(messages), project_id)
-    return _stored_steps(messages), links, total
+    links, total, counts = _task_links(latest_plan(messages), project_id)
+    return _stored_steps(messages), links, total, counts
 
 
-def _activity(space: Any, chat_id: str, project_id: str, *, running: bool) -> tuple[List[str], List[dict[str, str]], int]:
+def _activity(
+    space: Any, chat_id: str, project_id: str, *, running: bool
+) -> tuple[List[str], List[dict[str, str]], int, dict[str, int]]:
     """A chat's latest steps and task links; none of them worth a failed map.
 
     A running chat is read from its live turn (``recent_steps`` and the live
@@ -1232,7 +1255,7 @@ def _activity(space: Any, chat_id: str, project_id: str, *, running: bool) -> tu
             return _stored_activity(manager(), chat_id, project_id)
     except Exception:  # noqa: BLE001 - activity is a convenience, never a failure
         logger.debug("map: no activity for a chat of %s", project_id, exc_info=True)
-    return [], [], 0
+    return [], [], 0, _no_link_counts()
 
 
 def _modified(mtime: Any) -> Optional[str]:

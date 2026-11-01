@@ -66,6 +66,7 @@ window.ready=true;
               const note = region.querySelector('.gridMap__note');
               const canvas = document.querySelector('.gridMap__canvas');
               const links = document.querySelector('.gridMap__links');
+              const legend = document.querySelector('.gridMap__legend');
               return {overflow: document.documentElement.scrollWidth > innerWidth,
                 transform: getComputedStyle(canvas).transform,
                 regionHeight: region.getBoundingClientRect().height,
@@ -73,6 +74,8 @@ window.ready=true;
                 fonts: [...document.querySelectorAll('.gridMap__note--off')].map(n => parseFloat(getComputedStyle(n).fontSize)),
                 targets: [...document.querySelectorAll('.gridNode')].map(n => n.getBoundingClientRect().height),
                 linksHidden: !links || getComputedStyle(links).display === 'none',
+                legendHidden: !legend || getComputedStyle(legend).display === 'none',
+                connections: document.querySelectorAll('.gridOverview__connection').length,
                 steps: [...document.querySelectorAll('.gridNode__step')].map(n => ({
                   font: parseFloat(getComputedStyle(n).fontSize),
                   clipped: n.scrollWidth > n.clientWidth + 1}))};
@@ -85,6 +88,10 @@ window.ready=true;
             assert metrics['regionHeight'] < 500, metrics
             # A line between boxes means nothing once the canvas is a document.
             assert metrics['linksHidden'], metrics
+            # And with no lines there is no key to them: the overview's list of
+            # connections is what names the relation on a phone.
+            assert metrics['legendHidden'], metrics
+            assert metrics['connections'] >= 1, metrics
             # The step is readable in the flow, at a real size and in full.
             assert metrics['steps'], metrics
             assert all(step['font'] >= 12 for step in metrics['steps']), metrics
@@ -94,4 +101,9 @@ window.ready=true;
         processes = page.locator('[data-region="processes"]').inner_text()
         assert 'Active: drew the process cards' in processes, processes
         assert '1 task' in processes, processes
+        overview = page.locator('#overview').inner_text()
+        assert 'Connections' in overview, overview
+        assert 'Readable synthetic task' in overview, overview
+        assert 'A synthetic working chat' in overview, overview
+        assert 'Last turn' in overview, overview
         browser.close()

@@ -397,6 +397,7 @@ def test_an_idle_chat_shows_its_last_steps_and_its_plans_task_links(client, spac
         {"task_id": f"{root.id}-b", "relation": map_api.TURN_RELATION},
     ]
     assert item["task_links_total"] == 2
+    assert item["task_link_counts"] == {"turn": 1, "plan": 1}
     # What a task or a step says never leaves: only titles and typed links.
     assert "SECRET" not in response.text
     assert "prj-other" not in response.text
@@ -433,6 +434,7 @@ def test_a_running_chat_shows_its_live_turn_and_the_live_plan_replaces_the_store
     ]
     # The live plan replaces the stored one: no step and no link of an older turn.
     assert item["task_links_total"] == 2
+    assert item["task_link_counts"] == {"turn": 1, "plan": 1}
     assert f"{root.id}-old" not in response.text
     assert "A stored step" not in response.text
     assert "SECRET" not in response.text
@@ -456,6 +458,10 @@ def test_steps_and_task_links_are_bounded_while_the_total_counts_all(client, spa
     assert item["steps"] == ["Step 3", "Step 4", "Step 5"]
     assert len(item["task_links"]) == map_api.TASK_LINKS_LIMIT
     assert item["task_links_total"] == map_api.TASK_LINKS_LIMIT + 10
+    # The counts of both relations are exact over the whole plan, not over the
+    # links the bound left: every second task of the sixty is a turn link.
+    every_second = (map_api.TASK_LINKS_LIMIT + 10) // 2
+    assert item["task_link_counts"] == {"turn": every_second, "plan": every_second}
     assert item["task_links"][-1] == {
         "task_id": f"{root.id}-t{map_api.TASK_LINKS_LIMIT - 1:02d}",
         "relation": map_api.PLAN_RELATION,
@@ -478,6 +484,29 @@ def test_duplicate_plan_links_count_once_and_keep_the_stronger_relation(client, 
 
     assert item["task_links"] == [{"task_id": repeated, "relation": map_api.TURN_RELATION}]
     assert item["task_links_total"] == 1
+    assert item["task_link_counts"] == {"turn": 1, "plan": 0}
+
+
+def test_an_empty_or_a_foreign_plan_is_counted_as_no_link(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id), view("chat-2", root.id)]
+    # A chat that left no plan at all, and one whose plan names only tasks of
+    # another project (or free-form ids): neither has a link of this project.
+    space.messages["chat-2"] = [traced({"kind": "plan", "plan": {"tasks": [
+        {"id": "prj-other-1", "turn": True},
+        {"id": "prj-other-2", "turn": False},
+        {"id": "no-prefix", "turn": True},
+        {"id": None, "turn": True},
+        {"turn": True},
+    ]}})]
+
+    items = client.get(f"/api/projects/{root.id}/map").json()["processes"]["items"]
+
+    assert [item["task_link_counts"] for item in items] == [
+        {"turn": 0, "plan": 0},
+        {"turn": 0, "plan": 0},
+    ]
+    assert [item["task_links_total"] for item in items] == [0, 0]
 
 
 def test_a_chat_whose_history_cannot_be_read_still_has_a_map(tmp_path, bd):
@@ -498,6 +527,7 @@ def test_a_chat_whose_history_cannot_be_read_still_has_a_map(tmp_path, bd):
     assert response.status_code == 200
     item = response.json()["processes"]["items"][0]
     assert (item["steps"], item["task_links"], item["task_links_total"]) == ([], [], 0)
+    assert item["task_link_counts"] == {"turn": 0, "plan": 0}
 
 
 def test_files_are_bounded_hidden_entries_excluded(client, space, bd):
