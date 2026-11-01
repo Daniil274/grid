@@ -209,6 +209,14 @@ class AgentTurn:
         """Titles of the turn's latest timeline steps."""
         return [step.get("title", "") for step in self._recorder.snapshot()][-8:]
 
+    def plan_snapshot(self) -> dict[str, Any]:
+        """The plan of this turn, live, as its board holds it now.
+
+        A public read for the map (web_chat.map_api): the tasks the turn's
+        tracker calls changed, and whether this turn touched each of them.
+        """
+        return self._observer.plan_snapshot()
+
     def step_record(self, step_id: str) -> Optional[dict[str, Any]]:
         """A step of this turn with its payloads, for a lazy step opened live."""
         return self._recorder.step_record(step_id)

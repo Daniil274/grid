@@ -24,7 +24,15 @@ def test_mobile_error_and_nodes_fit_without_scaling(width, failed):
                  'reason': "The project's local tracker could not be read.",
                  'diagnosis': {'message': 'The tracker database could not be opened. This alone does not establish corruption; check the server diagnostic.', 'exit_code': 1}}
     data = {'project': {'title': 'Synthetic mobile project'}, 'tasks': tasks,
-            'processes': {'available': True, 'items': []},
+            # A working chat: its card carries the last step and the link count,
+            # which the flow layout must show in full, not as a clipped line.
+            'processes': {'available': True, 'items': [
+                {'chat_id': 'chat-mobile-a', 'title': 'A synthetic working chat',
+                 'active': True, 'awaiting_approval': False,
+                 'steps': ['read the map answer', 'drew the process cards'],
+                 'task_links': [{'task_id': 'prj-mobile-a', 'relation': 'turn'}],
+                 'task_links_total': 1},
+            ]},
             'files': {'available': True, 'items': []}}
     html = '''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/styles/base.css"><link rel="stylesheet" href="/styles/grid.css">
@@ -57,12 +65,17 @@ window.ready=true;
               const region = document.querySelector('[data-region="tasks"]');
               const note = region.querySelector('.gridMap__note');
               const canvas = document.querySelector('.gridMap__canvas');
+              const links = document.querySelector('.gridMap__links');
               return {overflow: document.documentElement.scrollWidth > innerWidth,
                 transform: getComputedStyle(canvas).transform,
                 regionHeight: region.getBoundingClientRect().height,
                 noteFits: !note || note.getBoundingClientRect().bottom <= region.getBoundingClientRect().bottom,
                 fonts: [...document.querySelectorAll('.gridMap__note--off')].map(n => parseFloat(getComputedStyle(n).fontSize)),
-                targets: [...document.querySelectorAll('.gridNode')].map(n => n.getBoundingClientRect().height)};
+                targets: [...document.querySelectorAll('.gridNode')].map(n => n.getBoundingClientRect().height),
+                linksHidden: !links || getComputedStyle(links).display === 'none',
+                steps: [...document.querySelectorAll('.gridNode__step')].map(n => ({
+                  font: parseFloat(getComputedStyle(n).fontSize),
+                  clipped: n.scrollWidth > n.clientWidth + 1}))};
             }''')
             assert not metrics['overflow'], metrics
             assert metrics['transform'] == 'none', metrics
@@ -70,6 +83,15 @@ window.ready=true;
             assert all(size >= 14 for size in metrics['fonts']), metrics
             assert all(height >= 44 for height in metrics['targets']), metrics
             assert metrics['regionHeight'] < 500, metrics
+            # A line between boxes means nothing once the canvas is a document.
+            assert metrics['linksHidden'], metrics
+            # The step is readable in the flow, at a real size and in full.
+            assert metrics['steps'], metrics
+            assert all(step['font'] >= 12 for step in metrics['steps']), metrics
+            assert not any(step['clipped'] for step in metrics['steps']), metrics
         else:
             assert page.locator('.gridMap__region').count() == 3
+        processes = page.locator('[data-region="processes"]').inner_text()
+        assert 'Active: drew the process cards' in processes, processes
+        assert '1 task' in processes, processes
         browser.close()

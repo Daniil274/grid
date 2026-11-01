@@ -62,6 +62,14 @@
 .gridMap__edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .gridMap__edge { stroke: var(--tool-search); stroke-width: 1; opacity: .5; stroke-linecap: round; }
 
+/* -- links: a chat working on a task, quieter than a dependency ------------ */
+.gridMap__links { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.gridMap__link { stroke-width: 1; fill: none; stroke-linecap: round; opacity: .34; }
+/* A last turn touched the task: a thin, solid thread. */
+.gridMap__link[data-relation=turn] { stroke: var(--tool-search); }
+/* A plan mentions it: the same thread, broken. */
+.gridMap__link[data-relation=plan] { stroke: var(--text-3); stroke-dasharray: 3 4; }
+
 /* -- nodes ----------------------------------------------------------------- */
 .gridNode {
   position: absolute; box-sizing: border-box; display: flex; flex-direction: column; gap: 2px;
@@ -74,7 +82,12 @@
 .gridNode:focus-visible { outline: 2px solid var(--tool-search); outline-offset: 1px; }
 .gridNode__mark { font-size: 11px; line-height: 1.1; color: var(--text-3); }
 .gridNode__title { font-size: 12px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
-.gridNode__meta { font-size: 10px; letter-spacing: .04em; color: var(--text-3); text-transform: uppercase; }
+.gridNode__meta { font-size: 10px; line-height: 1.2; letter-spacing: .04em; color: var(--text-3); text-transform: uppercase; }
+
+/* The work behind a process card: the last step, and how much it touches. */
+.gridNode__tail { display: flex; align-items: baseline; gap: 6px; margin-top: auto; min-width: 0; }
+.gridNode__step { flex: 1 1 auto; min-width: 0; font-size: 10px; line-height: 1.25; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gridNode__links { flex: none; font-size: 10px; line-height: 1.25; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .gridNode--task[data-state=ready] { border-color: var(--line-strong); }
 .gridNode--task[data-state=ready] .gridNode__mark { color: var(--text-2); }
@@ -116,6 +129,9 @@
 .gridOverview__link--button:hover { border-color: var(--tool-search); }
 .gridOverview__meta { margin-left: auto; font-size: 10px; color: var(--text-3); flex: none; font-variant-numeric: tabular-nums; }
 
+.gridOverview__body { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.gridOverview__detail { font-size: 11px; line-height: 1.35; color: var(--text-3); overflow-wrap: anywhere; }
+
 .gridPicker__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .gridPicker__link { display: flex; align-items: center; min-height: 44px; color: var(--text); text-decoration: none; border-bottom: 1px solid var(--line); padding: 8px 2px; }
 .gridPicker__link:hover { color: var(--tool-search); }
@@ -149,6 +165,9 @@
     transform: none !important; display: flex; flex-direction: column; gap: 12px;
   }
   .gridMap__edges { display: none; }
+  /* The canvas is a document at this width: a line between drawn boxes would
+     only point at nothing, so the cards carry the step and the count instead. */
+  .gridMap__links { display: none; }
   .gridMap__region {
     position: relative; left: auto !important; top: auto !important;
     width: 100% !important; height: auto !important; min-height: 0;
@@ -163,6 +182,11 @@
     width: 100% !important; height: auto !important; min-height: 70px;
   }
   .gridNode__title { font-size: 14px; }
+  .gridNode__step, .gridNode__links { font-size: 12px; }
+  /* In the flow there is room for the whole step: no truncation to guess at. */
+  .gridNode__tail { flex-wrap: wrap; margin-top: 4px; }
+  .gridNode__step { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+  .gridOverview__detail { font-size: 13px; }
   .gridOverview__note, .gridOverview .gridMap__note {
     font-size: 14px; overflow-wrap: anywhere;
   }

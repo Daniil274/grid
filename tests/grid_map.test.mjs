@@ -37,6 +37,7 @@ const el = (tag) => document.createElement(tag);
 
 const GRID_HTML = fileURLToPath(new URL("../web_chat/grid.html", import.meta.url));
 const INDEX_HTML = fileURLToPath(new URL("../web_chat/index.html", import.meta.url));
+const GRID_CSS = fileURLToPath(new URL("../web_chat/styles/grid.css", import.meta.url));
 
 /** A project as GET /api/projects/{id}/map answers for it. */
 function sampleMap(overrides = {}) {
@@ -58,9 +59,24 @@ function sampleMap(overrides = {}) {
     },
     processes: {
       items: [
-        { chat_id: "c1", title: "Chat one", updated_at: "2026-10-04T10:00:00Z", active: true, awaiting_approval: false },
-        { chat_id: "c2", title: "Chat two", updated_at: "2026-10-04T11:00:00Z", active: true, awaiting_approval: true },
-        { chat_id: "c3", title: "Chat three", updated_at: "2026-10-03T11:00:00Z", active: false, awaiting_approval: false },
+        {
+          chat_id: "c1", title: "Chat one", updated_at: "2026-10-04T10:00:00Z", active: true, awaiting_approval: false,
+          steps: ["read the map answer", "drew the process cards"],
+          task_links: [{ task_id: "bd-1", relation: "turn" }, { task_id: "bd-2", relation: "plan" }],
+          task_links_total: 2,
+        },
+        {
+          chat_id: "c2", title: "Chat two", updated_at: "2026-10-04T11:00:00Z", active: true, awaiting_approval: true,
+          steps: [{ title: "asked for approval" }],
+          task_links: [{ task_id: "bd-2", relation: "turn" }],
+          task_links_total: 7,
+        },
+        {
+          chat_id: "c3", title: "Chat three", updated_at: "2026-10-03T11:00:00Z", active: false, awaiting_approval: false,
+          steps: ["closed the loop", "wrote the tests"],
+          task_links: [],
+          task_links_total: 0,
+        },
       ],
       total: 3,
       truncated: false,
@@ -220,6 +236,149 @@ test("chats link into the chat, files into the project's files", () => {
     nodesOf(root, "gridNode--file").map((node) => node.getAttribute("href")),
     ["/files?context=p1&path=project%2Fdocs", "/files?context=p1&path=project&file=project%2FREADME.md"],
   );
+});
+
+/** Every process node's place and size by chat id: what "does not move" means. */
+const processPlaces = (geometry) =>
+  Object.fromEntries(geometry.nodes.processes.map((node) => [node.id, `${node.x},${node.y},${node.width},${node.height}`]));
+
+const processCard = (root, chatId) =>
+  nodesOf(root, "gridNode--process").find((node) => node.getAttribute("href") === `/?conversation=${chatId}`);
+
+test("a process card carries the last real step and the number of linked tasks", () => {
+  const root = el("div");
+  renderMap(root, sampleMap(), { projectId: "p1" });
+
+  const working = processCard(root, "c1");
+  assert.match(textOf(working), /Active: drew the process cards/, "the last step, phrased as work in progress");
+  assert.doesNotMatch(textOf(working), /read the map answer/, "only the last step, not the whole trace");
+  assert.match(textOf(working), /2 tasks/);
+  assert.match(working.getAttribute("title"), /Active: drew the process cards/);
+  assert.match(working.getAttribute("title"), /2 tasks/);
+
+  // A step may be an object carrying its title; the server's total counts more
+  // links than the visible cards show.
+  const waiting = processCard(root, "c2");
+  assert.match(textOf(waiting), /Active: asked for approval/);
+  assert.match(textOf(waiting), /7 tasks/);
+
+  const idle = processCard(root, "c3");
+  assert.match(textOf(idle), /Last: wrote the tests/, "a chat that rests shows its last step as the last one");
+  assert.doesNotMatch(textOf(idle), /\d+ tasks/, "a chat with no link says nothing about tasks");
+  assert.equal(idle.findAll("gridNode__links").length, 0);
+});
+
+test("a new step changes the words of a card, never its place or size", () => {
+  const before = layoutMap(sampleMap());
+  const later = sampleMap();
+  const chat = later.processes.items[0];
+  chat.steps.push("a much longer step that names a file, a task and an acceptance criterion in full");
+  chat.active = false;
+  chat.awaiting_approval = false;
+  chat.task_links = Array.from({ length: 40 }, (_, index) => ({ task_id: `bd-${index}`, relation: "plan" }));
+  chat.task_links_total = 40;
+  const after = layoutMap(later);
+
+  assert.deepEqual(processPlaces(after), processPlaces(before), "activity and its steps move nothing");
+  assert.deepEqual(after.regions.processes, before.regions.processes);
+  assert.deepEqual(
+    after.nodes.tasks.map((node) => `${node.x},${node.y}`),
+    before.nodes.tasks.map((node) => `${node.x},${node.y}`),
+  );
+  assert.equal(after.height, before.height, "nor does the canvas grow");
+
+  const root = el("div");
+  renderMap(root, later, { projectId: "p1" });
+  assert.match(textOf(processCard(root, "c1")), /Last: a much longer step/);
+  assert.match(textOf(processCard(root, "c1")), /40 tasks/);
+});
+
+test("links join a task to a chat only where both are on the map, once per pair", () => {
+  const map = sampleMap();
+  map.processes.items[0].task_links = [
+    { task_id: "bd-1", relation: "plan" },
+    { task_id: "bd-1", relation: "turn" }, // the same pair again: one line, the turn wins
+    { task_id: "bd-2", relation: "plan" },
+    { task_id: "bd-404", relation: "turn" }, // a task this map does not show
+    { task_id: "bd-3", relation: "invented" }, // not a relation the server sends
+    { task_id: "bd-3", relation: "constructor" }, // a name borrowed from Object is not one either
+  ];
+  map.processes.items[1].task_links = [{ task_id: "bd-3", relation: "turn" }];
+
+  const geometry = layoutMap(map);
+  assert.deepEqual(
+    geometry.links.map((link) => `${link.from}->${link.to}:${link.relation}`).sort(),
+    ["bd-1->c1:turn", "bd-2->c1:plan", "bd-3->c2:turn"],
+  );
+  // The dependency edges answer another question and are left as they were.
+  assert.deepEqual(
+    geometry.edges.map((edge) => `${edge.from}->${edge.to}`).sort(),
+    ["bd-1->bd-2", "bd-1->bd-3"],
+  );
+
+  const centre = (node) => ({ x: node.x + node.width / 2, y: node.y + node.height / 2 });
+  for (const link of geometry.links) {
+    const task = geometry.nodes.tasks.find((node) => node.id === link.from);
+    const chat = geometry.nodes.processes.find((node) => node.id === link.to);
+    assert.deepEqual({ x: link.x1, y: link.y1 }, centre(task), `${link.from} starts at its task`);
+    assert.deepEqual({ x: link.x2, y: link.y2 }, centre(chat), `${link.to} ends at its chat`);
+  }
+
+  // A map whose chats name nothing gets no links at all.
+  const quiet = sampleMap();
+  for (const chat of quiet.processes.items) chat.task_links = [];
+  assert.deepEqual(layoutMap(quiet).links, []);
+});
+
+test("links are drawn under the nodes, a turn and a plan as different lines", () => {
+  const root = el("div");
+  renderMap(root, sampleMap(), { projectId: "p1" });
+  const canvas = root.find("gridMap__canvas");
+  const order = canvas.childNodes.map((child) => {
+    if (child.classList.contains("gridMap__edges")) return "edges";
+    if (child.classList.contains("gridMap__links")) return "links";
+    return `region:${child.dataset.region}`;
+  });
+  assert.deepEqual(order, ["edges", "links", "region:tasks", "region:processes", "region:files"], "under every node");
+
+  const lines = canvas.findAll("gridMap__link");
+  assert.deepEqual(
+    lines
+      .map((line) => `${line.getAttribute("data-task")}->${line.getAttribute("data-chat")}:${line.getAttribute("data-relation")}`)
+      .sort(),
+    ["bd-1->c1:turn", "bd-2->c1:plan", "bd-2->c2:turn"],
+  );
+  // The two kinds must stay apart for the eye, not only in the attribute:
+  // a solid thread for a turn, a dashed one for a plan.
+  const css = readFileSync(GRID_CSS, "utf8");
+  assert.match(css, /\.gridMap__link\[data-relation=turn\][^{]*\{[^}]*stroke:[^}]*\}/);
+  assert.match(css, /\.gridMap__link\[data-relation=plan\][^{]*\{[^}]*stroke-dasharray:[^}]*\}/);
+  assert.match(css, /@media \(max-width: 720px\)[^@]*\.gridMap__links \{ display: none; \}/, "the flow layout draws no lines");
+});
+
+test("no step and no link is invented for a chat that has none", () => {
+  const map = sampleMap();
+  map.processes.items = [{ chat_id: "c9", title: "Quiet chat", active: false, awaiting_approval: false }];
+  assert.deepEqual(layoutMap(map).links, []);
+
+  const root = el("div");
+  renderMap(root, map, { projectId: "p1" });
+  assert.equal(root.findAll("gridMap__links").length, 0, "no links, no layer");
+  const card = nodesOf(root, "gridNode--process")[0];
+  assert.equal(card.findAll("gridNode__step").length, 0);
+  assert.equal(card.findAll("gridNode__links").length, 0);
+  assert.match(textOf(card), /Idle/);
+});
+
+test("the overview names the same last step and count for a working chat", () => {
+  const overview = el("div");
+  renderOverview(overview, sampleMap(), { projectId: "p1" });
+  assert.match(textOf(overview), /Active: drew the process cards/);
+  assert.match(textOf(overview), /2 tasks/);
+  assert.match(textOf(overview), /Active: asked for approval/);
+  assert.match(textOf(overview), /7 tasks/);
+  // The overview names what is working, not every chat of the project.
+  assert.doesNotMatch(textOf(overview), /wrote the tests/);
 });
 
 test("a result is not a link when the server names no files_url", () => {

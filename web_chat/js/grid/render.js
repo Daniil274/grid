@@ -100,6 +100,34 @@ function edgesLayer(geometry) {
   return svg;
 }
 
+/** The task -> chat lines, under the nodes too, each kind in its own stroke. */
+function linksLayer(geometry) {
+  if (!geometry.links?.length) return null;
+  const svg = svgEl("svg", {
+    class: "gridMap__links",
+    width: geometry.width,
+    height: geometry.height,
+    viewBox: `0 0 ${geometry.width} ${geometry.height}`,
+    "aria-hidden": "true",
+    focusable: "false",
+  });
+  for (const link of geometry.links) {
+    svg.append(
+      svgEl("line", {
+        class: "gridMap__link",
+        x1: link.x1,
+        y1: link.y1,
+        x2: link.x2,
+        y2: link.y2,
+        "data-relation": link.relation,
+        "data-task": link.from,
+        "data-chat": link.to,
+      }),
+    );
+  }
+  return svg;
+}
+
 /**
  * Put a node where the layout says, inside a region whose own corner is
  * *origin*: the layout speaks canvas coordinates, the node is a child of its
@@ -131,20 +159,71 @@ export function taskNode(node, projectId, origin) {
   return place(box, node, origin);
 }
 
-/** One chat of the processes region: active and awaiting approval stand out. */
+/**
+ * The words of the last step the server traced for a chat, or "" when it
+ * traced none. A step is a title - a string, or an object carrying one - and
+ * is never invented: no steps, no line.
+ */
+export function lastStep(chat) {
+  const steps = Array.isArray(chat?.steps) ? chat.steps : [];
+  const last = steps[steps.length - 1];
+  if (last == null) return "";
+  const words = typeof last === "string" ? last : text(last.title ?? last.text ?? last.label);
+  return words.trim();
+}
+
+/** "Active: <last step>" while the chat works, "Last: <last step>" once it rests. */
+export function stepLabel(chat) {
+  const step = lastStep(chat);
+  return step ? `${chat?.active ? "Active" : "Last"}: ${step}` : "";
+}
+
+/**
+ * How many tasks the chat is linked to: the server's own total, which counts
+ * every link it knows, or the distinct tasks it listed when no total came.
+ */
+export function linkedTaskCount(chat) {
+  const listed = Array.isArray(chat?.task_links) ? chat.task_links : [];
+  const ids = new Set();
+  for (const link of listed) {
+    const id = text(link?.task_id).trim();
+    if (id) ids.add(id);
+  }
+  const total = Number(chat?.task_links_total);
+  return Number.isFinite(total) && total >= ids.size ? Math.floor(total) : ids.size;
+}
+
+/** "3 tasks", "1 task", or "" for none: a number is never shown bare. */
+export const linkedTasksLabel = (count) => (count ? `${count} ${count === 1 ? "task" : "tasks"}` : "");
+
+/**
+ * One chat of the processes region: active and awaiting approval stand out,
+ * and the card carries the last step the chat took and how many tasks it is
+ * linked to. A step changes the words, never the card's size.
+ */
 export function processNode(node, origin) {
   const chat = node.item ?? {};
   const status = chat.awaiting_approval ? "Awaiting approval" : chat.active ? "Active" : "Idle";
+  const step = stepLabel(chat);
+  const linked = linkedTaskCount(chat);
   const box = h(
     "a.gridNode.gridNode--process",
     {
       href: chatHref(node.id),
       dataset: { active: String(Boolean(chat.active)), awaiting: String(Boolean(chat.awaiting_approval)) },
-      title: `${node.title} · ${status}${when(chat.updated_at) ? ` · ${when(chat.updated_at)}` : ""}`,
+      title: `${node.title} · ${status}${step ? ` · ${step}` : ""}${linked ? ` · ${linkedTasksLabel(linked)}` : ""}${when(chat.updated_at) ? ` · ${when(chat.updated_at)}` : ""}`,
     },
     h("span.gridNode__mark", { "aria-hidden": "true", text: chat.awaiting_approval ? "!" : chat.active ? "●" : "○" }),
     h("span.gridNode__title", { text: node.title }),
     h("span.gridNode__meta", { text: status }),
+    step || linked
+      ? h(
+          "span.gridNode__tail",
+          {},
+          h("span.gridNode__step", { text: step }),
+          linked ? h("span.gridNode__links", { text: linkedTasksLabel(linked) }) : null,
+        )
+      : null,
   );
   return place(box, node, origin);
 }
@@ -323,6 +402,8 @@ export function renderMap(container, map, { projectId = "", geometry = null } = 
     dataset: { map: projectId },
   });
   canvas.append(edgesLayer(placed));
+  const links = linksLayer(placed);
+  if (links) canvas.append(links);
   for (const region of ["tasks", "processes", "files"]) canvas.append(regionFrame(region, placed, map, projectId));
   const plane = h("div.gridMap__plane", {}, canvas);
   replace(container, plane);
@@ -380,14 +461,25 @@ const taskLine = (task, projectId) =>
     h("span.gridOverview__meta", { text: task.id }),
   );
 
-const chatLine = (chat) =>
-  h(
+/** One working chat: where it goes, the last step it took, what that touched. */
+function chatLine(chat) {
+  const step = stepLabel(chat);
+  const linked = linkedTaskCount(chat);
+  return h(
     "li.gridOverview__item",
     {},
     h("span.gridOverview__mark", { "aria-hidden": "true", text: chat.awaiting_approval ? "!" : "●" }),
-    h("a.gridOverview__link", { href: chatHref(chat.chat_id), text: text(chat.title) || text(chat.chat_id) }),
+    h(
+      "div.gridOverview__body",
+      {},
+      h("a.gridOverview__link", { href: chatHref(chat.chat_id), text: text(chat.title) || text(chat.chat_id) }),
+      step || linked
+        ? h("span.gridOverview__detail", { text: [step, linkedTasksLabel(linked)].filter(Boolean).join(" · ") })
+        : null,
+    ),
     h("span.gridOverview__meta", { text: chat.awaiting_approval ? "Awaiting approval" : "Active" }),
   );
+}
 
 /**
  * The compact panel beside the map: the counts, what is blocked, what is

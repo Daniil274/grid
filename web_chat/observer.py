@@ -860,6 +860,16 @@ class WebStreamObserver:
     def policy_blocks(self) -> int:
         return self._held[0]
 
+    def plan_snapshot(self) -> dict[str, Any]:
+        """The conversation's plan as its board holds it now, as public data.
+
+        The live twin of ``plan_board.latest_plan`` for a running turn: every
+        task with its state, and whether this turn touched it (``turn``). A
+        reader outside this module (the map, web_chat.map_api) asks this
+        instead of reaching into the board's private fields.
+        """
+        return self._plan.snapshot()
+
     # -- typed public events ----------------------------------------------
     def _publish_event(self, event: Optional[CommunicationEvent]) -> None:
         """Hand a public event to the transport; an internal one never leaves."""

@@ -10,6 +10,9 @@
  *   yields the same coordinates;
  * - a status change therefore never moves a task, and a new task (which is the
  *   newest by `created_at`) is appended after the ones already there.
+ * - processes are ordered by chat id, so a chat keeps its place as it starts
+ *   and stops working; its card shows the last step it took, and a new step
+ *   never changes the card's size.
  *
  * Everything here is arithmetic on plain objects: no DOM, no measurement, no
  * clock. That is what tests/grid_map.test.mjs pins down.
@@ -27,7 +30,9 @@ const MARGIN = 28;
 /** The node sizes of each region. */
 export const NODE_SIZE = {
   tasks: { width: 156, height: 64 },
-  processes: { width: 184, height: 56 },
+  // Tall enough for a title, the run state, the last step and the link count.
+  // The height is a constant, so a new step never moves a card.
+  processes: { width: 184, height: 92 },
   files: { width: 184, height: 52 },
 };
 
@@ -98,7 +103,7 @@ function place(count, columns, size, origin) {
  * The whole map as geometry.
  *
  * @param {object} map - the answer of GET /api/projects/{id}/map
- * @returns {{width:number,height:number,regions:object,nodes:object,edges:Array,columns:object}}
+ * @returns {{width:number,height:number,regions:object,nodes:object,edges:Array,links:Array,columns:object}}
  */
 export function layoutMap(map = {}) {
   const tasks = orderTasks(Array.isArray(map?.tasks?.items) ? map.tasks.items : []);
@@ -163,6 +168,9 @@ export function layoutMap(map = {}) {
     regions: { tasks: tasksRegion, processes: processesRegion, files: filesRegion },
     nodes: { tasks: taskNodes, processes: processNodes, files: fileNodes },
     edges: taskEdges(taskNodes),
+    // Task -> chat, kept apart from the dependencies: a different question,
+    // drawn as a different line.
+    links: taskChatLinks(taskNodes, processNodes),
     columns: { tasks: taskColumns, processes: processColumns, files: fileColumns },
   };
 }
@@ -187,3 +195,48 @@ export function taskEdges(taskNodes = []) {
 }
 
 const pairOf = (from, to) => ({ x1: from.x, y1: from.y, x2: to.x, y2: to.y });
+
+/**
+ * The two kinds of work a chat has done on a task: both are real, neither is
+ * a guess. A set, so a name borrowed from Object.prototype is not a relation.
+ */
+export const LINK_RELATIONS = new Set(["turn", "plan"]);
+
+/**
+ * Task -> chat links, only where both ends are on this map.
+ *
+ * The server lists, on each process, the tasks that chat worked on:
+ * `{task_id, relation}`, with `relation` `turn` (the chat's last turn touched
+ * the task) or `plan` (the task is in the chat's plan). A task that is not on
+ * the map - a closed one, another project's, a stale id - draws nothing, and a
+ * pair is drawn once: a `turn` is the stronger evidence, so it wins over a
+ * `plan` for the same task and chat.
+ */
+export function taskChatLinks(taskNodes = [], processNodes = []) {
+  const tasks = new Map(taskNodes.map((node) => [node.id, node]));
+  const centre = (node) => ({ x: node.x + node.width / 2, y: node.y + node.height / 2 });
+  const links = [];
+  const byPair = new Map();
+  for (const process of processNodes) {
+    const chatId = text(process?.id);
+    if (!chatId) continue;
+    const listed = Array.isArray(process?.item?.task_links) ? process.item.task_links : [];
+    for (const link of listed) {
+      const taskId = text(link?.task_id);
+      const relation = text(link?.relation);
+      if (!taskId || !LINK_RELATIONS.has(relation)) continue;
+      const task = tasks.get(taskId);
+      if (!task) continue;
+      const key = `${chatId}\u0000${taskId}`;
+      const known = byPair.get(key);
+      if (known) {
+        if (known.relation === "plan" && relation === "turn") known.relation = "turn";
+        continue;
+      }
+      const drawn = { from: taskId, to: chatId, relation, ...pairOf(centre(task), centre(process)) };
+      byPair.set(key, drawn);
+      links.push(drawn);
+    }
+  }
+  return links;
+}

@@ -741,3 +741,50 @@ def test_a_call_whose_id_changed_while_written_still_takes_its_row():
     rows = harness.steps()
     assert [row["id"] for row in rows] == [first["id"], second["id"]]
     assert [row["body"] for row in rows] == ["a", "b"]
+
+
+def test_the_observer_answers_its_live_plan_as_a_public_snapshot():
+    """The map reads a running turn's plan through this, not private fields."""
+    import json
+
+    harness = Harness()
+    assert harness.observer.plan_snapshot()["tasks"] == []
+
+    harness.feed(
+        tool_called("beads_plan", "c1", json.dumps(
+            {"tasks": [{"key": "a", "title": "SECRET title", "description": "SECRET"}]}
+        )),
+        tool_output("c1", json.dumps({"ids": {"a": "grid-1"}})),
+    )
+
+    plan = harness.observer.plan_snapshot()
+    assert [task["id"] for task in plan["tasks"]] == ["grid-1"]
+    assert plan["tasks"][0]["turn"] is True
+    assert plan["total"] == 1
+
+
+def test_a_turn_reads_its_plan_through_a_public_snapshot():
+    from web_chat.session import AgentTurn
+
+    class Session:
+        """What a turn asks of its session here: the manager and the context."""
+
+        context_id = "c-1"
+
+        def __init__(self, manager):
+            self.manager = manager
+
+    manager = SimpleNamespace(
+        get_context_messages=lambda context_id, limit=40: {"messages": [
+            {"role": "assistant", "metadata": {"trace": [{"kind": "plan", "plan": {"tasks": [
+                {"id": "grid-1", "title": "One", "status": "open"},
+            ]}}]}},
+        ]}
+    )
+    turn = AgentTurn(Session(manager), "hi", system_key=None, agent_key=None)
+
+    plan = turn.plan_snapshot()
+
+    assert [task["id"] for task in plan["tasks"]] == ["grid-1"]
+    # A continued plan starts as this turn's own: it touched nothing yet.
+    assert plan["tasks"][0]["turn"] is False

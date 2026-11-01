@@ -72,8 +72,10 @@ from tools.beads_tools import _docker_fallback_enabled, _find_bd, _get_isolation
 from web_chat.build_info import SHORT as BUILD_COMMIT_SHORT
 from web_chat.build_info import UNKNOWN, read_build_info
 from web_chat.explorer_api import list_folder
+from web_chat.plan_board import latest_plan
 from web_chat.space import SPACE_ID
 from web_chat.tasks_api import _counts, _issues, _task
+from web_chat.trace import normalize_steps
 from web_chat.views import conversation_title
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,12 @@ logger = logging.getLogger(__name__)
 TASKS_LIMIT = 300
 PROCESSES_LIMIT = 50
 FILES_LIMIT = 100
+
+#: What the map says of a chat's work: the latest steps of its turn, and the
+#: tasks the conversation's plan ties it to.
+STEPS_LIMIT = 3
+STEP_TITLE_LIMIT = 120
+TASK_LINKS_LIMIT = 50
 
 #: How long bd and the folder listing may take before the map says so.
 BD_TIMEOUT_SECONDS = 20.0
@@ -137,6 +145,11 @@ TASK_FIELDS = (
 
 #: The kinds of a file entry: a link is a link, never passed off as a file.
 FILE_KINDS = ("dir", "file", "link", "other")
+
+#: The relations a chat's task link can carry: a task this turn touched
+#: (``turn``) or one its plan holds from earlier (``plan``).
+TURN_RELATION = "turn"
+PLAN_RELATION = "plan"
 
 
 class ReasonCode(str, Enum):
@@ -1044,6 +1057,9 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
     ``conversation_views`` gives every chat of the space (its metadata copied,
     its message list a shallow copy of references); the title is the user's,
     or the first words of the chat's first user message, as the rail shows it.
+    Each chat also carries the last steps of its work and the typed links to
+    the tasks of this project's plan (:func:`_activity`): what the chat did,
+    never what a tool was given or returned.
     """
     manager = getattr(space, "context_manager", None)
     unavailable = {
@@ -1090,6 +1106,7 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
                 running = bool(turns.is_running(chat_id))
             except Exception:  # noqa: BLE001
                 running = False
+        steps, links, links_total = _activity(space, chat_id, project_id, running=running)
         items.append(
             {
                 "chat_id": chat_id,
@@ -1097,6 +1114,9 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
                 "updated_at": view.get("updated_at") or metadata.get("updated_at"),
                 "active": running,
                 "awaiting_approval": bool(awaiting.get(chat_id)),
+                "steps": steps,
+                "task_links": links,
+                "task_links_total": links_total,
             }
         )
     # The running chats above the idle ones; newest first; the id breaks a tie.
@@ -1115,6 +1135,104 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
             "awaiting_approval": sum(item["awaiting_approval"] for item in items),
         },
     }
+
+
+def _step_titles(steps: Any) -> List[str]:
+    """The last :data:`STEPS_LIMIT` titles of *steps*, normalized and bounded.
+
+    A step of a live trace is a dict and one of a turn's ``recent_steps`` a
+    string; only the title leaves this function - never a subtitle, a body or
+    a payload - with its whitespace collapsed and cut to
+    :data:`STEP_TITLE_LIMIT` characters.
+    """
+    titles: List[str] = []
+    for entry in steps or []:
+        title = entry.get("title") if isinstance(entry, dict) else entry
+        if not isinstance(title, str):
+            continue
+        text = " ".join(title.split())
+        if not text:
+            continue
+        titles.append(text[:STEP_TITLE_LIMIT])
+    return titles[-STEPS_LIMIT:]
+
+
+def _stored_steps(messages: List[Any]) -> List[str]:
+    """The latest steps the conversation's newest stored trace holds."""
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        trace = metadata.get("trace") or normalize_steps(metadata.get("trace_events")) or []
+        if isinstance(trace, list) and trace:
+            return _step_titles(trace)
+    return []
+
+
+def _task_links(plan: Optional[dict[str, Any]], project_id: str) -> tuple[List[dict[str, str]], int]:
+    """The plan's tasks of this project as typed links; the count before the bound.
+
+    Only a task id that carries the project's own prefix is a link: a plan that
+    names a task of another project (or a free-form id) never reaches the map.
+    The relation says whether this turn touched the task, never what the task
+    says - no title, description or note of a task leaves here.
+    """
+    prefix = f"{project_id}-"
+    by_id: Dict[str, dict[str, str]] = {}
+    for task in (plan or {}).get("tasks") or []:
+        task_id = task.get("id") if isinstance(task, dict) else None
+        if not isinstance(task_id, str) or not task_id.startswith(prefix) or len(task_id) <= len(prefix):
+            continue
+        relation = TURN_RELATION if task.get("turn") is True else PLAN_RELATION
+        current = by_id.get(task_id)
+        if current is None or relation == TURN_RELATION:
+            by_id[task_id] = {
+                "task_id": task_id,
+                "relation": relation,
+            }
+    links = list(by_id.values())
+    return links[:TASK_LINKS_LIMIT], len(links)
+
+
+def _live_activity(turn: Any, project_id: str) -> tuple[List[str], List[dict[str, str]], int]:
+    """What a running turn did so far, read through its public methods only."""
+    recent = getattr(turn, "recent_steps", None)
+    steps = _step_titles(recent() if callable(recent) else [])
+    snapshot = getattr(turn, "plan_snapshot", None)
+    links, total = _task_links(snapshot() if callable(snapshot) else None, project_id)
+    return steps, links, total
+
+
+def _stored_activity(manager: Any, chat_id: str, project_id: str) -> tuple[List[str], List[dict[str, str]], int]:
+    """What an idle chat's newest stored turn and plan hold, from one read."""
+    snapshot = manager.get_context_messages(chat_id, limit=40)
+    messages = list((snapshot or {}).get("messages") or [])
+    links, total = _task_links(latest_plan(messages), project_id)
+    return _stored_steps(messages), links, total
+
+
+def _activity(space: Any, chat_id: str, project_id: str, *, running: bool) -> tuple[List[str], List[dict[str, str]], int]:
+    """A chat's latest steps and task links; none of them worth a failed map.
+
+    A running chat is read from its live turn (``recent_steps`` and the live
+    plan snapshot of its board) - the live plan *replaces* the stored one, so
+    the turn flags of two different turns are never mixed. An idle chat is
+    read from its newest stored trace and the plan its messages left. Any
+    trouble reading either is logged and answered as "no activity": the map
+    of a project must not fail because one chat's history could not be read.
+    """
+    try:
+        if running:
+            turns = getattr(space, "turns", None)
+            active = turns.get(chat_id) if turns is not None else None
+            if active is not None:
+                return _live_activity(active[0], project_id)
+        manager = getattr(space, "context_manager", None)
+        if callable(manager):
+            return _stored_activity(manager(), chat_id, project_id)
+    except Exception:  # noqa: BLE001 - activity is a convenience, never a failure
+        logger.debug("map: no activity for a chat of %s", project_id, exc_info=True)
+    return [], [], 0
 
 
 def _modified(mtime: Any) -> Optional[str]:

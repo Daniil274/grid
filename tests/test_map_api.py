@@ -36,13 +36,18 @@ from web_chat.turns import TurnBoard
 
 
 class FakeManager:
-    """What the map asks of a context manager: the chats and their metadata."""
+    """What the map asks of a context manager: the chats, and one chat's messages."""
 
-    def __init__(self, views):
+    def __init__(self, views, messages=None):
         self._views = views
+        self._messages = messages if messages is not None else {}
 
     def conversation_views(self):
         return list(self._views)
+
+    def get_context_messages(self, context_id, *, limit=None):
+        messages = list(self._messages.get(context_id, []))
+        return {"messages": messages[-limit:] if limit else messages}
 
 
 class FakeSpace:
@@ -57,10 +62,12 @@ class FakeSpace:
         self.turns = TurnBoard()
         self.workspace_path = str(root / "workspace")
         self._views = []
+        #: Stored messages by chat id, as the context manager would answer them.
+        self.messages = {}
         self.waiting = {}
 
     def context_manager(self):
-        return FakeManager(self._views)
+        return FakeManager(self._views, self.messages)
 
     def awaiting_approval(self):
         return self.waiting
@@ -338,6 +345,159 @@ class _Running:
 
     def done(self):
         return False
+
+
+class _LiveTurn:
+    """A running turn as the map reads it: its public steps and plan only."""
+
+    def __init__(self, steps, plan):
+        self._steps = list(steps)
+        self._plan = plan
+
+    def recent_steps(self):
+        return list(self._steps)
+
+    def plan_snapshot(self):
+        return self._plan
+
+
+def traced(*steps):
+    """One stored assistant message whose metadata holds *steps* as its trace."""
+    return {"role": "assistant", "metadata": {"trace": list(steps)}}
+
+
+def test_an_idle_chat_shows_its_last_steps_and_its_plans_task_links(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    # The plan is the newest one the conversation left; the steps are the last
+    # three of its newest stored trace, in order.
+    space.messages["chat-1"] = [
+        traced({"kind": "plan", "title": "Plan · 0/2 done", "plan": {"tasks": [
+            {"id": f"{root.id}-a", "title": "SECRET task title",
+             "description": "SECRET description", "turn": False},
+            {"id": f"{root.id}-b", "notes": "SECRET notes", "turn": True},
+            # Another project's task (or a free-form id) is never a link here.
+            {"id": "prj-other-1", "turn": True},
+        ]}}),
+        traced(
+            {"kind": "tool", "title": "Searched the web", "subtitle": "SECRET query"},
+            {"kind": "tool", "title": "  Read   the\nfile  ", "body": "SECRET body"},
+            {"kind": "tool", "title": "x" * 300},
+            {"kind": "reasoning", "title": "Thinking", "body": "SECRET thinking"},
+        ),
+    ]
+
+    response = client.get(f"/api/projects/{root.id}/map")
+    item = response.json()["processes"]["items"][0]
+
+    assert item["steps"] == ["Read the file", "x" * map_api.STEP_TITLE_LIMIT, "Thinking"]
+    assert all(isinstance(step, str) for step in item["steps"])
+    assert item["task_links"] == [
+        {"task_id": f"{root.id}-a", "relation": map_api.PLAN_RELATION},
+        {"task_id": f"{root.id}-b", "relation": map_api.TURN_RELATION},
+    ]
+    assert item["task_links_total"] == 2
+    # What a task or a step says never leaves: only titles and typed links.
+    assert "SECRET" not in response.text
+    assert "prj-other" not in response.text
+
+
+def test_a_running_chat_shows_its_live_turn_and_the_live_plan_replaces_the_stored(
+    client, space, bd
+):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    space.messages["chat-1"] = [traced(
+        {"kind": "plan", "title": "Plan · 9/9 done", "plan": {"tasks": [
+            {"id": f"{root.id}-old", "turn": True},
+        ]}},
+        {"kind": "tool", "title": "A stored step"},
+    )]
+    live = _LiveTurn(
+        ["Ran the tests", "Wrote the fix", "  Closed   the bead "],
+        {"tasks": [
+            {"id": f"{root.id}-new", "description": "SECRET", "turn": True},
+            {"id": f"{root.id}-kept", "notes": "SECRET", "turn": False},
+        ], "counts": {}, "total": 2},
+    )
+    space.turns.register("chat-1", live, _Running())
+
+    response = client.get(f"/api/projects/{root.id}/map")
+    item = response.json()["processes"]["items"][0]
+
+    assert item["active"] is True
+    assert item["steps"] == ["Ran the tests", "Wrote the fix", "Closed the bead"]
+    assert item["task_links"] == [
+        {"task_id": f"{root.id}-new", "relation": map_api.TURN_RELATION},
+        {"task_id": f"{root.id}-kept", "relation": map_api.PLAN_RELATION},
+    ]
+    # The live plan replaces the stored one: no step and no link of an older turn.
+    assert item["task_links_total"] == 2
+    assert f"{root.id}-old" not in response.text
+    assert "A stored step" not in response.text
+    assert "SECRET" not in response.text
+
+
+def test_steps_and_task_links_are_bounded_while_the_total_counts_all(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    plan = {"tasks": [
+        {"id": f"{root.id}-t{index:02d}", "turn": index % 2 == 0}
+        for index in range(map_api.TASK_LINKS_LIMIT + 10)
+    ]}
+    space.messages["chat-1"] = [traced(
+        {"kind": "plan", "plan": plan},
+        *[{"kind": "tool", "title": f"Step {index}"} for index in range(6)],
+    )]
+
+    item = client.get(f"/api/projects/{root.id}/map").json()["processes"]["items"][0]
+
+    assert len(item["steps"]) == map_api.STEPS_LIMIT
+    assert item["steps"] == ["Step 3", "Step 4", "Step 5"]
+    assert len(item["task_links"]) == map_api.TASK_LINKS_LIMIT
+    assert item["task_links_total"] == map_api.TASK_LINKS_LIMIT + 10
+    assert item["task_links"][-1] == {
+        "task_id": f"{root.id}-t{map_api.TASK_LINKS_LIMIT - 1:02d}",
+        "relation": map_api.PLAN_RELATION,
+    }
+
+
+def test_duplicate_plan_links_count_once_and_keep_the_stronger_relation(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    repeated = f"{root.id}-same"
+    space.messages["chat-1"] = [traced(
+        {"kind": "plan", "plan": {"tasks": [
+            {"id": repeated, "turn": False},
+            {"id": repeated, "turn": True},
+            {"id": repeated, "turn": False},
+        ]}},
+    )]
+
+    item = client.get(f"/api/projects/{root.id}/map").json()["processes"]["items"][0]
+
+    assert item["task_links"] == [{"task_id": repeated, "relation": map_api.TURN_RELATION}]
+    assert item["task_links_total"] == 1
+
+
+def test_a_chat_whose_history_cannot_be_read_still_has_a_map(tmp_path, bd):
+    space = FakeSpace(tmp_path / "u1")
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("the history is unreadable")
+
+    space.context_manager = lambda: SimpleNamespace(
+        conversation_views=lambda: list(space._views),
+        get_context_messages=boom,
+    )
+
+    response = TestClient(make_app({"u1": space})).get(f"/api/projects/{root.id}/map")
+
+    assert response.status_code == 200
+    item = response.json()["processes"]["items"][0]
+    assert (item["steps"], item["task_links"], item["task_links_total"]) == ([], [], 0)
 
 
 def test_files_are_bounded_hidden_entries_excluded(client, space, bd):
