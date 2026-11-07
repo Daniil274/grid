@@ -448,6 +448,34 @@ tools:
   project_add_notes:
     type: "function"
     description: "Add shared context to a project's notes without silently replacing existing notes (mode if_empty or append)."
+  # ── Lazy: the user's background tasks, from a chat ──
+  lazy_catalog:
+    type: "function"
+    description: "What a lazy task is made of here: the agents and subscriptions, sizes, priorities and limits. Read this first."
+  lazy_list:
+    type: "function"
+    description: "List the user's lazy tasks compactly: title, state, steps done, next step, where it lands."
+  lazy_get:
+    type: "function"
+    description: "One lazy task in full: its brief, steps, last history and placement. Its version is what lazy_update/lazy_cancel take as expected_version."
+  lazy_preview:
+    type: "function"
+    description: "Where a task like this would land among the existing ones - nothing is saved and no step starts."
+  lazy_create:
+    type: "function"
+    description: "Create a lazy task the agent runs in the background between the user's turns; request_id makes a retry return the same task."
+    prompt_addition: |
+      `lazy_create(title, brief, system, agent, size="M", acceptance="", optional="", priority="normal", deadline="", repeat_hours=0, cap=0, project_id="", request_id="")`
+      Вызов сохраняет задачу и не ждёт её шагов, но это не preview: сохранение будит цикл сервиса, и первый шаг может начаться в пределах тика, если план ставит его на сейчас. Нужно сначала показать пользователю — используй `lazy_preview` или создай задачу на паузе. `request_id` — один ключ на одну задачу: повтор возвращает уже созданную (`created=false`).
+  lazy_update:
+    type: "function"
+    description: "Change a lazy task: only the named fields; series=true changes the whole series of rounds; expected_version refuses a stale change."
+    prompt_addition: |
+      `lazy_update(task_id, expected_version=-1, series=false, title, brief, acceptance, priority, size, deadline, repeat_hours, cap, run_now, status, project_id, drop_optional)`
+      Передавай `expected_version` из `lazy_get`: если задачу успели изменить, ответ будет `stale` и ничего не перезапишется. `series=true` правит открытый раунд серии (task_id может быть series_id). Изменение сохраняется и будит цикл: снятие с паузы или `run_now=true` могут сразу запустить следующий шаг.
+  lazy_cancel:
+    type: "function"
+    description: "Cancel a lazy task for good; series=true cancels the whole series of rounds."
   init_codegraph:
     type: "function"
     description: "Builds the CodeGraph index of the workspace, or updates it. Idempotent."
@@ -563,6 +591,13 @@ agents:
       - project_get
       - project_ensure
       - project_add_notes
+      - lazy_catalog
+      - lazy_list
+      - lazy_get
+      - lazy_preview
+      - lazy_create
+      - lazy_update
+      - lazy_cancel
       - chat_history
       - init_codegraph
       - codegraph
@@ -683,6 +718,10 @@ agents:
       - memory_overview
       - project_list
       - project_get
+      - lazy_catalog
+      - lazy_list
+      - lazy_get
+      - lazy_preview
       - beads_init
       - beads_ready
       - beads_list

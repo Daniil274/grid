@@ -98,6 +98,18 @@ class Task:
     #: Seconds between rounds: a task that is done sets up its next round with
     #: fresh steps, due this long after; None runs once.
     repeat: Optional[float] = None
+    #: The series of rounds a repeating task belongs to: the id of its first
+    #: round, kept by every later round, so the series can be paused, edited or
+    #: cancelled as one thing. None for a task that runs once.
+    series_id: Optional[str] = None
+    #: The user's project this task works in; None for no project.
+    project_id: Optional[str] = None
+    #: The caller's key for one creation: a repeated request returns this task
+    #: instead of making another (web_chat.lazy.service.LazyAgents.create_or_get).
+    request_id: Optional[str] = None
+    #: Bumped on every save. A caller may name the version it read, and its
+    #: change is refused when the task moved since (a stale edit).
+    version: int = 0
     conversation_id: Optional[str] = None
     #: No step starts before this: a refused or failed step backs off.
     retry_at: Optional[float] = None

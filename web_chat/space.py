@@ -337,6 +337,7 @@ class UserSpace:
         own_credentials: Optional[OwnCredentials] = None,
         local_cli_login: bool = False,
         chat_spaces: bool = False,
+        lazy: Optional[Callable[[], Any]] = None,
     ) -> None:
         """``layout`` None keeps the single-user layout (see the module docs).
 
@@ -382,6 +383,9 @@ class UserSpace:
         self.on_systems_changed = on_systems_changed
         self.local_cli_login = local_cli_login
         self.chat_spaces = bool(chat_spaces and layout is not None and layout.chat_spaces is not None)
+        #: The server's lazy agents, read when a factory is built: the lazy tools
+        #: of this user's chats act on the user's own tasks (tools/lazy_tools.py).
+        self._lazy_provider = lazy
         self.entitlement = entitlement
         policy = (lambda: entitlement().limits) if entitlement is not None else (lambda: deployment.user_limits)
         spend = usage if hasattr(usage, "spent_micro") else None
@@ -714,6 +718,9 @@ class UserSpace:
         )
         factory.system_builder = self._builder_access()
         factory.project_store = self.project_store
+        # The user's own lazy tasks, as their chats' agents may see and change them
+        # (tools/lazy_tools.py). None in a server that runs no lazy agents.
+        factory.lazy_agents = self.lazy_chat()
         # A chat remembers at its own level, its project's and the user's (core.factory.memory),
         # in a file beside the workspace that the agents' commands cannot open.
         factory.memory_scopes = self.memory_scopes
@@ -1610,6 +1617,21 @@ class UserSpace:
         self.conversations.update_context_metadata(
             context_id, {k: v for k, v in updates.items() if v is not None}
         )
+
+    def lazy_chat(self) -> Optional[Any]:
+        """The user's lazy tasks for this space's agents; None without a lazy service.
+
+        The object is bound to this user and this space (web_chat.lazy.chat.LazyChat):
+        the tools never name a user or a project themselves, and the factory of a
+        server that runs no lazy agents carries none.
+        """
+        provider = getattr(self, "_lazy_provider", None)
+        agents = provider() if callable(provider) else provider
+        if agents is None:
+            return None
+        from web_chat.lazy.chat import LazyChat
+
+        return LazyChat(agents, self.user_id, self)
 
     # -- projects ---------------------------------------------------------
     def project_snapshot(self):

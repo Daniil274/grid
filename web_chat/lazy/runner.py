@@ -58,7 +58,8 @@ class HeadlessSocket:
 
 @dataclass
 class StepOutcome:
-    #: "answered", "interrupted", "stopped", "error" - the turn's - or "refused" when none started.
+    #: "answered", "interrupted", "stopped", "error" - the turn's - or "refused" when
+    #: none started, or "blocked" when the task's project cannot take the work at all.
     outcome: str
     started_at: float
     ended_at: float
@@ -83,6 +84,33 @@ def last_answer(space: Any, context_id: str) -> str:
 REVISION_REFUSAL = "(revision."
 
 
+def project_problem(space: Any, task: Task) -> Optional[str]:
+    """Why the task's project cannot take this step, or None when it can.
+
+    A chat whose project is gone falls back to the user's personal space
+    (``UserSpace.chat_roots``) and an archived project keeps its notes but takes
+    no new work: either way the step must not start, or its files, notes and
+    tracker entries would land where the user did not ask - the personal space
+    for a deleted project. The service pauses the task with this reason instead
+    (``LazyAgents.finish``).
+    """
+    if not task.project_id:
+        return None
+    store = getattr(space, "project_store", None)
+    project = store.get(task.project_id) if store is not None else None
+    if project is None:
+        return (
+            f"Its project is gone ({task.project_id}): the work was not moved to your personal space. "
+            "Pick a project for the task, or start it without one."
+        )
+    if project.archived:
+        return (
+            f'The project "{project.title}" is archived: nothing was added to it. '
+            "Unarchive it, or move the task to another project."
+        )
+    return None
+
+
 def ensure_conversation(space: Any, task: Task, *, fresh: bool = False) -> str:
     """The task's conversation, made on its first step (or again, if the user deleted it).
 
@@ -100,11 +128,26 @@ def ensure_conversation(space: Any, task: Task, *, fresh: bool = False) -> str:
         system_key=task.system,
         agent_key=task.agent,
         lazy_task=task.id,
+        # The step's chat belongs to the task's project: its notes, its files
+        # and its tracker are the ones the work is done in.
+        project_id=task.project_id,
     )
+    if task.project_id:
+        _seed_project(space, context_id, task.project_id)
     assign = getattr(space, "assign_chat_space", None)
     if assign is not None:
         assign(context_id)
     return context_id
+
+
+def _seed_project(space: Any, context_id: str, project_id: str) -> None:
+    """Start the step's chat from its project's shared notes, as a chat of the project does."""
+    try:
+        from web_chat.projects_api import seed_project_context
+
+        seed_project_context(space, context_id, project_id)
+    except Exception:  # noqa: BLE001 - a chat without its notes is still a chat
+        logger.warning("Lazy step's chat could not be seeded with its project's notes", exc_info=True)
 
 
 class StepRunner:
@@ -127,6 +170,9 @@ class StepRunner:
 
         started = self._clock()
         async with self._spaces.use(task.user_id) as space:
+            problem = project_problem(space, task)
+            if problem:
+                return StepOutcome("blocked", started, self._clock(), reason=problem)
             context_id = ensure_conversation(space, task)
             on_conversation(context_id)
             manager = space.context_manager()

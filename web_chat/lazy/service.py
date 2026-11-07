@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -63,7 +64,37 @@ TOLERANCE = 0.5
 
 
 class LazyError(ValueError):
-    """A request the lazy agents cannot take, in words for the user."""
+    """A request the lazy agents cannot take, in words for the user.
+
+    ``code`` is the stable, machine-readable kind: the HTTP page shows only the
+    words, a tool returns the code beside ``isError`` (tools/lazy_tools.py).
+    """
+
+    code = "invalid"
+
+
+class LazyStale(LazyError):
+    """The task moved since the caller read it; nothing was changed."""
+
+    code = "stale"
+
+
+class LazyProjectNotFound(LazyError):
+    """The named project is not this user's (or no longer there)."""
+
+    code = "project_not_found"
+
+
+class LazyProjectArchived(LazyError):
+    """The named project is archived: its notes are kept, its work is not added."""
+
+    code = "project_archived"
+
+
+class LazyProjectLocked(LazyError):
+    """This round already works in a project's chat; moving it would leave that work behind."""
+
+    code = "project_locked"
 
 
 @dataclass
@@ -108,6 +139,11 @@ class LazyAgents:
         self._loop_task: Optional[asyncio.Task] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._unsubscribe: Optional[Callable[[], None]] = None
+        #: Serialises creations so the same ``request_id`` makes one task, not two.
+        self._create_lock = threading.Lock()
+        #: Serialises the read-check-write of one edit, so a change named against
+        #: a version is decided once (the store's save is the last word still).
+        self._edit_lock = threading.RLock()
 
     # -- lifecycle ---------------------------------------------------------------------
     async def start(self) -> None:
@@ -263,8 +299,15 @@ class LazyAgents:
             self.calibration(settings.account, user_id), offer=offer,
         )
 
-    def settings_for(self, user_id: str, space: Any = None, timezone: Optional[str] = None) -> Settings:
-        """The user's settings; a first visit picks the subscription their agents run on."""
+    def settings_for(
+        self, user_id: str, space: Any = None, timezone: Optional[str] = None, *, persist: bool = True
+    ) -> Settings:
+        """The user's settings; a first visit picks the subscription their agents run on.
+
+        *persist* False answers the same question without writing the chosen
+        defaults: a call that saves nothing (``preview_new``) must not leave the
+        settings row of a first visit behind.
+        """
         if self.store.has_settings(user_id) or space is None:
             return self.store.settings(user_id)
         settings = Settings()
@@ -273,7 +316,8 @@ class LazyAgents:
             settings.account = "chatgpt"
         if timezone:
             settings.routine = replace(settings.routine, timezone=timezone)
-        self.store.save_settings(user_id, settings)
+        if persist:
+            self.store.save_settings(user_id, settings)
         return settings
 
     def state(self, user_id: str, space: Any, *, timezone: Optional[str] = None) -> dict:
@@ -360,9 +404,13 @@ class LazyAgents:
         return data
 
     # -- tasks ---------------------------------------------------------------------------
-    def draft(self, user_id: str, space: Any, payload: dict) -> Task:
-        """A task as the form describes it, checked but not saved."""
-        settings = self.settings_for(user_id, space)
+    def draft(self, user_id: str, space: Any, payload: dict, *, persist_settings: bool = True) -> Task:
+        """A task as the form describes it, checked but not saved.
+
+        *persist_settings* False keeps a preview from writing the defaults a
+        first visit would otherwise record.
+        """
+        settings = self.settings_for(user_id, space, persist=persist_settings)
         title = str(payload.get("title") or "").strip()
         system, agent = payload.get("system"), payload.get("agent")
         if not system or not agent:
@@ -372,7 +420,12 @@ class LazyAgents:
             raise LazyError(choice.problem)
         if choice.account not in LABELS:
             raise LazyError(f"{choice.label} does not run on a subscription lazy agents can spend.")
-        size = payload.get("size") if payload.get("size") in SIZES else "M"
+        size = payload.get("size") or "M"
+        if size not in SIZES:
+            raise LazyError(f"Unknown size: {size}.")
+        priority = payload.get("priority") or "normal"
+        if priority not in PRIORITIES:
+            raise LazyError(f"Unknown priority: {priority}.")
         task = Task(
             id=new_id("lazy"),
             user_id=user_id,
@@ -381,33 +434,70 @@ class LazyAgents:
             acceptance=str(payload.get("acceptance") or "")[:2000],
             optional=str(payload.get("optional") or "")[:2000],
             deadline=_deadline(payload.get("deadline")),
-            priority=payload.get("priority") if payload.get("priority") in PRIORITIES else "normal",
+            priority=priority,
             size=size,
             system=system,
             agent=agent,
             cap=_points(payload.get("cap")),
             repeat=_repeat(payload.get("repeat_hours")),
+            # Whose project the work belongs to; checked here, for the page's
+            # API and the tools alike, against this user's own project store.
+            project_id=_checked_project(space, payload.get("project_id")),
+            request_id=_request_id(payload.get("request_id")),
             # The agent's subscription; None when it is the settings' own.
             account=None if choice.account == settings.account else choice.account,
             created_at=self.clock(),
             updated_at=self.clock(),
         )
+        if task.repeat:
+            # The first round opens the series; every later round keeps its id.
+            task.series_id = task.id
         for index, kind in enumerate(kinds_for(task.optional), start=1):
             task.steps.append(Step.make(kind, size, index, optional=kind == "extra"))
         return task
 
     def create_task(self, user_id: str, space: Any, payload: dict) -> Task:
+        task, _created = self.create_or_get(user_id, space, payload)
+        return task
+
+    def create_or_get(self, user_id: str, space: Any, payload: dict) -> Tuple[Task, bool]:
+        """The task *payload* describes, and whether it was made now.
+
+        ``request_id`` makes creation idempotent: a retry - a timed-out answer,
+        a repeated turn, two calls in one answer - returns the task the first
+        call made, unchanged, instead of a second copy. Without one every call
+        makes a task, as before.
+        """
         if not str(payload.get("title") or "").strip():
             raise LazyError("Give the task a title.")
-        task = self.draft(user_id, space, payload)
-        task.note("Created")
-        self.store.save_task(task)
+        request_id = _request_id(payload.get("request_id"))
+        if not request_id:
+            task = self.draft(user_id, space, payload)
+            task.note("Created")
+            self.store.save_task(task)
+            self.wake()
+            return task, True
+        # One lookup-and-insert at a time: two calls with one key (two threads of
+        # one answer, or two servers on one store) must meet the first task, not
+        # make a second. The store's insert is the promise's last word: its
+        # transaction and unique key decide the winner across processes too.
+        with self._create_lock:
+            existing = self.store.task_by_request(user_id, request_id)
+            if existing is not None:
+                return existing, False
+            task = self.draft(user_id, space, {**payload, "request_id": request_id})
+            task.note("Created")
+            if not self.store.save_new_task(task):
+                existing = self.store.task_by_request(user_id, request_id)
+                if existing is None:
+                    raise LazyError("The task could not be saved: its request_id is taken.")
+                return existing, False
         self.wake()
-        return task
+        return task, True
 
     def preview_new(self, user_id: str, space: Any, payload: dict) -> dict:
         """Where a task like this would land among the others - nothing is saved."""
-        task = self.draft(user_id, space, payload)
+        task = self.draft(user_id, space, payload, persist_settings=False)
         settings = self.store.settings(user_id)
         settings = self.pool_settings(settings, task.account or settings.account)
         tasks = self.pools(self.store.settings(user_id), self.store.tasks(user_id, finished=False)).get(settings.account, [])
@@ -470,33 +560,143 @@ class LazyAgents:
             "others": others,
         }
 
-    def update_task(self, user_id: str, task_id: str, changes: dict) -> Task:
-        task = self.task(user_id, task_id)
-        if task.finished:
-            raise LazyError("This task is finished.")
-        status = changes.get("status")
-        task = _edited(task, changes, self.clock())
-        if status == "paused" and self._is_running(user_id, task_id):
-            self._stops[task_id] = "Paused by you"
-        self.store.save_task(task)
+    def update_task(
+        self,
+        user_id: str,
+        task_id: str,
+        changes: dict,
+        *,
+        expected_version: Optional[int] = None,
+        space: Any = None,
+    ) -> Task:
+        """*task_id* with *changes* applied and saved; a stale caller is refused.
+
+        ``expected_version`` is the ``Task.version`` the caller read: when the
+        task moved since - a step ran, the user edited it, a series round was
+        made - nothing is changed and :class:`LazyStale` is raised, so a slow
+        edit cannot overwrite what it did not see.
+
+        The check and the save are one step: the store writes only when the
+        version is still the one read, so two racing callers cannot both win.
+        A named project is checked against this user's own projects, so the
+        page's API takes the same path as the tools.
+        """
+        with self._edit_lock:
+            task = self.task(user_id, task_id)
+            _check_version(task, expected_version)
+            if task.finished:
+                raise LazyError("This task is finished.")
+            if "project_id" in changes:
+                project = _checked_project(space, changes["project_id"])
+                if project != task.project_id:
+                    self._refuse_project_move(task, space)
+                changes = {**changes, "project_id": project}
+            status = changes.get("status")
+            task = _edited(task, changes, self.clock())
+            if status == "paused" and self._is_running(user_id, task_id):
+                self._stops[task_id] = "Paused by you"
+            if not self.store.save_task(task, expected_version=int(task.version or 0)):
+                raise LazyStale("The task changed since you read it. Read it again and repeat the change.")
         self.wake()
         return task
 
-    def cancel(self, user_id: str, task_id: str) -> Task:
-        task = self.task(user_id, task_id)
-        if task.finished:
-            return task
-        if self._is_running(user_id, task_id):
-            self._stops[task_id] = "Cancelled by you"
-        task.status = "cancelled"
-        for step in task.steps:
-            if step.status == "pending":
-                step.status = "skipped"
-        task.note("Cancelled", kind="warning")
-        task.updated_at = self.clock()
-        self.store.save_task(task)
+    def _refuse_project_move(self, task: Task, space: Any) -> None:
+        """Refuse to move work that already has a chat - or a running step - elsewhere.
+
+        A step's chat is made in the task's project and every later step of the
+        task continues it (``web_chat.lazy.runner.ensure_conversation``). Changing
+        the task's project would leave that chat, and everything written in it, in
+        the old project while the task claims the new one - silently. So the move
+        is refused while the work lives somewhere: stop (or finish) this task and
+        start another for the other project.
+        """
+        if self._is_running(task.user_id, task.id):
+            raise LazyProjectLocked(
+                "A step of this task is running in its project: pause or cancel it before moving it. "
+                "Start a new task to work in another project."
+            )
+        if not task.conversation_id:
+            return
+        manager = getattr(space, "context_manager", None)
+        still_there = True  # without the space, assume the work is there: refuse, never guess
+        if manager is not None:
+            try:
+                still_there = bool(manager().has_context(task.conversation_id))
+            except Exception:  # noqa: BLE001 - a check that cannot run is not a yes
+                still_there = True
+        if still_there:
+            raise LazyProjectLocked(
+                "This task already worked in a chat of its project: moving it would leave that work behind. "
+                "Start a new task for the other project."
+            )
+
+    def cancel(self, user_id: str, task_id: str, *, expected_version: Optional[int] = None) -> Task:
+        """Stop *task_id* for good; a stale caller is refused, as on an edit."""
+        with self._edit_lock:
+            task = self.task(user_id, task_id)
+            _check_version(task, expected_version)
+            if task.finished:
+                return task
+            if self._is_running(user_id, task_id):
+                self._stops[task_id] = "Cancelled by you"
+            task.status = "cancelled"
+            for step in task.steps:
+                if step.status == "pending":
+                    step.status = "skipped"
+            task.note("Cancelled", kind="warning")
+            task.updated_at = self.clock()
+            if not self.store.save_task(task, expected_version=int(task.version or 0)):
+                raise LazyStale("The task changed since you read it. Read it again and cancel it.")
         self.wake()
         return task
+
+    # -- a series of rounds ---------------------------------------------------------------
+    def series_tasks(self, user_id: str, ref: str) -> List[Task]:
+        """The rounds of the series *ref* names, or the one task *ref* names.
+
+        A repeating task's series is addressed by the id of its first round -
+        the same id every later round keeps (``Task.series_id``). A task that
+        runs once is a series of one, addressed by its own id.
+        """
+        tasks = self.store.tasks(user_id)
+        rounds = [task for task in tasks if task.series_id == ref]
+        if rounds:
+            return rounds
+        single = next((task for task in tasks if task.id == ref), None)
+        if single is None:
+            raise KeyError(ref)
+        return [single]
+
+    def update_series(
+        self,
+        user_id: str,
+        ref: str,
+        changes: dict,
+        *,
+        expected_version: Optional[int] = None,
+        space: Any = None,
+    ) -> List[Task]:
+        """Apply *changes* to the round of the series *ref* that is still open.
+
+        The next round is made from this one when it ends, so editing the open
+        round is editing the series. A finished series has nothing to edit.
+        """
+        with self._edit_lock:
+            rounds = [task for task in self.series_tasks(user_id, ref) if not task.finished]
+            if not rounds:
+                raise LazyError("This task is finished.")
+            _check_version(rounds[0], expected_version)
+            return [self.update_task(user_id, task.id, changes, space=space) for task in rounds]
+
+    def cancel_series(self, user_id: str, ref: str, *, expected_version: Optional[int] = None) -> List[Task]:
+        """Cancel the series *ref* names: its open round now, and no round after it."""
+        with self._edit_lock:
+            rounds = self.series_tasks(user_id, ref)
+            open_rounds = [task for task in rounds if not task.finished]
+            if not open_rounds:
+                return []
+            _check_version(open_rounds[0], expected_version)
+            return [self.cancel(user_id, task.id) for task in open_rounds]
 
     def delete(self, user_id: str, task_id: str) -> None:
         if self._is_running(user_id, task_id):
@@ -504,12 +704,12 @@ class LazyAgents:
         if not self.store.delete_task(user_id, task_id):
             raise KeyError(task_id)
 
-    def apply(self, user_id: str, task_id: str, change: dict) -> None:
+    def apply(self, user_id: str, task_id: str, change: dict, *, space: Any = None) -> None:
         """Take one of the plan's ways out: a change to the task, or to the settings."""
         if "settings" in change:
             self.update_settings(user_id, _with_settings(self.store.settings(user_id), change["settings"]).to_dict())
         if "task" in change:
-            self.update_task(user_id, task_id, change["task"])
+            self.update_task(user_id, task_id, change["task"], space=space)
 
     def update_settings(self, user_id: str, payload: dict) -> Settings:
         current = self.store.settings(user_id)
@@ -668,7 +868,8 @@ class LazyAgents:
             return task
         now = self.clock()
         account = pool_key(settings.account, user_id)
-        if outcome.tokens or outcome.outcome != "refused":
+        # A step that never started (refused, or blocked by its project) books nothing.
+        if outcome.tokens or outcome.outcome not in ("refused", "blocked"):
             used, source = self.measure(settings, outcome, baseline, user_id, started_at)
             self.store.add_run(Run(
                 id=new_id("run"), user_id=user_id, account=account, task_id=task_id, step_id=step_id,
@@ -684,6 +885,14 @@ class LazyAgents:
         step.finished_at = now
         if task.status == "cancelled":
             step.status = "skipped"
+        elif outcome.outcome == "blocked":
+            # The task's project cannot take the work (gone, or archived): the
+            # step is not started at all, so nothing lands in the user's personal
+            # space instead. The task waits, paused, with the reason on it.
+            step.status = "pending"
+            step.reason = outcome.reason
+            task.status = "paused"
+            task.note(f"{step.title} did not start: {outcome.reason}", kind="error")
         elif outcome.outcome == "answered":
             self._answered(task, step, outcome.answer)
         elif outcome.outcome in ("interrupted", "stopped"):
@@ -721,6 +930,10 @@ class LazyAgents:
             acceptance=task.acceptance, optional=task.optional,
             deadline=max(now, task.deadline or now) + repeat, priority=task.priority, size=task.size,
             system=task.system, agent=task.agent, account=task.account, cap=task.cap, repeat=task.repeat,
+            # The same series, and the same project: a round does not change
+            # whose series it is or where its work belongs.
+            series_id=task.series_id or task.id,
+            project_id=task.project_id,
             created_at=now, updated_at=now,
         )
         for index, kind in enumerate(kinds_for(following.optional), start=1):
@@ -792,7 +1005,58 @@ class LazyAgents:
 
 
 # -- editing ---------------------------------------------------------------------------
-EDITABLE = ("title", "brief", "acceptance", "deadline", "priority", "size", "run_now", "cap", "drop_optional", "status")
+EDITABLE = (
+    "title", "brief", "acceptance", "deadline", "priority", "size", "run_now", "cap", "drop_optional", "status",
+    "project_id", "repeat_hours",
+)
+
+
+def _project_id(value: Any) -> Optional[str]:
+    """A project id as a task keeps it; the caller checks the project is the user's."""
+    clean = str(value or "").strip()
+    return clean[:64] or None
+
+
+def _checked_project(space: Any, value: Any) -> Optional[str]:
+    """The id of *space*'s project that *value* names, or None for no project.
+
+    The page's API and the tools both come through here before a task is saved,
+    so a made-up id, another user's project or an archived one is refused there
+    and then - not merely left to fail later, when the step's chat is made.
+    """
+    clean = _project_id(value)
+    if not clean:
+        return None
+    store = getattr(space, "project_store", None)
+    if store is None:
+        raise LazyProjectNotFound("Projects are not available in this session.")
+    project = store.get(clean)
+    if project is None:
+        raise LazyProjectNotFound("Project not found: it is not one of your projects.")
+    if project.archived:
+        raise LazyProjectArchived("That project is archived: its work is not extended. Unarchive it first.")
+    return project.id
+
+
+def _request_id(value: Any) -> Optional[str]:
+    """A caller's key for one creation, as the task remembers it."""
+    clean = str(value or "").strip()
+    return clean[:200] or None
+
+
+def _check_version(task: Task, expected: Optional[int]) -> None:
+    """Refuse a change to *task* when the caller read another version of it."""
+    if expected is None:
+        return
+    try:
+        named = int(expected)
+    except (TypeError, ValueError):
+        raise LazyError("The version is not a number.") from None
+    if named != int(task.version or 0):
+        raise LazyStale(
+            f"The task changed since you read it (now version {task.version}, you named {named}). "
+            "Read it again and repeat the change."
+        )
 
 
 def _deadline(value: Any) -> Optional[float]:
@@ -849,6 +1113,14 @@ def _copy(task: Task) -> Task:
 def _edited(task: Task, changes: dict, now: float) -> Task:
     """*task* with *changes* applied (the page's fields, or a way out of the plan)."""
     notes: List[str] = []
+    # A named value that is not one of ours is refused, not quietly dropped:
+    # the page re-reads the task and the tools report the fields they changed.
+    if "priority" in changes and changes["priority"] not in PRIORITIES:
+        raise LazyError(f"Unknown priority: {changes['priority']}.")
+    if "size" in changes and changes["size"] not in SIZES:
+        raise LazyError(f"Unknown size: {changes['size']}.")
+    if "status" in changes and changes["status"] not in ("active", "paused"):
+        raise LazyError("A task is either active or paused.")
     if "title" in changes and str(changes["title"]).strip():
         task.title = str(changes["title"]).strip()[:160]
     for key, limit in (("brief", 8000), ("acceptance", 2000)):
@@ -871,6 +1143,19 @@ def _edited(task: Task, changes: dict, now: float) -> Task:
         notes.append("Do it now: first in line, also in your hours" if task.run_now else "Back in line")
     if "cap" in changes:
         task.cap = _points(changes["cap"])
+    if "repeat_hours" in changes:
+        task.repeat = _repeat(changes["repeat_hours"])
+        if task.repeat and not task.series_id:
+            # A task that starts repeating opens its series with this round.
+            task.series_id = task.id
+        notes.append(
+            f"Repeats every {_hours(task.repeat)}" if task.repeat else "Runs once"
+        )
+    if "project_id" in changes:
+        project = _project_id(changes["project_id"])
+        if project != task.project_id:
+            task.project_id = project
+            notes.append("Moved to another project" if project else "No project")
     if changes.get("drop_optional"):
         for step in task.steps:
             if step.optional and step.status == "pending":

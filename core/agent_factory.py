@@ -230,6 +230,9 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         # The web chat user's ProjectStore, set by their space: the project tools
         # (tools/project_tools.py) act only on it, never on a model-named user or path.
         self.project_store = None
+        # The web chat user's lazy tasks (web_chat.lazy.chat.LazyChat), set by
+        # their space: the lazy tools act only on it, never on a model-named user.
+        self.lazy_agents = None
         if working_directory:
             self.config.set_working_directory(working_directory)
 

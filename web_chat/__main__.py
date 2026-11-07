@@ -261,6 +261,8 @@ def single_user_options(deployment, args: argparse.Namespace) -> dict:
                     local_cli_login=True,
                     # What the system builder makes shows in every space once it is free.
                     on_systems_changed=lambda: pool.invalidate(),
+                    # The lazy agents, once the server has made them.
+                    lazy=lambda: pool.lazy,
                 )
             )
         ),
@@ -347,6 +349,8 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
             # a role change applies when the space is next built.
             admin=bool((user := accounts.user(user_id)) and user.is_admin),
             on_systems_changed=lambda: pool.invalidate(),
+            # The lazy agents, once the server has made them.
+            lazy=lambda: pool.lazy,
         )
 
     print(f"Data: {data_dir}")

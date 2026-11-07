@@ -54,7 +54,7 @@ def register_lazy_routes(api: APIRouter, current_user: Callable, current_space: 
 
     @api.patch("/api/lazy/tasks/{task_id}")
     async def update_task(task_id: str, body: dict, user: Any = Depends(current_user), space: Any = Depends(current_space)) -> JSONResponse:
-        guarded(lambda: lazy.update_task(user.id, task_id, body))
+        guarded(lambda: lazy.update_task(user.id, task_id, body, space=space))
         return state(user, space)
 
     @api.post("/api/lazy/tasks/{task_id}/preview")
@@ -63,7 +63,7 @@ def register_lazy_routes(api: APIRouter, current_user: Callable, current_space: 
 
     @api.post("/api/lazy/tasks/{task_id}/apply")
     async def apply(task_id: str, body: dict, user: Any = Depends(current_user), space: Any = Depends(current_space)) -> JSONResponse:
-        guarded(lambda: lazy.apply(user.id, task_id, body.get("change") or {}))
+        guarded(lambda: lazy.apply(user.id, task_id, body.get("change") or {}, space=space))
         return state(user, space)
 
     @api.post("/api/lazy/tasks/{task_id}/cancel")

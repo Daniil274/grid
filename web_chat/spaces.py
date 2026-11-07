@@ -25,7 +25,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Callable, Dict, Iterator, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Iterator, Optional
 
 from web_chat.space import UserSpace
 
@@ -63,6 +63,9 @@ class SpacePool:
         # users' spaces are built at the same time.
         self._locks: Dict[str, asyncio.Lock] = {}
         self.restart_pending = False
+        #: The server's lazy agents (web_chat.lazy.service.LazyAgents), set by it
+        #: once they exist; the spaces pass it to their factories' tools.
+        self.lazy: Optional[Any] = None
 
     def pause_for_restart(self, pending: bool) -> None:
         self.restart_pending = pending

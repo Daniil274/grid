@@ -351,6 +351,9 @@ class WebChatServer:
             self.lazy = LazyAgents(
                 LazyStore(lazy_path), spaces, usage=self.usage, snapshot=self.usage_snapshot
             )
+            # The spaces hand it to their factories, so a chat's agents can read
+            # and change their user's own lazy tasks (tools/lazy_tools.py).
+            spaces.lazy = self.lazy
             register_lazy_routes(api, self.current_user, self.current_space, self.lazy)
             from web_chat.digest import DailyDigest, DigestStore, register_digest_routes
 
