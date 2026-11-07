@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -804,12 +805,27 @@ def _deadline(value: Any) -> Optional[float]:
 
 
 def _repeat(hours: Any) -> Optional[float]:
-    """Seconds between rounds from hours; None (once) for nothing, zero or a bad value."""
+    """Seconds between rounds from ``repeat_hours``; None (once) for nothing or zero.
+
+    The interval is not a calendar time: the round after this one is due that
+    long after this round's deadline (or after it ended, when that is later),
+    so a daily task does not keep a fixed hour of the day.
+    """
+    if hours in (None, "", 0, "0"):
+        return None
+    if isinstance(hours, bool):
+        raise LazyError("The repeat is not a number of hours.")
     try:
         value = float(hours)
     except (TypeError, ValueError):
+        raise LazyError("The repeat is not a number of hours.") from None
+    if not math.isfinite(value):
+        raise LazyError("The repeat is not a number of hours.")
+    if value == 0:
         return None
-    return value * HOUR if value >= 1 else None
+    if value < 1:
+        raise LazyError("A repeat is at least one hour.")
+    return value * HOUR
 
 
 def _hours(seconds: float) -> str:

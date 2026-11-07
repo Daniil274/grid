@@ -16,6 +16,7 @@ import { ICONS } from "../ui/icons.js";
 import {
   STATES, duration, fromLocalInput, hoursSummary, moment, points, quickDeadlines, toLocalInput, tokens, waitText,
 } from "./format.js";
+import { REPEAT_CHOICES, REPEAT_HINT, repeatHours } from "./repeat.js";
 
 const nowOf = (state) => state.now + (Date.now() / 1000 - state.loadedAt);
 
@@ -108,6 +109,7 @@ export function openTaskDialog(state, act) {
   const draft = {
     title: "", brief: "", acceptance: "", optional: "", deadline: null, size: "M", priority: "normal",
     system: usable[0]?.system ?? null, agent: usable[0]?.agent ?? null, cap: null,
+    repeat_hours: 0,
   };
   const preview = h("aside.preview", { "aria-live": "polite" }, h("p.preview__muted", { text: "Fill in the task to see where it lands." }));
   const error = h("p.lazyDialog__error", { role: "alert" });
@@ -158,6 +160,23 @@ export function openTaskDialog(state, act) {
     return `~${tokens(total)} tokens`;
   };
 
+  // How often the task repeats: the service takes hours between rounds, counted
+  // from the previous round's deadline - an interval, not a time of day.
+  let repeatChoice = "once";
+  const repeatProblem = h("span.field__problem", { role: "alert" });
+  const repeatInput = h("input.control", {
+    type: "number", min: "1", step: "1", inputmode: "numeric", placeholder: "Hours, for example 36",
+  });
+  repeatInput.hidden = true;
+  const applyRepeat = () => {
+    const { hours, problem } = repeatHours(repeatChoice, repeatInput.value);
+    draft.repeat_hours = problem ? null : hours;
+    repeatInput.hidden = repeatChoice !== "custom";
+    repeatProblem.textContent = problem;
+    refresh();
+  };
+  repeatInput.addEventListener("input", applyRepeat);
+
   const dialog = dialogShell("task-dialog", "New lazy task",
     h("div.lazyDialog__grid", {},
       h("div.lazyDialog__fields", {},
@@ -170,6 +189,9 @@ export function openTaskDialog(state, act) {
         h("label.field", {}, h("span.field__label", { text: "Agent" }), agentSelect, agentHint),
         field("Deadline", deadlinePicker(state, null, (t) => { draft.deadline = t; refresh(); }),
           "Leave it open and the task runs whenever there is room."),
+        field("Repeat", h("div.repeatPicker", {},
+          segmented("Repeat", REPEAT_CHOICES, repeatChoice, (value) => { repeatChoice = value; applyRepeat(); }),
+          repeatInput, repeatProblem), REPEAT_HINT),
         h("div.field__pair", {},
           field("Size", segmented("Size", [
             ["S", "Small", sizeHint("S")], ["M", "Medium", sizeHint("M")], ["L", "Large", sizeHint("L")],
@@ -188,6 +210,13 @@ export function openTaskDialog(state, act) {
               error.textContent = "Give the task a title.";
               return;
             }
+            const repeat = repeatHours(repeatChoice, repeatInput.value);
+            if (repeat.problem) {
+              error.textContent = repeat.problem;
+              repeatProblem.textContent = repeat.problem;
+              return;
+            }
+            draft.repeat_hours = repeat.hours;
             const next = await act(api.lazyCreate(draft), "Planned");
             if (next) dialog.close();
           },

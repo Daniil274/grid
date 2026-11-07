@@ -830,6 +830,22 @@
   line-height: 1.45;
 }
 
+.field__problem {
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.field__problem:empty { display: none; }
+
+.repeatPicker {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.repeatPicker > .control { width: 100%; max-width: 220px; }
+
 .field__pair {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

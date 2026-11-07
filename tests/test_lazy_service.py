@@ -346,6 +346,34 @@ def test_the_routes_act_for_the_signed_in_user(world):
     assert client.delete(f"/api/lazy/tasks/{task_id}").json()["tasks"] == []
 
 
+def test_the_api_takes_the_repeat_in_hours_and_refuses_a_bad_one(world):
+    app = FastAPI()
+    api = APIRouter()
+
+    async def current_user():
+        return SimpleNamespace(id="u")
+
+    async def current_space():
+        return world.space
+
+    register_lazy_routes(api, current_user, current_space, world.lazy)
+    app.include_router(api)
+    client = TestClient(app)
+    body = {"title": "Weekly", "system": "eng", "agent": "engineer"}
+    weekly = client.post("/api/lazy/tasks", json={**body, "repeat_hours": 168}).json()
+    view = next(task for task in weekly["tasks"] if task["id"] == weekly["created"])
+    assert view["repeat"] == 7 * 24 * HOUR
+    assert client.post("/api/lazy/tasks", json={**body, "repeat_hours": 0.5}).status_code == 400
+    assert client.post("/api/lazy/tasks", json={**body, "repeat_hours": "weekly"}).status_code == 400
+    # NaN and infinity are not intervals: they would poison the deadline and the
+    # state JSON (Starlette refuses to send it), so the task is never made.
+    for bad in ("nan", "inf", "Infinity", "1e400", True):
+        assert client.post("/api/lazy/tasks", json={**body, "repeat_hours": bad}).status_code == 400
+    # The page still loads, and only the good weekly task is there.
+    tasks = client.get("/api/lazy").json()["tasks"]
+    assert [task["repeat"] for task in tasks] == [7 * 24 * HOUR]
+
+
 # -- a pool per subscription ---------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_tasks_on_two_subscriptions_run_side_by_side_each_on_its_own_pool(world):
@@ -396,3 +424,33 @@ async def test_a_repeating_task_sets_up_its_next_round_when_done(world):
     assert following.deadline >= task.deadline + 24 * HOUR  # a day after the round it follows
     assert all(step.status == "pending" for step in following.steps) and following.conversation_id is None
     assert new_task(world, repeat_hours=0).repeat is None  # zero or nothing runs once
+
+
+def test_the_form_values_of_repeat_become_an_interval(world):
+    # The page's presets: once, every day, every week, and its own hours.
+    assert new_task(world, repeat_hours=24).repeat == 24 * HOUR
+    assert new_task(world, repeat_hours=168).repeat == 7 * 24 * HOUR
+    assert new_task(world, repeat_hours=36).repeat == 36 * HOUR
+    assert new_task(world, repeat_hours=None).repeat is None
+    assert new_task(world, repeat_hours="").repeat is None
+    with pytest.raises(LazyError, match="at least one hour"):
+        new_task(world, repeat_hours=0.5)
+    with pytest.raises(LazyError, match="at least one hour"):
+        new_task(world, repeat_hours=-24)
+    with pytest.raises(LazyError, match="not a number"):
+        new_task(world, repeat_hours="weekly")
+    for not_a_span in ("nan", "NaN", "inf", "Infinity", "-inf", 1e400, float("nan"), float("inf"), True):
+        with pytest.raises(LazyError, match="not a number"):
+            new_task(world, repeat_hours=not_a_span)
+
+
+@pytest.mark.asyncio
+async def test_the_next_round_is_an_interval_not_a_calendar_time(world):
+    # A daily task whose round was due in the past is followed a day after it
+    # actually ended - not at midnight, not at the hour of the first deadline.
+    task = new_task(world, title="Nightly report", repeat_hours=24, deadline=NOW - 5 * HOUR)
+    for _ in range(len(task.steps)):
+        await run_due(world)
+    following = next(t for t in world.store.tasks("u", finished=False) if t.title == "Nightly report")
+    assert following.deadline == pytest.approx(NOW + 24 * HOUR)
+    assert following.repeat == 24 * HOUR
