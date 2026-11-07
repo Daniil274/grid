@@ -59,12 +59,39 @@ export function createScrollFollower(container) {
       // Only explicit upward input can pause following; reaching the end resumes it.
       if (!draggingScrollbar && !following && atEnd()) following = true;
     },
+    /** Put the mode back as it was: a re-render is not reader input. */
+    setFollowing(value) {
+      following = Boolean(value);
+    },
     scrollToBottom(force = false) {
       if (!force && !following) return;
       following = true;
       container.scrollTop = container.scrollHeight;
     },
   };
+}
+
+/**
+ * Where the reader is looking: the message at the top edge of the viewport,
+ * how far its own top sits above that edge, and whether the stream is followed.
+ * Null when the host has no layout to measure (a test harness, a detached page):
+ * then nothing may be assumed about the place, and nothing is restored.
+ */
+function readPlace(container, messages) {
+  const box = container.getBoundingClientRect?.();
+  if (!box) return null;
+  const list = [...container.querySelectorAll(".msg")];
+  if (!list.length) return null;
+  let index = 0;
+  for (let at = 0; at < list.length; at += 1) {
+    const rect = list[at].getBoundingClientRect?.();
+    if (!rect) return null;
+    if (rect.top <= box.top + 1) index = at;
+    else break;
+  }
+  const rect = list[index].getBoundingClientRect();
+  const handle = messages.get(list[index].getAttribute("id"));
+  return { index, messageId: handle?.messageId ?? null, offset: rect.top - box.top };
 }
 
 export function createTranscript({
@@ -74,6 +101,35 @@ export function createTranscript({
   /** Live message handles by id - the speech player reports state by id. */
   const messages = new Map();
   const scrollFollower = createScrollFollower(container);
+  /** >0 while a whole conversation is being built: appending must not scroll. */
+  let batching = 0;
+
+  /** The reader's place on screen right now, or null when it cannot be read. */
+  const currentPlace = () => {
+    const found = readPlace(container, messages);
+    return found ? { ...found, following: scrollFollower.following } : null;
+  };
+
+  /**
+   * Put the reader back where *place* found them after the transcript was
+   * rebuilt. The anchor message is looked up by its stored id first - a
+   * resync can add or replace a bubble - and by position otherwise.
+   */
+  const restorePlace = (place) => {
+    if (!place) return;
+    const box = container.getBoundingClientRect?.();
+    const list = [...container.querySelectorAll(".msg")];
+    if (!box || !list.length) return;
+    const anchor = (place.messageId
+      ? list.find((node) => messages.get(node.getAttribute("id"))?.messageId === place.messageId)
+      : null) ?? list[Math.min(place.index, list.length - 1)];
+    const rect = anchor?.getBoundingClientRect?.();
+    if (!rect) return;
+    // Same expression as when the place was read: any difference is scroll.
+    container.scrollTop += (rect.top - box.top) - place.offset;
+    scrollFollower.setFollowing(place.following);
+    syncJumpButton();
+  };
 
   /** Only the newest answer offers "Continue in new chat"; earlier ones hide it. */
   const offersContinue = () => {
@@ -155,14 +211,18 @@ export function createTranscript({
       loadingTimer = setTimeout(() => container.classList.add("is-loading"), 120);
     },
 
-    /** @returns the message handle, so the caller can stream into it. */
-    add(options) {
+    /**
+     * `reveal: false` appends without moving the reader: a resync attaches, it
+     * does not open the chat.
+     * @returns the message handle, so the caller can stream into it.
+     */
+    add(options, { reveal = true } = {}) {
       setEmpty(false);
       const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage, onRestore: onRestoreCheckpoint });
       messages.set(message.id, message);
       container.append(message.el);
       if (options.role === "assistant" && !options.content) makeAnswerLive(message);
-      scrollToBottom(true);
+      if (reveal && !batching) scrollToBottom(true);
       offersContinue();
       return message;
     },
@@ -175,38 +235,52 @@ export function createTranscript({
       messages.get(id)?.setSpeechState(state);
     },
 
-    /** Replace the whole transcript with a stored conversation. */
-    /** `loadStep(messageId, stepId)` fetches a lazy trace step of a stored message. */
-    render(stored, { loadStep = null } = {}) {
-      container.replaceChildren();
-      messages.clear();
-      for (const message of stored) {
-        const handle = this.add({
-          role: message.role,
-          content: message.content,
-          timestamp: message.timestamp,
-          kind: message.kind,
-          compaction: message.compaction,
-          context: message.context ?? message.metadata ?? null,
-          images: message.images,
-          messageId: message.id,
-          versions: message.versions,
-          checkpoint: message.checkpoint ?? null,
-          // Public typed events of the turn: narration and compact statuses.
-          events: message.events ?? [],
-        });
-        handle.reasoning?.hydrate(message.trace, {
-          loadStep: loadStep && message.id ? (stepId) => loadStep(message.id, stepId) : null,
-        });
-        if (message.interruption) {
-          handle.setInterrupted(message.interruption, { resumable: message.interruption.resumable });
+    /**
+     * Replace the whole transcript with a stored conversation.
+     *
+     * `reveal` is the explicit way in: opening a chat shows its newest message.
+     * A re-render of the chat already on screen (a resync, post-processing)
+     * passes `reveal: false` and keeps the reader's place - unless the stream
+     * was being followed, which still lands at the bottom.
+     * `loadStep(messageId, stepId)` fetches a lazy trace step of a stored message.
+     */
+    render(stored, { loadStep = null, reveal = true } = {}) {
+      const saved = reveal ? null : currentPlace();
+      batching += 1;
+      try {
+        container.replaceChildren();
+        messages.clear();
+        for (const message of stored) {
+          const handle = this.add({
+            role: message.role,
+            content: message.content,
+            timestamp: message.timestamp,
+            kind: message.kind,
+            compaction: message.compaction,
+            context: message.context ?? message.metadata ?? null,
+            images: message.images,
+            messageId: message.id,
+            versions: message.versions,
+            checkpoint: message.checkpoint ?? null,
+            // Public typed events of the turn: narration and compact statuses.
+            events: message.events ?? [],
+          });
+          handle.reasoning?.hydrate(message.trace, {
+            loadStep: loadStep && message.id ? (stepId) => loadStep(message.id, stepId) : null,
+          });
+          if (message.interruption) {
+            handle.setInterrupted(message.interruption, { resumable: message.interruption.resumable });
+          }
         }
+      } finally {
+        batching -= 1;
       }
       offersContinue();
       // Every stored plan starts folded; the newest one is the one to follow.
       [...messages.values()].reverse().find((handle) => handle.reasoning?.hasPlan)?.reasoning.setPlanCollapsed(false);
       setEmpty(stored.length === 0);
-      scrollToBottom(true);
+      if (reveal || saved?.following !== false) scrollToBottom(true);
+      else restorePlace(saved);
     },
 
     /** Whether any answer on screen shows a plan card. */

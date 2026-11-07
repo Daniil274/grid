@@ -738,8 +738,15 @@ export class ChatController {
     await this._refreshConversations();
   }
 
-  /** Attach to a turn already running on the server and replay it in place. */
-  async _attachToRunningTurn(contextId, { message: userText, resumes, elapsed_ms: elapsedMs }) {
+  /**
+   * Attach to a turn already running on the server and replay it in place.
+   *
+   * `reveal` is the explicit way in (a chat was just opened, or just sent):
+   * the newest message is shown. A resync attaches without moving the reader,
+   * who may be reading further up - and an answer this page was already
+   * streaming keeps its text until the server's snapshot replaces it.
+   */
+  async _attachToRunningTurn(contextId, { message: userText, resumes, elapsed_ms: elapsedMs }, { reveal = true } = {}) {
     const last = this._transcript.last();
     // The answer this page was streaming into when it went away is this same
     // turn, still on screen: the snapshot refills that bubble instead of
@@ -748,22 +755,27 @@ export class ChatController {
     const rebuild = last?.role === "assistant" && !last.messageId ? last : null;
     if (!rebuild) {
       if (resumes) {
-        if (last?.role !== "marker") this._transcript.add({ role: "user", kind: "continuation", timestamp: Date.now() - elapsedMs });
+        if (last?.role !== "marker") this._transcript.add({ role: "user", kind: "continuation", timestamp: Date.now() - elapsedMs }, { reveal });
       } else if (!(last?.role === "user" && last.text === userText)) {
-        this._transcript.add({ role: "user", content: userText, timestamp: Date.now() - elapsedMs });
+        this._transcript.add({ role: "user", content: userText, timestamp: Date.now() - elapsedMs }, { reveal });
       }
     }
     this._transcript.retireContinue();
-    const message = rebuild ?? this._transcript.add({ role: "assistant", author: "Grid", timestamp: Date.now() - elapsedMs });
-    // The snapshot's token frame carries the whole answer so far: start empty.
-    if (rebuild) message.setText("");
+    const message = rebuild
+      ?? this._transcript.add({ role: "assistant", author: "Grid", timestamp: Date.now() - elapsedMs }, { reveal });
     message.setWaiting(true);
     message.reasoning.start(elapsedMs);
     message.reasoning.setStepSource(this._liveStepSource(contextId, message));
-    this._transcript.scrollToBottom(true);
+    if (reveal) this._transcript.scrollToBottom(true);
+    // A following reader lands at the end at once, without waiting a frame.
+    else this._transcript.scrollToBottom();
     this._store.set({ streaming: true });
 
-    const turn = { message, contextId, failed: false, finalText: "", spoken: false, done: false };
+    // The snapshot's token frame carries the whole answer so far, so it
+    // replaces this bubble's text instead of being appended to it - but only
+    // when it arrives: clearing it here would blank a reader's screen for the
+    // round trip and drop the place they were reading.
+    const turn = { message, contextId, failed: false, finalText: "", spoken: false, done: false, snapshot: Boolean(rebuild) };
     this._activeTurn = turn;
     try {
       this._connection = await ChatConnection.open(contextId);
@@ -781,7 +793,12 @@ export class ChatController {
     const { message } = turn;
     connection
       .on("token", ({ content }) => {
-        message.appendText(content);
+        // An attaching page is sent the answer it missed as one frame: it
+        // states what the bubble shows, so it replaces rather than repeats.
+        if (turn.snapshot) {
+          turn.snapshot = false;
+          message.setText(content);
+        } else message.appendText(content);
         this._transcript.follow();
       })
       // The streamed text was narration before an action; the trace now holds it.
@@ -937,13 +954,15 @@ export class ChatController {
       // Same messages on screen: only take their ids and versions, so an
       // expanded reasoning panel stays as it is.
       if (force || !this._transcript.adopt(payload.messages)) {
-        this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id) });
+        // A resync is not an opening: the reader keeps their place unless the
+        // stream was being followed (a following reader still lands at the end).
+        this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id), reveal: false });
       }
       this._store.set({ queue: payload.pending ?? [], hasAgentContext: Boolean(payload.metadata?.routed_agent) });
       this._transcript.refreshContinueInNewChat?.();
       this._syncResumable();
       // The queue started the next waiting message: follow that turn too.
-      if (payload.active_turn && !this.isStreaming) await this._attachToRunningTurn(payload.id, payload.active_turn);
+      if (payload.active_turn && !this.isStreaming) await this._attachToRunningTurn(payload.id, payload.active_turn, { reveal: false });
       return payload;
     } catch (error) {
       console.warn("Could not reconcile the conversation", error);
