@@ -19,6 +19,27 @@ import { installFakeDom } from "./fake_dom.mjs";
 
 installFakeDom();
 
+// The transcript watches its host for the two things the fake DOM cannot do on
+// its own: a container that gains a box (it was hidden when the chat opened)
+// and content that changed after the render. Real engines fire these; here the
+// test pulls them.
+const resizeObservers = [];
+const mutationObservers = [];
+globalThis.ResizeObserver = class {
+  constructor(callback) { this.callback = callback; resizeObservers.push(this); }
+  observe(node) { this.node = node; }
+  unobserve() {}
+  disconnect() {}
+};
+globalThis.MutationObserver = class {
+  constructor(callback) { this.callback = callback; mutationObservers.push(this); }
+  observe(node) { this.node = node; }
+  disconnect() {}
+  takeRecords() { return []; }
+};
+const layoutChanged = () => { for (const observer of resizeObservers) observer.callback([]); };
+const contentChanged = () => { for (const observer of mutationObservers) observer.callback([]); };
+
 // -- layout model ------------------------------------------------------------
 const VIEWPORT = 300;
 const MESSAGE_BASE_HEIGHT = 90;
@@ -307,4 +328,164 @@ test("attaching does not blank the answer it is about to replace", async () => {
   lastSocket().deliver({ type: "token", content: "half an answer" });
   assert.equal(transcript.count(), 2, "one answer bubble");
   assert.equal(transcript.last().text, "half an answer");
+});
+
+// -- switching chats ---------------------------------------------------------
+/**
+ * A page with several chats in it. Each chat is a stored thread; the reader
+ * moves between them the way the sidebar does.
+ */
+async function openInbox(threads) {
+  FakeSocket.instances.length = 0;
+  const container = scrollHost();
+  const jumpButton = document.createElement("button");
+  const transcript = createTranscript({ container, emptyState: document.createElement("div"), jumpButton });
+  const store = createStore({ contextId: null, rootId: null, systems: [], conversations: [], queue: [] });
+  const chat = new ChatController({
+    store,
+    transcript,
+    onConversationsChanged: async () => {},
+    speech: { stop() {}, speak() {}, isActive: () => false, activeId: null },
+  });
+  api.getConversation = async (id) => ({
+    id, root: id, messages: threads[id], metadata: {}, pending: [], active_turn: threads.active_turn ?? null,
+  });
+  api.conversationPlan = async () => ({ tasks: [] });
+  api.createConversation = async () => ({ id: "new", workspace: null });
+  const open = async (id) => { await chat.openConversation(id); await tick(8); };
+  return { chat, transcript, container, jumpButton, open };
+}
+
+test("each chat keeps the place the reader left it at", async () => {
+  const box = await openInbox({ c1: storedThread(8), c2: storedThread(12) });
+
+  await box.open("c1");
+  scrollUp(box.container, 175);
+  await box.open("c2");
+  // A chat never read before is an opening: its newest message shows.
+  assert.equal(box.container.scrollTop, bottomOf(box.container), "a new chat shows its end");
+  scrollUp(box.container, 90);
+
+  await box.open("c1");
+  assert.equal(box.container.scrollTop, 175, "c1 opens where it was left");
+  await box.open("c2");
+  assert.equal(box.container.scrollTop, 90, "and c2 keeps its own place");
+});
+
+test("a chat left at its end opens at its end and keeps following", async () => {
+  const box = await openInbox({ c1: storedThread(8), c2: storedThread(12) });
+
+  await box.open("c1");
+  assert.equal(box.container.scrollTop, bottomOf(box.container));
+  await box.open("c2");
+  scrollUp(box.container, 60);
+  await box.open("c1");
+
+  assert.equal(box.container.scrollTop, bottomOf(box.container), "the end of c1, not a place inside it");
+  assert.equal(box.transcript.isFollowing(), true, "a chat left at the end is still followed");
+});
+
+test("a chat opened while the transcript has no layout ends at its newest message", async () => {
+  const box = await openInbox({ c1: storedThread(8), c2: storedThread(12) });
+  await box.open("c1");
+
+  // A hidden pane: the container has no box, so there is nothing to scroll yet.
+  box.container.clientHeight = 0;
+  await box.open("c2");
+  box.container.clientHeight = VIEWPORT;
+  layoutChanged();
+  await tick(8);
+
+  assert.equal(box.container.scrollTop, bottomOf(box.container), "the reveal waited for a layout");
+});
+
+test("content that arrives after the render keeps a following reader at the end", async () => {
+  const box = await openInbox({ c1: storedThread(8) });
+  await box.open("c1");
+  const before = bottomOf(box.container);
+
+  // The chat's stored plan, a lazy step, a picture: the list grows after the render.
+  box.transcript.add({ role: "assistant", content: "a late card", timestamp: 99 }, { reveal: false });
+  contentChanged();
+  await tick(8);
+
+  assert.ok(bottomOf(box.container) > before, "the list really grew");
+  assert.equal(box.container.scrollTop, bottomOf(box.container), "the reader at the end keeps up");
+});
+
+test("late content does not move a reader who is reading further up", async () => {
+  const box = await openInbox({ c1: storedThread(8) });
+  await box.open("c1");
+  scrollUp(box.container, 140);
+
+  box.transcript.add({ role: "assistant", content: "a late card", timestamp: 99 }, { reveal: false });
+  contentChanged();
+  await tick(8);
+
+  assert.equal(box.container.scrollTop, 140, "the reader was not pulled down");
+  assert.equal(box.transcript.isFollowing(), false);
+});
+
+test("starting another chat does not forget the place of the one it replaced", async () => {
+  const box = await openInbox({ c1: storedThread(8) });
+  await box.open("c1");
+  scrollUp(box.container, 175);
+
+  await box.chat.startConversation();
+  await box.open("c1");
+
+  assert.equal(box.container.scrollTop, 175, "the chat opens where it was left");
+});
+
+test("a chat that is still loading does not take the place of the chat on screen", async () => {
+  const box = await openInbox({ c1: storedThread(8), c2: storedThread(12) });
+  await box.open("c1");
+  scrollUp(box.container, 175);
+
+  // c2 is picked, but its read has not answered: c1 is still the chat on screen,
+  // and its place must not become c2's place.
+  const held = new Map();
+  const reading = (id) => {
+    const conversation = {
+      id, root: id, messages: id === "c2" ? storedThread(12) : storedThread(8), metadata: {}, pending: [], active_turn: null,
+    };
+    return conversation;
+  };
+  api.getConversation = async (id) => {
+    if (id !== "c2") return reading(id);
+    return new Promise((resolve) => held.set("c2", () => resolve(reading(id))));
+  };
+  const toC2 = box.chat.openConversation("c2");
+  await tick(2);
+
+  // The reader changes their mind before c2 is drawn; c1 comes back.
+  await box.chat.openConversation("c1");
+  await tick(4);
+  held.get("c2")?.(); // the late answer to a chat that is no longer open
+  await toC2.catch(() => {});
+  await tick(4);
+
+  api.getConversation = async (id) => reading(id);
+  await box.open("c2");
+  assert.equal(box.container.scrollTop, bottomOf(box.container),
+    "a chat that was never drawn opens at its own newest message");
+});
+
+test("changing chats mid-restore leaves each one its own place", async () => {
+  const box = await openInbox({ c1: storedThread(8), c2: storedThread(12) });
+  await box.open("c1");
+  scrollUp(box.container, 175);
+  await box.open("c2");
+  scrollUp(box.container, 90);
+
+  // Going back to c1, then changing one's mind before its place has landed.
+  const toC1 = box.chat.openConversation("c1");
+  await tick(1);
+  await box.open("c2");
+  await toC1.catch(() => {});
+  await tick(8);
+
+  assert.equal(box.container.scrollTop, 90, "the chat that took over is not dragged to the other's place");
+  await box.open("c1");
+  assert.equal(box.container.scrollTop, 175, "and the interrupted chat still opens at its own");
 });

@@ -54,6 +54,13 @@ export class ChatController {
     this._navigationIntent = 0;
     // The resync a burst of wake-up events scheduled (see resumeLive).
     this._resume = null;
+    // Where the reader was in each chat this page has visited: a chat opens
+    // where they left it, not at whatever position the last one was scrolled to.
+    this._places = new Map();
+    // The chat the transcript on screen really shows. A place belongs to the
+    // chat whose messages are on screen, and to no other: an open that is still
+    // fetching has already claimed a chat id without having drawn anything.
+    this._renderedId = null;
     this._listenForLifecycle();
   }
 
@@ -625,6 +632,10 @@ export class ChatController {
       return;
     }
     const intent = ++this._navigationIntent;
+    // A new chat replaces the one on screen: the reader's place in it is kept
+    // for the next time they come back.
+    const leaving = this._store.get().contextId;
+    if (leaving) this._rememberPlace(leaving);
     this._detach();
     this._voice?.cleanup();
     const { systemKey, agentKey, activeProject } = this._store.get();
@@ -639,6 +650,9 @@ export class ChatController {
       chatWorkspace: conversation.workspace ?? null, workspaceLocked: false, reference: null,
     });
     this._transcript.clear();
+    // An empty transcript is this chat's: nothing to remember yet, and nothing
+    // of the one it replaced.
+    this._renderedId = conversation.id;
     await this._refreshConversations();
   }
 
@@ -662,6 +676,11 @@ export class ChatController {
   async openConversation(contextId, intent = null, { keepSelection = false } = {}) {
     if (!contextId) return;
     if (intent === null) intent = ++this._navigationIntent;
+    // The place the reader has in this chat, remembered when they left it, is
+    // what the chat opens at - a chat is not a fresh page every time.
+    const leaving = this._store.get().contextId;
+    if (leaving && leaving !== contextId) this._rememberPlace(leaving);
+    const place = this._places.get(contextId) ?? null;
     // Leaving a chat mid-turn only stops watching it: the turn runs on the
     // server and is replayed when the chat is opened again.
     this._detach();
@@ -677,6 +696,7 @@ export class ChatController {
       if (intent === this._navigationIntent && this._store.get().contextId === contextId) {
         this._transcript.setLoading(false);
         this._transcript.clear();
+        this._renderedId = null;
         this._store.set({ resumable: false });
       }
       throw error;
@@ -701,12 +721,33 @@ export class ChatController {
       compacting: this._compactingId === payload.id,
       queue: payload.pending ?? [],
     });
-    this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id) });
+    // From here on, the places read off the screen belong to this chat.
+    this._renderedId = payload.id;
+    this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id), reveal: !place, place });
     this._syncResumable();
     // The saved plan of the chat, before any live plan step of a new turn.
     void this._showStoredPlan(payload.id);
-    // The agent kept working while the page was away: pick the turn back up.
-    if (payload.active_turn) await this._attachToRunningTurn(payload.id, payload.active_turn);
+    // The agent kept working while the page was away: pick the turn back up,
+    // without moving a reader who is not at the end of a resumed chat.
+    if (payload.active_turn) await this._attachToRunningTurn(payload.id, payload.active_turn, { reveal: !place });
+  }
+
+  /**
+   * Remember where the reader is in *contextId*, so reopening that chat puts
+   * them back there. Failing to read a place (no layout: a hidden pane) forgets
+   * the old one instead of restoring a guess.
+   */
+  _rememberPlace(contextId) {
+    // Only the chat on screen has a place to read: while another chat is still
+    // being fetched, the id in the store is ahead of the transcript, and reading
+    // the screen for it would hand this chat the position of the one before.
+    if (contextId !== this._renderedId) return;
+    const place = this._transcript.place?.() ?? null;
+    this._places.delete(contextId);
+    if (!place) return;
+    this._places.set(contextId, place);
+    // Bounded: a session reads a handful of chats, not an unbounded archive.
+    while (this._places.size > 40) this._places.delete(this._places.keys().next().value);
   }
 
   /** Stop following the turn on screen without stopping the agent. */
@@ -722,11 +763,13 @@ export class ChatController {
   async deleteConversation(contextId) {
     const intent = ++this._navigationIntent;
     await api.deleteConversation(contextId);
+    this._places.delete(contextId);
     if (intent !== this._navigationIntent) return;
     if (contextId === this._store.get().contextId) {
       this._detach();
       this._store.set({ contextId: null, hasAgentContext: false, reference: null });
       this._transcript.clear();
+      this._renderedId = null;
     }
     await this._refreshConversations();
     const next = this._store.get().conversations[0];
@@ -956,6 +999,7 @@ export class ChatController {
       if (force || !this._transcript.adopt(payload.messages)) {
         // A resync is not an opening: the reader keeps their place unless the
         // stream was being followed (a following reader still lands at the end).
+        this._renderedId = payload.id;
         this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id), reveal: false });
       }
       this._store.set({ queue: payload.pending ?? [], hasAgentContext: Boolean(payload.metadata?.routed_agent) });
