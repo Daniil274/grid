@@ -591,6 +591,113 @@ a.refChip:hover {
 .payload__memMore { justify-self: start; padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--radius-pill); background: transparent; color: var(--text-2); font-size: 11.5px; cursor: pointer; }
 .payload__memMore:hover, .payload__memMore:focus-visible { border-color: var(--accent-line); color: var(--accent); }
 
+/* Tracker operations (ui/bead-cards.js): a call's tasks, plan or log as rows
+   a reader can scan, with the generic JSON still one Source press away. Same
+   state vocabulary as the plan card, so a task looks the same in both. */
+.beadCard { display: grid; gap: 8px; min-width: 0; padding: 10px 12px; }
+.beadCard__note { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; margin: 0; color: var(--text-2); font-size: 12px; }
+.beadCard__note strong { color: var(--text); font-weight: 600; }
+.beadCard__note[data-tone="ok"] strong { color: var(--ok); }
+.beadCard__note[data-tone="error"] { color: var(--danger); }
+.beadCard__note[data-tone="error"] strong { color: var(--danger); }
+.beadCard__note[data-tone="empty"] { color: var(--text-3); }
+.beadCard__counts { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: 2px; }
+.beadCard__count { color: var(--text-3); font-size: 11px; }
+.beadCard__count[data-status="in_progress"] { color: var(--accent); }
+.beadCard__count[data-status="blocked"] { color: var(--danger); }
+.beadCard__count[data-status="closed"] { color: var(--ok); }
+.beadCard__issue { display: grid; gap: 6px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-inset); }
+.beadCard__issue[data-status="blocked"] { border-left: 3px solid var(--danger); }
+.beadCard__issue[data-status="in_progress"] { border-left: 3px solid var(--accent); }
+.beadCard__issue[data-status="closed"] { border-left: 3px solid var(--ok); }
+.beadCard__head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.beadCard__state { display: inline-flex; gap: 4px; align-items: center; color: var(--text-2); font-size: 11.5px; white-space: nowrap; }
+.beadCard__mark { flex: 0 0 auto; width: 1em; color: var(--text-3); font-family: var(--font-mono, monospace); text-align: center; }
+.beadCard__state[data-status="in_progress"] { color: var(--accent); }
+.beadCard__state[data-status="blocked"] { color: var(--danger); }
+.beadCard__state[data-status="closed"] { color: var(--ok); }
+.beadCard__state[data-status="in_progress"] .beadCard__mark,
+.beadCard__state[data-status="blocked"] .beadCard__mark,
+.beadCard__state[data-status="closed"] .beadCard__mark { color: inherit; }
+.beadCard__id { color: var(--text-2); font-family: var(--font-mono, monospace); font-size: 11.5px; text-decoration: none; overflow-wrap: anywhere; }
+/* Links stay comfortable to hit with a thumb: the text is small, the target is not. */
+a.beadCard__id, a.beadCard__depLink, a.beadCard__open {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+}
+a.beadCard__id:hover, a.beadCard__id:focus-visible { color: var(--accent); text-decoration: none; }
+a.beadCard__id:focus-visible, a.beadCard__rowLink:focus-visible, a.beadCard__open:focus-visible,
+.beadCard__more:focus-visible, .beadCard__details > summary:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.beadCard__tag { padding: 1px 8px; border: 1px solid var(--line); border-radius: var(--radius-pill); color: var(--text-3); font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; }
+.beadCard__pri[data-pri="0"] { border-color: var(--danger); color: var(--danger); }
+.beadCard__pri[data-pri="1"] { border-color: var(--warn); color: var(--warn); }
+.beadCard__tag--who { text-transform: none; }
+.beadCard__title { min-width: 0; margin: 0; color: var(--text); font-size: 12.5px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.beadCard__text { margin: 0; color: var(--text-2); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+.beadCard__text--muted { color: var(--text-3); }
+.beadCard__details > summary { cursor: pointer; color: var(--text-3); font-size: 11.5px; }
+.beadCard__details > summary { display: flex; align-items: center; min-height: 24px; }
+.beadCard__details > summary:hover { color: var(--text-2); }
+.beadCard__details > .beadCard__text { padding: 4px 0 0 10px; border-left: 1px solid var(--line); }
+.beadCard__facts { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+.beadCard__fact { display: flex; gap: 5px; min-width: 0; font-family: var(--font-mono, monospace); font-size: 11px; }
+.beadCard__key { flex: 0 0 auto; color: var(--text-3); }
+.beadCard__value { min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.beadCard__section { color: var(--text-3); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; }
+.beadCard__deps { display: grid; gap: 4px; }
+.beadCard__depRows { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.beadCard__dep { display: inline-flex; gap: 5px; align-items: center; max-width: 100%; padding: 1px 8px; border: 1px solid var(--line); border-radius: var(--radius-pill); color: var(--text-3); font-size: 11px; }
+.beadCard__depTitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.beadCard__depLink { color: var(--text-2); font-family: var(--font-mono, monospace); font-size: 11px; text-decoration: none; }
+.beadCard__depLink:hover, .beadCard__depLink:focus-visible { color: var(--accent); text-decoration: none; }
+.beadCard__rows { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; min-width: 0; }
+.beadCard__row { min-width: 0; border-radius: var(--radius-sm); }
+.beadCard__rowLink { display: flex; gap: 8px; align-items: flex-start; min-width: 0; padding: 5px 7px; border-radius: var(--radius-sm); color: inherit; text-decoration: none; }
+a.beadCard__rowLink:hover { background: var(--bg-inset); text-decoration: none; }
+.beadCard__rowMain { display: grid; gap: 1px; min-width: 0; flex: 1; }
+.beadCard__rowTop { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; min-width: 0; }
+/* A plan row's key chip reads as its own token, not as the title's last word. */
+.beadCard__row--plan .beadCard__rowTop { align-items: center; column-gap: 10px; }
+.beadCard__row--plan .beadCard__rowMain { gap: 3px; }
+.beadCard__rowTop .beadCard__title { flex: 1 1 180px; }
+.beadCard__meta { min-width: 0; color: var(--text-3); font-family: var(--font-mono, monospace); font-size: 10.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.beadCard__row[data-status="closed"] .beadCard__title { color: var(--text-2); }
+.beadCard__row[data-state="waiting"] .beadCard__title { color: var(--text-2); }
+.beadCard__more { justify-self: start; margin-top: 4px; padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--radius-pill); background: transparent; color: var(--text-2); font-size: 11.5px; cursor: pointer; }
+.beadCard__more { display: inline-flex; align-items: center; min-height: 24px; }
+.beadCard__more:hover, .beadCard__more:focus-visible { border-color: var(--accent-line); color: var(--accent); }
+.beadCard__notice { color: var(--text-3); font-size: 11px; }
+.beadCard__wave { display: grid; gap: 3px; }
+.beadCard__foot { display: flex; justify-content: flex-end; }
+.beadCard__open { color: var(--accent); font-size: 11.5px; text-decoration: none; }
+.beadCard__open:hover { text-decoration: underline; }
+.beadCard__pre { margin: 4px 0 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--text-2); font-family: var(--font-mono, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+/* Screen readers get the state as words; the mark above stays decorative. */
+.beadCard__sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* A shared log reads as chat lines: who, when, what. */
+.beadLog { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
+.beadLog__line { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); gap: 3px 8px; align-items: baseline; padding: 3px 6px; border-radius: var(--radius-sm); font-size: 12px; }
+.beadLog__line:nth-child(odd) { background: var(--bg-inset); }
+.beadLog__author { max-width: 120px; overflow: hidden; color: var(--text); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.beadLog__time { color: var(--text-3); font-family: var(--font-mono, monospace); font-size: 10.5px; }
+.beadLog__text { min-width: 0; color: var(--text-2); overflow-wrap: anywhere; white-space: pre-wrap; }
+.beadLog__line--raw { grid-template-columns: minmax(0, 1fr); color: var(--text-3); font-family: var(--font-mono, monospace); font-size: 11px; }
+.beadLog__line--raw .beadLog__text { color: var(--text-3); white-space: pre-wrap; }
+
+@media (max-width: 640px) {
+  .beadCard { padding: 8px 9px; }
+  .beadCard__issue { padding: 7px 8px; }
+  .beadCard__rowLink { padding: 6px 4px; }
+  .beadLog__author { max-width: 72px; }
+  .beadCard__depTitle { max-width: 150px; }
+}
+
 /* The plan card (ui/plan-card.js): the conversation's tracker tasks, above the answer. */
 .planCard {
   margin: 8px 0 10px;

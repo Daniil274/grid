@@ -9,6 +9,7 @@ import { languageFor, toolFamily } from "../lib/languages.js";
 import { scopedWorkspaceUrl } from "../lib/workspace-links.js";
 import { copyText } from "./toast.js";
 import { MEMORY_LAYER_NAMES, MEMORY_LEVEL_NAMES } from "../lib/memory-labels.js";
+import { beadJson, beadText } from "./bead-cards.js";
 
 const MAX_TEXT = 32000;
 const MAX_PARTS = 40;
@@ -77,12 +78,17 @@ function jsonView(value) {
   return walk(value);
 }
 
-function partView(part, memory, role) {
+function partView(part, memory, role, tool) {
   if (!part || typeof part !== "object") return h("pre.payload__body", { text: "Invalid content block" });
   const text = textOf(part.data).slice(0, MAX_TEXT);
   let body;
   switch (part.kind) {
-    case "json": body = (memory && memoryJson(part.data, memory, role)) || jsonView(part.data); break;
+    // A tracker payload reads as task cards; every other JSON keeps the tree.
+    case "json":
+      body = (memory && memoryJson(part.data, memory, role))
+        || beadJson(part.data, tool, role)
+        || jsonView(part.data);
+      break;
     case "markdown":
       body = h("div.payload__body.payload__body--prose", { html: renderMarkdown(text) });
       decorateMath(body);
@@ -104,7 +110,9 @@ function partView(part, memory, role) {
       break;
     }
     case "resource": body = resourceLink(part.uri, part.name || part.uri); break;
-    default: body = h("pre.payload__body", {}, h("code", { text: text || "Empty text" }));
+    case "text": body = beadText(text, tool, role) || h("pre.payload__body", {}, h("code", { text: text || "Empty text" })); break;
+    default: body = (!part.kind && beadText(text, tool, role))
+      || h("pre.payload__body", {}, h("code", { text: text || "Empty text" }));
   }
   const stats = part.kind === "diff" ? diffStats(text) : null;
   return h("div.payload__part", { dataset: { kind: part.kind || "text", tone: partTone(part) } },
@@ -364,7 +372,7 @@ export function renderPayload(label, typed, legacy, { markdown = false, state = 
   const truncated = value.truncated || size > MAX_TEXT || value.parts.length > MAX_PARTS;
   const memory = memoryTool(tool);
   const half = payloadRole(label, role);
-  const display = h("div.payload__typed", {}, parts.length ? parts.map((part) => partView(part, memory, half)) : h("span.payload__empty", { text: "No content returned" }));
+  const display = h("div.payload__typed", {}, parts.length ? parts.map((part) => partView(part, memory, half, tool)) : h("span.payload__empty", { text: "No content returned" }));
   // The raw view is the payload's own bytes shown a second time. A server-sent
   // ``raw_text`` is already a string, so its node costs nothing to make; a
   // payload without one is serialised part by part - the work the typed view

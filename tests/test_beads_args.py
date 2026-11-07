@@ -40,9 +40,21 @@ async def test_update_and_close_carry_values_inside_their_flags(monkeypatch, tmp
     _, [update] = await invoke(
         monkeypatch, tmp_path, beads_tools.beads_update, bead_id="p-1.2", title="-t", notes="--all"
     )
-    assert update == ["update", "p-1.2", "--title=-t", "--notes=--all"]
+    assert update == ["update", "p-1.2", "--json", "--title=-t", "--notes=--all"]
     _, [close] = await invoke(monkeypatch, tmp_path, beads_tools.beads_close, bead_id="p-1", reason="--force")
-    assert close == ["close", "p-1", "--reason=--force"]
+    assert close == ["close", "p-1", "--reason=--force", "--json"]
+
+
+async def test_reads_and_writes_ask_bd_for_the_task_itself(monkeypatch, tmp_path):
+    # The web chat draws a task from its own fields (status, dependencies,
+    # notes); bd's default answer for show/update/close is prose. Only the
+    # JSON shapes reach the caller, so every one of them must ask for it.
+    _, [show] = await invoke(monkeypatch, tmp_path, beads_tools.beads_show, bead_id="p-1")
+    assert show == ["show", "p-1", "--json"]
+    _, [update] = await invoke(monkeypatch, tmp_path, beads_tools.beads_update, bead_id="p-1", status="in_progress")
+    assert "--json" in update
+    _, [close] = await invoke(monkeypatch, tmp_path, beads_tools.beads_close, bead_id="p-1")
+    assert "--json" in close
 
 
 @pytest.mark.parametrize(

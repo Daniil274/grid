@@ -48,11 +48,40 @@ _SOFT_ERROR_TOOLS = {
     "project_list", "project_get", "project_ensure", "project_add_notes",
 }
 
+# The tracker tools answer in four shapes, only one of which is typed for
+# callers: bd's JSON (list/show/plan), plain confirmation text, `{"error": ...}`
+# from beads_plan and the log tools, and `{"success": false, ...}` from the log
+# tools. Their failures therefore have to be read here, and only here: the
+# same text from another tool is data, never a verdict on the run.
+_BEADS_TOOLS = {
+    "beads_init", "beads_ready", "beads_create", "beads_show", "beads_update",
+    "beads_close", "beads_sync", "beads_dep", "beads_plan", "beads_list",
+    "beads_log_append", "beads_log_read",
+}
+
 
 def _soft_error(tool: str, value: Any) -> bool:
     key = str(tool or "").rsplit(".", 1)[-1].strip().lower()
     return (key in _SOFT_ERROR_TOOLS and isinstance(value, dict)
             and isinstance(value.get("error"), str) and bool(value["error"].strip()))
+
+
+def _beads_error(tool: str, value: Any) -> bool:
+    """Whether a beads tool's result is a refusal rather than an answer.
+
+    Scoped to the tracker on purpose. The typed shapes (`error`,
+    `success: false`) are the source's own fields; the ❌ text is bd 1.3's
+    untyped failure output and is accepted only for these tools, as backward
+    compatibility - nowhere is a run's status inferred from prose.
+    """
+    key = str(tool or "").rsplit(".", 1)[-1].strip().lower()
+    if key not in _BEADS_TOOLS:
+        return False
+    if isinstance(value, dict):
+        if isinstance(value.get("error"), str) and value["error"].strip():
+            return True
+        return value.get("success") is False
+    return isinstance(value, str) and value.lstrip().startswith("❌")
 
 
 def normalize_payload(value: Any, *, role: str = "result", tool: str = "",
@@ -276,7 +305,8 @@ def normalize_payload(value: Any, *, role: str = "result", tool: str = "",
     payload = {"version": 1, "parts": parts, "raw_text": source[:MAX_TEXT],
                "truncated": truncated, "original_size": original_size,
                "is_error": (isinstance(value, dict) and value.get("isError") is True)
-               or (role != "input" and _soft_error(tool, value))}
+               or (role != "input" and (_soft_error(tool, value)
+                                        or _beads_error(tool, value)))}
     # A one-text-part payload whose raw text is that very text carries the same
     # bytes twice; the client joins the parts when ``raw_text`` is absent.
     if (not truncated and len(parts) == 1

@@ -125,6 +125,52 @@ def test_memory_soft_errors_are_errors_without_reclassifying_other_tools():
     assert not normalize_payload(failure, role="input", tool="memory_recall")["is_error"]
 
 
+def test_beads_failures_are_errors_within_the_tracker_only():
+    # bd 1.3 prints its failures as text; the tracker tools pass them through.
+    failure = "❌ Error listing beads: boom"
+    for tool in ("beads_list", "beads_ready", "beads_show", "beads_create",
+                 "beads_update", "beads_close", "beads_dep", "beads_init",
+                 "beads_sync", "server.beads_show"):
+        payload = normalize_payload(failure, tool=tool)
+        assert payload["is_error"], tool
+        assert payload["parts"][0]["data"] == failure
+    # The same text from any other tool is data, not a verdict on the run.
+    for tool in ("read_file", "shell", "", "memory_recall"):
+        assert not normalize_payload(failure, tool=tool)["is_error"], tool
+    assert not normalize_payload("✅ Beads initialized.", tool="beads_init")["is_error"]
+    assert not normalize_payload(failure, role="input", tool="beads_list")["is_error"]
+
+
+def test_beads_typed_error_and_success_flags_are_read():
+    for tool in ("beads_plan", "beads_log_append", "beads_log_read"):
+        assert normalize_payload({"error": "Nothing was created."}, tool=tool)["is_error"], tool
+        assert normalize_payload({"success": False, "error": "bad channel"}, tool=tool)["is_error"], tool
+        assert not normalize_payload({"success": True, "channel": "GAME"}, tool=tool)["is_error"], tool
+        assert not normalize_payload({"error": "  "}, tool=tool)["is_error"], tool
+    # Another tool's `success: false` is its own data: only the tracker's
+    # status field is interpreted here.
+    assert not normalize_payload({"success": False}, tool="read_file")["is_error"]
+    # The payload itself is untouched; only `is_error` is added.
+    plan = {"error": "Keys must be unique: build. Nothing was created."}
+    assert normalize_payload(plan, tool="beads_plan")["parts"][0]["data"] == plan
+
+
+def test_beads_failures_mark_the_step_as_error():
+    recorder = TraceRecorder(lambda _: None)
+    obs = WebStreamObserver(recorder, emit_token=lambda _: None)
+    obs.handle_event(event("tool_called", "b1", tool="beads_list", args='{"status":"open"}'))
+    obs.handle_event(event("tool_output", "b1", tool="beads_list",
+                           output="❌ Error listing beads: boom"))
+    row = recorder.snapshot()[0]
+    assert row["status"] == "error"
+    assert row["result_payload"]["is_error"]
+    # A plan refusal is typed JSON, not ❌ text.
+    obs.handle_event(event("tool_called", "b2", tool="beads_plan", args='{"tasks":[]}'))
+    obs.handle_event(event("tool_output", "b2", tool="beads_plan",
+                           output='{"error":"Give at least one task. Nothing was created."}'))
+    assert recorder.snapshot()[-1]["status"] == "error"
+
+
 def test_memory_soft_error_marks_the_step_as_error():
     recorder = TraceRecorder(lambda _: None)
     obs = WebStreamObserver(recorder, emit_token=lambda _: None)

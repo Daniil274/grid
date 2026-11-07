@@ -372,3 +372,199 @@ test("overview does not call a memory empty when its records are unreadable", ()
   assert.match(el.find("payload__typed").textContent, /nope/);
   assert.match(memoryView({ records: [], limit: 10 }, "memory_overview").find("payload__memNote").textContent, /Memory is empty/);
 });
+
+// -- tracker (beads) operations ----------------------------------------------
+// The cards read bd's own answers; these fixtures copy the shapes the tools
+// return (tools/beads_tools.py), not a shape invented for the test.
+
+const bead = (overrides = {}) => ({
+  id: "grid-1", title: "Fix the build", status: "open", priority: 1,
+  issue_type: "task", dependency_count: 0, dependent_count: 0, comment_count: 0,
+  created_at: "2026-11-07T08:58:01Z", updated_at: "2026-11-07T09:02:10Z",
+  ...overrides,
+});
+const listPage = (items, overrides = {}) => ({
+  page: 1, page_size: items.length, returned: items.length, total: items.length,
+  total_pages: 1, has_prev: false, has_next: false, prev_page: null, next_page: null,
+  items, ...overrides,
+});
+const beadView = (data, tool, role = "result") =>
+  renderPayload(role === "input" ? "Input" : "Result",
+    { version: 1, parts: [json(data)], raw_text: JSON.stringify(data) },
+    JSON.stringify(data), { tool, role });
+const beadText = (text, tool, role = "result") =>
+  renderPayload(role === "input" ? "Input" : "Result", payload({ kind: "text", media_type: "text/plain", data: text }), text, { tool, role });
+
+test("a list of tasks reads as rows: state, title, id, priority, type and page", () => {
+  const el = beadView(listPage([bead(), bead({ id: "grid-2", status: "in_progress", priority: 2, dependency_count: 2 }), bead({ id: "grid-3", status: "closed" })], { total: 3 }), "beads_list");
+  assert.ok(el.find("beadCard"));
+  assert.equal(el.findAll("beadCard__row").length, 3);
+  assert.match(el.find("beadCard__note").textContent, /3 tasks/);
+  assert.match(el.find("beadCard__counts").textContent, /1 open.*1 in progress.*1 closed/);
+  const row = el.findAll("beadCard__row")[1];
+  assert.match(row.textContent, /Fix the build/);
+  assert.match(row.textContent, /grid-2 · P2 · task · 2 dependencies/);
+  assert.equal(row.find("beadCard__rowLink").tagName, "A");
+  assert.equal(row.find("beadCard__rowLink").getAttribute("href"), "/tasks?task=grid-2");
+  // The state is words for a screen reader, not only a coloured mark.
+  assert.equal(row.find("beadCard__sr").textContent, "In progress");
+  // The tool's own JSON stays behind the Source button.
+  assert.equal(el.find("payload__raw").textContent, JSON.stringify(listPage([bead(), bead({ id: "grid-2", status: "in_progress", priority: 2, dependency_count: 2 }), bead({ id: "grid-3", status: "closed" })], { total: 3 })));
+});
+
+test("long lists are bounded and reveal the rest in chunks", () => {
+  const items = Array.from({ length: 60 }, (_, index) => bead({ id: `grid-${index + 1}`, title: `Task ${index + 1}` }));
+  const el = beadView(listPage(items, { total: 60, total_pages: 4 }), "beads_list");
+  assert.equal(el.findAll("beadCard__row").length, 8);
+  let more = el.find("beadCard__more");
+  assert.equal(more.textContent, "Show 20 more tasks");
+  more.click();
+  assert.equal(el.findAll("beadCard__row").length, 28);
+  el.find("beadCard__more").click();
+  el.find("beadCard__more").click();
+  assert.equal(el.findAll("beadCard__row").length, 50);
+  assert.equal(el.find("beadCard__more"), null);
+  assert.match(el.find("beadCard__notice").textContent, /10 more tasks · see source/);
+});
+
+test("empty and paged list answers say what they are", () => {
+  assert.match(beadView(listPage([], { total: 0, total_pages: 0 }), "beads_list").find("beadCard__note").textContent, /No tasks match/);
+  assert.match(beadView(listPage([], { page: 3, total: 40, total_pages: 3 }), "beads_list").find("beadCard__note").textContent, /Nothing on this page/);
+  assert.match(beadView([], "beads_ready").find("beadCard__note").textContent, /No tasks ready to start/);
+  assert.match(beadView([bead()], "beads_ready").find("beadCard__note").textContent, /Ready to start.*1 task/);
+});
+
+test("show reads one task: state, excerpt, acceptance, notes and dependency links", () => {
+  const description = `What the task is about. ${"detail ".repeat(100)}`;
+  const el = beadView([bead({
+    description,
+    acceptance_criteria: "Tests pass",
+    notes: "Checked on bd 1.3",
+    dependencies: [
+      { issue_id: "grid-1", depends_on_id: "grid-9", dependency_type: "blocks", title: "Base work" },
+      { issue_id: "grid-1", depends_on_id: "grid-8", dependency_type: "related" },
+    ],
+  })], "beads_show");
+  assert.equal(el.find("beadCard__title").textContent, "Fix the build");
+  assert.equal(el.find("beadCard__note"), null); // an answer, not a confirmation
+  assert.match(el.find("beadCard__text").textContent, /^What the task is about\./);
+  assert.equal(el.find("beadCard__text").textContent.length, 401); // excerpt plus the ellipsis
+  const summaries = el.findAll("beadCard__details").map((details) => details.querySelector("summary").textContent);
+  assert.deepEqual(summaries.slice(0, 2), ["Full description", "Acceptance criteria"]);
+  assert.ok(summaries.includes("Notes"));
+  // Every dependency is a chip, and its target opens in the tracker.
+  const links = el.findAll("beadCard__depLink");
+  assert.deepEqual(links.map((link) => link.getAttribute("href")), ["/tasks?task=grid-9", "/tasks?task=grid-8"]);
+  assert.match(links[0].textContent, /blocks grid-9/);
+  assert.equal(el.find("beadCard__open").getAttribute("href"), "/tasks?task=grid-1");
+});
+
+test("writes read as the action they performed, not as the issue JSON", () => {
+  const created = beadView(bead({ id: "grid-5", title: "New task" }), "beads_create");
+  assert.match(created.find("beadCard__note").textContent, /^Created$/);
+  const closeInput = beadView({ bead_id: "grid-5", reason: "Done already" }, "beads_close", "input");
+  assert.match(closeInput.find("beadCard__note").textContent, /^Close grid-5 · Done already$/);
+  const closed = beadView([bead({ id: "grid-5", status: "closed", close_reason: "Done already" })], "beads_close");
+  assert.match(closed.find("beadCard__note").textContent, /^Closed/);
+  assert.match(closed.find("beadCard__text").textContent, /Closed · Done already/);
+  const update = beadView({ bead_id: "grid-5", status: "in_progress", claim: true, notes: "starting" }, "beads_update", "input");
+  assert.match(update.find("beadCard__note").textContent, /Update grid-5: status → in_progress · claim it · notes added/);
+  const dep = beadView({ action: "add", child_id: "grid-2", parent_id: "grid-9" }, "beads_dep", "input");
+  assert.match(dep.find("beadCard__note").textContent, /^Link grid-2 depends on grid-9$/);
+});
+
+test("bd's dependency confirmation line becomes a link, not prose", () => {
+  const el = beadText("✓ Added dependency: grid-2 (T) depends on grid-9 (T) (blocks)", "beads_dep");
+  assert.ok(el.find("beadCard")); // the card replaced the prepared code block
+  assert.equal(el.find("beadCard__note").dataset.tone, "ok");
+  assert.match(el.find("beadCard__note").textContent, /^Added grid-2 depends on grid-9 \(blocks\)$/);
+  assert.deepEqual(el.findAll("beadCard__id").map((id) => id.getAttribute("href")), ["/tasks?task=grid-2", "/tasks?task=grid-9"]);
+  assert.equal(beadText("✓ Removed dependency: grid-2 (T) depends on grid-9 (T) (blocks)", "beads_dep").find("beadCard__note").textContent.startsWith("Removed"), true);
+});
+
+test("a plan shows its ready and waiting waves with what each waits for", () => {
+  const plan = {
+    ids: { research: "grid-1", build: "grid-2" },
+    ready: [{ key: "research", id: "grid-1", title: "Research" }],
+    waiting: [{ key: "build", id: "grid-2", title: "Build", waits_for: ["research", "grid-9"] }],
+  };
+  const el = beadView(plan, "beads_plan");
+  assert.match(el.find("beadCard__note").textContent, /Plan · 2 tasks · 1 ready, 1 waiting/);
+  const sections = el.findAll("beadCard__section").map((section) => section.textContent);
+  assert.deepEqual(sections, ["Ready now", "Waiting"]);
+  const rows = el.findAll("beadCard__row");
+  assert.match(rows[0].textContent, /Research.*research.*grid-1/);
+  assert.match(rows[1].textContent, /Build.*build.*waits for research, grid-9/);
+  // The input is the plan itself, read as its tasks and links.
+  const input = beadView({ tasks: [{ key: "research", title: "Research", depends_on: [] }, { key: "build", title: "Build", depends_on: ["research"] }] }, "beads_plan", "input");
+  assert.match(input.find("beadCard__note").textContent, /Plan of 2 tasks · 1 dependency link/);
+  assert.match(input.findAll("beadCard__row")[1].textContent, /depends on research/);
+});
+
+test("a failed plan is an error, never an empty plan", () => {
+  const el = beadView({ error: "Keys must be unique: build. Nothing was created." }, "beads_plan");
+  assert.match(el.find("beadCard__note").textContent, /Beads error — Keys must be unique/);
+  assert.equal(el.find("beadCard__wave"), null);
+  assert.equal(el.findAll("beadCard__row").length, 0);
+});
+
+test("a log read becomes chat lines and keeps unreadable lines as text", () => {
+  const newData = `${JSON.stringify({ ts: 1700000000, author: "GM", text: "Night falls." })}\nnot json at all\n${JSON.stringify({ ts: 1700000060, author: "Agent_A", text: "I vote." })}`;
+  const el = beadView({ success: true, channel: "GAME", reader: "GM", new_data: newData, truncated: false, cursor_before: 0, cursor_after: 120, log_exists: true, log_size: 120 }, "beads_log_read");
+  assert.match(el.find("beadCard__note").textContent, /#GAME · 3 new entries · for GM/);
+  const lines = el.findAll("beadLog__line");
+  assert.equal(lines.length, 3);
+  assert.match(lines[0].textContent, /GM.*22:13.*Night falls\./);
+  assert.match(lines[1].textContent, /not json at all/);
+  assert.match(lines[2].textContent, /Agent_A.*I vote\./);
+});
+
+test("log reads say when there is nothing new, no log, a reset or more bytes", () => {
+  const read = (overrides) => beadView({ success: true, channel: "GAME", reader: "GM", new_data: "", truncated: false, cursor_before: 0, cursor_after: 0, log_exists: true, log_size: 10, ...overrides }, "beads_log_read");
+  assert.match(read({}).find("beadCard__note").textContent, /No new entries in #GAME for GM/);
+  assert.match(read({ log_exists: false }).find("beadCard__note").textContent, /#GAME has no log yet/);
+  assert.match(read({ reset_to_end: true, cursor_after: 42 }).find("beadCard__note").textContent, /Marked as read · #GAME · cursor 42/);
+  assert.match(read({ new_data: '{"ts":1,"author":"A","text":"x"}', truncated: true }).findAll("beadCard__notice")[0].textContent, /more bytes/);
+  assert.match(beadView({ success: true, channel: "GAME", bytes_appended: 120 }, "beads_log_append").find("beadCard__note").textContent, /Appended to #GAME · 120 bytes/);
+  assert.match(beadView({ channel: "GAME", reader: "GM" }, "beads_log_read", "input").find("beadCard__note").textContent, /Read #GAME as GM/);
+});
+
+test("tracker confirmations, sync output and failures each read as themselves", () => {
+  assert.match(beadText("✅ Beads initialized.", "beads_init").find("beadCard__note").textContent, /Tracker initialized/);
+  assert.match(beadText("✅ Beads already initialized in this directory.", "beads_init").find("beadCard__note").textContent, /Tracker already initialized/);
+  const sync = beadText("Pulled 2 changes\nPushed 1 commit", "beads_sync");
+  assert.match(sync.find("beadCard__note").textContent, /Tracker synced/);
+  assert.match(sync.find("beadCard__pre").textContent, /Pushed 1 commit/);
+  const failed = beadText("❌ Error listing beads: boom", "beads_list");
+  assert.equal(failed.find("beadCard__note").dataset.tone, "error");
+  assert.match(failed.find("beadCard__note").textContent, /Beads error — listing beads: boom/);
+});
+
+test("task text never becomes markup and only real ids become links", () => {
+  const evil = '<script>alert(1)</script><img onerror="evil()">';
+  const el = beadView(listPage([bead({ id: "javascript:alert(1)", title: evil }), bead({ id: "grid-2", title: evil })]), "beads_list");
+  assert.equal(el.querySelectorAll("script").length, 0);
+  assert.equal(el.querySelectorAll("img").length, 0);
+  assert.ok(el.find("beadCard__typed")?.textContent ?? el.textContent.includes(evil));
+  const rows = el.findAll("beadCard__row");
+  // An id that is not a tracker id stays text, never a link nor a URL.
+  assert.equal(rows[0].find("beadCard__rowLink").tagName, "DIV");
+  assert.equal(rows[1].find("beadCard__rowLink").tagName, "A");
+  const show = beadView([bead({ id: "javascript:alert(1)", description: evil })], "beads_show");
+  assert.equal(show.findAll("beadCard__id").length, 0);
+  assert.equal(show.find("beadCard__open"), null);
+  assert.ok(show.textContent.includes(evil));
+});
+
+test("tracker cards stay bounded and other tools keep the JSON tree", () => {
+  const huge = "x".repeat(20000);
+  const show = beadView([bead({ description: huge, notes: huge })], "beads_show");
+  assert.equal(show.find("beadCard__details").find("beadCard__text").textContent.length, 4000);
+  const plain = renderPayload("Result", payload(json({ id: "grid-1", title: "Task" })), "", { tool: "read_file" });
+  assert.ok(plain.find("payload__fields"));
+  assert.equal(plain.find("beadCard"), null);
+  // A tracker answer this code does not recognise keeps the generic JSON view.
+  const odd = renderPayload("Result", payload(json({ strange: 1 })), "", { tool: "beads_list" });
+  assert.ok(odd.find("payload__fields"));
+  assert.equal(odd.find("beadCard"), null);
+});

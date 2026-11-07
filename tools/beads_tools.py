@@ -664,7 +664,9 @@ async def beads_show(context: RunContextWrapper, bead_id: str, directory: str = 
     if problem := _bad_ids(bead_id):
         return problem
 
-    res = await _bd(["show", bead_id], cwd=directory, container_id=container_id, context=context)
+    # --json keeps the task's own fields (dependencies, notes, acceptance)
+    # readable by the caller; bd's plain output is prose meant for a person.
+    res = await _bd(["show", bead_id, "--json"], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error showing bead {bead_id}: {res['error'] or res['output']}"
     return res["output"]
@@ -701,7 +703,7 @@ async def beads_update(
     if problem := _bad_ids(bead_id):
         return problem
 
-    args = ["update", bead_id]
+    args = ["update", bead_id, "--json"]
     if claim:
         args.append("--claim")
     if status:
@@ -741,7 +743,7 @@ async def beads_close(
     if problem := _bad_ids(bead_id):
         return problem
 
-    res = await _bd(["close", bead_id, bd_flag("reason", reason)], cwd=directory, container_id=container_id, context=context)
+    res = await _bd(["close", bead_id, bd_flag("reason", reason), "--json"], cwd=directory, container_id=container_id, context=context)
     if not res["success"]:
         return f"❌ Error closing bead {bead_id}: {res['error'] or res['output']}"
     return res["output"]
