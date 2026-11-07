@@ -179,6 +179,70 @@ async def test_without_a_request_id_each_call_makes_a_task(world):
     assert len(world.store.tasks(world.name)) == 2
 
 
+# -- made on pause: one save, never eligible -----------------------------------------------
+async def test_a_task_can_be_made_already_paused_and_never_starts(world):
+    made = await call(lazy_tools.lazy_create, world.chat, **PAYLOAD, status="paused")
+    task_id = made["task"]["id"]
+    assert made["created"] is True and made["task"]["status"] == "paused"
+    assert world.store.task(world.name, task_id).status == "paused"
+
+    plan = world.lazy.plan_for(world.name, world.store.settings(world.name))
+    assert plan.tasks[task_id].state == "paused"
+    assert all(placement.task_id != task_id for placement in plan.placements)
+
+    # A tick runs the fixture's Runner, which fails the test if anything starts.
+    await world.lazy._tick()
+    assert not world.lazy._running
+    assert world.store.task(world.name, task_id).steps[0].status == "pending"
+
+
+async def test_an_unknown_status_at_creation_is_refused_and_makes_nothing(world):
+    out = await call(lazy_tools.lazy_create, world.chat, **PAYLOAD, status="done")
+    assert out["isError"] and out["code"] == "invalid"
+    assert world.store.tasks(world.name) == []
+    with pytest.raises(LazyError):
+        world.chat.create({**PAYLOAD, "status": "cancelled"})
+    assert world.store.tasks(world.name) == []
+
+
+async def test_preview_understands_the_paused_status_and_saves_nothing(world):
+    picture = world.chat.preview({**PAYLOAD, "status": "paused"})
+    assert picture["placements"] == []
+    assert world.store.tasks(world.name) == []
+
+
+def test_recording_a_chat_does_not_undo_a_concurrent_pause(world, monkeypatch):
+    task = world.lazy.draft(world.name, world.space, {**PAYLOAD, "title": "Report"})
+    world.store.save_task(task)
+    real = world.store.save_task
+    state = {"raced": False}
+
+    def racing(saved, *, expected_version=None):
+        if not state["raced"]:
+            state["raced"] = True
+            world.lazy.update_task(world.name, task.id, {"status": "paused"})
+            return False  # this write was based on a task that has moved
+        return real(saved, expected_version=expected_version)
+
+    monkeypatch.setattr(world.store, "save_task", racing)
+    world.lazy._remember_conversation(world.name, task.id, "ctx-1")
+
+    stored = world.store.task(world.name, task.id)
+    assert state["raced"] is True
+    assert stored.conversation_id == "ctx-1" and stored.status == "paused"
+
+
+def test_a_chat_that_keeps_losing_the_race_is_left_for_the_next_step(world, monkeypatch):
+    task = world.lazy.draft(world.name, world.space, {**PAYLOAD, "title": "Report"})
+    world.store.save_task(task)
+    monkeypatch.setattr(world.store, "save_task", lambda saved, *, expected_version=None: False)
+
+    world.lazy._remember_conversation(world.name, task.id, "ctx-1")
+
+    stored = world.store.task(world.name, task.id)
+    assert stored.conversation_id is None and stored.status == "active"
+
+
 # -- the user's projects ------------------------------------------------------------------
 async def test_a_task_belongs_to_the_users_own_project(world):
     project, _ = world.projects.ensure("Launch")

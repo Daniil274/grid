@@ -234,6 +234,10 @@ class LazyChat:
             value = payload.get(key)
             if value not in (None, ""):
                 body[key] = value
+        # A task can be made paused in the same save that makes it; preview reads
+        # it too, and honestly shows a paused task with no step placed.
+        if payload.get("status") not in (None, ""):
+            body["status"] = payload["status"]
         if payload.get("project_id") not in (None, ""):
             body["project_id"] = payload["project_id"]
         if payload.get("repeat_hours") not in (None, ""):

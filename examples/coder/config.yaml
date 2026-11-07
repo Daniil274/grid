@@ -463,10 +463,10 @@ tools:
     description: "Where a task like this would land among the existing ones - nothing is saved and no step starts."
   lazy_create:
     type: "function"
-    description: "Create a lazy task the agent runs in the background between the user's turns; request_id makes a retry return the same task."
+    description: "Create a lazy task the agent runs in the background between the user's turns; request_id makes a retry return the same task, status=paused creates it already held."
     prompt_addition: |
-      `lazy_create(title, brief, system, agent, size="M", acceptance="", optional="", priority="normal", deadline="", repeat_hours=0, cap=0, project_id="", request_id="")`
-      Вызов сохраняет задачу и не ждёт её шагов, но это не preview: сохранение будит цикл сервиса, и первый шаг может начаться в пределах тика, если план ставит его на сейчас. Нужно сначала показать пользователю — используй `lazy_preview` или создай задачу на паузе. `request_id` — один ключ на одну задачу: повтор возвращает уже созданную (`created=false`).
+      `lazy_create(title, brief, system, agent, size="M", acceptance="", optional="", priority="normal", deadline="", repeat_hours=0, cap=0, project_id="", request_id="", status="active")`
+      Вызов сохраняет задачу и не ждёт её шагов, но это не preview: сохранение будит цикл сервиса, и первый шаг может начаться в пределах тика, если план ставит его на сейчас. Просьба «подготовь, но не начинай» — это `status="paused"` в этом же вызове: задача сохраняется уже на паузе и не запускается до `lazy_update`. Не создавай активную задачу и не ставь её на паузу вторым вызовом — между ними шаг может успеть начаться. Показать без сохранения — `lazy_preview`. `request_id` — один ключ на одну задачу: повтор возвращает уже созданную (`created=false`).
   lazy_update:
     type: "function"
     description: "Change a lazy task: only the named fields; series=true changes the whole series of rounds; expected_version refuses a stale change."

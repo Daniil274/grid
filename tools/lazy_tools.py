@@ -26,10 +26,11 @@ only save and wake the service's loop (web_chat.lazy.service.LazyAgents.wake),
 and that loop may start the first due step at once - a real model call in the
 background, not a preview. A new task is planned as early as the budget allows
 (core.lazy.planner), so an active task created outside the user's hours with
-room is normally picked up within one loop tick. To hold work, create it and
-pause it (``lazy_create`` then ``lazy_update(status="paused")``), or create it
-with a deadline in the future; ``lazy_preview`` is the only call that saves
-nothing and starts nothing.
+room is normally picked up within one loop tick. To hold work, create it
+already paused (``lazy_create(status="paused")``) - one atomic save, a task
+that is never eligible - or give it a deadline in the future; ``lazy_preview``
+is the only call that saves nothing and starts nothing. Create-then-pause is
+not that promise: the first step may start between the two calls.
 
 Work list-first: ``lazy_catalog``, ``lazy_list``, ``lazy_get``, then change.
 """
@@ -167,6 +168,7 @@ async def lazy_create(
     cap: float = 0,
     project_id: str = "",
     request_id: str = "",
+    status: str = "active",
 ) -> str:
     """Create a lazy task: the agent does the work in the background, between the user's turns.
 
@@ -178,14 +180,16 @@ async def lazy_create(
 
     This call saves the task and does not wait for any of its steps, but it is
     not a preview: saving wakes the service's loop, which may start the first
-    step within a tick if the plan places it now. Pause it right away
-    (lazy_update with status="paused"), or preview it instead, when the user
-    wants to look before work begins.
+    step within a tick if the plan places it now. When the user wants it
+    prepared but not started, pass ``status="paused"``: the task is saved
+    paused in the same atomic write and nothing of it is ever eligible to run
+    until it is resumed with lazy_update. Do not create and then pause - a step
+    may start between the two calls. Use lazy_preview to show it without saving.
     """
     payload = _payload(
         title=title, brief=brief, system=system, agent=agent, size=size, acceptance=acceptance,
         optional=optional, priority=priority, deadline=deadline, repeat_hours=repeat_hours,
-        cap=cap, project_id=project_id,
+        cap=cap, project_id=project_id, status=status,
     )
     return await asyncio.to_thread(_run, context, lambda client: client.create(payload, request_id=request_id))
 

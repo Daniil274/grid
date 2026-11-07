@@ -426,6 +426,14 @@ class LazyAgents:
         priority = payload.get("priority") or "normal"
         if priority not in PRIORITIES:
             raise LazyError(f"Unknown priority: {priority}.")
+        # A task may be made already on pause: "prepare it, do not start it" is
+        # then one atomic save, not a create that has to be caught before the
+        # loop's next tick (a pause after the save is a race - the first step
+        # may already be running). The state is set here, before any save, so
+        # nothing ever sees an active task that was meant to wait.
+        status = payload.get("status") or "active"
+        if status not in ("active", "paused"):
+            raise LazyError(f"Unknown status: {status}. Use active or paused.")
         task = Task(
             id=new_id("lazy"),
             user_id=user_id,
@@ -438,6 +446,7 @@ class LazyAgents:
             size=size,
             system=system,
             agent=agent,
+            status=status,
             cap=_points(payload.get("cap")),
             repeat=_repeat(payload.get("repeat_hours")),
             # Whose project the work belongs to; checked here, for the page's
@@ -473,7 +482,7 @@ class LazyAgents:
         request_id = _request_id(payload.get("request_id"))
         if not request_id:
             task = self.draft(user_id, space, payload)
-            task.note("Created")
+            task.note("Created paused" if task.status == "paused" else "Created")
             self.store.save_task(task)
             self.wake()
             return task, True
@@ -486,7 +495,7 @@ class LazyAgents:
             if existing is not None:
                 return existing, False
             task = self.draft(user_id, space, {**payload, "request_id": request_id})
-            task.note("Created")
+            task.note("Created paused" if task.status == "paused" else "Created")
             if not self.store.save_new_task(task):
                 existing = self.store.task_by_request(user_id, request_id)
                 if existing is None:
@@ -792,11 +801,28 @@ class LazyAgents:
         self.finish(user_id, task.id, step.id, outcome, settings)
 
     def _remember_conversation(self, user_id: str, task_id: str, context_id: str) -> None:
-        task = self.store.task(user_id, task_id)
-        if task is not None and task.conversation_id != context_id:
-            task.conversation_id = context_id
-            self.store.save_task(task)
+        """Point the task at the chat its step works in - without undoing a concurrent change.
 
+        A last-write-wins save here could put back an old status, project or
+        plan: the runner reports the chat while the loop and the user are
+        changing the same task, and their edit is newer than this read. So the
+        write is a compare-and-swap on the version it just read: if the task
+        moved in between, nothing is written and the fresh task is read again.
+        What survives is only this one field, set on the current task.
+
+        The retry is bounded: on a task being edited faster than this can win
+        (three rounds) the chat is not recorded this time; every later step of
+        the task calls this again (``ensure_conversation``), so the link is
+        made then, and no change of anyone else's is ever lost for it.
+        """
+        for _ in range(3):
+            task = self.store.task(user_id, task_id)
+            if task is None or task.conversation_id == context_id:
+                return
+            task.conversation_id = context_id
+            if self.store.save_task(task, expected_version=int(task.version or 0)):
+                return
+        logger.warning("Lazy task %s moved while its chat was recorded; left for the next step", task_id)
     def _should_stop(self, user_id: str, task_id: str, settings: Settings) -> Optional[str]:
         if task_id in self._stops:
             return self._stops[task_id]
