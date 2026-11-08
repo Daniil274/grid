@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from core.lazy.budget import headroom
 from core.lazy.estimate import Calibration
@@ -98,6 +98,9 @@ class TaskPlan:
     state: str
     finish_at: Optional[float] = None
     next_start: Optional[float] = None
+    #: The scheduled release this round waits for (``Task.not_before``); the
+    #: forecast ``next_start`` is never earlier than it.
+    scheduled_release: Optional[float] = None
     wait: Optional[Wait] = None
     late_by: float = 0.0
     cost: Dict[str, float] = field(default_factory=dict)
@@ -108,6 +111,7 @@ class TaskPlan:
             "state": self.state,
             "finish_at": self.finish_at,
             "next_start": self.next_start,
+            "scheduled_release": self.scheduled_release,
             "wait": self.wait.to_dict() if self.wait else None,
             "late_by": self.late_by,
             "cost": {name: round(points, 2) for name, points in self.cost.items()},
@@ -205,8 +209,15 @@ def plan(
     calibration: Calibration,
     *,
     offer: bool = True,
+    series_spend: Optional[Mapping[str, float]] = None,
 ) -> Plan:
-    """The plan for the user's tasks now; *offer* adds the ways out for missed deadlines."""
+    """The plan for the user's tasks now; *offer* adds the ways out for missed deadlines.
+
+    *series_spend* is what each series cost in the rolling seven days the caller
+    measures (``series_id`` -> weekly points, from the ledger). A series' cap is
+    spent across its rounds, so a new round does not open a fresh budget; a task
+    that does not repeat keeps counting its own closed steps.
+    """
     now = situation.now
     horizon_end = now + HORIZON
     ledger = _Ledger(situation, settings, rates)
@@ -289,6 +300,13 @@ def plan(
         if task.retry_at is not None and running is None and task.retry_at > ready:
             ready = task.retry_at
             after = Wait("retry", "Trying again later", until=ready)
+        result.scheduled_release = task.not_before
+        if task.not_before is not None and running is None and task.not_before > ready:
+            # The scheduled release: the plan places the round no earlier, and
+            # the loop wakes at it. A forecast may be later (no room yet); it is
+            # never earlier than the release.
+            ready = task.not_before
+            after = Wait("not_before", "Scheduled to start later", until=ready)
         if running is not None:
             result.state = "running"
         if settings.paused:
@@ -296,7 +314,12 @@ def plan(
                 result.state = "paused"
                 result.wait = Wait("pool_paused", "Lazy agents are paused")
             continue
-        spent_week = sum(step.used.get("seven_day", 0.0) for step in task.steps if not step.open)
+        if task.series_id and series_spend is not None:
+            # One budget for the whole series over the rolling window, not a
+            # fresh one per round.
+            spent_week = float(series_spend.get(task.series_id, 0.0))
+        else:
+            spent_week = sum(step.used.get("seven_day", 0.0) for step in task.steps if not step.open)
         finish: Optional[float] = ready if running is not None else None
         blocked = False
         for step in task.steps:
@@ -317,6 +340,13 @@ def plan(
                 result.next_start = start
                 if start > max(now, ready) + SLOT / 2 and why is not None:
                     result.wait = why
+                elif (
+                    start > now + SLOT / 2 and task.not_before is not None
+                    and task.not_before > now and ready >= task.not_before
+                ):
+                    # Nothing else holds it: the release does, and the answer
+                    # says so rather than leaving the delay unexplained.
+                    result.wait = after
                 elif start > now + SLOT / 2 and why is None and ready > now:
                     result.wait = after
             ledger.book(cost, start)
@@ -346,7 +376,9 @@ def plan(
         for task in tasks:
             task_plan = plans.get(task.id)
             if task_plan is not None and task.deadline is not None and task_plan.state in ("at_risk", "blocked", "running_late"):
-                task_plan.options = ways_out(task, tasks, settings, situation, rates, calibration, task_plan)
+                task_plan.options = ways_out(
+                    task, tasks, settings, situation, rates, calibration, task_plan, series_spend
+                )
     return result_plan
 
 
@@ -404,8 +436,11 @@ def _projection(
 
 
 # -- ways out of a missed deadline ----------------------------------------------------
-def _on_time(task_id: str, tasks: List[Task], settings: Settings, situation: Situation, rates: UserRates, calibration: Calibration) -> Tuple[bool, Optional[float]]:
-    trial = plan(tasks, settings, situation, rates, calibration, offer=False).tasks.get(task_id)
+def _on_time(
+    task_id: str, tasks: List[Task], settings: Settings, situation: Situation, rates: UserRates,
+    calibration: Calibration, series_spend: Optional[Mapping[str, float]] = None,
+) -> Tuple[bool, Optional[float]]:
+    trial = plan(tasks, settings, situation, rates, calibration, offer=False, series_spend=series_spend).tasks.get(task_id)
     if trial is None:
         return False, None
     return trial.state in ("on_track", "running"), trial.finish_at
@@ -429,7 +464,7 @@ def _with_task(tasks: List[Task], task_id: str, **changes) -> List[Task]:
 
 def ways_out(
     task: Task, tasks: List[Task], settings: Settings, situation: Situation, rates: UserRates,
-    calibration: Calibration, current: TaskPlan,
+    calibration: Calibration, current: TaskPlan, series_spend: Optional[Mapping[str, float]] = None,
 ) -> List[Option]:
     options: List[Option] = []
     # 1. Keep everything as it is, at a later deadline.
@@ -438,12 +473,12 @@ def ways_out(
         options.append(Option("deadline", "Keep the plan and move the deadline", {"task": {"deadline": later}}))
     # 2. Drop the optional part.
     if any(step.optional and step.status == "pending" for step in task.steps):
-        ok, _ = _on_time(task.id, _with_task(tasks, task.id, drop_optional=True), settings, situation, rates, calibration)
+        ok, _ = _on_time(task.id, _with_task(tasks, task.id, drop_optional=True), settings, situation, rates, calibration, series_spend)
         if ok:
             options.append(Option("drop_optional", "Drop the optional part", {"task": {"drop_optional": True}}))
     # 3. Let it run in the user's hours.
     if not task.run_now and not settings.routine.hours == {}:
-        ok, _ = _on_time(task.id, _with_task(tasks, task.id, run_now=True), settings, situation, rates, calibration)
+        ok, _ = _on_time(task.id, _with_task(tasks, task.id, run_now=True), settings, situation, rates, calibration, series_spend)
         if ok:
             options.append(Option("my_hours", "Let it run during your hours too", {"task": {"run_now": True}}))
     # 4. A larger share of one window: the least that is enough.
@@ -451,13 +486,13 @@ def ways_out(
         current_share = settings.allowance(name).share
         if current_share >= 100.0:
             continue
-        ok, _ = _on_time(task.id, tasks, settings.with_allowance(name, share=100.0), situation, rates, calibration)
+        ok, _ = _on_time(task.id, tasks, settings.with_allowance(name, share=100.0), situation, rates, calibration, series_spend)
         if not ok:
             continue
         lo, hi = current_share, 100.0
         while hi - lo > 0.5:
             mid = (lo + hi) / 2
-            fits, _ = _on_time(task.id, tasks, settings.with_allowance(name, share=mid), situation, rates, calibration)
+            fits, _ = _on_time(task.id, tasks, settings.with_allowance(name, share=mid), situation, rates, calibration, series_spend)
             lo, hi = (lo, mid) if fits else (mid, hi)
         share = math.ceil(hi * 2) / 2
         options.append(Option(

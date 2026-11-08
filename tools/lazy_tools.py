@@ -28,9 +28,13 @@ background, not a preview. A new task is planned as early as the budget allows
 (core.lazy.planner), so an active task created outside the user's hours with
 room is normally picked up within one loop tick. To hold work, create it
 already paused (``lazy_create(status="paused")``) - one atomic save, a task
-that is never eligible - or give it a deadline in the future; ``lazy_preview``
-is the only call that saves nothing and starts nothing. Create-then-pause is
-not that promise: the first step may start between the two calls.
+that is never eligible - or give it a ``not_before`` moment (``lazy_create``,
+``lazy_update``): the planner places no step of it earlier than that release.
+A future *deadline* does not hold work: it says when the task must be done,
+not when it may start, and an active task with room still starts at once.
+``lazy_preview`` is the only call that saves nothing and starts nothing.
+Create-then-pause is not that promise: the first step may start between the
+two calls.
 
 Work list-first: ``lazy_catalog``, ``lazy_list``, ``lazy_get``, then change.
 """
@@ -135,19 +139,27 @@ async def lazy_preview(
     priority: str = "normal",
     deadline: str = "",
     repeat_hours: float = 0,
-    cap: float = 0,
+    cap: Optional[float] = None,
     project_id: str = "",
+    not_before: str = "",
+    repeat: str = "",
 ) -> str:
     """Where a task like this would land among the existing ones - nothing is saved.
 
     ``deadline`` is ISO-8601 in the user's zone (2026-11-10T18:00) or epoch
-    seconds; ``repeat_hours`` 0 runs it once. Shows the steps it would be cut
-    into and which other tasks it would push.
+    seconds - when it must be done. ``not_before`` (same forms) is the
+    scheduled release: no step starts earlier. ``repeat_hours`` 0 runs it once;
+    ``repeat`` picks a typed rule instead - a number of hours, or JSON:
+    {"kind": "daily", "time": "04:00", "timezone": "Europe/Moscow"},
+    {"kind": "weekly", "time": "04:00", "weekday": "mon"} or
+    {"kind": "interval", "hours": 6}. ``cap`` is this task's own weekly points:
+    omit it for no extra limit (the pool's shares still apply), ``0`` for a real
+    zero. Shows the steps it would be cut into and which other tasks it would push.
     """
     payload = _payload(
         title=title, brief=brief, system=system, agent=agent, size=size, acceptance=acceptance,
         optional=optional, priority=priority, deadline=deadline, repeat_hours=repeat_hours,
-        cap=cap, project_id=project_id,
+        cap=cap, project_id=project_id, not_before=not_before, repeat=repeat,
     )
     return await asyncio.to_thread(_run, context, lambda client: client.preview(payload))
 
@@ -165,10 +177,12 @@ async def lazy_create(
     priority: str = "normal",
     deadline: str = "",
     repeat_hours: float = 0,
-    cap: float = 0,
+    cap: Optional[float] = None,
     project_id: str = "",
     request_id: str = "",
     status: str = "active",
+    not_before: str = "",
+    repeat: str = "",
 ) -> str:
     """Create a lazy task: the agent does the work in the background, between the user's turns.
 
@@ -185,11 +199,20 @@ async def lazy_create(
     paused in the same atomic write and nothing of it is ever eligible to run
     until it is resumed with lazy_update. Do not create and then pause - a step
     may start between the two calls. Use lazy_preview to show it without saving.
+
+    Holding it to a later moment is ``not_before`` (ISO-8601 in the user's zone
+    or epoch seconds): the planner places no step before that release, even when
+    there is room. A future ``deadline`` does *not* hold work - it says when the
+    task must be done, not when it may start. ``cap`` is the task's own weekly
+    points across its rounds: leave it out for no extra limit (the pool's shares
+    still apply), pass ``0`` for a real zero. ``repeat`` is a typed rule (a
+    number of hours, or JSON with kind daily/weekly/interval, time "04:00",
+    weekday "mon" and timezone); ``repeat_hours`` is its plain interval form.
     """
     payload = _payload(
         title=title, brief=brief, system=system, agent=agent, size=size, acceptance=acceptance,
         optional=optional, priority=priority, deadline=deadline, repeat_hours=repeat_hours,
-        cap=cap, project_id=project_id, status=status,
+        cap=cap, project_id=project_id, status=status, not_before=not_before, repeat=repeat,
     )
     return await asyncio.to_thread(_run, context, lambda client: client.create(payload, request_id=request_id))
 
@@ -212,6 +235,8 @@ async def lazy_update(
     status: Optional[str] = None,
     project_id: Optional[str] = None,
     drop_optional: Optional[bool] = None,
+    not_before: Optional[str] = None,
+    repeat: Optional[str] = None,
 ) -> str:
     """Change a lazy task; only the fields named are changed.
 
@@ -220,8 +245,13 @@ async def lazy_update(
     "paused" holds it and "active" resumes it. Pass the ``version`` from
     lazy_get as ``expected_version`` so a change made meanwhile is not
     overwritten (the answer says ``stale``). Clear a deadline with
-    ``deadline=""``, make it run once with ``repeat_hours=0``, detach a project
-    with ``project_id=""``.
+    ``deadline=""``, make it run once with ``repeat_hours=0`` (or ``repeat=""``),
+    clear a release with ``not_before=""``, detach a project with
+    ``project_id=""``. ``not_before`` is the scheduled release (ISO-8601 in the
+    user's zone or epoch seconds); a future deadline never holds work on its
+    own. ``repeat`` sets a typed rule - a number of hours, or JSON with kind
+    daily/weekly/interval, time "04:00", weekday "mon" and timezone - and
+    replaces either form that was there.
 
     A change is saved and wakes the service's loop: resuming a paused task,
     setting ``run_now=true`` or moving a deadline can make the next step start
@@ -230,7 +260,7 @@ async def lazy_update(
     changes = _changes(
         title=title, brief=brief, acceptance=acceptance, priority=priority, size=size,
         deadline=deadline, repeat_hours=repeat_hours, cap=cap, run_now=run_now, status=status,
-        project_id=project_id, drop_optional=drop_optional,
+        project_id=project_id, drop_optional=drop_optional, not_before=not_before, repeat=repeat,
     )
     version = None if expected_version is None or int(expected_version) < 0 else int(expected_version)
     return await asyncio.to_thread(

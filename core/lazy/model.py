@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from core.lazy.budget import Allowance
 from core.lazy.estimate import KINDS, sized
 from core.lazy.routine import Routine
+from core.lazy.schedule import Schedule
 
 PRIORITIES = ("low", "normal", "high")
 TASK_STATES = ("active", "paused", "done", "failed", "cancelled")
@@ -98,6 +99,18 @@ class Task:
     #: Seconds between rounds: a task that is done sets up its next round with
     #: fresh steps, due this long after; None runs once.
     repeat: Optional[float] = None
+    #: A calendar repeat - {"kind": "daily"|"weekly", "time": "04:00",
+    #: "weekday": "mon", "timezone": "Europe/Moscow"} - in the user's own zone.
+    #: None for an interval (``repeat``) or a task that runs once.
+    repeat_calendar: Optional[Dict[str, Any]] = None
+    #: The scheduled release of this round: no step of it starts before this
+    #: moment. None means "as soon as the plan allows" - the budgets, the
+    #: user's hours and the runner still decide. A later round of a series
+    #: carries its own release here, so it waits for the slot instead of
+    #: starting the moment the round before it ended. Kept apart from the
+    #: deadline (when it must be done) and from the plan's ``next_start``
+    #: (where it would actually start given room).
+    not_before: Optional[float] = None
     #: The series of rounds a repeating task belongs to: the id of its first
     #: round, kept by every later round, so the series can be paused, edited or
     #: cancelled as one thing. None for a task that runs once.
@@ -133,6 +146,22 @@ class Task:
     @property
     def finished(self) -> bool:
         return self.status in ("done", "failed", "cancelled")
+
+    @property
+    def schedule(self) -> Optional[Schedule]:
+        """How this task repeats: a calendar rule, an interval, or not at all."""
+        try:
+            if self.repeat_calendar:
+                return Schedule.from_dict(self.repeat_calendar)
+            if self.repeat:
+                return Schedule.interval(float(self.repeat))
+        except (TypeError, ValueError):
+            return None  # a stored rule that no longer parses: the task just runs once
+        return None
+
+    @property
+    def repeats(self) -> bool:
+        return self.schedule is not None
 
     def step(self, step_id: str) -> Optional[Step]:
         return next((step for step in self.steps if step.id == step_id), None)

@@ -58,10 +58,21 @@ HISTORY_TAIL = 5
 OTHERS_LIMIT = 5
 
 
+def _at(epoch: Optional[float], tzname: str) -> Optional[dict]:
+    """One moment both ways: epoch seconds and ISO-8601 with the zone's offset.
 
-
-
-
+    Both forms are given on purpose: a machine compares epochs, a person (and a
+    wall-clock schedule) reads the local time. ``timezone`` names the zone the
+    ISO form is written in, so "04:00" is never mistaken for the server's 04:00.
+    """
+    if epoch is None:
+        return None
+    tz = zone(tzname)
+    return {
+        "epoch": round(float(epoch), 3),
+        "iso": datetime.fromtimestamp(float(epoch), tz).isoformat(),
+        "timezone": getattr(tz, "key", None) or tzname or "UTC",
+    }
 
 
 class LazyUnavailable(LazyError):
@@ -103,6 +114,8 @@ class LazyChat:
                 "title_chars": 160,
                 "brief_chars": 8000,
                 "repeat_hours_min": 1,
+                "repeat_kinds": ["interval", "daily", "weekly"],
+                "repeat_time": "HH:MM in the user's zone (or the zone named in the rule)",
                 "cap_points": [0, 100],
                 "list_max": MAX_LIST,
             },
@@ -123,8 +136,9 @@ class LazyChat:
             tasks = [task for task in tasks if task.project_id == project]
         tasks = sorted(tasks, key=lambda task: task.created_at, reverse=True)
         size = max(1, min(MAX_LIST, int(limit or 20)))
+        tz = self._tz()  # one settings read for the whole list
         return {
-            "tasks": [self._brief(task) for task in tasks[:size]],
+            "tasks": [self._brief(task, tz) for task in tasks[:size]],
             "count": len(tasks[:size]),
             "total": len(tasks),
             "truncated": len(tasks) > size,
@@ -133,10 +147,18 @@ class LazyChat:
     def get(self, task_id: str) -> dict:
         """One task in full: its steps, its last history, where it lands."""
         task = self._task(task_id)
+        placement = self._placement(task)
+        if placement is not None:
+            tz = self._tz()
+            placement["times"] = {
+                "scheduled_release": _at(placement.get("scheduled_release"), tz),
+                "next_start": _at(placement.get("next_start"), tz),
+                "finish_at": _at(placement.get("finish_at"), tz),
+            }
         return {
             "task": self._detail(task),
             "project": self._project_brief(task.project_id),
-            "placement": self._placement(task),
+            "placement": placement,
         }
 
     # -- changing ------------------------------------------------------------------------
@@ -246,6 +268,10 @@ class LazyChat:
             body["cap"] = payload["cap"]
         if payload.get("deadline") not in (None, ""):
             body["deadline"] = self._moment(payload["deadline"])
+        if payload.get("not_before") not in (None, ""):
+            body["not_before"] = self._moment(payload["not_before"])
+        if payload.get("repeat") not in (None, ""):
+            body["repeat"] = payload["repeat"]
         return body
 
     def _changes(self, changes: dict) -> dict:
@@ -255,7 +281,7 @@ class LazyChat:
         if unknown:
             raise LazyError(f"Unknown field(s): {', '.join(sorted(unknown))}.")
         for key, value in changes.items():
-            if key == "deadline":
+            if key in ("deadline", "not_before"):
                 clean[key] = self._moment(value)
             elif key == "project_id":
                 clean[key] = str(value or "").strip()
@@ -315,8 +341,14 @@ class LazyChat:
             raise KeyError(task_id)
         return task
 
-    def _brief(self, task: Task) -> dict:
+    def _tz(self) -> str:
+        """The user's own zone: every wall time in a DTO is written in it."""
+        return self._agents.store.settings(self._user_id).routine.timezone
+
+    def _brief(self, task: Task, tz: Optional[str] = None) -> dict:
         done = sum(1 for step in task.steps if step.status == "done")
+        tz = tz or self._tz()
+        schedule = task.schedule
         return {
             "id": task.id,
             "title": task.title,
@@ -326,10 +358,22 @@ class LazyChat:
             "project_id": task.project_id,
             "series_id": task.series_id,
             "repeat_hours": round(task.repeat / HOUR, 2) if task.repeat else None,
+            # The typed rule, when there is one: interval, daily or weekly, with
+            # its zone and its missed policy. ``repeat_hours`` stays for the
+            # interval form alone.
+            "schedule": schedule.to_dict() if schedule is not None else None,
+            # The scheduled release: no step starts before it. Distinct from the
+            # deadline (when it must be done) and from the placement's forecast
+            # of where it will actually start.
+            "not_before": task.not_before,
             "deadline": task.deadline,
             "steps": {"done": done, "total": len(task.steps)},
             "next_step": task.next_step.title if task.next_step else None,
             "updated_at": task.updated_at,
+            "times": {
+                "not_before": _at(task.not_before, tz),
+                "deadline": _at(task.deadline, tz),
+            },
             "version": task.version,
         }
 
@@ -346,6 +390,7 @@ class LazyChat:
             "cap": task.cap,
             "run_now": task.run_now,
             "retry_at": task.retry_at,
+            "retry_at_iso": (_at(task.retry_at, self._tz()) or {}).get("iso"),
             "conversation_id": task.conversation_id,
             "created_at": task.created_at,
             "steps_detail": [

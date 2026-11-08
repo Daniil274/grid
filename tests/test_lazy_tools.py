@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.lazy.model import Settings
+from core.lazy.model import Settings, Task
 from core.lazy.routine import Routine
 from core.lazy.store import LazyStore
 from core.quota_telemetry import QuotaReading, QuotaTelemetry, WindowReading
@@ -625,11 +625,11 @@ def test_a_repeat_rounds_chat_belongs_to_the_project(tmp_path):
     project, _ = projects.ensure("Launch")
     projects.add_notes(project.id, "Ship on Monday")
     space = StepSpace(projects)
-    first = SimpleNamespace(
-        id="lazy-1", title="Weekly report", user_id="u", brief="Write it", acceptance="", optional="",
-        deadline=NOW, priority="normal", size="S", system="eng", agent="engineer", account=None,
-        cap=None, repeat=24 * HOUR, series_id="lazy-1", project_id=project.id,
-        created_at=NOW, updated_at=NOW, steps=[], history=[], conversation_id=None,
+    first = Task(
+        id="lazy-1", user_id="u", title="Weekly report", brief="Write it",
+        deadline=NOW, size="S", system="eng", agent="engineer",
+        repeat=24 * HOUR, series_id="lazy-1", project_id=project.id,
+        created_at=NOW, updated_at=NOW,
     )
     # The round the service makes when a repeating task ends (web_chat.lazy.service._next_round).
     store = LazyStore(tmp_path / "rounds.db")

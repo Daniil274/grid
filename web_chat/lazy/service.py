@@ -19,8 +19,10 @@ ends the service
 - or, for a step stopped short, keeps it pending to continue later, and backs
   off one that could not start.
 
-A task done with a ``repeat`` sets up its next round: the same work with
-fresh steps and a new chat, due that long after the last deadline.
+A task done with a repeat sets up its next round: the same work with fresh
+steps and a new chat, released at the series' next slot - an interval after this
+round's own release, or the next local wall time (daily/weekly) - never before
+it, and with the slots it missed while running skipped rather than queued.
 
 The provider's readings also teach the user's own rates (core.lazy.forecast):
 use between two readings that the pool's runs do not explain is the user's.
@@ -29,17 +31,21 @@ use between two readings that the pool's runs do not explain is the user's.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from core.lazy.estimate import SIZES, Calibration, checkpoint_of, kinds_for, size_in, sized, verdict_in
 from core.lazy.model import PRIORITIES, Run, Settings, Step, Task, new_id
 from core.lazy.planner import CHART_SPAN, Plan, plan
+from core.lazy.routine import zone
+from core.lazy.schedule import Schedule
 from core.lazy.situation import FRESH, Situation, from_reading
 from core.lazy.store import LazyStore
 from core.lazy.windows import DAY, HOUR, WINDOWS
@@ -61,6 +67,9 @@ BACKOFF = 15 * 60.0
 LEARN_SPAN = 30 * 60.0
 #: Over its share by more than this, a running step is stopped.
 TOLERANCE = 0.5
+#: A series' own cap is spent over this rolling window of the ledger, ending now.
+#: It is not aligned to any quota reset: a new round does not open a new budget.
+SERIES_WINDOW = 7 * DAY
 
 
 class LazyError(ValueError):
@@ -297,7 +306,35 @@ class LazyAgents:
         return plan(
             tasks, settings, self.situation(user_id, settings), self.store.rates(user_id),
             self.calibration(settings.account, user_id), offer=offer,
+            series_spend=self.series_spend(user_id, settings, tasks),
         )
+
+    def series_spend(
+        self, user_id: str, settings: Settings, pool: Optional[List[Task]] = None, *, now: Optional[float] = None
+    ) -> Dict[str, float]:
+        """Weekly points each series spent in the rolling window to *now*, from the ledger.
+
+        The ledger is the source of truth - not the steps of whichever round is
+        open - so a new round does not get a fresh cap and a measured, estimated
+        or interrupted run all count the same. A task that does not repeat is
+        not a series (its cap keeps counting its own steps in the planner).
+
+        Nothing is read unless some task in *pool* (the plan's own tasks) has
+        both a cap and a series: the usual task costs no extra query at all.
+        """
+        tasks = self.store.tasks(user_id, finished=False) if pool is None else pool
+        if not any(task.cap is not None and task.series_id for task in tasks):
+            return {}
+        moment = self.clock() if now is None else now
+        series = {task.id: task.series_id for task in self.store.tasks(user_id) if task.series_id}
+        account = pool_key(settings.account, user_id)
+        spent: Dict[str, float] = {}
+        for run in self.store.runs(account, moment - SERIES_WINDOW):
+            key = series.get(run.task_id)
+            if key is None:
+                continue
+            spent[key] = spent.get(key, 0.0) + run.used.get("seven_day", 0.0)
+        return spent
 
     def settings_for(
         self, user_id: str, space: Any = None, timezone: Optional[str] = None, *, persist: bool = True
@@ -449,6 +486,8 @@ class LazyAgents:
             status=status,
             cap=_points(payload.get("cap")),
             repeat=_repeat(payload.get("repeat_hours")),
+            repeat_calendar=_repeat_calendar(payload.get("repeat"), settings.routine.timezone),
+            not_before=_moment(payload.get("not_before"), settings.routine.timezone),
             # Whose project the work belongs to; checked here, for the page's
             # API and the tools alike, against this user's own project store.
             project_id=_checked_project(space, payload.get("project_id")),
@@ -458,7 +497,7 @@ class LazyAgents:
             created_at=self.clock(),
             updated_at=self.clock(),
         )
-        if task.repeat:
+        if task.repeats:
             # The first round opens the series; every later round keeps its id.
             task.series_id = task.id
         for index, kind in enumerate(kinds_for(task.optional), start=1):
@@ -548,13 +587,14 @@ class LazyAgents:
             target = next((t for t in tasks if t.id == task_id), None)
             if target is None:
                 raise KeyError(task_id)
-            edited = _edited(_copy(target), changes.get("task", changes), self.clock())
+            edited = _edited(_copy(target), changes.get("task", changes), self.clock(), self.store.settings(user_id).routine.timezone)
             trial_tasks = [edited if t.id == task_id else t for t in tasks]
         if "settings" in changes:
             trial_settings = _with_settings(settings, changes["settings"])
         after = plan(
             trial_tasks, trial_settings, self.situation(user_id, trial_settings), self.store.rates(user_id),
             self.calibration(trial_settings.account, user_id),
+            series_spend=self.series_spend(user_id, trial_settings, trial_tasks),
         )
         others = []
         for other in tasks:
@@ -601,7 +641,7 @@ class LazyAgents:
                     self._refuse_project_move(task, space)
                 changes = {**changes, "project_id": project}
             status = changes.get("status")
-            task = _edited(task, changes, self.clock())
+            task = _edited(task, changes, self.clock(), self.store.settings(user_id).routine.timezone)
             if status == "paused" and self._is_running(user_id, task_id):
                 self._stops[task_id] = "Paused by you"
             if not self.store.save_task(task, expected_version=int(task.version or 0)):
@@ -940,7 +980,7 @@ class LazyAgents:
         if task.status == "active" and not task.open_steps:
             task.status = "done"
             task.note("Done", kind="done")
-            if task.repeat:
+            if task.schedule is not None:
                 following = self._next_round(task, now)
                 self.store.save_task(following)
                 task.note(f"The next round is {following.id}", kind="info")
@@ -949,13 +989,37 @@ class LazyAgents:
         return task
 
     def _next_round(self, task: Task, now: float) -> Task:
-        """The round after a repeating *task*: the same work, fresh steps, a new chat."""
-        repeat = float(task.repeat or 0)
+        """The round after a repeating *task*: the same work, fresh steps, a new chat.
+
+        The next round is *released* - not merely given a deadline - at the
+        series' next slot. That slot is worked out from the moment this round
+        ended (``now``):
+
+        - ``interval``: a whole period after this round's own release, so two
+          rounds are never back to back and the grid does not drift with how
+          long a round took;
+        - ``daily``/``weekly``: the next wall time in the user's own zone.
+
+        Slots missed while this round ran (or while the server was down) are
+        skipped once, never replayed as a queue. The deadline keeps the span
+        this round had between its release and its deadline. Nothing starts
+        earlier than the release even if there is room: the schedule is the
+        floor, the budgets and the forecast are the rest.
+        """
+        schedule = task.schedule
+        anchor = task.not_before if task.not_before is not None else task.created_at
+        release = schedule.next_release(now, anchor=anchor) if schedule is not None else None
+        span = (task.deadline - anchor) if task.deadline is not None else None
         following = Task(
             id=new_id("lazy"), user_id=task.user_id, title=task.title, brief=task.brief,
             acceptance=task.acceptance, optional=task.optional,
-            deadline=max(now, task.deadline or now) + repeat, priority=task.priority, size=task.size,
-            system=task.system, agent=task.agent, account=task.account, cap=task.cap, repeat=task.repeat,
+            deadline=None if span is None else max(0.0, span) + (release if release is not None else now),
+            # The scheduled release, kept apart from the deadline: the round may
+            # be done any time before the deadline, but not started before this.
+            not_before=release,
+            priority=task.priority, size=task.size,
+            system=task.system, agent=task.agent, account=task.account, cap=task.cap,
+            repeat=task.repeat, repeat_calendar=task.repeat_calendar,
             # The same series, and the same project: a round does not change
             # whose series it is or where its work belongs.
             series_id=task.series_id or task.id,
@@ -964,7 +1028,9 @@ class LazyAgents:
         )
         for index, kind in enumerate(kinds_for(following.optional), start=1):
             following.steps.append(Step.make(kind, following.size, index, optional=kind == "extra"))
-        following.note(f"Next round of {task.id}; repeats every {_hours(repeat)}")
+        following.note(
+            f"Next round of {task.id}; {schedule.describe() if schedule is not None else 'runs once'}"
+        )
         return following
 
     def _answered(self, task: Task, step: Step, answer: str) -> None:
@@ -1033,7 +1099,7 @@ class LazyAgents:
 # -- editing ---------------------------------------------------------------------------
 EDITABLE = (
     "title", "brief", "acceptance", "deadline", "priority", "size", "run_now", "cap", "drop_optional", "status",
-    "project_id", "repeat_hours",
+    "project_id", "repeat_hours", "repeat", "not_before",
 )
 
 
@@ -1094,12 +1160,80 @@ def _deadline(value: Any) -> Optional[float]:
         raise LazyError("The deadline is not a moment in time.") from None
 
 
+def _moment(value: Any, timezone: str = "UTC") -> Optional[float]:
+    """A moment as epoch seconds: a number, or ISO-8601 read in *timezone* when it has none."""
+    if value in (None, "", 0):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    text = str(value).strip()
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise LazyError("The time is not a moment: give ISO-8601 (2026-11-10T18:00) or epoch seconds.") from None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=zone(timezone))
+    return moment.timestamp()
+
+
+def _repeat_calendar(value: Any, timezone: str) -> Optional[Dict[str, Any]]:
+    """A calendar rule from the API's ``repeat``, or None for a plain number.
+
+    A mapping (or its JSON) names the rule, and the zone it is read in:
+
+        {"kind": "daily", "time": "04:00", "timezone": "Europe/Moscow"}
+        {"kind": "weekly", "time": "04:00", "weekday": "mon"}
+        {"kind": "interval", "hours": 6}
+
+    The zone is the one named, else the user's own: a wall time means the user's
+    clock. An unknown zone is refused here, not silently read as UTC.
+    """
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text[0] not in "{[":
+            return None  # a number of hours, as ``repeat_hours`` always was
+        try:
+            value = json.loads(text)
+        except ValueError:
+            raise LazyError("The repeat is neither a number of hours nor a JSON rule.") from None
+    if not isinstance(value, Mapping):
+        raise LazyError("The repeat is neither a number of hours nor a rule.")
+    data = dict(value)
+    data["kind"] = str(data.get("kind") or ("interval" if "hours" in data else "daily")).lower()
+    data.setdefault("timezone", timezone or "UTC")
+    name = str(data.get("timezone") or "UTC")
+    if zone(name).key != name:
+        raise LazyError(f"Unknown time zone: {name}.")
+    try:
+        return Schedule.from_dict(data).to_dict()
+    except (TypeError, ValueError) as exc:
+        raise LazyError(str(exc) or "The repeat rule is not valid.") from None
+
+
+def _repeat_pair(value: Any, timezone: str) -> Tuple[Optional[float], Optional[Dict[str, Any]]]:
+    """(interval seconds, calendar rule) from one ``repeat`` value; one is set."""
+    rule = _repeat_calendar(value, timezone)
+    if rule is not None:
+        return None, rule
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _repeat(value), None
+    text = str(value or "").strip()
+    if not text:
+        return None, None
+    return _repeat(text), None
+
+
 def _repeat(hours: Any) -> Optional[float]:
     """Seconds between rounds from ``repeat_hours``; None (once) for nothing or zero.
 
-    The interval is not a calendar time: the round after this one is due that
-    long after this round's deadline (or after it ended, when that is later),
-    so a daily task does not keep a fixed hour of the day.
+    The interval is not a calendar time: the round after this one is *released*
+    a whole period after this round's own release (or after it ended, when that
+    is later), so it never starts back to back with the round before it. For a
+    fixed hour of the day use a calendar rule (``repeat``).
     """
     if hours in (None, "", 0, "0"):
         return None
@@ -1118,11 +1252,6 @@ def _repeat(hours: Any) -> Optional[float]:
     return value * HOUR
 
 
-def _hours(seconds: float) -> str:
-    hours = seconds / HOUR
-    return f"{hours / 24:g} day(s)" if hours >= 24 and hours % 24 == 0 else f"{hours:g} h"
-
-
 def _points(value: Any) -> Optional[float]:
     if value in (None, ""):
         return None
@@ -1136,7 +1265,7 @@ def _copy(task: Task) -> Task:
     return Task.from_dict(task.to_dict())
 
 
-def _edited(task: Task, changes: dict, now: float) -> Task:
+def _edited(task: Task, changes: dict, now: float, timezone: str = "UTC") -> Task:
     """*task* with *changes* applied (the page's fields, or a way out of the plan)."""
     notes: List[str] = []
     # A named value that is not one of ours is refused, not quietly dropped:
@@ -1170,13 +1299,22 @@ def _edited(task: Task, changes: dict, now: float) -> Task:
     if "cap" in changes:
         task.cap = _points(changes["cap"])
     if "repeat_hours" in changes:
+        # The interval named in hours replaces any calendar rule: one schedule
+        # at a time, and the caller's last word is the one kept.
         task.repeat = _repeat(changes["repeat_hours"])
-        if task.repeat and not task.series_id:
+        task.repeat_calendar = None
+        if task.repeats and not task.series_id:
             # A task that starts repeating opens its series with this round.
             task.series_id = task.id
-        notes.append(
-            f"Repeats every {_hours(task.repeat)}" if task.repeat else "Runs once"
-        )
+        notes.append(f"Repeats {task.schedule.describe()}" if task.schedule else "Runs once")
+    if "repeat" in changes:
+        task.repeat, task.repeat_calendar = _repeat_pair(changes["repeat"], timezone)
+        if task.repeats and not task.series_id:
+            task.series_id = task.id
+        notes.append(f"Repeats {task.schedule.describe()}" if task.schedule else "Runs once")
+    if "not_before" in changes:
+        task.not_before = _moment(changes["not_before"], timezone)
+        notes.append("Release moved" if task.not_before is not None else "Release cleared")
     if "project_id" in changes:
         project = _project_id(changes["project_id"])
         if project != task.project_id:
