@@ -325,18 +325,26 @@ def relocate_config(document: Dict[str, Any], source_dir: Path, target_dir: Path
 def inspect_system(load: Callable[[], Any], *, requires=(), confined: bool = False) -> Dict[str, Any]:
     """Agents and health of a system; a config that does not load is reported, never raised.
 
+    ``readiness`` is the blocking part of the report: a ``system_skills`` name
+    the system does not have (core.tool_check.readiness). A draft with one is
+    still created, written and checked - it just is not ready to run or to be
+    activated/published, and the gates of the systems page say so.
+
     Loading a config replaces the process-wide project tools loader: it is
     put back afterwards.
     """
     from core.managers.project_tools_loader import get_project_loader, set_project_loader
-    from core.tool_check import CONFIG, diagnose, summarize
+    from core.tool_check import CONFIG, diagnose, readiness, summarize
 
     previous = get_project_loader()
     try:
         config = load()
         issues = diagnose(config, requires=requires, confined=confined)
     except Exception as exc:
-        return {"loaded": False, "error": str(exc), "agents": [], "config": [], "environment": [], "packages": []}
+        return {
+            "loaded": False, "ready": False, "error": str(exc), "agents": [], "config": [],
+            "readiness": [], "environment": [], "packages": [],
+        }
     finally:
         set_project_loader(previous)
     agents = [
@@ -351,11 +359,14 @@ def inspect_system(load: Callable[[], Any], *, requires=(), confined: bool = Fal
         }
         for key, agent in config.config.agents.items()
     ]
+    gaps = readiness(config)
     return {
         "loaded": True,
+        "ready": not gaps,
         "error": "",
         "agents": agents,
         "config": [issue.text() for issue in issues if issue.kind == CONFIG],
+        "readiness": [issue.text() for issue in gaps],
         "environment": summarize([issue for issue in issues if issue.kind != CONFIG]),
         "packages": packages_of(config),
     }

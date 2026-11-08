@@ -734,7 +734,15 @@ class SystemHub:
                 if active:
                     require_quality(store.directory(key))
                     inspection = inspect_system(lambda: access.load(key, str(space.workspace_path)), confined=True)
-                    if not inspection["loaded"] or inspection["config"]:
+                    if not inspection["loaded"]:
+                        raise StoreError("Fix the system's config before activating it.")
+                    # Readiness first: a missing declared skill is a reason of its own,
+                    # and the person needs to see which one.
+                    if inspection["readiness"]:
+                        raise StoreError(
+                            "The system is not ready to run: " + "; ".join(inspection["readiness"][:3])
+                        )
+                    if inspection["config"]:
                         raise StoreError("Fix the system's config before activating it.")
                 store.set_status(key, "published" if active else "draft")
             if delete:
@@ -885,6 +893,11 @@ class SystemHub:
             inspection = inspect_system(lambda: Config(str(store.config_path(key))), requires=manifest.requires)
             if not inspection["loaded"]:
                 raise HTTPException(status_code=400, detail=f"The config does not load: {inspection['error']}")
+            if inspection["readiness"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="The system is not ready to run: " + "; ".join(inspection["readiness"][:3]),
+                )
             if inspection["config"]:
                 raise HTTPException(
                     status_code=400,
@@ -988,7 +1001,11 @@ class SystemHub:
             access = space._builder_access()
             access.validate(store.config_text(key), key)
             inspection = inspect_system(lambda: access.load(key, str(space.workspace_path)), confined=True)
-            if not inspection["loaded"] or inspection["config"]:
+            if not inspection["loaded"]:
+                raise ValueError("Fix the system's configuration before submission.")
+            if inspection["readiness"]:
+                raise ValueError("The system is not ready to run: " + "; ".join(inspection["readiness"][:3]))
+            if inspection["config"]:
                 raise ValueError("Fix the system's configuration before submission.")
             before = revision(source)
             record = SubmissionRecord(

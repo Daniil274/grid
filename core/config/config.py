@@ -493,6 +493,18 @@ class Config:
             logger.warning(f"Failed to read skill file {skill_path}: {exc}")
             return None
 
+    def missing_system_skills(self, agent_key: str) -> List[str]:
+        """Skills an agent declares and this config does not have.
+
+        ``system_skills`` is a promise: the agent runs with those instructions.
+        A name with no file in ``skills/`` (or an unreadable one) is not a
+        warning to shrug off - the agent would silently work without the rules
+        its system says it follows. Callers use this to refuse to start a run
+        (core.tool_check.readiness, web_chat.systems) instead of doing so.
+        """
+        agent = self.get_agent(agent_key)
+        return [name for name in (agent.system_skills or []) if self.skill_path(name) is None]
+
     def build_agent_prompt_sections(self, agent_key: str) -> List[PromptSection]:
         """Build structured prompt sections for an agent."""
         agent_config = self.get_agent(agent_key)

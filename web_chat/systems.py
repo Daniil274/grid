@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.config.config import Config
 from core.routing import AutoRouter
-from core.tool_check import ToolIssue, agent_issues, diagnose
+from core.tool_check import ToolIssue, agent_issues, diagnose, run_readiness
 
 logger = logging.getLogger("grid.web_chat.systems")
 
@@ -64,6 +64,15 @@ class ExtraSystem:
     routable: bool
     badge: str
     requires: Tuple[str, ...] = ()
+
+
+class SystemNotReady(RuntimeError):
+    """A turn was refused before it started: the system lacks what it declares.
+
+    Raised with the declaration gaps themselves (agents, skills), so the caller
+    shows a reason instead of running an agent without the instructions its
+    system promises. Nothing is built and no model is called.
+    """
 
 
 @dataclass(frozen=True)
@@ -345,6 +354,14 @@ class SystemRegistry:
         """Issues a run of one agent meets: the system's, its own and its subagents'."""
         return agent_issues(self.config(system_key), self.issues(system_key), agent_key)
 
+    def readiness(self, system_key: str, agent_key: str) -> List[ToolIssue]:
+        """What stops a run of *agent_key* outright: declared skills the system does not have.
+
+        Unlike :meth:`issues`, these are not warnings to show beside a running
+        turn - they are why the turn must not start (``resolve``).
+        """
+        return run_readiness(self.config(system_key), agent_key)
+
     # -- resolution --------------------------------------------------------
     async def resolve(
         self,
@@ -391,6 +408,17 @@ class SystemRegistry:
             if routed_agent
             else config.get_default_agent()
         )
+
+        # Fail closed before a factory is built or a model is called: an agent
+        # whose declared skill file is missing would run without the rules its
+        # system promises, and nothing in the answer would say so.
+        gaps = run_readiness(config, chosen_agent)
+        if gaps:
+            raise SystemNotReady(
+                f"system '{chosen_system}' cannot start agent '{chosen_agent}': "
+                + "; ".join(issue.text() for issue in gaps)
+                + ". Add the missing skill files or remove the declarations, then try again."
+            )
 
         return Resolution(
             system=chosen_system,

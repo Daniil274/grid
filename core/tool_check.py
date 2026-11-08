@@ -102,6 +102,43 @@ def agent_issues(config: Config, issues: Iterable[ToolIssue], agent_key: str) ->
     return [issue for issue in issues if issue.agent is None or issue.agent in reachable_agents(config, agent_key)]
 
 
+def readiness(config: Config, agent_key: Optional[str] = None) -> List[ToolIssue]:
+    """Declarations the system does not honour: a ``system_skills`` name with no file.
+
+    This is the one part of the check that is not advice. A tool whose service
+    is down may come up, a key may be exported later - the agent still has all
+    its tools. A skill file that is not there never appears: the agent runs
+    without the instructions its system says it follows, and nothing in its
+    answer says so. So a caller that is about to start a run refuses instead
+    (``web_chat.systems.SystemRegistry.resolve``), and the systems page uses the
+    same rule before activating or publishing a system.
+
+    Without *agent_key* every agent of the system is checked.
+    """
+    grid = config.config
+    keys = [agent_key] if agent_key is not None else list(grid.agents)
+    issues: List[ToolIssue] = []
+    for key in keys:
+        if key not in grid.agents:
+            continue
+        for skill_name in config.missing_system_skills(key):
+            issues.append(
+                ToolIssue(
+                    CONFIG,
+                    f"uses missing skill '{skill_name}'",
+                    agent=key,
+                    hint=f"add skills/{skill_name}.md next to the config, or remove it from system_skills",
+                )
+            )
+    return issues
+
+
+def run_readiness(config: Config, agent_key: str) -> List[ToolIssue]:
+    """Readiness of a run of *agent_key*: the agent and every agent it can call."""
+    reachable = set(reachable_agents(config, agent_key))
+    return [issue for issue in readiness(config) if issue.agent in reachable]
+
+
 def reachable_agents(config: Config, agent_key: str) -> List[str]:
     """*agent_key* and every agent it can reach through agent tools, in call order."""
     grid = config.config
@@ -191,9 +228,8 @@ class _Diagnosis:
     def _check_agent(self, agent_key: str, agent: Any) -> None:
         if agent.routable and not agent.description:
             self.add(CONFIG, "has no description, routing to it is blind", agent=agent_key)
-        for skill_name in agent.system_skills:
-            if self.config.skill_path(skill_name) is None:
-                self.add(CONFIG, f"uses missing skill '{skill_name}'", agent=agent_key)
+        # One rule for a missing skill, shared with the run and activation gates.
+        self.issues.extend(readiness(self.config, agent_key))
         self._check_models(agent_key, agent)
         for tool_name in agent.tools:
             self._check_tool(agent_key, agent, tool_name)

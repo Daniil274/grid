@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, List, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from agents import Agent
 
@@ -34,6 +35,147 @@ from utils.exceptions import ConfigError
 from utils.logger import Logger
 
 logger = logging.getLogger("grid.agent_factory")
+
+
+#: Statuses a tool's own return value reports as a failure, regardless of how
+#: it is worded. The unified structured contract the tracker tools will adopt
+#: (``ok``/``success``/``status``/``error``) is read here already; ``❌`` is the
+#: legacy text contract of the beads tools until then.
+_FAILED_STATUSES = frozenset({"error", "failed", "failure", "denied", "refused"})
+_SUCCESS_FLAGS = ("success", "ok")
+_LEGACY_ERROR_MARK = "❌"
+
+
+class PreparationFailed(RuntimeError):
+    """A required batch of steps did not finish: the agent must not start.
+
+    Raised instead of starting a model on incomplete context. ``result`` keeps
+    the per-step outcome so a caller can report which step failed and why.
+    """
+
+    def __init__(self, result: "PreparationResult", subject: str = "preparation"):
+        self.result = result
+        self.subject = subject
+        super().__init__(result.failure_report(subject))
+
+
+class StepDidNotSucceed(RuntimeError):
+    """A tool returned but its own result says the call failed.
+
+    Raised inside a batch so the step is recorded ``FAILED`` with the tool's
+    reason as its detail, exactly as a raised call is: a returned failure is
+    not a successful preparation.
+    """
+
+
+@dataclass(frozen=True)
+class StepFailure:
+    """One step that did not finish: its name, status and the reason."""
+
+    name: str
+    status: str
+    detail: str = ""
+
+    def describe(self) -> str:
+        reason = self.detail or "no reason reported"
+        return f"{self.name} ({self.status}): {reason}"
+
+
+class PreparationResult(str):
+    """A batch's injected text, with the typed outcome of every step.
+
+    The string value is what is prepended to the agent's instructions, so a
+    caller that only needs the text uses it as before. The attributes carry the
+    verdict, and that is what a caller must decide on: ``ok`` is True only when
+    every step finished ``DONE``. A step that raised, was missing, returned a
+    failure or was refused by the action policy makes ``ok`` False; it is never
+    reported as a successful preparation.
+    """
+
+    def __new__(
+        cls,
+        text: str,
+        outcomes: List[StepOutcome],
+        *,
+        phase: str,
+        required: bool = True,
+    ) -> "PreparationResult":
+        result = super().__new__(cls, text or "")
+        result.outcomes = list(outcomes)
+        result.phase = phase
+        result.required = bool(required)
+        return result
+
+    @property
+    def ok(self) -> bool:
+        """True only when every step finished; an empty batch is a success."""
+        return all(outcome.status == DONE for outcome in self.outcomes)
+
+    @property
+    def failures(self) -> List[StepFailure]:
+        """The steps that did not finish, in the batch's order."""
+        return [
+            StepFailure(
+                name=outcome.step.name,
+                status=outcome.status,
+                detail=outcome.detail,
+            )
+            for outcome in self.outcomes
+            if outcome.status != DONE
+        ]
+
+    def failure_report(self, subject: str = "preparation") -> str:
+        """A line a caller can show: what did not happen and why."""
+        failures = self.failures
+        if not failures:
+            return f"{subject} succeeded"
+        reasons = "; ".join(failure.describe() for failure in failures)
+        return (
+            f"{subject}: {len(failures)} of {len(self.outcomes)} step(s) did not "
+            f"finish: {reasons}"
+        )
+
+
+def failure_reason(value: Any) -> Optional[str]:
+    """Why a tool's return value says the call did not succeed, or None.
+
+    The structured fields are authoritative: ``success``/``ok`` false, a
+    failure ``status``, or an ``error`` without a success flag. A text answer
+    is read through the documented legacy contract of the beads tools (a
+    leading ``❌``); a plain text without it is not judged on its wording.
+    """
+    data: Optional[Mapping[str, Any]] = None
+    if isinstance(value, Mapping):
+        data = value
+    elif isinstance(value, str):
+        stripped = value.lstrip()
+        if stripped.startswith("{"):
+            try:
+                parsed = json.loads(stripped)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, Mapping):
+                data = parsed
+        if data is None:
+            if stripped.startswith(_LEGACY_ERROR_MARK):
+                return stripped.splitlines()[0].lstrip(_LEGACY_ERROR_MARK).strip() or "failed"
+            return None
+
+    if data is None:
+        return None
+
+    for flag in _SUCCESS_FLAGS:
+        if data.get(flag) is False:
+            detail = data.get("error") or data.get("message") or data.get("detail")
+            return str(detail) if detail else f"{flag} is false"
+    status = data.get("status")
+    if isinstance(status, str) and status.lower() in _FAILED_STATUSES:
+        detail = data.get("error") or data.get("reason") or data.get("message")
+        return str(detail) if detail else f"status {status!r}"
+    error = data.get("error")
+    if error and not any(data.get(flag) is True for flag in _SUCCESS_FLAGS):
+        return str(error)
+    return None
 
 
 class AutoRunTools:
@@ -128,6 +270,14 @@ class AutoRunTools:
                             f"⚠️ Auto-run tool '{tool_name}' blocked by action policy"
                         )
                         return "", BLOCKED
+                    reason = failure_reason(tool_result)
+                    if reason:
+                        # A setup step that reports its own failure is not
+                        # context: injected, it reads as a successful result.
+                        logger.warning(
+                            f"⚠️ Auto-run tool '{tool_name}' did not succeed: {reason}"
+                        )
+                        raise StepDidNotSucceed(reason)
                     logger.debug(
                         f"Injected auto-run result of '{tool_name}' into instructions"
                     )
@@ -135,6 +285,8 @@ class AutoRunTools:
                         f"\n\n=== AUTO-RUN TOOL RESULT '{tool_name}' ===\n{tool_result}\n",
                         DONE,
                     )
+                except StepDidNotSucceed:
+                    return "", FAILED
                 except Exception as tool_err:
                     logger.warning(
                         f"⚠️ Error in auto-run tool '{tool_name}': {tool_err}"
@@ -177,17 +329,59 @@ class AutoRunTools:
             return None
         return next(iter(self._resolve_function_tools([tool_name])), None)
 
+    async def _resolve_init_tool_pool(
+        self,
+        init_tools: List[Dict[str, Any]],
+        tools: list,
+        *,
+        agent_key: Optional[str] = None,
+    ) -> list:
+        """The tools explicit init_tools may call: only what the target was given.
+
+        A dynamic agent is issued its tools by the caller, so its init_tools may
+        use exactly those. A configured agent (``agent_key``) may also use the
+        ``auto_run_tools`` its own config declares: those are its promised
+        preparation, not an arbitrary addition.
+
+        Nothing is resolved from the registry just because an init_tool names
+        it. Doing so let a caller reach a tool the target was never issued
+        (a reviewer could run a preview it does not have), so a name outside
+        the pool is refused by :meth:`_execute_init_tools`, not added here.
+        """
+        pool = list(tools)
+        if agent_key is None:
+            return pool
+        try:
+            agent_config = self.config.get_agent(agent_key)
+        except Exception:  # an unconfigured key is not a config agent
+            return pool
+        declared = [
+            spec.get("name")
+            for spec in (getattr(agent_config, "auto_run_tools", None) or [])
+            if isinstance(spec, Mapping) and spec.get("name")
+        ]
+        known = {getattr(tool, "name", "") for tool in pool}
+        extra_names = [name for name in dict.fromkeys(declared) if name not in known]
+        if extra_names:
+            extra_tools, _, _ = await self._resolve_tools_for_names(extra_names)
+            pool.extend(extra_tools)
+        return pool
+
     async def _execute_init_tools(
         self,
         init_tools: List[Dict[str, Any]],
         tools: list,
         run_context: "GridRunContext",
-    ) -> str:
+    ) -> PreparationResult:
         """
         Run a list of raw tool-spec dicts and return concatenated results.
 
         Mirrors _execute_auto_run_tools() but accepts plain dicts instead of
         an AgentConfig, making it suitable for dynamic (orchestrated) agents.
+
+        The result is the injected text *and* its typed verdict (PreparationResult):
+        explicit init_tools are required, so a caller starts the model only when
+        ``result.ok`` is true and otherwise reports ``result.failure_report()``.
 
         Args:
             init_tools: List of {"name": "tool_name", "parameters": {...}}.
@@ -195,11 +389,14 @@ class AutoRunTools:
             run_context: GridRunContext used for tool invocation.
 
         Returns:
-            Combined result string ready to be prepended to agent instructions.
+            PreparationResult: text for the instructions, plus per-step status.
         """
         observer = getattr(run_context, "stream_observer", None) or self._stream_observer
+        # A container's workspace is CONTAINER_WORKDIR, not "/": an init tool
+        # told its directory is the filesystem root indexes the whole container
+        # instead of the workspace the agent was given.
         working_dir = (
-            "/"
+            CONTAINER_WORKDIR
             if getattr(self, "container_id", None)
             else self.config.get_working_directory()
         )
@@ -250,14 +447,24 @@ class AutoRunTools:
                             f"⚠️ init_tool '{tool_name}' blocked by action policy"
                         )
                         return "", BLOCKED
+                    reason = failure_reason(result)
+                    if reason:
+                        logger.warning(
+                            f"⚠️ init_tool '{tool_name}' did not succeed: {reason}"
+                        )
+                        raise StepDidNotSucceed(reason)
                     return f"\n\n=== CONTEXT [{tool_name}] ===\n{result}\n", DONE
+                except StepDidNotSucceed:
+                    raise
                 except Exception as e:
+                    # Shown to the run's view and kept for the caller: the
+                    # batch records the real error, not an empty "failed".
                     logger.warning(f"⚠️ init_tool '{tool_name}' error: {e}")
                     if hasattr(observer, "tool_call_finished"):
                         observer.tool_call_finished(
                             agent_key, tool_name, f"❌ {type(e).__name__}: {e}"
                         )
-                    return "", FAILED
+                    raise
             logger.warning(
                 f"⚠️ init_tool '{tool_name}' not found in agent's tool list"
             )
@@ -266,15 +473,20 @@ class AutoRunTools:
                     agent_key, tool_name,
                     f"❌ init_tool '{tool_name}' not found in the agent's tool list",
                 )
-            return "", FAILED
+            raise StepDidNotSucceed(
+                f"tool '{tool_name}' is not available to this agent"
+            )
 
         started = time.perf_counter()
         outcomes = await run_steps(steps, run_one)
         self._log_preparation(
             "init_tools", outcomes, time.perf_counter() - started, run_context
         )
-        return "".join(
-            outcome.value for outcome in outcomes if outcome.status == DONE
+        return PreparationResult(
+            "".join(outcome.value for outcome in outcomes if outcome.status == DONE),
+            outcomes,
+            phase="init_tools",
+            required=True,
         )
 
     def _log_preparation(

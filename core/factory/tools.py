@@ -807,11 +807,43 @@ class ToolAssembly:
                     if not isinstance(parsed_init_tools, list):
                         raise ValueError("init_tools must be a JSON list")
                 except (ValueError, TypeError) as exc:
+                    # An init_tool list the caller wrote badly is a required
+                    # preparation that did not happen: the agent must not start
+                    # as if it had its context. The caller sees the error.
                     logger.warning("Invalid init_tools for agent %s: %s", agent_key, exc)
-                    parsed_init_tools = []
-                init_info = await self._execute_init_tools(
-                    parsed_init_tools, list(local_sub_agent.tools or []), sub_run_ctx
+                    return (
+                        f"❌ Agent '{agent_key}' did not start: its init_tools are "
+                        f"not a valid JSON list ({type(exc).__name__}: {exc}). "
+                        "Nothing was run; fix init_tools and call again."
+                    )
+                # init_tools are the caller's calls made before the agent
+                # starts. They may use only the tools the target is given, plus
+                # (for a configured agent) its own declared auto_run_tools: a
+                # name it does not have is refused, never fetched from the
+                # registry.
+                init_pool = await self._resolve_init_tool_pool(
+                    parsed_init_tools,
+                    list(local_sub_agent.tools or []),
+                    agent_key=agent_key,
                 )
+                init_info = await self._execute_init_tools(
+                    parsed_init_tools, init_pool, sub_run_ctx
+                )
+                if not init_info.ok:
+                    # Required preparation failed (tool raised, was missing,
+                    # returned a failure, or the policy refused it): report the
+                    # real reason to the caller instead of running the model on
+                    # partial or refused context. A policy refusal is not
+                    # retried or bypassed.
+                    logger.warning(
+                        "init_tools of agent %s did not finish: %s",
+                        agent_key, init_info.failure_report(),
+                    )
+                    return (
+                        f"❌ Agent '{agent_key}' did not start: "
+                        f"{init_info.failure_report('its required init_tools')}. "
+                        "Nothing it was asked to do was run."
+                    )
             if preamble or init_info:
                 prefix = "\n\n".join(part for part in (preamble, init_info) if part)
                 enhanced_input = f"{prefix}\n\n[Current user request]\n\n{enhanced_input}"
