@@ -16,6 +16,7 @@ import { applyStoredTheme } from "../ui/theme.js";
 import { toast } from "../ui/toast.js";
 import { openDeadlineDialog, openSettingsDialog, openTaskDialog } from "./dialogs.js";
 import { STATES, colorSlot, duration, moment, points, relative, stateOf, tokens, waitText } from "./format.js";
+import { describeSchedule } from "./repeat.js";
 import { drawTimeline } from "./timeline.js";
 
 applyStoredTheme();
@@ -363,7 +364,13 @@ function taskCard(task) {
     task.priority !== "normal" ? `${task.priority} priority` : null,
     task.deadline ? `Deadline ${moment(task.deadline, now())} (${relative(task.deadline, now())})` : "No deadline",
     task.run_now ? "Do it now" : null,
-    task.repeat ? `Repeats every ${task.repeat >= 86400 && task.repeat % 86400 === 0 ? `${task.repeat / 86400} d` : `${task.repeat / 3600} h`}` : null,
+    // The rule in words: an interval, or a wall time in the user's own zone.
+    task.repeat_calendar || task.repeat
+      ? describeSchedule(task.repeat_calendar ?? { kind: "interval", seconds: task.repeat })
+      : null,
+    // The release is not the deadline: it is when the round may start at all.
+    task.not_before && task.not_before > now() + 60 ? `Released ${moment(task.not_before, now())}` : null,
+    task.cap != null ? `Own budget ${points(task.cap)} pts/week` : null,
   ].filter(Boolean);
   return h("article.taskCard", { dataset: { task: task.id, state: key }, class: `c${colorSlot(task.id)}` },
     h("header.taskCard__head", {},

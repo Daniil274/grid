@@ -367,6 +367,10 @@ class LazyAgents:
             pool_situation = self.situation(user_id, pool)
             pool_plan = plan(
                 pool_tasks, pool, pool_situation, self.store.rates(user_id), self.calibration(account, user_id),
+                # The page shows the same budget the loop plans with: a series'
+                # cap is spent from the ledger here too, or a capped series
+                # would look on track while the runner blocks it.
+                series_spend=self.series_spend(user_id, pool, pool_tasks, now=pool_situation.now),
             )
             pictures.append((pool, pool_situation, pool_plan))
         _, situation, current = pictures[0]

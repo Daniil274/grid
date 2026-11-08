@@ -16,7 +16,7 @@ import { ICONS } from "../ui/icons.js";
 import {
   STATES, duration, fromLocalInput, hoursSummary, moment, points, quickDeadlines, toLocalInput, tokens, waitText,
 } from "./format.js";
-import { REPEAT_CHOICES, REPEAT_HINT, repeatHours } from "./repeat.js";
+import { MISSED_NOTE, REPEAT_CHOICES, REPEAT_HINT, WEEKDAY_OPTIONS, repeatPayload } from "./repeat.js";
 
 const nowOf = (state) => state.now + (Date.now() / 1000 - state.loadedAt);
 
@@ -52,6 +52,34 @@ function segmented(name, options, value, onChange) {
     }));
 }
 
+/** An optional moment (the release): a local date and time, or nothing. */
+function momentPicker(initial, onChange, noneLabel) {
+  const input = h("input.control", { type: "datetime-local", value: toLocalInput(initial) });
+  input.addEventListener("change", () => onChange(fromLocalInput(input.value)));
+  const none = h("button.chipBtn", { type: "button", on: { click: () => { input.value = ""; onChange(null); } } }, noneLabel);
+  return h("div.deadlinePicker", {}, input, h("div.chipRow", {}, none));
+}
+
+const releasePicker = (state, initial, onChange) => momentPicker(initial, onChange, "Any time");
+
+/**
+ * The task's own weekly points. Empty is no extra limit (the pool's shares
+ * still apply) - not zero: 0 is a real zero, and the service honours it.
+ */
+function capInput(onChange) {
+  const input = h("input.control", {
+    type: "number", min: "0", step: "0.5", inputmode: "decimal", placeholder: "No own limit",
+  });
+  input.addEventListener("input", () => {
+    const raw = String(input.value).trim();
+    if (raw === "") return onChange(null, "");
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) return onChange(null, "A budget is points per week: a number, or 0.");
+    onChange(value, "");
+  });
+  return input;
+}
+
 function deadlinePicker(state, initial, onChange) {
   const input = h("input.control", { type: "datetime-local", value: toLocalInput(initial) });
   input.addEventListener("change", () => onChange(fromLocalInput(input.value)));
@@ -73,8 +101,12 @@ function planSummary(state, planned, steps, placements) {
       h("span.preview__cost", { text: `${points(placement.cost.five_hour)} / ${points(placement.cost.seven_day)} pts` }));
   });
   const finish = planned.finish_at ? `Ready ${moment(planned.finish_at, now)} (${duration(planned.finish_at - now)} from now)` : "No time found in the next two weeks";
+  const release = planned.scheduled_release && planned.scheduled_release > now + 60
+    ? h("p.preview__wait", { text: `Released ${moment(planned.scheduled_release, now)} - no step starts before it` })
+    : null;
   return h("div.preview__plan", {},
     h("div.preview__head", {}, chip(planned.state), h("strong", { text: finish })),
+    release,
     planned.wait ? h("p.preview__wait", { text: waitText(planned.wait, now) }) : null,
     rows.length ? h("ol.preview__steps", {}, rows) : null,
     planned.options?.length
@@ -109,7 +141,7 @@ export function openTaskDialog(state, act) {
   const draft = {
     title: "", brief: "", acceptance: "", optional: "", deadline: null, size: "M", priority: "normal",
     system: usable[0]?.system ?? null, agent: usable[0]?.agent ?? null, cap: null,
-    repeat_hours: 0,
+    repeat_hours: 0, repeat: null, not_before: null,
   };
   const preview = h("aside.preview", { "aria-live": "polite" }, h("p.preview__muted", { text: "Fill in the task to see where it lands." }));
   const error = h("p.lazyDialog__error", { role: "alert" });
@@ -160,22 +192,50 @@ export function openTaskDialog(state, act) {
     return `~${tokens(total)} tokens`;
   };
 
-  // How often the task repeats: the service takes hours between rounds, counted
-  // from the previous round's deadline - an interval, not a time of day.
-  let repeatChoice = "once";
+  // How often the task repeats: a period between rounds (an interval, in hours)
+  // or a wall time on a local day (daily/weekly) in the user's own zone. They
+  // are different rules and the form keeps them apart; a missed slot is skipped.
+  const repeat = {
+    choice: "once", hours: "", time: "04:00", weekday: "mon",
+    timezone: state.settings?.routine?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  };
   const repeatProblem = h("span.field__problem", { role: "alert" });
-  const repeatInput = h("input.control", {
+  const budgetProblem = h("span.field__problem", { role: "alert" });
+  const hoursInput = h("input.control", {
     type: "number", min: "1", step: "1", inputmode: "numeric", placeholder: "Hours, for example 36",
   });
-  repeatInput.hidden = true;
+  const timeInput = h("input.control", { type: "time", value: repeat.time });
+  timeInput.value = repeat.time;
+  const weekdaySelect = h("select.control", {},
+    WEEKDAY_OPTIONS.map(([key, label]) => h("option", { value: key, selected: key === repeat.weekday }, label)));
+  const zoneInput = h("input.control", { value: repeat.timezone, spellcheck: "false", placeholder: "Europe/Moscow" });
+  zoneInput.value = repeat.timezone;
+  const calendarFields = h("div.repeatPicker__calendar", {},
+    h("label.field", {}, h("span.field__label", { text: "At" }), timeInput),
+    h("label.field", {}, h("span.field__label", { text: "On" }), weekdaySelect),
+    h("label.field", {}, h("span.field__label", { text: "Time zone" }), zoneInput));
+  const missedNote = h("span.field__hint", { text: MISSED_NOTE });
   const applyRepeat = () => {
-    const { hours, problem } = repeatHours(repeatChoice, repeatInput.value);
-    draft.repeat_hours = problem ? null : hours;
-    repeatInput.hidden = repeatChoice !== "custom";
-    repeatProblem.textContent = problem;
+    const chosen = repeatPayload(repeat);
+    draft.repeat_hours = chosen.repeat_hours;
+    draft.repeat = chosen.repeat;
+    hoursInput.hidden = repeat.choice !== "interval";
+    calendarFields.hidden = repeat.choice !== "daily" && repeat.choice !== "weekly";
+    weekdaySelect.parentElement.hidden = repeat.choice !== "weekly";
+    missedNote.hidden = calendarFields.hidden;
+    repeatProblem.textContent = chosen.problem;
     refresh();
   };
-  repeatInput.addEventListener("input", applyRepeat);
+  for (const control of [hoursInput, timeInput, zoneInput]) {
+    control.addEventListener("input", () => {
+      repeat.hours = hoursInput.value;
+      repeat.time = timeInput.value || "04:00";
+      repeat.timezone = zoneInput.value;
+      applyRepeat();
+    });
+  }
+  weekdaySelect.addEventListener("change", () => { repeat.weekday = weekdaySelect.value; applyRepeat(); });
+  applyRepeat();
 
   const dialog = dialogShell("task-dialog", "New lazy task",
     h("div.lazyDialog__grid", {},
@@ -190,8 +250,15 @@ export function openTaskDialog(state, act) {
         field("Deadline", deadlinePicker(state, null, (t) => { draft.deadline = t; refresh(); }),
           "Leave it open and the task runs whenever there is room."),
         field("Repeat", h("div.repeatPicker", {},
-          segmented("Repeat", REPEAT_CHOICES, repeatChoice, (value) => { repeatChoice = value; applyRepeat(); }),
-          repeatInput, repeatProblem), REPEAT_HINT),
+          segmented("Repeat", REPEAT_CHOICES, repeat.choice, (value) => { repeat.choice = value; applyRepeat(); }),
+          hoursInput, calendarFields, missedNote, repeatProblem), REPEAT_HINT),
+        field("Start no earlier than", releasePicker(state, null, (t) => { draft.not_before = t; refresh(); }),
+          "A release: no step starts before it, even with room. The deadline says when it must be done."),
+        field("Own weekly budget", h("div", {}, capInput((value, problem) => {
+          draft.cap = value;
+          budgetProblem.textContent = problem;
+          refresh();
+        }), budgetProblem), "Leave it empty for no extra limit; 0 is a real zero: nothing runs."),
         h("div.field__pair", {},
           field("Size", segmented("Size", [
             ["S", "Small", sizeHint("S")], ["M", "Medium", sizeHint("M")], ["L", "Large", sizeHint("L")],
@@ -210,13 +277,18 @@ export function openTaskDialog(state, act) {
               error.textContent = "Give the task a title.";
               return;
             }
-            const repeat = repeatHours(repeatChoice, repeatInput.value);
-            if (repeat.problem) {
-              error.textContent = repeat.problem;
-              repeatProblem.textContent = repeat.problem;
+            const chosen = repeatPayload(repeat);
+            if (chosen.problem) {
+              error.textContent = chosen.problem;
+              repeatProblem.textContent = chosen.problem;
               return;
             }
-            draft.repeat_hours = repeat.hours;
+            if (budgetProblem.textContent) {
+              error.textContent = budgetProblem.textContent;
+              return;
+            }
+            draft.repeat_hours = chosen.repeat_hours;
+            draft.repeat = chosen.repeat;
             const next = await act(api.lazyCreate(draft), "Planned");
             if (next) dialog.close();
           },

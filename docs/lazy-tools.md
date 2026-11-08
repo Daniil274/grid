@@ -160,6 +160,27 @@
 
 Бюджет пула (`allowances`) задачу не трогает: `cap` — её собственный предел сверх общей доли.
 
+### Форма создания на странице
+
+Правило строит `web_chat/js/lazy/repeat.js` (`repeatPayload`), форму — `web_chat/js/lazy/dialogs.js`:
+
+- «Once» — `repeat_hours: 0`, `repeat: null`;
+- «Own interval» — `repeat_hours: <часы>`, календарного правила нет;
+- «Every day» / «Every week» — `repeat: {kind, time: "HH:MM", timezone, weekday?, missed: "skip"}` и
+  `repeat_hours: 0`. Время строго `HH:MM`, зона — IANA (по умолчанию зона пользователя из настроек);
+  неизвестная зона или кривое время не отправляются, а показываются ошибкой. День недели есть только у weekly;
+- «Start no earlier than» — `not_before` (момент; можно не задавать). Подпись прямо говорит: это релиз,
+  а дедлайн — когда готово;
+- «Own weekly budget» — пусто → `cap: null` (своего предела нет), `0` → `cap: 0` (настоящий ноль).
+
+Карточка задачи показывает правило словами (`describeSchedule`: «Every 6 h», «Daily at 04:00
+(Europe/Moscow)»), релиз («Released …», пока он в будущем) и свой бюджет, когда он задан. Превью формы
+показывает `scheduled_release` отдельной строкой («Released … - no step starts before it»), а ожидание
+приходит как `wait.code == "not_before"`. Надпись «Deadline» относится только к готовности.
+
+Релиз нельзя обойти: `run_now` меняет порядок и часы, но не `not_before`; `preview` показывает релиз и
+ничего не сохраняет; страница и `lazy_update` хранят `not_before` отдельным полем.
+
 ## Защита от устаревших изменений
 
 `lazy_get` (и `lazy_list`) отдают `version`. Передай её как `expected_version` в `lazy_update`/`lazy_cancel`:

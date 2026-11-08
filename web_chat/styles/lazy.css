@@ -846,6 +846,17 @@
 
 .repeatPicker > .control { width: 100%; max-width: 220px; }
 
+/* A calendar rule's three small fields sit in one row where there is room. */
+.repeatPicker__calendar {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  width: 100%;
+  max-width: 420px;
+}
+
+.repeatPicker__calendar .control { width: 100%; }
+
 .field__pair {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

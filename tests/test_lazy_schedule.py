@@ -405,3 +405,38 @@ async def test_a_release_can_be_moved_and_cleared_by_the_tools(world):
     assert moved["task"]["not_before"] == datetime(2026, 11, 10, 4, 0, tzinfo=MOSCOW).timestamp()
     cleared = await call(lazy_tools.lazy_update, world.chat, task_id=task_id, not_before="")
     assert cleared["task"]["not_before"] is None
+
+
+async def test_the_page_shows_the_same_series_budget_the_loop_plans_with(world):
+    # The page's own plan (state) must spend a series' cap from the ledger too,
+    # or a capped series looks on track while the runner blocks it.
+    first = world.lazy.create_task("u", world.space, payload(repeat_hours=24, cap=1.0))
+    for step in first.steps:
+        step.status = "done"
+    first.status = "done"
+    world.store.save_task(first)
+    second = world.lazy._next_round(first, NOW)
+    world.store.save_task(second)
+    world.store.add_run(Run(id="r1", user_id="u", account="claude-code", task_id=first.id, step_id="s1",
+                            started_at=NOW - 60, ended_at=NOW, used={"seven_day": 1.0}))
+
+    planned = world.lazy.plan_for("u", world.store.settings("u")).tasks[second.id]
+    shown = world.lazy.state("u", world.space)["plan"]["tasks"][second.id]
+    assert planned.state == "blocked" and planned.wait.code == "cap"
+    assert shown["state"] == planned.state and shown["wait"]["code"] == "cap"
+
+
+async def test_preview_and_do_it_now_do_not_jump_the_release(world):
+    task = world.lazy.create_task("u", world.space, payload())
+    release = NOW + 5 * HOUR
+    # A preview shows the release and a forecast after it, and saves nothing.
+    picture = world.lazy.preview("u", task.id, {"task": {"not_before": release}})
+    assert picture["after"]["scheduled_release"] == release
+    assert picture["after"]["next_start"] >= release
+    assert world.store.task("u", task.id).not_before is None
+    # "Do it now" changes the order and the hours, never the release.
+    world.lazy.update_task("u", task.id, {"not_before": release})
+    world.lazy.update_task("u", task.id, {"run_now": True})
+    assert world.store.task("u", task.id).not_before == release
+    entry = world.lazy.plan_for("u", world.store.settings("u")).tasks[task.id]
+    assert entry.next_start >= release and entry.wait.code == "not_before"
