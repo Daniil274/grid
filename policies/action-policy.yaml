@@ -206,7 +206,13 @@ max_attempts_per_run: 100
 max_attempts_per_turn: 1000
 max_denials_per_run: 20
 max_delegation_depth: 8
-max_action_bytes: 65536
+# The largest one call may be, measured in UTF-8 bytes of the JSON the gate
+# carries for it (kind, tool, arguments); a non-ASCII character counts as its
+# own UTF-8 length, not as the six bytes of its \u escape. A call over the
+# limit is refused before it runs, and the refusal reports only the actual and
+# limit sizes. Raised from 65536 by explicit operator request (2026-11-08); it
+# stays bounded - the schema refuses more than 1 MiB (schemas/action_policy.py).
+max_action_bytes: 262144
 max_history_events: 20
 max_history_bytes: 32768
 max_reasoning_bytes: 8192

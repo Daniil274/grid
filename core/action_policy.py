@@ -196,11 +196,35 @@ class PolicyDenied(Exception):
         rule: str,
         approval_id: str | None = None,
         verdicts: dict | None = None,
+        details: dict | None = None,
     ):
         super().__init__(rule)
         self.rule = rule
         self.approval_id = approval_id
         self.verdicts = verdicts
+        # Host-side facts a block may report safely - sizes and limits, never
+        # anything the action carried. See ``BLOCK_DETAILS``.
+        self.details = details
+
+
+#: The block-detail keys a refusal may pass to the agent: numbers about the
+#: refusal itself, never the payload they measure.
+BLOCK_DETAILS = frozenset({"actual_bytes", "limit_bytes"})
+
+
+def json_size(value: Any) -> int:
+    """Bytes ``value`` costs as UTF-8 JSON, a non-ASCII character as itself.
+
+    ``json.dumps(..., ensure_ascii=True)`` writes one non-ASCII character as
+    the six bytes of its ``\\uXXXX`` escape, so measuring that form refused
+    calls that fit. The limit bounds what a call carries, so it is measured in
+    the bytes that carry it. Only the number is reported; nothing of the
+    payload leaves the gate.
+    """
+    text = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    # A lone surrogate is not UTF-8 encodable; count it as the three bytes its
+    # escape-free byte sequence takes instead of failing the call outright.
+    return len(text.encode("utf-8", "surrogatepass"))
 
 
 @dataclass(frozen=True)
@@ -777,7 +801,9 @@ class ActionGate:
         # Never log arguments, tool output, credentials or provider error bodies.
         logger.info("ACTION_POLICY %s", json.dumps(event, ensure_ascii=True))
 
-    def _deny(self, run, tool, kind, digest, rule, approval_id=None, verdicts=None):
+    def _deny(
+        self, run, tool, kind, digest, rule, approval_id=None, verdicts=None, details=None
+    ):
         # Neither a pending review, a request nobody answered nor an
         # infrastructure outage is a violation. Attempt budgets still bound
         # repeated calls.
@@ -801,6 +827,11 @@ class ActionGate:
             payload["approval_id"] = approval_id
         if verdicts:
             payload["verdicts"] = dict(verdicts)
+        if details:
+            # How far over a budget the action was - a number, not its content.
+            payload.update(
+                (key, value) for key, value in details.items() if key in BLOCK_DETAILS
+            )
         if rule == "policy_filter":
             payload["filter"] = filter_name
         if rule == "policy_unavailable":
@@ -1035,15 +1066,28 @@ class ActionGate:
                 if not isinstance(run.task, str) or not run.task.strip():
                     raise PolicyDenied("missing_trusted_task")
                 arguments = self._as_data(raw_args)
-                serialized = json.dumps(
-                    {"kind": kind, "tool": tool_name, "arguments": arguments},
-                    sort_keys=True,
-                    ensure_ascii=True,
-                    default=str,
+                action = {"kind": kind, "tool": tool_name, "arguments": arguments}
+                # An approval is bound to this exact action, so the digested
+                # form stays what it always was: sorted keys, ASCII escapes.
+                # The size limit must not be able to move a pending approval.
+                canonical = json.dumps(
+                    action, sort_keys=True, ensure_ascii=True, default=str
                 )
-                digest = hashlib.sha256(serialized.encode()).hexdigest()
-                if len(serialized.encode()) > self.config.max_action_bytes:
-                    raise PolicyDenied("action_size_limit")
+                digest = hashlib.sha256(canonical.encode()).hexdigest()
+                # The limit bounds what the call carries, so it is measured in
+                # UTF-8 bytes (core.action_policy.json_size), not in the longer
+                # escaped form. Over the limit the call is refused unexecuted
+                # and told how far over it was, never what it held.
+                actual_bytes = json_size(action)
+                limit_bytes = self.config.max_action_bytes
+                if actual_bytes > limit_bytes:
+                    raise PolicyDenied(
+                        "action_size_limit",
+                        details={
+                            "actual_bytes": actual_bytes,
+                            "limit_bytes": limit_bytes,
+                        },
+                    )
                 if (
                     kind == "agent"
                     and self.config.max_delegation_depth is not None
@@ -1152,6 +1196,7 @@ class ActionGate:
                     exc.rule,
                     approval_id=exc.approval_id,
                     verdicts=exc.verdicts,
+                    details=exc.details,
                 )
         except (ValueError, TypeError, KeyError, OSError):
             async with run.lock:

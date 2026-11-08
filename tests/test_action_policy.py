@@ -334,6 +334,81 @@ async def test_oversized_arguments_are_rejected_not_truncated():
     validator.evaluate.assert_not_awaited()
 
 
+def action_bytes(tool="bash_tool", kind="function", arguments=None):
+    """The gate's own measure, restated: UTF-8 bytes of the action as JSON.
+
+    Written out independently of core.action_policy so a change to one side
+    cannot silently agree with a change to the other.
+    """
+    text = json.dumps(
+        {"kind": kind, "tool": tool, "arguments": arguments},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return len(text.encode("utf-8"))
+
+
+async def test_action_size_limit_is_inclusive_at_the_boundary():
+    arguments = {"command": "pytest -q"}
+    size = action_bytes(arguments=arguments)
+
+    gate, validator, _, ctx = setup_gate(max_action_bytes=size)
+    assert (await call(gate, ctx, args=arguments)).startswith("ran:")
+    validator.evaluate.assert_awaited()
+
+    executed = []
+
+    async def spy(ctx, args):
+        executed.append(args)
+        return "ran"
+
+    gate, validator, _, ctx = setup_gate(max_action_bytes=size - 1)
+    blocked = json.loads(await call(gate, ctx, args=arguments, invoke=spy))
+    assert blocked["rule"] == "action_size_limit"
+    assert executed == []
+    validator.evaluate.assert_not_awaited()
+
+
+async def test_action_size_limit_counts_utf8_bytes_not_ascii_escapes():
+    # One Cyrillic letter is two UTF-8 bytes but six bytes as a \u escape, so
+    # an escaped measure refused this action although it fits.
+    arguments = {"command": "echo " + "я" * 40}
+    size = action_bytes(arguments=arguments)
+    escaped = len(
+        json.dumps(
+            {"kind": "function", "tool": "bash_tool", "arguments": arguments},
+            sort_keys=True,
+            ensure_ascii=True,
+        ).encode("utf-8")
+    )
+    assert escaped > size
+
+    gate, validator, _, ctx = setup_gate(max_action_bytes=size)
+    assert (await call(gate, ctx, args=arguments)).startswith("ran:")
+    validator.evaluate.assert_awaited()
+
+
+async def test_action_size_refusal_reports_sizes_never_content():
+    secret = "sk-live-must-not-leave-the-gate"
+    gate, validator, _, ctx = setup_gate(max_action_bytes=64)
+    executed = []
+
+    async def spy(ctx, args):
+        executed.append(args)
+        return "ran"
+
+    result = await call(gate, ctx, args={"content": secret * 20}, invoke=spy)
+    blocked = json.loads(result)
+    assert blocked["rule"] == "action_size_limit"
+    assert blocked["limit_bytes"] == 64
+    assert blocked["actual_bytes"] == action_bytes(arguments={"content": secret * 20})
+    assert blocked["actual_bytes"] > blocked["limit_bytes"]
+    assert secret not in result and "content" not in result
+    assert executed == []
+    validator.evaluate.assert_not_awaited()
+
+
 async def test_sensitive_and_large_arguments_are_projected_before_validation():
     gate, validator, state, ctx = setup_gate(max_argument_value_bytes=64)
     await call(

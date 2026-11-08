@@ -215,6 +215,19 @@ chat shows each decision as a badge on its action row.
 routing under any filter and prints where they would go - run it before
 changing filters, protected paths or declarations.
 
+## Size of one action
+
+`max_action_bytes` (default 65536, at most 1048576) caps one mediated call: the
+JSON the gate carries for it - its `kind`, `tool` and `arguments` - measured in
+UTF-8 bytes. A non-ASCII character counts as its own UTF-8 length; it is not
+charged the six bytes of its `\uXXXX` escape. A call over the cap is refused
+before it runs with the `action_size_limit` rule, and the refusal carries only
+`actual_bytes` and `limit_bytes` - never the arguments it measured. Approvals
+stay bound to a canonical digest of the action, so raising or lowering the cap
+never moves a pending approval. The cap is read from the policy file when the
+config loads, and each factory keeps the snapshot it was built with: a change
+applies to runs started after a restart.
+
 ## Limits
 
 This gate is a judgment layer, not containment. A tool that does more than it

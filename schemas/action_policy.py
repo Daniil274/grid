@@ -259,6 +259,9 @@ class ActionPolicyConfig(BaseModel):
     review_ttl_seconds: int = Field(default=300, ge=10, le=86400)
     max_pending_reviews: int = Field(default=100, ge=1, le=10000)
     max_delegation_depth: int | None = Field(default=8, ge=1, le=100)
+    # The largest one call may be, in UTF-8 bytes of the JSON the gate carries
+    # for it (core.action_policy.json_size). A non-ASCII character counts as its
+    # own UTF-8 length, not as its longer ``\u`` escape.
     max_action_bytes: int = Field(default=65536, ge=1, le=1048576)
     # The run's earlier calls the policy model sees beside a judged call.
     max_history_bytes: int = Field(default=32768, ge=0, le=1048576)
