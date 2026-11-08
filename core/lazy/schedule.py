@@ -138,6 +138,19 @@ class Schedule:
                         weekday=self.weekday, timezone=timezone or self.timezone, missed=self.missed)
 
     # -- the answer ---------------------------------------------------------------------
+    def first_release(self, now: float) -> float:
+        """The release of a series' *first* round, opening the series at *now*.
+
+        An interval has no wall time to wait for: its first round is due at the
+        moment the series opens and only the plan may hold it. A calendar rule
+        does name a wall time, so its first round waits for the next slot - a
+        series "daily at 04:00" made at 11:00 does not run at 11:00 and then
+        never again on its own grid.
+        """
+        if self.kind == "interval":
+            return float(now)
+        return self.next_release(now)
+
     def next_release(self, after: float, *, anchor: Optional[float] = None) -> float:
         """The first release strictly after *after* (the round's end).
 

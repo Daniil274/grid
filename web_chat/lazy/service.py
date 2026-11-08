@@ -475,6 +475,15 @@ class LazyAgents:
         status = payload.get("status") or "active"
         if status not in ("active", "paused"):
             raise LazyError(f"Unknown status: {status}. Use active or paused.")
+        now = self.clock()
+        calendar = _repeat_calendar(payload.get("repeat"), settings.routine.timezone)
+        # A calendar rule has a wall time to wait for, so the series' first
+        # round is released at its next slot, derived here from the typed rule
+        # (never taken from the model's epoch). An interval, or a task with no
+        # rule, opens at once: only the plan holds it. An explicit release wins.
+        release = _moment(payload.get("not_before"), settings.routine.timezone)
+        if release is None and calendar is not None:
+            release = Schedule.from_dict(calendar).first_release(now)
         task = Task(
             id=new_id("lazy"),
             user_id=user_id,
@@ -490,16 +499,16 @@ class LazyAgents:
             status=status,
             cap=_points(payload.get("cap")),
             repeat=_repeat(payload.get("repeat_hours")),
-            repeat_calendar=_repeat_calendar(payload.get("repeat"), settings.routine.timezone),
-            not_before=_moment(payload.get("not_before"), settings.routine.timezone),
+            repeat_calendar=calendar,
+            not_before=release,
             # Whose project the work belongs to; checked here, for the page's
             # API and the tools alike, against this user's own project store.
             project_id=_checked_project(space, payload.get("project_id")),
             request_id=_request_id(payload.get("request_id")),
             # The agent's subscription; None when it is the settings' own.
             account=None if choice.account == settings.account else choice.account,
-            created_at=self.clock(),
-            updated_at=self.clock(),
+            created_at=now,
+            updated_at=now,
         )
         if task.repeats:
             # The first round opens the series; every later round keeps its id.
@@ -1316,6 +1325,18 @@ def _edited(task: Task, changes: dict, now: float, timezone: str = "UTC") -> Tas
         if task.repeats and not task.series_id:
             task.series_id = task.id
         notes.append(f"Repeats {task.schedule.describe()}" if task.schedule else "Runs once")
+    if ("repeat_hours" in changes or "repeat" in changes) and task.not_before is None:
+        # Editing the rule of a round that has not started yet opens a calendar
+        # series at its next slot, exactly as creating it would. A round already
+        # under way keeps its release: the rule decides the next round instead.
+        schedule = task.schedule
+        if (
+            schedule is not None and schedule.kind != "interval"
+            and task.running_step is None
+            and all(step.status == "pending" for step in task.steps)
+        ):
+            task.not_before = schedule.first_release(now)
+            notes.append("Released at the next slot")
     if "not_before" in changes:
         task.not_before = _moment(changes["not_before"], timezone)
         notes.append("Release moved" if task.not_before is not None else "Release cleared")

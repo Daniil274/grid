@@ -352,6 +352,9 @@ async def test_a_daily_rule_keeps_the_users_wall_clock(world):
     )
     assert task.schedule.kind == "daily" and task.schedule.timezone == "Europe/Moscow"
     assert task.series_id == task.id  # a calendar rule opens a series, like an interval does
+    # The first round is released at the rule's next slot, derived from the typed
+    # rule (11:00 Moscow -> tomorrow's 04:00), not taken from the model's epoch.
+    assert task.not_before == datetime(2027, 1, 16, 4, 0, tzinfo=MOSCOW).timestamp()
     following = world.lazy._next_round(task, NOW)  # 11:00 in Moscow
     local = datetime.fromtimestamp(following.not_before, MOSCOW)
     assert local.date().isoformat() == "2027-01-16" and (local.hour, local.minute) == (4, 0)
@@ -440,3 +443,58 @@ async def test_preview_and_do_it_now_do_not_jump_the_release(world):
     assert world.store.task("u", task.id).not_before == release
     entry = world.lazy.plan_for("u", world.store.settings("u")).tasks[task.id]
     assert entry.next_start >= release and entry.wait.code == "not_before"
+
+# -- the first calendar round, downtime and permitted lateness ---------------------------
+def test_editing_the_rule_releases_an_unstarted_round_at_the_next_slot(world):
+    task = world.lazy.create_task("u", world.space, payload())  # no rule yet: runs now
+    assert task.not_before is None
+    world.lazy.update_task("u", task.id, {"repeat": json.dumps({"kind": "daily", "time": "04:00"})})
+    edited = world.store.task("u", task.id)
+    # Same answer as creating the series: the round waits for 04:00, not 11:00.
+    assert edited.not_before == datetime(2027, 1, 16, 4, 0, tzinfo=MOSCOW).timestamp()
+    entry = world.lazy.plan_for("u", world.store.settings("u")).tasks[task.id]
+    assert entry.scheduled_release == edited.not_before
+    assert entry.next_start >= edited.not_before
+
+
+async def test_a_server_that_was_down_runs_one_round_not_the_slots_it_missed(world):
+    first = world.lazy.create_task(
+        "u", world.space, payload(repeat=json.dumps({"kind": "daily", "time": "04:00"})),
+    )
+    released = datetime(2027, 1, 16, 4, 0, tzinfo=MOSCOW).timestamp()
+    assert first.not_before == released
+    # Three days pass with the server off: the round released on the 16th is
+    # still the one to run - late, not skipped - and nothing was queued.
+    world.clock.now = datetime(2027, 1, 19, 11, 0, tzinfo=MOSCOW).timestamp()
+    world.store.save_task(first)
+    entry = world.lazy.plan_for("u", world.store.settings("u")).tasks[first.id]
+    assert entry.scheduled_release == released  # the same slot, not moved by the plan
+    assert entry.next_start == world.clock.now  # late is allowed: it starts now
+
+    await finish_round(world, first.id)
+    rounds = world.store.tasks("u", finished=False)
+    assert len(rounds) == 1  # one round, not one per missed day
+    second = rounds[0]
+    # Released on the nearest future slot, exactly once; the three missed
+    # 04:00 slots are gone.
+    assert second.not_before == datetime(2027, 1, 20, 4, 0, tzinfo=MOSCOW).timestamp()
+    # Planning again neither replays a missed slot nor hops forward on every tick.
+    for _ in range(3):
+        world.lazy.plan_for("u", world.store.settings("u"))
+    assert world.store.task("u", second.id).not_before == second.not_before
+
+
+def test_a_released_round_late_for_quota_keeps_its_slot_and_waits_for_room():
+    release = NOW - 7 * HOUR  # released at 04:00, still not run at 11:00
+    task = task_of(("think", 1_000_000, 5), not_before=release)
+    full = Situation(now=NOW, account="claude-code", mode="live", windows={
+        "five_hour": WindowNow("five_hour", used=100, user=100, agents=0, reserved=0, resets_at=NOW + HOUR),
+        "seven_day": WindowNow("seven_day", used=0, user=0, agents=0, reserved=0, resets_at=NOW + 100 * HOUR),
+    })
+    result = plan([task], SETTINGS, full, STILL, PRICES)
+    entry = result.tasks["t1"]
+    # Quota makes the round late, it does not cancel it: the release is kept and
+    # the plan says "no room yet", not "this slot is skipped".
+    assert entry.scheduled_release == release
+    assert entry.wait.code == "budget"
+    assert entry.next_start == NOW + HOUR  # starts when the window resets, once
