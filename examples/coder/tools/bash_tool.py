@@ -2,6 +2,7 @@
 BashTool — executes shell commands with isolation by working directory.
 """
 
+import json
 import re
 import subprocess
 import sys
@@ -166,6 +167,56 @@ def _run_command(
         raise TimeoutError(f"Command exceeded timeout of {timeout} seconds")
 
 
+def _device_target():
+    """(target, error) where this run's commands go: the chat's device, or here."""
+    try:
+        from core.devices import execution
+    except Exception:  # pragma: no cover - a deployment without devices
+        return None, None
+    try:
+        return execution.chosen(), None
+    except execution.DeviceError as exc:
+        return None, f"❌ Execution error: {exc}"
+
+
+def _device_output(answer: str, command: str, description: str, caution: str, timeout: int) -> str:
+    """shell_exec's answer (exit code, stdout, stderr) in the shape bash_tool gives."""
+    try:
+        payload = json.loads(answer)
+    except (TypeError, ValueError):
+        payload = {"stdout": answer, "stderr": "", "exit_code": 0}
+    if not isinstance(payload, dict):
+        payload = {"stdout": answer, "stderr": "", "exit_code": 0}
+    if payload.get("timed_out"):
+        return f"⏱️ Command timed out on the device after {timeout} seconds"
+    stdout = payload.get("stdout") or ""
+    stderr = payload.get("stderr") or ""
+    returncode = payload.get("exit_code", 0) or 0
+    parts = []
+    if description:
+        parts.append(f"📋 {description}")
+    parts.append(f"$ {command}")
+    if stdout:
+        parts.append(_truncate(stdout))
+    if stderr:
+        parts.append(f"stderr:\n{_truncate(stderr)}")
+    if returncode != 0:
+        parts.append(f"⚠️ Exit code: {returncode}")
+    return caution + "\n\n".join(parts)
+
+
+def _run_on_device(target, command: str, working_dir: str, timeout: int) -> str:
+    """bash_tool on the device: shell_exec, keeping its arguments."""
+    from core.devices import execution
+
+    answer = execution.call(
+        target,
+        "shell_exec",
+        {"command": command, "working_dir": working_dir or ".", "timeout": timeout},
+    )
+    return answer
+
+
 @function_tool
 def bash_tool(
     command: str,
@@ -194,6 +245,19 @@ def bash_tool(
         return f"❌ Command blocked: {danger_reason}"
 
     caution_prefix = "⚠️ Potentially dangerous command\n" if _is_caution(command) else ""
+
+    # --- On the user's device, when the chat works on one ------------------
+    target, failure = _device_target()
+    if failure:
+        return failure
+    if target is not None:
+        from core.devices import execution
+
+        try:
+            answer = _run_on_device(target, command, working_dir, timeout)
+        except execution.DeviceError as exc:
+            return f"❌ Execution error: {exc}"
+        return _device_output(answer, command, description, caution_prefix, timeout)
 
     # --- Resolve working directory (sandbox enforced) ----------------------
     visible_dir = display_agent_path_auto(working_dir)

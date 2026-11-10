@@ -75,6 +75,12 @@ from core.config.prompt_sections import PromptSection
 from core.context import ContextManager
 from core.checkpoints import Checkpoints
 from core.conversation_store import ConversationCodec, ConversationStore
+from core.factory.execution import (
+    CLOUD,
+    EXECUTION_TARGET_KEY,
+    EXECUTION_WORKDIR_KEY,
+    resolve_target,
+)
 from core.factory.policy import POLICY_FILTER_KEY
 from core.managers.container_manager import ContainerManager
 from core.model_access import ModelAccess
@@ -303,6 +309,16 @@ class WorkspaceChoiceError(ValueError):
     """A chat cannot work in the directory asked for."""
 
 
+class WorkspaceBindingError(RuntimeError):
+    """A space would work in a directory that is not its own.
+
+    The space's config was bound to one directory and the space expects
+    another: a stale relative path, a link out of the user's root, or a config
+    whose ``working_directory`` won over the binding. Nothing is made or
+    mounted there; the space fails closed instead of sharing a directory.
+    """
+
+
 @dataclass
 class ChosenWorkspace:
     """A working directory chosen for some chats, and what runs there: the
@@ -466,7 +482,20 @@ class UserSpace:
 
     def _build(self) -> None:
         config = self._workspace_config()
-        workspace = Path(config.get_working_directory()).resolve()
+        if self.layout is not None:
+            # Before anything is made or mounted: the config must work in this
+            # user's own workspace, whatever the config's allow_path_override says.
+            workspace = self._require_bound_directory(
+                Path(config.get_working_directory()),
+                self.layout.workspace.parent,
+                "The user's workspace",
+            )
+            if workspace != self.layout.workspace.resolve():
+                raise WorkspaceBindingError(
+                    f"The workspace of user {self.user_id} is {workspace}, not {self.layout.workspace.resolve()}"
+                )
+        else:
+            workspace = Path(config.get_working_directory()).resolve()
         workspace.mkdir(parents=True, exist_ok=True)
         isolated = self.require_isolation or isolation_enabled(config)
         container_id = self._start_container(config, workspace) if isolated else None
@@ -562,18 +591,34 @@ class UserSpace:
         """The systems of the space, loaded with *workdir*, their tools in
         *container_id*; for a chat with a space of its own, reaching *roots*."""
         build = functools.partial(self._build_factory, container_id=container_id, roots=roots)
+        # The system configs of a laid-out space are bound to its workspace,
+        # exactly like its base config; a one-user server keeps the CLI's
+        # --path as an ordinary override, as it always was.
+        binding = self._binding_for(roots)
         return SystemRegistry(
             base_config=config,
             catalog=self.deployment.catalog,
             build_factory=build,
             build_factory_for_key=build,
             working_directory=workdir,
+            workspace_binding=binding,
             customize=self.personal_agents.apply if self.personal_agents is not None else None,
             confined=self.require_isolation,
             credentials=lambda: self.model_access.credentials,
-            extras=functools.partial(self._extra_systems, workdir),
+            extras=functools.partial(self._extra_systems, workdir, binding),
             admin=self.admin,
         )
+
+    def _binding_for(self, roots: Optional[ChatRoots] = None) -> Optional[str]:
+        """The directory the space's system configs are bound to, if any.
+
+        A chat's own space wins over the user's; a one-user server binds
+        nothing and keeps taking the CLI's ``--path`` as an override."""
+        if roots is not None:
+            return str(roots.chat)
+        if self.layout is not None:
+            return str(self.layout.workspace)
+        return None
 
     @property
     def _configs_workdir(self) -> Optional[str]:
@@ -582,12 +627,19 @@ class UserSpace:
 
     def fresh_config(self, system_key: str) -> Config:
         """A new load of a system's config as its file says, for this space."""
-        return Config(str(self.deployment.system_config_path(system_key)), self._configs_workdir)
+        return Config(
+            str(self.deployment.system_config_path(system_key)),
+            self._configs_workdir,
+            workspace_binding=self._binding_for(),
+        )
 
-    def _extra_systems(self, workdir: Optional[str] = None) -> List[ExtraSystem]:
+    def _extra_systems(
+        self, workdir: Optional[str] = None, binding: Optional[str] = None
+    ) -> List[ExtraSystem]:
         """The systems of this space beside the catalog's (SystemRegistry.refresh_extras),
         loaded with *workdir* - the space's own when None."""
         workdir = workdir if workdir is not None else self._configs_workdir
+        binding = binding if binding is not None else self._binding_for()
         extras: List[ExtraSystem] = []
         store = self.deployment.created_store
         if self.admin and store is not None:
@@ -601,7 +653,9 @@ class UserSpace:
                         name=manifest.name,
                         description=manifest.description,
                         config_path=path,
-                        load=lambda path=path: Config(str(path), workdir),
+                        load=lambda path=path: Config(
+                            str(path), workdir, workspace_binding=binding
+                        ),
                         routable=False,
                         badge="draft",
                         requires=tuple(manifest.requires),
@@ -635,7 +689,9 @@ class UserSpace:
                     name=manifest.name,
                     description=manifest.description,
                     config_path=self.built_systems.config_path(manifest.key),
-                    load=lambda key=manifest.key, access=access: access.load(key, str(self.workspace_path)),
+                    load=lambda key=manifest.key, access=access: access.load(
+                        key, str(self.workspace_path)
+                    ).bind_workspace(binding),
                     routable=manifest.status == "published",
                     badge="mine",
                     requires=tuple(manifest.requires),
@@ -649,15 +705,61 @@ class UserSpace:
         is ``--path``, else the config's - or, when the config isolates its
         agents, ``workspace/user_<id>`` beside the config, so the container
         never mounts the config's directory itself.
+
+        The directories the server derives (a laid-out user's workspace, the
+        isolated one-user one) are bound, not offered as an override: they are
+        where the container mounts this space's files, so
+        ``settings.allow_path_override: false`` must not send them elsewhere.
         """
         config_path = str(self.deployment.config_path)
         if self.layout is not None:
-            return Config(config_path, str(self.layout.workspace.resolve()))
+            # As written, not resolved: _require_bound_directory must still see
+            # a symlinked user directory before it collapses onto a sibling.
+            return Config(config_path, workspace_binding=str(self.layout.workspace))
         config = Config(config_path, self.deployment.working_directory)
         if not isolation_enabled(config) or self.deployment.working_directory is not None:
             return config
         workspace = self.deployment.config_path.parent / "workspace" / f"user_{self.user_id}"
-        return Config(config_path, str(workspace.resolve()))
+        return Config(config_path, workspace_binding=str(workspace))
+
+    @staticmethod
+    def _require_bound_directory(path: Path, root: Path, what: str) -> Path:
+        """*path*, resolved, as a directory directly under *root* - or refuse.
+
+        A space is one directory beside its siblings, never the root itself
+        and never another space's; a resolved parent that is not *root* means
+        a link out of it or a path from another layout, and the caller must
+        not make, mount or hand that directory to a container.
+        """
+        raw = Path(path)
+        raw_root = Path(root)
+        # Judge the links before they are collapsed. Resolving both sides
+        # first lets a symlinked user directory (users/alice -> users/bob)
+        # pass as bob's own tree: alice and bob resolve to the same directory,
+        # so the parent check cannot tell them apart (S1's residual hole).
+        if raw_root.is_symlink():
+            raise WorkspaceBindingError(
+                f"{what} {raw} lives under the symlink {raw_root}: refusing to use it"
+            )
+        try:
+            relative = raw.relative_to(raw_root)
+        except ValueError:
+            relative = None
+        if relative is not None:
+            current = raw_root
+            for part in relative.parts:
+                current = current / part
+                if current.is_symlink():
+                    raise WorkspaceBindingError(
+                        f"{what} {raw} goes through the symlink {current}: refusing to use it"
+                    )
+        expected = raw.resolve()
+        expected_root = raw_root.resolve()
+        if expected.parent != expected_root:
+            raise WorkspaceBindingError(
+                f"{what} {expected} is not a directory under {expected_root}: refusing to use it"
+            )
+        return expected
 
     def _start_container(self, config: Config, workspace: Path) -> Optional[str]:
         manager = self._container_manager = self._manager(config)
@@ -718,6 +820,9 @@ class UserSpace:
         )
         factory.system_builder = self._builder_access()
         factory.project_store = self.project_store
+        # Whose devices a chat of this space may work on, and where its tools act
+        # (core.factory.execution, core.devices.execution): this user's.
+        factory.execution_user = self.user_id
         # The user's own lazy tasks, as their chats' agents may see and change them
         # (tools/lazy_tools.py). None in a server that runs no lazy agents.
         factory.lazy_agents = self.lazy_chat()
@@ -868,7 +973,9 @@ class UserSpace:
             project_id = None
         return ChatRoots(
             chat=(self.layout.chat_spaces / space_id).resolve(),
-            user=self.workspace_path,
+            # The layout's workspace, not whatever a config resolved to: the
+            # user's root is the same one the space itself works in.
+            user=self.layout.workspace.resolve(),
             project=project,
             project_id=project_id,
         )
@@ -1268,10 +1375,26 @@ class UserSpace:
 
     def _build_chat_runtime(self, roots: ChatRoots) -> ChosenWorkspace:
         """The config, container and systems of a chat with a space of its own."""
+        if self.layout is None:
+            raise WorkspaceBindingError(f"Chat space {roots.chat} has no layout to belong to")
+        # Before anything is made or mounted: every directory this runtime
+        # mounts is this user's own, and the chat's is one of their chats.
+        bound = [
+            (roots.chat, self.layout.chat_spaces, "The chat's space"),
+            (roots.user, self.layout.workspace.parent, "The user's space"),
+        ]
+        if roots.project is not None:
+            bound.append((roots.project, self.layout.project_spaces, "The project's space"))
+        for directory, root, what in bound:
+            self._require_bound_directory(directory, root, what)
+        if roots.user.resolve() != self.layout.workspace.resolve():
+            raise WorkspaceBindingError(
+                f"The user's space {roots.user} is not the workspace of user {self.user_id}"
+            )
         for directory in (roots.chat, roots.project):
             if directory is not None:
                 directory.mkdir(parents=True, exist_ok=True)
-        config = Config(str(self.deployment.config_path), str(roots.chat))
+        config = Config(str(self.deployment.config_path), workspace_binding=str(roots.chat.resolve()))
         manager: Optional[ContainerManager] = None
         container_id: Optional[str] = None
         if self.require_isolation or isolation_enabled(config):
@@ -1569,6 +1692,72 @@ class UserSpace:
         for _, factory in self._built_factories():
             if getattr(factory, "action_gate", None) is not None:
                 factory.set_policy_filter(context_id, name)
+        return True
+
+    # -- where a chat works: the server or one of the user's devices ---------
+    def device_choices(self) -> List[Dict[str, Any]]:
+        """The devices this user has connected now: the targets a chat may pick.
+
+        Only what is connected: a target nobody can serve would leave the
+        chat's writes nowhere to go (core.factory.execution.resolve_target).
+        """
+        from core.devices.hub import hub as device_hub
+
+        try:
+            devices = device_hub().devices(self.user_id)
+        except Exception:  # noqa: BLE001 - a server without devices offers none
+            logger.debug("No devices to offer", exc_info=True)
+            return []
+        return [
+            {
+                "device": device.id,
+                "name": device.name,
+                "kind": device.kind,
+                "platform": device.platform,
+                "default_workdir": device.default_workdir,
+                "capabilities": list(device.capabilities),
+            }
+            for device in devices
+        ]
+
+    def execution_target(self, context_id: str) -> Dict[str, Any]:
+        """Where chat *context_id* works, and what it may switch to.
+
+        The choice lives in the conversation's metadata (like the policy
+        filter), so it survives a restart and shows up in the chat's state; the
+        devices are the ones connected now.
+        """
+        metadata = self.conversation_metadata(context_id)
+        target = metadata.get(EXECUTION_TARGET_KEY)
+        workdir = metadata.get(EXECUTION_WORKDIR_KEY)
+        return {
+            "target": target if isinstance(target, str) and target else CLOUD,
+            "workdir": workdir if isinstance(workdir, str) else "",
+            "devices": self.device_choices(),
+        }
+
+    def set_execution_target(self, context_id: str, target: Any, workdir: Any = "") -> bool:
+        """Point conversation *context_id* at *target* from now on, its running
+        turn included: ``"cloud"`` for the server, ``"device:<id>"`` for one of
+        the user's devices. False - and nothing changed - for a device this user
+        does not have connected now.
+
+        The user's choice only: the tools read it through the factory
+        (core.factory.execution), and no agent tool reaches this.
+        """
+        resolved = resolve_target(self.user_id, target, workdir)
+        if resolved is None:
+            return False
+        value, folder = resolved
+        self.conversations.update_context_metadata(
+            context_id, {EXECUTION_TARGET_KEY: value, EXECUTION_WORKDIR_KEY: folder}
+        )
+        # Every system this chat may run under follows at once; the running turn
+        # reads the target per call, so it moves with the user's switch.
+        for _, factory in self._built_factories():
+            setter = getattr(factory, "set_execution_target", None)
+            if callable(setter):
+                setter(value, folder, context_id=context_id, user_id=self.user_id)
         return True
 
     # -- lifecycle -----------------------------------------------------------

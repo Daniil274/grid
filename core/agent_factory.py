@@ -25,11 +25,12 @@ from core.compact import AutoCompactTrackingState
 from core.config.config import Config
 from core.credentials import CredentialError
 from core.context import ContextManager
-from core.factory.auto_run import AutoRunTools
+from core.factory.auto_run import AutoRunTools, PreparationFailed
 from core.factory.journal import RunJournal
 from core.factory.mcp import McpServers
 from core.factory.memory import MemoryUpkeep
 from core.factory.models import ModelProvider
+from core.factory.execution import ExecutionTargets
 from core.factory.policy import PolicyWiring
 from core.factory.run_context import (
     AutoRunToolContext,
@@ -91,7 +92,9 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRunTools, PolicyWiring):
+class AgentFactory(
+    TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRunTools, PolicyWiring, ExecutionTargets
+):
     """Builds a system's agents and runs its conversation turns.
 
     One factory per system config. It caches the agents it built, keeps each
@@ -266,6 +269,9 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         # namespace comes from the config's tenant, not from the system's key.
         self._memory_tenant = None
         self.instructions_builder.memory_manager_provider = self.get_memory_manager
+        # Where the tools act: on the server, or on the device the chat chose
+        # (core.factory.execution, core.devices.execution).
+        self.instructions_builder.execution_target_info = self.execution_device
 
         # Initialize ContainerManager
         from core.managers.container_manager import CONTAINER_WORKDIR, ContainerManager
@@ -530,6 +536,7 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         system_skills: Optional[List[str]] = None,
         action_state: Optional[Any] = None,
         fallback_model_keys: Optional[List[str]] = None,
+        run_context: Optional[GridRunContext] = None,
     ) -> Agent:
         """
         Create an ad-hoc Agent instance not backed by config.yaml.
@@ -537,6 +544,12 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         This is the core building block for orchestration/meta-agent patterns.
         ``action_state`` is the policy state the agent will run under; its
         ``init_tools`` are judged under it too, since an agent wrote them.
+        ``run_context`` is the caller's run: the executor's init_tools inherit
+        its user, container, session, observer, action state and stop control,
+        so they act for the same user and report into the same view. Explicit
+        init_tools are required: when one does not finish, PreparationFailed is
+        raised and no agent is returned - the caller reports the real error
+        instead of starting a model without its context.
         ``fallback_model_keys`` are tried in order when the model fails a
         request (a revoked login, an outage); only allowed models with a login
         are kept.
@@ -686,38 +699,31 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
 
         # Run init_tools and prepend results to instructions
         if init_tools:
-            try:
-                temp_ctx = GridRunContext(
-                    factory=self,
-                    context_id=self.get_active_context_id() or "init",
-                    user_id=None,
-                    agent_id=name,
-                    container_id=getattr(self, "container_id", None),
-                    action_state=action_state,
+            temp_ctx = self._init_tool_context(
+                name, action_state, run_context
+            )
+            # init_tools are the caller's calls made before the agent starts
+            # (e.g. beads_show, beads_update claim=true). A dynamic agent may
+            # use only the tools it was issued: a name outside them is refused,
+            # never resolved from the registry.
+            init_pool = await self._resolve_init_tool_pool(init_tools, tools)
+            init_info = await self._execute_init_tools(init_tools, init_pool, temp_ctx)
+            if not init_info.ok:
+                # Required context is missing: the model must not start on a
+                # batch that raised, was missing a tool, returned a failure or
+                # was refused by the policy. The caller gets the real reason.
+                for failure in init_info.failures:
+                    logger.error(
+                        "init_tool '%s' %s for '%s': %s",
+                        failure.name, failure.status, name,
+                        failure.detail or "no reason reported",
+                    )
+                raise PreparationFailed(init_info, f"init_tools of agent '{name}'")
+            if init_info:
+                enhanced_instructions = str(init_info) + "\n\n" + enhanced_instructions
+                logger.info(
+                    f"init_tools: injected {len(init_tools)} context result(s) into '{name}'"
                 )
-                # init_tools are the caller's calls made before the agent
-                # starts (e.g. beads_show, beads_update claim=true): they need
-                # not be among the tools the agent itself is given.
-                known = {getattr(tool, "name", "") for tool in tools}
-                extra_names = [
-                    tool_name
-                    for tool_name in dict.fromkeys(
-                        spec.get("name") for spec in init_tools if isinstance(spec, dict)
-                    )
-                    if tool_name and tool_name not in known
-                ]
-                init_pool = list(tools)
-                if extra_names:
-                    extra_tools, _, _ = await self._resolve_tools_for_names(extra_names)
-                    init_pool.extend(extra_tools)
-                init_info = await self._execute_init_tools(init_tools, init_pool, temp_ctx)
-                if init_info:
-                    enhanced_instructions = init_info + "\n\n" + enhanced_instructions
-                    logger.info(
-                        f"init_tools: injected {len(init_tools)} context result(s) into '{name}'"
-                    )
-            except Exception as e:
-                logger.warning(f"⚠️ init_tools failed for agent '{name}': {e}")
 
         # Log final tool configuration
         function_tool_names = [getattr(t, "__name__", str(t)) for t in tools]
@@ -747,6 +753,65 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         # Requested tools the agent did not get: its caller reports them back.
         setattr(agent, "_grid_missing_tools", missing_tool_names)
         return agent
+
+    def _init_tool_context(
+        self,
+        name: str,
+        action_state: Optional[Any],
+        run_context: Optional[GridRunContext],
+    ) -> GridRunContext:
+        """The run context an executor's init_tools run under.
+
+        It is the caller's run, not a blank one: the same user (a tracker call
+        must not lose its owner), container, session, pipeline, observer, stop
+        control and action state - and the same run identity and binding list,
+        so a claim made by the preparation is owned by this executor run and is
+        settled by the same ``finally`` as a claim its model later makes.
+        Without a caller (a CLI or a background launcher) the context is the
+        factory's own, still with the container the tools need to run in.
+        """
+        parent = run_context
+        parent_state = getattr(parent, "action_state", None)
+        parent_metadata = getattr(parent, "metadata", None)
+        return GridRunContext(
+            factory=self,
+            context_id=(
+                getattr(parent, "context_id", None)
+                or self.get_active_context_id()
+                or "init"
+            ),
+            session=getattr(parent, "session", None),
+            user_id=getattr(parent, "user_id", None),
+            agent_id=name,
+            metadata=dict(parent_metadata) if isinstance(parent_metadata, dict) else None,
+            container_id=(
+                getattr(parent, "container_id", None)
+                or getattr(self, "container_id", None)
+            ),
+            pipeline_id=getattr(parent, "pipeline_id", None),
+            parent_step_id=getattr(parent, "step_id", None),
+            execution_mode=getattr(parent, "execution_mode", None),
+            system_access_active=bool(getattr(parent, "system_access_active", False)),
+            action_state=action_state if action_state is not None else parent_state,
+            action_depth=(getattr(parent, "action_depth", 0) or 0)
+            + (1 if parent is not None else 0),
+            stream_observer=(
+                getattr(parent, "stream_observer", None)
+                or getattr(self, "_stream_observer", None)
+            ),
+            run_control=getattr(parent, "run_control", None),
+            # The preparation acts as the same run: without this the claim it
+            # makes has no owner and no run to settle it (core.tracker_lifecycle).
+            run_id=getattr(parent, "run_id", None),
+            parent_run_id=getattr(parent, "parent_run_id", None),
+            # The *same* list (not a copy): an executor's preparation and its
+            # model settle their claims together in one finally.
+            task_bindings=(
+                getattr(parent, "task_bindings", None)
+                if parent is not None and getattr(parent, "task_bindings", None) is not None
+                else []
+            ),
+        )
 
     def _load_system_skill(self, skill_name: str) -> Optional[str]:
         """Load a system skill file, delegating to config."""
@@ -887,20 +952,10 @@ class AgentFactory(TurnRunner, SessionUpkeep, MemoryUpkeep, ToolAssembly, AutoRu
         # Release session connections; the history belongs to the conversation.
         await self._runtime_support.cleanup_sessions()
 
-        # Kill stale dolt server started by beads inside the container (network_mode=host
-        # makes container ports visible on the host, so orphaned dolt processes persist).
-        if self.container_id:
-            try:
-                import subprocess
-
-                subprocess.run(
-                    ["docker", "exec", self.container_id, "pkill", "-f", "dolt"],
-                    capture_output=True,
-                    timeout=5,
-                )
-                logger.debug("Sent pkill dolt to container %s", self.container_id[:12])
-            except Exception as e:
-                logger.debug("Could not pkill dolt in container: %s", e)
+        # No blanket process cleanup here: `pkill -f dolt` inside the container
+        # also kills a dolt server another run (or the UI) is using, and a
+        # workspace's tracker is not this factory's to stop. A stuck process is
+        # handled by its own caller, addressed to the call that started it.
 
         # Clear caches
         self.clear_cache()

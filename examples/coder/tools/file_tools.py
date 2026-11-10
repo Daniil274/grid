@@ -290,6 +290,90 @@ def _truncate(content: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
     return content[:max_chars] + f"\n\n... [truncated {remaining} characters, use limit_lines and offset] ..."
 
 
+def _device_target(label: str):
+    """(target, error) where this run's files live: the chat's device, or here.
+
+    ``target`` is None when the work is on the server; ``error`` is what the
+    agent is told when the chat is pointed at a device that is not connected -
+    a write meant for the user's machine must never land on the server's disk.
+    """
+    try:
+        from core.devices import execution
+    except Exception:  # pragma: no cover - a deployment without devices
+        return None, None
+    try:
+        return execution.chosen(), None
+    except execution.DeviceError as exc:
+        return None, f"❌ {label} error: {exc}"
+
+
+def _device_read(target, filepath: str, offset: int, limit_lines: Optional[int]) -> Any:
+    """file_read on the device: fs_read, in the answer the agents know."""
+    from core.devices import execution
+
+    arguments: dict = {"filepath": filepath, "offset": max(0, int(offset or 0))}
+    if limit_lines is not None:
+        arguments["limit_lines"] = int(limit_lines)
+    try:
+        content = execution.call(target, "fs_read", arguments)
+    except execution.DeviceError as exc:
+        return f"❌ Read error: {exc}"
+
+    lines = content.split("\n")
+    if offset > 0 or limit_lines is not None:
+        start = max(0, int(offset or 0))
+        header = f"📄 {filepath} (lines {start + 1}–{start + len(lines)}):\n"
+    else:
+        header = f"📄 {filepath} ({len(lines)} lines):\n"
+    return header + "\n" + _truncate(content)
+
+
+def _device_write(target, filepath: str, content: str, overwrite: bool) -> str:
+    """file_write on the device: fs_write, in the answer the agents know."""
+    from core.devices import execution
+
+    try:
+        execution.call(
+            target,
+            "fs_write",
+            {"filepath": filepath, "content": content, "overwrite": bool(overwrite)},
+        )
+    except execution.DeviceError as exc:
+        return f"❌ Write error: {exc}"
+    lines = len(content.split("\n"))
+    size = len(content.encode("utf-8"))
+    verb = "overwritten" if overwrite else "created"
+    emoji = "📝" if overwrite else "✅"
+    return f"{emoji} File {verb}: {filepath} ({lines} lines, {size} bytes)"
+
+
+def _device_append(target, filepath: str, content: str) -> str:
+    """file_append on the device: fs_append, in the answer the agents know."""
+    from core.devices import execution
+
+    try:
+        answer = execution.call(target, "fs_append", {"filepath": filepath, "content": content})
+    except execution.DeviceError as exc:
+        return f"❌ Append error: {exc}"
+    added = re.search(r"Appended (\d+) bytes", answer or "")
+    added_bytes = int(added.group(1)) if added else len(content.encode("utf-8"))
+    lines_added = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+    return f"✅ Appended to {filepath}: {lines_added} lines, {added_bytes} bytes"
+
+
+def _device_edit(target, filepath: str, patch_content: str) -> str:
+    """file_edit on the device: fs_edit, in the answer the agents know."""
+    from core.devices import execution
+
+    try:
+        answer = execution.call(target, "fs_edit", {"filepath": filepath, "patch_content": patch_content})
+    except execution.DeviceError as exc:
+        return f"❌ Edit error: {exc}"
+    hunks = re.search(r"Applied (\d+) hunk", answer or "")
+    detail = f"{hunks.group(1)} patch hunk(s)" if hunks else (answer or "applied").strip()
+    return f"✅ File updated: {filepath} ({detail})"
+
+
 def _resolve(raw: str) -> tuple:
     """
     Returns (visible_path, resolved_path_str).
@@ -318,6 +402,12 @@ def file_read(
     Returns:
         File content or a portion of it
     """
+    target, failure = _device_target("Read")
+    if failure:
+        return failure
+    if target is not None:
+        return _device_read(target, filepath, offset, limit_lines)
+
     try:
         visible, resolved = _resolve(filepath)
     except ValueError as exc:
@@ -379,6 +469,12 @@ def file_write(
     Returns:
         Operation result
     """
+    target, failure = _device_target("Write")
+    if failure:
+        return failure
+    if target is not None:
+        return _device_write(target, filepath, content, overwrite)
+
     try:
         visible, resolved = _resolve(filepath)
     except ValueError as exc:
@@ -420,6 +516,12 @@ def file_append(
     Returns:
         Operation result
     """
+    target, failure = _device_target("Append")
+    if failure:
+        return failure
+    if target is not None:
+        return _device_append(target, filepath, content)
+
     try:
         visible, resolved = _resolve(filepath)
     except ValueError as exc:
@@ -477,6 +579,12 @@ def file_edit(
     Returns:
         Operation result
     """
+    target, failure = _device_target("Edit")
+    if failure:
+        return failure
+    if target is not None:
+        return _device_edit(target, filepath, patch_content)
+
     try:
         visible, resolved = _resolve(filepath)
     except ValueError as exc:

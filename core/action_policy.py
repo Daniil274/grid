@@ -44,6 +44,21 @@ logger = logging.getLogger("grid.action_policy")
 #: Effects that change things: allowed freely only when the request asks for changes.
 CHANGE_EFFECTS = frozenset({"write", "exec"})
 
+
+def _device_locator(factory: Any) -> Optional[Callable[[str], Optional[str]]]:
+    """The locator of a run that works on a device; None when it works here."""
+    if factory is None:
+        return None
+    try:
+        from core.devices import execution
+
+        target = execution.chosen(factory)
+    except Exception:  # noqa: BLE001 - an unreachable device is not a policy failure
+        return None
+    if target is None:
+        return None
+    return execution.relative_locator(target)
+
 VERDICTS = ("allow", "deny", "review")
 
 # Run states whose call is executing in the current task: a call it makes in
@@ -724,8 +739,18 @@ class ActionGate:
 
     @staticmethod
     def _locator(raw_ctx: Any) -> Callable[[str], Optional[str]]:
-        """Turns an argument path into a workspace path, as the tools resolve it."""
+        """Turns an argument path into a workspace path, as the tools resolve it.
+
+        A chat pointed at a device (core.devices.execution) judges paths by that
+        device's rules instead: Windows or POSIX, relative to the folder the
+        device works in. A path inside it is inside the workspace of this run; a
+        path outside it - through ``..``, another drive or another root - is not,
+        and the call is routed as an outside action.
+        """
         factory = getattr(raw_ctx, "factory", None)
+        on_device = _device_locator(factory)
+        if on_device is not None:
+            return on_device
         try:
             root = _sandbox_root(factory)
         except Exception:

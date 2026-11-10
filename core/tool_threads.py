@@ -40,6 +40,19 @@ OFF_LOOP = "_grid_off_loop"
 
 _sdk_function_tool = agents.tool.function_tool
 
+#: The event loop a tool thread belongs to: set for each off-loop tool call, so
+#: a tool that must reach something living on the server's loop (a device's MCP
+#: session, core.devices.execution) can hand its coroutine back instead of
+#: starting a loop of its own.
+_server_loop: contextvars.ContextVar[Optional[asyncio.AbstractEventLoop]] = contextvars.ContextVar(
+    "grid_tool_server_loop", default=None
+)
+
+
+def server_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """The server's event loop, from inside a tool thread; None elsewhere."""
+    return _server_loop.get()
+
 
 def _setting(name: str, default: int) -> int:
     try:
@@ -125,7 +138,13 @@ def _off_loop(func: Callable[..., Any]) -> Callable[..., Any]:
     # signature and type hints (through __wrapped__), the name and docstring.
     @functools.wraps(func)
     async def run_in_thread(*args: Any, **kwargs: Any) -> Any:
-        return await run_in_tool_thread(func, *args, **kwargs)
+        # The thread carries this loop with it (contextvars go along): a tool
+        # that must call back into the server - a device's session - asks for it.
+        token = _server_loop.set(asyncio.get_running_loop())
+        try:
+            return await run_in_tool_thread(func, *args, **kwargs)
+        finally:
+            _server_loop.reset(token)
 
     return run_in_thread
 

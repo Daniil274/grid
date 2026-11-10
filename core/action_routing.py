@@ -240,11 +240,17 @@ def route_call(
         raw_paths.extend(command_paths(command))
     located = [(raw, locate(raw)) for raw in raw_paths]
     paths = [path if path is not None else _normalized(raw) for raw, path in located]
-    # A read-only shell command can read outside the agent workspace. Treat
-    # absolute/traversal paths the locator cannot contain as external effects;
-    # this is policy routing, not a filesystem sandbox.
-    if kind == READ and any(path is None and _is_external_path(raw) for raw, path in located):
-        kind = EXTERNAL
+    # A path the locator cannot contain - an absolute path elsewhere, a walk out
+    # of the workspace or the device's working folder with "..", another drive -
+    # is an outside action: a read, and equally a write, which would land where
+    # the user did not put the agent. This is policy routing, not a filesystem
+    # sandbox: it decides whether the user is asked, not what the OS allows.
+    if any(path is None and _is_external_path(raw) for raw, path in located):
+        if kind == READ:
+            kind = EXTERNAL
+        elif kind == WRITE:
+            kind = EXTERNAL
+            reasons.append("outside the working folder")
 
     route = "allow" if kind == DELEGATE_KIND else getattr(selected, kind)
     reasons.insert(0, f"{kind}: {route}")

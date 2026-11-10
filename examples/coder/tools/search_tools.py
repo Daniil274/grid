@@ -54,6 +54,40 @@ def _resolve_dir(directory: str) -> tuple:
     return visible, path
 
 
+def _device_target(label: str):
+    """(target, error) where this run searches: the chat's device, or here."""
+    try:
+        from core.devices import execution
+    except Exception:  # pragma: no cover - a deployment without devices
+        return None, None
+    try:
+        return execution.chosen(), None
+    except execution.DeviceError as exc:
+        return None, f"❌ {label}: {exc}"
+
+
+def _device_answer(answer: str, pattern: str, directory: str, max_results: int, noun: str) -> str:
+    """A node's fs_glob/fs_grep answer in the shape these tools give the agent."""
+    header, _, body = (answer or "").partition("\n")
+    if header.startswith("No files matched") or header.startswith("No matches"):
+        return f"🔍 Nothing found for pattern '{pattern}' in '{directory}'"
+    count = header.split(" ", 1)[0]
+    if not count.isdigit():
+        return answer
+    if noun == "results":
+        head = f"🔍 Found {count} results for pattern '{pattern}':"
+    else:
+        head = f"🔍 Found {count} matches for '{pattern}'"
+    if int(count) >= max_results:
+        head += f" (showing first {max_results})"
+    lines = body.split("\n") if body.strip() else []
+    displayed = lines[:MAX_OUTPUT_LINES]
+    output = "\n".join(displayed)
+    if len(lines) > MAX_OUTPUT_LINES:
+        output += f"\n\n... and {len(lines) - MAX_OUTPUT_LINES} more {noun} ..."
+    return f"{head}\n\n{output}" if output else head
+
+
 # ---------------------------------------------------------------------------
 # glob_tool
 # ---------------------------------------------------------------------------
@@ -80,6 +114,26 @@ def glob_tool(
     Returns:
         List of found files
     """
+    target, failure = _device_target("Search error")
+    if failure:
+        return failure
+    if target is not None:
+        from core.devices import execution
+
+        try:
+            answer = execution.call(
+                target,
+                "fs_glob",
+                {
+                    "pattern": pattern,
+                    "directory": directory,
+                    "max_results": max(1, int(max_results)),
+                },
+            )
+        except execution.DeviceError as exc:
+            return f"❌ Search error: {exc}"
+        return _device_answer(answer, pattern, directory, max(1, int(max_results)), "results")
+
     try:
         visible, base_path = _resolve_dir(directory)
     except ValueError as exc:
@@ -411,6 +465,29 @@ def grep_tool(
     )
     if arg_error:
         return arg_error
+
+    target, failure = _device_target("Search error")
+    if failure:
+        return failure
+    if target is not None:
+        from core.devices import execution
+
+        try:
+            answer = execution.call(
+                target,
+                "fs_grep",
+                {
+                    "pattern": pattern,
+                    "directory": directory,
+                    "file_extensions": file_extensions,
+                    "case_sensitive": bool(case_sensitive),
+                    "use_regex": bool(use_regex),
+                    "max_results": max_results,
+                },
+            )
+        except execution.DeviceError as exc:
+            return f"❌ Search error: {exc}"
+        return _device_answer(answer, pattern, directory, max_results, "matches")
 
     try:
         visible, base_path = _resolve_dir(directory)

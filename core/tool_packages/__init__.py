@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import gzip
 import hashlib
 import io
 import json
@@ -124,6 +125,50 @@ def digest(package: Path) -> str:
         sha.update(b"\0")
         sha.update(path.read_bytes())
     return sha.hexdigest()[:20]
+
+
+def package_archive(package: Path) -> Tuple[bytes, str]:
+    """The ``.tar.gz`` a device downloads for *package*, and its sha256.
+
+    The same tree always gives the same bytes - times, owners and modes are
+    fixed and the gzip header carries no name - so the hash names the content a
+    device is about to run (``GET /node/tools/{pkg}/{hash}.tar.gz``,
+    web_chat.devices_api, which serves exactly these bytes).
+    """
+    buffer = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=buffer, mtime=0, compresslevel=9) as packed:
+        with tarfile.open(fileobj=packed, mode="w", format=tarfile.PAX_FORMAT) as archive:
+            for path in sorted(package.rglob("*")):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                info = archive.gettarinfo(str(path), arcname=str(path.relative_to(package.parent)))
+                info.mtime, info.uid, info.gid = 0, 0, 0
+                info.uname = info.gname = ""
+                info.mode = 0o755 if info.mode & 0o111 else 0o644
+                with path.open("rb") as handle:
+                    archive.addfile(info, handle)
+    data = buffer.getvalue()
+    return data, hashlib.sha256(data).hexdigest()
+
+
+#: The archive hashes already computed, by package directory and its content stamp.
+_archive_digests: Dict[Tuple[str, tuple], str] = {}
+
+
+def archive_digest(package: Path) -> str:
+    """The hash a device fetches *package* by; computed once per content."""
+    stamp = tuple(
+        (relative.as_posix(), (package / relative).stat().st_mtime_ns, (package / relative).stat().st_size)
+        for relative in files_of(package)
+        if not (package / relative).is_symlink()
+    )
+    key = (str(package), stamp)
+    found = _archive_digests.get(key)
+    if found is None:
+        if len(_archive_digests) > 64:  # a long-lived server, few packages
+            _archive_digests.clear()
+        found = _archive_digests[key] = package_archive(package)[1]
+    return found
 
 
 # -- reading a package without running it ------------------------------------------------
@@ -564,6 +609,46 @@ async def ensure_on_host(package: Path, *, timeout: float = INSTALL_TIMEOUT) -> 
 
 
 # -- one @function_tool as an agent's tool ---------------------------------------------------
+def _device_target(factory: Any) -> Tuple[Any, Optional[str]]:
+    """(target, error): the device this call runs on, or None when it runs here.
+
+    A chat pointed at a device (``execution_target`` in its metadata,
+    core.devices.execution) runs a package's function on that device instead of
+    in the server's container: the code, the interpreter and the files are the
+    user's, and the answer is the function's own result.
+    """
+    try:
+        from core.devices import execution
+    except Exception:  # pragma: no cover - a deployment without devices
+        return None, None
+    if factory is None:
+        from utils.path_utils import get_current_factory
+
+        factory = get_current_factory()
+    try:
+        return execution.chosen(factory), None
+    except execution.DeviceError as exc:
+        return None, f"❌ Tool error: {exc}"
+
+
+async def _call_on_device(target: Any, package: Path, package_name: str, fn: str, raw_args: Any) -> str:
+    """One call of *package*'s function *fn* on the device: ``tool_exec``, its own answer."""
+    from core.devices import execution
+
+    answer = await execution.call_in_device(
+        target,
+        "tool_exec",
+        {
+            "package": package_name,
+            "hash": await asyncio.to_thread(archive_digest, package),
+            "fn": fn,
+            "arguments": execution.arguments_of(raw_args),
+        },
+        timeout=CALL_TIMEOUT,
+    )
+    return answer
+
+
 def build_package_function_tool(
     config_dir: Path,
     package_rel: str,
@@ -604,6 +689,13 @@ def build_package_function_tool(
     async def on_invoke_tool(ctx: Any, raw_args: Any) -> Any:
         raw_ctx = getattr(ctx, "context", None)
         factory = getattr(raw_ctx, "factory", None)
+        target, failure = _device_target(factory)
+        if failure:
+            return failure
+        if target is not None:
+            # The chat works on a device: its node runs the package (tool_exec),
+            # with the same function and the same arguments.
+            return await _call_on_device(target, pkg_path, pkg_path.name or package_rel, target_name, raw_args)
         container_id = (
             getattr(raw_ctx, "container_id", None)
             or getattr(factory, "container_id", None)

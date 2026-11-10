@@ -33,10 +33,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import re
 import time
 import uuid
 from contextlib import suppress
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, List, Optional, Sequence
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -45,13 +47,25 @@ from core.interruption import INTERRUPTED_TYPE, is_resumable
 from core.pricing import format_usd
 from core.steering import SteerMessage
 from core.tool_check import summarize
-from web_chat.attachments import AttachmentError, agent_message, normalize_images
+from web_chat.attachments import (
+    AttachmentError,
+    agent_message,
+    jpeg_urls,
+    normalize_images,
+    runtime_accepts_images,
+    save_images,
+    with_attachments,
+)
+from web_chat.audio_ingress import AudioAttachment, parse_audio_data_url, runtime_accepts_audio, transcribe_audio
+from web_chat.accounts.service import SessionRevoked
 from web_chat.delivery import DELIVERIES, MessageQueue, decide_delivery
 from web_chat.observer import WebStreamObserver
 from web_chat.plan_board import PlanBoard
 from web_chat.spend import TurnSpend, tracking
 from web_chat.systems import Resolution
-from web_chat.trace import StepKind, TraceRecorder, is_tool_result, slim_step
+from web_chat.trace import StepKind, StepStatus, TraceRecorder, is_tool_result, slim_step
+from web_chat import ui_state
+from web_chat.ui_document import UiDocumentError, action_of, validate_values
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +86,405 @@ MAX_REPLAY_NOTES = 100
 _DELTA_TYPES = frozenset({"token", "reasoning"})
 #: Frames rebuilt from accumulated state instead of being kept one by one.
 _STATEFUL_TYPES = frozenset({"token", "reasoning", "step", "step_removed", "answer_reset", "final_output", "done"})
+
+#: What of a turn's timeline the map may show: a small, payload-free activity.
+#: Six real steps at most, a short title, a message's public narration, and a
+#: few project-relative file chips. Everything else of a step stays here.
+ACTIVITY_LIMIT = 6
+ACTIVITY_TITLE_LIMIT = 120
+ACTIVITY_SUMMARY_LIMIT = 160
+ACTIVITY_FILES_LIMIT = 4
+#: The one context every trace has: the agent that ran the turn itself. A real
+#: agent step opens a context of its own, nested under the context it runs in.
+CONTEXT_ROOT_ID = "root"
+CONTEXT_ROOT_LABEL = "Main agent"
+_ACTIVITY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
+
+#: How often an idle chat socket revalidates the session that opened it.
+#: Every command revalidates too; this covers the stretches in between, when
+#: the turn is long or the tab is simply left open.
+SESSION_REVALIDATE_SECONDS = 30.0
+_ACTIVITY_KINDS = frozenset(kind.value for kind in StepKind)
+_ACTIVITY_STATUSES = frozenset(status.value for status in StepStatus)
+#: A file chip never names another space of the workspace, only the project's own.
+_FOREIGN_SPACE_ROOTS = frozenset({"user", "users", "shared", "projects"})
+
+
+def _activity_text(value: Any, limit: int) -> str:
+    """*value* as one bounded line: whitespace collapsed, cut to *limit*."""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:limit]
+
+
+def _activity_number(value: Any) -> Optional[float]:
+    """A real nonnegative number, never a bool, NaN or infinity; else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value if value >= 0 else None
+
+
+def _activity_id(value: Any) -> Optional[str]:
+    """*value* as a safe step/context id, or None: the allowlist every id meets."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text if _ACTIVITY_ID.fullmatch(text) else None
+
+
+def _project_file_ref(value: Any) -> Optional[str]:
+    """*value* as a safe project-relative POSIX path, or None.
+
+    A plain ``src/a.py`` and a chat's ``project/src/a.py`` are the same file;
+    only the project's own space is admitted. Absolute paths (``/``, ``\\``,
+    a drive or a scheme), backslashes, ``.``/``..`` and empty segments, hidden
+    and tool-state folders (``.beads``, ``.git``, ``.grid``, ``.codegraph``)
+    and another space's root are all refused. This is a syntactic check: the
+    path is not proof that the file exists.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or "\\" in text or "\x00" in text or text.startswith(("/", "~")):
+        return None
+    if "://" in text or re.match(r"[A-Za-z]:", text):
+        return None
+    parts = text.split("/")
+    if any(part in ("", ".", "..") or part.startswith(".") for part in parts):
+        return None
+    if parts[0] == "project":
+        parts = parts[1:]
+    if not parts or parts[0] in _FOREIGN_SPACE_ROOTS:
+        return None
+    return "/".join(parts)
+
+
+def _activity_files(step: dict[str, Any]) -> List[str]:
+    """Up to :data:`ACTIVITY_FILES_LIMIT` unique project-relative file refs."""
+    files: List[str] = []
+    seen: set[str] = set()
+    # An already public item carries normalized ``files``; a trace step carries
+    # typed ``refs``. Both are re-normalized here, so the check holds either way.
+    candidates = step.get("files")
+    if not isinstance(candidates, list):
+        refs = step.get("refs")
+        candidates = [
+            (ref.get("detail") or ref.get("label"))
+            for ref in (refs if isinstance(refs, list) else [])
+            if isinstance(ref, dict) and ref.get("kind") == "file"
+        ]
+    for candidate in candidates:
+        path = _project_file_ref(candidate)
+        if path is None or path in seen:
+            continue
+        seen.add(path)
+        files.append(path)
+        if len(files) >= ACTIVITY_FILES_LIMIT:
+            break
+    return files
+
+
+def _activity_item(step: Any) -> Optional[dict[str, Any]]:
+    """One step as the map may show it, or None when it is not a real step."""
+    if not isinstance(step, dict):
+        return None
+    kind, status = step.get("kind"), step.get("status")
+    if kind not in _ACTIVITY_KINDS or status not in _ACTIVITY_STATUSES:
+        return None
+    step_id = step.get("id")
+    if _activity_id(step_id) is None:
+        return None
+    title = _activity_text(step.get("title"), ACTIVITY_TITLE_LIMIT)
+    if not title:
+        return None
+    # Only a message's subtitle is public narration; every other subtitle and
+    # body (a reasoning step's own thinking included) must never leave here.
+    summary = ""
+    if kind == StepKind.MESSAGE.value:
+        summary = _activity_text(
+            step.get("summary") or step.get("subtitle"), ACTIVITY_SUMMARY_LIMIT
+        )
+    return {
+        "id": _activity_id(step_id),
+        "kind": kind,
+        "title": title,
+        "status": status,
+        "at_ms": _activity_number(step.get("at_ms")),
+        "duration_ms": _activity_number(step.get("duration_ms")),
+        "summary": summary,
+        "files": _activity_files(step),
+    }
+
+
+def _effective_parents(direct: dict[str, str]) -> dict[str, str]:
+    """Every context's acyclic parent: a missing id or a cycle falls back to root.
+
+    A chain that returns to its own start is a cycle, so that context hangs
+    from root. A chain that reaches a cycle elsewhere keeps its direct parent:
+    those cyclic contexts are themselves rooted here, so the tree stays finite.
+    """
+    resolved: dict[str, str] = {}
+    for context_id, parent in direct.items():
+        effective = parent
+        seen: set[str] = set()
+        current = parent
+        while current != CONTEXT_ROOT_ID:
+            if current == context_id:
+                effective = CONTEXT_ROOT_ID
+                break
+            if current in seen:
+                break
+            seen.add(current)
+            current = direct.get(current, CONTEXT_ROOT_ID)
+        resolved[context_id] = effective
+    return resolved
+
+
+def _activity_contexts(
+    raw: List[Any],
+) -> tuple[List[dict[str, Any]], List[Optional[str]], bool]:
+    """The public hierarchy of *raw* steps and each step's owning context.
+
+    A real ``agent`` step opens a context of its own, labelled with its title
+    and timed by its own status and timings; it is also an event of the context
+    it was delegated from. Every ordinary step belongs to the nearest existing
+    agent context its ``parent_id`` names, or to root. ``total`` counts every
+    raw step of a context before any public bound, and contexts keep every
+    agent step even when its events are older than the six shown items.
+
+    The third answer says whether a real trace exists at all: only then does
+    root appear, so an empty or unreadable activity stays ``contexts: []``.
+    """
+    steps: List[tuple[int, dict[str, Any]]] = [
+        (index, step) for index, step in enumerate(raw) if isinstance(step, dict)
+    ]
+    if not steps:
+        return [], [None] * len(raw), False
+
+    # Agent contexts in trace order; a repeated id is one context, first wins.
+    agent_steps: List[tuple[str, dict[str, Any]]] = []
+    agent_ids: set[str] = set()
+    for _, step in steps:
+        if step.get("kind") != StepKind.AGENT.value:
+            continue
+        agent_id = _activity_id(step.get("id"))
+        if agent_id is None or agent_id in agent_ids:
+            continue
+        agent_ids.add(agent_id)
+        agent_steps.append((agent_id, step))
+
+    direct: dict[str, str] = {}
+    for agent_id, step in agent_steps:
+        parent_id = _activity_id(step.get("parent_id"))
+        direct[agent_id] = (
+            parent_id
+            if parent_id is not None
+            and parent_id != agent_id
+            and parent_id in agent_ids
+            else CONTEXT_ROOT_ID
+        )
+    parents = _effective_parents(direct)
+
+    owners: List[Optional[str]] = [None] * len(raw)
+    totals: dict[str, int] = {CONTEXT_ROOT_ID: 0}
+    for index, step in steps:
+        if step.get("kind") == StepKind.AGENT.value:
+            agent_id = _activity_id(step.get("id"))
+            if agent_id is not None and agent_id in parents:
+                owner = parents[agent_id]
+            else:  # a repeated or malformed agent row is still a delegation event
+                parent_id = _activity_id(step.get("parent_id"))
+                owner = (
+                    parent_id
+                    if parent_id is not None
+                    and parent_id != agent_id
+                    and parent_id in agent_ids
+                    else CONTEXT_ROOT_ID
+                )
+        else:
+            parent_id = _activity_id(step.get("parent_id"))
+            owner = (
+                parent_id
+                if parent_id is not None and parent_id in agent_ids
+                else CONTEXT_ROOT_ID
+            )
+        owners[index] = owner
+        totals[owner] = totals.get(owner, 0) + 1
+
+    root_statuses = [
+        step.get("status")
+        for index, step in steps
+        if owners[index] == CONTEXT_ROOT_ID
+    ]
+    if StepStatus.RUNNING.value in root_statuses:
+        root_status = StepStatus.RUNNING.value
+    elif StepStatus.DONE.value in root_statuses:
+        root_status = StepStatus.DONE.value
+    else:
+        root_status = None
+
+    contexts: List[dict[str, Any]] = [{
+        "id": CONTEXT_ROOT_ID,
+        "parent_id": None,
+        "label": CONTEXT_ROOT_LABEL,
+        "status": root_status,
+        "at_ms": None,
+        "duration_ms": None,
+        "total": totals.get(CONTEXT_ROOT_ID, 0),
+    }]
+    for agent_id, step in agent_steps:
+        status = step.get("status")
+        contexts.append({
+            "id": agent_id,
+            "parent_id": parents.get(agent_id, CONTEXT_ROOT_ID),
+            "label": _activity_text(step.get("title"), ACTIVITY_TITLE_LIMIT),
+            "status": status if status in _ACTIVITY_STATUSES else None,
+            "at_ms": _activity_number(step.get("at_ms")),
+            "duration_ms": _activity_number(step.get("duration_ms")),
+            "total": totals.get(agent_id, 0),
+        })
+    return contexts, owners, True
+
+
+def _public_contexts(value: Any) -> List[dict[str, Any]]:
+    """An already public context list, sanitized again into the same contract."""
+    entries = (
+        [entry for entry in value if isinstance(entry, dict)]
+        if isinstance(value, list)
+        else []
+    )
+    by_id: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        context_id = _activity_id(entry.get("id"))
+        if context_id is None or context_id in by_id:
+            continue
+        total = entry.get("total")
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            total = 0
+        status = entry.get("status")
+        by_id[context_id] = {
+            "id": context_id,
+            "parent_id": _activity_id(entry.get("parent_id")),
+            "label": _activity_text(entry.get("label"), ACTIVITY_TITLE_LIMIT),
+            "status": status if status in _ACTIVITY_STATUSES else None,
+            "at_ms": _activity_number(entry.get("at_ms")),
+            "duration_ms": _activity_number(entry.get("duration_ms")),
+            "total": total,
+        }
+    if CONTEXT_ROOT_ID in by_id:
+        root = by_id[CONTEXT_ROOT_ID]
+        root.update(
+            parent_id=None, label=CONTEXT_ROOT_LABEL, at_ms=None, duration_ms=None
+        )
+
+    direct = {
+        context_id: (
+            context["parent_id"]
+            if context["parent_id"] is not None
+            and context["parent_id"] != context_id
+            and context["parent_id"] in by_id
+            else CONTEXT_ROOT_ID
+        )
+        for context_id, context in by_id.items()
+        if context_id != CONTEXT_ROOT_ID
+    }
+    parents = _effective_parents(direct)
+    contexts: List[dict[str, Any]] = []
+    if CONTEXT_ROOT_ID in by_id:
+        contexts.append(by_id[CONTEXT_ROOT_ID])
+    for context_id, context in by_id.items():
+        if context_id == CONTEXT_ROOT_ID:
+            continue
+        context["parent_id"] = parents.get(context_id, CONTEXT_ROOT_ID)
+        contexts.append(context)
+    return contexts
+
+
+def _public_activity(value: dict[str, Any]) -> dict[str, Any]:
+    """An already public activity, re-checked: no wider shape reaches a client."""
+    contexts = _public_contexts(value.get("contexts"))
+    context_ids = {context["id"] for context in contexts}
+    items: List[dict[str, Any]] = []
+    for entry in value.get("items") if isinstance(value.get("items"), list) else []:
+        item = _activity_item(entry)
+        if item is None:
+            continue
+        context_id = _activity_id(entry.get("context_id"))
+        if context_id not in context_ids:
+            context_id = CONTEXT_ROOT_ID if CONTEXT_ROOT_ID in context_ids else None
+        if context_id is None:
+            continue
+        item["context_id"] = context_id
+        items.append(item)
+    if items and CONTEXT_ROOT_ID not in context_ids:
+        statuses = [item["status"] for item in items]
+        root_status = (
+            StepStatus.RUNNING.value if StepStatus.RUNNING.value in statuses
+            else StepStatus.DONE.value if StepStatus.DONE.value in statuses
+            else None
+        )
+        contexts.insert(0, {
+            "id": CONTEXT_ROOT_ID,
+            "parent_id": None,
+            "label": CONTEXT_ROOT_LABEL,
+            "status": root_status,
+            "at_ms": None,
+            "duration_ms": None,
+            "total": len(items),
+        })
+        for item in items:
+            if item["context_id"] not in {context["id"] for context in contexts}:
+                item["context_id"] = CONTEXT_ROOT_ID
+        context_ids = {context["id"] for context in contexts}
+
+    total = value.get("total")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        total = len(items)
+    total = max(total, len(items))
+    return {
+        "items": items[-ACTIVITY_LIMIT:],
+        "total": total,
+        "truncated": total > ACTIVITY_LIMIT,
+        "contexts": contexts,
+    }
+
+
+def public_activity(steps: Any) -> dict[str, Any]:
+    """A bounded, payload-free activity list of *steps*, for the map.
+
+    Every item is an allowlisted projection of one real trace step; each maps
+    to the same shape whether the step comes from a live recorder, a stored
+    trace or an already public activity item. ``total`` counts every valid
+    step before the bound, so a truncated list never hides how much there was.
+
+    ``contexts`` is the trace's agent hierarchy: root for the turn's own agent
+    and one context per real ``agent`` step, each item naming the context that
+    owns it. An already public activity (a dict) is only re-sanitized, so live
+    and stored reads pass through this same projector without widening it.
+    """
+    if isinstance(steps, dict):
+        return _public_activity(steps)
+    raw = list(steps) if isinstance(steps, (list, tuple)) else []
+    contexts, owners, real = _activity_contexts(raw)
+    items: List[dict[str, Any]] = []
+    context_ids = {context["id"] for context in contexts}
+    for index, step in enumerate(raw):
+        item = _activity_item(step)
+        if item is None:
+            continue
+        owner = owners[index] if index < len(owners) else None
+        item["context_id"] = owner if owner in context_ids else CONTEXT_ROOT_ID
+        if item["context_id"] not in context_ids:
+            continue
+        items.append(item)
+    return {
+        "items": items[-ACTIVITY_LIMIT:],
+        "total": len(items),
+        "truncated": len(items) > ACTIVITY_LIMIT,
+        "contexts": contexts if real else [],
+    }
 
 
 def revision_error_event(exc: revisions.ContextCompatibilityError) -> dict[str, Any]:
@@ -128,15 +541,24 @@ class AgentTurn:
         system_key: Optional[str],
         agent_key: Optional[str],
         images: tuple[str, ...] = (),
+        images_saved: bool = False,
+        audio: Optional[AudioAttachment] = None,
         edit_of: Optional[str] = None,
+        ui_origin: Optional[dict[str, Any]] = None,
     ) -> None:
         """``message`` None is Continue: the turn resumes the conversation's
-        interrupted turn with the agent that ran it. ``images`` are normalized
-        ``data:`` URLs (web_chat.attachments) sent with the message."""
+        interrupted turn with the agent that ran it. ``images`` are the
+        message's images (web_chat.attachments); ``images_saved`` says their
+        files and link block were already written when the message arrived -
+        a message sent while another turn ran."""
         self._session = session
         self._message = message
         self._images = tuple(images)
+        self._images_saved = images_saved
+        self._audio = audio
         self._edit_of = edit_of
+        #: Where the request came from, when a UI button sent it (web_chat.ui_state).
+        self._ui_origin = ui_origin
         self._requested = (system_key, agent_key)
         self._factory: Any = None  # set once the turn knows where it runs
         self._resolution: Optional[Resolution] = None
@@ -209,6 +631,18 @@ class AgentTurn:
         """Titles of the turn's latest timeline steps."""
         return [step.get("title", "") for step in self._recorder.snapshot()][-8:]
 
+    def recent_activity(self) -> dict[str, Any]:
+        """The turn's latest steps as the map shows them: bounded, typed, no payloads.
+
+        A public read for the map (web_chat.map_api): each item carries only
+        its id, kind, title, status, timings, a message's public narration and
+        safe project-relative file refs. A reasoning step's body and subtitle,
+        every step's body, detail, input and result payload and a plan's
+        content stay in the turn; this is a projection, never a recorder
+        snapshot.
+        """
+        return public_activity(self._recorder.snapshot())
+
     def plan_snapshot(self) -> dict[str, Any]:
         """The plan of this turn, live, as its board holds it now.
 
@@ -221,8 +655,13 @@ class AgentTurn:
         """A step of this turn with its payloads, for a lazy step opened live."""
         return self._recorder.step_record(step_id)
 
-    def steer(self, item: dict[str, Any], queue: "MessageQueue") -> bool:
+    async def steer(self, item: dict[str, Any], queue: "MessageQueue") -> bool:
         """Hand a queued message to the running agent for its next step.
+
+        The message's files were kept and named in its text when it arrived
+        (:meth:`ChatSession._keep_images`); the pictures themselves go to the
+        agent only when the model this turn runs on may read them - as they do
+        for a message that starts a turn.
 
         Delivered, it leaves the queue and shows in the chat; if the turn ends
         first it waits in the queue for the next turn. False when the agent
@@ -230,6 +669,9 @@ class AgentTurn:
         """
         if self._factory is None or not hasattr(self._factory, "steer"):
             return False
+        images = list(item.get("images") or [])
+        if images and self._resolution is not None and not await self._images_reach_model(self._resolution):
+            images = []
 
         def delivered(message: SteerMessage) -> None:
             queue.remove(message.message_id)
@@ -241,7 +683,7 @@ class AgentTurn:
 
         return self._factory.steer(
             self._session.context_id,
-            SteerMessage(item["id"], item["text"], list(item.get("images") or []), delivered, undelivered),
+            SteerMessage(item["id"], item["text"], images, delivered, undelivered),
         )
 
     def withdraw(self, item_id: str) -> bool:
@@ -405,6 +847,9 @@ class AgentTurn:
     async def _produce(self) -> None:
         space = self._session.space
         try:
+            # Auto-routing needs words; never ask the router to interpret base64.
+            if self._audio is not None and not all(self._requested):
+                await self._transcribe_audio()
             resolution = self._resolution = await self._resolve()
             label = self._session.agent_label(resolution.system, resolution.agent)
             self._observer.agent_label = label
@@ -425,6 +870,10 @@ class AgentTurn:
             if manifest is not None and getattr(resolution.config, "config", None) is not None:
                 revisions.compatible(manifest, resolution.config, self._session.context_id)
             await space.warm_agent(resolution.agent, resolution.system, context_id=self._session.context_id)
+            if self._audio is not None:
+                runtime = await resolution.factory.create_agent(resolution.agent)
+                if not runtime_accepts_audio(runtime, self._audio):
+                    await self._transcribe_audio()
             self._recorder.close(step, title=f"Runtime ready · {label}")
             self._checkpoint = await self._snapshot()
 
@@ -439,26 +888,31 @@ class AgentTurn:
                 title=self._title(),
             )
             self._factory = resolution.factory
-            if self._message is None:
-                result = await resolution.factory.continue_agent(
-                    resolution.agent,
-                    self._session.context_id,
-                    stream=True,
-                    user_id=space.user_id,
-                    stream_observer=self._observer,
-                    turn_id=self.run_id,
-                )
-            else:
-                result = await resolution.factory.run_agent(
-                    agent_key=resolution.agent,
-                    message=agent_message(self._message, list(self._images)),
-                    edit_of=self._edit_of,
-                    context_id=self._session.context_id,
-                    stream=True,
-                    user_id=space.user_id,
-                    stream_observer=self._observer,
-                    turn_id=self.run_id,
-                )
+            from core.fallback_model import ModelSelection, model_selection
+
+            selection = ModelSelection()
+            with model_selection(selection):
+                if self._message is None:
+                    result = await resolution.factory.continue_agent(
+                        resolution.agent,
+                        self._session.context_id,
+                        stream=True,
+                        user_id=space.user_id,
+                        stream_observer=self._observer,
+                        turn_id=self.run_id,
+                    )
+                else:
+                    text, images = await self._message_for_agent(resolution)
+                    result = await resolution.factory.run_agent(
+                        agent_key=resolution.agent,
+                        message=agent_message(text, images, self._audio.data_url if self._audio else None),
+                        edit_of=self._edit_of,
+                        context_id=self._session.context_id,
+                        stream=True,
+                        user_id=space.user_id,
+                        stream_observer=self._observer,
+                        turn_id=self.run_id,
+                    )
             self._recorder.end_all_reasoning()
             self.outcome = "answered"
             if result:
@@ -507,6 +961,54 @@ class AgentTurn:
             "summary": lines,
             "issues": [issue.to_dict() for issue in issues],
         })
+
+    async def _transcribe_audio(self) -> None:
+        """Both browser and Telegram enter here, at most once per recording."""
+        if self._audio is None:
+            return
+        step = self._recorder.open(StepKind.PREPARE, "Transcribing audio locally")
+        service = getattr(self._session.space.deployment, "voice_service", None)
+        transcript = await transcribe_audio(self._audio, service)
+        caption = self._message or ""
+        self._message = f"{caption}\n\n{transcript}" if caption else transcript
+        self._audio = None
+        self._recorder.close(step, title="Audio transcribed")
+        self._queue.put_nowait({"type": "audio_transcribed", "text": transcript})
+
+    async def _message_for_agent(self, resolution: Resolution) -> tuple[str, list[str]]:
+        """What the agent reads: the text with a link to every image, and the
+        images themselves only when a model of this runtime may see them.
+
+        The files are stored either way, so a chat keeps the picture as a file
+        of its own space whatever the model can read - the message then names
+        it in the chat's ``Attached files:`` block, with its download URL and
+        its workspace path. A file that could not be stored is an error of the
+        turn, never a picture quietly dropped.
+        """
+        text, _images = await self._session._keep_images(
+            self._message or "", () if self._images_saved else self._images
+        )
+        if not self._images or not await self._images_reach_model(resolution):
+            return text, []
+        return text, jpeg_urls(self._images)
+
+    async def _images_reach_model(self, resolution: Resolution) -> bool:
+        """Whether the runtime that is about to run may read a picture.
+
+        Asking builds the agent - which the turn does right after anyway, and
+        the factory caches it. A factory that cannot be asked, or a runtime
+        that fails to build here, keeps the images: only a model known to
+        refuse them is spared them.
+        """
+        create = getattr(resolution.factory, "create_agent", None)
+        if not callable(create):
+            return True
+        try:
+            runtime = await create(resolution.agent)
+        except Exception as exc:  # noqa: BLE001 - the turn reports a real build failure
+            logger.warning("Could not tell whether %s reads images: %s", resolution.agent, exc)
+            return True
+        return runtime_accepts_images(runtime)
 
     async def _resolve(self) -> Resolution:
         """Decide the system and agent, showing the routing as its own step.
@@ -557,7 +1059,7 @@ class AgentTurn:
         if self._message is None:
             return None
         text = " ".join(self._message.split())[:42]
-        return text or ("Image" if self._images else None)
+        return text or ("Audio message" if self._audio else "Image" if self._images else None)
 
     def _routing_text(self) -> str:
         """What the router reads: the text, or a word that there are images."""
@@ -771,29 +1273,74 @@ class AgentTurn:
             logger.exception("Recording the turn's token usage failed")
 
     def _persist_trace(self) -> None:
-        # Only onto this turn's answer: a stopped turn stored none, and the other
-        # assistant entries are sub-agent reports, which are not answers.
-        self._session.manager.update_last_message_metadata(
+        # Onto this turn's own answer: a stopped turn's record is its
+        # interruption message, and a sub-agent report may be appended after an
+        # answer. The turn id finds the right message, never a neighbour's.
+        # A request a UI button sent keeps its provenance on the user message:
+        # visible in the thread, and the exact values the agent received.
+        if self._ui_origin:
+            self._session.manager.update_turn_message_metadata(
+                self._session.context_id,
+                self.run_id,
+                {ui_state.ORIGIN_KEY: dict(self._ui_origin)},
+                when=lambda last: last.role == "user",
+            )
+        ui_blocks = self._observer.ui_blocks()
+        kept = self._session.manager.update_turn_message_metadata(
             self._session.context_id,
+            self.run_id,
             {
-                "trace": self._recorder.snapshot(),
+                # A step still in flight when the turn ends gets its interval
+                # frozen here (web_chat.trace.TraceRecorder.snapshot), and the
+                # turn's own duration is stored beside it: history must show the
+                # same numbers the live "done" frame showed, not re-derive them.
+                "trace": self._recorder.snapshot(final=True),
+                "duration_ms": self._recorder.elapsed_ms,
                 # The turn's public communication, durable with the message: a
                 # reconnect (or a reload) replays the sentences and statuses
                 # instead of deriving them again from the trace, and the same
                 # event ids make a live frame and its stored twin one thing.
                 "events": self._observer.turn_events(public_only=True),
+                # The interfaces this turn presented, with the values they
+                # hold (web_chat.ui_state): beside the answer, not in a tool
+                # payload compaction may drop, so a reload shows them again.
+                **({"ui": ui_blocks} if ui_blocks else {}),
             },
             when=lambda last: last.role == "assistant" and not is_tool_result(last),
         )
+        if not kept:
+            # Loud, not silent: a turn with no message to keep its trace on is a
+            # bug in the turn's own record, and history would lose its timings.
+            logger.warning("No message of turn %s to keep its trace on", self.run_id)
 
 
 class ChatSession:
-    """Command loop for one chat websocket, in the space of the user it serves."""
+    """Command loop for one chat websocket, in the space of the user it serves.
 
-    def __init__(self, space: Any, websocket: WebSocket, context_id: str) -> None:
+    ``authorize`` re-asks who the socket acts for, for a server with accounts:
+    it returns the current user or raises
+    :class:`web_chat.accounts.service.SessionRevoked`. It is called before
+    every command and, while the socket is idle, every
+    ``revalidate_interval`` seconds. Without it (a single-user server, or a
+    transport without sessions) the socket acts for its space as before.
+    """
+
+    def __init__(
+        self,
+        space: Any,
+        websocket: WebSocket,
+        context_id: str,
+        *,
+        authorize: Optional[Callable[[], Awaitable[Any]]] = None,
+        revalidate_interval: Optional[float] = None,
+    ) -> None:
         self.space = space
         self._socket = websocket
         self.context_id = context_id
+        self._authorize = authorize
+        self._revalidate_interval = (
+            SESSION_REVALIDATE_SECONDS if revalidate_interval is None else revalidate_interval
+        )
         self.manager = space.context_manager()
         # A chat id that does not exist yet is a new chat: the client picks it
         # before the first message. An existing one - including a legacy one
@@ -809,16 +1356,68 @@ class ChatSession:
     async def serve(self) -> None:
         await self._socket.accept()
         self.manager.ensure_context(self.context_id)
+        watcher = None
+        if self._authorize is not None:
+            watcher = asyncio.create_task(self._watch_session(), name="chat-session-watch")
         try:
             while True:
                 await self._dispatch(await self._socket.receive_text())
         except (WebSocketDisconnect, RuntimeError, OSError):
             pass
         finally:
+            if watcher is not None:
+                watcher.cancel()
+                with suppress(asyncio.CancelledError):
+                    await watcher
             # Leaving the page detaches; the turn keeps running for later viewers.
             active = self._turns.get(self.context_id)
             if active is not None:
                 active[0].detach(self)
+
+    # -- the session behind the socket -------------------------------------
+    async def _revalidate(self) -> None:
+        """Raise :class:`SessionRevoked` unless the socket may still act.
+
+        The user is the one the session identifies now; it must also be the
+        user whose space this socket serves. A session that somehow maps to
+        another user is treated as ended, never as a new identity.
+        """
+        if self._authorize is None:
+            return
+        user = await self._authorize()
+        owner = getattr(self.space, "user_id", None)
+        if owner is not None and getattr(user, "id", None) != owner:
+            raise SessionRevoked("The session no longer belongs to this space")
+
+    async def _authorized(self) -> bool:
+        try:
+            await self._revalidate()
+        except SessionRevoked:
+            return False
+        except Exception:  # noqa: BLE001 - an unknown answer is never permission to act
+            logger.exception("Session revalidation failed; refusing the command")
+            return False
+        return True
+
+    async def _watch_session(self) -> None:
+        """Close the socket once its session ends, even when no command comes."""
+        while True:
+            await asyncio.sleep(self._revalidate_interval)
+            try:
+                await self._revalidate()
+            except SessionRevoked:
+                await self._refuse_revoked()
+                return
+            except Exception:  # noqa: BLE001 - no evidence of authorization means no access
+                logger.exception("Session revalidation failed; closing the socket")
+                await self._refuse_revoked()
+                return
+
+    async def _refuse_revoked(self) -> None:
+        """Close the socket with 1008; its commands and approvals are refused."""
+        logger.info("Closing chat socket for %s: its session ended", self.context_id)
+        with suppress(RuntimeError, OSError):
+            await self._socket.close(code=1008, reason="Session ended")
 
     async def send(self, event: dict[str, Any]) -> None:
         async with self.send_lock:
@@ -836,6 +1435,9 @@ class ChatSession:
 
     # -- commands ----------------------------------------------------------
     async def _dispatch(self, raw: str) -> None:
+        if not await self._authorized():
+            await self._refuse_revoked()
+            return
         try:
             payload = json.loads(raw)
             if not isinstance(payload, dict):
@@ -853,6 +1455,12 @@ class ChatSession:
         if payload.get("action") == "policy_filter":
             await self._set_policy_filter(payload.get("filter"))
             return
+        if payload.get("action") == "execution_target":
+            # Where this conversation works: the server, or one of the user's
+            # devices (core.factory.execution). A live switch: the running turn
+            # and its tools follow it from the next call on.
+            await self._set_execution_target(payload.get("target"), payload.get("workdir"))
+            return
         if payload.get("action") == "policy_review":
             await self._answer_review(payload)
             return
@@ -867,15 +1475,27 @@ class ChatSession:
         if payload.get("action") in ("unqueue", "send_queued"):
             await self._queued_action(payload.get("action"), payload.get("id"))
             return
+        if payload.get("action") == "ui_action":
+            # A button of a presented interface: a normal user turn, its text
+            # composed by the server from the stored document (web_chat.ui_state).
+            await self._ui_action(payload)
+            return
 
         message = payload.get("message")
         text = message.strip() if isinstance(message, str) else ""
         attached = payload.get("images")
-        if not text and not attached:
+        audio_payload = payload.get("audio")
+        if not text and not attached and not audio_payload:
             return
         if isinstance(payload.get("policy_filter"), str):
             # The switch as the user left it: the turn this message starts runs under it.
             self.space.set_policy_filter(self.context_id, payload["policy_filter"])
+        if isinstance(payload.get("execution_target"), str):
+            # The same for where it works: the choice travels with the message,
+            # so the turn starts on the machine the user is looking at.
+            self.space.set_execution_target(
+                self.context_id, payload["execution_target"], payload.get("execution_workdir")
+            )
         try:
             # Decoding and re-encoding is CPU work: off the loop, so Stop and
             # the other commands stay responsive.
@@ -884,7 +1504,16 @@ class ChatSession:
             await self.send({"type": "error", "content": str(exc)})
             await self.send({"type": "done"})
             return
+        try:
+            audio = await asyncio.to_thread(parse_audio_data_url, audio_payload) if audio_payload is not None else None
+        except ValueError as exc:
+            await self.send({"type": "error", "content": str(exc)})
+            await self.send({"type": "done"})
+            return
         if self._turns.is_claimed(self.context_id):
+            if audio is not None:
+                await self.send({"type": "busy", "content": "Audio cannot be added while this conversation is busy. Please retry after the current turn."})
+                return
             # The agent is working: the message is delivered, not refused. A
             # decision can take seconds, so it runs beside the command loop.
             self._background(self._deliver_during_turn(text, images, payload.get("delivery")))
@@ -893,13 +1522,29 @@ class ChatSession:
         if not (isinstance(edit_of, str) and 0 < len(edit_of) <= 64):
             edit_of = None
         await self._start(
-            text, payload.get("system_key"), payload.get("agent_key"), images=images, edit_of=edit_of
+            text, payload.get("system_key"), payload.get("agent_key"), images=images, audio=audio, edit_of=edit_of
         )
 
     async def _set_policy_filter(self, name: Any) -> None:
         """The user moved the policy switch: this conversation and its running turn follow."""
         ok = isinstance(name, str) and self.space.set_policy_filter(self.context_id, name)
         await self.send({"type": "policy_filter", "filter": name if ok else None, "ok": bool(ok)})
+
+    async def _set_execution_target(self, target: Any, workdir: Any) -> None:
+        """The user pointed this chat at a device, or brought it back to the cloud.
+
+        The answer is the state the chat is in afterwards - the target, its
+        folder and the devices it may switch to - so a refused switch leaves the
+        client showing what is true, not what it asked for.
+        """
+        if target is None:
+            # A client asking where this chat works: nothing changes.
+            await self.send({"type": "execution_target", "ok": True, **self.space.execution_target(self.context_id)})
+            return
+        folder = workdir if isinstance(workdir, str) else ""
+        ok = isinstance(target, str) and self.space.set_execution_target(self.context_id, target, folder)
+        state = self.space.execution_target(self.context_id)
+        await self.send({"type": "execution_target", "ok": bool(ok), **state})
 
     async def _answer_review(self, payload: dict[str, Any]) -> None:
         """The user allowed or declined a call held in this conversation."""
@@ -912,11 +1557,118 @@ class ChatSession:
         )
         await self.send({"type": "policy_review", "approval_id": approval_id, "ok": bool(ok)})
 
+    async def _ui_action(self, payload: dict[str, Any]) -> None:
+        """A button of a presented interface, as the user's next turn.
+
+        Everything is re-checked here and nowhere else: the conversation this
+        socket is already authorized for, the message and block it owns, the
+        action the *stored* document allows, the values against that document's
+        state schema and the revisions the client is looking at. The text the
+        agent receives is composed by the server from that document - a
+        template, tool name or prompt from the browser is never used. A repeated
+        ``request_id`` repeats the acknowledgement and starts nothing.
+        """
+        # The ids travel back on every refusal, so the page can tell the
+        # widget which of its buttons was refused and settle that attempt.
+        where = {
+            key: payload[key]
+            for key in ("message_id", "ui_id")
+            if isinstance(payload.get(key), str) and payload[key]
+        }
+        fields = {
+            "message_id": payload.get("message_id"),
+            "ui_id": payload.get("ui_id"),
+            "action_id": payload.get("action_id"),
+            "request_id": payload.get("request_id"),
+        }
+        for name, value in fields.items():
+            if not isinstance(value, str) or not 0 < len(value) <= 64:
+                await self._ui_refused("ui.schema", f"{name} is required", **where)
+                return
+        revisions = {}
+        for name in ("document_revision", "state_revision"):
+            value = payload.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                await self._ui_refused("ui.schema", f"{name} must be a non-negative integer", **where)
+                return
+            revisions[name] = value
+        if not isinstance(payload.get("values"), dict):
+            await self._ui_refused("ui.schema", "values must be an object", **where)
+            return
+        known = ui_state.known_submit(self.manager, self.context_id, fields["request_id"])
+        if known is not None:
+            # A retry of an honoured press is still successful while its turn runs.
+            await self.send({"type": "ui_submitted", "text": known.get("text", ""), "origin": known.get("origin"), "duplicate": True})
+            return
+        if self._turns.is_claimed(self.context_id):
+            # A scoped refusal, not a bare `busy`: the page opened this socket
+            # for one button press and must settle that attempt, while the
+            # conversation's real running turn stays untouched.
+            await self._ui_refused(
+                "ui.busy", "This conversation already has an active turn.", **where
+            )
+            return
+        try:
+            _, block = ui_state.find_block(
+                self.manager, self.context_id, fields["message_id"], fields["ui_id"]
+            )
+            document = block.get("document") or {}
+            if revisions["document_revision"] != block.get("revision"):
+                raise ui_state.UiStateError(
+                    "ui.stale", "This interface has changed; reload it before using its buttons."
+                )
+            action_of(document, fields["action_id"])
+            values = validate_values(document, payload.get("values"))
+            saved = ui_state.save_values(
+                self.manager,
+                self.context_id,
+                fields["message_id"],
+                fields["ui_id"],
+                {
+                    "values": values,
+                    "state_revision": revisions["state_revision"],
+                    "request_id": f"submit:{fields['request_id']}",
+                },
+            )
+        except UiDocumentError as exc:
+            await self._ui_refused(exc.code, exc.message, **where)
+            return
+        except ui_state.UiStateError as exc:
+            await self._ui_refused(exc.code, exc.message, **where, **exc.details)
+            return
+        text = ui_state.compose_submission(document, fields["action_id"], values)
+        origin = ui_state.origin_of(
+            fields["message_id"], fields["ui_id"], fields["action_id"], document, values, saved["state_revision"]
+        )
+        await self.send({"type": "ui_submitted", "text": text, "origin": origin})
+        if not await self._start(text, None, None, ui_origin=origin):
+            # The turn did not start (a refusal was already sent): nothing was
+            # sent, and this socket's one button attempt must still settle.
+            await self._ui_refused(
+                "ui.refused",
+                "The choice was not sent: the conversation could not start a turn.",
+                **where,
+            )
+            return
+        ui_state.claim_submit(
+            self.manager, self.context_id, fields["request_id"], {"text": text, "origin": origin}
+        )
+
+    async def _ui_refused(self, code: str, message: str, **details: Any) -> None:
+        """A refused UI request: a scoped, typed frame that also settles it.
+
+        ``ui_action`` opens a socket for one button press; an ``error`` or
+        ``busy`` frame alone would leave that page waiting for a ``done`` it
+        will never get (the conversation itself is not this turn). The typed
+        frame tells the page to close this attempt - and only this one.
+        """
+        await self.send({"type": "ui_refused", "code": code, "content": message, **details})
+
     def _background(self, coroutine: Any) -> None:
         """Run *coroutine* beside the command loop, owned by the space."""
         self._turns.spawn(coroutine)
 
-    async def _deliver_during_turn(self, text: str, images: list[str], requested: Any) -> None:
+    async def _deliver_during_turn(self, text: str, images: Sequence[Any], requested: Any) -> None:
         """Deliver a message sent while a turn runs: now, next step or after the turn."""
         active = self._turns.running(self.context_id)
         if active is None:
@@ -935,6 +1687,14 @@ class ChatSession:
                 steps=turn.recent_steps(),
                 agent_text=turn.answer_tail,
             )
+        # The queue is stored: it takes the normalized copies, while the files
+        # themselves are kept now, in the chat's workspace, and named in the
+        # text the agent reads when the message is delivered or started later.
+        try:
+            text, images = await self._keep_images(text, images)
+        except AttachmentError as exc:
+            await self.send({"type": "error", "content": str(exc)})
+            return
         try:
             item = queue.add(
                 text,
@@ -949,7 +1709,7 @@ class ChatSession:
         await turn.announce(
             {"type": "delivery", "id": item["id"], "delivery": delivery, "decided_by": decided_by}, also_to=self
         )
-        if delivery == "next_step" and not turn.steer(item, queue):
+        if delivery == "next_step" and not await turn.steer(item, queue):
             queue.requeue(item["id"])
         await turn.announce({"type": "queue", "items": queue.public()}, also_to=self)
         if delivery == "now":
@@ -1002,10 +1762,13 @@ class ChatSession:
 
     async def _start_queued(self, queue: MessageQueue, item: dict[str, Any]) -> None:
         """Send a waiting message as the next turn. Refused - a limit, say - it
-        goes back to the front of the queue instead of being lost."""
+        goes back to the front of the queue instead of being lost.
+
+        Its files were kept when it arrived, and its text already names them;
+        only their normalized copies wait in the queue for the model."""
         queue.remove(item["id"])
         images = item.get("images") or []
-        if not await self._start(item["text"], None, None, images=images):
+        if not await self._start(item["text"], None, None, images=images, images_saved=True):
             queue.add(item["text"], images, item.get("delivery") or "after_turn", front=True)
         await self.send({"type": "queue", "items": queue.public()})
 
@@ -1014,6 +1777,51 @@ class ChatSession:
         config = getattr(self.space, "config", None)
         settings = getattr(getattr(config, "config", None), "settings", None)
         return getattr(settings, "image_processing", None)
+
+    def workspace_for_files(self) -> Optional[Any]:
+        """The directory this chat's files live in; None when the space has none.
+
+        A chat may work in a directory of its own (web_chat.space): its files
+        go there, and the download URL names the chat so the route opens them
+        in it. A space that cannot name a directory has nowhere to keep them,
+        and says so rather than dropping the files.
+        """
+        space, context_id = self.space, self.context_id
+        file_spaces = getattr(space, "file_spaces", None)
+        if callable(file_spaces):
+            found = file_spaces(context_id)
+            return found[0] if isinstance(found, tuple) else found
+        conversation_workspace = getattr(space, "conversation_workspace", None)
+        if callable(conversation_workspace):
+            return conversation_workspace(context_id)
+        return None
+
+    async def _keep_images(self, text: str, images: Sequence[Any]) -> tuple[str, list[str]]:
+        """Keep *images* in the chat's workspace; the text that names them.
+
+        Returns *text* with the chat's ``Attached files:`` block naming every
+        kept file (its URL and its workspace path) and the normalized
+        ``data:`` URLs the model reads. A chat with nowhere to keep them, or a
+        write that fails, raises :class:`AttachmentError`: the turn reports it
+        to the user instead of sending a message whose picture was lost.
+        Blocking file work, so the caller runs this off the event loop when it
+        is not already awaited there.
+        """
+        if not images:
+            return text, []
+        workspace = self.workspace_for_files()
+        if workspace is None:
+            raise AttachmentError(
+                "The image could not be kept: this chat has no workspace to save it in."
+            )
+        from web_chat.uploads import UploadError
+
+        try:
+            saved = await asyncio.to_thread(save_images, list(images), workspace, self.context_id)
+        except (UploadError, OSError) as exc:
+            logger.warning("Could not store an image in the workspace: %s", exc)
+            raise AttachmentError(f"The image could not be saved in the chat's workspace: {exc}") from None
+        return with_attachments(text, saved), jpeg_urls(images)
 
     async def _attach(self) -> None:
         active = self._turns.get(self.context_id)
@@ -1047,15 +1855,19 @@ class ChatSession:
         system_key: Any,
         agent_key: Any,
         *,
-        images: list[str] | tuple[str, ...] = (),
+        images: Sequence[Any] = (),
+        images_saved: bool = False,
+        audio: Optional[AudioAttachment] = None,
         edit_of: Optional[str] = None,
         restart_resume: bool = False,
+        ui_origin: Optional[dict[str, Any]] = None,
     ) -> bool:
         """Start a turn; ``message`` None continues the interrupted one.
         Whether it started; a refusal was sent to the socket.
 
         ``edit_of`` marks the message as a new version of an edited one, sent
-        into the branch made for it (POST .../branches)."""
+        into the branch made for it (POST .../branches). ``images_saved``: the
+        message's files are already in the workspace, named in ``message``."""
         if getattr(self.space, "restart_pending", False):
             await self.send({"type": "error", "content": "Server restart in progress. Please try again shortly."})
             await self.send({"type": "done"})
@@ -1102,7 +1914,10 @@ class ChatSession:
             system_key=system_key or None,
             agent_key=agent_key or None,
             images=tuple(images),
+            images_saved=images_saved,
+            audio=audio,
             edit_of=edit_of,
+            ui_origin=ui_origin,
         )
         self._turns.claim(self.context_id, turn)
         task = asyncio.create_task(turn.run())
@@ -1169,5 +1984,15 @@ class ChatSession:
             await task
 
 
-async def chat_session(space: Any, websocket: WebSocket, context_id: str) -> None:
-    await ChatSession(space, websocket, context_id).serve()
+async def chat_session(
+    space: Any,
+    websocket: WebSocket,
+    context_id: str,
+    *,
+    authorize: Optional[Callable[[], Awaitable[Any]]] = None,
+    revalidate_interval: Optional[float] = None,
+) -> None:
+    """Serve one chat socket; *authorize* revalidates its session (see :class:`ChatSession`)."""
+    await ChatSession(
+        space, websocket, context_id, authorize=authorize, revalidate_interval=revalidate_interval
+    ).serve()
