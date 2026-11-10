@@ -57,6 +57,19 @@ def _safe(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]", "-", value)[:40]
 
 
+def _machine_error(exc: BaseException) -> MachineError:
+    """A failure of the docker client as a :class:`MachineError`, its text for the user.
+
+    The docker SDK raises ``docker.errors.DockerException`` for whatever the
+    daemon, the image or the network says, and a container that started may
+    answer with a shape this code does not know (a ``KeyError`` for a missing
+    key of its attrs): neither should reach the Devices page as a 500.
+    """
+    if isinstance(exc, KeyError):
+        return MachineError(f"The browser machine did not start as expected: {exc.args[0] if exc.args else exc}.")
+    return MachineError(f"The browser machine could not be started: {exc}")
+
+
 class MachinePool:
     """The browser machines of this server."""
 
@@ -93,9 +106,16 @@ class MachinePool:
     @property
     def client(self) -> Any:
         if self._client is None:
-            import docker
+            try:
+                import docker
 
-            self._client = docker.from_env()
+                self._client = docker.from_env()
+            except ImportError as exc:
+                raise MachineError(
+                    "This server has no docker SDK, so it cannot start browser machines."
+                ) from exc
+            except Exception as exc:  # DockerException: no daemon, no permission
+                raise _machine_error(exc) from exc
         return self._client
 
     # -- what there is ----------------------------------------------------------
@@ -139,6 +159,16 @@ class MachinePool:
         raise MachineError("The browser machine did not start in time; try again.")
 
     def _run(self, user_id: str, device_id: str, slot: int, token: str) -> tuple[str, str]:
+        """Start the container and give its address; docker's failures come back as a MachineError."""
+        try:
+            return self._start_container(user_id, device_id, slot, token)
+        except MachineError:
+            raise
+        except Exception as exc:  # DockerException, a KeyError in attrs, no daemon
+            logger.warning("Browser machine %s of %s could not start: %s", device_id, user_id, exc)
+            raise _machine_error(exc) from exc
+
+    def _start_container(self, user_id: str, device_id: str, slot: int, token: str) -> tuple[str, str]:
         client = self.client
         self._ensure_network(client)
         environment = {"NODE_TOKEN": token, "NODE_NAME": f"Browser {slot + 1}", "TZ": self.timezone}

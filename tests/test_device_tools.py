@@ -1,8 +1,12 @@
 """Agents' device tools, pairing a device of one's own, the devices API and the machine pool."""
 
 import asyncio
+import io
 import json
 import socket
+import tarfile
+import time
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -352,3 +356,254 @@ async def test_runs_side_by_side_take_turns_but_a_run_inside_shares_its_callers_
     finally:
         await end.close()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def test_the_single_user_server_starts_devices_and_browser_machines(tmp_path):
+    """A one-user server keeps paired devices and runs machines, as one with accounts does."""
+    import inspect
+
+    from web_chat.__main__ import single_user_options
+    from web_chat.server import WebChatServer
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    config = SimpleNamespace(
+        get_working_directory=lambda: str(tmp_path / "work"),
+        get_logs_directory=lambda: str(logs),
+        get_absolute_path=lambda key: str(tmp_path / key),
+    )
+    deployment = SimpleNamespace(
+        config=config, plans=SimpleNamespace(resolve=lambda **kwargs: None), review_policy=SimpleNamespace()
+    )
+    args = SimpleNamespace(
+        user_id="default_user", browser_machines=2,
+        host="127.0.0.1", port=8000, trusted_host=[], allowed_origin=[],
+    )
+    options = single_user_options(deployment, args)
+    # The Devices page works here too: the one user pairs devices and runs machines.
+    assert options["devices_dir"] == logs / "devices"
+    assert options["browser_machines"] == 2
+    # And the options are the server's own arguments, not stray keys.
+    assert {"devices_dir", "browser_machines"} <= set(inspect.signature(WebChatServer.__init__).parameters)
+
+
+def test_the_single_user_server_starts_devices_and_browser_machines(tmp_path):
+    """A one-user server keeps paired devices and runs machines as a server with accounts does."""
+    from web_chat.__main__ import single_user_options
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    config = SimpleNamespace(
+        get_working_directory=lambda: str(tmp_path / "work"),
+        get_logs_directory=lambda: str(logs),
+        get_absolute_path=lambda key: str(tmp_path / key),
+    )
+    deployment = SimpleNamespace(config=config, plans=SimpleNamespace(resolve=lambda **kw: None),
+                                 review_policy=SimpleNamespace())
+    args = SimpleNamespace(
+        user_id="default_user", browser_machines=2,
+        host="127.0.0.1", port=8000, trusted_host=[], allowed_origin=[],
+    )
+    options = single_user_options(deployment, args)
+    assert options["devices_dir"] == logs / "devices"
+    assert options["browser_machines"] == 2
+
+    # A server with accounts answers the same two things, out of its data directory.
+    source = (tmp_path / "unused").parent  # keeps the import close to its use
+    import inspect
+
+    from web_chat import __main__ as entry
+
+    accounts = inspect.getsource(entry.multi_user_options)
+    assert '"devices_dir"' in accounts and '"browser_machines"' in accounts
+    assert source.exists()
+
+
+# -- folders, installers, binaries and tool packages --------------------------
+
+
+@asynccontextmanager
+async def served(app):
+    """The app on a real port: the hub's device session belongs to this loop."""
+    import httpx
+    import uvicorn
+
+    port = _free_port()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", ws="auto"))
+    task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(200):
+            if server.started:
+                break
+            await asyncio.sleep(0.02)
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=30) as client:
+            yield client
+    finally:
+        server.should_exit = True
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_the_dirs_endpoint_lists_a_devices_folders_and_makes_one(tmp_path, fresh_hub):
+    from tests.test_device_hub import FakeFiles
+
+    files = FakeFiles()
+    tasks, end = await connected(fresh_hub, files)
+    try:
+        app, _ = _app(tmp_path, fresh_hub)
+        async with served(app) as client:
+            listing = (await client.get("/api/devices/dev-1/dirs")).json()
+            assert listing["device"] == "dev-1"
+            # Nothing asked for: the node's own directory, and where it is.
+            assert listing["path"] == "/home/alice" and listing["workdir"] == "/home/alice"
+            assert [entry["path"] for entry in listing["dirs"]] == ["/home/alice/docs", "/home/alice/pics"]
+            assert [entry["name"] for entry in listing["dirs"]] == ["docs", "pics"]
+            assert listing["roots"] == ["/", "/home"]
+            assert listing["bookmarks"] == ["/home/alice/work"]
+            # Nothing is asked for: the node opens its own directory.
+            assert files.calls[-1] == {}
+
+            asked = (await client.get("/api/devices/dev-1/dirs", params={"path": "/home"})).json()
+            assert asked["path"] == "/home" and files.calls[-1]["path"] == "/home"
+
+            made = (await client.post(
+                "/api/devices/dev-1/dirs", json={"path": "/home/alice", "mkdir": "/home/alice/new"}
+            )).json()
+            assert made["created"] == "/home/alice/new" and files.calls[-1]["mkdir"] == "/home/alice/new"
+            assert "/home/alice/new" in [entry["path"] for entry in made["dirs"]]
+
+            assert (await client.get("/api/devices/nobody/dirs")).status_code == 404
+
+        # The server's own call holds no lease: an agent takes the device at once.
+        await fresh_hub.call("alice", "dev-1", "fs_list_dirs", {}, holder="chat-a", allowed="look")
+    finally:
+        await end.close()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_a_device_without_fs_tools_still_says_where_it_works(tmp_path, fresh_hub):
+    from tests.test_device_hub import WorkdirNode
+
+    tasks, end = await connected(fresh_hub, FakeScreen(), node_class=WorkdirNode)
+    try:
+        app, _ = _app(tmp_path, fresh_hub)
+        async with served(app) as client:
+            listing = (await client.get("/api/devices/dev-1/dirs")).json()
+            assert listing["path"] == "/home/alice/projects" and listing["workdir"] == "/home/alice/projects"
+            assert listing["dirs"] == [] and "lists no directories" in listing["detail"]
+    finally:
+        await end.close()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def test_a_viewer_that_goes_away_gives_the_person_s_control_back(tmp_path):
+    from core.devices.hub import Device
+
+    class FakeTunnel:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, channel, message):
+            self.sent.append((channel, message))
+
+        async def close(self, reason=""):
+            pass
+
+    hub = DeviceHub()
+    # A device that is connected and watching, without a node behind it: this
+    # test is about the view, not the tools (tests/test_device_hub.py has those).
+    hub._devices["dev-1"] = Device(
+        id="dev-1", user_id="alice", name="Laptop", kind="desktop", platform="linux-amd64",
+        capabilities=[], view=True, tools={}, origin="paired", tunnel=FakeTunnel(), session=None,
+        default_workdir="/home/alice",
+    )
+    app, _ = _app(tmp_path, hub)
+    client = TestClient(app)
+
+    with client.websocket_connect("/api/devices/dev-1/view"):
+        # The page took control while its view is open.
+        assert client.post("/api/devices/dev-1/control", json={"taken": True}).json()["person"] is True
+        assert hub.get("alice", "dev-1").person is True
+        assert hub.watchers("dev-1") == 1
+    # The socket is closed: the person's hand goes with it, however the view ended.
+    for _ in range(200):
+        if not hub.get("alice", "dev-1").person:
+            break
+        time.sleep(0.01)
+    assert hub.get("alice", "dev-1").person is False and hub.watchers("dev-1") == 0
+
+
+def test_the_installers_name_this_server_and_pair_the_device(tmp_path):
+    app, _ = _app(tmp_path, DeviceHub())
+    client = TestClient(app)
+
+    script = client.get("/node/install.sh").text
+    assert "http://testserver" in script and 'URL="$SERVER/node/bin/$TARGET"' in script
+    assert "grid-node-linux-amd64" in script and "grid-node-linux-arm64" in script
+    assert "grid-node" in script and "install --server" in script and "--pair" in script
+    assert "GRID_PAIR_CODE" in script
+
+    with_code = client.get("/node/install.sh", params={"code": "ABCDE-FGHJK"}).text
+    assert "ABCDE-FGHJK" in with_code
+    # A code that is not one is never pasted into a script.
+    evil = client.get("/node/install.sh", params={"code": 'x"; echo pwned; #'}).text
+    assert "pwned" not in evil
+
+    powershell = client.get("/node/install.ps1").text
+    assert "http://testserver" in powershell and "grid-node-windows-amd64.exe" in powershell
+    assert "install" in powershell and "--pair" in powershell
+    assert "ABCDE-FGHJK" in client.get("/node/install.ps1", params={"code": "ABCDE-FGHJK"}).text
+
+
+def test_a_compiled_node_binary_is_served_when_the_server_has_one(tmp_path, monkeypatch):
+    from web_chat import devices_api
+
+    monkeypatch.setattr(devices_api, "binaries_roots", lambda: [tmp_path / "dist" / "grid-node"])
+    app, _ = _app(tmp_path, DeviceHub())
+    client = TestClient(app)
+    assert client.get("/node/bin/grid-node-linux-amd64").status_code == 404
+
+    built = tmp_path / "dist" / "grid-node"
+    built.mkdir(parents=True)
+    (built / "grid-node-linux-amd64").write_bytes(b"\x7fELF a fake node")
+    got = client.get("/node/bin/grid-node-linux-amd64")
+    assert got.status_code == 200 and got.content == b"\x7fELF a fake node"
+    assert client.get("/node/bin/grid-node-linux-arm64").status_code == 404
+    # Only the names this server builds are handed out, never a path.
+    assert client.get("/node/bin/..%2F..%2Fetc%2Fpasswd").status_code == 404
+
+
+def test_a_tool_package_goes_to_a_paired_device_by_its_hash(tmp_path, monkeypatch):
+    from web_chat import devices_api
+
+    root = tmp_path / "repo"
+    package = root / "examples" / "coder" / "tools" / "notes"
+    package.mkdir(parents=True)
+    (package / "tool.py").write_text("print('hi')\n")
+    (package / "README.md").write_text("notes\n")
+    monkeypatch.setattr(devices_api, "packages_root", lambda: root)
+
+    app, _ = _app(tmp_path, DeviceHub())
+    client = TestClient(app)
+    assert devices_api.tool_package("notes") == package
+    assert devices_api.tool_package("system") is None
+    assert devices_api.tool_package("../etc") is None
+    _, digest = devices_api.tool_package_archive(package)
+    # The same tree always packs to the same bytes: the hash names the content.
+    assert devices_api.tool_package_archive(package)[1] == digest
+
+    url = f"/node/tools/notes/{digest}.tar.gz"
+    assert client.get(url).status_code == 401  # a device's token is needed
+    code = client.post("/api/devices/pairing").json()["code"]
+    paired = client.post("/node/pair", json={"code": code, "name": "Laptop", "kind": "desktop"}).json()
+    headers = {"Authorization": f"Bearer {paired['token']}"}
+
+    answer = client.get(url, headers=headers)
+    assert answer.status_code == 200 and answer.headers["x-package-sha256"] == digest
+    archive = tarfile.open(fileobj=io.BytesIO(answer.content), mode="r:gz")
+    assert archive.getnames() == ["notes/README.md", "notes/tool.py"]
+    assert archive.extractfile("notes/tool.py").read() == b"print('hi')\n"
+
+    assert client.get(f"/node/tools/notes/{digest[:12]}.tar.gz", headers=headers).status_code == 200
+    assert client.get("/node/tools/notes/latest.tar.gz", headers=headers).status_code == 200
+    assert client.get(f"/node/tools/notes/{'0' * 64}.tar.gz", headers=headers).status_code == 409
+    assert client.get(f"/node/tools/missing/{digest}.tar.gz", headers=headers).status_code == 404

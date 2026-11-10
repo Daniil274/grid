@@ -1,6 +1,7 @@
 """A device and the hub over one tunnel: tools, classes, leases, control and the live view."""
 
 import asyncio
+import json
 from typing import Any, Dict, List
 
 import pytest
@@ -83,9 +84,54 @@ class FakeScreen(Driver):
         self.inputs.append(event)
 
 
-async def connected(hub: DeviceHub, driver: Driver, device_id="dev-1", user="alice"):
+class FakeFiles(Driver):
+    """A node's file system: ``fs_list_dirs`` answers the listing grid-node's fs tools do."""
+
+    name = "files"
+    capabilities = ["files", "shell"]
+
+    def __init__(self) -> None:
+        self.calls: List[Dict[str, Any]] = []
+        self.roots = ["/", "/home"]
+        self.tree = {"/home/alice": ["/home/alice/docs", "/home/alice/pics"]}
+
+    def tools(self):
+        async def list_dirs(args):
+            self.calls.append(dict(args))
+            path = args.get("path") or "/home/alice"
+            dirs = list(self.tree.get(path, []))
+            if args.get("mkdir"):
+                dirs.append(args["mkdir"])
+            return [text(json.dumps({
+                "path": path,
+                "workdir": "/home/alice",
+                "roots": self.roots,
+                "dirs": dirs,
+                "bookmarks": ["/home/alice/work"],
+                "parent": "/" if path != "/" else None,
+            }))]
+
+        return [
+            ToolSpec(
+                "fs_list_dirs", "List directories",
+                {"type": "object", "properties": {"path": {"type": "string"}, "mkdir": {"type": "string"}}},
+                list_dirs, LOOK_HINTS,
+            ),
+        ]
+
+
+class WorkdirNode(Node):
+    """A node that names the directory it works in, as grid-node's build does."""
+
+    WORKDIR = "/home/alice/projects"
+
+    def hello(self) -> Dict[str, Any]:
+        return {**super().hello(), "default_workdir": self.WORKDIR}
+
+
+async def connected(hub: DeviceHub, driver: Driver, device_id="dev-1", user="alice", node_class=Node):
     node_end, hub_end = socket_pair()
-    node = Node(name="test machine", kind="browser", drivers=[driver])
+    node = node_class(name="test machine", kind="browser", drivers=[driver])
     tasks = [
         asyncio.create_task(node.serve(Tunnel(node_end))),
         asyncio.create_task(hub.serve(Tunnel(hub_end), device_id=device_id, user_id=user, origin="machine")),
@@ -236,3 +282,61 @@ async def test_a_real_browser_is_read_and_driven_through_the_hub(tmp_path):
         await hub_end.close()
         await asyncio.gather(*tasks, return_exceptions=True)
         await driver.stop()
+
+
+async def test_the_node_names_the_directory_it_works_in_and_the_server_calls_its_system_methods():
+    hub = DeviceHub()
+    driver = FakeScreen()
+    tasks, hub_end = await connected(hub, driver, node_class=WorkdirNode)
+    try:
+        (device,) = hub.devices("alice")
+        # Where the node works is the node's to say: the Devices page opens there.
+        assert device.default_workdir == "/home/alice/projects"
+        assert device.summary("chat-a")["default_workdir"] == "/home/alice/projects"
+
+        # The server's own backend calls a system method whatever class it is:
+        # the class check is the agents' (tools.device_tools), not the server's.
+        with pytest.raises(DeviceError, match="is a run tool: call it with device_run"):
+            await hub.call("alice", "dev-1", "shell_run", {"command": "ls"}, holder="chat-a", allowed=DO)
+        result = await hub.system_call("alice", "dev-1", "shell_run", {"command": "ls"}, holder="web/alice")
+        assert result.content[0].text == "done" and driver.ran == ["ls"]
+        # ... and `allowed="any"` says the same thing to `call` itself.
+        await hub.call("alice", "dev-1", "shell_run", {"command": "pwd"}, holder="web/alice", allowed="any")
+        # A system call still leases the device, so its caller gives the lease back.
+        with pytest.raises(DeviceError, match="in use by another conversation"):
+            await hub.call("alice", "dev-1", "screen_look", {}, holder="chat-b", allowed=LOOK)
+        hub.release("web/alice")
+        await hub.call("alice", "dev-1", "screen_look", {}, holder="chat-b", allowed=LOOK)
+
+        with pytest.raises(DeviceError, match="has no tool fs_list_dirs"):
+            await hub.system_call("alice", "dev-1", "fs_list_dirs", {}, holder="web/alice")
+    finally:
+        await hub_end.close()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_a_viewer_that_goes_away_gives_the_person_s_control_back():
+    hub = DeviceHub()
+    driver = FakeScreen()
+    tasks, hub_end = await connected(hub, driver)
+    frames = []
+
+    async def sink(frame):
+        frames.append(frame)
+
+    try:
+        await hub.take_control("alice", "dev-1", True)
+        assert hub.in_use("dev-1")
+        async with hub.watching("alice", "dev-1", sink):
+            for _ in range(100):
+                if frames:
+                    break
+                await asyncio.sleep(0.01)
+            assert frames  # the viewer is watching, and the person holds it
+        # The block ended - the socket died, however it went: nobody holds it now.
+        assert hub.watchers("dev-1") == 0
+        assert hub.devices("alice")[0].person is False
+        await hub.system_call("alice", "dev-1", "screen_look", {}, holder="web/alice")
+    finally:
+        await hub_end.close()
+        await asyncio.gather(*tasks, return_exceptions=True)

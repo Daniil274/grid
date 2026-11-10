@@ -1,8 +1,14 @@
 """CLI entry point for Grid Web Chat.
 
-    grid-web-chat [options]                 one local user, no sign-in (the default)
-    grid-web-chat --accounts [options]      many users, each signed in, each in a space of their own
-    grid-web-chat accounts <command>        manage accounts (web_chat.accounts.cli)
+    grid-web-chat --accounts [options]         users sign in; each works in a space of their own
+    grid-web-chat --unsafe-single-user [opts]  one local user, no sign-in: explicit, unsafe
+    grid-web-chat accounts <command>           manage accounts (web_chat.accounts.cli)
+
+One of the first two is required: the server never starts unauthenticated by
+default. ``--unsafe-single-user`` is the explicit opt-in for a server of one
+local user with no sign-in - every connection then acts as that user and is an
+admin. Reachable by anything but this machine, it hands the workspace, the
+credentials and the agents to whoever asks; use ``--accounts`` there.
 
 With ``--accounts`` everything the server keeps lives in ``--data-dir``: the
 accounts database and, per user, ``users/<id>/`` with the user's conversations,
@@ -10,6 +16,12 @@ agent sessions and workspace. Every user's agents then run in a container of
 their own, whatever the config's ``isolation.enabled`` says (a one-user server
 follows that flag); the server refuses to start without a usable Docker,
 unless ``--trusted-users`` says every user may run commands on this machine.
+
+Both modes answer only the Host names they were told about: loopback names and
+the ``--host`` address always, plus ``--trusted-host`` and the hosts of
+``--allowed-origin``. A request sent to any other name - a DNS record of
+another site pointing here, a proxy forwarding the client's Host - is refused
+before it reaches a page, a file or a route.
 """
 
 from __future__ import annotations
@@ -41,6 +53,44 @@ IDLE_SPACE_SECONDS = 30 * 60
 SUPERVISED = "GRID_WEB_CHAT_SUPERVISED"
 #: How such a server asks to be started again (EX_TEMPFAIL).
 RESTART_EXIT = 75
+
+#: Addresses that name every interface, not one host: the server is then
+#: reachable under a name only --allowed-origin/--trusted-host can tell it.
+WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", "[::]", ""})
+
+
+def serve_mode(args: argparse.Namespace) -> str:
+    """Which server the arguments ask for - ``accounts`` or ``single-user``.
+
+    Without ``--accounts`` or ``--unsafe-single-user`` the server refuses to
+    start: serving one user without sign-in is a choice an operator makes, not
+    a default they inherit by typing the command.
+    """
+    if args.accounts:
+        return "accounts"
+    if args.unsafe_single_user:
+        return "single-user"
+    raise SystemExit(
+        "Choose who may use this server:\n"
+        "  grid-web-chat --accounts --data-dir DIR   users sign in; each has a space of their own\n"
+        "  grid-web-chat --unsafe-single-user        one local user, no sign-in (explicit, unsafe)\n"
+        "Run `grid-web-chat --help` for the rest."
+    )
+
+
+def trusted_hosts_for(args: argparse.Namespace) -> tuple[str, ...]:
+    """The Host values this server answers to, from the operator's configuration.
+
+    Loopback names are always accepted (web_chat.security.TrustedHosts); a
+    concrete ``--host`` is this deployment's own address; ``--trusted-host``
+    names another one, such as the Host a proxy forwards; the public names of
+    ``--allowed-origin`` are added by the server itself (web_chat.server).
+    """
+    hosts = list(args.trusted_host)
+    if args.host not in WILDCARD_HOSTS:
+        name = f"[{args.host}]" if ":" in args.host and not args.host.startswith("[") else args.host
+        hosts.append(f"{name}:{args.port}")
+    return tuple(dict.fromkeys(hosts))
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -83,6 +133,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--unsafe-single-user",
+        action="store_true",
+        help="Serve one local user without sign-in: every connection is that user, an admin. "
+        "Explicit and unsafe - anyone who can reach the port acts as them. Use --accounts instead.",
+    )
+    parser.add_argument(
+        "--trusted-host",
+        action="append",
+        default=[],
+        metavar="HOST[:PORT]",
+        help="Another Host header this server answers to, e.g. the name a proxy forwards; "
+        "loopback names are always accepted (default: the --host address)",
+    )
 
     multi = parser.add_argument_group("accounts")
     multi.add_argument("--accounts", action="store_true", help="Serve many users who sign in")
@@ -135,6 +199,7 @@ def main() -> None:
         raise SystemExit(accounts_main(sys.argv[2:]))
 
     args = parse_args(sys.argv[1:])
+    mode = serve_mode(args)
 
     try:
         import uvicorn
@@ -165,7 +230,22 @@ def main() -> None:
     print(f"Config: {deployment.config_path}")
 
     record_policy_decisions(Path(deployment.config.get_logs_directory()))
-    options = multi_user_options(deployment, args) if args.accounts else single_user_options(deployment, args)
+    if mode == "single-user":
+        print(
+            "WARNING: --unsafe-single-user: no sign-in. Every connection is the local user, an admin, "
+            "with their workspace, credentials and agents. A proxy, tunnel or port forward that "
+            "reaches this port gives that to others; use --accounts for anything but this machine."
+        )
+    elif args.host in WILDCARD_HOSTS and not (args.allowed_origin or args.trusted_host):
+        print(
+            "No public address configured: only loopback Host names are answered, so clients using "
+            "another name get 400. Pass --allowed-origin https://chat.example.com (and --trusted-host "
+            "if the proxy forwards a different Host)."
+        )
+    options = multi_user_options(deployment, args) if mode == "accounts" else single_user_options(deployment, args)
+    # What the Host check answers besides loopback: a client that opened another
+    # name (a proxy's public one) must have it configured here or in --allowed-origin.
+    print(f"Hosts: loopback and {', '.join(options['trusted_hosts']) or 'nothing else'}")
     print(f"Open http://{args.host}:{args.port}/")
     proxy = {"forwarded_allow_ips": args.forwarded_allow_ips} if args.forwarded_allow_ips else {}
     restart_requested = False
@@ -268,6 +348,8 @@ def single_user_options(deployment, args: argparse.Namespace) -> dict:
         ),
         "activity": activity,
         "usage": usage,
+        # The names this server answers to; loopback names are always accepted.
+        "trusted_hosts": trusted_hosts_for(args),
         "submissions_dir": records / "system_submissions",
         "restart_path": records / "server_restart.json",
         "lazy_path": records / "lazy.db",
@@ -280,6 +362,11 @@ def single_user_options(deployment, args: argparse.Namespace) -> dict:
         "warm_user": args.user_id,
         # Beside the single user's own records (web_chat.space.single_user_records).
         "reviews": open_reviews(deployment, Path(deployment.config.get_logs_directory()) / "reviews"),
+        # The devices this one user pairs, and the browser machines the server
+        # runs for them: the same two answers a server with accounts gives, so
+        # the Devices page works the same way here.
+        "devices_dir": records / "devices",
+        "browser_machines": args.browser_machines,
     }
 
 
@@ -371,6 +458,7 @@ def multi_user_options(deployment, args: argparse.Namespace) -> dict:
             accounts, secure_cookies=args.secure_cookies, tiers=lambda: deployment.plans.tier_names()
         ),
         "allowed_origins": tuple(args.allowed_origin),
+        "trusted_hosts": trusted_hosts_for(args),
         "vault": vault,
         "chatgpt": chatgpt,
         "warm_user": None,

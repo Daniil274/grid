@@ -32,6 +32,12 @@ from grid_node.tunnel import CTL, VIEW, Tunnel
 logger = logging.getLogger("grid.devices")
 
 LOOK, DO, RUN = "look", "do", "run"
+#: Passed as ``allowed`` to :meth:`DeviceHub.call` by the server's own backend:
+#: a system method of the node (a directory listing, a file read) is called
+#: whatever class its annotations say, because the server, not an agent,
+#: asked for it. Agents never call this way (tools.device_tools passes LOOK,
+#: DO or RUN), so the tools' classes still tell theirs apart.
+ANY = "any"
 #: Seconds a conversation keeps a device after its last call.
 LEASE_SECONDS = 300
 #: Seconds a device gets to say hello after connecting.
@@ -98,6 +104,10 @@ class Device:
     origin: str
     tunnel: Tunnel
     session: ClientSession
+    #: The directory the node works in by default: the one the Devices page
+    #: opens, and the base the server's own file calls (``fs_*``) start from.
+    #: The node names it in its hello; empty when it has none to give.
+    default_workdir: str = ""
     connected_at: float = field(default_factory=time.time)
     last_used: float = field(default_factory=time.time)
     holder: Optional[str] = None
@@ -121,6 +131,7 @@ class Device:
             "kind": self.kind,
             "platform": self.platform,
             "capabilities": self.capabilities,
+            "default_workdir": self.default_workdir,
             "status": status,
             "tools": {
                 name: {"class": tool_class(tool), "description": tool.description,
@@ -193,6 +204,11 @@ class DeviceHub:
                         origin=origin,
                         tunnel=tunnel,
                         session=session,
+                        # Where the node works by default: the Devices page opens
+                        # there and the server's file calls start from it.
+                        default_workdir=str(
+                            hello.get("default_workdir") or hello.get("workdir") or ""
+                        )[:1024],
                     )
                     previous = self._devices.get(device_id)
                     if previous is not None:
@@ -232,6 +248,10 @@ class DeviceHub:
         device = self._devices.get(device_id)
         return device.last_used if device is not None else None
 
+    def watchers(self, device_id: str) -> int:
+        """How many live views of the device are open: nobody sees it at zero."""
+        return len(self._viewers.get(device_id, ()))
+
     # -- calls ------------------------------------------------------------------
 
     async def call(
@@ -242,17 +262,25 @@ class DeviceHub:
         arguments: Dict[str, Any],
         *,
         holder: str,
-        allowed: str,
+        allowed: Optional[str] = None,
         timeout: float = CALL_SECONDS,
     ) -> types.CallToolResult:
-        """Call *tool* of the device for conversation *holder*; *allowed* is the class the caller may use."""
+        """Call *tool* of the device for conversation *holder*; *allowed* is the class the caller may use.
+
+        ``allowed=ANY`` (or ``None``) skips the class check: the server's own
+        backend calls the node's system methods (``fs_list_dirs``, ``fs_read``,
+        ``shell_exec``, ...) that way, and they are not an agent's look, do or
+        run. An agent's tool always names its class, so the classes still tell
+        its tools apart (tools.device_tools).
+        """
         device = self.get(user_id, device_id)
         spec = device.tools.get(tool)
         if spec is None:
             raise DeviceError(f"Device {device_id} has no tool {tool}; it has: {', '.join(sorted(device.tools))}.")
-        kind = tool_class(spec)
-        if kind != allowed:
-            raise DeviceError(f"{tool} is a {kind} tool: call it with device_{kind}, not device_{allowed}.")
+        if allowed is not None and allowed != ANY:
+            kind = tool_class(spec)
+            if kind != allowed:
+                raise DeviceError(f"{tool} is a {kind} tool: call it with device_{kind}, not device_{allowed}.")
         if device.person:
             raise DeviceError(
                 f"A person has taken control of {device.name}; wait until they give it back, then look again."
@@ -271,6 +299,27 @@ class DeviceHub:
             device.last_used = time.time()
             device.held_until = time.time() + LEASE_SECONDS
         return result
+
+    async def system_call(
+        self,
+        user_id: str,
+        device_id: str,
+        method: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        *,
+        holder: str,
+        timeout: float = CALL_SECONDS,
+    ) -> types.CallToolResult:
+        """Call a system method of the node for the server's own backend.
+
+        A system method (``fs_list_dirs``, ``fs_read``, ``fs_write``,
+        ``fs_edit``, ``fs_append``, ``fs_glob``, ``fs_grep``, ``shell_exec``,
+        ``tool_exec``) is not an agent's look, do or run: the class check is
+        skipped, the lease and the person's control still hold.
+        """
+        return await self.call(
+            user_id, device_id, method, dict(arguments or {}), holder=holder, allowed=ANY, timeout=timeout
+        )
 
     def release(self, holder: str) -> None:
         """End every lease of *holder* and the runs inside it (its turn or run ended)."""
@@ -296,17 +345,39 @@ class DeviceHub:
             if not viewers:
                 self._viewers.pop(device_id, None)
                 current = self._devices.get(device_id)
-                if current is not None and current.view:
-                    try:
-                        await current.tunnel.send(VIEW, {"type": "watch", "on": False})
-                    except Exception:
-                        pass
+                if current is not None:
+                    # The last viewer is gone - with its socket, however it went.
+                    # Whosever hand was on the device lets go of it: an agent
+                    # must never find the device blocked by a person nobody has
+                    # seen since (devices_api closes the view the same way).
+                    if current.person:
+                        current.person = False
+                        self._notify(current.user_id)
+                    if current.view:
+                        try:
+                            await current.tunnel.send(VIEW, {"type": "watch", "on": False})
+                        except Exception:
+                            pass
 
     async def take_control(self, user_id: str, device_id: str, taken: bool) -> None:
         """A person takes the device from agents, or gives it back."""
         device = self.get(user_id, device_id)
         device.person = bool(taken)
         self._notify(user_id)
+
+    async def release_control(self, user_id: str, device_id: str) -> bool:
+        """Give the person's control back once nobody is watching the device.
+
+        The live view calls this as it closes - a shut tab, a dropped socket, an
+        ended session - so no device is left blocked by a hand nobody can see.
+        The last viewer's to give: a view still open keeps its control.
+        """
+        device = self.get(user_id, device_id)
+        if self.watchers(device_id) or not device.person:
+            return False
+        device.person = False
+        self._notify(user_id)
+        return True
 
     async def person_input(self, user_id: str, device_id: str, event: Dict[str, Any]) -> None:
         """A person's input from the live view; taking control comes first."""
