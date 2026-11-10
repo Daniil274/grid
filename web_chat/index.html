@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
   <meta name="color-scheme" content="dark light">
   <title>Grid Chat</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/static/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -20,6 +23,7 @@
   <link rel="stylesheet" href="/static/styles/rail.css">
   <link rel="stylesheet" href="/static/styles/memory.css">
   <link rel="stylesheet" href="/static/styles/reference.css">
+  <link rel="stylesheet" href="/static/styles/targets.css">
 </head>
 <body>
   <div class="app">
@@ -114,6 +118,81 @@
           </div>
         </div>
 
+        <div class="topbar__target" id="target-picker">
+          <button class="routeChip routeChip--target" id="target-chip" type="button" aria-haspopup="dialog" data-mode="cloud"
+                  title="Where this chat's tools act: this server, or a computer of yours">
+            <span class="routeChip__icon" data-icon="monitor" data-icon-size="14"></span>
+            <span class="routeChip__text">
+              <span class="routeChip__name" id="target-name">Cloud</span>
+              <span class="routeChip__meta" id="target-meta"></span>
+            </span>
+            <span class="routeChip__chevron" data-icon="chevron" data-icon-size="14"></span>
+          </button>
+
+          <div class="popover popover--target" id="target-popover" role="dialog" aria-label="Where this chat's tools act">
+            <div class="popover__head">
+              <h2>Where this chat's tools act</h2>
+              <p>On this server, or on a computer of yours: files, search and commands then run there.</p>
+            </div>
+            <div class="targetList" id="target-list"></div>
+            <section class="targetConnect">
+              <h3 class="targetConnect__head">Connect a device</h3>
+              <p class="targetConnect__hint">Run one line on the computer. It connects out to this server; no port is opened on it.</p>
+              <div class="targetConnect__row">
+                <span class="targetConnect__os">Linux / macOS</span>
+                <code class="targetConnect__code" id="target-connect-linux">Loading…</code>
+                <button class="btn btn--ghost btn--xs" id="target-copy-linux" type="button" data-icon="copy">Copy</button>
+              </div>
+              <div class="targetConnect__row">
+                <span class="targetConnect__os">Windows</span>
+                <code class="targetConnect__code" id="target-connect-windows">Loading…</code>
+                <button class="btn btn--ghost btn--xs" id="target-copy-windows" type="button" data-icon="copy">Copy</button>
+              </div>
+              <a class="targetConnect__link" href="/devices" target="grid-devices" rel="noopener">Devices page: watch them live and pair a computer</a>
+            </section>
+          </div>
+
+          <button class="routeChip routeChip--workdir" id="workdir-chip" type="button" aria-haspopup="dialog" hidden
+                  title="The folder this chat's tools work in on the device">
+            <span class="routeChip__icon" data-icon="folder" data-icon-size="14"></span>
+            <span class="routeChip__text">
+              <span class="routeChip__name" id="workdir-name">Folder</span>
+              <span class="routeChip__meta" id="workdir-meta"></span>
+            </span>
+            <span class="routeChip__chevron" data-icon="chevron" data-icon-size="14"></span>
+          </button>
+
+          <div class="popover popover--workdir" id="workdir-popover" role="dialog" aria-label="Working folder on the device">
+            <div class="popover__head">
+              <h2>Working folder</h2>
+              <p>A change inside this folder is ordinary work; anything outside it is put to you first.</p>
+            </div>
+            <div class="workdirBar">
+              <button class="iconBtn iconBtn--sm workdirBar__up" id="workdir-up" type="button" title="Up one folder" aria-label="Up one folder" data-icon="chevron"></button>
+              <code class="workdirPath" id="workdir-path">…</code>
+              <button class="btn btn--ghost btn--xs" id="workdir-reload" type="button" title="Read this folder again">Refresh</button>
+              <button class="btn btn--primary btn--xs" id="workdir-use" type="button" title="Have this chat work in the folder shown">Use this folder</button>
+            </div>
+            <div class="workdirBookmarks" id="workdir-bookmarks"></div>
+            <div class="workdirList" id="workdir-list"></div>
+            <form class="workdirForm" id="workdir-new-form">
+              <label class="field">
+                <span class="field__label">New folder here</span>
+                <input class="control" id="workdir-new" name="folder" type="text" maxlength="255" placeholder="notes" autocomplete="off" spellcheck="false">
+              </label>
+              <button class="btn btn--ghost" type="submit" data-icon="plus">Create</button>
+            </form>
+            <form class="workdirForm" id="workdir-path-form">
+              <label class="field">
+                <span class="field__label">Or type a path</span>
+                <input class="control" id="workdir-input" name="path" type="text" maxlength="4096" placeholder="C:\Users\me\project" autocomplete="off" spellcheck="false">
+              </label>
+              <button class="btn btn--primary" type="submit">Use this folder</button>
+            </form>
+            <p class="workdirStatus" id="workdir-status" role="status" aria-live="polite"></p>
+          </div>
+        </div>
+
         <div class="topbar__status">
           <span class="statusText" id="runtime-status" data-state="ready"></span>
           <button class="pill" id="workspace-pill" type="button" title="Copy workspace path" hidden></button>
@@ -150,23 +229,41 @@
           <div class="composer__tray" id="composer-tray" hidden></div>
           <label class="visuallyHidden" for="composer-input">Message</label>
           <textarea id="composer-input" class="composer__input" rows="1" placeholder="Message Grid…" enterkeyhint="enter"></textarea>
+          <div class="composerRecording" id="audio-recording" hidden>
+            <button class="iconBtn" id="audio-cancel" type="button" title="Cancel recording" aria-label="Cancel recording" data-icon="close"></button>
+            <span class="composerRecording__dot" aria-hidden="true"></span>
+            <span class="composerRecording__label" role="status">Recording voice message</span>
+            <span class="composerRecording__time" id="audio-recording-time" aria-label="Recording duration">0:00</span>
+          </div>
           <div class="composer__bar">
+            <details class="composerTools" id="composer-tools">
+              <summary class="iconBtn composerTools__toggle" aria-label="Attachments and message options" title="Attachments and message options" aria-controls="composer-tools-panel" aria-expanded="false" data-icon="plus"></summary>
+              <div class="composerTools__panel" id="composer-tools-panel" role="group" aria-label="Message options">
+                <span class="composerTools__heading">Message options</span>
+                <input id="composer-files" type="file" multiple hidden>
+                <button class="composerTools__action" id="attach" type="button" title="Attach files (or paste / drop them)" aria-label="Attach files" data-icon="attach">Attach files</button>
+                <button class="composerTools__action composer__compact" id="compact-context" type="button" data-icon="compact" title="Summarize the agent context to free token space. Chat history stays visible." aria-label="Compact context" disabled><span class="compactLabel">Compact context</span></button>
+                <label class="composerTools__setting" for="policy-filter" id="policy-filter-setting">
+                  <span>Policy filter</span>
+                  <select class="composer__delivery composer__policy" id="policy-filter" hidden></select>
+                </label>
+                <label class="composerTools__setting" id="delivery-setting" for="delivery">
+                  <span>Message delivery</span>
+                  <select class="composer__delivery" id="delivery" title="How a message reaches the working agent" hidden>
+                    <option value="auto">Auto</option>
+                    <option value="now">Now (stop the agent)</option>
+                    <option value="next_step">At the next step</option>
+                    <option value="after_turn">After this turn</option>
+                  </select>
+                </label>
+              </div>
+            </details>
             <span class="composer__hint"><kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line</span>
             <div class="composer__buttons">
-              <label class="visuallyHidden" for="policy-filter">Policy filter</label>
-              <select class="composer__delivery composer__policy" id="policy-filter" hidden></select>
-              <input id="composer-files" type="file" multiple hidden>
-              <button class="iconBtn" id="attach" type="button" title="Attach files (or paste / drop them)" aria-label="Attach files" data-icon="attach"></button>
-              <button class="btn btn--ghost composer__compact" id="compact-context" type="button" data-icon="compact" title="Summarize the agent context to free token space. Chat history stays visible." aria-label="Compact context" disabled><span class="compactLabel">Compact context</span></button>
               <button class="btn btn--ghost" id="continue" type="button" data-icon="resume" title="Continue from where the agent stopped" hidden>Continue</button>
-              <select class="composer__delivery" id="delivery" title="How a message reaches the working agent" hidden>
-                <option value="auto">Auto</option>
-                <option value="now">Now (stop the agent)</option>
-                <option value="next_step">At the next step</option>
-                <option value="after_turn">After this turn</option>
-              </select>
-              <button class="btn btn--ghost" id="stop" type="button" data-icon="stop" hidden>Stop</button>
-              <button class="btn btn--primary" id="send" type="button" data-icon="send" disabled>Send</button>
+              <button class="btn btn--ghost composer__stop" id="stop" type="button" data-icon="stop" title="Stop after the current step" aria-label="Stop after the current step" hidden>Stop</button>
+              <button class="iconBtn composer__audio" id="audio-message" type="button" title="Record voice message" aria-label="Record voice message" aria-pressed="false" data-icon="mic"></button>
+              <button class="btn btn--primary composer__send" id="send" type="button" data-icon="send" title="Send message" aria-label="Send message" disabled>Send</button>
             </div>
           </div>
         </div>

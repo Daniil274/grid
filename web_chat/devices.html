@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <title>Devices · Grid</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/static/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
   <link rel="stylesheet" href="/static/styles/tokens.css">
   <link rel="stylesheet" href="/static/styles/base.css">
   <link rel="stylesheet" href="/static/styles/devices.css">
@@ -27,9 +30,31 @@
 
     <section class="devicesPairing" id="pairing" hidden aria-label="Connect your computer">
       <h2>Connect your computer</h2>
-      <p>Run this on the computer within 10 minutes. It connects out to this server; no port is opened on it.</p>
-      <pre class="devicesCommand" id="pair-command"></pre>
-      <button class="btn btn--ghost" id="copy-command" type="button">Copy</button>
+      <p>Run one line on the computer within 10 minutes. It downloads <code>grid-node</code>, connects out to this server and keeps running in the background; no port is opened on the computer.</p>
+      <div class="devicesInstall">
+        <div class="devicesInstall__os">
+          <h3>Linux / macOS</h3>
+          <pre class="devicesCommand" id="pair-command-linux"></pre>
+          <button class="btn btn--ghost" id="copy-command-linux" type="button">Copy</button>
+        </div>
+        <div class="devicesInstall__os">
+          <h3>Windows (PowerShell)</h3>
+          <pre class="devicesCommand" id="pair-command-windows"></pre>
+          <button class="btn btn--ghost" id="copy-command-windows" type="button">Copy</button>
+        </div>
+      </div>
+      <p class="devicesInstall__note">
+        Both lines carry this pairing code (<code id="pair-code"></code>), which works once.
+        To download the binary yourself, or to pair without a code, use the links below.
+      </p>
+      <div class="devicesDownloads">
+        <h3>grid-node binaries</h3>
+        <ul id="device-downloads">
+          <li><a href="/node/bin/grid-node-linux-amd64" download>grid-node-linux-amd64</a><span>Linux, x86-64</span></li>
+          <li><a href="/node/bin/grid-node-linux-arm64" download>grid-node-linux-arm64</a><span>Linux, ARM64</span></li>
+          <li><a href="/node/bin/grid-node-windows-amd64.exe" download>grid-node-windows-amd64.exe</a><span>Windows, x86-64</span></li>
+        </ul>
+      </div>
     </section>
 
     <section class="devicesGrid" id="devices" aria-label="Connected devices"></section>

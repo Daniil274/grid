@@ -12,6 +12,7 @@ import { createStore } from "./lib/store.js";
 import { api } from "./net/api.js";
 import { tokens } from "./lib/format.js";
 import { ChatController } from "./chat.js";
+import { createAudioRecorder } from "./ui/audio-recorder.js";
 import { AccountsDrawer } from "./accounts/admin.js";
 import { monitorPageLifecycle, monitorServer } from "./net/server-monitor.js";
 import { PasswordDrawer } from "./accounts/password.js";
@@ -20,6 +21,7 @@ import { PersonalAgentsDrawer } from "./agents/drawer.js";
 import { MemoryDrawer } from "./ui/memory-dialog.js";
 import { SettingsDrawer } from "./settings/drawer.js";
 import { createRoutePicker } from "./ui/route-picker.js";
+import { createTargetPicker } from "./ui/target-picker.js";
 import { createComposer } from "./ui/composer.js";
 import { createPolicySwitch } from "./ui/policy-switch.js";
 import { createQueueTray } from "./ui/queue.js";
@@ -89,7 +91,22 @@ const store = createStore({
   policy: null,
   // The filter the user picked (ui/policy-switch.js).
   policyFilter: null,
+  // Where the chat's tools act (ui/target-picker.js): "cloud", the server, or
+  // "device:<id>" - one of the user's computers - with the folder it works in.
+  executionTarget: "cloud",
+  executionWorkdir: "",
+  // The devices a chat may switch to, as the server reports them when connected.
+  devices: [],
 });
+
+const WORK_MODE_KEY = "grid.chat.work-mode";
+const readWorkMode = () => {
+  try {
+    return globalThis.localStorage?.getItem(WORK_MODE_KEY) === "combined" ? "combined" : "segmented";
+  } catch {
+    return "segmented";
+  }
+};
 
 /** Icon-only buttons declare their glyph in markup; fill them in one pass. */
 function paintIcons(scope = document) {
@@ -169,10 +186,17 @@ async function boot() {
   // the same player the messages do, so there is only ever one voice speaking.
   globalThis.GridSpeech = speech;
 
+  let workMode = readWorkMode();
   const transcript = createTranscript({
     container: $("#chat-scroll"),
     emptyState: $("#welcome"),
     jumpButton: $("#jump-latest"),
+    executionMode: workMode,
+    onExecutionModeToggle: () => {
+      workMode = workMode === "combined" ? "segmented" : "combined";
+      try { globalThis.localStorage?.setItem(WORK_MODE_KEY, workMode); } catch { /* Storage is optional. */ }
+      transcript.setExecutionMode(workMode);
+    },
     onEditMessage: (edited) => void chat.editMessage(edited),
     onSwitchVersion: (contextId) => void chat.switchVersion(contextId),
     onDeleteMessage: (target) => void chat.deleteMessage(target),
@@ -190,6 +214,15 @@ async function boot() {
     },
     onContinue: () => chat.continueTurn(),
     onContinueInNewChat: () => void chat.continueInNewChat(),
+    // A presented interface (js/ui/ui-block.js): its local sorting/selection is
+    // kept on the message without a model call; a button becomes a normal turn.
+    onUiSave: ({ messageId, uiId, values, stateRevision, requestId }) =>
+      api.saveUiState(store.get().contextId, messageId, uiId, {
+        values,
+        state_revision: stateRevision,
+        request_id: requestId,
+      }),
+    onUiSubmit: (fields) => chat.submitUiAction(fields),
   });
 
   const chat = new ChatController({
@@ -218,12 +251,63 @@ async function boot() {
     deliverySelect: $("#delivery"),
     continueButton: $("#continue"),
     attachButton: $("#attach"),
+    audioButton: $("#audio-message"),
+    tools: $("#composer-tools"),
     fileInput: $("#composer-files"),
     tray: $("#composer-tray"),
     store,
     onSend: (text, images, delivery) => chat.send(text, { images, delivery }),
     onStop: () => chat.stop(),
     onContinue: () => chat.continueTurn(),
+  });
+
+  // One-shot audio messages use the normal turn orchestration; VoiceUI retains
+  // its independent continuous command microphone.
+  const audioButton = $("#audio-message");
+  const recordingBar = $("#audio-recording");
+  const composerRoot = $(".composer");
+  let recordingTimer = null;
+  const audioRecorder = createAudioRecorder({
+    onSend: (audio) => chat.send("", { audio }),
+    onState: (recording) => {
+      clearInterval(recordingTimer);
+      recordingTimer = null;
+      composerRoot.classList.toggle("is-recording", recording);
+      recordingBar.hidden = !recording;
+      if (recording) {
+        $("#composer-tools").open = false;
+        const started = Date.now();
+        const updateTime = () => {
+          const seconds = Math.floor((Date.now() - started) / 1000);
+          $("#audio-recording-time").textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+        };
+        updateTime();
+        recordingTimer = setInterval(updateTime, 1000);
+      }
+      if (audioButton) {
+        audioButton.setAttribute("aria-pressed", String(recording));
+        audioButton.title = recording ? "Stop and send voice message" : "Record voice message";
+        audioButton.setAttribute("aria-label", audioButton.title);
+        audioButton.replaceChildren(icon(recording ? ICONS.send : ICONS.mic));
+      }
+      composer.refresh();
+    },
+    onError: (error) => toast(error?.message ?? "Could not record audio", { tone: "error" }),
+  });
+  audioButton?.addEventListener("click", () => {
+    if (audioRecorder.recording) void audioRecorder.stop();
+    else {
+      window.VoiceUI?.cleanup();
+      void audioRecorder.start();
+    }
+  });
+  $("#audio-cancel")?.addEventListener("click", () => { audioRecorder.cancel(); audioButton.focus(); });
+  window.addEventListener("pagehide", () => audioRecorder.cancel());
+  store.watch(["contextId", "streaming", "compacting", "restartPending"], () => {
+    if (audioRecorder.recording) audioRecorder.cancel();
+  });
+  composerRoot.addEventListener("click", (event) => {
+    if (event.target.closest("#voice-open-btn") && audioRecorder.recording) audioRecorder.cancel();
   });
 
   createPolicySwitch({
@@ -392,6 +476,43 @@ async function boot() {
     onChange: selectRoute,
   });
   createWelcomeSystems({ container: $("#welcome-systems"), store, onChange: selectRoute });
+
+  // Where the chat's work happens: this server, or one of the user's computers
+  // and a folder on it (web_chat/devices_api.py, core/devices/execution.py).
+  createTargetPicker({
+    nodes: {
+      button: $("#target-chip"),
+      nameNode: $("#target-name"),
+      metaNode: $("#target-meta"),
+      popover: $("#target-popover"),
+      list: $("#target-list"),
+      connectLinux: $("#target-connect-linux"),
+      connectWindows: $("#target-connect-windows"),
+      copyLinux: $("#target-copy-linux"),
+      copyWindows: $("#target-copy-windows"),
+      folder: {
+        button: $("#workdir-chip"),
+        nameNode: $("#workdir-name"),
+        metaNode: $("#workdir-meta"),
+        popover: $("#workdir-popover"),
+        up: $("#workdir-up"),
+        path: $("#workdir-path"),
+        reload: $("#workdir-reload"),
+        use: $("#workdir-use"),
+        bookmarks: $("#workdir-bookmarks"),
+        list: $("#workdir-list"),
+        newForm: $("#workdir-new-form"),
+        newInput: $("#workdir-new"),
+        pathForm: $("#workdir-path-form"),
+        pathInput: $("#workdir-input"),
+        status: $("#workdir-status"),
+      },
+    },
+    store,
+    api,
+    onChange: (selection) => chat.setExecutionTarget(selection),
+    onCopied: (message) => toast(message),
+  });
 
   createThemeToggle($("#theme-toggle"));
 
@@ -656,6 +777,9 @@ async function boot() {
   });
 
   await reloadRuntime();
+  // A chat opened straight from the address bar: which device it works on, and
+  // the devices it may switch to, are the server's to say.
+  if (store.get().contextId) void chat.refreshExecutionTarget();
   document.addEventListener("grid:server-status", ({ detail }) => {
     store.set({ restartPending: ["preparing", "restarting"].includes(detail.phase), serverUnavailable: false });
   });

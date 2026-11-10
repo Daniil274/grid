@@ -17,15 +17,31 @@ class SettingsStructuredUpdateRequest(BaseModel):
 
     config: Dict[str, Any]
     target: Optional[str] = None
+    revision: Optional[str] = None
 
 
 class SettingsYamlUpdateRequest(BaseModel):
     yaml_content: str
     target: Optional[str] = None
+    revision: Optional[str] = None
 
 
 class ConversationRenameRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
+
+
+class UiStateRequest(BaseModel):
+    """The local choices of a presented interface, saved without a model call.
+
+    ``state_revision`` is the revision the page is updating: a different stored
+    one means another tab (or the submit) already moved the state, and the
+    server answers with the current values instead of overwriting them.
+    ``request_id`` makes a retry of the same save a no-op.
+    """
+
+    values: Dict[str, Any]
+    state_revision: int = Field(ge=0)
+    request_id: str = Field(min_length=1, max_length=64)
 
 
 class BranchRequest(BaseModel):
@@ -90,6 +106,16 @@ class WorkspaceRequest(BaseModel):
     """The directory a chat works in, as a full path on the server."""
 
     path: str = Field(min_length=1, max_length=4096)
+
+
+class ExecutionRequest(BaseModel):
+    """Where a chat's tools act: ``cloud``, the server, or ``device:<id>``.
+
+    ``workdir`` is the folder on that device; empty means the device's own.
+    """
+
+    target: str = Field(default="cloud", max_length=80)
+    workdir: str = Field(default="", max_length=4096)
 
 
 class ActionReviewRequest(BaseModel):

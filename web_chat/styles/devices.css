@@ -53,6 +53,35 @@
   font-size: 13px;
 }
 
+/* The installers: one line per platform, then the binaries to fetch by hand. */
+.devicesInstall {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  margin: 4px 0 8px;
+}
+
+.devicesInstall__os { display: grid; gap: 8px; align-content: start; }
+.devicesInstall__os h3 { margin: 0; font-size: 13px; color: var(--text-2); font-weight: 600; }
+.devicesInstall__os .devicesCommand { margin: 0; }
+.devicesInstall__os .btn { justify-self: start; }
+
+.devicesInstall__note { color: var(--text-2); font-size: 13px; }
+.devicesInstall__note code {
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-size: 12px;
+}
+
+.devicesDownloads { margin-top: 12px; }
+.devicesDownloads h3 { margin: 0 0 6px; font-size: 13px; color: var(--text-2); font-weight: 600; }
+.devicesDownloads ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.devicesDownloads li { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; font-size: 13px; }
+.devicesDownloads a { color: var(--accent-text, var(--accent)); }
+.devicesDownloads li > span { color: var(--text-3); }
+
 .devicesGrid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));

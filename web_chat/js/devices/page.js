@@ -115,14 +115,27 @@ async function forget(device) {
   await refresh();
 }
 
+/**
+ * One line per platform that fetches the compiled grid-node and pairs it: no
+ * checkout, no Python, nothing to install first. The code is in the line itself,
+ * so the person only copies and pastes it into a terminal.
+ */
+function installLines(server, code) {
+  return {
+    linux: `curl -fsSL ${server}/node/install.sh | sh -s -- ${code}`,
+    windows: `iwr -UseBasicParsing ${server}/node/install.ps1?code=${code} | iex`,
+  };
+}
+
 async function pair() {
   try {
     const { code } = await api.newPairing();
-    const server = location.origin;
-    $("pair-command").textContent =
-      `# from a Grid checkout, with: pip install playwright mcp websockets && playwright install chromium\n` +
-      `python -m grid_node --server ${server} --pair ${code} --driver browser`;
+    const lines = installLines(location.origin, code);
+    $("pair-command-linux").textContent = lines.linux;
+    $("pair-command-windows").textContent = lines.windows;
+    $("pair-code").textContent = code;
     $("pairing").hidden = false;
+    $("pairing").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
     toast(error.message, { tone: "error" });
   }
@@ -248,7 +261,8 @@ function wireViewer() {
 
 $("start-machine").addEventListener("click", startMachine);
 $("pair").addEventListener("click", pair);
-$("copy-command").addEventListener("click", () => copyText($("pair-command").textContent, "Command copied"));
+$("copy-command-linux").addEventListener("click", () => copyText($("pair-command-linux").textContent, "Command copied"));
+$("copy-command-windows").addEventListener("click", () => copyText($("pair-command-windows").textContent, "Command copied"));
 wireViewer();
 refresh();
 setInterval(refresh, REFRESH_MS);

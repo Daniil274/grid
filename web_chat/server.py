@@ -27,7 +27,8 @@ from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Literal, Optional
+from typing import Any, AsyncIterator, Callable, Iterable, Literal, Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, WebSocket, status
 from fastapi.middleware.gzip import GZipMiddleware
@@ -43,14 +44,16 @@ from web_chat.schemas import (
     ActionReviewRequest,
     BranchRequest,
     ConversationCreateRequest,
+    ExecutionRequest,
     MigrationRequest,
     WorkspaceRequest,
     ConversationRenameRequest,
     PrepareAgentRequest,
     SettingsStructuredUpdateRequest,
     SettingsYamlUpdateRequest,
+    UiStateRequest,
 )
-from web_chat.security import OriginGuard, refusal
+from web_chat.security import OriginGuard, TrustedHostMiddleware, refusal
 from web_chat.space import IsolationUnavailable, UserSpace, WorkspaceChoiceError
 from web_chat.spaces import SpacePool
 from core.interruption import COMPACTED_TYPE
@@ -59,6 +62,7 @@ from web_chat.trace import is_tool_result
 from core.checkpoints import CheckpointError
 from web_chat.session import CHECKPOINTS_KEY
 from web_chat.observer import public_message_events
+from web_chat import ui_state
 from web_chat.views import (
     UNTITLED,
     agent_options,
@@ -85,6 +89,47 @@ LAZY_HTML = ROOT / "lazy.html"
 #: How often idle and stale spaces are looked for and retired.
 SWEEP_INTERVAL_SECONDS = 60.0
 
+#: The only parts of the package a browser may fetch: the client's code and its
+#: styles, with the two voice scripts and the favicon assets beside them.
+#: Everything else in ``web_chat`` - the server's own modules, its records -
+#: is never public.
+PUBLIC_STATIC_DIRS = ("js", "styles")
+PUBLIC_STATIC_FILES = (
+    "voice.js",
+    "voice-capture.js",
+    "favicon.svg",
+    "favicon.ico",
+    "apple-touch-icon.png",
+)
+
+#: Never served, even from a public directory: server code, secrets and data
+#: are not client assets, whatever directory a file ended up in.
+PRIVATE_SUFFIXES = frozenset(
+    {
+        ".py", ".pyc", ".pyo", ".pth", ".pyd", ".so", ".dylib",
+        ".db", ".sqlite", ".sqlite3", ".env", ".ini", ".toml", ".yaml", ".yml",
+        ".json", ".pem", ".key", ".log", ".sh", ".bat", ".ps1",
+    }
+)
+
+
+def is_public_static(path: str) -> bool:
+    """Whether *path* (relative to the package) is a client resource.
+
+    An allowlist of paths rather than a blocklist of extensions: ``/static``
+    used to serve the whole package, so ``/static/server.py`` answered with
+    the server's source. Only the client directories and files above pass;
+    server code and data have no public name.
+    """
+    parts = [part for part in path.replace("\\", "/").split("/") if part not in {"", "."}]
+    if not parts or any(part == ".." or part.startswith(".") for part in parts):
+        return False
+    if Path(parts[-1]).suffix.lower() in PRIVATE_SUFFIXES:
+        return False
+    if len(parts) == 1:
+        return parts[0] in PUBLIC_STATIC_FILES
+    return parts[0] in PUBLIC_STATIC_DIRS
+
 
 class RevalidatedStaticFiles(StaticFiles):
     """Static files the browser must revalidate before reuse.
@@ -98,6 +143,15 @@ class RevalidatedStaticFiles(StaticFiles):
         response = super().file_response(*args, **kwargs)
         response.headers["Cache-Control"] = "no-cache"
         return response
+
+
+class PublicStaticFiles(RevalidatedStaticFiles):
+    """Serves the client's files and refuses everything else in the package."""
+
+    def lookup_path(self, path: str):
+        if not is_public_static(path):
+            return "", None
+        return super().lookup_path(path)
 
 
 #: Sent with every response, whatever proxy stands in front: no framing by
@@ -143,6 +197,7 @@ class WebChatServer:
         auth: Optional[Any] = None,
         identify: Optional[Identify] = None,
         allowed_origins: tuple[str, ...] = (),
+        trusted_hosts: Iterable[str] = (),
         action_review_token: Optional[str] = None,
         warm_user: Optional[str] = DEFAULT_USER,
         reviews: Optional[Any] = None,
@@ -163,7 +218,13 @@ class WebChatServer:
         """``auth`` is a web_chat.accounts.http.SessionAuth for a server with
         accounts; without it ``identify`` decides, by default the single local
         user. ``allowed_origins`` are other sites' origins trusted like the
-        server's own (a reverse proxy's public address). ``warm_user``'s space is
+        server's own (a reverse proxy's public address). ``trusted_hosts`` are
+        the ``Host`` values this server answers to, besides loopback names;
+        their hosts and those of ``allowed_origins`` are the only names served
+        (a proxy whose public name is not the one it forwards). The default is
+        no further names: a programmatic ``create_app``/``WebChatServer``
+        answers loopback names only until the names it is published under are
+        given - the Host check is never skipped. ``warm_user``'s space is
         built and its default agent warmed at startup; None warms nobody.
         ``reviews`` is the web_chat.review.desk.ReviewDesk users file reviews
         of answers with; None offers no reviews. ``activity`` records what the
@@ -185,7 +246,13 @@ class WebChatServer:
         self.auth = auth
         self.action_review_token = action_review_token
         self._identify = auth.identify if auth is not None else identify or single_user()
-        self._guard = OriginGuard(allowed_origins)
+        # Every Host served is explicit: loopback names, the configured ones,
+        # and the public names of allowed origins - never the one the request
+        # itself claims (web_chat.security.TrustedHosts). An empty list is a
+        # real answer (loopback only), not "no check": the middleware is always
+        # installed, so a forgotten argument cannot leave the port open.
+        hosts = tuple(dict.fromkeys((*trusted_hosts, *(urlsplit(origin).netloc for origin in allowed_origins))))
+        self._guard = OriginGuard(allowed_origins, trusted_hosts=hosts)
         self._warm_user = warm_user
         self._sweeper: Optional[asyncio.Task] = None
         self.reviews = reviews
@@ -203,6 +270,7 @@ class WebChatServer:
             # Every system's models and providers: the catalog names only its router.
             getattr(deployment, "usage_config", None) or (lambda: (deployment.catalog or deployment.config).config),
             vault=vault,
+            usage=self.usage,
             spent_micro=self.usage.spent_micro,
             local_cli_login=lambda: local_cli_login,
         )
@@ -237,6 +305,10 @@ class WebChatServer:
         self.app = FastAPI(title="Grid Web Chat", docs_url=None, redoc_url=None, lifespan=self._lifespan)
         # A long chat is megabytes of JSON; compressed it is a tenth of that.
         self.app.add_middleware(GZipMiddleware, minimum_size=2048, compresslevel=5)
+        # Added last, so it runs first: a request to a name this server does
+        # not publish is refused before any page, file or route sees it. Always
+        # installed - with no configured name, only loopback names are answered.
+        self.app.add_middleware(TrustedHostMiddleware, allowed=hosts)
 
         @self.app.middleware("http")
         async def security_headers(request: Request, call_next):
@@ -430,7 +502,7 @@ class WebChatServer:
         return current_user, current_space
 
     def _mount_static(self) -> None:
-        self.app.mount("/static", RevalidatedStaticFiles(directory=str(ROOT)), name="static")
+        self.app.mount("/static", PublicStaticFiles(directory=str(ROOT)), name="static")
 
     @asynccontextmanager
     async def _lifespan(self, _app: FastAPI) -> AsyncIterator[None]:
@@ -532,6 +604,9 @@ class WebChatServer:
         file = self.deployment.config_file(target)
         raw = self.deployment.config_dict(file.key)
         cfg = space.config.config
+        from core.model_registry import resolve_document
+        registry = self.deployment.model_registry()
+        resolved = resolve_document(raw, file.path) if file.kind not in {"models", "providers"} else {}
         return {
             "target": file.key,
             "kind": file.kind,
@@ -540,6 +615,10 @@ class WebChatServer:
                 for item in self.deployment.config_files()
             ],
             "config": raw,
+            "model_catalog": {**registry.models, **resolved.get("models", {})},
+            "registry_models": registry.models,
+            "provider_catalog": {**registry.providers, **resolved.get("providers", {})},
+            "revision": hashlib.sha256(file.path.read_bytes()).hexdigest(),
             "raw_yaml": self.deployment.config_yaml(file.key),
             # The forms are drawn from the schema, so every setting it knows is editable.
             "schema": config_schema(),
@@ -552,7 +631,7 @@ class WebChatServer:
                 "container_id": space.container_id,
                 "agent_options": agent_options(space.registry),
                 "systems": system_options(space.registry),
-                "model_keys": sorted((raw.get("models") or {}).keys()),
+                "model_keys": sorted((cfg.models or {}).keys()),
                 "tool_keys": sorted((raw.get("tools") or {}).keys()),
                 "prompt_keys": sorted((raw.get("prompt_templates") or {}).keys()),
             },
@@ -880,6 +959,42 @@ class WebChatServer:
                 raise HTTPException(status_code=400, detail=str(exc)) from None
             return JSONResponse({"id": context_id, "workspace": str(workspace)})
 
+        def known_conversation(space: UserSpace, context_id: str) -> None:
+            """404 for a chat that is not there: metadata would be made up for it."""
+            if space.context_manager().conversation_view(context_id) is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+
+        @api.get("/api/chat/conversations/{context_id}/execution")
+        async def read_execution_target(
+            context_id: str, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """Where a chat's tools act, and the devices it may switch to.
+
+            The choice lives in the conversation's metadata (like the policy
+            filter), so it survives a restart and reaches the prompt; the devices
+            are the ones connected now (core.factory.execution).
+            """
+            known_conversation(space, context_id)
+            return JSONResponse(space.execution_target(context_id))
+
+        @api.put("/api/chat/conversations/{context_id}/execution")
+        async def choose_execution_target(
+            context_id: str, body: ExecutionRequest, space: UserSpace = Depends(current_space)
+        ) -> JSONResponse:
+            """Point a chat at the server or one of the user's devices.
+
+            The answer is the state the chat is in afterwards - the target, its
+            folder and the devices it may switch to - never an echo of the
+            request: a device that is not connected leaves the chat where it was.
+            """
+            known_conversation(space, context_id)
+            if not space.set_execution_target(context_id, body.target, body.workdir):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"No device like {body.target} is connected to this account",
+                )
+            return JSONResponse({"ok": True, **space.execution_target(context_id)})
+
         @api.patch("/api/chat/conversations/{context_id}")
         async def rename_conversation(
             context_id: str, body: ConversationRenameRequest, space: UserSpace = Depends(current_space)
@@ -1087,6 +1202,41 @@ class WebChatServer:
             )
             return JSONResponse({"id": context_id, **result})
 
+        @api.put("/api/chat/conversations/{context_id}/ui/{message_id}/{ui_id}")
+        async def save_ui_state(
+            context_id: str,
+            message_id: str,
+            ui_id: str,
+            body: UiStateRequest,
+            space: UserSpace = Depends(current_space),
+        ) -> JSONResponse:
+            """Keep the local choices of a presented interface (web_chat.ui_state).
+
+            Sorting and selection happen on the page; this only remembers the
+            result, checked against the document it belongs to. A stale
+            ``state_revision`` answers 409 with the values that are current, so
+            a second tab is never overwritten silently.
+            """
+            manager = space.context_manager()
+            try:
+                state = await asyncio.to_thread(
+                    ui_state.save_values,
+                    manager,
+                    context_id,
+                    message_id,
+                    ui_id,
+                    body.model_dump(),
+                )
+            except ui_state.UiStateError as exc:
+                if exc.code == "ui.not_found":
+                    status = 404
+                elif exc.code == "ui.stale":
+                    status = 409
+                else:
+                    status = 400
+                return JSONResponse(exc.as_dict(), status_code=status)
+            return JSONResponse(state)
+
         @api.post("/api/chat/conversations/{context_id}/compact")
         async def compact_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
             """Summarize the agent's session in this conversation now (core.context_budget)."""
@@ -1229,6 +1379,10 @@ class WebChatServer:
             body: SettingsStructuredUpdateRequest, user: User = Depends(admin)
         ) -> JSONResponse:
             try:
+                current = self.deployment.config_file(body.target).path.read_bytes()
+                expected = getattr(body, "revision", None)
+                if expected and hashlib.sha256(current).hexdigest() != expected:
+                    raise RuntimeError("Configuration changed since it was loaded; reload before saving.")
                 self.deployment.save_structured_config(body.config, body.target)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1239,6 +1393,9 @@ class WebChatServer:
             body: SettingsYamlUpdateRequest, user: User = Depends(admin)
         ) -> JSONResponse:
             try:
+                current = self.deployment.config_file(body.target).path.read_bytes()
+                if body.revision and hashlib.sha256(current).hexdigest() != body.revision:
+                    raise RuntimeError("Configuration changed since it was loaded; reload before saving.")
                 self.deployment.save_yaml_config(body.yaml_content, body.target)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1248,7 +1405,8 @@ class WebChatServer:
         async def chat_ws(websocket: WebSocket, context_id: str, space: UserSpace = Depends(current_space)) -> None:
             from web_chat.session import chat_session
 
-            await chat_session(space, websocket, context_id)
+            authorize = self.auth.revalidator(websocket) if self.auth is not None else None
+            await chat_session(space, websocket, context_id, authorize=authorize)
 
 
 def create_app(

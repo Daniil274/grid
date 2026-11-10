@@ -7,7 +7,7 @@
  * caller registers, so no component has to parse raw frames.
  */
 
-/** @typedef {"token"|"step"|"step_removed"|"reasoning"|"routed"|"tool_issues"|"final_output"|"answer_reset"|"attached"|"stopping"|"interrupted"|"image"|"delivery"|"queue"|"steered"|"revision_notice"|"error"|"busy"|"done"|"policy_filter"|"policy_review"} ChatEventType */
+/** @typedef {"token"|"step"|"step_removed"|"reasoning"|"routed"|"tool_issues"|"final_output"|"answer_reset"|"attached"|"stopping"|"interrupted"|"image"|"delivery"|"queue"|"steered"|"revision_notice"|"model"|"ui"|"ui_submitted"|"error"|"busy"|"done"|"policy_filter"|"policy_review"|"execution_target"} ChatEventType */
 
 export class ChatConnection {
   /**
@@ -57,21 +57,33 @@ export class ChatConnection {
 
   /**
    * @param {string} message
-   * @param {{system_key: ?string, agent_key: ?string, policy_filter?: string}} selection
-   *   nulls mean `auto`; `policy_filter` is the policy switch
+   * @param {{system_key: ?string, agent_key: ?string, policy_filter?: string,
+   *   execution_target?: string, execution_workdir?: string}} selection
+   *   nulls mean `auto`; `policy_filter` is the policy switch; `execution_target`
+   *   is where the tools act (`cloud` or `device:<id>`, with its folder)
    * @param {string[]} [images] data URLs attached to the message
+   * @param {string|null} [audio] WAV data URL attached to the message
    * @param {?string} [editOf] the slot of the message this one is a new version of
    * @param {?string} [delivery] while the agent works: "now", "next_step",
    *   "after_turn", or null for the decision model to choose
    */
-  send(message, selection, images = [], editOf = null, delivery = null) {
+  send(message, selection, images = [], editOf = null, delivery = null, audio = null) {
     return this._post({
       message,
       ...selection,
       ...(images.length ? { images } : {}),
       ...(editOf ? { edit_of: editOf } : {}),
       ...(delivery ? { delivery } : {}),
+      ...(audio ? { audio } : {}),
     });
+  }
+
+  /** Send a captured audio data URL as an audio-bearing user message. */
+  sendAudio(audio, selection) {
+    if (typeof audio !== "string" || !audio.startsWith("data:audio/wav;base64,")) {
+      throw new TypeError("Audio messages must be WAV data URLs");
+    }
+    return this._post({ message: "", audio, ...selection });
   }
 
   /** Act on a waiting message: "send_queued" or "unqueue". */
@@ -97,9 +109,39 @@ export class ChatConnection {
     return this._post({ action: "policy_filter", filter });
   }
 
+  /**
+   * Point this conversation at the server or a device - a live switch: the
+   * running turn and its tools follow it from the next call on. The server
+   * answers with `execution_target`: the state the chat is in afterwards, its
+   * devices included, so a refused switch leaves the page showing what is true.
+   */
+  executionTarget(target, workdir = "") {
+    return this._post({ action: "execution_target", target, workdir });
+  }
+
   /** Allow or decline a call the policy holds for the user; `remember` allows the tool for the turn. */
   answerReview(approvalId, { approve, remember = false }) {
     return this._post({ action: "policy_review", approval_id: approvalId, approve, remember });
+  }
+
+  /**
+   * Send a button of a presented interface as the user's next turn.
+   *
+   * The browser sends ids, values and revisions only: the server composes the
+   * sentence from the stored document, so no prompt, tool or HTML travels from
+   * here. `requestId` makes a retry of the same press harmless.
+   */
+  uiAction({ messageId, uiId, actionId, documentRevision, stateRevision, values, requestId }) {
+    return this._post({
+      action: "ui_action",
+      message_id: messageId,
+      ui_id: uiId,
+      action_id: actionId,
+      document_revision: documentRevision,
+      state_revision: stateRevision,
+      values,
+      request_id: requestId,
+    });
   }
 
   /** Follow the conversation's running turn: the server replays it, then streams live. */

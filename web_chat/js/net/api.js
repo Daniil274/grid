@@ -64,6 +64,17 @@ export const api = {
   deviceControl: (id, taken) => request(`/api/devices/${encodeURIComponent(id)}/control`, json("POST", { taken })),
   newPairing: () => request("/api/devices/pairing", { method: "POST" }),
   forgetDevice: (id) => request(`/api/devices/paired/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** The folders of one device, for the chat's folder picker (device's own disk). */
+  deviceDirs: (id, path) =>
+    request(`/api/devices/${encodeURIComponent(id)}/dirs${queryString({ path })}`, { cache: "no-store" }),
+  /** Make a folder on the device; the answer is the listing it is in. */
+  makeDeviceDir: (id, path, mkdir) =>
+    request(`/api/devices/${encodeURIComponent(id)}/dirs`, json("POST", { path, mkdir })),
+  /** Where a chat's tools act: the server ("cloud") or one of the user's devices. */
+  executionTarget: (id) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/execution`, { cache: "no-store" }),
+  setExecutionTarget: (id, target, workdir) =>
+    request(`/api/chat/conversations/${encodeURIComponent(id)}/execution`, json("PUT", { target, workdir })),
   serverStatus: () => request("/api/server/status", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
   adminServer: () => request("/api/admin/server", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
   restartServer: () => request("/api/admin/server/restart", { method: "POST" }),
@@ -95,6 +106,16 @@ export const api = {
       { cache: "no-cache" },
     ),
   createConversation: (selection) => request("/api/chat/conversations", json("POST", selection)),
+  /**
+   * Remember the local choices of a presented interface (web_chat/ui_state.py).
+   * `state_revision` is the revision the page is updating: a 409 (`ui.stale`)
+   * carries the values the server actually holds, so the page can show them.
+   */
+  saveUiState: (id, messageId, uiId, body) =>
+    request(
+      `/api/chat/conversations/${encodeURIComponent(id)}/ui/${encodeURIComponent(messageId)}/${encodeURIComponent(uiId)}`,
+      json("PUT", body),
+    ),
   /** Projects: a metadata layer over chats (title, parent, description). */
   projects: () => request("/api/projects", { cache: "no-store" }),
   createProject: (project) => request("/api/projects", json("POST", project)),
@@ -108,6 +129,15 @@ export const api = {
     request(`/api/chat/conversations/${encodeURIComponent(id)}/continue`, json("POST", { strategy })),
   /** The plan of a project: the tasks its chats planned, bd's statuses first. */
   projectPlan: (id) => request(`/api/projects/${encodeURIComponent(id)}/plan`, { cache: "no-store" }),
+  /**
+   * One chat of a project's map: its safe messages, runs and operations.
+   * Asked only when that chat is selected; never the full transcript.
+   */
+  mapChat: (projectId, chatId) =>
+    request(
+      `/api/projects/${encodeURIComponent(projectId)}/map/chats/${encodeURIComponent(chatId)}`,
+      { cache: "no-cache" },
+    ),
   /** The plan a chat's turns left behind, for the card shown when it opens again. */
   conversationPlan: (id) =>
     request(`/api/chat/conversations/${encodeURIComponent(id)}/plan`, { cache: "no-store" }),
@@ -154,15 +184,31 @@ export const api = {
   task: (id) => request(`/api/tasks/${encodeURIComponent(id)}`, { cache: "no-store" }),
   createTask: (task) => request("/api/tasks", json("POST", task)),
   updateTask: (id, patch) => request(`/api/tasks/${encodeURIComponent(id)}`, json("PATCH", patch)),
-  closeTask: (id, reason) => request(`/api/tasks/${encodeURIComponent(id)}/close`, json("POST", { reason })),
-  taskDep: (id, action, parentId) =>
-    request(`/api/tasks/${encodeURIComponent(id)}/deps`, json("POST", { action, parent_id: parentId })),
+  /**
+   * Close a task. `options.request_id` is the caller's action key: the server's
+   * journal answers a repeat instead of closing twice (web_chat/tasks_api.py).
+   */
+  closeTask: (id, reason, options = {}) =>
+    request(
+      `/api/tasks/${encodeURIComponent(id)}/close`,
+      json("POST", { reason, ...(options.request_id ? { request_id: options.request_id } : {}) }),
+    ),
+  /** One dependency edge; `options.request_id` is the action key, as above. */
+  taskDep: (id, action, parentId, options = {}) =>
+    request(
+      `/api/tasks/${encodeURIComponent(id)}/deps`,
+      json("POST", {
+        action,
+        parent_id: parentId,
+        ...(options.request_id ? { request_id: options.request_id } : {}),
+      }),
+    ),
   initTracker: () => request("/api/tasks/init", { method: "POST" }),
   /** A config file: `target` is the catalog's or a system's key (web_chat/deployment.py); none is the default system's. */
   getSettings: (target) => request(`/api/settings${target ? `?target=${encodeURIComponent(target)}` : ""}`),
-  saveSettings: (config, target) => request("/api/settings/structured", json("PUT", { config, target })),
-  saveYaml: (yamlContent, target) =>
-    request("/api/settings/yaml", json("PUT", { yaml_content: yamlContent, target })),
+  saveSettings: (config, target, revision) => request("/api/settings/structured", json("PUT", { config, target, revision })),
+  saveYaml: (yamlContent, target, revision) =>
+    request("/api/settings/yaml", json("PUT", { yaml_content: yamlContent, target, revision })),
   /** Report a problem with an answer: freezes it for the admins (web_chat/review). */
   reportAnswer: (contextId, messageId, note) =>
     request(`/api/chat/conversations/${encodeURIComponent(contextId)}/reviews`, json("POST", { message_id: messageId, note })),

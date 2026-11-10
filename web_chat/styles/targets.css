@@ -1,0 +1,290 @@
+/**
+ * Where a chat's tools act (web_chat/js/ui/target-picker.js): the target chip -
+ * this server or one of the user's computers - and, on a computer, the folder
+ * chip with its picker.
+ *
+ * Both hang off the topbar beside the route chip, which answers a different
+ * question ("who works on this message"); the shapes are the route picker's so
+ * the two read as one family.
+ */
+
+.topbar__target {
+  position: relative;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.routeChip__icon {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+/* A chat that works on a computer says so: the server is the quiet default. */
+.routeChip--target[data-mode="device"],
+.routeChip--workdir {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.routeChip--target[data-mode="device"] .routeChip__icon,
+.routeChip--workdir .routeChip__icon {
+  color: var(--accent);
+}
+
+.routeChip--workdir {
+  max-width: min(30vw, 260px);
+}
+
+/* -- the target popover --------------------------------------------------- */
+.popover--target {
+  width: min(460px, calc(100vw - 32px));
+}
+
+.targetList {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  max-height: min(48vh, 380px);
+  overflow-y: auto;
+}
+
+.targetConnect {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.targetConnect__head {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.targetConnect__hint {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.targetConnect__row {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.targetConnect__os {
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.targetConnect__code {
+  overflow-x: auto;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--bg-inset);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.targetConnect__link {
+  margin-top: 4px;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.targetConnect__link:hover {
+  text-decoration: underline;
+}
+
+/* -- the folder popover --------------------------------------------------- */
+.popover--workdir {
+  right: 0;
+  left: auto;
+  width: min(520px, calc(100vw - 32px));
+}
+
+.workdirBar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.workdirBar__up {
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+}
+
+.workdirPath {
+  flex: 1;
+  overflow: hidden;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--bg-inset);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workdirBookmarks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.workdirBookmark {
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-size: 11.5px;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+
+.workdirBookmark:hover {
+  border-color: var(--line-strong);
+  background: var(--bg-3);
+}
+
+.workdirList {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  max-height: min(40vh, 320px);
+  overflow-y: auto;
+}
+
+.workdirRow {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.workdirRow__open {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  color: var(--text);
+  text-align: left;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+
+.workdirRow__open:hover,
+.workdirRow__open:focus-visible {
+  border-color: var(--accent-line);
+  background: var(--bg-3);
+}
+
+.workdirRow__open svg {
+  flex-shrink: 0;
+  color: var(--tool-edit);
+}
+
+.workdirRow__name {
+  overflow: hidden;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workdirRow__use {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11.5px;
+  transition: border-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.workdirRow__use:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.workdirForm {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  margin-top: 12px;
+}
+
+.workdirForm .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.workdirStatus {
+  margin-top: 8px;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.workdirStatus[data-tone="error"] {
+  color: var(--danger);
+}
+
+/* -- a phone -------------------------------------------------------------- */
+@media (max-width: 720px) {
+  .topbar__target {
+    position: static;
+  }
+
+  /* The folder picker hangs from the whole bar, inside the screen. */
+  .popover--target,
+  .popover--workdir {
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-height: calc(100dvh - 150px);
+    overflow-y: auto;
+  }
+
+  .workdirList,
+  .targetList {
+    max-height: none;
+    overflow: visible;
+  }
+
+  /* The chips keep their names: the meta line is what the popover repeats. */
+  .routeChip--target .routeChip__meta,
+  .routeChip--workdir .routeChip__meta {
+    display: none;
+  }
+
+  .targetConnect__row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .targetConnect__os {
+    grid-column: 1 / -1;
+  }
+}
