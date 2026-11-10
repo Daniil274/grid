@@ -50,3 +50,17 @@ func TestInstallNeedsAServer(t *testing.T) {
 		t.Fatal("install without a server succeeded")
 	}
 }
+
+func TestAndroidRegistersNothingAndSaysHowToStart(t *testing.T) {
+	message := startOnAndroid(Options{Executable: "/data/data/com.termux/files/home/grid-node",
+		Server: "https://grid.example", Kind: "desktop"})
+	for _, expected := range []string{
+		"no service manager",
+		"--server https://grid.example",
+		"termux-wake-lock",
+	} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("the Android answer lacks %q:\n%s", expected, message)
+		}
+	}
+}

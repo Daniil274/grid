@@ -8,7 +8,11 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+# Python builds land in dist/; the grid-node binaries this server hands out
+# at /node/bin/<target> are tracked on purpose (see grid_node_go/build.sh).
+dist/*
+!dist/grid-node/
+!dist/grid-node/*
 downloads/
 eggs/
 .eggs/

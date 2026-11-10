@@ -136,9 +136,21 @@ func Install(o Options) (string, error) {
 		return installWindows(o)
 	case "darwin":
 		return installLaunchd(o)
+	case "android":
+		// Termux has systemd, launchd nor Task Scheduler: nothing to register.
+		return startOnAndroid(o), nil
 	default:
 		return installSystemd(o)
 	}
+}
+
+// startOnAndroid tells how to run the node where no service manager exists.
+// Android kills a background process when the terminal leaves the screen unless
+// the wake lock is held, so that is part of the answer.
+func startOnAndroid(o Options) string {
+	return "Android has no service manager, so nothing was registered; start the node with:\n" +
+		"  " + o.Command() + " &\n" +
+		"and keep it alive with: termux-wake-lock"
 }
 
 func installSystemd(o Options) (string, error) {

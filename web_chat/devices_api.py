@@ -139,7 +139,8 @@ LIST_DIRS = "fs_list_dirs"
 #: A tool package's name: one directory under a ``tools/`` root, nothing else.
 PACKAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 #: The binaries this server hands out, by the name the installer asks for.
-NODE_TARGETS = ("grid-node-linux-amd64", "grid-node-linux-arm64", "grid-node-windows-amd64.exe")
+NODE_TARGETS = ("grid-node-linux-amd64", "grid-node-linux-arm64", "grid-node-android-arm64",
+                "grid-node-windows-amd64.exe")
 
 
 def server_holder(user_id: str) -> str:
@@ -278,6 +279,13 @@ set -eu
 SERVER="${GRID_SERVER:-@@SERVER@@}"
 CODE="${1:-${GRID_PAIR_CODE:-@@CODE@@}}"
 
+# Termux calls itself Linux but is Android: it runs only position independent
+# binaries and keeps no systemd, so it gets its own build and its own start.
+ANDROID=""
+if [ -n "${TERMUX_VERSION:-}" ] || [ -d /data/data/com.termux/files/usr ]; then
+  ANDROID=1
+fi
+
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64|Linux-amd64) TARGET=grid-node-linux-amd64 ;;
   Linux-aarch64|Linux-arm64) TARGET=grid-node-linux-arm64 ;;
@@ -286,6 +294,15 @@ case "$(uname -s)-$(uname -m)" in
     exit 1
     ;;
 esac
+if [ -n "$ANDROID" ]; then
+  case "$(uname -m)" in
+    aarch64|arm64) TARGET=grid-node-android-arm64 ;;
+    *)
+      echo "grid-node: this server has no Android build for $(uname -m); see $SERVER/node/bin/" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 BIN_DIR="${GRID_NODE_HOME:-$HOME/.grid-node}/bin"
 mkdir -p "$BIN_DIR"
@@ -302,6 +319,20 @@ else
 fi
 chmod +x "$TMP"
 mv "$TMP" "$BIN_DIR/grid-node"
+
+if [ -n "$ANDROID" ]; then
+  # Nothing registers a service here, so pair now and leave the node running.
+  LOG="${GRID_NODE_HOME:-$HOME/.grid-node}/node.log"
+  mkdir -p "${GRID_NODE_HOME:-$HOME/.grid-node}"
+  if [ -n "$CODE" ]; then
+    nohup "$BIN_DIR/grid-node" --server "$SERVER" --pair "$CODE" >>"$LOG" 2>&1 &
+  else
+    nohup "$BIN_DIR/grid-node" --server "$SERVER" >>"$LOG" 2>&1 &
+  fi
+  echo "grid-node: started in the background; its log is $LOG"
+  echo "grid-node: keep it alive with: termux-wake-lock"
+  exit 0
+fi
 
 if [ -n "$CODE" ]; then
   exec "$BIN_DIR/grid-node" install --server "$SERVER" --pair "$CODE"

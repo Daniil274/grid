@@ -539,6 +539,8 @@ def test_the_installers_name_this_server_and_pair_the_device(tmp_path):
     script = client.get("/node/install.sh").text
     assert "http://testserver" in script and 'URL="$SERVER/node/bin/$TARGET"' in script
     assert "grid-node-linux-amd64" in script and "grid-node-linux-arm64" in script
+    # Termux is Android and gets its own build: it runs only PIE binaries.
+    assert "grid-node-android-arm64" in script and "TERMUX_VERSION" in script
     assert "grid-node" in script and "install --server" in script and "--pair" in script
     assert "GRID_PAIR_CODE" in script
 
