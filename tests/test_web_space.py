@@ -422,3 +422,31 @@ def test_a_branch_works_in_the_directory_of_its_conversation(minimal_config, mon
     branch, _ = manager.fork_context(chat, message_id)
 
     assert space.conversation_workspace(branch) == project.resolve()
+
+
+async def test_closing_the_space_saves_what_the_conversations_hold(
+    minimal_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The strict save in close() is a barrier for the background saver.
+
+    A turn may have written its answer just as the space retired: closing the
+    space writes what the conversations still hold (space.close ->
+    conversations.save(strict=True) before the store flush), so nothing the
+    user has read goes away with the space.
+    """
+    monkeypatch.setenv("TEST_OPENROUTER_KEY", "test-key")
+
+    space = UserSpace(Deployment(config_path=str(minimal_config)))
+    manager = space.context_manager()
+    context_id = manager.start_new_context()
+    manager.append_message_to(context_id, "user", "Keep me")
+    # The message is in memory, its save still with the background saver.
+    await space.close()
+
+    reopened = UserSpace(Deployment(config_path=str(minimal_config)))
+    try:
+        view = reopened.context_manager().conversation_view(context_id)
+        assert [message.content for message in view["messages"]] == ["Keep me"]
+    finally:
+        await reopened.close()

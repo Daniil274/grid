@@ -155,7 +155,7 @@ async function openChat(state) {
 const runningTurn = (resumes = false) => ({ message: resumes ? "" : "hi", resumes, elapsed_ms: 5200 });
 
 // -- tests -------------------------------------------------------------------
-test("hide and show sends exactly one attach, however many wake-up events arrive", async () => {
+test("hide and show reconnects nothing while the turn still streams, however many wake-ups arrive", async () => {
   const state = { messages: storedUser(), active_turn: runningTurn() };
   const { chat } = await openChat(state);
   assert.equal(attachFrames(), 1); // the open chat attached to its running turn
@@ -171,10 +171,13 @@ test("hide and show sends exactly one attach, however many wake-up events arrive
   fire(pageListeners, "online");
   await chat.resumeLive();
 
-  assert.equal(sockets().length, before + 1, "one new connection");
-  assert.equal(attachFrames(), 2, "exactly one attach for the whole burst");
+  // The socket the turn streams over is open and carries the turn the server
+  // runs: the burst read the conversation once and drew nothing over the
+  // stream - so there was nothing to reconnect, and nothing reattached.
+  assert.equal(sockets().length, before, "the live connection is the freshest state there is");
+  assert.equal(attachFrames(), 1, "exactly one attach for the whole burst: the one the open made");
   assert.equal(lastSocket().sent.filter((frame) => frame.action === "attach").length, 1);
-  assert.equal(chat.isStreaming, true, "the running turn is followed again");
+  assert.equal(chat.isStreaming, true, "the running turn is followed as it was");
 
   // A done frame is what ends it.
   state.active_turn = null;
@@ -224,15 +227,26 @@ test("a turn found still running is rebuilt in place, without a duplicate bubble
   const { chat, transcript } = await openChat(state);
   assert.equal(transcript.count(), 2, "the request and the answer following it");
   lastSocket().deliver({ type: "token", content: "half an ans" });
+  const answer = transcript.last();
   assert.equal(transcript.last().text, "half an ans");
+  const connections = sockets().length;
 
-  // The lock screen came and went while the turn ran on.
+  // The lock screen killed the socket without a close event; the turn ran on.
+  lastSocket().die();
+
+  // The page comes back: the turn it finds still running is the one whose
+  // answer is already on screen - rebuilt in place, over a new socket.
   await chat.resumeLive();
+
+  assert.equal(sockets().length, connections + 1, "a new connection for the rebuilt turn");
+  assert.equal(transcript.count(), 2, "one answer bubble, not two");
+  assert.equal(transcript.last(), answer, "the same bubble, not a new one");
+  assert.equal(transcript.last().role, "assistant");
+  assert.equal(transcript.last().text, "half an ans", "the streamed text survived the round trip");
 
   // The server's snapshot: the answer it has so far, once, into the same bubble.
   lastSocket().deliver({ type: "token", content: "half an answer" });
   assert.equal(transcript.count(), 2, "one answer bubble, not two");
-  assert.equal(transcript.last().role, "assistant");
   assert.equal(transcript.last().text, "half an answer");
   assert.equal(chat.isStreaming, true);
 
@@ -284,4 +298,19 @@ test("done is what finalises a turn", async () => {
 
   assert.equal(finishes.length, 1);
   assert.equal(chat.isStreaming, false);
+});
+
+test("the attached frame re-bases the live clock on the server's elapsed", async () => {
+  const state = { messages: storedUser(), active_turn: runningTurn() };
+  const { chat, transcript } = await openChat(state);
+
+  // The history read that opened the page is older than the attach: only the
+  // frame knows how long the turn has really run.
+  const seen = [];
+  transcript.last().reasoning.setElapsed = (elapsedMs) => seen.push(elapsedMs);
+
+  lastSocket().deliver({ type: "attached", message: "hi", resumes: false, elapsed_ms: 12_345, run_id: "r" });
+
+  assert.deepEqual(seen, [12_345]);
+  assert.equal(chat.isStreaming, true);
 });

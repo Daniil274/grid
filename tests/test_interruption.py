@@ -579,3 +579,105 @@ def test_a_turn_that_failed_before_records_existed_can_be_continued():
     assert "Too many images" in record.detail
     assert record.task == "Open Notepad"
     assert manager.pending_interruption(context_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_stop_mid_answer_keeps_the_partial_text_the_page_read(factory):
+    """A stopped turn's message is the answer it had written, not a summary.
+
+    The partial text the page was streaming is what the turn leaves behind -
+    live (the returned answer) and stored (the message with the mark of the
+    interruption): after a Stop, a reload or a reconcile shows the same words
+    the user read instead of losing them (web_chat.session._persist_trace
+    attaches the turn's events to this message by run_id).
+    """
+    context_id = factory.context_manager.start_new_context()
+    at_tool, release = asyncio.Event(), asyncio.Event()
+
+    async def tool_runs():
+        at_tool.set()
+        await release.wait()
+
+    said = RunItemStreamEvent(
+        name="message_output_created",
+        item=SimpleNamespace(type="message_output_item", raw_item={"type": "message"}),
+    )
+
+    def reading(event, agent_key=None):
+        # What the page was reading when the user stopped.
+        return "The backup finished." if event is said else None
+
+    stream = FakeStream(
+        [said, called("c1"), tool_runs, returned("c1")],
+        [called("c2", tool="perceive"), returned("c2")],
+        final_output="Done.",
+    )
+    runner = StreamingRunner(stream)
+    with patch("agents.Runner", runner):
+        turn = asyncio.create_task(
+            factory.run_agent(
+                "worker",
+                "Click OK",
+                context_id=context_id,
+                stream=True,
+                stream_observer=SimpleNamespace(handle_event=reading),
+            )
+        )
+        await at_tool.wait()
+        assert factory.request_stop(context_id) is True
+        release.set()
+        answer = await turn
+
+    assert stream.cancel_mode == "after_turn"
+    record = last_record(factory, context_id)
+    assert record.reason is StopReason.USER_STOP
+    # The words the page had read are the turn's message - the ones the
+    # factory answers with and the ones stored in the conversation.
+    assert answer == "The backup finished."
+    messages = stored(factory, context_id)
+    assert messages[-1].role == "assistant"
+    assert messages[-1].content == "The backup finished."
+    assert interruption_of(messages[-1]) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_stop_before_a_word_answers_with_the_summary(factory):
+    """No partial text was written: the summary stands in, as before."""
+    context_id = factory.context_manager.start_new_context()
+    at_tool, release = asyncio.Event(), asyncio.Event()
+
+    async def tool_runs():
+        at_tool.set()
+        await release.wait()
+
+    def reading(event, agent_key=None):
+        return None
+
+    stream = FakeStream(
+        [called("c1"), tool_runs, returned("c1")],
+        [called("c2", tool="perceive"), returned("c2")],
+        final_output="Done.",
+    )
+    runner = StreamingRunner(stream)
+    with patch("agents.Runner", runner):
+        turn = asyncio.create_task(
+            factory.run_agent(
+                "worker",
+                "Click OK",
+                context_id=context_id,
+                stream=True,
+                stream_observer=SimpleNamespace(handle_event=reading),
+            )
+        )
+        await at_tool.wait()
+        assert factory.request_stop(context_id) is True
+        release.set()
+        answer = await turn
+
+    record = last_record(factory, context_id)
+    assert record.reason is StopReason.USER_STOP
+    assert "stopped by the user" in answer
+    messages = stored(factory, context_id)
+    assert messages[-1].role == "assistant"
+    assert "stopped by the user" in messages[-1].content
+    assert interruption_of(messages[-1]) is not None

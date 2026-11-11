@@ -106,6 +106,17 @@ TIMEOUT_REPORT = (
 )
 
 
+def outcome_for_stop(reason: StopReason) -> str:
+    """How the runtime ended a run, as the task journal records it."""
+    if reason == StopReason.TIMEOUT:
+        return "timeout"
+    if reason == StopReason.MAX_TURNS:
+        return "attempt_limit"
+    if reason in (StopReason.USER_STOP, StopReason.CRASH):
+        return "cancelled"
+    return "error"
+
+
 def limit_report_seconds(timeout: float) -> float:
     """Seconds an agent its time limit stopped gets to write that report: a
     tenth of the limit, from half a minute to two."""
@@ -156,8 +167,13 @@ class TurnRunner:
         agent_key: str,
         action_state: Any,
         on_event: Optional[Callable[[Any], None]] = None,
+        on_fragment: Optional[Callable[[str], None]] = None,
     ) -> List[str]:
         """Feed a streamed run to its observer; return the text fragments it rendered.
+
+        ``on_fragment`` receives each answer fragment as the stream renders it:
+        what the page is showing when the run is stopped mid-answer is what
+        the turn then keeps (see ``_record_interruption``).
 
         Rendering and bookkeeping never stop a run: their failures are logged.
         """
@@ -178,6 +194,8 @@ class TurnRunner:
                 logger.exception("Stream bookkeeping failed for %s", agent_key)
             if fragment:
                 fragments.append(fragment)
+                if on_fragment is not None:
+                    on_fragment(fragment)
         return fragments
 
     def _run_config(
@@ -724,8 +742,12 @@ class TurnRunner:
         stream: bool,
         observer: Any,
         progress: "RunProgress",
+        streamed: Optional[List[str]] = None,
     ) -> Tuple[str, Any]:
         """Recover a missing model result once within the original deadline/session."""
+        # ``streamed`` collects the answer fragments this attempt renders:
+        # what the page is showing if the run stops mid-answer, and what the
+        # turn then keeps as its message (see _record_interruption).
         timeout = self.config.get_agent_timeout(agent_key)
         # 0 means no timeout: a coordinating agent runs as long as it needs.
         deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
@@ -736,6 +758,7 @@ class TurnRunner:
                         return await self._run_attempt_once(
                             agent, agent_key, run_input, run_ctx, session,
                             stream=stream, observer=observer, progress=progress,
+                            streamed=streamed,
                         )
                     except TurnStopped as stop:
                         recoverable = stop.reason == StopReason.ERROR and (stop.detail.startswith(ANSWER_CUT_OFF) or stop.detail in {
@@ -770,6 +793,7 @@ class TurnRunner:
         stream: bool,
         observer: Any,
         progress: "RunProgress",
+        streamed: Optional[List[str]] = None,
     ) -> Tuple[str, Any]:
         """One run of the agent. Returns its answer text and the SDK result.
 
@@ -778,6 +802,11 @@ class TurnRunner:
         that a retry would repeat, the user's graceful Stop. Other errors
         propagate for _run_with_retries to judge.
         """
+        if streamed is not None:
+            # Only this attempt's rendered fragments stand in a stopped turn's
+            # message (see _record_interruption): the ones of an attempt
+            # before a retry do not.
+            del streamed[:]
         timeout = self.config.get_agent_timeout(agent_key)
         max_turns = self.config.get_max_turns(agent_key)
         control = run_ctx.run_control
@@ -841,6 +870,7 @@ class TurnRunner:
                             agent_key=agent_key,
                             action_state=run_ctx.action_state,
                             on_event=record_tool_event,
+                            on_fragment=streamed.append if streamed is not None else None,
                         )
                     finally:
                         if control is not None:
@@ -909,6 +939,7 @@ class TurnRunner:
         stream: bool,
         observer: Any,
         progress: "RunProgress",
+        streamed: Optional[List[str]] = None,
     ) -> Tuple[str, Any]:
         """Run until an answer: transient provider errors are retried with backoff.
 
@@ -950,6 +981,7 @@ class TurnRunner:
                         stream=stream,
                         observer=observer,
                         progress=progress,
+                        streamed=streamed,
                     )
                 except TurnStopped:
                     raise
@@ -1228,6 +1260,7 @@ class TurnRunner:
         progress: "RunProgress",
         turn_id: Optional[str],
         images: Optional[List[str]] = None,
+        partial_answer: str = "",
     ) -> Interruption:
         """Store why the turn stopped and what was in progress; return the record.
 
@@ -1249,7 +1282,7 @@ class TurnRunner:
             self.context_manager.append_message_to(
                 context_id,
                 "assistant",
-                with_images(interruption.summary(), images or []),
+                with_images(self._interruption_text(interruption, partial_answer), images or []),
                 interruption.message_metadata(context_id=context_id, turn_id=turn_id),
             )
             self.journal.update_pending_run(
@@ -1267,6 +1300,20 @@ class TurnRunner:
             "Turn of %s in %s interrupted: %s %s", agent_key, context_id, reason.value, detail
         )
         return interruption
+
+    @staticmethod
+    def _interruption_text(interruption: Interruption, partial_answer: str) -> str:
+        """What a turn says when it is interrupted: the answer it had already
+        written, else the summary of what it had done.
+
+        A Stop mid-answer keeps the partial text as the turn's message - the
+        same words the page is streaming, stored with the mark of the stop -
+        so a reload, a reconcile or a resume finds them instead of a blank or
+        a summary that repeats them; before a first word the summary stands.
+        """
+        if partial_answer.strip():
+            return partial_answer.strip()
+        return interruption.summary()
 
     async def _run_turn(
         self,
@@ -1307,6 +1354,10 @@ class TurnRunner:
         active_context_id: Optional[str] = None
         task = ""
         stored = False  # the turn's request is in the conversation
+        # The answer fragments the current attempt has rendered: what the
+        # page is showing if the run stops mid-answer, and what the turn then
+        # keeps as its last message (see _record_interruption).
+        streamed: List[str] = []
         session_log = None
         binding = None
         try:
@@ -1473,6 +1524,7 @@ class TurnRunner:
                         stream=stream,
                         observer=observer,
                         progress=progress,
+                        streamed=streamed,
                     )
             except TurnStopped as stop:
                 ending = outcome_for_stop(stop.reason)
@@ -1485,8 +1537,9 @@ class TurnRunner:
                     progress=progress,
                     turn_id=turn_id,
                     images=generated.images,
+                    partial_answer="".join(streamed),
                 )
-                output, result, answered = interruption.summary(), progress.result, False
+                output, result, answered = self._interruption_text(interruption, "".join(streamed)), progress.result, False
 
             if answered:
                 self.context_manager.append_message_to(
@@ -1542,6 +1595,7 @@ class TurnRunner:
                     progress=progress,
                     turn_id=turn_id,
                     images=generated.images,
+                    partial_answer="".join(streamed),
                 )
             raise
         except ContextCompatibilityError:
@@ -1562,6 +1616,7 @@ class TurnRunner:
                     progress=progress,
                     turn_id=turn_id,
                     images=generated.images,
+                    partial_answer="".join(streamed),
                 )
             if not progress.recorded_failure:
                 try:

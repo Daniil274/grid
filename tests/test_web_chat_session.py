@@ -10,7 +10,12 @@ import pytest
 from core.context import ContextManager
 from fastapi import WebSocketDisconnect
 
-from web_chat.session import chat_session
+from web_chat.session import (
+    MAX_REPLAY_NOTES,
+    AgentTurn,
+    ChatSession,
+    chat_session,
+)
 from web_chat.turns import TurnBoard
 
 
@@ -1034,3 +1039,75 @@ async def test_a_turn_that_changes_files_leaves_a_checkpoint_to_restore(tmp_path
     assert (workspace / "plan.md").read_text() == "v1" and not (workspace / "new.py").exists()
     await socket.incoming.put(None)
     await session
+
+
+# -- the turn is visible from the moment its message is accepted -------------
+
+
+@pytest.mark.asyncio
+async def test_the_turn_is_registered_while_its_preamble_still_runs():
+    """A GET from any tab sees the active turn while the preamble still runs.
+
+    The claim, the registered task and the message precede the revision
+    check, recovery and admission (web_chat.session._run_turn_preamble):
+    a page that collapses and returns during that window does not lose its
+    message to an empty active_turn, and no second turn claims the race.
+    """
+    in_preamble, preamble_done = asyncio.Event(), asyncio.Event()
+
+    async def slow_revision_check(self, system_key):
+        in_preamble.set()
+        await preamble_done.wait()
+        return []
+
+    space, socket = space_for(AsyncMock()), Socket()
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
+    with patch.object(ChatSession, "_check_revision", slow_revision_check):
+        await socket.incoming.put('{"message":"hello"}')
+        await asyncio.wait_for(in_preamble.wait(), 2)
+        active = space.turns.running("ctx")
+        assert active is not None
+        assert active[0].message == "hello"
+        assert space.turns.is_claimed("ctx")
+        preamble_done.set()
+    await wait_for(lambda: not space.turns.is_claimed("ctx"))
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_a_refused_preamble_releases_the_conversation():
+    """A turn the preamble refuses is unregistered and released at once."""
+    space, socket = space_for(AsyncMock()), Socket()
+    space.admit_turn = lambda: "The day's turn limit is reached"
+    session = asyncio.create_task(chat_session(space, socket, "ctx"))
+    await socket.incoming.put('{"message":"hello"}')
+    first = await asyncio.wait_for(socket.outgoing.get(), 2)
+    second = await asyncio.wait_for(socket.outgoing.get(), 2)
+    assert first == {"type": "error", "content": "The day's turn limit is reached"}
+    assert second == {"type": "done"}
+    # The refusal released the claim and the record: the conversation is not
+    # left busy by a turn that never ran.
+    await wait_for(lambda: not space.turns.is_claimed("ctx"))
+    assert space.turns.running("ctx") is None
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_a_long_turn_never_loses_its_public_words():
+    """The replay cap trims bookkeeping frames, never the agent's own words."""
+    space, socket = space_for(AsyncMock()), Socket()
+    session = ChatSession(space, socket, "ctx")
+    turn = AgentTurn(session, "hello", system_key=None, agent_key=None, images=(), images_saved=False)
+    turn._remember_replay({"type": "event", "event": {"kind": "message", "text": "said first"}})
+    for index in range(MAX_REPLAY_NOTES + 20):
+        turn._remember_replay({"type": "image", "content": f"image-{index}"})
+    turn._remember_replay({"type": "event", "event": {"kind": "message", "text": "said last"}})
+    frames = turn._snapshot_frames()
+    # say_public words - and any interface the agent presented - survive the
+    # churn of technical frames however long the turn runs: a page that comes
+    # back late replays every one of them, in order.
+    said = [frame["event"]["text"] for frame in frames if frame["type"] == "event"]
+    assert said == ["said first", "said last"]
+    assert len([frame for frame in frames if frame["type"] == "image"]) == MAX_REPLAY_NOTES

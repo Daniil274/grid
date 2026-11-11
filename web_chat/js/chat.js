@@ -21,6 +21,15 @@ const RESUME_DEBOUNCE_MS = 200;
 const RESUME_RETRIES = 2;
 /** Base delay between those retries; the second waits twice as long. */
 const RESUME_RETRY_MS = 300;
+/**
+ * How many times a resync waits for a turn the server has not accounted for
+ * yet. A page that comes back over its own running turn reads a snapshot that
+ * can predate it entirely: the turn registers only at its claim
+ * (`web_chat/session.py`) and its request is written later still - and a
+ * resync that settled for that snapshot would drop the very messages the
+ * reader just sent. The server catches up in seconds; the resync reads again.
+ */
+const RESUME_TAIL_RETRIES = 6;
 
 /**
  * Revision frames carry a machine code (`revision.*`); the text is only for
@@ -49,6 +58,10 @@ export class ChatController {
     this._speech = speech;
     this._voice = voice;
     this._connection = null;
+    // A socket this page is opening for a turn it already follows: the send
+    // (or the attach) is in flight, and a resync that fires in that window
+    // must treat the turn as live rather than orphan it.
+    this._connecting = false;
     this._activeTurn = null;
     // Agents whose tool problems were already announced on this page.
     this._warnedAgents = new Set();
@@ -153,7 +166,19 @@ export class ChatController {
     pending.resolve?.();
   }
 
-  /** One resync: drop the turn, then reconcile - retried while it cannot be read. */
+  /**
+   * One resync: read the server, and drop only what the snapshot contradicts.
+   *
+   * The page usually comes back over its own running turn: the request it
+   * sent and the answer streaming into it are the freshest state there is,
+   * carried by a socket that is still open (or by a send whose socket is
+   * still opening). None of that is torn down before the server's snapshot
+   * is read: a turn the server still runs goes on streaming over the same
+   * socket - no reconnect, no rebuild, no bubbles lost - and only a turn the
+   * server no longer has, or has not accounted for yet, is let go and
+   * rebuilt from what was stored, with the page's own tail carried over
+   * until the snapshot holds it.
+   */
   async _resyncLive({ turn = null, contextId = null, intent = null } = {}) {
     // The burst is about one chat, seen under one navigation. A chat opened
     // meanwhile has its own read - and its own turn, which must not be dropped
@@ -161,13 +186,65 @@ export class ChatController {
     if (!this._ownsResync(contextId, intent)) return;
     // A newer turn is on screen: the burst was about the one before it.
     if (this._activeTurn && this._activeTurn !== turn) return;
-    this._dropLiveTurn();
-    for (let attempt = 0; attempt <= RESUME_RETRIES; attempt += 1) {
-      if (attempt) await new Promise((resolve) => setTimeout(resolve, RESUME_RETRY_MS * attempt));
+    // The page woke up over a turn it is still following for this chat: the
+    // socket it streams over is open (or a send it made is still opening
+    // one). The snapshot decides - and until then, nothing is torn down.
+    const live = this._activeTurn?.contextId === contextId
+      && !this._activeTurn.done
+      && (this._connecting || this._connection?.isOpen);
+    if (live) {
+      for (let wait = 0; wait <= RESUME_TAIL_RETRIES; wait += 1) {
+        if (wait) await new Promise((resolve) => setTimeout(resolve, RESUME_RETRY_MS * Math.min(wait, 4)));
+        if (!this._ownsResync(contextId, intent)) return; // the reader moved on
+        // Reconciling over a live turn reads without redrawing it: the read
+        // refreshes what surrounds the stream and leaves the stream alone.
+        const payload = await this._reconcile(contextId);
+        if (!payload) continue; // unreadable for now: the stream stays as it is
+        // The server runs this very turn: the stream this page already has is
+        // the freshest state there is, and it goes on over the same socket.
+        if (payload.active_turn && this._followsTurn(payload.active_turn, this._activeTurn)) return;
+        // No such turn (yet). A send this page made can still be on its way
+        // to the turn registry (window W1): nothing about it has come back,
+        // and a socket that still carries frames is not torn down on a guess -
+        // read again. A turn the page only attached, or one that already
+        // spoke, is one the server has: its absence there means it is over.
+        if (!payload.active_turn && this._connection?.isOpen
+          && this._activeTurn?.sent && !this._activeTurn.received
+          && wait < RESUME_TAIL_RETRIES) continue;
+        break; // the server is past this page's turn: let the tail go
+      }
+      this._dropLiveTurn();
+    } else this._dropLiveTurn();
+    for (let attempt = 0; attempt <= RESUME_RETRIES + RESUME_TAIL_RETRIES; attempt += 1) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, RESUME_RETRY_MS * Math.min(attempt, 4)));
       if (!this._ownsResync(contextId, intent)) return; // the reader moved on
       // Reconciling attaches to the server's running turn, or shows what was stored.
-      if (await this._reconcile(contextId)) return;
+      const payload = await this._reconcile(contextId);
+      if (!payload) {
+        if (attempt >= RESUME_RETRIES) return; // the conversation stays unreadable
+        continue;
+      }
+      // The tail this page still shows is not in the snapshot yet: the server
+      // is registering the turn (window W1) or writing its request (W2). It
+      // will be in a moment - read again rather than leave the reader's
+      // message looking unsent. The keeps of each read hold the tail on
+      // screen meanwhile, so this costs reads, not bubbles.
+      if (this._liveTailUnaccounted(contextId, payload)
+        && attempt < RESUME_RETRIES + RESUME_TAIL_RETRIES) continue;
+      return;
     }
+  }
+
+  /**
+   * Is the turn the server reports running the one this page follows? Its
+   * request identifies it: the text this page sent, or that it is a resume.
+   * A turn this page never knew the request of is never assumed to be its.
+   */
+  _followsTurn(activeTurn, turn) {
+    if (!turn || !activeTurn) return false;
+    if (activeTurn.resumes) return turn.resumes === true;
+    if (turn.resumes) return false;
+    return turn.request != null && turn.request === (activeTurn.message ?? null);
   }
 
   /**
@@ -191,11 +268,23 @@ export class ChatController {
     this._connection?.close();
     this._connection = null;
     this._activeTurn = null;
-    // The bubble stays on screen: the read that follows keeps it (the stored
-    // conversation has no answer yet) and the attach refills it from the
-    // snapshot. Dropping it here would blank the answer until the round trip.
+    // The bubbles stay on screen: the read that follows keeps them (the
+    // stored conversation has neither the request nor the answer yet) and
+    // the attach refills the answer from the snapshot. Dropping them here
+    // would blank the answer until the round trip - and the request until
+    // the server writes it (window W2), which it may not have begun to
+    // (window W1).
     if (turn?.message && !turn.message.messageId) {
-      this._liveAnswer = { contextId: turn.contextId, message: turn.message, settled: Boolean(turn.done) };
+      this._liveAnswer = {
+        contextId: turn.contextId,
+        message: turn.message,
+        settled: Boolean(turn.done),
+        // The request bubble of the same turn, ahead of the answer: while
+        // the snapshot holds neither (W1/W2), it is as live as the answer,
+        // and a read that carries the answer over carries it too - or the
+        // reader's own message disappears from under them.
+        request: this._transcript.requestOf(turn.message) ?? null,
+      };
     }
     this._store.set({ streaming: false, stopping: false });
     // Whoever waits for this turn to settle (Stop, an edit) must not hang.
@@ -669,7 +758,14 @@ export class ChatController {
     // assistant message of the run, including the narration before each tool
     // call, and only the last one survives into `final_output`. Speaking the
     // stream would read aloud the steps the message itself discards.
-    const turn = { message, contextId, failed: false, finalText: "", spoken, done: false };
+    const turn = {
+      message, contextId, failed: false, finalText: "", spoken, done: false,
+      // What identifies this turn to a snapshot: the request it was sent
+      // (null text is a Continue), and that this page initiated it. `sent`
+      // and `received` bracket window W1 - the send is on its way to the
+      // turn registry until the first frame of the run comes back.
+      request: text, resumes: text === null, sent: true, received: false,
+    };
     this._activeTurn = turn;
     // A turn that starts now owns the screen: an earlier answer is neither
     // kept nor adopted by the reads this turn will cause.
@@ -677,7 +773,12 @@ export class ChatController {
     // The chat has a turn now: its working directory stays as it is.
     this._store.set({ workspaceLocked: true });
     try {
-      this._connection = await ChatConnection.open(contextId);
+      this._connecting = true;
+      try {
+        this._connection = await ChatConnection.open(contextId);
+      } finally {
+        this._connecting = false;
+      }
       this._bind(this._connection, turn);
       if (text === null) {
         // Continue has no message to carry the switch: it goes first.
@@ -724,12 +825,21 @@ export class ChatController {
     message.reasoning.start();
     message.reasoning.setStepSource(this._liveStepSource(contextId, message));
     this._transcript.follow();
-    const turn = { message, contextId, failed: false, finalText: "", spoken: false, done: false, submitted: false };
+    const turn = {
+      message, contextId, failed: false, finalText: "", spoken: false, done: false, submitted: false,
+      // The request arrives with the server's own `ui_submitted` frame.
+      request: null, resumes: false, sent: true, received: false,
+    };
     this._activeTurn = turn;
     this._liveAnswer = null;
     this._store.set({ streaming: true, stopping: false, workspaceLocked: true });
     try {
-      this._connection = await ChatConnection.open(contextId);
+      this._connecting = true;
+      try {
+        this._connection = await ChatConnection.open(contextId);
+      } finally {
+        this._connecting = false;
+      }
       this._bind(this._connection, turn);
       if (!this._connection.uiAction(fields)) {
         throw new Error("Chat connection closed before the choice could be sent");
@@ -976,7 +1086,7 @@ export class ChatController {
     // The agent kept working while the page was away: pick the turn back up,
     // without moving a reader who is not at the end of a resumed chat.
     if (payload.active_turn && this._ownsRead(read)) {
-      await this._attachToRunningTurn(payload.id, payload.active_turn, { reveal: !place });
+      await this._attachToRunningTurn(payload.id, payload.active_turn, { reveal: !place, stored: payload.messages });
     }
     // The devices a chat may switch to are the ones connected now: read once
     // the chat is on screen, so the target chip names them.
@@ -1051,7 +1161,7 @@ export class ChatController {
    * who may be reading further up - and an answer this page was already
    * streaming keeps its text until the server's snapshot replaces it.
    */
-  async _attachToRunningTurn(contextId, { message: userText, resumes, elapsed_ms: elapsedMs }, { reveal = true } = {}) {
+  async _attachToRunningTurn(contextId, { message: userText, resumes, elapsed_ms: elapsedMs }, { reveal = true, stored = null } = {}) {
     // One turn per chat. A second attach to a chat this page already follows
     // would stack another request and answer under it, open a second socket
     // and leave the first one open - the turn on screen already is that turn.
@@ -1067,6 +1177,27 @@ export class ChatController {
         if (last?.role !== "marker") this._transcript.add({ role: "user", kind: "continuation", timestamp: Date.now() - elapsedMs }, { reveal });
       } else if (!(last?.role === "user" && last.text === userText)) {
         this._transcript.add({ role: "user", content: userText, timestamp: Date.now() - elapsedMs }, { reveal });
+      }
+    } else {
+      // The kept answer is on screen, but the request ahead of it may not be:
+      // the read that carried the answer over was taken in window W2 (the
+      // turn registers before its user message is written) or W1 (the server
+      // does not know the turn yet), and the thread it rendered holds no
+      // trace of the request. The turn's own request goes back in front of
+      // the answer - exactly once: never duplicated when the bubble is
+      // already held there, already stored in the thread, or drawn by this
+      // very attach.
+      const request = this._transcript.requestOf(rebuild);
+      const same = request
+        && (resumes ? request.kind === "continuation" : (request.text ?? "") === (userText ?? ""))
+        ? request : null;
+      // Without the stored thread to ask, a stored request ahead of the
+      // answer is the closest thing to one; with it, the thread decides.
+      const already = same && (!same.messageId || stored === null) ? same : null;
+      if (!already && !this._userTurnAlreadyStored(userText, stored)) {
+        this._transcript.addBefore(rebuild, resumes
+          ? { role: "user", kind: "continuation", timestamp: Date.now() - elapsedMs }
+          : { role: "user", content: userText, timestamp: Date.now() - elapsedMs }, { reveal });
       }
     }
     this._transcript.retireContinue();
@@ -1084,12 +1215,24 @@ export class ChatController {
     // replaces this bubble's text instead of being appended to it - but only
     // when it arrives: clearing it here would blank a reader's screen for the
     // round trip and drop the place they were reading.
-    const turn = { message, contextId, failed: false, finalText: "", spoken: false, done: false, snapshot: Boolean(rebuild) };
+    const turn = {
+      message, contextId, failed: false, finalText: "", spoken: false, done: false,
+      snapshot: Boolean(rebuild),
+      // What identifies the turn the page attached to: the request the server
+      // says it runs. This page did not send it, so window W1 does not apply.
+      request: userText, resumes: Boolean(resumes), sent: false, received: false,
+    };
     this._activeTurn = turn;
     // This turn owns the bubble now: a read that follows may adopt it in place.
     this._liveAnswer = null;
     try {
-      const connection = await ChatConnection.open(contextId);
+      this._connecting = true;
+      let connection;
+      try {
+        connection = await ChatConnection.open(contextId);
+      } finally {
+        this._connecting = false;
+      }
       // Another turn took the screen while the socket opened: this one's
       // frames belong to nobody, and leaving it open would stream into a bubble
       // the newer turn no longer shows.
@@ -1118,6 +1261,10 @@ export class ChatController {
      */
     const live = (handler) => (payload) => {
       if (this._activeTurn !== turn || this._connection !== connection) return;
+      // The server has spoken about this turn: it is out of window W1, and a
+      // snapshot without it means the turn has ended, not that it is still
+      // being registered.
+      turn.received = true;
       handler(payload);
     };
     /**
@@ -1202,6 +1349,11 @@ export class ChatController {
           return;
         }
         turn.submitted = true;
+        turn.request = submitted;
+        // The request is drawn once: a rebuild that restored this turn's
+        // request ahead of the answer (window W2) already holds it.
+        const request = this._transcript.requestOf(turn.message);
+        if (request && !request.messageId && (request.text ?? "") === (submitted ?? "")) return;
         this._transcript.addBefore(turn.message, {
           role: "user",
           content: submitted,
@@ -1320,9 +1472,15 @@ export class ChatController {
     this._activeTurn = null;
     // The answer was streamed here, not read from the server: the stored
     // conversation has it only once the run returned. The read that follows
-    // keeps this bubble instead of redrawing the thread without it.
+    // keeps this bubble instead of redrawing the thread without it - and the
+    // request ahead of it with it, while the thread holds neither (W1/W2).
     if (!turn.failed && !turn.message.messageId) {
-      this._liveAnswer = { contextId: turn.contextId, message: turn.message, settled: Boolean(turn.done) };
+      this._liveAnswer = {
+        contextId: turn.contextId,
+        message: turn.message,
+        settled: Boolean(turn.done),
+        request: this._transcript.requestOf(turn.message) ?? null,
+      };
     }
     turn.onSettled?.();
     // The user's own counts may have moved; the page refreshes its badge.
@@ -1426,6 +1584,13 @@ export class ChatController {
       // running turn, or a write that has not landed yet): it is adopted in
       // place, not redrawn from a history that lacks it.
       const keep = this._answerToKeep(contextId, payload);
+      // The request of the same turn rides along with the kept answer while
+      // the snapshot holds neither: window W2 carries a running turn whose
+      // user message is not written yet, and W1 is the page's own entirely.
+      // A render that kept the answer but dropped the request would answer a
+      // message the reader cannot see any more.
+      const request = keep ? this._keptRequest(contextId, payload) : null;
+      const keeps = keep ? (request ? [request, keep] : [keep]) : null;
       // Same messages on screen: only take their ids and versions, so an
       // expanded reasoning panel stays as it is.
       if (keep || force || !this._transcript.adopt(payload.messages)) {
@@ -1433,7 +1598,7 @@ export class ChatController {
         // stream was being followed (a following reader still lands at the end).
         this._renderedId = payload.id;
         this._shownCompactions = countCompactions(payload.messages);
-        this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id), reveal: false, keep });
+        this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id), reveal: false, keep: keeps });
       }
       // The stored conversation now shows its own answer (or never will): the
       // bubble that was held on screen is not needed any more.
@@ -1442,7 +1607,9 @@ export class ChatController {
       this._transcript.refreshContinueInNewChat?.();
       this._syncResumable();
       // The queue started the next waiting message: follow that turn too.
-      if (payload.active_turn && !this.isStreaming) await this._attachToRunningTurn(payload.id, payload.active_turn, { reveal: false });
+      if (payload.active_turn && !this.isStreaming) {
+        await this._attachToRunningTurn(payload.id, payload.active_turn, { reveal: false, stored: payload.messages });
+      }
       return payload;
     } catch (error) {
       if (error?.name === "AbortError") return null; // a newer read took over
@@ -1531,18 +1698,100 @@ export class ChatController {
     const handle = kept.message;
     // Adopted into the stored thread, or no longer the trailing message.
     if (handle.messageId || this._transcript.last() !== handle) return null;
-    // The turn is still running: the stored conversation cannot hold its
-    // answer, and the snapshot that follows fills this bubble.
-    if (payload.active_turn) return handle;
-    // No turn runs: the answer is stored - the run's output, or the note it
-    // ended with. Only a write that has not landed leaves the thread ending on
-    // the request; then the bubble stays until it does.
+    // A turn is running. It is the turn this bubble answers while its request
+    // is the one the server says it runs - and the request is what tells the
+    // turn this page saw from the one the queue may have started meanwhile.
+    // The thread cannot hold the answer of a running turn (it is written when
+    // the run returns), and the snapshot that follows fills this bubble. A
+    // turn whose request is not the running one's is a turn that has ended -
+    // and holding its bubble would draw the answer twice once the queue's
+    // turn stores its own.
     const stored = Array.isArray(payload.messages) ? payload.messages : [];
-    if (stored.length && stored.at(-1)?.role !== "user") return null;
+    // Once the thread stores the request, the turn is this page's past: the
+    // writes have caught up with it, and an assistant message after it is the
+    // answer as the server recorded it (the run's output, the partial answer
+    // a Stop kept, or the note the run ended with).
+    const requestStored = kept.request
+      ? (Boolean(kept.request.messageId) || this._userTurnAlreadyStored(kept.request.text ?? "", stored))
+      : null;
+    if (payload.active_turn) {
+      if (!kept.request) return handle; // nothing identifies the turn: assume the running one
+      const resumes = payload.active_turn.resumes === true;
+      const same = resumes
+        ? kept.request.kind === "continuation"
+        : (kept.request.text ?? "") === (payload.active_turn.message ?? "");
+      return same ? handle : null;
+    }
+    // No turn runs. The answer is stored once an assistant message follows the
+    // request of this turn - the stored thread shows it then, exactly once,
+    // and the held bubble is dropped so it is not drawn twice. Until that
+    // write lands, what trails the thread is the request itself (or, when
+    // the server never wrote the turn, the answer of the turn before), and
+    // the bubble stays: a stopped turn's partial answer, streamed while the
+    // reader watched, is not reset to the history that surrounds it.
+    if (requestStored === true) {
+      if (stored.length && stored.at(-1)?.role !== "user") return null;
+    } else if (requestStored === null && stored.length && stored.at(-1)?.role !== "user") {
+      return null; // no request to identify the turn: the old rule stands
+    }
     // An empty bubble is only worth keeping while its turn may still fill it:
     // otherwise it is the "working" indicator of a turn the server has
     // nothing for, and it must not pulse forever.
     return handle.text || kept.settled ? handle : null;
+  }
+
+  /**
+   * Is the request of the running (or just-finished) turn already in the
+   * stored thread? The server registers a turn before it writes the user's
+   * message (`core/factory/turns.py`), so a snapshot can carry `active_turn`
+   * and still lack the request (window W2). Once written, the request is the
+   * thread's newest user message - the answers of its own turn, and every
+   * message of the turns before it, only trail or precede it.
+   */
+  _userTurnAlreadyStored(userText, stored) {
+    const messages = Array.isArray(stored) ? stored : [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message?.role !== "user") continue; // the answers this turn may have stored
+      return (message.content ?? "") === (userText ?? "");
+    }
+    return false;
+  }
+
+  /**
+   * The request bubble of the turn whose answer a read keeps, when the stored
+   * thread does not have it. The render that carries the answer over carries
+   * the request with it - in front of the answer, where the turn had it.
+   */
+  _keptRequest(contextId, payload) {
+    const kept = this._liveAnswer;
+    const request = kept?.request ?? null;
+    if (!request || kept.contextId !== contextId) return null;
+    if (request.messageId) return null; // stored: the render draws it
+    if (this._userTurnAlreadyStored(request.text ?? "", payload.messages)) return null;
+    return request;
+  }
+
+  /**
+   * Is the tail this page still shows - the request it sent, the answer that
+   * streamed into it - missing from the snapshot? The server registers a turn
+   * before it writes the request, and writes the answer only when the run
+   * returns: in between, a read shows the thread as it was before the turn.
+   * A resync that settled for that snapshot would leave the reader's message
+   * looking unsent, so it reads again instead.
+   */
+  _liveTailUnaccounted(contextId, payload) {
+    const kept = this._liveAnswer;
+    if (!kept || kept.contextId !== contextId) return false;
+    const stored = Array.isArray(payload?.messages) ? payload.messages : [];
+    const request = kept.request ?? null;
+    // The request is accounted for once the thread stores it (or the answer
+    // was adopted into it); the answer once an assistant message follows it.
+    const requestStored = request
+      ? (Boolean(request.messageId) || this._userTurnAlreadyStored(request.text ?? "", stored))
+      : Boolean(kept.message.messageId);
+    const answerStored = requestStored && stored.length > 0 && stored.at(-1)?.role === "assistant";
+    return !requestStored || !answerStored;
   }
 
   /** Fetches a stored step that left its payloads on the server (``lazy``). */

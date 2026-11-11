@@ -392,8 +392,15 @@ export function createTranscript({
      * place - unless the stream was being followed, which still lands at the
      * bottom.
      * `loadStep(messageId, stepId)` fetches a lazy trace step of a stored message.
+     * `keep` is an answer whose turn the server has not stored yet (it is
+     * still running, or ended without a written answer): it trails the stored
+     * messages, keeping its element, its trace and the reader's place, until
+     * the snapshot of the running turn refills it. The turn's request rides
+     * with it as a pair `[request, answer]` while the stored thread holds
+     * neither (the turn registers before its user message is written): the
+     * render must not erase the reader's own message out of the thread.
      */
-    render(stored, { loadStep = null, reveal = true, place = null } = {}) {
+    render(stored, { loadStep = null, reveal = true, place = null, keep = null } = {}) {
       // Where the reader is to end up: the place this chat was left at, else
       // the place of the chat on screen (a resync). A chat with neither - one
       // that was never read - opens at its newest message.
@@ -424,13 +431,17 @@ export function createTranscript({
             handle.setInterrupted(message.interruption, { resumable: message.interruption.resumable });
           }
         }
+        for (const handle of keep ? (Array.isArray(keep) ? keep : [keep]) : []) {
+          messages.set(handle.id, handle);
+          container.append(handle.el);
+        }
       } finally {
         batching -= 1;
       }
       offersContinue();
       // Every stored plan starts folded; the newest one is the one to follow.
       [...messages.values()].reverse().find((handle) => handle.reasoning?.hasPlan)?.reasoning.setPlanCollapsed(false);
-      setEmpty(stored.length === 0);
+      setEmpty(stored.length === 0 && !keep);
       // A chat left at its end opens at its end: the messages after the reader
       // are the reason they were following. Any other place is restored.
       if (target && target.following === false) restorePlace(target);
@@ -506,6 +517,24 @@ export function createTranscript({
     resumable() {
       const turns = [...messages.values()].filter((handle) => handle.kind !== "compaction");
       return turns.at(-1)?.resumable === true;
+    },
+
+    /** Take a message off the screen (a submit the server already honoured). */
+    drop(handle) {
+      if (!handle) return;
+      messages.delete(handle.id);
+      handle.el.remove();
+      offersContinue();
+    },
+
+    /**
+     * Tell the widget of a stored message what the server answered for one
+     * request: its new state revision, or that the press was refused.
+     */
+    acknowledgeUi(messageId, uiId, patch) {
+      if (!messageId || !uiId) return;
+      const handle = [...messages.values()].find((message) => message.messageId === messageId);
+      handle?.acknowledgeUi?.(uiId, patch);
     },
 
     /** Insert a message just before *anchor* - a message the user sent mid-turn. */

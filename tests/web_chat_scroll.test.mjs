@@ -314,20 +314,30 @@ test("a following reader stays at the end across a resync", async () => {
 
 test("attaching does not blank the answer it is about to replace", async () => {
   const state = { messages: storedThread(1), active_turn: null };
-  const { chat, transcript } = await openChat(state);
+  const { chat, transcript, container } = await openChat(state);
   // The page was streaming this answer when it went away.
+  const stored = transcript.last();
   const answer = transcript.add({ role: "assistant", author: "Grid", timestamp: 2 });
   answer.setText("half an ans");
   assert.equal(transcript.count(), 2);
 
   const attaching = chat._attachToRunningTurn("c1", runningTurn(), { reveal: false });
-  assert.equal(transcript.last().text, "half an ans", "the text on screen survives the attach");
+  assert.equal(answer.text, "half an ans", "the text on screen survives the attach");
   await attaching;
+
+  // The attach also put the turn's request back ahead of the answer: the
+  // thread the snapshot drew predates the turn (window W2), so it holds no
+  // trace of the message the answer answers.
+  const onScreen = [...container.querySelectorAll(".msg")];
+  assert.equal(transcript.count(), 3, "the stored thread, the request and the answer");
+  assert.equal(onScreen[0], stored.el, "the stored thread stays");
+  assert.equal(onScreen[2], answer.el, "the answer trails the restored request");
+  assert.equal(answer.text, "half an ans", "and it is still the answer it was");
 
   // The snapshot states the whole answer so far: it replaces, it does not repeat.
   lastSocket().deliver({ type: "token", content: "half an answer" });
-  assert.equal(transcript.count(), 2, "one answer bubble");
-  assert.equal(transcript.last().text, "half an answer");
+  assert.equal(transcript.count(), 3, "one answer bubble");
+  assert.equal(answer.text, "half an answer");
 });
 
 // -- switching chats ---------------------------------------------------------

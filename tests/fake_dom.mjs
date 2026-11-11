@@ -26,6 +26,23 @@ class FakeNode {
     this.append(...nodes);
   }
 
+  /**
+   * Insert *node* before *anchor* (appended when the anchor is absent or no
+   * child): the one way a view places a message ahead of another (a request
+   * ahead of the answer it started, a marker ahead of a live tail).
+   */
+  insertBefore(node, anchor = null) {
+    const child = typeof node === "string" ? new FakeText(node) : node;
+    if (anchor == null || !this.childNodes.includes(anchor)) {
+      this.append(child);
+      return child;
+    }
+    child.remove();
+    child.parentNode = this;
+    this.childNodes.splice(this.childNodes.indexOf(anchor), 0, child);
+    return child;
+  }
+
   replaceWith(node) {
     const parent = this.parentNode;
     if (!parent) return;

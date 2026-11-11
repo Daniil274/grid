@@ -83,6 +83,11 @@ DELTA_FLUSH_BYTES = 1536
 #: One-shot frames kept for a socket that attaches later (routing, tool issues,
 #: images, ...). Pin their bounded number: a busy turn cannot grow without end.
 MAX_REPLAY_NOTES = 100
+#: Replayed frames that are never dropped when the cap trims the rest: the
+#: turn's own words to people - a public message (``say_public``) or an
+#: interface it presented - are the agent's speech, not bookkeeping, and a
+#: page that returns to a long turn replays every one of them.
+_REPLAY_PINNED_TYPES = frozenset({"event", "ui"})
 _DELTA_TYPES = frozenset({"token", "reasoning"})
 #: Frames rebuilt from accumulated state instead of being kept one by one.
 _STATEFUL_TYPES = frozenset({"token", "reasoning", "step", "step_removed", "answer_reset", "final_output", "done"})
@@ -565,6 +570,14 @@ class AgentTurn:
         self._stop_requested = False
         self.restart_paused = False
         self.user_stopped = False
+        #: The admission gate: the turn's task starts at once and waits here
+        #: (run) until its preamble (ChatSession._run_turn_preamble) admits it,
+        #: so the conversation shows its active turn - and a Stop or a queued
+        #: message reaches it - while the revision check, recovery and the
+        #: admission still run.
+        self._admitted: asyncio.Event = asyncio.Event()
+        #: Whether the preamble let the turn go before it ever ran.
+        self._refused = False
         #: How the turn ended: "answered", "interrupted", "error" or "stopped".
         self.outcome: Optional[str] = None
         self._answer_tail = ""  # the agent's latest words, for delivery decisions
@@ -807,6 +820,15 @@ class AgentTurn:
                 await also_to.send({**event, "run_id": self.run_id})
 
     async def run(self) -> None:
+        # The turn is registered before its preamble admits it (see
+        # ChatSession._run_turn_preamble): the task waits here, already visible
+        # as the conversation's active turn, until the admission. Refused - an
+        # incompatible revision, the day's quota, a Stop while it prepared - it
+        # ends here without a frame: the preamble sent the refusal, and the
+        # claim and the record went back in the preamble's release.
+        await self._admitted.wait()
+        if self._refused:
+            return
         # The producer starts from this context: its model calls count in the turn's spend.
         with tracking(self._spend):
             producer = asyncio.create_task(self._produce())
@@ -832,8 +854,14 @@ class AgentTurn:
                     self.outcome = "interrupted"
             self._record_activity()
             self._record_usage()
-            # Release before "done": the client may submit its next turn at once.
-            self._session.release(self)
+            # The claim passes on here, in the same event-loop step as the
+            # turn's last work: whichever message waits in the queue to start
+            # next is claimed before this one lets go, so a GET from a
+            # returning tab never lands between the two turns and finds no
+            # active turn (ChatSession._succeed_queued). "done" follows it:
+            # by the time the client can answer, the conversation is free - or
+            # already in its next turn.
+            self._session.hand_over(self)
             with suppress(WebSocketDisconnect, RuntimeError, OSError):
                 await self._emit({
                     "type": "done",
@@ -1193,15 +1221,35 @@ class AgentTurn:
         elif frame["type"] == "final_output":
             self._answer = str(frame.get("content") or "")
         elif frame["type"] not in _STATEFUL_TYPES and frame["type"] != "token":
-            self._notes.append({key: value for key, value in event.items()})
-            if len(self._notes) > MAX_REPLAY_NOTES:
-                del self._notes[:-MAX_REPLAY_NOTES]
+            self._remember_replay(event)
         for session in list(self._subscribers):
             try:
                 await session.send(frame)
             except (WebSocketDisconnect, RuntimeError, OSError):
                 # A closed tab must not stall the agent or the other viewers.
                 self._subscribers.discard(session)
+
+    def _remember_replay(self, event: dict[str, Any]) -> None:
+        """Keep a one-shot frame for a socket that attaches later.
+
+        The cap bounds the bookkeeping frames (queue snapshots, delivery
+        notices, images); the pinned ones - a public message the agent said
+        with ``say_public``, an interface it presented - stay whole however
+        long the turn runs: they are the words a returning page must still
+        hear, not chatter to trim (web_chat.observer.EventLog keeps the same
+        distinction for the stored events).
+        """
+        note = {key: value for key, value in event.items()}
+        self._notes.append(note)
+        if note.get("type") in _REPLAY_PINNED_TYPES:
+            return
+        spare = [kept for kept in self._notes if kept.get("type") not in _REPLAY_PINNED_TYPES]
+        if len(spare) <= MAX_REPLAY_NOTES:
+            return
+        for index, kept in enumerate(self._notes):
+            if kept is spare[0]:
+                del self._notes[index]
+                break
 
     # -- checkpoints -------------------------------------------------------
     async def _snapshot(self) -> Optional[dict]:
@@ -1432,6 +1480,12 @@ class ChatSession:
 
     def release(self, turn: "AgentTurn") -> None:
         self._turns.release(self.context_id, turn)
+
+    def hand_over(self, turn: "AgentTurn") -> None:
+        """Give a finished turn's claim back and the conversation on, in one
+        event-loop step (see :meth:`_succeed_queued`).
+        """
+        self._succeed_queued(turn)
 
     # -- commands ----------------------------------------------------------
     async def _dispatch(self, raw: str) -> None:
@@ -1742,6 +1796,15 @@ class ChatSession:
             return
         await active[0].announce(snapshot)
         if action == "send_queued":
+            if not active[0]._admitted.is_set():
+                # Not admitted yet: its task is still waiting at run()'s gate,
+                # and cancelling it there ends the turn with no "done" of its
+                # own. Its preamble sees the stop, sends its refusal, and the
+                # message stays first in line to start at once (see
+                # _run_turn_preamble and _advance_queue).
+                active[0].user_stopped = True
+                await self._cancel(active[1])
+                return
             await self._cancel(active[1])
 
     async def _advance_queue(self, finished: AgentTurn) -> None:
@@ -1759,6 +1822,76 @@ class ChatSession:
         if finished.outcome != "answered" and item.get("delivery") != "now":
             return
         await self._start_queued(queue, item)
+
+    def _succeed_queued(self, finished: AgentTurn) -> None:
+        """Release a finished turn's claim, passing it to the next queued message.
+
+        Called from the turn's own finally (:meth:`hand_over`), with no await
+        in between: whichever message starts next is claimed before the
+        finished one lets go, so a GET - a resync, a reload, another tab -
+        never lands between two turns and sees no active turn while a message
+        waits in the queue. The successor's admission (its revision check,
+        recovery, the quota) runs beside the command loop; refused, the
+        message waits at the front of the queue again instead of being lost.
+        """
+        # The finished turn's claim goes first: the claim check below is then
+        # about another turn, never this one's own. All of this runs in one
+        # event-loop step - nothing can run in between - so a GET still sees
+        # an active turn: the finished one, then its successor (see
+        # _run_turn_preamble and _succeed_queued's caller).
+        self._turns.release(self.context_id, finished)
+        item = None
+        queue = None
+        if not getattr(self.space, "restart_pending", False) and not self._turns.is_claimed(self.context_id):
+            queue = MessageQueue(self.manager, self.context_id)
+            item = queue.next_queued()
+            if item is not None and finished.outcome != "answered" and item.get("delivery") != "now":
+                # A stop, a timeout, a failure: only a message asked to go
+                # *now* still starts; the rest wait for the user again, in
+                # place - their id and their position are what the page
+                # already shows (see _advance_queue).
+                item = None
+        if item is None:
+            return
+        # Taken out here, in the same step: between the turns the queue is
+        # never ahead of what starts.
+        queue.remove(item["id"])
+        successor = AgentTurn(
+            self,
+            item["text"],
+            system_key=None,
+            agent_key=None,
+            images=tuple(item.get("images") or []),
+            images_saved=True,
+        )
+        # Claimed and registered before the successor's preamble runs, so its
+        # message is the conversation's active turn at once (see _start).
+        self._turns.claim(self.context_id, successor)
+        # The successor's task starts here, in the same event-loop step the
+        # finished turn's claim goes: the two turns hand over with no moment
+        # in between where a GET would see no active turn - registered at
+        # once, admitted by its preamble beside the command loop.
+        task = asyncio.create_task(successor.run())
+        self._turns.register(self.context_id, successor, task)
+        task.add_done_callback(self._turn_ended(successor))
+        self._background(self._admit_queued_turn(successor, queue, item, task))
+
+    async def _admit_queued_turn(
+        self, turn: AgentTurn, queue: MessageQueue, item: dict[str, Any], task: asyncio.Task
+    ) -> None:
+        """Run a queued message's preamble, its turn already claimed for it.
+
+        Refused - a limit, an incompatible revision, a Stop in between - the
+        message goes back to the front of the queue instead of being lost.
+        """
+        if not await self._run_turn_preamble(turn, None, restart_resume=False, task=task):
+            queue.add(
+                item["text"],
+                item.get("images") or [],
+                item.get("delivery") or "after_turn",
+                front=True,
+            )
+        await self.send({"type": "queue", "items": queue.public()})
 
     async def _start_queued(self, queue: MessageQueue, item: dict[str, Any]) -> None:
         """Send a waiting message as the next turn. Refused - a limit, say - it
@@ -1844,6 +1977,14 @@ class ChatSession:
             await turn.announce({"type": "stopping"})
             return
         turn.user_stopped = True
+        if not turn._admitted.is_set():
+            # Not admitted yet: its task is still waiting at run()'s gate, and
+            # cancelling it there ends the turn with no "done" of its own. The
+            # preamble sees the stop, sends its refusal to its own socket and
+            # lets the claim go (see _run_turn_preamble); this page is told here.
+            await self.send({"type": "done", "stopped": True})
+            await self._cancel(task)
+            return
         if not now and turn.request_stop():
             await turn.announce({"type": "stopping"})
             return
@@ -1865,6 +2006,15 @@ class ChatSession:
         """Start a turn; ``message`` None continues the interrupted one.
         Whether it started; a refusal was sent to the socket.
 
+        The turn is claimed and registered the moment its message is
+        accepted - before the revision check, recovery and admission, which
+        can each take a while - so a GET from any tab in that window still
+        sees the conversation's active turn with the user's message in it,
+        and a message sent by another socket in it is queued rather than
+        racing a second turn. A refusal unregisters and releases (see
+        _run_turn_preamble), so the conversation is never left busy by a
+        turn that never ran.
+
         ``edit_of`` marks the message as a new version of an edited one, sent
         into the branch made for it (POST .../branches). ``images_saved``: the
         message's files are already in the workspace, named in ``message``."""
@@ -1879,35 +2029,6 @@ class ChatSession:
             await self.send({"type": "error", "content": "Unknown system or agent"})
             await self.send({"type": "done"})
             return False
-        # A conversation this runtime cannot continue is refused before routing,
-        # warm-up, the daily-turn quota and any metadata write: the client gets
-        # the machine code, not a generic failure after work has begun. One that
-        # only drifted re-pins and continues, with a notice instead.
-        try:
-            notices = await self._check_revision(system_key)
-        except revisions.ContextCompatibilityError as exc:
-            await self.send(revision_error_event(exc))
-            await self.send({"type": "done"})
-            return False
-        # Recovery mutates stored execution state, so it must follow admission.
-        self.manager.recover_abandoned_turn(self.context_id)
-        if message is None and self.manager.pending_interruption(self.context_id) is None:
-            await self.send({"type": "error", "content": "There is nothing to continue in this conversation."})
-            await self.send({"type": "done"})
-            return False
-        # Admitting counts the turn for the day: only a request that will run.
-        # Continuing an already admitted turn must not charge a second daily turn.
-        refusal = None if restart_resume and message is None else self.space.admit_turn()
-        if refusal is not None:
-            await self.send({"type": "error", "content": refusal})
-            await self.send({"type": "done"})
-            return False
-        # The conversation continues on a revision this runtime re-pinned it to
-        # (a Grid version, a different system configuration, or a conversation
-        # stored before pinning existed). Tell the client before the turn runs,
-        # with a typed event that is not an error: nothing failed.
-        for notice in notices:
-            await self.send(revision_notice_event(notice))
         turn = AgentTurn(
             self,
             message,
@@ -1919,19 +2040,122 @@ class ChatSession:
             edit_of=edit_of,
             ui_origin=ui_origin,
         )
-        self._turns.claim(self.context_id, turn)
-        task = asyncio.create_task(turn.run())
-        self._turns.register(self.context_id, turn, task)
+        if not self._turns.claim(self.context_id, turn):
+            # A claim raced this one in the window above: one turn per
+            # conversation, and the other one was first.
+            await self.send({"type": "busy", "content": "This conversation already has an active turn."})
+            return False
+        # Registered, its task started and waiting at run()'s admission gate
+        # until the preamble admits it: the conversation's active turn is
+        # visible from the moment its message is accepted (see
+        # _run_turn_preamble), and a refusal - or a Stop while it prepares -
+        # releases it again.
+        return await self._run_turn_preamble(turn, system_key, restart_resume=restart_resume)
+
+    async def _run_turn_preamble(
+        self,
+        turn: "AgentTurn",
+        system_key: Any,
+        *,
+        restart_resume: bool,
+        task: Optional[asyncio.Task] = None,
+    ) -> bool:
+        """Admit an accepted turn - its revision, recovery and quota - and run it.
+
+        The turn's task starts at once and waits in run() at its admission
+        gate, registered beside it, so the conversation shows its active turn
+        - and a Stop or a queued message reaches it - from the moment the
+        message is accepted. Every refusal here, and a Stop that arrives while
+        the preamble runs, lets the waiting task go and releases the record
+        and the claim, so the conversation is never left busy by a turn that
+        never ran.
+        """
+        if task is None:
+            # Created and registered here, in the same event-loop step the
+            # message is accepted: no window a GET could land in. A caller
+            # that claims a successor turn (see _succeed_queued) passes the
+            # task it created for the same reason.
+            task = asyncio.create_task(turn.run())
+            self._turns.register(self.context_id, turn, task)
+            task.add_done_callback(self._turn_ended(turn))
+        admitted = False
+        try:
+            # A conversation this runtime cannot continue is refused before routing,
+            # warm-up, the daily-turn quota and any metadata write: the client gets
+            # the machine code, not a generic failure after work has begun. One that
+            # only drifted re-pins and continues, with a notice instead.
+            try:
+                notices = await self._check_revision(system_key)
+            except revisions.ContextCompatibilityError as exc:
+                await self.send(revision_error_event(exc))
+                await self.send({"type": "done"})
+                return False
+            if turn.user_stopped:
+                # A Stop reached it while it prepared: it never runs.
+                await self.send({"type": "done", "stopped": True})
+                return False
+            # Recovery mutates stored execution state, so it must follow admission.
+            self.manager.recover_abandoned_turn(self.context_id)
+            # ``resumes`` - not ``message``, a property that is never None:
+            # the request is a Continue (see AgentTurn.message).
+            if turn.resumes and self.manager.pending_interruption(self.context_id) is None:
+                await self.send({"type": "error", "content": "There is nothing to continue in this conversation."})
+                await self.send({"type": "done"})
+                return False
+            # Admitting counts the turn for the day: only a request that will run.
+            # Continuing an already admitted turn must not charge a second daily turn.
+            refusal = None if restart_resume and turn.resumes else self.space.admit_turn()
+            if refusal is not None:
+                await self.send({"type": "error", "content": refusal})
+                await self.send({"type": "done"})
+                return False
+            if turn.user_stopped:
+                await self.send({"type": "done", "stopped": True})
+                return False
+            # The conversation continues on a revision this runtime re-pinned it to
+            # (a Grid version, a different system configuration, or a conversation
+            # stored before pinning existed). Tell the client before the turn runs,
+            # with a typed event that is not an error: nothing failed.
+            for notice in notices:
+                await self.send(revision_notice_event(notice))
+            if turn.user_stopped:
+                await self.send({"type": "done", "stopped": True})
+                return False
+            admitted = True
+            return True
+        finally:
+            if admitted:
+                # The gate opens: the turn's waiting task takes over here.
+                turn._admitted.set()
+            else:
+                # The turn never ran. Let its waiting task go at the gate (it
+                # ends without a frame of its own: the refusal went to the
+                # socket above), and give the claim and the record back - a
+                # started turn hands its claim over in run()'s own finally.
+                self._turns.forget(self.context_id, turn)
+                self._turns.release(self.context_id, turn)
+                turn._refused = True
+                turn._admitted.set()
+                if turn.user_stopped:
+                    # What waits in the queue to go *now* still starts, as it
+                    # would after a running turn was stopped (see _advance_queue).
+                    self._background(self._advance_queue(turn))
+
+    def _turn_ended(self, turn: "AgentTurn") -> Callable[[asyncio.Task], None]:
+        """What runs when a started turn's task ends: forget its record.
+
+        run() hands the claim over in its own finally, in the same event-loop
+        step as its last frame, so nothing starts here. A task cancelled
+        before its first step never reaches that finally: this callback is
+        the turn's last chance to let the claim go, and the chat must not
+        stay busy for good.
+        """
 
         def ended(_task: asyncio.Task) -> None:
             self._turns.forget(self.context_id, turn)
-            # run() releases in its finally; a task cancelled before its first
-            # step never gets there, and the chat must not stay busy for good.
             self._turns.release(self.context_id, turn)
-            self._background(self._advance_queue(turn))
 
-        task.add_done_callback(ended)
-        return True
+        return ended
 
     async def _check_revision(self, system_key: Any) -> list[dict[str, Any]]:
         """Judge a conversation that cannot run here, before any work.

@@ -1770,7 +1770,19 @@ class UserSpace:
         """Stop everything the space runs. A space is never rebuilt in place:
         its pool replaces it with a new one (web_chat.spaces)."""
         await self.turns.close()
-        store = getattr(getattr(self, "conversations", None), "store", None)
+        manager = getattr(self, "conversations", None)
+        save = getattr(manager, "save", None)
+        if callable(save):
+            try:
+                # A turn may have written its answer just as the space
+                # retired. The strict save is a barrier: it waits for a
+                # background save that started earlier and pushes what the
+                # turns have not saved yet, so nothing the user has read
+                # goes away with the space (see core.context.save).
+                await asyncio.to_thread(save, strict=True)
+            except Exception:
+                logger.exception("Could not save conversations while closing the space")
+        store = getattr(manager, "store", None)
         if store is not None:
             # What the turns wrote last is on disk before the space goes.
             await asyncio.to_thread(store.flush, durable=True)
