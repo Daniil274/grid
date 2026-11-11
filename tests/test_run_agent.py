@@ -528,9 +528,25 @@ async def test_a_request_past_the_threshold_compacts_the_session_mid_turn(factor
     with patch("core.factory.sessions.compact_conversation", new=AsyncMock(return_value=summarized())):
         sent = await run_config.call_model_input_filter(data)
 
-    # This call reads the compacted session: the summary, not the huge request.
-    assert [item.get("content") for item in sent.input] == ["Summary: the user started a task."]
-    assert [item.get("content") for item in await session.get_items()] == ["Summary: the user started a task."]
+    # This call reads the compacted session: the summary, the dialogue beside
+    # it, and the newest tool results of the very steps it is running - not
+    # the huge request.
+    assert [item["content"] for item in sent.input if item.get("role")] == [
+        "Summary: the user started a task.",
+        "Start",
+        "First.",
+    ]
+    assert [item.get("call_id") for item in sent.input if item.get("type") == "function_call"] == ["c1"]
+    outputs = [item for item in sent.input if item.get("type") == "function_call_output"]
+    assert [item.get("call_id") for item in outputs] == ["c1"]  # no orphan call or output
+    assert len(outputs[0]["output"]) < 400_000  # a huge result is clipped, head and tail
+    assert "more characters]" in outputs[0]["output"]
+    assert await session.get_items() == sent.input
+    from core.context_budget import request_tokens
+
+    assert request_tokens(await session.get_items()) < factory.models.compact_threshold(
+        "worker", factory.compact_config
+    )
     # The running turn shows the step, the stored chat the marker - with the
     # summary it holds, for a session seeded after it.
     assert shown and shown[0][0] > shown[0][1]
@@ -559,14 +575,61 @@ async def test_compacting_one_agent_clears_the_other_agents_stale_sessions(facto
         result = await factory.compact_session("worker", context_id, force=True)
 
     assert result["summary"] == "Summary: the user started a task."
-    assert [item.get("content") for item in await worker.get_items()] == ["Summary: the user started a task."]
+    # The compaction keeps the dialogue beside the summary: the tool calls and
+    # results fold into it, what was said does not.
+    assert [item.get("content") for item in await worker.get_items()] == [
+        "Summary: the user started a task.",
+        "Start",
+        "First.",
+    ]
     assert await reviewer.get_items() == []
+
+
+async def test_compaction_keeps_the_dialogue_inside_a_budget(factory):
+    """The dialogue a compaction keeps beside its summary is bounded: the
+    compacted session lands under the threshold and smaller than it was, the
+    user's messages and the newest answers verbatim, an older long answer
+    clipped head-and-tail."""
+    context_id = factory.context_manager.start_new_context()
+    session = factory._get_agent_session("worker", context_id)
+    items = []
+    for n in range(10):
+        items.append({"role": "user", "content": f"question {n}"})
+        items.append({"role": "assistant", "content": "a" * 10_000})
+    # Tool noise the summary replaces is what made the session huge.
+    items += [
+        {"type": "function_call", "call_id": "c1", "name": "bash", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": "x" * 400_000},
+    ]
+    await session.add_items(items)
+
+    with patch("core.factory.sessions.compact_conversation", new=AsyncMock(return_value=summarized())), patch.object(
+        factory.models, "compact_client_and_model", return_value=(object(), "m")
+    ):
+        result = await factory.compact_session("worker", context_id)
+
+    threshold = factory.models.compact_threshold("worker", factory.compact_config)
+    assert result["tokens_before"] > threshold
+    assert result["tokens_after"] < threshold
+    assert result["tokens_after"] < result["tokens_before"]
+    fresh = await session.get_items()
+    contents = [item["content"] for item in fresh if item.get("role")]
+    assert contents[0] == "Summary: the user started a task."
+    # Every user message survives verbatim, the newest answers whole.
+    assert [c for c in contents if c.startswith("question")] == [f"question {n}" for n in range(10)]
+    assert contents[-2:] == ["question 9", "a" * 10_000]
+    # Clipping stops once the dialogue fits: only the oldest answers shrink.
+    assert contents.count("a" * 10_000) == 8
+    assert any("more characters]" in c for c in contents)
+    # The tool calls and results are gone: the summary holds them.
+    assert [item for item in fresh if item.get("type") in ("function_call", "function_call_output")] == []
 
 
 async def test_a_session_joining_after_a_compaction_seeds_from_the_marker(factory):
     """An agent joining a compacted conversation seeds from the last marker:
-    the summary it holds and the dialogue after it - not the whole
-    pre-compaction history the compaction already replaced."""
+    the summary it holds, then the conversation's dialogue - what the
+    compaction kept beside its summary and what was said since - never the
+    tool calls and results the summary replaced."""
     with use(RecordingRunner("First.")):
         await factory.run_agent("worker", "OLDEST-BEFORE-COMPACTION")
         context_id = factory.context_manager.get_current_context_id()
@@ -584,7 +647,13 @@ async def test_a_session_joining_after_a_compaction_seeds_from_the_marker(factor
     assert "Summary: the user started a task." in items
     assert "SENT-AFTER-COMPACTION" in items
     assert "After." in items
-    assert "OLDEST-BEFORE-COMPACTION" not in items
+    # The dialogue from before the compaction is preserved: the participants'
+    # own words do not fall out of what a joining agent reads.
+    assert "OLDEST-BEFORE-COMPACTION" in items
+    assert "First." in items
+    # The seeding runs once: the dialogue the summary already covers is not
+    # duplicated by a second copy of the marker's summary.
+    assert items.count("Summary: the user started a task.") == 1
 
 
 async def test_a_context_overflow_summarizes_the_session_and_retries_once(factory):

@@ -947,11 +947,12 @@ class ContextManager:
         seeded from it never reads them back as the model's own words.
 
         ``from_last_compacted`` seeds from the last compaction marker instead:
-        the summary that marker holds, then the dialogue stored after it - not
-        the whole history the compaction already replaced with that summary.
-        A conversation without a marker, or a legacy marker that holds no
-        summary, keeps the full dialogue: there is nothing better to seed
-        from, and the turn's own compaction handles a seed past the threshold.
+        the summary that marker holds, then the conversation's dialogue - what
+        the compaction kept beside its summary and what was said since - never
+        the tool calls and results the summary replaced. A conversation without
+        a marker, or a legacy marker that holds no summary, keeps the full
+        dialogue: there is nothing better to seed from, and the turn's own
+        compaction handles a seed past the threshold.
         
         Args:
             last_n: Number of last messages to include (default: all)
@@ -966,7 +967,11 @@ class ContextManager:
                 seed_summary: Optional[str] = None
                 if from_last_compacted:
                     # The last marker wins: everything before it is covered by
-                    # the summary it holds.
+                    # the summary it holds. The dialogue itself stays in the
+                    # seed - compaction keeps it beside the summary
+                    # (factory.sessions.compact_session) - and the marker,
+                    # which holds that summary, is filtered out with the
+                    # other non-dialogue messages below.
                     marker_index = None
                     for index, msg in enumerate(conversation):
                         if isinstance(msg, ContextMessage) and (msg.metadata or {}).get("type") == COMPACTED_TYPE:
@@ -977,7 +982,7 @@ class ContextManager:
                         ).strip()
                         if summary:
                             seed_summary = summary
-                            conversation = conversation[marker_index + 1:]
+                            conversation = conversation[:marker_index] + conversation[marker_index + 1:]
                 messages = [
                     msg
                     for msg in conversation
@@ -1036,6 +1041,15 @@ class ContextManager:
                             })
 
                 if seed_summary:
+                    # The dialogue beside the summary is bounded the way
+                    # compaction bounds it, so a huge conversation seeds its
+                    # recent part and lets the turn's own compaction handle
+                    # the rest; the summary itself is never trimmed away.
+                    from core.context_budget import SEED_DIALOGUE_TOKENS, preserved_dialogue_items
+
+                    sdk_messages = preserved_dialogue_items(
+                        sdk_messages, budget=SEED_DIALOGUE_TOKENS
+                    )
                     # The summary reaches the model as the user's own record of
                     # the compacted part, the way a compacted session holds it
                     # (core.compact.compact_conversation) - not as the

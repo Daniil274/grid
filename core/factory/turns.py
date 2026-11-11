@@ -27,7 +27,7 @@ from core.action_policy import ActionRunState
 from core.agent_input import AgentInput, context_content, parse_agent_input
 from core.compact import is_prompt_too_long_error
 from core.context import strip_service_context_footer
-from core.context_budget import context_budget_filter, request_tokens
+from core.context_budget import OVERFLOW_RETRY_NOTE, context_budget_filter, request_tokens
 from core.deadlines import Deadline
 from core.factory.failures import (
     is_retriable,
@@ -138,15 +138,6 @@ NO_REPORT = "Model returned no final written report"
 # The same, when the last response filled the model's max_tokens: it spent its
 # answer budget thinking. The detail names the limit, so it starts like this.
 ANSWER_CUT_OFF = "the model spent its whole answer budget"
-
-# Input of an attempt rerun after an overflowing session was summarized: the
-# summary already holds the request and what was done for it.
-OVERFLOW_RETRY_NOTE = (
-    "[The conversation was compacted into the summary above to fit the context "
-    "window.] Continue the current request from where you stopped; do not redo "
-    "steps that already succeeded."
-)
-
 
 class TurnRunner:
     """Runs the turns of the factory's conversations.
@@ -264,14 +255,15 @@ class TurnRunner:
 
         Called between the steps of a turn, once a request still passes the
         auto-compact threshold with its oldest tool outputs cleared: the
-        session is compacted (``compact_session``, which also drops the marker
-        into the stored chat) and re-read, so this call - and the run after it -
-        works from the summary. The step is shown as any compaction's is
-        (*observer*). A session that cannot be compacted (the summary model
+        session is compacted in turn (``compact_session``, which also drops
+        the marker into the stored chat) and re-read, so this call - and the
+        run after it - works from the summary, the dialogue beside it and the
+        newest tool results of the very steps it is running. The step is shown
+        as any compaction's is (*observer*). A session that cannot be compacted (the summary model
         failed, the breaker is locked out) leaves the request as it was: a real
         overflow reaches the turn's own forced compaction and retry.
         """
-        compacted = await self.compact_session(agent_key, context_id)
+        compacted = await self.compact_session(agent_key, context_id, in_turn=True)
         if compacted:
             self._report_compaction(observer, compacted)
             try:

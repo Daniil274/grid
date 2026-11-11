@@ -245,6 +245,7 @@ async def test_compaction_extracts_original_messages_even_when_backend_fails(tmp
     upkeep.models = SimpleNamespace(
         context_window=lambda key: 10000,
         compact_request=lambda key: (object(), "model", False),
+        compact_threshold=lambda key, cfg: 100_000,
     )
     original = [{"role": "user", "content": "Decision: preserve original fact"}]
     session = SimpleNamespace(
@@ -268,7 +269,11 @@ async def test_compaction_extracts_original_messages_even_when_backend_fails(tmp
         assert await upkeep.compact_session("agent", "ctx", force=True)
     manager.extract_and_store_from_messages.assert_called_once_with(original)
     session.clear_session.assert_awaited_once()
-    session.add_items.assert_awaited_once_with([{"role": "user", "content": "summary"}])
+    # The compacted session holds the summary followed by the dialogue it keeps.
+    session.add_items.assert_awaited_once_with([
+        {"role": "user", "content": "summary"},
+        {"role": "user", "content": "Decision: preserve original fact"},
+    ])
 
 
 @pytest.mark.parametrize("backend", ["tencent", "hybrid"])

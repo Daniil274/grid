@@ -266,7 +266,10 @@ def get_user_summary_message(
 
     base = (
         "This session is being continued from a previous conversation that ran out of context. "
-        "The summary below covers the earlier portion of the conversation.\n\n"
+        "The summary below is a technical work ledger of that earlier portion - goal and "
+        "architecture decisions, tracker and sub-agent state, files read and modified, "
+        "verification and errors, and the current state of the work. The dialogue messages "
+        "themselves are preserved in the session and follow this summary.\n\n"
         + formatted
     )
 

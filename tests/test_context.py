@@ -727,8 +727,9 @@ def test_the_sdk_projection_is_the_dialogue_only():
 
 def test_the_sdk_projection_seeds_from_the_last_compaction_marker():
     """A session seeded after a compaction reads the summary the last marker
-    holds and the dialogue stored after it - not the whole pre-compaction
-    history the compaction already replaced with that summary."""
+    holds, then the conversation's dialogue: what the compaction kept beside
+    its summary (the participants' own words) and what was said since - never
+    the tool calls and results the summary replaced."""
     from core.context import COMPACTED_SUMMARY_NOTE
     from core.interruption import COMPACTED_TYPE
 
@@ -745,10 +746,12 @@ def test_the_sdk_projection_seeds_from_the_last_compaction_marker():
         context_id=context_id, from_last_compacted=True
     ) == [
         {"role": "user", "content": f"{COMPACTED_SUMMARY_NOTE}\n\nSummary of the second."},
+        {"role": "user", "content": "oldest message"},
+        {"role": "user", "content": "after the first compaction"},
         {"role": "user", "content": "after the second compaction"},
         {"role": "user", "content": "a later message"},
     ]
-    # last_n still trims the dialogue after the marker, never the summary.
+    # last_n still trims the dialogue, never the summary.
     assert cm.get_conversation_history_as_sdk_messages(
         last_n=1, context_id=context_id, from_last_compacted=True
     ) == [
@@ -768,6 +771,31 @@ def test_the_sdk_projection_seeds_from_the_last_compaction_marker():
         {"role": "user", "content": "after the second compaction"},
         {"role": "user", "content": "a later message"},
     ]
+
+
+def test_a_seed_bounded_dialogue_keeps_the_summary_and_the_newest_messages():
+    """A dialogue too big to seed whole is bounded the way compaction bounds
+    it (core.context_budget): the summary stays, the oldest dialogue gives
+    way to the newest."""
+    from unittest.mock import patch
+
+    from core.context import COMPACTED_SUMMARY_NOTE
+    from core.interruption import COMPACTED_TYPE
+
+    cm = ContextManager()
+    context_id = cm.start_new_context()
+    cm.add_message("assistant", "", {"type": COMPACTED_TYPE, "summary": "The summary."})
+    for n in range(10):
+        cm.add_message("user", f"message number {n} of the stored conversation")
+
+    with patch("core.context_budget.SEED_DIALOGUE_TOKENS", 50):
+        seeded = cm.get_conversation_history_as_sdk_messages(
+            context_id=context_id, from_last_compacted=True
+        )
+
+    assert seeded[0] == {"role": "user", "content": f"{COMPACTED_SUMMARY_NOTE}\n\nThe summary."}
+    assert seeded[-1] == {"role": "user", "content": "message number 9 of the stored conversation"}
+    assert 1 < len(seeded) < 11
 
 
 def test_the_sdk_projection_of_a_conversation_without_a_dialogue_is_empty():

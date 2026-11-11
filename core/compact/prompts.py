@@ -24,18 +24,32 @@ NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
 """
 
-# Analysis instructions for different compact types
+# Analysis instructions for different compact types.
+#
+# The summary is a technical work ledger, not a transcript: the dialogue
+# messages themselves are preserved in the compacted session (they follow the
+# summary), so the analysis focuses on what was done, found, changed, verified
+# and coordinated - GRID tasks, sub-agent runs, files, errors, git state.
 ANALYSIS_INSTRUCTION_BASE = """Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
 
 1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
    - The user's explicit requests and intents
    - Your approach to addressing the user's requests
-   - Key decisions, technical concepts and code patterns
+   - Key decisions, technical concepts and architecture choices
    - Specific details like:
      - file names
-     - full code snippets
-     - function signatures
+     - class and function names and their signatures
+     - what each read found and each edit changed, in one or two lines
+     - DO NOT copy long verbatim code blocks into the summary: name the file
+       and the symbol, and quote at most a line or two where the exact text
+       matters (an error message, a signature, a config key)
      - file edits
+   - GRID coordination state, with exact identifiers:
+     - beads tasks: bead_id, title, status, dependencies
+     - sub-agent runs: the orchestrate tool called, its context_id, status
+       and outcome
+     - verification runs: which tests and commands ran, and whether they passed
+     - git state: commits with their hashes, the branch, uncommitted changes
    - Errors that you ran into and how you fixed them
    - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
 2. Double-check for technical accuracy and completeness, addressing each required element thoroughly."""
@@ -55,19 +69,19 @@ ANALYSIS_INSTRUCTION_PARTIAL = """Before providing your final summary, wrap your
    - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
 2. Double-check for technical accuracy and completeness, addressing each required element thoroughly."""
 
-# Summary structure template
+# Summary structure template: a focused technical work ledger. The dialogue
+# messages (user and assistant) are preserved verbatim in the compacted
+# session - they follow the summary - so the ledger carries the work, not a
+# restatement of the talk.
 SUMMARY_STRUCTURE = """Your summary should include the following sections:
 
-1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
-2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
-3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
-4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
-6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.
-7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
-8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
-9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirming with the user first.
-                       If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off. This should be verbatim to ensure there's no drift in task interpretation.
+1. Goal & Architecture Decisions: What this session is working towards - the user's request or the beads task it serves - and the architecture and technical decisions made so far, with the reasons that matter for continuing the work.
+2. Tracker & Sub-agents State: The GRID coordination ledger, with exact identifiers: beads tasks (bead_id, title, status, dependencies), sub-agent runs (the orchestrate tool called, its context_id, status, outcome), and anything waiting on a reply, a run to finish, or a task to be closed.
+3. Files Read & Modified: The files, classes and functions examined or changed, each with its path and a one-or-two-line note of what was found or changed. No long verbatim code dumps - reference the file and the symbol, and quote at most a line or two where the exact text matters.
+4. Verification, Errors & Git State: Test and verification runs (which commands ran, whether they passed, which failures remain), errors hit and how each was fixed, and git state (commits with their hashes, the branch, uncommitted changes).
+5. Current State & Immediate Next Step: Where the work stands right now - what is done, what is in progress - and the single next step to take, with the exact identifiers it needs (bead_id, context_id, file path). Ensure the step is DIRECTLY in line with the user's most recent request; do not start tangential or long-completed work without confirming with the user first.
+
+The user's and assistant's dialogue messages are preserved verbatim in the compacted session and follow this summary, so do NOT restate or list them here: focus on the technical work ledger above - tool findings, file changes, errors and fixes, verification, coordination state, and the current state of the work.
 
 Here's an example of how your output should be structured:
 
@@ -77,46 +91,22 @@ Here's an example of how your output should be structured:
 </analysis>
 
 <summary>
-1. Primary Request and Intent:
-   [Detailed description]
+1. Goal & Architecture Decisions:
+   [What is being built or fixed, and the decisions that shape it]
 
-2. Key Technical Concepts:
-   - [Concept 1]
-   - [Concept 2]
-   - [...]
+2. Tracker & Sub-agents State:
+   - beads: [bead_id] - [title], [status], [dependencies]
+   - sub-agents: [orchestrate tool] context_id [ctx-...] - [status], [outcome]
 
-3. Files and Code Sections:
-   - [File Name 1]
-      - [Summary of why this file is important]
-      - [Summary of the changes made to this file, if any]
-      - [Important Code Snippet]
-   - [File Name 2]
-      - [Important Code Snippet]
-   - [...]
+3. Files Read & Modified:
+   - [path/to/file.py] ([class_or_function]): [what was found or changed]
 
-4. Errors and fixes:
-    - [Detailed description of error 1]:
-      - [How you fixed the error]
-      - [User feedback on the error if any]
-    - [...]
+4. Verification, Errors & Git State:
+   - [tests/commands]: [pass or fail, remaining failures]
+   - git: [commit hash] on [branch], [uncommitted changes]
 
-5. Problem Solving:
-   [Description of solved problems and ongoing troubleshooting]
-
-6. All user messages: 
-    - [Detailed non tool use user message]
-    - [...]
-
-7. Pending Tasks:
-    - [Task 1]
-    - [Task 2]
-    - [...]
-
-8. Current Work:
-   [Precise description of current work]
-
-9. Optional Next Step:
-   [Optional Next step to take]
+5. Current State & Immediate Next Step:
+   [Precise current state, and the next step with its identifiers]
 
 </summary>
 </example>
@@ -340,7 +330,7 @@ def get_user_summary_message(
     
     formatted_summary = format_compact_summary(summary)
     
-    base = f"""This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+    base = f"""This session is being continued from a previous conversation that ran out of context. The summary below is a technical work ledger of that earlier portion - goal and architecture decisions, tracker and sub-agent state, files read and modified, verification and errors, and the current state of the work. The dialogue messages themselves are preserved in the session and follow this summary.
 
 {formatted_summary}"""
     

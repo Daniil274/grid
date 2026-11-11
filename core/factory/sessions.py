@@ -17,7 +17,14 @@ import logging
 from typing import Any, Dict, Optional, Tuple
 
 from core.compact import COMPACTED_TYPE, compact_conversation
-from core.context_budget import request_tokens, session_transcript
+from core.context_budget import (
+    DIALOGUE_BUDGET_MIN,
+    DIALOGUE_BUDGET_SHARE,
+    preserved_dialogue_items,
+    recent_turn_tool_tail,
+    request_tokens,
+    session_transcript,
+)
 from core.interruption import CONTINUATION_TYPE
 
 logger = logging.getLogger("grid.agent_factory")
@@ -402,16 +409,24 @@ class SessionUpkeep:
         return {"tokens_before": tokens_before, "tokens_after": tokens_after}
 
     async def compact_session(
-        self, agent_key: str, context_id: str, *, force: bool = False
+        self, agent_key: str, context_id: str, *, force: bool = False, in_turn: bool = False
     ) -> Optional[Dict[str, int]]:
-        """Summarize *agent_key*'s session in a conversation into one message.
+        """Summarize *agent_key*'s session in a conversation, keeping the dialogue.
 
         Without ``force`` only when the session is past the auto-compact
         threshold (core.context_budget) and compaction has not failed
         ``compact.auto.max_consecutive_failures`` times in a row. The compaction
         model reads the session - messages, tool calls and their results - and
-        the session is replaced by its summary. The stored chat users see keeps
-        every message; it only gains a display-only marker (COMPACTED_TYPE).
+        the session is replaced by its summary followed by the clean dialogue
+        (``preserved_dialogue_items``): what the user asked and the agent
+        answered stays in the session, and the technical work folds into the
+        summary. ``in_turn`` - a compaction between the tool steps of a run -
+        also keeps the newest tool calls and results of the active turn
+        (``recent_turn_tool_tail``), so a run compacted mid-flight keeps the
+        results it is working from. Both stay inside budgets that always leave
+        the compacted session smaller than both the threshold and what it was.
+        The stored chat users see keeps every message; it only gains a
+        display-only marker (COMPACTED_TYPE).
         That marker holds the summary text, so a session seeded after it (an
         agent taking the conversation over) reads the compacted part instead of
         the whole pre-compaction history, and the other agents' sessions of the
@@ -449,12 +464,52 @@ class SessionUpkeep:
             self._compact_tracking.consecutive_failures += 1
             return None
         self._compact_tracking.consecutive_failures = 0
+        threshold = self.models.compact_threshold(agent_key, compact_cfg)
+        # The compacted session must stay under the threshold (or the next
+        # request would compact it again, forever), and - unless the compact
+        # was asked for by hand, which answers an explicit request, not the
+        # shrinking guarantee - smaller than what it was (or a mid-turn
+        # compaction could loop), so the dialogue and the tool tail share what
+        # is left of that ceiling once the summary is paid for.
+        if threshold > 0:
+            target_max = threshold if force else min(threshold, max(tokens_before - 1, 1))
+        else:
+            target_max = max(tokens_before, 1) if force else max(tokens_before - 1, 1)
+        summary_tokens = request_tokens(summary)
+        tail_items = (
+            recent_turn_tool_tail(items, max_tokens=max(0, target_max - summary_tokens))
+            if in_turn
+            else []
+        )
+        tail_tokens = request_tokens(tail_items)
+        dialogue_budget = (
+            max(DIALOGUE_BUDGET_MIN, int(threshold * DIALOGUE_BUDGET_SHARE))
+            if threshold > 0
+            else DIALOGUE_BUDGET_MIN
+        )
+        available = target_max - summary_tokens - tail_tokens
+        dialogue_items = (
+            preserved_dialogue_items(items, budget=min(dialogue_budget, available))
+            if available > 0
+            else []
+        )
+        compacted_items = list(summary) + dialogue_items + list(tail_items)
+        tokens_after = request_tokens(compacted_items)
+        if not force and tokens_after >= tokens_before:
+            # The budgets above should make this unreachable; if an estimate
+            # betrayed them anyway, the compaction must still shrink: the
+            # dialogue goes first, then the tail - the summary stays.
+            logger.warning(
+                "Compacted session of %s (~%d tokens) would not shrink; keeping the summary alone",
+                agent_key, tokens_after,
+            )
+            compacted_items = list(summary)
+            tokens_after = summary_tokens
         await asyncio.to_thread(self.sync_memory_from_context, items)
         await session.clear_session()
-        await session.add_items(summary)
+        await session.add_items(compacted_items)
         # Turn marks taken before this point no longer count items of this session.
         self._bump_session_epoch(context_id, agent_key)
-        tokens_after = request_tokens(summary)
         logger.info("Compacted the session of %s: ~%d -> ~%d tokens", agent_key, tokens_before, tokens_after)
         # The chat keeps its own visible log beside the agent session, so a
         # compaction would otherwise leave no trace in the thread. Drop a
