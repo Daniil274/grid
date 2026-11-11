@@ -11,13 +11,13 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"gridnode/internal/android"
 	"gridnode/internal/protocol"
 	"gridnode/internal/state"
 )
@@ -201,7 +201,7 @@ func (r *Runner) runTool(ctx context.Context, dir, packageName, fn string, args 
 	}
 	runContext, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(runContext, command[0], command[1:]...)
+	cmd := android.CommandContext(runContext, command[0], command[1:]...)
 	cmd.Dir = workdir
 	cmd.Stdin = bytes.NewReader(payload)
 	var stdout, stderr bytes.Buffer

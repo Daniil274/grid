@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"gridnode/internal/android"
 	"gridnode/internal/fsdriver"
 	"gridnode/internal/protocol"
 )
@@ -68,7 +69,7 @@ func (d *Driver) Exec(ctx protocol.Context, args map[string]any) ([]protocol.Con
 	timeout := protocol.Clamp(protocol.Int(args, "timeout", 60), 1, 900)
 	shell, shellArgs := shellCommand(command)
 
-	cmd := exec.Command(shell, shellArgs...)
+	cmd := android.Command(shell, shellArgs...)
 	cmd.Dir = target
 	stdout := &limitedBuffer{limit: 4 * 1024 * 1024}
 	stderr := &limitedBuffer{limit: 4 * 1024 * 1024}

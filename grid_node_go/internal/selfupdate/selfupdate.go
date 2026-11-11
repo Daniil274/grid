@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -101,7 +100,7 @@ func replace(executable, temporary string) error {
 
 // restart starts the new binary with the same arguments and leaves this process.
 func restart(executable string) error {
-	command := exec.Command(executable, android.Args(os.Args)[1:]...)
+	command := android.Command(executable, android.Args(os.Args)[1:]...)
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
