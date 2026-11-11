@@ -609,3 +609,30 @@ def test_a_tool_package_goes_to_a_paired_device_by_its_hash(tmp_path, monkeypatc
     assert client.get("/node/tools/notes/latest.tar.gz", headers=headers).status_code == 200
     assert client.get(f"/node/tools/notes/{'0' * 64}.tar.gz", headers=headers).status_code == 409
     assert client.get(f"/node/tools/missing/{digest}.tar.gz", headers=headers).status_code == 404
+
+
+def test_a_paired_device_takes_a_runtime_and_its_sha(tmp_path, monkeypatch):
+    """The runtime routes: a paired device downloads the archive and the sha
+    it will be held against; no token, no runtime."""
+    import hashlib
+
+    monkeypatch.setenv("GRID_NODE_RUNTIME_DIR", str(tmp_path))
+    archive = b"an interpreter"
+    (tmp_path / "python-linux-amd64.tar.gz").write_bytes(archive)
+    (tmp_path / "python-linux-amd64.tar.gz.sha256").write_text(
+        hashlib.sha256(archive).hexdigest()
+    )
+
+    app, _ = _app(tmp_path / "store", DeviceHub())
+    client = TestClient(app)
+    code = client.post("/api/devices/pairing").json()["code"]
+    token = client.post("/node/pair", json={"code": code, "name": "Laptop", "kind": "desktop"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    url = "/node/runtime/python-linux-amd64.tar.gz"
+
+    assert client.get(url).status_code == 401
+    assert client.get(url + ".sha256").status_code == 401
+    assert client.get(url, headers=headers).content == archive
+    assert client.get(url + ".sha256", headers=headers).text == hashlib.sha256(archive).hexdigest()
+    assert client.get("/node/runtime/python-linux-arm64.tar.gz", headers=headers).status_code == 404
+    assert client.get("/node/runtime/..%2Fescape.tar.gz", headers=headers).status_code == 404

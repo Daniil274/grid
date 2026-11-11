@@ -18,6 +18,8 @@ which is for signed-in users only:
     POST   /node/pair                          {"code", "name", "kind"} -> {"device", "token"}
     WS     /node/connect                       Authorization: Bearer <token>; the device's tunnel
     GET    /node/tools/{pkg}/{hash}.tar.gz     Authorization: Bearer <token>; a tool package
+    GET    /node/runtime/{name}.tar.gz          Authorization: Bearer <token>; a portable Python or uv
+    GET    /node/runtime/{name}.tar.gz.sha256   the same's sha256, when the server publishes it
     GET    /node/install.sh                    the installer a device fetches
     GET    /node/install.ps1                   the same for Windows
     GET    /node/bin/{target}                  a compiled grid-node binary
@@ -31,6 +33,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import tarfile
 from contextlib import suppress
@@ -247,6 +250,17 @@ def binaries_roots() -> List[Path]:
     """Where this server keeps the compiled grid-node binaries."""
     base = packages_root()
     return [base / "dist" / "grid-node", base / "grid_node" / "bin"]
+
+
+def runtime_root() -> Path:
+    """Where the portable runtimes this server can hand a node live: the
+    ``dist/node-runtime`` of the repository it runs from, unless
+    ``GRID_NODE_RUNTIME_DIR`` names elsewhere (``deploy/node-runtime/build.sh``
+    fills the directory)."""
+    override = os.environ.get("GRID_NODE_RUNTIME_DIR")
+    if override:
+        return Path(override)
+    return packages_root() / "dist" / "node-runtime"
 
 
 def node_binary(target: str) -> Optional[Path]:
@@ -591,6 +605,38 @@ def register_device_routes(
                 "Cache-Control": "no-store",
             },
         )
+
+    @app.get("/node/runtime/{name}.tar.gz.sha256", response_class=PlainTextResponse)
+    async def node_runtime_sha(name: str, request: Request) -> PlainTextResponse:
+        """The sha256 of a runtime archive, to a device that has paired."""
+        if pairing is None:
+            raise HTTPException(status_code=404, detail="This server pairs no devices.")
+        device = await asyncio.to_thread(pairing.verify, _bearer(request))
+        if device is None:
+            raise HTTPException(status_code=401, detail="Pair this device first: a paired device's token is needed.")
+        sidecar = runtime_root() / f"{name}.tar.gz.sha256" if PACKAGE_NAME.match(name) else None
+        if sidecar is None or not sidecar.is_file():
+            raise HTTPException(status_code=404, detail=f"This server has no runtime {name}.")
+        logger.info("Device %s takes the sha256 of runtime %s", device.id, name)
+        return PlainTextResponse(
+            sidecar.read_text(encoding="utf-8").strip(),
+            media_type="text/plain",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/node/runtime/{name}.tar.gz")
+    async def node_runtime(name: str, request: Request) -> FileResponse:
+        """A portable Python (or uv), to a device that has none of its own."""
+        if pairing is None:
+            raise HTTPException(status_code=404, detail="This server pairs no devices.")
+        device = await asyncio.to_thread(pairing.verify, _bearer(request))
+        if device is None:
+            raise HTTPException(status_code=401, detail="Pair this device first: a paired device's token is needed.")
+        archive = runtime_root() / f"{name}.tar.gz" if PACKAGE_NAME.match(name) else None
+        if archive is None or not archive.is_file():
+            raise HTTPException(status_code=404, detail=f"This server has no runtime {name}.")
+        logger.info("Device %s takes runtime %s", device.id, name)
+        return FileResponse(archive, media_type="application/gzip", headers={"Cache-Control": "no-store"})
 
     @app.get("/node/install.sh", response_class=PlainTextResponse)
     async def install_sh(request: Request, code: str = "") -> PlainTextResponse:
