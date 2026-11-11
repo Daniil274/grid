@@ -816,6 +816,14 @@ class CompactMicroConfig(BaseModel):
 class CompactAutoConfig(BaseModel):
     """Configuration for automatic compaction trigger."""
     enabled: bool = True
+    max_context_tokens: int = Field(
+        default=160_000,
+        ge=0,
+        description="Ceiling on the auto-compact threshold, however large the model's "
+        "window: past this many estimated session tokens the context is summarized "
+        "even on a 1M-token window, so a request never grows past what a model can "
+        "still answer in (and a summarizer can read). 0 disables the ceiling.",
+    )
     buffer_tokens: int = Field(
         default=13000,
         ge=1000,

@@ -9,8 +9,10 @@ import yaml
 from core.compact import (
     calculate_token_warning_state,
     get_auto_compact_threshold,
+    max_context_tokens_ceiling,
     is_auto_compact_enabled,
 )
+from core.model_registry import resolve_document
 from schemas import CompactAutoConfig, CompactConfig, ModelConfig
 
 
@@ -65,7 +67,9 @@ def _raw(path):
 def test_every_example_keeps_room_for_the_answer(path):
     """Compaction starts early enough that a request and its answer fit the window,
     and late enough that it does not run after nearly every turn."""
-    raw = _raw(path)
+    # Examples pick models from the shared catalog (models.use / models_file):
+    # expand it before reading what a model actually is.
+    raw = resolve_document(_raw(path), path)
     assert "compact" not in (raw.get("settings") or {}), "compact belongs at the top level"
     compact_cfg = CompactConfig(**raw.get("compact", {}))
     assert compact_cfg.enabled and compact_cfg.auto.enabled and compact_cfg.micro.enabled
@@ -78,7 +82,16 @@ def test_every_example_keeps_room_for_the_answer(path):
             summary = f"{agent_key}/{key}: compacts at {threshold}, answers up to {model.max_tokens}, " \
                 f"window {model.context_window}"
             assert threshold + model.max_tokens + SCHEMA_MARGIN_TOKENS <= model.context_window, summary
-            assert threshold >= model.context_window // 3, summary
+            # A window larger than the ceiling does not wait for it: a system of
+            # 1M-window models compacts when the ceiling says at the latest,
+            # not only after a third of the window has gone by.
+            ceiling = max_context_tokens_ceiling(compact_cfg)
+            latest = (
+                model.context_window // 3
+                if ceiling <= 0
+                else min(model.context_window // 3, ceiling)
+            )
+            assert threshold >= latest, summary
 
 
 @pytest.mark.parametrize("path", EXAMPLES, ids=lambda path: path.parent.name)

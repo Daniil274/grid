@@ -24,7 +24,8 @@ def compact_server():
     manager.append_message_to("ctx", "user", "Keep the visible conversation.")
     factory = SimpleNamespace(compact_session=AsyncMock(return_value={"tokens_before": 12000, "tokens_after": 800}))
     space.registry = SimpleNamespace(factory=lambda key: factory, default_key=lambda: "s")
-    server = WebChatServer(SimpleNamespace(), SpacePool(lambda user_id: space), warm_user=None)
+    server = WebChatServer(SimpleNamespace(), SpacePool(lambda user_id: space), warm_user=None,
+                           trusted_hosts=("testserver",))
     return server, space, factory
 
 
@@ -39,11 +40,81 @@ async def test_compaction_returns_counts_and_does_not_touch_stored_messages(comp
     async with api_client(server) as client:
         response = await client.post("/api/chat/conversations/ctx/compact")
     assert response.status_code == 200
-    assert response.json() == {"id": "ctx", "tokens_before": 12000, "tokens_after": 800}
+    body = response.json()
+    assert body["id"] == "ctx"
+    assert body["tokens_before"] == 12000
+    assert body["tokens_after"] == 800
+    # The marker entry the client draws from, without reading the chat back.
+    assert body["compacted"]["tokens_before"] == 12000
+    assert body["compacted"]["tokens_after"] == 800
+    assert body["compacted"]["timestamp"]
     factory.compact_session.assert_awaited_once_with("a", "ctx", force=True)
     # The marker is added by the real factory (tests/test_run_agent.py); the route itself writes nothing.
     assert space.context_manager().conversation_view("ctx") == before
     assert not space.turns.is_claimed("ctx")
+
+
+async def test_compaction_answer_carries_the_marker_written_into_the_thread(compact_server):
+    """The `compacted` entry is the marker the compaction left in the thread."""
+    server, space, factory = compact_server
+
+    async def compact(agent_key, context_id, *, force=True):
+        # What the real factory does (core/factory/sessions.py): the marker
+        # lands in the stored thread beside the visible conversation.
+        space.context_manager().append_message_to(context_id, "assistant", "", metadata={
+            "type": COMPACTED_TYPE, "tokens_before": 12000, "tokens_after": 800})
+        return {"tokens_before": 12000, "tokens_after": 800, "summary": "The plan, kept."}
+
+    factory.compact_session.side_effect = compact
+    async with api_client(server) as client:
+        response = await client.post("/api/chat/conversations/ctx/compact")
+    assert response.status_code == 200
+    marker = space.context_manager().conversation_view("ctx")["messages"][-1]
+    assert response.json()["compacted"] == {
+        "tokens_before": 12000,
+        "tokens_after": 800,
+        "summary": "The plan, kept.",
+        "timestamp": marker.timestamp,
+    }
+
+
+@pytest.mark.parametrize(
+    "default_from, expected",
+    [
+        ("factory", "factory-default"),
+        ("config", "agent-two"),
+        ("first-agent", "agent-one"),
+    ],
+)
+async def test_a_chat_without_a_routed_agent_compacts_with_the_system_default_agent(
+        compact_server, default_from, expected):
+    """No routing yet is not a refusal: the system's default agent stands in."""
+    server, space, factory = compact_server
+    space.context_manager().update_context_metadata("ctx", {"routed_agent": None})
+    if default_from == "factory":
+        factory.default_agent_key = "factory-default"
+    else:
+        factory.config = SimpleNamespace(
+            list_agents=lambda: {"agent-one": {}, "agent-two": {}},
+            # "config": the named default is one of the listed agents;
+            # "first-agent": the named default is not, the first agent stands in.
+            get_default_agent=lambda: "agent-two" if default_from == "config" else "not-listed",
+        )
+    async with api_client(server) as client:
+        response = await client.post("/api/chat/conversations/ctx/compact")
+    assert response.status_code == 200
+    factory.compact_session.assert_awaited_once_with(expected, "ctx", force=True)
+    assert not space.turns.is_claimed("ctx")
+
+
+async def test_compaction_without_a_routed_agent_or_system_default_is_refused(compact_server):
+    server, space, factory = compact_server
+    async with api_client(server) as client:
+        assert (await client.post("/api/chat/conversations/missing/compact")).status_code == 404
+        space.context_manager().update_context_metadata("ctx", {"routed_agent": None})
+        response = await client.post("/api/chat/conversations/ctx/compact")
+    assert response.status_code == 422
+    factory.compact_session.assert_not_awaited()
 
 
 async def test_compaction_reserves_context_against_turns_edits_deletion_and_duplicate_requests(compact_server):
@@ -92,15 +163,6 @@ async def test_failed_compaction_releases_context_for_retry(compact_server, fail
         factory.compact_session.side_effect = None
         factory.compact_session.return_value = {"tokens_before": 100, "tokens_after": 10}
         assert (await client.post("/api/chat/conversations/ctx/compact")).status_code == 200
-
-
-async def test_compaction_does_not_call_a_model_for_missing_or_empty_context(compact_server):
-    server, space, factory = compact_server
-    async with api_client(server) as client:
-        assert (await client.post("/api/chat/conversations/missing/compact")).status_code == 404
-        space.context_manager().update_context_metadata("ctx", {"routed_agent": None})
-        assert (await client.post("/api/chat/conversations/ctx/compact")).status_code == 400
-    factory.compact_session.assert_not_awaited()
 
 
 def test_a_compaction_marker_serializes_with_its_token_counts():

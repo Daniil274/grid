@@ -40,6 +40,11 @@ logger = Logger.get_logger("compact.auto")
 # ---------------------------------------------------------------------------
 
 AUTOCOMPACT_BUFFER_TOKENS = 13_000
+# However large the model's window, a session is summarized from this many
+# estimated tokens unless compact.auto.max_context_tokens says otherwise: a
+# 1M-token window would otherwise let a request grow past what a model can
+# still answer in (and what a summarizer can read) before it is compacted.
+DEFAULT_MAX_CONTEXT_TOKENS = 160_000
 WARNING_THRESHOLD_BUFFER_TOKENS = 20_000
 ERROR_THRESHOLD_BUFFER_TOKENS = 20_000
 MANUAL_COMPACT_BUFFER_TOKENS = 3_000
@@ -83,6 +88,30 @@ def _clamp_reserved_summary_tokens(value: int, context_window: int) -> int:
     return max(1_000, min(parsed, cap))
 
 
+def max_context_tokens_ceiling(compact_cfg: "Optional[CompactConfig]" = None) -> int:
+    """The configured ceiling on the auto-compact threshold, or 0 for none.
+
+    ``compact.auto.max_context_tokens`` — 0 disables the ceiling, and anything
+    else replaces ``DEFAULT_MAX_CONTEXT_TOKENS``: however large the model's
+    window, past this many estimated session tokens the context is
+    summarized. Keeping the ceiling here lets
+    ``ModelProvider.compact_threshold`` tell a ceiling from a misconfigured
+    ``buffer_tokens`` before it warns about a low threshold.
+    """
+    auto = _auto_cfg(compact_cfg)
+    if auto is None:
+        return DEFAULT_MAX_CONTEXT_TOKENS
+    ceiling = (
+        DEFAULT_MAX_CONTEXT_TOKENS
+        if getattr(auto, "max_context_tokens", None) is None
+        else getattr(auto, "max_context_tokens", None)
+    )
+    try:
+        return max(0, int(ceiling))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CONTEXT_TOKENS
+
+
 def get_effective_context_window_size(
     context_window: int,
     compact_cfg: "Optional[CompactConfig]" = None,
@@ -113,12 +142,21 @@ def get_auto_compact_threshold(
     the window. ``compact.auto.buffer_tokens`` covers only what the session's
     estimate leaves out - instructions, tool schemas - and a margin, so one
     value fits every model of a system, whatever its window and answer size.
+    ``compact.auto.max_context_tokens`` (default ``DEFAULT_MAX_CONTEXT_TOKENS``)
+    caps the result, so a 1M-token window does not wait until 860k tokens
+    before its context is ever compacted.
     Supports env override CLAUDE_AUTOCOMPACT_PCT_OVERRIDE for testing.
     """
     auto = _auto_cfg(compact_cfg)
     effective = get_effective_context_window_size(context_window, compact_cfg)
     buffer = auto.buffer_tokens if auto is not None else AUTOCOMPACT_BUFFER_TOKENS
+    ceiling = max_context_tokens_ceiling(compact_cfg)
+
     threshold = effective - max(0, answer_tokens) - buffer
+    if ceiling > 0:
+        # A window larger than the ceiling never waits for it: whatever the
+        # subtraction left, compaction starts at the ceiling at the latest.
+        threshold = min(threshold, ceiling)
 
     pct_override = os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")
     if pct_override:

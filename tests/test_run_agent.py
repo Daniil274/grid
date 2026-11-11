@@ -79,6 +79,22 @@ def use(runner):
     return patch.object(agents, "Runner", runner)
 
 
+class RecordingRunner(ScriptedRunner):
+    """Records what each model call reads before the turn writes to the session."""
+
+    def __init__(self, *replies):
+        super().__init__(*replies)
+        self.seen = []
+
+    async def run(self, agent, run_input, *, context, max_turns, session, run_config=None):
+        items = await session.get_items() if session is not None else []
+        self.seen.append(SimpleNamespace(agent=agent, input=str(run_input), items=items))
+        return await super().run(
+            agent, run_input, context=context, max_turns=max_turns,
+            session=session, run_config=run_config,
+        )
+
+
 async def test_the_answer_carries_no_service_context_id(factory):
     """The answer is the model's text: the app appends no service footer."""
     runner = ScriptedRunner("Done.")
@@ -124,8 +140,9 @@ async def test_a_legacy_session_footer_is_kept_not_destructively_rewritten(facto
 
 
 async def test_history_reaches_the_model_through_one_channel(factory):
+    """History is delivered in the session, never twice and never in the prompt."""
     with use(ScriptedRunner("First.")):
-        await factory.run_agent("worker", "Start")
+        await factory.run_agent("worker", "SECRET-A-DETAIL")
     context_id = factory.context_manager.get_current_context_id()
 
     built = []
@@ -136,14 +153,110 @@ async def test_history_reaches_the_model_through_one_channel(factory):
         return original(agent_key, context_path, **kwargs)
 
     factory.instructions_builder.assemble_model_context = spy
-    with use(ScriptedRunner("Second.", "Review.")):
+    runner = RecordingRunner("Second.", "Review.")
+    with use(runner):
         # The worker's own session holds the conversation: no transcript.
         await factory.run_agent("worker", "Continue", context_id=context_id)
-        # The reviewer joins it with an empty session: it gets the transcript.
+        # The reviewer joins it: its empty session is seeded instead of a transcript.
         await factory.run_agent("reviewer", "Review it", context_id=context_id)
 
     # The last build per agent is the one its run used (creating an agent builds too).
-    assert dict(built) == {"worker": False, "reviewer": True}
+    assert dict(built) == {"worker": False, "reviewer": False}
+    joined = runner.seen[1]
+    # The joining agent reads the conversation in its session, exactly once...
+    assert str(joined.items).count("SECRET-A-DETAIL") == 1
+    assert "SECRET-A-DETAIL" in str(joined.items)
+    # ...and not as prompt sections beside it.
+    assert "SECRET-A-DETAIL" not in joined.agent.instructions
+
+
+async def test_a_joining_agents_next_turn_still_has_the_conversation(factory):
+    """A -> B -> B: what B was told on joining is still there on its next turn."""
+    runner = RecordingRunner("First.", "Review.", "More.")
+    with use(runner):
+        await factory.run_agent("worker", "SECRET-A-DETAIL")
+        context_id = factory.context_manager.get_current_context_id()
+        await factory.run_agent("reviewer", "Review it", context_id=context_id)
+        await factory.run_agent("reviewer", "Go on", context_id=context_id)
+
+    second = runner.seen[2]
+    # The conversation the reviewer joined on is in its session, once.
+    assert str(second.items).count("SECRET-A-DETAIL") == 1
+    assert "Review." in str(second.items)
+    # Not repeated in the prompt, and no "meanwhile" block for what it saw.
+    assert "SECRET-A-DETAIL" not in second.input
+    assert "Meanwhile in this conversation" not in second.input
+
+
+async def test_an_agent_that_comes_back_hears_what_the_other_agent_said(factory):
+    """A -> B -> A: A keeps its own history and is told B's exchange, once."""
+    runner = RecordingRunner("First.", "Review: keep the card.", "Third.")
+    with use(runner):
+        await factory.run_agent("worker", "SECRET-A-DETAIL")
+        context_id = factory.context_manager.get_current_context_id()
+        await factory.run_agent("reviewer", "Review it", context_id=context_id)
+        await factory.run_agent("worker", "Go on", context_id=context_id)
+
+    back = runner.seen[2]
+    # Its own session still holds what it said, and none of the reviewer's answer.
+    assert str(back.items).count("SECRET-A-DETAIL") == 1
+    assert "Review: keep the card." not in str(back.items)
+    # The reviewer's exchange reaches it as the one record of what it missed.
+    assert back.input.count("Review: keep the card.") == 1
+    assert "Agent reviewer:" in back.input
+    # Its own words are not replayed to it.
+    assert "SECRET-A-DETAIL" not in back.input
+
+
+async def test_the_seed_keeps_the_whole_dialogue_and_compaction_follows_it(factory):
+    """Seeding trims nothing; a long session is summarized, not cut by hand.
+
+    The joining agent takes the whole stored dialogue, the earliest message
+    included. A session past the auto-compact threshold then goes through the
+    turn's own ``compact_session``: the normal path summarizes what was seeded,
+    so the beginning of the conversation survives as summary instead of being
+    silently dropped while seeding.
+    """
+    runner = RecordingRunner("First.", "Review.")
+    with use(runner):
+        await factory.run_agent("worker", "OLDEST-MESSAGE-THAT-IS-KEPT")
+        context_id = factory.context_manager.get_current_context_id()
+        await factory.run_agent("reviewer", "Review it", context_id=context_id)
+
+    seeded = runner.seen[1].items
+    # The whole projection is seeded: the earliest message is not dropped.
+    assert "OLDEST-MESSAGE-THAT-IS-KEPT" in str(seeded)
+    assert "First." in str(seeded)
+
+    # A joining agent whose seeded session is past the threshold is compacted by
+    # the standard path, and the summary is made from everything that was seeded.
+    factory.models.compact_threshold = lambda agent_key, compact: 6  # a few tokens
+    compact = AsyncMock(return_value=summarized())
+    runner = RecordingRunner("Review too.")
+    with use(runner), patch("core.factory.sessions.compact_conversation", new=compact):
+        await factory.run_agent("reviewer", "Review again", context_id=context_id)
+
+    transcript = compact.await_args.kwargs["messages"]
+    assert any("OLDEST-MESSAGE-THAT-IS-KEPT" in m.get_text() for m in transcript)
+    # The session the turn then runs on is the summary, as after any compaction.
+    assert runner.seen[0].items[0]["content"] == "Summary: the user started a task."
+
+
+async def test_a_session_is_seeded_only_from_its_own_conversation(factory):
+    """Chats stay isolated: another conversation's history never seeds a session."""
+    runner = RecordingRunner("One.", "Other.", "Two.")
+    with use(runner):
+        await factory.run_agent("worker", "SECRET-FIRST-CHAT")
+        factory.context_manager.get_current_context_id()
+        other = factory.context_manager.start_new_context()
+        await factory.run_agent("reviewer", "hello", context_id=other)
+        await factory.run_agent("worker", "hello again", context_id=other)
+
+    assert "SECRET-FIRST-CHAT" not in str(runner.seen[1].items)
+    assert "SECRET-FIRST-CHAT" not in str(runner.seen[2].items)
+    assert "SECRET-FIRST-CHAT" not in runner.seen[2].input
+    # The worker's session in the other chat holds that chat's reviewer turn.
+    assert "Other." in str(runner.seen[2].items)
 
 
 async def test_a_transient_provider_error_is_retried(factory):
@@ -381,11 +494,97 @@ async def test_compaction_stops_after_repeated_failures(factory):
         for _ in range(limit + 2):
             assert await factory.compact_session("worker", context_id) is None
     assert compact.await_count == limit
-    # An explicit /compact still tries.
+    # An explicit /compact still tries, and resets the lockout it inherits:
+    # the auto path tries again on its next turn, not stays locked out forever.
     with patch("core.factory.sessions.compact_conversation", new=AsyncMock(return_value=summarized())), patch.object(
         factory.models, "compact_client_and_model", return_value=(object(), "m")
     ):
         assert await factory.compact_session("worker", context_id, force=True)
+    assert factory._compact_tracking.consecutive_failures == 0
+
+
+async def test_a_request_past_the_threshold_compacts_the_session_mid_turn(factory):
+    """A turn of many tool calls grows its session unchecked: a request that
+    still passes the auto-compact threshold with its old tool outputs cleared
+    is compacted in flight, and this call reads the summary."""
+    from agents.run import CallModelData, ModelInputData
+
+    with use(ScriptedRunner("First.")):
+        await factory.run_agent("worker", "Start")
+    context_id = factory.context_manager.get_current_context_id()
+    session = factory._get_agent_session("worker", context_id)
+    await session.add_items([
+        {"type": "function_call", "call_id": "c1", "name": "file_read", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": "x" * 400_000},
+    ])
+    shown = []
+    observer = SimpleNamespace(handle_compaction=lambda before, after: shown.append((before, after)))
+    run_config = factory._run_config("worker", session=session, observer=observer, context_id=context_id)
+    data = CallModelData(
+        model_data=ModelInputData(input=await session.get_items(), instructions="Be brief."),
+        agent=None, context=None,
+    )
+
+    with patch("core.factory.sessions.compact_conversation", new=AsyncMock(return_value=summarized())):
+        sent = await run_config.call_model_input_filter(data)
+
+    # This call reads the compacted session: the summary, not the huge request.
+    assert [item.get("content") for item in sent.input] == ["Summary: the user started a task."]
+    assert [item.get("content") for item in await session.get_items()] == ["Summary: the user started a task."]
+    # The running turn shows the step, the stored chat the marker - with the
+    # summary it holds, for a session seeded after it.
+    assert shown and shown[0][0] > shown[0][1]
+    marker = [
+        m
+        for m in factory.context_manager.conversation_snapshot()
+        if (m.metadata or {}).get("type") == COMPACTED_TYPE
+    ][-1]
+    assert marker.metadata["summary"] == "Summary: the user started a task."
+
+
+async def test_compacting_one_agent_clears_the_other_agents_stale_sessions(factory):
+    """Every agent of a conversation keeps a session of its own; compacting
+    one clears the others', so a sibling re-seeds from the compacted
+    conversation instead of replaying a stale pre-compaction history."""
+    with use(ScriptedRunner("First.")):
+        await factory.run_agent("worker", "Start")
+    context_id = factory.context_manager.get_current_context_id()
+    worker = factory._get_agent_session("worker", context_id)
+    reviewer = factory._get_agent_session("reviewer", context_id)
+    await reviewer.add_items([{"role": "user", "content": "the reviewer's own stale history"}])
+    factory._agent_sessions[("worker", context_id)] = worker
+    factory._agent_sessions[("reviewer", context_id)] = reviewer
+
+    with patch("core.factory.sessions.compact_conversation", new=AsyncMock(return_value=summarized())):
+        result = await factory.compact_session("worker", context_id, force=True)
+
+    assert result["summary"] == "Summary: the user started a task."
+    assert [item.get("content") for item in await worker.get_items()] == ["Summary: the user started a task."]
+    assert await reviewer.get_items() == []
+
+
+async def test_a_session_joining_after_a_compaction_seeds_from_the_marker(factory):
+    """An agent joining a compacted conversation seeds from the last marker:
+    the summary it holds and the dialogue after it - not the whole
+    pre-compaction history the compaction already replaced."""
+    with use(RecordingRunner("First.")):
+        await factory.run_agent("worker", "OLDEST-BEFORE-COMPACTION")
+        context_id = factory.context_manager.get_current_context_id()
+    with patch("core.factory.sessions.compact_conversation", new=AsyncMock(return_value=summarized())):
+        await factory.compact_session("worker", context_id, force=True)
+
+    # The marker sits at the end of the chat: a turn stored after it is read as
+    # itself, the compacted part through the summary.
+    with use(RecordingRunner("After.")):
+        await factory.run_agent("worker", "SENT-AFTER-COMPACTION", context_id=context_id)
+
+    reviewer = factory._get_agent_session("reviewer", context_id)
+    assert await factory._seed_session(reviewer, context_id, "reviewer")
+    items = str(await reviewer.get_items())
+    assert "Summary: the user started a task." in items
+    assert "SENT-AFTER-COMPACTION" in items
+    assert "After." in items
+    assert "OLDEST-BEFORE-COMPACTION" not in items
 
 
 async def test_a_context_overflow_summarizes_the_session_and_retries_once(factory):

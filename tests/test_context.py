@@ -685,3 +685,95 @@ class TestContextManager:
         
         assert len(results) == 3
         assert all(result == "success" for result in results)
+
+
+def test_the_sdk_projection_names_its_conversation():
+    """A projection never depends on which conversation happens to be active."""
+    cm = ContextManager()
+    first = cm.start_new_context()
+    cm.add_message("user", "in the first chat")
+    second = cm.start_new_context()
+    cm.add_message("user", "in the second chat")
+
+    assert cm.get_conversation_history_as_sdk_messages(context_id=first) == [
+        {"role": "user", "content": "in the first chat"}
+    ]
+    assert cm.get_conversation_history_as_sdk_messages(context_id=second) == [
+        {"role": "user", "content": "in the second chat"}
+    ]
+    assert cm.get_conversation_history_as_sdk_messages(last_n=1, context_id=first) == [
+        {"role": "user", "content": "in the first chat"}
+    ]
+
+
+def test_the_sdk_projection_is_the_dialogue_only():
+    """Sub-agent reports, compaction markers and interruption records are not
+    something a participant said: a session seeded from the projection must
+    never read them back as the model's own words."""
+    from core.interruption import COMPACTED_TYPE, INTERRUPTED_TYPE
+
+    cm = ContextManager()
+    cm.add_message("user", "hello")
+    cm.add_message("assistant", "Tool result of Agent(coder): done", {"kind": "tool_result"})
+    cm.add_message("assistant", "", {"type": COMPACTED_TYPE})
+    cm.add_message("assistant", "Stopped by the user.", {"type": INTERRUPTED_TYPE})
+    cm.add_message("assistant", "answer\n\nContext ID: ctx-0a1b2c3d")
+
+    assert cm.get_conversation_history_as_sdk_messages() == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "answer"},
+    ]
+
+
+def test_the_sdk_projection_seeds_from_the_last_compaction_marker():
+    """A session seeded after a compaction reads the summary the last marker
+    holds and the dialogue stored after it - not the whole pre-compaction
+    history the compaction already replaced with that summary."""
+    from core.context import COMPACTED_SUMMARY_NOTE
+    from core.interruption import COMPACTED_TYPE
+
+    cm = ContextManager()
+    context_id = cm.start_new_context()
+    cm.add_message("user", "oldest message")
+    cm.add_message("assistant", "", {"type": COMPACTED_TYPE, "summary": "Summary of the early talk."})
+    cm.add_message("user", "after the first compaction")
+    cm.add_message("assistant", "", {"type": COMPACTED_TYPE, "summary": "Summary of the second."})
+    cm.add_message("user", "after the second compaction")
+    cm.add_message("user", "a later message")
+
+    assert cm.get_conversation_history_as_sdk_messages(
+        context_id=context_id, from_last_compacted=True
+    ) == [
+        {"role": "user", "content": f"{COMPACTED_SUMMARY_NOTE}\n\nSummary of the second."},
+        {"role": "user", "content": "after the second compaction"},
+        {"role": "user", "content": "a later message"},
+    ]
+    # last_n still trims the dialogue after the marker, never the summary.
+    assert cm.get_conversation_history_as_sdk_messages(
+        last_n=1, context_id=context_id, from_last_compacted=True
+    ) == [
+        {"role": "user", "content": f"{COMPACTED_SUMMARY_NOTE}\n\nSummary of the second."},
+        {"role": "user", "content": "a later message"},
+    ]
+
+    # A legacy marker without its summary seeds the full dialogue instead:
+    # there is nothing better to seed from, and the turn's own compaction
+    # handles a seed past the threshold.
+    cm.add_message("assistant", "", {"type": COMPACTED_TYPE})
+    assert cm.get_conversation_history_as_sdk_messages(
+        context_id=context_id, from_last_compacted=True
+    ) == [
+        {"role": "user", "content": "oldest message"},
+        {"role": "user", "content": "after the first compaction"},
+        {"role": "user", "content": "after the second compaction"},
+        {"role": "user", "content": "a later message"},
+    ]
+
+
+def test_the_sdk_projection_of_a_conversation_without_a_dialogue_is_empty():
+    cm = ContextManager()
+    context_id = cm.start_new_context()
+    cm.add_message("assistant", "Tool result of Agent(coder): done", {"kind": "tool_result"})
+
+    assert cm.get_conversation_history_as_sdk_messages(context_id=context_id) == []
+    assert cm.get_conversation_history_as_sdk_messages(context_id="ctx-unknown") == []

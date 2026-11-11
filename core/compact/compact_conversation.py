@@ -172,6 +172,7 @@ async def compact_conversation(
     max_output_tokens: int = 20_000,
     compact_cfg: Optional[Any] = None,
     responses_api: Optional[dict] = None,
+    raw_tokens_before: Optional[int] = None,
 ) -> CompactionResult:
     """
     Compact a conversation by generating an LLM summary of older messages.
@@ -192,6 +193,12 @@ async def compact_conversation(
             to resume without asking questions (True for auto-compact).
         is_auto_compact: Whether this was triggered automatically.
         max_output_tokens: Maximum tokens for the LLM summary response.
+        raw_tokens_before: Tokens the compacted session actually holds, when
+            the caller knows them (core.context_budget.request_tokens).
+            *messages* clips tool arguments and outputs (session_transcript),
+            so its own estimate can be far smaller than the session; without
+            the raw count a summary larger than the clipped transcript but
+            smaller than the session would falsely abort the compaction.
 
     Returns:
         CompactionResult on success.
@@ -204,6 +211,11 @@ async def compact_conversation(
         raise ValueError(ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)
 
     tokens_before = estimate_message_tokens(messages)
+    if raw_tokens_before is not None:
+        try:
+            tokens_before = max(tokens_before, int(raw_tokens_before))
+        except (TypeError, ValueError):
+            logger.warning("compact_conversation: unusable raw_tokens_before %r", raw_tokens_before)
 
     # 1. Strip images
     messages = strip_images_from_messages(messages)

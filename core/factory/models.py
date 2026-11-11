@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import logging
 from urllib.parse import urlparse
-from typing import Any, Dict, FrozenSet, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 
 from agents import ModelSettings
 from agents.model_settings import Reasoning
 from openai import AsyncOpenAI
 
 from core.bounded_model import BoundedModel
-from core.compact import get_auto_compact_threshold
+from core.compact import get_auto_compact_threshold, max_context_tokens_ceiling
 from core.modalities import IMAGE, TEXT_ONLY
 from core.model_access import ModelAccess
 from core.model_catalog import catalog as model_catalog
@@ -338,35 +338,97 @@ class ModelProvider:
         return client, model, options
 
     def compact_request(self, key: Optional[str]) -> tuple[Any, Optional[str], Optional[dict]]:
-        """Resolve the summary model and its API options together, including fallback."""
-        resolve = self.model_request
-        compact_cfg = self.compact_config
-        summary_model_key = getattr(compact_cfg, "summary_model", None)
+        """The first summary-model candidate, with its API options; None when
+        none resolves (see :meth:`compact_requests`)."""
+        candidates = self.compact_requests(key)
+        return candidates[0] if candidates else (None, None, None)
+
+    def compact_requests(self, key: Optional[str]) -> List[tuple[Any, Optional[str], Optional[dict]]]:
+        """Every summary-model candidate in fallback order, ready to call.
+
+        ``compact.summary_model`` comes first; the agent's own model chain
+        (``model``: one key or a fallback list) follows, so a summary survives
+        the failure of the model that would usually write it. Each candidate
+        is ``(client, model, Responses API options)``, as
+        :meth:`model_request` resolves them; a key that does not resolve is
+        logged and skipped, never raised - compaction falls to the next one.
+        """
+        keys: List[str] = []
+        summary_model_key = getattr(self.compact_config, "summary_model", None)
         if summary_model_key:
+            keys.append(summary_model_key)
+        if key:
+            # *key* is an agent key here, not a model key: resolve_key would
+            # collapse it to the primary model and lose the fallbacks. When it
+            # names no agent it is a model key (an executor's own session) or
+            # an alias, and resolving it is exactly what is left to do.
+            chain = self._agent_model_keys(str(key))
+            keys.extend(chain or [str(self.resolve_key(key))])
+
+        candidates: List[tuple[Any, Optional[str], Optional[dict]]] = []
+        seen = set()
+        for model_key in keys:
+            if model_key in seen:
+                continue
+            seen.add(model_key)
             try:
-                return resolve(summary_model_key)
+                candidates.append(self.model_request(model_key))
             except Exception:
                 logger.warning(
-                    "Configured compact.summary_model '%s' is unavailable; falling back to resolved model",
-                    summary_model_key,
+                    "Configured compact summary model '%s' is unavailable; trying the next candidate",
+                    model_key,
                 )
-        if key:
-            return resolve(self.resolve_key(key))
-        return None, None, None
+        return candidates
+
+    def _agent_model_keys(self, agent_key: Optional[str]) -> List[str]:
+        """The model chain of *agent_key*'s agent, primary model first.
+
+        ``model`` is one key or an ordered fallback list (AgentConfig.model_keys);
+        an unknown agent (and so a model key or alias) has no chain of its
+        own - an empty list, never an exception.
+        """
+        if not agent_key:
+            return []
+        try:
+            agent = self.config.get_agent(agent_key)
+        except Exception:
+            return []
+        if hasattr(agent, "model_keys"):
+            return [str(key) for key in agent.model_keys()]
+        return [str(agent.primary_model)]
 
     def context_window(self, agent_key: Optional[str]) -> int:
-        """The context window of *agent_key*'s model; a default for unknown agents."""
-        try:
-            return self.config.get_model(self.config.get_agent(agent_key).primary_model).context_window
-        except Exception:
-            return DEFAULT_CONTEXT_WINDOW
+        """The context window *agent_key*'s requests must fit in.
+
+        The narrowest window of the agent's model chain, not the primary
+        model's alone: a fallback model with a smaller window would
+        otherwise take requests the primary model's window allowed - and
+        overflow (a 1M primary with a 258k fallback would compact at 860k).
+        A default stands in for an unknown agent.
+        """
+        windows = []
+        for model_key in self._agent_model_keys(agent_key):
+            try:
+                windows.append(int(self.config.get_model(model_key).context_window))
+            except Exception:
+                continue
+        return min(windows) if windows else DEFAULT_CONTEXT_WINDOW
 
     def answer_tokens(self, agent_key: Optional[str]) -> int:
-        """How much of the window *agent_key*'s model may fill with one answer."""
-        try:
-            return self.config.get_model(self.config.get_agent(agent_key).primary_model).max_tokens
-        except Exception:
-            return 0
+        """How much of the window *agent_key*'s model may fill with one answer.
+
+        The largest answer cap of the agent's model chain: whichever model
+        answers, the threshold leaves room for it.
+        """
+        caps = []
+        for model_key in self._agent_model_keys(agent_key):
+            try:
+                cap = int(self.config.get_model(model_key).max_tokens)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if cap > 0:
+                caps.append(cap)
+        return max(caps) if caps else 0
 
     def compact_threshold(self, agent_key: Optional[str], compact_cfg: Any) -> int:
         """Session tokens past which *agent_key*'s context is compacted.
@@ -377,7 +439,14 @@ class ModelProvider:
         """
         window = self.context_window(agent_key)
         threshold = get_auto_compact_threshold(window, compact_cfg, self.answer_tokens(agent_key))
-        if threshold < window // 4 and agent_key not in self._low_threshold_warned:
+        # A threshold at the configured ceiling (compact.auto.max_context_tokens)
+        # is policy, however small a share of the window it is: it is not
+        # warned about the way a too-large buffer_tokens is.
+        if (
+            threshold < window // 4
+            and threshold < max_context_tokens_ceiling(compact_cfg)
+            and agent_key not in self._low_threshold_warned
+        ):
             self._low_threshold_warned.add(agent_key)
             logger.warning(
                 "Agent %s compacts its context at %d of %d tokens: lower compact.auto.buffer_tokens "

@@ -20,6 +20,7 @@ from utils.logger import Logger
 
 from core.interruption import (
     COMPACTED_TYPE,
+    INTERRUPTED_TYPE,
     CallLedger,
     Interruption,
     StopReason,
@@ -51,6 +52,13 @@ ACTIVE_RUN_STATUSES = ("running", "retrying")
 # id a user typed into the dialogue is not a footer and stays.
 CONTEXT_ID_FOOTER_RE = re.compile(r"\s*\nContext ID: ctx-[0-9a-fA-F]{8,}[ \t]*$")
 
+
+#: What a session seeded from a compaction marker reads before the dialogue
+#: that follows it: the summary is the user's record of the compacted part.
+COMPACTED_SUMMARY_NOTE = (
+    "[A summary of this conversation's context from before it was compacted;"
+    " it replaces everything said before the messages that follow.]"
+)
 
 def strip_service_context_footer(text: str) -> str:
     """*text* without a trailing service ``Context ID: ctx-...`` footer line.
@@ -918,25 +926,68 @@ class ContextManager:
             logger.warning("Lock timeout in get_conversation_history")
             return []
     
-    def get_conversation_history_as_sdk_messages(self, last_n: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_conversation_history_as_sdk_messages(
+        self,
+        last_n: Optional[int] = None,
+        *,
+        context_id: Optional[str] = None,
+        from_last_compacted: bool = False,
+    ) -> List[Dict[str, Any]]:
         """
         Get conversation history as list of messages in Agents SDK format.
         
         Converts ContextMessage objects to SDK format with support for multimodal content.
-        This is used when session is disabled (e.g., for multimodal messages with images).
+        This is used when session is disabled (e.g., for multimodal messages with images),
+        and to seed a session that is empty (an agent joining a conversation).
+
+        ``context_id`` names the conversation to project; without it the call
+        projects the one it acts on (bound, else active). The projection is the
+        dialogue only: a sub-agent report, a compaction marker and an
+        interruption record are not something a participant said, so a session
+        seeded from it never reads them back as the model's own words.
+
+        ``from_last_compacted`` seeds from the last compaction marker instead:
+        the summary that marker holds, then the dialogue stored after it - not
+        the whole history the compaction already replaced with that summary.
+        A conversation without a marker, or a legacy marker that holds no
+        summary, keeps the full dialogue: there is nothing better to seed
+        from, and the turn's own compaction handles a seed past the threshold.
         
         Args:
             last_n: Number of last messages to include (default: all)
+            from_last_compacted: Seed from the last compaction marker onwards
             
         Returns:
             List of messages in SDK format: [{"role": "user", "content": ...}, ...]
         """
         try:
             with safe_lock(self._lock, timeout=5.0):
-                if not self._conversation_history:
+                conversation = list(self._target_bucket(context_id).get("conversation") or [])
+                seed_summary: Optional[str] = None
+                if from_last_compacted:
+                    # The last marker wins: everything before it is covered by
+                    # the summary it holds.
+                    marker_index = None
+                    for index, msg in enumerate(conversation):
+                        if isinstance(msg, ContextMessage) and (msg.metadata or {}).get("type") == COMPACTED_TYPE:
+                            marker_index = index
+                    if marker_index is not None:
+                        summary = str(
+                            (conversation[marker_index].metadata or {}).get("summary") or ""
+                        ).strip()
+                        if summary:
+                            seed_summary = summary
+                            conversation = conversation[marker_index + 1:]
+                messages = [
+                    msg
+                    for msg in conversation
+                    if isinstance(msg, ContextMessage)
+                    and not is_tool_result(msg)
+                    and (msg.metadata or {}).get("type") not in (COMPACTED_TYPE, INTERRUPTED_TYPE)
+                    and not (isinstance(msg.content, str) and not msg.content.strip())
+                ]
+                if not messages and not seed_summary:
                     return []
-                
-                messages = self._conversation_history
                 if last_n:
                     messages = messages[-last_n:]
                 
@@ -983,7 +1034,17 @@ class ContextManager:
                                 "role": msg.role,
                                 "content": _assistant_content_without_footer(msg.role, content)
                             })
-                
+
+                if seed_summary:
+                    # The summary reaches the model as the user's own record of
+                    # the compacted part, the way a compacted session holds it
+                    # (core.compact.compact_conversation) - not as the
+                    # assistant's words.
+                    sdk_messages.insert(0, {
+                        "role": "user",
+                        "content": f"{COMPACTED_SUMMARY_NOTE}\n\n{seed_summary}",
+                    })
+
                 return sdk_messages
         except ContextError:
             logger.warning("Lock timeout in get_conversation_history_as_sdk_messages")

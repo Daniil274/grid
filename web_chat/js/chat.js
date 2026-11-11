@@ -29,6 +29,10 @@ const RESUME_RETRY_MS = 300;
 const REVISION_CODE_PREFIX = "revision.";
 const isRevisionCode = (code) => typeof code === "string" && code.startsWith(REVISION_CODE_PREFIX);
 
+/** How many compaction markers a stored thread carries (``kind`` "compaction"). */
+const countCompactions = (messages) =>
+  (Array.isArray(messages) ? messages : []).filter((message) => message?.kind === "compaction").length;
+
 export class ChatController {
   /**
    * @param {object} deps
@@ -70,6 +74,11 @@ export class ChatController {
     // chat whose messages are on screen, and to no other: an open that is still
     // fetching has already claimed a chat id without having drawn anything.
     this._renderedId = null;
+    // How many compaction markers the transcript on screen shows. Markers are
+    // only ever appended to a thread and every full render recounts them, so
+    // the ones a read brings past this count are new and are inserted in
+    // place (see `_insertCompactionMarkers`).
+    this._shownCompactions = 0;
     this._listenForLifecycle();
   }
 
@@ -322,17 +331,50 @@ export class ChatController {
     if (restartPending) throw new Error("Wait for the server restart to finish.");
     this._compactingId = contextId;
     this._store.set({ compacting: true });
+    let outcome;
     try {
-      const result = await api.compactConversation(contextId);
-      // Compaction leaves a display-only marker in the stored thread; pull the
-      // conversation back so it shows up right away rather than on the next turn.
-      await this._reconcile(contextId, { force: true });
-      return result;
+      outcome = await api.compactConversation(contextId);
+    } catch (error) {
+      // A compact the reader asked for must never fail silently, whoever
+      // called it - the button, a spoken command. `notified` tells a caller
+      // with its own error surface (the button's catch) not to repeat it.
+      toast(error?.message || "Context compaction failed.", { tone: "error" });
+      error.notified = true;
+      throw error;
     } finally {
       this._compactingId = null;
       // Only the chat being compacted shows it; another one may be open by now.
       if (this._store.get().contextId === contextId) this._store.set({ compacting: false });
     }
+    // The marker of what was compacted, drawn from the answer itself: the
+    // reconcile below can be dropped - a newer read took the screen
+    // (`_claimRead`/`_ownsRead`), or a turn started - and the marker would
+    // otherwise stay unseen until the next full read of the chat.
+    this._renderCompactionMarker(contextId, outcome);
+    // Compaction leaves a display-only marker in the stored thread; pull the
+    // conversation back so it shows up right away rather than on the next turn.
+    await this._reconcile(contextId, { force: true });
+    return outcome;
+  }
+
+  /**
+   * Draw the marker of a finished manual compaction at once, from the
+   * server's own answer - it carries the entry the compaction wrote into the
+   * stored thread (``compacted``: the token counts and when it was written).
+   */
+  _renderCompactionMarker(contextId, outcome) {
+    if (!outcome || this._renderedId !== contextId || !this._transcript) return;
+    const entry = outcome.compacted ?? outcome;
+    this._transcript.add(
+      {
+        role: "marker",
+        kind: "compaction",
+        timestamp: entry.timestamp ?? null,
+        compaction: { tokens_before: entry.tokens_before, tokens_after: entry.tokens_after },
+      },
+      { reveal: false },
+    );
+    this._shownCompactions += 1;
   }
 
   /**
@@ -841,6 +883,7 @@ export class ChatController {
     // An empty transcript is this chat's: nothing to remember yet, and nothing
     // of the one it replaced.
     this._renderedId = conversation.id;
+    this._shownCompactions = 0;
     await this._refreshConversations();
   }
 
@@ -889,6 +932,7 @@ export class ChatController {
         this._transcript.setLoading(false);
         this._transcript.clear();
         this._renderedId = null;
+        this._shownCompactions = 0;
         this._store.set({ resumable: false });
       }
       throw error;
@@ -924,6 +968,7 @@ export class ChatController {
     });
     // From here on, the places read off the screen belong to this chat.
     this._renderedId = payload.id;
+    this._shownCompactions = countCompactions(payload.messages);
     this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id), reveal: !place, place });
     this._syncResumable();
     // The saved plan of the chat, before any live plan step of a new turn.
@@ -986,6 +1031,7 @@ export class ChatController {
       this._store.set({ contextId: null, hasAgentContext: false, reference: null });
       this._transcript.clear();
       this._renderedId = null;
+      this._shownCompactions = 0;
     }
     await this._refreshConversations();
     const next = this._store.get().conversations[0];
@@ -1286,8 +1332,13 @@ export class ChatController {
     this._syncResumable();
     void this._refreshConversations();
     // A failed turn stores no answer, so reconciling would re-render the
-    // transcript without it and wipe the error the reader has to see.
+    // transcript without it and wipe the error the reader has to see. But the
+    // turn may have compacted the session before it started or while it ran
+    // (a prompt-too-long retry), and the marker that compaction wrote into
+    // the stored thread must still reach the screen: it is inserted in
+    // place, the error stays where it is.
     if (reconcile && !turn.failed) void this._reconcile(turn.contextId, { force: turn.detached });
+    else if (reconcile) void this._syncCompactionMarkers(turn.contextId);
   }
 
   /**
@@ -1349,8 +1400,13 @@ export class ChatController {
       // went through another navigation and came back to this chat; or it is
       // another chat now. Either way this answer predates the screen it would
       // be drawn on. Not a reason to call the screen settled: if that newer
-      // read fails, a resync retries.
-      if (!this._ownsRead(read)) return null;
+      // read fails, a resync retries. A forced read still owes the screen one
+      // thing: the compaction markers the thread gained (a manual compact, a
+      // deleted message) must not stay unseen until the next turn.
+      if (!this._ownsRead(read)) {
+        if (force) this._insertCompactionMarkers(payload);
+        return null;
+      }
       // The newest read settles this chat: whatever an opening of it was
       // showing as loading is over, drawn or attached by this pass.
       this._transcript.setLoading(false);
@@ -1358,6 +1414,9 @@ export class ChatController {
       // it, and drawing the stored thread would cut the answer off mid-word.
       if (this._activeTurn?.contextId === contextId) {
         this._store.set({ queue: payload.pending ?? [], hasAgentContext: Boolean(payload.metadata?.routed_agent) });
+        // The running turn's history cannot be drawn over its live answer,
+        // but a forced read still owes the thread its new compaction markers.
+        if (force) this._insertCompactionMarkers(payload);
         return payload;
       }
       // A turn that was on screen when the read started ended meanwhile: its
@@ -1373,6 +1432,7 @@ export class ChatController {
         // A resync is not an opening: the reader keeps their place unless the
         // stream was being followed (a following reader still lands at the end).
         this._renderedId = payload.id;
+        this._shownCompactions = countCompactions(payload.messages);
         this._transcript.render(payload.messages, { loadStep: this._stepLoader(payload.id), reveal: false, keep });
       }
       // The stored conversation now shows its own answer (or never will): the
@@ -1391,6 +1451,64 @@ export class ChatController {
     } finally {
       if (this._syncAbort === abort) this._syncAbort = null;
     }
+  }
+
+  /**
+   * Bring the compaction markers of the stored thread onto the screen without
+   * re-rendering it.
+   *
+   * A failed turn is not reconciled: the stored conversation holds no answer
+   * for it, and a full render would wipe the error the reader has to see.
+   * Yet that turn may have compacted the agent's session before it started
+   * or while it ran (a prompt-too-long retry), and the marker the compaction
+   * left in the stored thread has to be shown anyway - it is inserted in
+   * place, before the turn's own live bubbles, which is where the stored
+   * thread keeps it.
+   * @returns {Promise<?object>} the conversation read, or null when this read
+   *   did not settle the screen
+   */
+  async _syncCompactionMarkers(contextId) {
+    if (contextId !== this._store.get().contextId || this._renderedId !== contextId || !this._transcript) return null;
+    const abort = new AbortController();
+    const read = this._claimRead(abort);
+    try {
+      const payload = await this._fetchConversation(contextId, { signal: abort.signal });
+      if (!payload || !this._ownsRead(read)) return null;
+      this._insertCompactionMarkers(payload);
+      return payload;
+    } catch (error) {
+      if (error?.name !== "AbortError") console.warn("Could not sync the compaction markers", error);
+      return null;
+    } finally {
+      if (this._syncAbort === abort) this._syncAbort = null;
+    }
+  }
+
+  /**
+   * Insert the compaction markers *payload*'s thread holds that the screen
+   * lacks. Markers are only ever appended to a thread and every full render
+   * recounts them (`_shownCompactions`), so the missing ones are always the
+   * newest; they land before the live bubbles trailing the thread - a failed
+   * turn's request and error - which is where the stored thread keeps them.
+   */
+  _insertCompactionMarkers(payload) {
+    if (!payload || this._renderedId !== payload.id || !this._transcript) return;
+    const stored = (Array.isArray(payload.messages) ? payload.messages : [])
+      .filter((message) => message?.kind === "compaction");
+    const missing = stored.slice(this._shownCompactions);
+    if (!missing.length) return;
+    const anchor = this._transcript.last();
+    for (const message of missing) {
+      const marker = {
+        role: "marker",
+        kind: "compaction",
+        timestamp: message.timestamp ?? message.compaction?.timestamp ?? null,
+        compaction: message.compaction ?? null,
+      };
+      if (anchor && !anchor.messageId) this._transcript.addBefore(anchor, marker);
+      else this._transcript.add(marker, { reveal: false });
+    }
+    this._shownCompactions = stored.length;
   }
 
   /**

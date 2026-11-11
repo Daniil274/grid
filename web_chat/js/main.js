@@ -629,7 +629,9 @@ async function boot() {
       const count = (value) => Number(value).toLocaleString();
       toast(`Context compacted: ≈${count(result.tokens_before)} → ${count(result.tokens_after)} tokens.`, { tone: "success", timeout: 6000 });
     } catch (error) {
-      toast(error.message, { tone: "error" });
+      // `compactContext` already told the reader in chat if it could; say it
+      // only when it could not (a thrown before-handling guard, say).
+      if (!error?.notified) toast(error.message, { tone: "error" });
     }
   });
   $("#open-usage").addEventListener("click", (event) => {

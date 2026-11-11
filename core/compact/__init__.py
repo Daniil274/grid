@@ -68,6 +68,7 @@ from .auto_compact import (
     MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
     get_effective_context_window_size,
     get_auto_compact_threshold,
+    max_context_tokens_ceiling,
     calculate_token_warning_state,
     is_auto_compact_enabled,
     should_auto_compact,
@@ -123,6 +124,7 @@ __all__ = [
     "ERROR_THRESHOLD_BUFFER_TOKENS", "MANUAL_COMPACT_BUFFER_TOKENS",
     "MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES",
     "get_effective_context_window_size", "get_auto_compact_threshold",
+    "max_context_tokens_ceiling",
     "calculate_token_warning_state", "is_auto_compact_enabled",
     "should_auto_compact", "auto_compact_if_needed",
     # Reactive

@@ -272,11 +272,67 @@ class SessionUpkeep:
         }
 
     async def _summary_of(self, items: list, key: Optional[str], *, auto: bool) -> Optional[list]:
-        """Session *items* as summary messages, by the compaction model (or
-        *key*'s model); None when that failed or wrote nothing - logged."""
+        """Session *items* as summary messages, by the compaction model or
+        *key*'s model chain as fallbacks; None when every candidate failed or
+        wrote nothing - logged, never raised.
+
+        The summary is measured against the session's real size
+        (``request_tokens`` of *items*), never against the clipped transcript
+        the summarizer reads (``session_transcript``): a session of huge tool
+        outputs clips to a transcript that can be smaller than its own summary,
+        and that must not abort compaction as "not smaller than the context".
+        """
+        raw_tokens_before = request_tokens(items)
+        candidates = self._compact_candidates(key)
+        if not candidates:
+            logger.warning("Compacting the session of %s has no model to write the summary", key)
+            return None
+        for client, model, responses_api in candidates:
+            summary = await self._summary_by(
+                items, key, client, model, responses_api, auto, raw_tokens_before
+            )
+            if summary is not None:
+                return summary
+        return None
+
+    def _compact_candidates(self, key: Optional[str]) -> list:
+        """Every summary-model candidate in fallback order, ready to call.
+
+        ``ModelProvider.compact_requests`` is the list (the configured summary
+        model, then the agent's model chain); a models object without it - a
+        stand-in offering only the single-candidate ``compact_request`` - gives
+        one candidate. A candidate that does not resolve is dropped, never
+        raised: the ones after it get their chance.
+        """
+        requests = getattr(self.models, "compact_requests", None)
+        if callable(requests):
+            return [tuple(candidate) for candidate in requests(key) if candidate]
+        single = getattr(self.models, "compact_request", None)
+        if not callable(single):
+            return []
+        try:
+            candidate = tuple(single(key))
+        except Exception:
+            logger.warning(
+                "Compacting the session of %s has no model to write the summary",
+                key, exc_info=True,
+            )
+            return []
+        return [candidate] if any(candidate) else []
+
+    async def _summary_by(
+        self,
+        items: list,
+        key: Optional[str],
+        client: Any,
+        model: Optional[str],
+        responses_api: Optional[dict],
+        auto: bool,
+        raw_tokens_before: int,
+    ) -> Optional[list]:
+        """Session *items* as summary messages, by one summary-model candidate."""
         compact_cfg = self.compact_config
         try:
-            client, model, responses_api = self.models.compact_request(key)
             result = await compact_conversation(
                 messages=session_transcript(items),
                 llm_client=client,
@@ -286,9 +342,13 @@ class SessionUpkeep:
                 max_output_tokens=compact_cfg.summary_max_output_tokens,
                 compact_cfg=compact_cfg,
                 responses_api=responses_api,
+                raw_tokens_before=raw_tokens_before,
             )
         except Exception:
-            logger.warning("Compacting the session of %s failed", key, exc_info=True)
+            logger.warning(
+                "Compacting the session of %s by %s failed; trying the next candidate",
+                key, model, exc_info=True,
+            )
             return None
         summary = [
             {"role": message.role, "content": message.get_text()}
@@ -297,12 +357,21 @@ class SessionUpkeep:
         ]
         if not result.success() or not summary:
             logger.warning(
-                "Compacting the session of %s produced no summary: %s",
-                key,
+                "Compacting the session of %s by %s produced no summary: %s",
+                key, model,
                 result.user_display_message or result.error_message or result.status.value,
             )
             return None
         return summary
+
+    @staticmethod
+    def _summary_text(summary: list) -> str:
+        """The summary messages as one text, for the chat marker and the result."""
+        return "\n\n".join(
+            str(item.get("content", ""))
+            for item in summary
+            if isinstance(item, dict) and str(item.get("content", "")).strip()
+        )
 
     async def summarize_session(
         self, session: Any, model_key: Optional[str], *, above_tokens: int = 0
@@ -343,12 +412,21 @@ class SessionUpkeep:
         model reads the session - messages, tool calls and their results - and
         the session is replaced by its summary. The stored chat users see keeps
         every message; it only gains a display-only marker (COMPACTED_TYPE).
-        Returns ``{"tokens_before", "tokens_after"}``, or None when
+        That marker holds the summary text, so a session seeded after it (an
+        agent taking the conversation over) reads the compacted part instead of
+        the whole pre-compaction history, and the other agents' sessions of the
+        conversation are cleared to re-seed the same way. ``force`` - a manual
+        compact - resets the lockout the auto path earned by failing in a row.
+        Returns ``{"tokens_before", "tokens_after", "summary"}``, or None when
         nothing was compacted; a failure is logged, never raised.
         """
         compact_cfg = self.compact_config
         if not compact_cfg.enabled or not (force or compact_cfg.auto.enabled):
             return None
+        if force:
+            # A manual compact is an explicit request: the lockout the auto
+            # path earned by failing in a row does not apply to it.
+            self._compact_tracking.consecutive_failures = 0
         session = self._get_agent_session(agent_key, context_id)
         items = await session.get_items()
         if not items:
@@ -383,6 +461,7 @@ class SessionUpkeep:
         # display-only marker into it: it never reaches the model, but the chat
         # shows where the context was rewritten. ``append_message_to`` returns
         # False for contexts that are not chat conversations, which is fine.
+        summary_text = self._summary_text(summary)
         self.context_manager.append_message_to(
             context_id,
             "assistant",
@@ -391,6 +470,48 @@ class SessionUpkeep:
                 "type": COMPACTED_TYPE,
                 "tokens_before": tokens_before,
                 "tokens_after": tokens_after,
+                "summary": summary_text,
             },
         )
-        return {"tokens_before": tokens_before, "tokens_after": tokens_after}
+        # The other agents of this conversation hold sessions of their own,
+        # each now stale - a full history the summary has replaced.
+        await self._clear_stale_sibling_sessions(context_id, agent_key)
+        return {
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "summary": summary_text,
+        }
+
+    async def _clear_stale_sibling_sessions(self, context_id: str, agent_key: str) -> None:
+        """Clear the other agents' sessions of *context_id* after a compaction.
+
+        Every agent of a conversation keeps a session of it; when one agent's
+        session is compacted, the others still hold theirs in full - stale,
+        uncompacted, free to sit far past every threshold until that agent's
+        own turn comes. Each is cleared, so its next turn re-seeds it from the
+        compacted conversation (the summary marker and the dialogue after it,
+        ``turns._seed_session``) instead of replaying the pre-compaction
+        history. Its session epoch is bumped with it: a fork mark taken before
+        no longer cuts a session that was rewritten. Best effort - a sibling
+        that cannot be cleared keeps its history and is compacted by its own
+        turn; never raised.
+        """
+        sessions = getattr(self, "_agent_sessions", None) or {}
+        for (other_key, other_context), other in list(sessions.items()):
+            if other_context != context_id or other_key == agent_key:
+                continue
+            try:
+                if not await other.get_items(limit=1):
+                    continue  # already empty: it seeds anew on its own
+                await other.clear_session()
+            except Exception:
+                logger.warning(
+                    "Clearing the stale session of %s in %s failed",
+                    other_key, context_id, exc_info=True,
+                )
+                continue
+            self._bump_session_epoch(context_id, other_key)
+            logger.info(
+                "Cleared the stale session of %s in %s: it re-seeds from the compacted conversation",
+                other_key, context_id,
+            )

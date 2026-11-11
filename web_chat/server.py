@@ -188,6 +188,53 @@ def _revision_view(manager: Any, context_id: str) -> dict[str, Any]:
         return {"status": "malformed"}
 
 
+def _compaction_markers(manager: Any, context_id: str) -> list[dict[str, Any]]:
+    """The compaction markers a conversation's thread holds, oldest first.
+
+    Each is the display-only entry a compaction wrote (``type``
+    COMPACTED_TYPE), as the chat renders it from the stored thread: the token
+    counts and when the marker was written.
+    """
+    view = manager.conversation_view(context_id) or {}
+    markers: list[dict[str, Any]] = []
+    for message in view.get("messages") or []:
+        metadata = getattr(message, "metadata", None) or {}
+        if metadata.get("type") != COMPACTED_TYPE:
+            continue
+        markers.append(
+            {
+                "tokens_before": metadata.get("tokens_before"),
+                "tokens_after": metadata.get("tokens_after"),
+                "timestamp": getattr(message, "timestamp", None),
+            }
+        )
+    return markers
+
+
+def _default_agent_key(factory: Any) -> Optional[str]:
+    """The agent to compact a chat no agent has routed to yet.
+
+    The factory's own default when the core names one
+    (``factory.default_agent_key``); else the system config's default agent,
+    else the first agent it defines. None when it defines no agent at all.
+    """
+    default = getattr(factory, "default_agent_key", None)
+    if default:
+        return default
+    config = getattr(factory, "config", None)
+    if config is None:
+        return None
+    try:
+        agents = list(config.list_agents() or {})
+        default = config.get_default_agent()
+    except Exception:  # a config that cannot be read has no default to offer
+        logger.warning("Could not read the system's default agent", exc_info=True)
+        return None
+    if default in agents:
+        return default
+    return agents[0] if agents else None
+
+
 class WebChatServer:
     def __init__(
         self,
@@ -1239,25 +1286,55 @@ class WebChatServer:
 
         @api.post("/api/chat/conversations/{context_id}/compact")
         async def compact_conversation(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:
-            """Summarize the agent's session in this conversation now (core.context_budget)."""
+            """Summarize the agents' sessions in this conversation now (core.context_budget).
+
+            A chat no agent has routed to yet is not a refusal: the system's
+            default agent stands in, so a manual compact never fails on the
+            missing routing. The answer carries the marker the compaction
+            wrote into the stored thread - the token counts, the summary and
+            when it was written (``compacted``) - so the client draws it at
+            once, without waiting to read the conversation back; the next
+            read shows the same marker from the thread itself.
+            """
             manager = space.context_manager()
             if manager.conversation_view(context_id) is None:
                 raise HTTPException(status_code=404, detail="Conversation not found")
             metadata = manager.get_context_metadata(context_id)
-            agent = metadata.get("routed_agent")
-            if not agent:
-                raise HTTPException(status_code=400, detail="No agent has worked in this chat yet")
-            registry = await space.registry_for(context_id)
-            system = metadata.get("routed_system") or registry.default_key()
+            agent = metadata.get("routed_agent") or None
             if not space.turns.claim(context_id):
                 raise HTTPException(status_code=409, detail="Wait for the running turn or compaction before compacting")
             try:
-                outcome = await registry.factory(system).compact_session(agent, context_id, force=True)
+                registry = await space.registry_for(context_id)
+                system = metadata.get("routed_system") or registry.default_key()
+                factory = registry.factory(system)
+                target = agent or _default_agent_key(factory)
+                if not target:
+                    raise HTTPException(
+                        status_code=422, detail="This system defines no agent to compact this chat with"
+                    )
+                # The markers the thread holds now; the ones past this point
+                # are what this compaction wrote.
+                markers_before = len(_compaction_markers(manager, context_id))
+                outcome = await factory.compact_session(target, context_id, force=True)
+                markers = _compaction_markers(manager, context_id)
             finally:
                 space.turns.release(context_id)
             if outcome is None:
                 raise HTTPException(status_code=422, detail="Nothing was compacted: the context is empty or the summary failed")
-            return JSONResponse({"id": context_id, **outcome})
+            # The marker this compaction wrote; when none is visible in the
+            # thread (a context the chat does not render), the outcome speaks
+            # for itself.
+            written = markers[markers_before:]
+            marker = written[-1] if written else {}
+            compacted = {
+                "tokens_before": marker.get("tokens_before", outcome.get("tokens_before")),
+                "tokens_after": marker.get("tokens_after", outcome.get("tokens_after")),
+                "summary": outcome.get("summary"),
+                "timestamp": marker.get("timestamp")
+                or outcome.get("timestamp")
+                or datetime.now(timezone.utc).isoformat(),
+            }
+            return JSONResponse({"id": context_id, **outcome, "compacted": compacted})
 
         @api.post("/api/chat/conversations/{context_id}/activate")
         async def activate_branch(context_id: str, space: UserSpace = Depends(current_space)) -> JSONResponse:

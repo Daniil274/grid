@@ -27,7 +27,7 @@ from core.action_policy import ActionRunState
 from core.agent_input import AgentInput, context_content, parse_agent_input
 from core.compact import is_prompt_too_long_error
 from core.context import strip_service_context_footer
-from core.context_budget import context_budget_filter
+from core.context_budget import context_budget_filter, request_tokens
 from core.deadlines import Deadline
 from core.factory.failures import (
     is_retriable,
@@ -196,6 +196,7 @@ class TurnRunner:
         steering: Optional[Steering] = None,
         session: Optional[SQLiteSession] = None,
         observer: Any = None,
+        context_id: Optional[str] = None,
     ) -> RunConfig:
         """What every model call of a run of *agent_key* passes through.
 
@@ -204,23 +205,44 @@ class TurnRunner:
         ``session``), then the image budget (core.image_window), then the
         context budget (core.context_budget): old compactable tool outputs are
         cleared from the request once it would pass the auto-compact threshold,
-        and *observer* is told so.
+        and *observer* is told so. A request that would still pass the
+        threshold after clearing is compacted in flight: the session itself is
+        summarized (``compact_session``) and this call reads the compacted
+        session - a turn of many tool calls cannot grow its context unchecked
+        until the turn ends. The compaction is shown as any compaction's is:
+        the step (*observer*) and the marker in the stored chat.
         """
         max_images = self.config.config.settings.image_processing.max_images_per_request
+        threshold = self.models.compact_threshold(agent_key, self.compact_config)
         clear_outputs = context_budget_filter(
-            self.models.compact_threshold(agent_key, self.compact_config),
+            threshold,
             self.compact_config,
             on_cleared=getattr(observer, "handle_outputs_cleared", None),
         )
+        # Only a configured agent's own run can compact its session mid-run: a
+        # dynamic agent has no threshold of its own, and a run without its
+        # session has nothing to compact.
+        compact_in_turn = bool(agent_key and session is not None and context_id)
 
         def budget(items: List[Any], instructions: Optional[str]) -> ModelInputData:
+            """The request to send - or, past the threshold, a coroutine that
+            compacts the session mid-run and resolves to the request to send.
+            The SDK awaits an awaitable filter result; a caller that has one
+            synchronously (tests) only ever sees the plain request, for no
+            request of theirs passes the threshold."""
             items = limit_images(items, max_images)
             if clear_outputs is not None:
                 items = clear_outputs(items, instructions)
+            if compact_in_turn and request_tokens(items, instructions) > threshold:
+                return self._compact_in_turn(
+                    agent_key, context_id, session, observer, items, instructions
+                )
             return ModelInputData(input=items, instructions=instructions)
 
         if steering is None:
             def apply(data: CallModelData) -> ModelInputData:
+                # Synchronous while nothing async is on the way: the messages
+                # the user sent meanwhile are what made the run async.
                 return budget(data.model_data.input, data.model_data.instructions)
         else:
             async def apply(data: CallModelData) -> ModelInputData:
@@ -228,6 +250,41 @@ class TurnRunner:
                 return budget(items, data.model_data.instructions)
 
         return RunConfig(call_model_input_filter=apply)
+
+    async def _compact_in_turn(
+        self,
+        agent_key: str,
+        context_id: str,
+        session: SQLiteSession,
+        observer: Any,
+        items: List[Any],
+        instructions: Optional[str],
+    ) -> ModelInputData:
+        """Compact the session mid-run; the request the current call then reads.
+
+        Called between the steps of a turn, once a request still passes the
+        auto-compact threshold with its oldest tool outputs cleared: the
+        session is compacted (``compact_session``, which also drops the marker
+        into the stored chat) and re-read, so this call - and the run after it -
+        works from the summary. The step is shown as any compaction's is
+        (*observer*). A session that cannot be compacted (the summary model
+        failed, the breaker is locked out) leaves the request as it was: a real
+        overflow reaches the turn's own forced compaction and retry.
+        """
+        compacted = await self.compact_session(agent_key, context_id)
+        if compacted:
+            self._report_compaction(observer, compacted)
+            try:
+                fresh = await session.get_items()
+            except Exception:
+                logger.warning(
+                    "Reading the compacted session of %s failed; the request goes as it was",
+                    agent_key, exc_info=True,
+                )
+                fresh = []
+            if fresh:
+                return ModelInputData(input=fresh, instructions=instructions)
+        return ModelInputData(input=items, instructions=instructions)
 
     @staticmethod
     def _report_compaction(observer: Any, compacted: Optional[Dict[str, int]]) -> None:
@@ -560,6 +617,43 @@ class TurnRunner:
             self._logged_agents.add(agent_key)
         return instructions
 
+    async def _seed_session(self, session: Any, context_id: str, agent_key: str) -> bool:
+        """Put the conversation's dialogue into a session that holds none of it.
+
+        History reaches the model through the agent's own session
+        (core.managers.session_manager), so an agent that joins a conversation
+        - routed to it for the first time, or back with a session that no
+        longer holds it - would otherwise learn the past from this turn's
+        instructions alone, and the next turn would have nothing.
+
+        Only an empty session is seeded: that is the idempotency marker, and a
+        compacted session already holds a summary of this conversation, which
+        a second copy would duplicate. Everything the conversation still holds
+        is seeded: nothing is trimmed here - except by a compaction marker. A
+        conversation that was compacted seeds from its last marker: the summary
+        the marker holds and the dialogue stored after it, not the whole
+        pre-compaction history the compaction already replaced with that
+        summary. A session past the auto-compact threshold is summarized by
+        the turn's own ``compact_session`` right after seeding - the normal
+        path, which keeps a summary of the whole history instead of silently
+        dropping its earliest messages.
+        """
+        if await session.get_items(limit=1):
+            return False
+        messages = self.context_manager.get_conversation_history_as_sdk_messages(
+            context_id=context_id, from_last_compacted=True
+        )
+        if not messages:
+            return False
+        await session.add_items(messages)
+        logger.info(
+            "Seeded the session of %s in %s with %d stored messages",
+            agent_key,
+            context_id,
+            len(messages),
+        )
+        return True
+
     def _missed_exchange(self, context_id: str, agent_key: str) -> str:
         """What other agents and the user said here after this agent's last turn.
 
@@ -739,7 +833,11 @@ class TurnRunner:
                         max_turns=runner_max_turns(max_turns),
                         session=session,
                         run_config=self._run_config(
-                            agent_key, steering=steering, session=session, observer=observer
+                            agent_key,
+                            steering=steering,
+                            session=session,
+                            observer=observer,
+                            context_id=run_ctx.context_id,
                         ),
                     )
                     if control is not None:
@@ -762,7 +860,12 @@ class TurnRunner:
                         context=run_ctx,
                         max_turns=runner_max_turns(max_turns),
                         session=session,
-                        run_config=self._run_config(agent_key, observer=observer),
+                        run_config=self._run_config(
+                            agent_key,
+                            session=session,
+                            observer=observer,
+                            context_id=run_ctx.context_id,
+                        ),
                     )
         except TimeoutError:
             if timeout <= 0 or not deadline.expired():
@@ -1281,18 +1384,24 @@ class TurnRunner:
             # A legacy session may still hold answers or tool results with
             # the service footer; the model never reads it back.
             await self._strip_legacy_context_footers(session)
+            # An agent that joins this conversation gets the stored dialogue in
+            # its session, so history survives past the turn it joins on.
+            seeded = await self._seed_session(session, active_context_id, agent_key)
             # Past the threshold, the session is summarized before the turn adds to it.
             self._report_compaction(observer, await self.compact_session(agent_key, active_context_id))
             # Where this turn starts in the agent's session: a branch forked at
-            # this turn's message copies the session up to here (fork_conversation).
+            # this turn's message copies the session up to here (fork_conversation);
+            # taken after seeding, so a branch carries the history the agent joined with.
             session_mark = {
                 "agent": agent_key,
                 "items": len(await session.get_items()),
                 "epoch": self._session_epoch(active_context_id, agent_key),
             }
-            # A transcript in the prompt only for an agent that joins a
-            # conversation its session has not seen (e.g. after routing).
-            include_transcript = continuing and not await session.get_items(limit=1)
+            # A transcript in the prompt only when the session could not take
+            # the history: nothing stored to seed an empty session with.
+            include_transcript = (
+                continuing and not seeded and not await session.get_items(limit=1)
+            )
             # What memory knows about this request, picked by meaning (core.factory.memory).
             memory_section = await self.memory_prompt_section(active_context_id, message)
             agent.instructions = self._prepare_instructions(
@@ -1314,9 +1423,14 @@ class TurnRunner:
                 else agent_input.items
             )
             # Messages other agents exchanged with the user since this agent's
-            # last turn: its session never saw them (an agent new to the
-            # conversation gets the whole transcript in its instructions).
-            missed = "" if include_transcript else self._missed_exchange(active_context_id, agent_key)
+            # last turn: its session never saw them. An agent new to the
+            # conversation was seeded with the dialogue itself, so neither
+            # the transcript nor this block is added for it.
+            missed = (
+                ""
+                if include_transcript or seeded
+                else self._missed_exchange(active_context_id, agent_key)
+            )
             notes = "\n\n".join(part for part in (preamble, missed) if part)
             if notes and isinstance(run_input, str):
                 run_input = f"{notes}\n\n[Current user request]\n\n{run_input}"
@@ -1369,6 +1483,7 @@ class TurnRunner:
                         progress=progress,
                     )
             except TurnStopped as stop:
+                ending = outcome_for_stop(stop.reason)
                 interruption = self._record_interruption(
                     context_id=active_context_id,
                     agent_key=agent_key,

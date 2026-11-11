@@ -54,3 +54,34 @@ async def test_compact_conversation_aborts_if_summary_is_larger():
     assert result.status == CompactionStatus.ABORTED
     assert result.tokens_saved == 0
     assert result.compacted_messages == messages
+
+
+@pytest.mark.asyncio
+async def test_the_real_session_size_prevents_a_false_abort():
+    """A session of huge tool outputs clips down to a small transcript.
+
+    A summary measured against the clipped transcript is larger than it and
+    reads as "not smaller than the context" - a false ABORTED, for the session
+    it would summarize is far larger. Measured against the session's real size
+    (``raw_tokens_before``, what the caller knows) the same summary stands."""
+    messages = [
+        CompactMessage(role="user", content="Hello", message_id="m1"),
+        CompactMessage(role="tool", content="Result: 42", message_id="m2"),
+    ]
+
+    against_the_transcript = await compact_conversation(
+        messages=messages,
+        llm_client=_FakeClient(),
+        model="fake-model",
+        is_auto_compact=True,
+    )
+    assert against_the_transcript.status == CompactionStatus.ABORTED
+
+    against_the_session = await compact_conversation(
+        messages=messages,
+        llm_client=_FakeClient(),
+        model="fake-model",
+        is_auto_compact=True,
+        raw_tokens_before=500_000,
+    )
+    assert against_the_session.status == CompactionStatus.SUCCESS
