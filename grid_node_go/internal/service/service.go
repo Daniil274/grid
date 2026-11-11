@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"gridnode/internal/android"
 )
 
 // Options describe the node a service starts.
@@ -122,9 +124,9 @@ func homeDir() string {
 // Install registers the service and starts it.
 func Install(o Options) (string, error) {
 	if o.Executable == "" {
-		executable, err := os.Executable()
-		if err != nil {
-			return "", err
+		executable := android.Self()
+		if executable == "" {
+			return "", fmt.Errorf("cannot find this binary")
 		}
 		o.Executable = executable
 	}
@@ -137,7 +139,7 @@ func Install(o Options) (string, error) {
 	case "darwin":
 		return installLaunchd(o)
 	case "android":
-		// Termux has systemd, launchd nor Task Scheduler: nothing to register.
+		// Android has neither systemd, launchd nor Task Scheduler to register in.
 		return startOnAndroid(o), nil
 	default:
 		return installSystemd(o)

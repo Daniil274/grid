@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 
+	"gridnode/internal/android"
 	"gridnode/internal/browserdriver"
 	"gridnode/internal/fsdriver"
 	"gridnode/internal/node"
@@ -65,7 +66,7 @@ func (l *listFlag) Set(value string) error {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(android.Args(os.Args)[1:], os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -292,9 +293,9 @@ func installCommand(args []string, stdout, stderr io.Writer, logger *log.Logger)
 	}
 	workspace = state.ExpandHome(workspace)
 
-	executable, err := os.Executable()
-	if err != nil {
-		logger.Printf("cannot find this binary: %v", err)
+	executable := android.Self()
+	if executable == "" {
+		logger.Print("cannot find this binary")
 		return 1
 	}
 	options := service.Options{

@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"gridnode/internal/android"
 )
 
 // Update downloads url over the existing binary and restarts the node.
@@ -22,9 +24,9 @@ func Update(ctx context.Context, url, expectedSHA string) error {
 	if strings.TrimSpace(url) == "" {
 		return fmt.Errorf("update message carries no url")
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		return err
+	executable := android.Self()
+	if executable == "" {
+		return fmt.Errorf("cannot find this binary")
 	}
 	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
 		executable = resolved
@@ -99,7 +101,7 @@ func replace(executable, temporary string) error {
 
 // restart starts the new binary with the same arguments and leaves this process.
 func restart(executable string) error {
-	command := exec.Command(executable, os.Args[1:]...)
+	command := exec.Command(executable, android.Args(os.Args)[1:]...)
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
