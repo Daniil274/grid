@@ -3,6 +3,8 @@ package toolrunner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,7 +71,7 @@ func (r *Runner) Interpreter(ctx context.Context, allowDownload bool) ([]string,
 // downloadPython fetches <server>/node/runtime/python-<os>-<arch>.tar.gz.
 func (r *Runner) downloadPython(ctx context.Context) error {
 	url := fmt.Sprintf("%s/node/runtime/python-%s-%s.tar.gz", strings.TrimRight(r.Server, "/"), runtime.GOOS, runtime.GOARCH)
-	body, err := r.download(ctx, url)
+	body, err := r.downloadVerified(ctx, url)
 	if err != nil {
 		return err
 	}
@@ -110,7 +112,7 @@ func (r *Runner) downloadPython(ctx context.Context) error {
 // interpreter: uv brings its own Python on first use.
 func (r *Runner) downloadUV(ctx context.Context) (string, error) {
 	url := fmt.Sprintf("%s/node/runtime/uv-%s-%s.tar.gz", strings.TrimRight(r.Server, "/"), runtime.GOOS, runtime.GOARCH)
-	body, err := r.download(ctx, url)
+	body, err := r.downloadVerified(ctx, url)
 	if err != nil {
 		return "", err
 	}
@@ -172,6 +174,36 @@ func (r *Runner) download(ctx context.Context, url string) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(response.Body, 512*1024*1024))
 	if err != nil {
 		return nil, err
+	}
+	return data, nil
+}
+
+
+// fetchSHA fetches the sha256 the server publishes beside a runtime archive,
+// or "" when it does not: the check is an addition, not a requirement.
+func (r *Runner) fetchSHA(ctx context.Context, url string) string {
+	data, err := r.download(ctx, url+".sha256")
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(string(data)))
+}
+
+// downloadVerified fetches url and holds it against the sha256 published
+// beside it, when there is one: a corrupted or tampered download must never
+// run as a Python interpreter.
+func (r *Runner) downloadVerified(ctx context.Context, url string) ([]byte, error) {
+	expected := r.fetchSHA(ctx, url)
+	data, err := r.download(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	if expected == "" {
+		return data, nil
+	}
+	digest := sha256.Sum256(data)
+	if actual := hex.EncodeToString(digest[:]); actual != expected {
+		return nil, fmt.Errorf("the runtime from %s is %s, not the %s its .sha256 publishes", url, actual, expected)
 	}
 	return data, nil
 }
