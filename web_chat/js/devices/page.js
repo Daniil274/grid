@@ -124,6 +124,9 @@ function installLines(server, code) {
   return {
     linux: `curl -fsSL ${server}/node/install.sh | sh -s -- ${code}`,
     windows: `iwr -UseBasicParsing ${server}/node/install.ps1?code=${code} | iex`,
+    // cmd.exe has no pipe-into-a-shell, and its curl is a plain file
+    // fetcher: the line downloads the exe itself and runs the same install.
+    windowsCmd: `md "%LOCALAPPDATA%\\grid-node" 2>nul & curl -fsSL -o "%LOCALAPPDATA%\\grid-node\\grid-node.exe" ${server}/node/bin/grid-node-windows-amd64.exe && "%LOCALAPPDATA%\\grid-node\\grid-node.exe" install --server ${server} --pair ${code}`,
   };
 }
 
@@ -133,6 +136,7 @@ async function pair() {
     const lines = installLines(location.origin, code);
     $("pair-command-linux").textContent = lines.linux;
     $("pair-command-windows").textContent = lines.windows;
+    $("pair-command-windows-cmd").textContent = lines.windowsCmd;
     $("pair-code").textContent = code;
     $("pairing").hidden = false;
     $("pairing").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -263,6 +267,7 @@ $("start-machine").addEventListener("click", startMachine);
 $("pair").addEventListener("click", pair);
 $("copy-command-linux").addEventListener("click", () => copyText($("pair-command-linux").textContent, "Command copied"));
 $("copy-command-windows").addEventListener("click", () => copyText($("pair-command-windows").textContent, "Command copied"));
+$("copy-command-windows-cmd").addEventListener("click", () => copyText($("pair-command-windows-cmd").textContent, "Command copied"));
 wireViewer();
 refresh();
 setInterval(refresh, REFRESH_MS);

@@ -16,7 +16,7 @@
  * store and a `change` callback the chat controller sends to the server.
  */
 
-import { h, icon, replace } from "../lib/dom.js";
+import { debounce, h, icon, replace } from "../lib/dom.js";
 import { ICONS } from "./icons.js";
 
 /** The chat works on the server: no device, no folder of its own. */
@@ -31,11 +31,14 @@ function folderName(path) {
 /** A device's target value (`device:<id>`), as the server spells it. */
 const targetOf = (device) => `device:${device.device}`;
 
-/** One line that installs the node and pairs it, per platform. */
-function installers(origin) {
+/** One line that installs the node and pairs it, per platform, *code* included. */
+function installers(origin, code) {
   return {
-    linux: `curl -fsSL ${origin}/node/install.sh | sh -s -- <code from Devices>`,
-    windows: `iwr ${origin}/node/install.ps1 -UseBasicParsing | iex`,
+    linux: `curl -fsSL ${origin}/node/install.sh | sh -s -- ${code}`,
+    windows: `iwr -UseBasicParsing ${origin}/node/install.ps1?code=${code} | iex`,
+    // cmd.exe has no pipe-into-a-shell and its curl is a plain file fetcher:
+    // the line downloads the exe itself and runs the same install subcommand.
+    windowsCmd: `md "%LOCALAPPDATA%\\grid-node" 2>nul & curl -fsSL -o "%LOCALAPPDATA%\\grid-node\\grid-node.exe" ${origin}/node/bin/grid-node-windows-amd64.exe && "%LOCALAPPDATA%\\grid-node\\grid-node.exe" install --server ${origin} --pair ${code}`,
   };
 }
 
@@ -61,7 +64,7 @@ function folderRow(entry, { onOpen, onUse }) {
 }
 
 /** One choice of the target list, in the route picker's own shape. */
-function option({ title, description, meta, active, onPick }) {
+function option({ iconPath, title, description, meta, active, onPick }) {
   return h(
     "button.routeOption",
     {
@@ -73,7 +76,12 @@ function option({ title, description, meta, active, onPick }) {
     h(
       "span.routeOption__top",
       {},
-      h("span.routeOption__title", { text: title }),
+      h(
+        "span.routeOption__head",
+        {},
+        iconPath ? icon(iconPath, { size: 14, className: "routeOption__icon" }) : null,
+        h("span.routeOption__title", { text: title }),
+      ),
       active ? icon(ICONS.check, { size: 14, className: "routeOption__check" }) : null,
     ),
     description ? h("span.routeOption__desc", { text: description }) : null,
@@ -90,6 +98,11 @@ function option({ title, description, meta, active, onPick }) {
  */
 export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
   const { button, nameNode, metaNode, popover, list, folder } = nodes;
+  // The chip's own glyph: a cloud on the server, a screen on a computer. The
+  // first render paints it from the state itself - `paintIcons` in js/main.js
+  // has already filled the markup in, and that glyph is simply replaced.
+  const iconNode = button.querySelector(".routeChip__icon");
+  let chipMode = "";
 
   // The chip drives the popover: it names it (aria-controls) and reports its
   // state (aria-expanded), the popover itself is focusable and holds the menu.
@@ -103,7 +116,7 @@ export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
   const origin = `${location.protocol}//${location.host}`;
 
   /** Open one popover, closing the other: two open menus make no sense. */
-  function menu(chip, panel) {
+  function menu(chip, panel, { onOpen, onClose } = {}) {
     const options = () => [...panel.querySelectorAll(".routeOption, .workdirRow__open, .workdirBookmark")];
     const focusFirst = () => (options()[0] ?? panel).focus();
     return {
@@ -114,12 +127,14 @@ export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
         this.closeOther?.();
         panel.classList.add("is-open");
         chip.setAttribute("aria-expanded", "true");
+        onOpen?.();
         focusFirst();
       },
       close({ restoreFocus = panel.contains(document.activeElement) } = {}) {
         if (!panel.classList.contains("is-open")) return;
         panel.classList.remove("is-open");
         chip.setAttribute("aria-expanded", "false");
+        onClose?.();
         if (restoreFocus) chip.focus();
       },
       toggle() {
@@ -129,7 +144,61 @@ export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
     };
   }
 
-  const targetMenu = menu(button, popover);
+  // -- connecting a computer from right here ---------------------------------
+  // A pairing code lives ten minutes and is spent once, so a fresh one is
+  // asked for every time the popover opens and filled into the one line
+  // itself; the code never has to be fetched anywhere else.
+  async function offerPairingCode() {
+    nodes.connectLinux.textContent = "Loading…";
+    nodes.connectWindows.textContent = "Loading…";
+    nodes.connectWindowsCmd.textContent = "Loading…";
+    try {
+      const { code } = await api.newPairing();
+      const lines = installers(origin, code);
+      nodes.connectLinux.textContent = lines.linux;
+      nodes.connectWindows.textContent = lines.windows;
+      nodes.connectWindowsCmd.textContent = lines.windowsCmd;
+    } catch (error) {
+      const text = error.message || "Pairing is unavailable on this server.";
+      nodes.connectLinux.textContent = text;
+      nodes.connectWindows.textContent = text;
+      nodes.connectWindowsCmd.textContent = text;
+    }
+  }
+
+  // The list is read while the popover is open, so a computer that connects
+  // while the user watches appears in it at once (web_chat/devices_api.py).
+  let devicesPoll = null;
+
+  async function readDevices() {
+    try {
+      const answer = await api.devices();
+      if (nodes.connectSection) nodes.connectSection.hidden = answer.pairing === false;
+      const devices = Array.isArray(answer.devices) ? answer.devices : [];
+      // A quiet poll must not rebuild the list under the user's fingers.
+      if (JSON.stringify(devices) !== JSON.stringify(store.get().devices)) store.set({ devices });
+    } catch {
+      // The server was out of reach this tick; the next one tries again.
+    }
+  }
+
+  function watchDevices(start) {
+    if (start) {
+      void readDevices();
+      devicesPoll = setInterval(() => void readDevices(), 3000);
+    } else if (devicesPoll !== null) {
+      clearInterval(devicesPoll);
+      devicesPoll = null;
+    }
+  }
+
+  const targetMenu = menu(button, popover, {
+    onOpen: () => {
+      void offerPairingCode();
+      watchDevices(true);
+    },
+    onClose: () => watchDevices(false),
+  });
   const folderMenu = menu(folder.button, folder.popover);
   targetMenu.closeOther = () => folderMenu.close({ restoreFocus: false });
   folderMenu.closeOther = () => targetMenu.close({ restoreFocus: false });
@@ -143,10 +212,37 @@ export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
     (state.devices || []).find((device) => targetOf(device) === state.executionTarget) ?? null;
 
   // -- the target chip and its list -----------------------------------------
+
+  /**
+   * A name is written whole or not at all: a chip that cuts it in the middle
+   * names nothing, so the text goes and the glyph stays, with the name in the
+   * title. The measurement happens while the name is still shown - hidden text
+   * measures zero - so the class is dropped first and laid on again after.
+   */
+  function fitName() {
+    button.classList.remove("is-compact");
+    if (nameNode.scrollWidth > nameNode.clientWidth + 1) button.classList.add("is-compact");
+  }
+
+  // The folder's name follows the same rule as the device's: written whole
+  // or not at all - a clipped name names nothing, the glyph stays a button.
+  function fitFolderName() {
+    folder.button.classList.remove("is-compact");
+    if (folder.nameNode.scrollWidth > folder.nameNode.clientWidth + 1) folder.button.classList.add("is-compact");
+  }
+
   function renderChip(state) {
     const device = deviceIn(state);
+    const mode = device ? "device" : "cloud";
+    if (mode !== chipMode) {
+      chipMode = mode;
+      if (iconNode) replace(iconNode, icon(device ? ICONS.monitor : ICONS.cloud, { size: 14 }));
+    }
+    const folderPath = device ? state.executionWorkdir || device.default_workdir || "" : "";
+    const title = device
+      ? `The tools act on ${device.name}${folderPath ? `, in ${folderPath}` : ""}`
+      : "The tools act on this server, in the chat's workspace";
     if (device) {
-      const folderPath = state.executionWorkdir || device.default_workdir || "";
       nameNode.textContent = device.name;
       metaNode.textContent = [device.platform || device.kind, folderPath].filter(Boolean).join(" · ");
       button.dataset.mode = "device";
@@ -155,15 +251,25 @@ export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
       metaNode.textContent = "Tools act on this server";
       button.dataset.mode = "cloud";
     }
+    // The title is also the chip's name while the text is hidden.
+    button.title = title;
+    button.setAttribute("aria-label", `Where this chat's tools act: ${title}`);
     // A folder is a device's folder: on the server the workspace says it.
     folder.button.hidden = !device;
     if (device) {
-      const folderPath = state.executionWorkdir || device.default_workdir || "";
       folder.nameNode.textContent = folderPath ? folderName(folderPath) : "Choose a folder";
       folder.metaNode.textContent = folderPath || "The device's folder";
       folder.button.title = folderPath
         ? `This chat works in ${folderPath} on ${device.name}`
         : `Choose the folder this chat works in on ${device.name}`;
+    }
+    // Compacting one chip frees width for the other: fit both until they
+    // settle, or a long route name would compact a chip that would fit.
+    for (let round = 0; round < 3; round++) {
+      const was = [button.classList.contains("is-compact"), folder.button.classList.contains("is-compact")];
+      fitName();
+      fitFolderName();
+      if (was[0] === button.classList.contains("is-compact") && was[1] === folder.button.classList.contains("is-compact")) break;
     }
   }
 
@@ -171,6 +277,7 @@ export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
     const devices = state.devices || [];
     const options = [
       option({
+        iconPath: ICONS.cloud,
         title: "Cloud",
         description: "Files, search and commands run on this Grid server, in the chat's workspace.",
         meta: "the server · its workspace",
@@ -179,6 +286,7 @@ export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
       }),
       ...devices.map((device) =>
         option({
+          iconPath: ICONS.monitor,
           title: device.name,
           description: `Files, search and commands run on this device (${device.kind || "device"}). Anything outside its folder is put to you first.`,
           meta: [device.platform, device.default_workdir, (device.capabilities || []).join(", ")]
@@ -193,7 +301,7 @@ export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
     if (!devices.length) {
       options.push(
         h("p.routeHint", {
-          text: "No computer is connected yet. Run one line from below on the computer, then come back.",
+          text: "No computer is connected yet. Run one line from below on the computer; it appears here as soon as it connects.",
         }),
       );
     }
@@ -366,17 +474,18 @@ export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
     if (path) void load(path);
   });
 
-  // The one line that connects a computer, for each platform.
-  const lines = installers(origin);
-  nodes.connectLinux.textContent = lines.linux;
-  nodes.connectWindows.textContent = lines.windows;
-  for (const [id, text] of [
-    ["linux", lines.linux],
-    ["windows", lines.windows],
+  // The copy buttons copy what the lines say now: the code in them is fresh
+  // from the server, not the one a page load once brought.
+  for (const [line, copy] of [
+    [nodes.connectLinux, nodes.copyLinux],
+    [nodes.connectWindows, nodes.copyWindows],
+    [nodes.connectWindowsCmd, nodes.copyWindowsCmd],
   ]) {
-    (id === "linux" ? nodes.copyLinux : nodes.copyWindows).addEventListener("click", async () => {
+    copy.addEventListener("click", async () => {
+      const text = line.textContent;
+      if (!text || text === "Loading…") return;
       try {
-        await navigator.clipboard.writeText(text);
+        await navigator.clipboard.writeText(line.textContent);
         onCopied?.("Installer command copied");
       } catch {
         onCopied?.("Select the command and copy it");
@@ -396,6 +505,13 @@ export function createTargetPicker({ nodes, store, api, onChange, onCopied }) {
     if (folderMenu.isOpen() && deviceIn(state)) void load(state.executionWorkdir || "");
     else if (!deviceIn(state)) listing = null;
   });
+
+  // The chip is only as wide as the viewport allows (`max-width: 46vw` in
+  // styles/layout.css), so a resize can make a name that fitted stop fitting.
+  window.addEventListener("resize", debounce(() => renderChip(store.get()), 120));
+  // A name measured in the fallback font may stop fitting once the real one
+  // lands, so the check runs again when the fonts are ready.
+  document.fonts?.ready.then(() => renderChip(store.get())).catch(() => {});
 
   return { close: closeAll, refresh: () => renderList(store.get()) };
 }

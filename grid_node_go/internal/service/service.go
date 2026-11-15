@@ -4,6 +4,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -237,22 +238,77 @@ func installWindows(o Options) (string, error) {
 	if err := os.WriteFile(batch, []byte("@echo off\r\n"+command+"\r\n"), 0o644); err != nil {
 		return "", err
 	}
-	message := "wrote " + batch
+	// The .cmd starts the node in a visible console; the .vbs below starts the
+	// same .cmd with the window hidden, so the Run entry and the immediate
+	// start below are silent - no console flashes at sign-in.
+	silent := filepath.Join(dir, "grid-node-silent.vbs")
+	if err := os.WriteFile(silent, []byte(silentLauncher(batch)), 0o644); err != nil {
+		return "", err
+	}
+	windows := `wscript.exe "` + silent + `"`
+	message := "wrote " + batch + " (run it to see the node's console)" +
+		"; " + silent + " starts it with no window"
 	if schtasks, err := exec.LookPath("schtasks"); err == nil {
-		if err := run(schtasks, "/Create", "/SC", "ONLOGON", "/TN", "GridNode", "/TR", command, "/F"); err != nil {
-			message += fmt.Sprintf("; creating the scheduled task failed (%v)", err)
+		// The task starts the silent launcher too: a console-less sign-in.
+		if err := runQuiet(schtasks, "/Create", "/SC", "ONLOGON", "/TN", "GridNode", "/TR", windows, "/F"); err != nil {
+			message += fmt.Sprintf("; could not register the logon task (%s)"+
+				" - creating an at-sign-in task needs administrator rights once, so"+
+				" it was skipped; the Run entry starts the node at sign-in anyway", exitStatus(err))
 		} else {
-			message += "; scheduled task GridNode created (at logon)"
+			message += "; scheduled task GridNode starts the node at sign-in"
 		}
 	}
 	if reg, err := exec.LookPath("reg"); err == nil {
-		if err := run(reg, "add", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "GridNode", "/t", "REG_SZ", "/d", command, "/f"); err != nil {
-			message += fmt.Sprintf("; adding the Run entry failed (%v)", err)
+		if err := runQuiet(reg, "add", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "GridNode", "/t", "REG_SZ", "/d", windows, "/f"); err != nil {
+			message += fmt.Sprintf("; adding the Run entry failed (%s)"+
+				" - it holds the autostart, so retry once from an administrator shell", exitStatus(err))
 		} else {
-			message += "; Run entry GridNode added"
+			message += "; Run entry GridNode starts the node at sign-in"
 		}
 	}
+	// An install ends with a working node, not only with a registry: start it
+	// now, detached and hidden, so the device is online the moment this ends.
+	if wscript, err := exec.LookPath("wscript.exe"); err == nil {
+		if err := exec.Command(wscript, silent).Start(); err != nil {
+			message += fmt.Sprintf("; starting it now failed (%v) - start it with: %s", err, windows)
+		} else {
+			message += "; started in the background, with no window - give it a few seconds to connect"
+		}
+	} else {
+		message += "; wscript.exe not found, so start it with: " + windows
+	}
 	return message, nil
+}
+
+// silentLauncher is the .vbs that starts the batch with no console window:
+// WshShell.Run's window style 0 hides it, and False means it need not wait.
+func silentLauncher(batch string) string {
+	return "' Grid node launcher: starts grid-node.cmd with no console window.\r\n" +
+		"CreateObject(\"WScript.Shell\").Run " + vbsQuote(batch) + ", 0, False\r\n"
+}
+
+// vbsQuote wraps a path in the quotes a Run command line wants.
+func vbsQuote(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+// runQuiet reports only whether the command worked, not its output: a tool
+// that failed in another code page would only add mojibake to the message.
+func runQuiet(name string, args ...string) error {
+	command := exec.Command(name, args...)
+	if err := command.Run(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// exitStatus spells an exit error out, without the output it carried.
+func exitStatus(err error) string {
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return fmt.Sprintf("exit status %d", exit.ExitCode())
+	}
+	return err.Error()
 }
 
 func run(name string, args ...string) error {

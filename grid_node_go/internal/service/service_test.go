@@ -45,6 +45,25 @@ func TestArgumentsAndQuoting(t *testing.T) {
 	}
 }
 
+func TestSilentLauncherQuotesTheBatch(t *testing.T) {
+	launcher := silentLauncher(`C:\Users\dan ii\grid-node\grid-node.cmd`)
+	for _, expected := range []string{
+		`CreateObject("WScript.Shell").Run`,
+		`"C:\Users\dan ii\grid-node\grid-node.cmd"`,
+		`, 0, False`,
+	} {
+		if !strings.Contains(launcher, expected) {
+			t.Fatalf("the launcher lacks %q:\n%s", expected, launcher)
+		}
+	}
+}
+
+func TestVbsQuoteDoublesInnerQuotes(t *testing.T) {
+	if got := vbsQuote(`C:\a "b"`); got != `"C:\a ""b"""` {
+		t.Fatalf("vbsQuote gave %q", got)
+	}
+}
+
 func TestInstallNeedsAServer(t *testing.T) {
 	if _, err := Install(Options{Executable: "grid-node"}); err == nil {
 		t.Fatal("install without a server succeeded")

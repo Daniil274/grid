@@ -198,6 +198,7 @@ async function boot() {
       transcript.setExecutionMode(workMode);
     },
     onEditMessage: (edited) => void chat.editMessage(edited),
+    onRetryMessage: (target) => void chat.retryMessage(target),
     onSwitchVersion: (contextId) => void chat.switchVersion(contextId),
     onDeleteMessage: (target) => void chat.deleteMessage(target),
     onForkMessage: (id) => void chat.forkAt(id),
@@ -486,10 +487,13 @@ async function boot() {
       metaNode: $("#target-meta"),
       popover: $("#target-popover"),
       list: $("#target-list"),
+      connectSection: $("#target-connect"),
       connectLinux: $("#target-connect-linux"),
       connectWindows: $("#target-connect-windows"),
+      connectWindowsCmd: $("#target-connect-windows-cmd"),
       copyLinux: $("#target-copy-linux"),
       copyWindows: $("#target-copy-windows"),
+      copyWindowsCmd: $("#target-copy-windows-cmd"),
       folder: {
         button: $("#workdir-chip"),
         nameNode: $("#workdir-name"),
@@ -764,7 +768,9 @@ async function boot() {
   void refreshAccountUsage();
 
   store.subscribe(({ workspacePath, chatWorkspace, chooseWorkspace, isolated, streaming, compacting, hasAgentContext, contextId, restartPending, serverUnavailable }) => {
-    const label = serverUnavailable ? "Reconnecting to server…" : restartPending ? "Server restarting · waiting for saved steps" : compacting ? "Compacting context…" : streaming ? "Working" : isolated ? "Container isolated" : "Local runtime";
+    // Isolation says nothing while the chat is idle: on this server it is
+    // simply how things run, so the label stays quiet instead of naming it.
+    const label = serverUnavailable ? "Reconnecting to server…" : restartPending ? "Server restarting · waiting for saved steps" : compacting ? "Compacting context…" : streaming ? "Working" : isolated ? "" : "Local runtime";
     $("#runtime-status").textContent = label;
     $("#runtime-status").dataset.state = streaming || compacting ? "busy" : "ready";
     $("#compact-context").disabled = !contextId || !hasAgentContext || streaming || compacting || Boolean(restartPending);

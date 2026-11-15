@@ -555,6 +555,13 @@ def test_the_installers_name_this_server_and_pair_the_device(tmp_path):
     assert "install" in powershell and "--pair" in powershell
     assert "ABCDE-FGHJK" in client.get("/node/install.ps1", params={"code": "ABCDE-FGHJK"}).text
 
+    cmd = client.get("/node/install.bat").text
+    assert "http://testserver" in cmd and "grid-node-windows-amd64.exe" in cmd
+    assert "install --server" in cmd and "--pair" in cmd and "GRID_PAIR_CODE" in cmd
+    assert "ABCDE-FGHJK" in client.get("/node/install.bat", params={"code": "ABCDE-FGHJK"}).text
+    # A code that is not one is never pasted into the batch file either.
+    assert "pwned" not in client.get("/node/install.bat", params={"code": "x&echo pwned"}).text
+
 
 def test_a_compiled_node_binary_is_served_when_the_server_has_one(tmp_path, monkeypatch):
     from web_chat import devices_api

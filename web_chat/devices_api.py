@@ -22,6 +22,7 @@ which is for signed-in users only:
     GET    /node/runtime/{name}.tar.gz.sha256   the same's sha256, when the server publishes it
     GET    /node/install.sh                    the installer a device fetches
     GET    /node/install.ps1                   the same for Windows
+    GET    /node/install.bat                   the same for Windows from cmd.exe
     GET    /node/bin/{target}                  a compiled grid-node binary
 """
 
@@ -379,6 +380,35 @@ if ($Code) { $Install += @("--pair", $Code) }
 & $Bin @Install
 """
 
+#: The same installer for Windows again, but for cmd.exe, where most hands are.
+INSTALL_BAT = """@echo off
+rem Grid device installer: fetches grid-node.exe and pairs this computer.
+rem
+rem     curl -fsSL -o grid-node-setup.bat "@@SERVER@@/node/install.bat?code=@@CODE@@" && grid-node-setup.bat
+rem
+rem The code may also come as the first argument or from GRID_PAIR_CODE, and the
+rem server (behind a proxy, say) from GRID_SERVER. PowerShell runs install.ps1.
+setlocal
+set "SERVER=@@SERVER@@"
+if not "%GRID_SERVER%"=="" set "SERVER=%GRID_SERVER%"
+set "CODE=@@CODE@@"
+if not "%1"=="" set "CODE=%1"
+if not "%GRID_PAIR_CODE%"=="" set "CODE=%GRID_PAIR_CODE%"
+set "DIR=%LOCALAPPDATA%\\grid-node"
+if not exist "%DIR%" mkdir "%DIR%"
+set "BIN=%DIR%\\grid-node.exe"
+set "URL=%SERVER%/node/bin/grid-node-windows-amd64.exe"
+echo grid-node: downloading %URL%
+curl -fsSL -o "%BIN%" "%URL%"
+if errorlevel 1 (
+  echo grid-node: curl failed - Windows 10 ships it, or download %URL% yourself.
+  exit /b 1
+)
+set "ARGS=install --server %SERVER%"
+if not "%CODE%"=="" set "ARGS=%ARGS% --pair %CODE%"
+"%BIN%" %ARGS%
+"""
+
 #: What a pairing code may be: the alphabet the server hands out, nothing else.
 PAIRING_CODE = re.compile(r"^[A-Za-z0-9-]{4,40}$")
 
@@ -652,6 +682,15 @@ def register_device_routes(
         """The same installer for Windows."""
         return PlainTextResponse(
             installer_script(INSTALL_PS1, request, code),
+            media_type="text/plain",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/node/install.bat", response_class=PlainTextResponse)
+    async def install_bat(request: Request, code: str = "") -> PlainTextResponse:
+        """The same installer for Windows again, but one cmd.exe runs."""
+        return PlainTextResponse(
+            installer_script(INSTALL_BAT, request, code),
             media_type="text/plain",
             headers={"Cache-Control": "no-store"},
         )

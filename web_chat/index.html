@@ -121,7 +121,7 @@
         <div class="topbar__target" id="target-picker">
           <button class="routeChip routeChip--target" id="target-chip" type="button" aria-haspopup="dialog" data-mode="cloud"
                   title="Where this chat's tools act: this server, or a computer of yours">
-            <span class="routeChip__icon" data-icon="monitor" data-icon-size="14"></span>
+            <span class="routeChip__icon" data-icon="cloud" data-icon-size="14"></span>
             <span class="routeChip__text">
               <span class="routeChip__name" id="target-name">Cloud</span>
               <span class="routeChip__meta" id="target-meta"></span>
@@ -135,7 +135,7 @@
               <p>On this server, or on a computer of yours: files, search and commands then run there.</p>
             </div>
             <div class="targetList" id="target-list"></div>
-            <section class="targetConnect">
+            <section class="targetConnect" id="target-connect">
               <h3 class="targetConnect__head">Connect a device</h3>
               <p class="targetConnect__hint">Run one line on the computer. It connects out to this server; no port is opened on it.</p>
               <div class="targetConnect__row">
@@ -147,6 +147,11 @@
                 <span class="targetConnect__os">Windows</span>
                 <code class="targetConnect__code" id="target-connect-windows">Loading…</code>
                 <button class="btn btn--ghost btn--xs" id="target-copy-windows" type="button" data-icon="copy">Copy</button>
+              </div>
+              <div class="targetConnect__row">
+                <span class="targetConnect__os">Windows (cmd)</span>
+                <code class="targetConnect__code" id="target-connect-windows-cmd">Loading…</code>
+                <button class="btn btn--ghost btn--xs" id="target-copy-windows-cmd" type="button" data-icon="copy">Copy</button>
               </div>
               <a class="targetConnect__link" href="/devices" target="grid-devices" rel="noopener">Devices page: watch them live and pair a computer</a>
             </section>
