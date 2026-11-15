@@ -700,6 +700,56 @@ async def test_every_model_call_clears_old_tool_outputs_past_the_budget(factory)
     assert items[1]["output"] == "y" * 200_000  # the session's items are untouched
 
 
+async def test_a_broken_filter_chain_never_hides_the_real_failure(factory):
+    """The SDK's UserError (must return a ModelInputData) once masked the
+    turn's real error - all models had failed 403, a swallowed summary
+    failure then left the old chain returning None. The guard sends the
+    request as it was, so the model's own error is what the user sees."""
+    from agents.run import CallModelData, ModelInputData
+
+    data = CallModelData(
+        model_data=ModelInputData(
+            input=[{"type": "message", "role": "user", "content": "Go"}],
+            instructions="Be brief.",
+        ),
+        agent=None,
+        context=None,
+    )
+
+    def broken(payload):  # a swallowed failure left nothing
+        return None
+
+    async def broken_async(payload):  # ... in an async chain
+        return None
+
+    def broken_mid_compaction(payload):  # ... behind a mid-turn compaction
+        return broken_async(payload)
+
+    for apply in (broken, broken_async, broken_mid_compaction):
+        guarded = factory._guarded_filter(apply)
+        result = guarded(data)
+        if not isinstance(result, ModelInputData):
+            result = await result
+        assert result is data.model_data  # the request goes as it was
+
+
+async def test_the_guard_passes_a_filter_result_through_unchanged(factory):
+    from agents.run import CallModelData, ModelInputData
+
+    data = CallModelData(
+        model_data=ModelInputData(input=[{"type": "message", "role": "user", "content": "Go"}], instructions="Be brief."),
+        agent=None,
+        context=None,
+    )
+    expected = ModelInputData(input=data.model_data.input, instructions="other")
+
+    def apply(payload):
+        return expected
+
+    result = factory._guarded_filter(apply)(data)
+    assert result is expected
+
+
 def test_the_model_whitelist_allows_only_listed_models(factory):
     assert factory.models.is_allowed("anything")  # no list: every model
     factory.config.config.settings.allowed_models = ["m"]

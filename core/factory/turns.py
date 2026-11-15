@@ -10,6 +10,8 @@ conversation can fork before an edited message.
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import logging
 import time
 from dataclasses import replace
@@ -258,7 +260,51 @@ class TurnRunner:
                 items = await steering.apply(data.model_data.input, session)
                 return budget(items, data.model_data.instructions)
 
-        return RunConfig(call_model_input_filter=apply)
+        return RunConfig(call_model_input_filter=self._guarded_filter(apply))
+
+    def _guarded_filter(
+        self, apply: Callable[[CallModelData], Any]
+    ) -> Callable[[CallModelData], Any]:
+        """Never let a bug in the filter chain hide the turn's real failure.
+
+        The SDK raises its own UserError - shown to the user in place of the
+        model's error - when the filter returns anything but ModelInputData.
+        That UserError once masked the actual "all models failed" of a turn:
+        a swallowed summary-model failure had left the old chain returning
+        None. Guard the whole class once, here: a wrong result is logged,
+        the request goes as it was, and the turn fails - or answers - on its
+        own merits.
+        """
+        if inspect.iscoroutinefunction(apply):
+            @functools.wraps(apply)
+            async def guarded(data: CallModelData) -> ModelInputData:
+                return self._filter_result(await apply(data), data)
+        else:
+            @functools.wraps(apply)
+            def guarded(data: CallModelData) -> Any:
+                # budget() may hand back a coroutine (mid-turn compaction)
+                # even from a plain def: follow it and only then check.
+                result = apply(data)
+                if inspect.isawaitable(result):
+                    async def done() -> ModelInputData:
+                        return self._filter_result(await result, data)
+                    return done()
+                return self._filter_result(result, data)
+        return guarded
+
+    @staticmethod
+    def _filter_result(result: Any, data: CallModelData) -> ModelInputData:
+        """What the filter gave the SDK: a ModelInputData, or the untouched
+        request when the chain returned anything else."""
+        if isinstance(result, ModelInputData):
+            return result
+        logger.error(
+            "model input filter returned %s, not ModelInputData; "
+            "the request goes as it was",
+            type(result).__name__,
+            exc_info=True,
+        )
+        return data.model_data
 
     async def _compact_in_turn(
         self,
