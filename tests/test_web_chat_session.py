@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from core.context import ContextManager
+from schemas import AgentExecution
 from fastapi import WebSocketDisconnect
 
 from web_chat.session import (
@@ -15,7 +16,9 @@ from web_chat.session import (
     AgentTurn,
     ChatSession,
     chat_session,
+    public_activity,
 )
+from web_chat.trace import ContextRef, StepKind
 from web_chat.turns import TurnBoard
 
 
@@ -69,7 +72,7 @@ def space_for(run, *, request_stop=lambda context_id: False, continue_agent=None
         agent_issues=lambda system, agent: [],
     )
     return SimpleNamespace(
-        context_manager=lambda: manager, workspace_path='.', workspace_label='.', user_id='test', admit_turn=lambda: None,
+        context_manager=lambda: manager, workspace_path='.', workspace_label='.', user_id='test', admit_turn=lambda turn=None: None,
         workspace_label_of=lambda context_id: '.', registry_of=lambda context_id: registry,
         factory=factory, warm_agent=AsyncMock(), resolve_turn=resolve_turn,
         update_conversation_metadata=lambda *a, **kw: None,
@@ -534,18 +537,22 @@ def png_data_url(size=(32, 24)):
 
 
 @pytest.mark.asyncio
-async def test_attached_images_reach_the_agent_as_an_sdk_message():
+async def test_attached_images_reach_the_agent_as_an_sdk_message(tmp_path):
     import json
 
     run = AsyncMock(return_value="A green square.")
     space, socket = space_for(run), Socket()
+    space.conversation_workspace = lambda context_id: tmp_path
     session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put(json.dumps({"message": "what is this?", "images": [png_data_url()]}))
     assert (await socket.event("final_output"))["content"] == "A green square."
     await socket.event("done")
 
     sent = json.loads(run.await_args.kwargs["message"])
-    assert sent["content"][0] == {"type": "input_text", "text": "what is this?"}
+    # The words, then the chat's block naming the kept file by its workspace path.
+    assert sent["content"][0]["type"] == "input_text"
+    assert sent["content"][0]["text"].startswith("what is this?\n\nAttached files:\n- [")
+    assert ' — workspace path: "uploads/image-' in sent["content"][0]["text"]
     assert sent["content"][1]["type"] == "input_image"
     assert sent["content"][1]["image_url"].startswith("data:image/jpeg;base64,")
     await socket.incoming.put(None)
@@ -553,16 +560,18 @@ async def test_attached_images_reach_the_agent_as_an_sdk_message():
 
 
 @pytest.mark.asyncio
-async def test_an_image_alone_is_a_message():
+async def test_an_image_alone_is_a_message(tmp_path):
     import json
 
     run = AsyncMock(return_value="ok")
     space, socket = space_for(run), Socket()
+    space.conversation_workspace = lambda context_id: tmp_path
     session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put(json.dumps({"images": [png_data_url()]}))
     await socket.event("done")
     sent = json.loads(run.await_args.kwargs["message"])
-    assert [part["type"] for part in sent["content"]] == ["input_image"]
+    assert [part["type"] for part in sent["content"]] == ["input_text", "input_image"]
+    assert sent["content"][0]["text"].startswith("Attached files:\n- [")
     await socket.incoming.put(None)
     await session
 
@@ -834,6 +843,43 @@ async def test_a_turn_inside_its_token_budget_runs_to_the_end():
 
 
 @pytest.mark.asyncio
+async def test_the_done_frame_carries_the_last_prompt_size_of_the_turn():
+    async def run(**kwargs):
+        kwargs['stream_observer'].handle_event(_completed_usage(80, 40))
+        kwargs['stream_observer'].handle_event(_completed_usage(2100, 20))
+        return 'the answer'
+
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
+    await socket.incoming.put('{"message":"hello"}')
+
+    done = await socket.event('done')
+
+    # The turn totals both calls; the context is what the model saw last.
+    assert done['tokens_in'] == 2180 and done['tokens_out'] == 60
+    assert done['context_tokens'] == 2100
+
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
+async def test_a_done_frame_without_usage_has_no_context_size():
+    run = AsyncMock(return_value='Ready')
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
+    await socket.incoming.put('{"message":"hello"}')
+
+    done = await socket.event('done')
+
+    # Absent, not zero: the UI shows nothing rather than "0".
+    assert 'context_tokens' not in done
+
+    await socket.incoming.put(None)
+    await session
+
+
+@pytest.mark.asyncio
 async def test_a_stop_in_the_same_burst_as_the_message_frees_the_chat():
     """Message and Stops read before the turn's task took a step: the turn still
     ends as stopped, and the chat takes the next message instead of "busy"."""
@@ -1041,6 +1087,357 @@ async def test_a_turn_that_changes_files_leaves_a_checkpoint_to_restore(tmp_path
     await session
 
 
+def turn_with_a_trace():
+    """A real AgentTurn over an empty conversation, for its public trace reads."""
+    class Session:
+        context_id = 'ctx'
+        space = SimpleNamespace()
+
+    manager = ContextManager()
+    manager.ensure_context('ctx')
+    session = Session()
+    session.manager = manager
+    return AgentTurn(session, 'hello', system_key='s', agent_key='a')
+
+
+def test_recent_activity_is_a_safe_projection_of_the_turn_trace():
+    turn = turn_with_a_trace()
+    recorder = turn._recorder
+    recorder.note(
+        StepKind.REASONING, 'Thinking',
+        subtitle='SECRET reasoning subtitle', body='SECRET reasoning body',
+    )
+    recorder.note(
+        StepKind.TOOL, 'Read file',
+        detail='SECRET detail',
+        input_payload={'path': 'SECRET input'},
+        result_payload={'raw_text': 'SECRET result'},
+        refs=[
+            ContextRef('file', 'a.py', 'project/src/a.py'),
+            ContextRef('file', 'passwd', '/etc/passwd'),
+            ContextRef('file', 'win', '..\\win.py'),
+            ContextRef('file', 'foreign', 'user/notes.md'),
+        ],
+    )
+    recorder.note(StepKind.MESSAGE, 'Narration', subtitle='  I will  read the file ')
+    recorder.note(StepKind.PLAN, 'Plan · 1/1', plan={'tasks': [{'title': 'SECRET task'}]})
+
+    activity = turn.recent_activity()
+
+    assert set(activity) == {'items', 'total', 'truncated', 'contexts'}
+    assert activity['total'] == 4 and activity['truncated'] is False
+    assert activity['contexts'] == [{
+        'id': 'root', 'parent_id': None, 'label': 'Main agent',
+        'status': 'done', 'at_ms': None, 'duration_ms': None, 'total': 4,
+    }]
+    kinds = [entry['kind'] for entry in activity['items']]
+    assert kinds == ['reasoning', 'tool', 'message', 'plan']
+    for entry in activity['items']:
+        assert set(entry) == {
+            'id', 'kind', 'title', 'status', 'at_ms', 'duration_ms', 'summary', 'files',
+            'context_id',
+        }
+        assert entry['context_id'] == 'root'
+    reasoning, tool, message, plan = activity['items']
+    assert reasoning['summary'] == ''
+    assert tool['summary'] == ''
+    assert tool['files'] == ['src/a.py']
+    assert message['summary'] == 'I will read the file'
+    assert plan['summary'] == ''
+    # Not one secret of a body, a payload, a plan or a foreign path leaves.
+    assert 'SECRET' not in json.dumps(activity)
+    assert '/etc/passwd' not in json.dumps(activity)
+    assert 'user/notes.md' not in json.dumps(activity)
+
+
+def test_recent_activity_is_bounded_to_six_steps_and_four_files():
+    turn = turn_with_a_trace()
+    recorder = turn._recorder
+    for index in range(7):
+        recorder.note(StepKind.TOOL, f'Step {index}')
+    recorder.note(
+        StepKind.TOOL, 'x' * 300,
+        refs=[ContextRef('file', f'f{index}.py', f'project/src/f{index}.py') for index in range(6)],
+    )
+
+    activity = turn.recent_activity()
+
+    assert activity['total'] == 8
+    assert activity['truncated'] is True
+    assert [entry['title'] for entry in activity['items']][:-1] == [f'Step {index}' for index in range(2, 7)]
+    assert activity['items'][-1]['title'] == 'x' * 120
+    assert activity['items'][-1]['files'] == [f'src/f{index}.py' for index in range(4)]
+
+
+def test_recent_activity_is_empty_without_steps():
+    assert turn_with_a_trace().recent_activity() == {
+        'items': [], 'total': 0, 'truncated': False, 'contexts': [],
+    }
+
+
+def test_recent_activity_keeps_nested_agent_contexts_and_their_events():
+    turn = turn_with_a_trace()
+    recorder = turn._recorder
+    recorder.note(StepKind.TOOL, 'Root action')
+    agent_a = recorder.open(
+        StepKind.AGENT, 'Agent A',
+        subtitle='SECRET A prompt', body='SECRET A reasoning',
+        input_payload={'prompt': 'SECRET A input'},
+        result_payload={'report': 'SECRET A report'},
+    )
+    recorder.note(
+        StepKind.TOOL, 'A action', parent_id=agent_a.id,
+        detail='SECRET A arguments', result_payload={'raw': 'SECRET A result'},
+    )
+    recorder.note(
+        StepKind.MESSAGE, 'A says', parent_id=agent_a.id,
+        subtitle='A public line', body='SECRET A message',
+    )
+    agent_b = recorder.open(
+        StepKind.AGENT, 'Agent B', parent_id=agent_a.id,
+        subtitle='SECRET B prompt', body='SECRET B reasoning',
+    )
+    recorder.note(
+        StepKind.TOOL, 'B action', parent_id=agent_b.id,
+        input_payload={'query': 'SECRET B input'},
+        result_payload={'raw': 'SECRET B result'},
+    )
+    recorder.close(agent_b)
+    recorder.close(agent_a)
+
+    activity = turn.recent_activity()
+
+    contexts = {context['id']: context for context in activity['contexts']}
+    assert [context['id'] for context in activity['contexts']] == [
+        'root', agent_a.id, agent_b.id,
+    ]
+    assert (contexts['root']['parent_id'], contexts['root']['label']) == (None, 'Main agent')
+    assert contexts['root']['total'] == 2  # its own action and A's delegation row
+    assert contexts[agent_a.id]['parent_id'] == 'root'
+    assert contexts[agent_a.id]['label'] == 'Agent A'
+    assert contexts[agent_a.id]['total'] == 3  # A's action, message and B's delegation
+    assert contexts[agent_b.id]['parent_id'] == agent_a.id
+    assert contexts[agent_b.id]['label'] == 'Agent B'
+    assert contexts[agent_b.id]['total'] == 1
+    assert contexts[agent_a.id]['status'] == contexts[agent_b.id]['status'] == 'done'
+
+    owners = {entry['title']: entry['context_id'] for entry in activity['items']}
+    assert owners == {
+        'Root action': 'root',
+        'Agent A': 'root',
+        'A action': agent_a.id,
+        'A says': agent_a.id,
+        'Agent B': agent_a.id,
+        'B action': agent_b.id,
+    }
+    for entry in activity['items']:
+        assert set(entry) == {
+            'id', 'kind', 'title', 'status', 'at_ms', 'duration_ms', 'summary',
+            'files', 'context_id',
+        }
+    assert activity['items'][3]['summary'] == 'A public line'
+    # No prompt, report, reasoning, body, plan or payload may leave a context.
+    assert 'SECRET' not in json.dumps(activity)
+
+
+def test_an_agent_context_survives_even_when_its_events_fell_out_of_the_six():
+    turn = turn_with_a_trace()
+    recorder = turn._recorder
+    for index in range(7):
+        recorder.note(StepKind.TOOL, f'Before {index}')
+    old_agent = recorder.open(StepKind.AGENT, 'Old agent')
+    recorder.note(StepKind.TOOL, 'Old work', parent_id=old_agent.id)
+    recorder.close(old_agent)
+    for index in range(6):
+        recorder.note(StepKind.TOOL, f'After {index}')
+
+    activity = turn.recent_activity()
+
+    assert [entry['title'] for entry in activity['items']] == [
+        f'After {index}' for index in range(6)
+    ]
+    contexts = {context['id']: context for context in activity['contexts']}
+    assert old_agent.id in contexts
+    assert contexts[old_agent.id]['total'] == 1
+    assert contexts['root']['total'] == 14  # 13 direct actions and the delegation row
+    assert all(entry['context_id'] == 'root' for entry in activity['items'])
+
+
+def test_malformed_or_cyclic_agent_parents_fall_back_to_root():
+    activity = public_activity([
+        {'id': 'a', 'kind': 'agent', 'title': 'A', 'status': 'done', 'parent_id': 'b'},
+        {'id': 'b', 'kind': 'agent', 'title': 'B', 'status': 'running', 'parent_id': 'a'},
+        {'id': 'c', 'kind': 'agent', 'title': 'C', 'status': 'done', 'parent_id': 'ghost'},
+        {'id': 'd', 'kind': 'agent', 'title': 'D', 'status': 'done', 'parent_id': 'd'},
+        {'id': '/bad', 'kind': 'agent', 'title': 'Bad', 'status': 'done'},
+        {'id': 't1', 'kind': 'tool', 'title': 'Root work', 'status': 'done',
+         'parent_id': 'ghost'},
+        {'id': 't2', 'kind': 'tool', 'title': 'A work', 'status': 'done',
+         'parent_id': 'a'},
+    ])
+
+    contexts = {context['id']: context for context in activity['contexts']}
+    assert set(contexts) == {'root', 'a', 'b', 'c', 'd'}
+    for context_id in ('a', 'b', 'c', 'd'):
+        assert contexts[context_id]['parent_id'] == 'root'
+    # Every raw step belongs to a context, even one with an unusable id.
+    assert contexts['root']['total'] == 6
+    assert contexts['a']['total'] == 1
+    assert {entry['id'] for entry in activity['items']} == {
+        'a', 'b', 'c', 'd', 't1', 't2',
+    }
+    assert all(
+        entry['context_id'] in contexts for entry in activity['items']
+    )
+
+
+# -- a chat's lazy map detail -----------------------------------------------------
+#
+# The detail route mounts with the map on the real WebChatServer, and it reads
+# the real ContextManager: the message and run buckets, not a copy of them.
+
+
+def test_the_map_detail_route_reads_a_real_chat_through_the_servers_own_app(projects_client, projects_space):
+    project = projects_client.post("/api/projects", json={"title": "Grid"}).json()
+    manager = projects_space.context_manager()
+    manager.ensure_context("chat-1")
+    manager.update_context_metadata("chat-1", {"project_id": project["id"], "title": "First chat"})
+    manager.add_message("user", "a question " + "x" * 400, context_id="chat-1")
+    manager.add_message(
+        "assistant",
+        "the answer",
+        context_id="chat-1",
+        metadata={
+            "turn_id": "turn-1",
+            "type": "agent_response",
+            "trace": [
+                {"id": "t-1", "kind": "tool", "title": "Read a file", "status": "done",
+                 "at_ms": 10, "duration_ms": 2, "body": "SECRET"},
+            ],
+        },
+    )
+    execution = AgentExecution(
+        agent_name="dev", input_message="SECRET", start_time=1.0, end_time=2.0,
+        context_id="chat-1", turn_id="turn-1",
+    )
+    manager.add_execution(execution, context_id="chat-1")
+
+    response = projects_client.get(f"/api/projects/{project['id']}/map/chats/chat-1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chat"] == {
+        "id": "chat-1", "title": "First chat", "href": "/?conversation=chat-1",
+    }
+    assert [item["role"] for item in body["messages"]["items"]] == ["user", "assistant"]
+    assert body["messages"]["items"][1]["turn_id"] == "turn-1"
+    assert body["executions"]["items"][0]["id"] == "turn:turn-1"
+    assert body["operations"]["items"][0]["execution_id"] == "turn:turn-1"
+    assert "SECRET" not in response.text
+    # A chat of another project is not found through this one.
+    assert projects_client.get(f"/api/projects/{project['id']}/map/chats/ghost").status_code == 404
+
+
+def test_persisting_a_turn_keeps_its_time_and_freezes_open_steps():
+    turn = turn_with_a_trace()
+    manager = turn._session.manager
+    manager.append_message_to('ctx', 'assistant', 'done')
+    recorder = turn._recorder
+    running = recorder.open(StepKind.AGENT, 'coder')
+
+    turn._persist_trace()
+
+    stored = manager.get_context_messages('ctx')['messages'][-1]['metadata']
+    assert stored['duration_ms'] == recorder.elapsed_ms
+    trace = {step['id']: step for step in stored['trace']}
+    frozen = trace[running.id]
+    # Cut off mid-run: the interval is kept, the status stays honest.
+    assert frozen['status'] == 'running'
+    assert frozen['duration_ms'] is not None
+    assert 0 <= frozen['duration_ms'] <= recorder.elapsed_ms
+
+
+def test_persisting_a_turn_keeps_its_last_context_size():
+    turn = turn_with_a_trace()
+    manager = turn._session.manager
+    manager.append_message_to('ctx', 'assistant', 'done')
+    turn._recorder.record_usage(SimpleNamespace(input_tokens=700, output_tokens=50))
+
+    turn._persist_trace()
+
+    stored = manager.get_context_messages('ctx')['messages'][-1]['metadata']
+    # History shows the same number the live done frame showed.
+    assert stored['context_tokens'] == 700
+
+
+def test_persisting_a_turn_without_usage_stores_no_context_size():
+    turn = turn_with_a_trace()
+    manager = turn._session.manager
+    manager.append_message_to('ctx', 'assistant', 'done')
+
+    turn._persist_trace()
+
+    stored = manager.get_context_messages('ctx')['messages'][-1]['metadata']
+    # Absent, never a zero: the reloaded chat shows nothing.
+    assert 'context_tokens' not in stored
+
+
+def test_a_turns_trace_is_stored_even_after_a_subagent_report():
+    turn = turn_with_a_trace()
+    manager = turn._session.manager
+    manager.append_message_to('ctx', 'assistant', 'the answer', {'turn_id': turn.run_id})
+    # A sub-agent report is appended after the answer: it is not this turn's record.
+    manager.append_message_to('ctx', 'assistant', 'Tool result of Agent(coder)', {'kind': 'tool_result'})
+    turn._recorder.note(StepKind.TOOL, 'Read file')
+
+    turn._persist_trace()
+
+    messages = manager.get_context_messages('ctx')['messages']
+    report, answer = messages[-1], messages[-2]
+    assert report['metadata'].get('kind') == 'tool_result'
+    assert 'trace' not in report['metadata']
+    assert answer['metadata']['duration_ms'] == turn._recorder.elapsed_ms
+    assert answer['metadata']['trace'][-1]['title'] == 'Read file'
+
+
+def test_a_trace_never_lands_on_another_turns_answer():
+    first = turn_with_a_trace()
+    manager = first._session.manager
+    second = AgentTurn(first._session, 'again', system_key='s', agent_key='a')
+    manager.append_message_to('ctx', 'assistant', 'first answer', {'turn_id': first.run_id})
+    manager.append_message_to('ctx', 'assistant', 'second answer', {'turn_id': second.run_id})
+    second._recorder.note(StepKind.TOOL, 'Read file')
+
+    second._persist_trace()
+
+    messages = manager.get_context_messages('ctx')['messages']
+    assert 'trace' not in messages[-2]['metadata']
+    assert 'duration_ms' not in messages[-2]['metadata']
+    assert messages[-1]['metadata']['duration_ms'] == second._recorder.elapsed_ms
+
+
+@pytest.mark.asyncio
+async def test_switching_agent_keeps_the_conversation():
+    """The picker changes who answers, never the conversation: both turns run
+    in the same context, so a switch is a handover of one chat, not a new one."""
+    run = AsyncMock(return_value='ok')
+    space, socket = space_for(run), Socket()
+    session = asyncio.create_task(chat_session(space, socket, 'ctx'))
+
+    await socket.incoming.put(json.dumps({"message": "hello", "agent_key": "worker"}))
+    await socket.event('final_output')
+    await socket.event('done')
+    await socket.incoming.put(json.dumps({"message": "again", "agent_key": "reviewer"}))
+    await socket.event('final_output')
+    await socket.event('done')
+    await socket.incoming.put(None)
+    await session
+
+    calls = [call.kwargs for call in run.await_args_list]
+    assert [call['agent_key'] for call in calls] == ['worker', 'reviewer']
+    assert [call['context_id'] for call in calls] == ['ctx', 'ctx']
+
+
 # -- the turn is visible from the moment its message is accepted -------------
 
 
@@ -1079,7 +1476,7 @@ async def test_the_turn_is_registered_while_its_preamble_still_runs():
 async def test_a_refused_preamble_releases_the_conversation():
     """A turn the preamble refuses is unregistered and released at once."""
     space, socket = space_for(AsyncMock()), Socket()
-    space.admit_turn = lambda: "The day's turn limit is reached"
+    space.admit_turn = lambda turn=None: "The day's turn limit is reached"
     session = asyncio.create_task(chat_session(space, socket, "ctx"))
     await socket.incoming.put('{"message":"hello"}')
     first = await asyncio.wait_for(socket.outgoing.get(), 2)

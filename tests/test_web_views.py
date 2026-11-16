@@ -74,3 +74,34 @@ def test_a_long_trace_leaves_its_payloads_for_later():
     assert slim[1]["lazy"] and slim[1]["detail"] == big[:400] and slim[1]["body"] == "done"
     assert slim[2] == steps[2]  # small: left as it was
     assert "result_payload" in steps[0]  # the stored trace is untouched
+
+
+def test_a_stored_turn_duration_travels_with_its_message():
+    message = SimpleNamespace(
+        role="assistant", content="done", metadata={"duration_ms": 90_000, "trace": []}
+    )
+    assert serialize_message(message)["duration_ms"] == 90_000
+
+
+def test_an_unknown_or_invalid_turn_duration_stays_unknown():
+    for value in (None, True, "90000", -5, float("nan")):
+        message = SimpleNamespace(role="assistant", content="", metadata={"duration_ms": value})
+        assert serialize_message(message)["duration_ms"] is None, value
+
+
+def test_a_stored_context_size_travels_with_its_message():
+    message = SimpleNamespace(
+        role="assistant", content="done", metadata={"context_tokens": 1500, "trace": []}
+    )
+    assert serialize_message(message)["context_tokens"] == 1500
+
+
+def test_an_unknown_or_invalid_context_size_stays_unknown():
+    # Nothing, a flag, a string, zero, a negative or a fraction: the chat shows
+    # no number rather than a made-up one (>0 integer only).
+    for value in (None, True, False, "1500", 0, -3, 1500.5):
+        message = SimpleNamespace(role="assistant", content="", metadata={"context_tokens": value})
+        assert serialize_message(message)["context_tokens"] is None, value
+    assert serialize_message(SimpleNamespace(role="assistant", content="", metadata={}))[
+        "context_tokens"
+    ] is None

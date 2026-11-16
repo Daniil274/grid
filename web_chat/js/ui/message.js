@@ -15,7 +15,7 @@ import { decorateMath } from "../lib/math.js";
 import { scopeWorkspaceLinks } from "../lib/workspace-links.js";
 import { ICONS } from "./icons.js";
 import { createActivityView } from "./activity.js";
-import { createReasoningPanel } from "./reasoning.js";
+import { renderUiBlock } from "./ui-block.js";
 import { copyText, toast } from "./toast.js";
 
 const ROLE_LABEL = { assistant: "Grid", user: "You", system: "System" };
@@ -127,6 +127,18 @@ function actionButton(label, path, onClick, extraClass = "") {
 }
 
 /**
+ * A prompt size for people: "812", "123k", "1.2m".
+ *
+ * The exact number is in the title; the row shows the magnitude that makes
+ * a growing context visible at a glance.
+ */
+function contextSize(tokens) {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+  if (tokens >= 1000) return `${Math.round(tokens / 1000)}k`;
+  return String(tokens);
+}
+
+/**
  * @param {object} options
  * @param {"user"|"assistant"|"system"} options.role
  * @param {string} [options.content]
@@ -134,6 +146,10 @@ function actionButton(label, path, onClick, extraClass = "") {
  * @param {string|number} [options.timestamp]
  * @param {(edit: {id: string, text: string, images: string[]}) => void} [options.onEdit]
  *   user messages only: saving an edit starts a new branch
+ * @param {(target: {id: string, role: string}) => void} [options.onRetry]
+ *   user and assistant messages: repeat the request behind this message - the
+ *   message itself for the user's, the request the answer answers for an
+ *   assistant's - as a new branch with the text untouched
  * @param {(contextId: string) => void} [options.onSwitchVersion] opens another
  *   version of an edited message
  * @param {?string} [options.messageId] the stored message's id
@@ -159,11 +175,14 @@ function actionButton(label, path, onClick, extraClass = "") {
  * @param {(checkpoint: {turn_id: string, files: number}) => void} [options.onRestore]
  * @param {object[]} [options.events] assistant messages only: the public typed
  *   events the server stored with the message (`message.events`)
+ * @param {?number} [options.contextTokens] assistant messages only: the prompt
+ *   size of the turn's last model call, shown beside the actions
  */
 export function createMessage({
   role, content = "", author = "", timestamp, onEdit, onSpeak, onReport, onContinue, onSwitchVersion, onDelete, onFork,
-  onContinueInNewChat, onRestore, kind = null, compaction = null, context = null, images = [], messageId = null, versions = null,
-  checkpoint = null, events = [],
+  onRetry, onContinueInNewChat, onRestore, kind = null, compaction = null, context = null, images = [], messageId = null, versions = null,
+  checkpoint = null, events = [], executionMode = "segmented", onExecutionModeToggle = null,
+  ui = [], origin = null, onUiSave = null, onUiSubmit = null, contextTokens = null,
 }) {
   if (kind === "continuation") return createContinuationMarker({ timestamp });
   if (kind === "compaction") return createCompactionMarker({ timestamp, compaction });
@@ -178,10 +197,11 @@ export function createMessage({
       event.target.classList.toggle("is-expanded");
     }
   });
-  const reasoning = isAssistant ? createReasoningPanel() : null;
-  // What the agent said around its work and the compact status of that work:
-  // public events only, and the answer itself stays the message body below.
-  const activity = isAssistant ? createActivityView().setAuthor(author) : null;
+  // One chronological stream owns both halves of the turn: every public
+  // message closes its execution panel, and the next step starts another.
+  const activity = isAssistant ? createActivityView({ mode: executionMode }).setAuthor(author) : null;
+  const reasoning = activity;
+  let currentExecutionMode = executionMode;
 
   let text = content;
   // A user's uploaded files close their text (lib/files.js): shown as files,
@@ -220,13 +240,48 @@ export function createMessage({
   };
   showCheckpoint(checkpoint);
 
+  // "Repeat request": the same request runs again from this point - the edit
+  // flow with the text untouched, so the repeat is a new version of the
+  // message rather than a copy of it further down the chat.
+  const retryButton = (role === "user" || isAssistant) && onRetry
+    ? actionButton(
+      role === "user"
+        ? "Repeat this request (starts a new branch)"
+        : "Repeat the request behind this answer (starts a new branch)",
+      ICONS.repeat,
+      () => stored(() => onRetry({ id: storedId, role })),
+      "msgAction--retry",
+    )
+    : null;
+
+  const executionModeButton = isAssistant && onExecutionModeToggle
+    ? h("button.msgAction.msgAction--executionMode", {
+        type: "button",
+        title: currentExecutionMode === "combined" ? "Show work by messages" : "Show work as one block",
+        "aria-label": currentExecutionMode === "combined" ? "Show work by messages" : "Show work as one block",
+        "aria-pressed": String(currentExecutionMode === "combined"),
+        on: { click: onExecutionModeToggle },
+      }, icon(ICONS.panel, { size: 14 }))
+    : null;
+
+  // The turn's ending context size, beside the actions: a number, not a
+  // button, and absent until the turn reports one.
+  const contextTokensNode = isAssistant
+    ? h("span.msg__contextTokens", {
+        hidden: true,
+        title: "Context tokens after this message",
+      })
+    : null;
+
   const actions = h(
     "div.msg__actions",
     {},
     actionButton("Copy message", ICONS.copy, () => copyText(ownWords().text, "Message copied")),
     role === "user" && onEdit ? actionButton("Edit (starts a new branch)", ICONS.edit, () => startEdit()) : null,
+    retryButton,
     restoreButton,
     speakButton,
+    executionModeButton,
     isAssistant && onReport
       ? actionButton("Report a problem with this answer", ICONS.inspect, () => startReport(), "msgAction--report")
       : null,
@@ -239,7 +294,21 @@ export function createMessage({
         "msgAction--delete",
       )
       : null,
+    contextTokensNode,
   );
+
+  /** Show the current context size; nothing at all when it is unknown. */
+  function setContextTokens(tokens) {
+    if (!contextTokensNode) return;
+    const count = Number(tokens);
+    const known = Number.isFinite(count) && count > 0;
+    contextTokensNode.hidden = !known;
+    contextTokensNode.textContent = known ? contextSize(count) : "";
+    contextTokensNode.title = known
+      ? `Context tokens after this message: ${Math.round(count).toLocaleString("en-US")}`
+      : "Context tokens after this message";
+  }
+  setContextTokens(contextTokens);
 
   /** Run *action* once the message is stored; a message in flight has no id yet. */
   function stored(action) {
@@ -270,6 +339,17 @@ export function createMessage({
     : null;
   if (continueInNewChat) continueInNewChat.hidden = true;
 
+  // Where a request came from, when a button of an interface sent it: the
+  // server composed and checked the sentence, so this line only says which
+  // control the person used - it never invents or repeats the prompt.
+  const originLine = origin?.source === "ui"
+    ? h("p.msg__origin", {
+        dataset: { uiId: origin.ui_id ?? "", action: origin.action_id ?? "" },
+        title: origin.ui_id ? `Interface ${origin.ui_id}, values as sent` : "",
+        text: `Chosen in the interface${origin.action_label ? `: ${origin.action_label}` : ""}`,
+      })
+    : null;
+
   const authorNode = h("span.msg__author", { text: author || ROLE_LABEL[role] || role });
   // "‹ 2/3 ›": the versions of an edited message, each in its own branch.
   const switcher = h("span.msg__versions");
@@ -294,6 +374,25 @@ export function createMessage({
   renderVersions(versions);
   // A user's attachments sit above their text; an assistant's generated
   // images follow its answer.
+  // Interfaces the answer presented (web_chat/ui_document.py), right under its
+  // text: part of the answer, not a tool card. Each widget owns its local
+  // choices and talks to the server only to save them or to send a button.
+  const uiSlot = h("div.msg__ui");
+  const uiWidgets = new Map();
+  const addUiBlock = (block) => {
+    if (!block || typeof block !== "object" || !block.id || uiWidgets.has(block.id)) return;
+    const widget = renderUiBlock(block, {
+      getMessageId: () => storedId,
+      onSave: onUiSave,
+      onSubmit: onUiSubmit,
+    });
+    uiWidgets.set(block.id, widget);
+    uiSlot.append(widget.el);
+    uiSlot.hidden = false;
+  };
+  for (const block of ui ?? []) addUiBlock(block);
+  uiSlot.hidden = uiWidgets.size === 0;
+
   const gallery = h("div.msg__images", { hidden: !images?.length });
   for (const url of images ?? []) gallery.append(renderImage(url));
   const fileList = h("div.msg__files", { hidden: true });
@@ -302,12 +401,12 @@ export function createMessage({
     { id, dataset: { role } },
     h("div.msg__meta", {}, authorNode, timestamp ? h("span.msg__time", { text: clock(timestamp) }) : null, switcher),
     revisionLines,
-    reasoning?.el,
-    reasoning?.planEl,
+    originLine,
     activity?.el,
     isAssistant ? null : gallery,
     isAssistant ? null : fileList,
     body,
+    isAssistant ? uiSlot : null,
     isAssistant ? gallery : null,
     actions,
     continueInNewChat,
@@ -420,12 +519,30 @@ export function createMessage({
       showCheckpoint(next);
     },
 
-    adopt({ id: nextId, versions: nextVersions, checkpoint: nextCheckpoint, events: nextEvents }) {
+    adopt({ id: nextId, versions: nextVersions, checkpoint: nextCheckpoint, events: nextEvents, contextTokens: nextContextTokens }) {
       storedId = nextId ?? storedId;
+      // A block shown during the live turn could not reach the server yet;
+      // now that the answer has an id its buttons and saves can work.
+      for (const widget of uiWidgets.values()) widget.refresh();
       renderVersions(nextVersions);
       showCheckpoint(nextCheckpoint ?? null);
       // A reconnect redraws nothing twice: the activity view dedupes by step.
       if (nextEvents?.length) activity?.apply(nextEvents);
+      if (nextContextTokens) setContextTokens(nextContextTokens);
+    },
+
+    /** The prompt size of the turn's last model call, beside the actions. */
+    setContextTokens,
+
+    /** Show an interface the answer just presented, once. */
+    addUiBlock(block) {
+      addUiBlock(block);
+      uiSlot.hidden = uiWidgets.size === 0;
+    },
+
+    /** Pass a server acknowledgement to the widget that sent the request. */
+    acknowledgeUi(uiId, patch) {
+      uiWidgets.get(uiId)?.acknowledge?.(patch);
     },
 
     /** Show an image the model generated, once. */
@@ -456,7 +573,20 @@ export function createMessage({
       activity?.setAuthor(name);
     },
 
-    /** One live step frame: narration and statuses join the activity view. */
+    /** Show this turn as one timeline or split it at public messages. */
+    setExecutionMode(mode) {
+      currentExecutionMode = mode;
+      activity?.setMode(mode);
+      if (executionModeButton) {
+        const combined = mode === "combined";
+        const label = combined ? "Show work by messages" : "Show work as one block";
+        executionModeButton.title = label;
+        executionModeButton.setAttribute("aria-label", label);
+        executionModeButton.setAttribute("aria-pressed", String(combined));
+      }
+    },
+
+    /** One live step frame: a top-level message joins the public stream. */
     observeStep(step) {
       activity?.observeStep(step);
     },

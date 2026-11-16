@@ -1195,6 +1195,115 @@ class ContextManager:
             self._request_save()
             return True
 
+    def update_turn_message_metadata(
+        self,
+        context_id: str,
+        turn_id: str,
+        updates: Dict[str, Any],
+        when: Callable[[ContextMessage], bool],
+    ) -> bool:
+        """Merge *updates* into the message of turn *turn_id* that ``when`` accepts.
+
+        A turn's answer is normally the conversation's last message, but a
+        sub-agent report can be appended after it. The message is found by its
+        explicit ``turn_id``, so one turn's trace can never land on another
+        turn's answer. Only a build that stored no turn ids falls back to the
+        newest untagged message ``when`` accepts, and never past a tagged one.
+        """
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            conversation = bucket["conversation"] if bucket else []
+            target: Optional[ContextMessage] = None
+            for message in reversed(conversation):
+                if (message.metadata or {}).get("turn_id") == turn_id and when(message):
+                    target = message
+                    break
+            if target is None:
+                # A build that stored no turn ids: the newest untagged message
+                # ``when`` accepts is the turn's record (a report after it is
+                # not, so this never lands on a sub-agent's output). A tagged
+                # message ends the search: older untagged ones are other turns.
+                for message in reversed(conversation):
+                    if (message.metadata or {}).get("turn_id"):
+                        break
+                    if when(message):
+                        target = message
+                        break
+            if target is None:
+                return False
+            target.metadata = {**(target.metadata or {}), **updates}
+            self._mark_changed(context_id)
+            self._request_save()
+            return True
+
+    def update_message_metadata_by_id(
+        self,
+        context_id: str,
+        message_id: str,
+        updates: Dict[str, Any],
+    ) -> bool:
+        """Merge *updates* into the message of *context_id* with that stable id.
+
+        The id is the one every message got at creation (``with_message_id``),
+        so a later write - a UI block's values, saved after the turn ended -
+        lands on the message it belongs to and on no neighbour. False when the
+        conversation or the message is not there.
+        """
+        if not isinstance(message_id, str) or not message_id:
+            return False
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            conversation = bucket["conversation"] if bucket else []
+            target: Optional[ContextMessage] = None
+            for message in reversed(conversation):
+                if (message.metadata or {}).get("message_id") == message_id:
+                    target = message
+                    break
+            if target is None:
+                return False
+            target.metadata = {**(target.metadata or {}), **updates}
+            self._mark_changed(context_id)
+            self._request_save()
+            return True
+
+    def mutate_message_metadata_by_id(
+        self,
+        context_id: str,
+        message_id: str,
+        mutate: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically read, mutate and store one message's metadata.
+
+        ``mutate`` runs while the manager's lock is held, so a check-then-write
+        over metadata (a UI block's revision, a queue item, a claim) cannot
+        interleave with another writer - which is what makes two simultaneous
+        saves on different threads safe. It receives the metadata as stored and
+        returns the new metadata, or ``None`` to leave the message untouched;
+        it must not call back into the manager (the lock is not re-entrant).
+
+        Returns the metadata as stored afterwards, or ``None`` when the
+        conversation or the message is unknown.
+        """
+        if not isinstance(message_id, str) or not message_id:
+            return None
+        with safe_lock(self._lock, timeout=5.0):
+            bucket = self._contexts.get(context_id)
+            conversation = bucket["conversation"] if bucket else []
+            target: Optional[ContextMessage] = None
+            for message in reversed(conversation):
+                if (message.metadata or {}).get("message_id") == message_id:
+                    target = message
+                    break
+            if target is None:
+                return None
+            current = target.metadata or {}
+            updated = mutate(current)
+            if updated is not None and updated is not current:
+                target.metadata = updated
+                self._mark_changed(context_id)
+                self._request_save()
+            return dict(target.metadata or {})
+
     def append_message_to(
         self,
         context_id: str,
@@ -1810,6 +1919,11 @@ class ContextManager:
             "output_length": len(str(payload.get("output") or "")),
             "has_error": bool(payload.get("error")),
         }
+        # The turn's join key, only for a record that actually carries one: an
+        # execution stored before turn ids existed reads exactly as it did.
+        turn_id = payload.get("turn_id")
+        if isinstance(turn_id, str) and turn_id.strip():
+            result["turn_id"] = turn_id.strip()
         if include_full:
             result["input"] = payload.get("input_message")
             result["output"] = payload.get("output")

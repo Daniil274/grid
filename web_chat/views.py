@@ -7,6 +7,7 @@ route and the voice control describe things the same way.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Callable, Optional
 
 from core.compact import COMPACTED_TYPE
@@ -14,6 +15,8 @@ from core.interruption import CONTINUATION_TYPE, interruption_of
 from core.tool_check import summarize
 from schemas.schemas import ImageContent
 from web_chat.systems import SystemRegistry
+from web_chat.errors import error_text
+from web_chat.ui_state import ORIGIN_KEY, UI_KEY
 from web_chat.trace import (  # noqa: F401 - the lazy rule is shared with the live stream
     LAZY_FIELD_BYTES,
     LAZY_STEP_FIELDS,
@@ -110,7 +113,24 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
     # Older builds stored a flat "trace_events" list; normalize_steps keeps
     # those conversations renderable by the current timeline component.
     trace = metadata.get("trace") or normalize_steps(metadata.get("trace_events"))
+    # The turn's whole time as the live "done" frame reported it. A stored
+    # conversation shows this number instead of summing step timings again;
+    # anything that is not a real non-negative number stays unknown.
+    duration = metadata.get("duration_ms")
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(duration)
+        or duration < 0
+    ):
+        duration = None
     record = interruption_of(msg)
+    # The prompt size of the turn's last model call: the context the answer
+    # was written at. A missing or impossible value stays unknown, so the
+    # chat shows nothing rather than a made-up number.
+    context_tokens = metadata.get("context_tokens")
+    if isinstance(context_tokens, bool) or not isinstance(context_tokens, int) or context_tokens <= 0:
+        context_tokens = None
     return {
         "id": metadata.get("message_id"),
         "versions": versions,
@@ -118,6 +138,8 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
         "content": content,
         "timestamp": getattr(msg, "timestamp", None),
         "trace": trace,
+        "duration_ms": duration,
+        "context_tokens": context_tokens,
         "kind": kind,
         "context": (
             {
@@ -134,6 +156,17 @@ def serialize_message(msg: Any, *, resumable: bool = False, versions: Optional[d
             else None
         ),
         "images": images,
+        # Interfaces this answer presented (web_chat.ui_state), with the values
+        # they hold: a reload, a reconnect and a second tab all restore the
+        # same block. Bounded when it was presented, so it is stored as it is.
+        "ui": [
+            block
+            for block in (metadata.get(UI_KEY) or [])
+            if isinstance(block, dict) and isinstance(block.get("document"), dict)
+        ],
+        # Where a request came from, when a UI button sent it: the values the
+        # agent received, shown with the message rather than guessed at.
+        "origin": metadata.get(ORIGIN_KEY) if getattr(msg, "role", "") == "user" else None,
         "interruption": (
             {**record.to_dict(), "resumable": resumable} if record is not None else None
         ),
@@ -201,7 +234,7 @@ def system_options(
             )
         except Exception as exc:  # a broken system stays visible and labelled
             logger.warning("System '%s' could not be loaded: %s", system.key, exc)
-            agents, default_agent, error, issues = [], None, str(exc), {"items": [], "summary": []}
+            agents, default_agent, error, issues = [], None, error_text(exc), {"items": [], "summary": []}
         options.append(
             {
                 "key": system.key,

@@ -29,6 +29,7 @@ from core.run_stream import (
 )
 from web_chat.payload import normalize_payload
 from web_chat.plan_board import TRACKED_TOOLS, PlanBoard, claimed_task_ids
+from web_chat.ui_state import UiSink
 from web_chat.tool_summaries import tool_subtitle, tool_title
 from web_chat.trace import (
     Step,
@@ -789,6 +790,7 @@ class WebStreamObserver:
         emit_image: Optional[Callable[[str], None]] = None,
         agent_label: str = "",
         plan: Optional[PlanBoard] = None,
+        ui: Optional[UiSink] = None,
         emit_event: Optional[Callable[[dict[str, Any]], None]] = None,
         events: Optional[EventLog] = None,
         turn_id: Optional[str] = None,
@@ -843,6 +845,9 @@ class WebStreamObserver:
         # The conversation's plan (web_chat.plan_board), fed by the tracker
         # calls of this turn and of its sub-agents; the calls it waits on, by id.
         self._plan = plan if plan is not None else PlanBoard(recorder)
+        # The interfaces this turn presented (web_chat.ui_state): one sink,
+        # shared with every nested view, so a sub-agent's block is the turn's.
+        self._ui = ui if ui is not None else UiSink()
         self._plan_calls: dict[str, tuple[str, Any]] = {}
         # Rows of tool calls the model is still writing, with the characters
         # written so far. A call with long arguments takes minutes to write;
@@ -853,6 +858,7 @@ class WebStreamObserver:
         self._writing: dict[tuple, Step] = {}
         self._written_chars: dict[tuple, int] = {}
         self._response_seq = 0
+        self._model_key: Optional[str] = None
         # Rows of tools the host ran itself (auto_run_tools, init_tools), oldest first per tool.
         self._host_calls: dict[str, deque[Step]] = {}
 
@@ -869,6 +875,24 @@ class WebStreamObserver:
         instead of reaching into the board's private fields.
         """
         return self._plan.snapshot()
+
+    # -- presented interfaces ----------------------------------------------
+    def present_ui(self, document: Any) -> dict[str, Any]:
+        """Validate *document*, keep its block and show it in the answer now.
+
+        The one entry point for ``tools.ui_tools.present_ui``. Validation
+        happens here, not in the tool, so a block that reaches the wire or the
+        stored message has always passed the same check. Raises
+        :class:`web_chat.ui_document.UiDocumentError` for a bad document.
+        """
+        block = self._ui.present(document)
+        if self._emit_event is not None:
+            self._emit_event({"type": "ui", "ui": block})
+        return block
+
+    def ui_blocks(self) -> list[dict[str, Any]]:
+        """The interfaces this turn presented, in order, ready to store."""
+        return [dict(block) for block in self._ui.blocks]
 
     # -- typed public events ----------------------------------------------
     def _publish_event(self, event: Optional[CommunicationEvent]) -> None:
@@ -1034,6 +1058,7 @@ class WebStreamObserver:
         child._held = self._held
         child._plan = self._plan
         child._plan_calls = self._plan_calls
+        child._ui = self._ui
         block = self._calls_by_id.get(call_id) if call_id else None
         if block is None and call_id is None:
             # Without an id, adopt the caller's call only when it is unambiguous.
@@ -1263,6 +1288,13 @@ class WebStreamObserver:
         from agents import RawResponsesStreamEvent, RunItemStreamEvent
 
         try:
+            from core.fallback_model import selected_model_key
+
+            model_key = selected_model_key()
+            if model_key and model_key != self._model_key:
+                self._model_key = model_key
+                if self._emit_event is not None:
+                    self._emit_event({"type": "model", "key": model_key})
             if isinstance(event, RawResponsesStreamEvent):
                 return self._on_raw_event(event, agent_key)
             if isinstance(event, RunItemStreamEvent):

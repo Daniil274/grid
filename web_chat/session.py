@@ -59,6 +59,7 @@ from web_chat.attachments import (
 from web_chat.audio_ingress import AudioAttachment, parse_audio_data_url, runtime_accepts_audio, transcribe_audio
 from web_chat.accounts.service import SessionRevoked
 from web_chat.delivery import DELIVERIES, MessageQueue, decide_delivery
+from web_chat.errors import error_text
 from web_chat.observer import WebStreamObserver
 from web_chat.plan_board import PlanBoard
 from web_chat.spend import TurnSpend, tracking
@@ -496,7 +497,7 @@ def revision_error_event(exc: revisions.ContextCompatibilityError) -> dict[str, 
     """A refusal the client can act on: reason, machine code, conversation, details."""
     return {
         "type": "error",
-        "content": str(exc),
+        "content": error_text(exc),
         "code": exc.code,
         "context_id": exc.context_id,
         "details": exc.details,
@@ -863,13 +864,18 @@ class AgentTurn:
             # already in its next turn.
             self._session.hand_over(self)
             with suppress(WebSocketDisconnect, RuntimeError, OSError):
-                await self._emit({
+                done = {
                     "type": "done",
                     "stopped": stopped,
                     "duration_ms": self._recorder.elapsed_ms,
                     "tokens_in": self._recorder.tokens_in,
                     "tokens_out": self._recorder.tokens_out,
-                })
+                }
+                # The model's last prompt size: the context this turn ended
+                # with. Absent when no call reported usage, never a zero.
+                if self._recorder.last_input_tokens > 0:
+                    done["context_tokens"] = self._recorder.last_input_tokens
+                await self._emit(done)
 
     # -- producer ----------------------------------------------------------
     async def _produce(self) -> None:
@@ -950,11 +956,11 @@ class AgentTurn:
         except Exception as exc:
             self.outcome = "error"
             logger.exception("Web chat run failed")
-            self._recorder.fail(str(exc))
+            self._recorder.fail(error_text(exc))
             event = (
                 revision_error_event(exc)
                 if isinstance(exc, revisions.ContextCompatibilityError)
-                else {"type": "error", "content": str(exc)}
+                else {"type": "error", "content": error_text(exc)}
             )
             self._queue.put_nowait(event)
         finally:
@@ -1334,6 +1340,9 @@ class AgentTurn:
                 when=lambda last: last.role == "user",
             )
         ui_blocks = self._observer.ui_blocks()
+        # What the model saw in its last call of the turn - the context the
+        # answer was written at; history shows it beside the message.
+        context_tokens = self._recorder.last_input_tokens
         kept = self._session.manager.update_turn_message_metadata(
             self._session.context_id,
             self.run_id,
@@ -1353,6 +1362,7 @@ class AgentTurn:
                 # hold (web_chat.ui_state): beside the answer, not in a tool
                 # payload compaction may drop, so a reload shows them again.
                 **({"ui": ui_blocks} if ui_blocks else {}),
+                **({"context_tokens": context_tokens} if context_tokens > 0 else {}),
             },
             when=lambda last: last.role == "assistant" and not is_tool_result(last),
         )
@@ -1555,13 +1565,13 @@ class ChatSession:
             # the other commands stay responsive.
             images = await asyncio.to_thread(normalize_images, attached, self._image_config())
         except AttachmentError as exc:
-            await self.send({"type": "error", "content": str(exc)})
+            await self.send({"type": "error", "content": error_text(exc)})
             await self.send({"type": "done"})
             return
         try:
             audio = await asyncio.to_thread(parse_audio_data_url, audio_payload) if audio_payload is not None else None
         except ValueError as exc:
-            await self.send({"type": "error", "content": str(exc)})
+            await self.send({"type": "error", "content": error_text(exc)})
             await self.send({"type": "done"})
             return
         if self._turns.is_claimed(self.context_id):
@@ -1747,7 +1757,7 @@ class ChatSession:
         try:
             text, images = await self._keep_images(text, images)
         except AttachmentError as exc:
-            await self.send({"type": "error", "content": str(exc)})
+            await self.send({"type": "error", "content": error_text(exc)})
             return
         try:
             item = queue.add(
@@ -1758,7 +1768,7 @@ class ChatSession:
                 front=delivery == "now",
             )
         except ValueError as exc:
-            await self.send({"type": "error", "content": str(exc)})
+            await self.send({"type": "error", "content": error_text(exc)})
             return
         await turn.announce(
             {"type": "delivery", "id": item["id"], "delivery": delivery, "decided_by": decided_by}, also_to=self
@@ -2104,7 +2114,7 @@ class ChatSession:
                 return False
             # Admitting counts the turn for the day: only a request that will run.
             # Continuing an already admitted turn must not charge a second daily turn.
-            refusal = None if restart_resume and turn.resumes else self.space.admit_turn()
+            refusal = None if restart_resume and turn.resumes else self.space.admit_turn(turn)
             if refusal is not None:
                 await self.send({"type": "error", "content": refusal})
                 await self.send({"type": "done"})
