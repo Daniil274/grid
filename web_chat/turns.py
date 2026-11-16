@@ -65,6 +65,16 @@ class TurnBoard:
         """Conversations with a turn on: the user's turns running now."""
         return len(self._claimed)
 
+    def running_turns_count(self, exclude: Any = None) -> int:
+        """Turns the user has on now, for the running-turns limit.
+
+        Claims held by operations (a compaction, a fork: owner ``None``) are
+        not turns, and the turn asking for admission - *exclude* - must not
+        count against itself: the limit judges the turns already on, not
+        the one at the door.
+        """
+        return sum(1 for owner in self._claimed.values() if owner is not None and owner is not exclude)
+
     # -- running turns ---------------------------------------------------------
     def register(self, context_id: str, turn: Any, task: asyncio.Task) -> None:
         self._turns[context_id] = (turn, task)
