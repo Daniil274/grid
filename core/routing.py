@@ -176,19 +176,42 @@ class AutoRouter:
         router: Router,
         *,
         working_directory: Optional[str] = None,
+        workspace_binding: Optional[str] = None,
     ) -> None:
         self.root_config = root_config
         self.router = router
         self.working_directory = working_directory
+        # A server-bound space, unlike a CLI ``working_directory``: a system's
+        # own config may not move it (see Config.__init__).
+        self.workspace_binding = workspace_binding or self._effective_binding(root_config, working_directory)
         self._configs: Dict[str, Config] = {}
         self._last: Optional[Route] = None
         # Read once: a router lives as long as the configs it was built from,
         # and publishing a system rebuilds the web chat's routers.
         self._created = {manifest.key: manifest for manifest in self._created_store_published()}
 
+    @staticmethod
+    def _effective_binding(root_config: Config, working_directory: Optional[str]) -> str:
+        """The directory every system config of this router is loaded into.
+
+        A config already bound by a server space keeps its binding. Else the
+        CLI's ``--path`` is the binding when the root config lets the path be
+        overridden - the operator's choice of directory, which a system's own
+        config may not redirect - and the config's own directory otherwise.
+        """
+        if root_config.workspace_binding is not None:
+            return root_config.workspace_binding
+        if working_directory is not None and root_config.config.settings.allow_path_override:
+            return str(Path(working_directory).expanduser().absolute())
+        return root_config.get_working_directory()
+
     @classmethod
     def from_config(
-        cls, root_config: Config, *, working_directory: Optional[str] = None
+        cls,
+        root_config: Config,
+        *,
+        working_directory: Optional[str] = None,
+        workspace_binding: Optional[str] = None,
     ) -> Optional["AutoRouter"]:
         """Build a router from ``routing:`` in *root_config*, or None when routing is off."""
         model_key = root_config.config.routing.model
@@ -209,13 +232,29 @@ class AutoRouter:
         else:
             client, model_name = ModelManager(root_config).get_openai_client_for_model(model_key)
             router = Router(client, model_name)
-        return cls(root_config, router, working_directory=working_directory)
+        return cls(
+            root_config,
+            router,
+            working_directory=working_directory,
+            workspace_binding=workspace_binding,
+        )
 
     def created_store(self) -> Optional["SystemStore"]:
         """The systems created from the web chat, when the catalog names their directory."""
         from core.system_store import store_for_catalog
 
         return store_for_catalog(self.root_config)
+
+    def bind_workspace(self, binding: Optional[str]) -> None:
+        """Bind the configs this router loads to *binding* - a server space.
+
+        Set once, before any system is loaded; a config already loaded for a
+        space is dropped so it cannot keep the directory it was loaded with.
+        """
+        if binding == self.workspace_binding:
+            return
+        self.workspace_binding = binding
+        self._configs.clear()
 
     def _created_store_published(self) -> list:
         store = self.created_store()
@@ -259,7 +298,11 @@ class AutoRouter:
             if path == self.root_config.config_path.resolve():
                 self._configs[name] = self.root_config
             else:
-                self._configs[name] = Config(str(path), self.working_directory)
+                self._configs[name] = Config(
+                    str(path),
+                    self.working_directory,
+                    workspace_binding=self.workspace_binding,
+                )
         return self._configs[name]
 
     def check_systems(self) -> Dict[str, List[str]]:

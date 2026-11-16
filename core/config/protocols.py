@@ -157,9 +157,11 @@ class IContextManager(Protocol):
 
     def get_conversation_history_as_sdk_messages(
         self,
-        last_n: Optional[int] = None
+        last_n: Optional[int] = None,
+        *,
+        context_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get conversation history in SDK message format."""
+        """Get a conversation's dialogue in SDK message format (default: the active one)."""
         ...
 
     def add_execution(self, execution: Any) -> None:

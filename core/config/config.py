@@ -23,20 +23,56 @@ logger = logging.getLogger("grid.config")
 class Config:
     """Thread-safe configuration manager with validation and caching."""
 
-    def __init__(self, config_path: str = "config.yaml", working_directory: Optional[str] = None):
+    def __init__(
+        self,
+        config_path: str = "config.yaml",
+        working_directory: Optional[str] = None,
+        *,
+        workspace_binding: Optional[str] = None,
+    ):
         """
         Initialize configuration manager.
         
         Args:
             config_path: Path to configuration file
             working_directory: Working directory override
+            workspace_binding: The directory a server binds this config to on
+                a user's behalf - a user's or a chat's own space. Unlike
+                ``working_directory`` it is not an override a caller or the CLI
+                may ask for: ``settings.allow_path_override`` does not apply to
+                it, and a relative path is refused instead of silently falling
+                back to another directory. The path is kept as written (only
+                made absolute): resolving it here would hide a symlinked user
+                directory from the server, which checks the path before its
+                links are collapsed (web_chat.space.UserSpace). Used by
+                web_chat.space for a space's own workspace, which must not
+                depend on the config's flag.
         """
         self.config_path = Path(config_path)
         self._config: Optional[GridConfig] = None
         self._cli_working_directory = working_directory
+        self._workspace_binding = self._validated_workspace_binding(workspace_binding)
         self.project_tools_loader = None
         self._working_directory = working_directory or os.getcwd()
         self._load_config()
+
+    @staticmethod
+    def _validated_workspace_binding(binding: Optional[str]) -> Optional[str]:
+        """A server-bound workspace as an absolute path; refuse anything else.
+
+        A binding is not a request that the config may turn down: it names the
+        directory the caller's container is about to mount, so a relative or
+        empty path is an error, never a fallback.
+        """
+        if binding is None:
+            return None
+        raw = str(binding).strip()
+        if not raw:
+            raise ConfigError("Workspace binding must be a non-empty absolute path")
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            raise ConfigError(f"Workspace binding must be an absolute path: {binding!r}")
+        return os.path.normpath(str(path))
 
     def _resolve_config_relative_path(self, path: Optional[str]) -> Optional[str]:
         """Resolve a config-defined path relative to the config file directory."""
@@ -119,6 +155,9 @@ class Config:
             if not isinstance(raw_config, dict):
                 raise ConfigError("Configuration root must be a YAML mapping")
             self._load_action_policy_file(raw_config)
+            from core.model_registry import resolve_document
+
+            raw_config = resolve_document(raw_config, self.config_path)
 
             # -----------------------------------------------------------------
             # Auto-attach base system tools for project configs
@@ -189,7 +228,12 @@ class Config:
             config_wd = self._resolve_config_relative_path(self.config.settings.working_directory)
             allow_override = self.config.settings.allow_path_override
 
-            if self._cli_working_directory:
+            if self._workspace_binding is not None:
+                # A server binding is authoritative: allow_path_override is
+                # about a caller's own choice of directory, not about the
+                # space this server put the caller in.
+                self._working_directory = self._workspace_binding
+            elif self._cli_working_directory:
                 if allow_override:
                     self._working_directory = self._cli_working_directory
                 else:
@@ -375,14 +419,38 @@ class Config:
     def get_working_directory(self) -> str:
         """Get current working directory."""
         return self._working_directory
+
+    @property
+    def workspace_binding(self) -> Optional[str]:
+        """The server-bound workspace of this config, if it has one."""
+        return self._workspace_binding
     
     def get_config_directory(self) -> str:
         """Get configuration directory."""
         config_dir = self._resolve_config_relative_path(self.config.settings.config_directory)
         return config_dir or str(self.config_path.parent.resolve())
     
+    def bind_workspace(self, binding: Optional[str]) -> "Config":
+        """Bind an already-loaded config to a server space, without a reload.
+
+        A config that reached the server loaded with a plain override (a
+        private system built through BuilderAccess) still must not keep a
+        ``settings.working_directory`` of its own once a space owns it.
+        Returns the config, so a loader can bind what it just built.
+        """
+        if binding is None:
+            return self
+        self._workspace_binding = self._validated_workspace_binding(binding)
+        self._working_directory = os.path.abspath(self._workspace_binding)
+        return self
+
     def set_working_directory(self, path: str) -> None:
         """Set working directory if allowed."""
+        if self._workspace_binding is not None:
+            # The binding is the directory the server put this space in: no
+            # caller may move it, just as ``allow_path_override`` never did.
+            logger.warning("Working directory is bound to %s; ignoring %r", self._workspace_binding, path)
+            return
         if not self.config.settings.allow_path_override:
             # Path override is disabled in configuration
             logger.warning("Path override is disabled in configuration")

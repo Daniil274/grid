@@ -43,28 +43,18 @@ compact:
     enabled: true
     preserve_last_n: 4
 
+providers_file: ../catalog/providers.yaml
+models_file: ../catalog/models.yaml
+
 providers:
-  openrouter:
-    name: openrouter
-    base_url: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    timeout: 60
-    max_retries: 2
+  use: [openrouter]
+  refine:
+    openrouter:
+      timeout: 60
+      max_retries: 2
 
 models:
-  router:
-    name: typesafe/jev-1.13
-    provider: openrouter
-    description: Decisions model that picks the system and the agent
-
-  policy:
-    name: typesafe/jev-1.13
-    provider: openrouter
-    description: Decisions model that judges agent actions for the policy gate
-    # Most judgments take under 2 s; a slow one can pass 6 s (2026-09-26: an
-    # answer arrived 1 ms after a 6 s cut-off, twice). A stalled request is
-    # dropped after this long and retried within validator.timeout_seconds.
-    request_timeout: 10
+  use: [router, policy]
 
 routing:
   model: router

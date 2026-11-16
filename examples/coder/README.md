@@ -37,19 +37,23 @@ Tools live in `tools/`, skills the agents load in `skills/`.
 A server with accounts runs `bash_tool`, `codegraph` and beads in each user's
 container, so the host needs only Docker and the sandbox image
 (`docker build -t grid-agent:latest docker/agent`), which has all of them.
+Without a usable Docker backend that server refuses to start (fail closed); the
+server image never mounts a Docker socket by itself (`docs/security.md`).
 
 ## Run
 
-Through the catalog, as the web chat does by default:
+Through the catalog, as the web chat does by default. The server never picks a
+mode for you: `--unsafe-single-user` is the explicit one-user, no-sign-in server
+(the image's `CMD` runs `--accounts` instead, see the README):
 
 ```bash
-grid-web-chat --routing routing.yaml --path /path/to/project
+grid-web-chat --unsafe-single-user --routing routing.yaml --path /path/to/project
 ```
 
 This system alone:
 
 ```bash
-grid-web-chat --config examples/coder/config.yaml --path /path/to/project
+grid-web-chat --unsafe-single-user --config examples/coder/config.yaml --path /path/to/project
 agent-chat --config examples/coder/config.yaml --path /path/to/project
 ```
 

@@ -54,36 +54,14 @@ compact:
       - active_window
       - scratchpad_read
 
-providers:
-  openrouter:
-    name: openrouter
-    base_url: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    timeout: 300
-    max_retries: 3
-    streaming_enabled: true
+providers_file: ../../catalog/providers.yaml
+models_file: ../../catalog/models.yaml
 
-  opencode:
-    name: "opencode"
-    base_url: "https://opencode.ai/zen/go/v1"
-    api_key_env: "OPENCODE_API_KEY"
-    default_headers:
-      User-Agent: "grid-agent-system/1.0"
-      x-opencode-session: "grid-coder"
-    timeout: 300
-    max_retries: 3
+providers:
+  use: [openrouter, opencode]
 
 models:
-
-  glm-5.3-flash:
-    name: deepseek-v4.1-flash
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 384000
-    context_window: 1000000
-    description: "DeepSeek V4 Flash Vision via OpenCode Go"
-    streaming_enabled: true
-    use_responses_api: false
+  use: [glm-5.3-flash]
 
 tools:
   perceive:

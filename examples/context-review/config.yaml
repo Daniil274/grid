@@ -45,34 +45,24 @@ compact:
       - file_search
       - file_content_search
 
+providers_file: ../../catalog/providers.yaml
+models_file: ../../catalog/models.yaml
+
 providers:
-  openrouter:
-    name: openrouter
-    base_url: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    timeout: 300
-    max_retries: 3
+  use: [openrouter]
 
 models:
-  glm-latest:
-    name: "~z-ai/glm-latest"
-    provider: openrouter
-    temperature: 0.2
-    max_tokens: 128000
-    context_window: 262144
-    description: "Latest GLM via OpenRouter"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
-  grok-4.7:
-    name: "x-ai/grok-4.7"
-    provider: openrouter
-    temperature: 0.2
-    max_tokens: 128000
-    context_window: 500000
-    description: "Grok 4.7 via OpenRouter"
-    streaming_enabled: true
+  use: [glm-latest, grok-4.7]
+  refine:
+    glm-latest:
+      name: "~z-ai/glm-latest"
+      provider: openrouter
+      max_tokens: 128000
+      context_window: 262144
+      description: "Latest GLM via OpenRouter"
+    grok-4.7:
+      preserve_reasoning_content: false
+      reasoning: null
 
 tools:
   file_read:

@@ -19,9 +19,59 @@ class ToolType(str, Enum):
     AGENT = "agent"
 
 
+class ProviderUsageLimits(BaseModel):
+    """Optional quota or budget ceilings declared for a provider in config."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    limit_usd: Optional[float] = Field(default=None, ge=0)
+    day_usd: Optional[float] = Field(default=None, ge=0)
+    week_usd: Optional[float] = Field(default=None, ge=0)
+    month_usd: Optional[float] = Field(default=None, ge=0)
+    tokens_per_5h: Optional[int] = Field(default=None, ge=1)
+    tokens_per_day: Optional[int] = Field(default=None, ge=1)
+    tokens_per_7d: Optional[int] = Field(default=None, ge=1)
+    tokens_per_month: Optional[int] = Field(default=None, ge=1)
+    responses_per_day: Optional[int] = Field(default=None, ge=1)
+
+
+class ProviderUsageConfig(BaseModel):
+    """How a provider's usage and quota are reported on the Usage page."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["auto", "metered", "openrouter_key", "chatgpt_wham", "claude_cli", "disabled"] = Field(
+        default="auto",
+        description=(
+            "How usage is shown for this provider: 'auto' chooses from auth/base_url and falls back "
+            "to local metered usage; 'openrouter_key' queries OpenRouter's /key endpoint and includes "
+            "local metered usage; 'metered' shows local token/response/cost accounting and any configured "
+            "windows/limits; 'chatgpt_wham' and 'claude_cli' use their subscription telemetry; "
+            "'disabled' hides usage details"
+        ),
+    )
+    show_server_usage: bool = Field(
+        default=True,
+        description="Whether server-key usage from UsageStore is shown on the provider card",
+    )
+    limits: ProviderUsageLimits = Field(
+        default_factory=ProviderUsageLimits,
+        description="Optional budget/token ceilings declared in config for this provider",
+    )
+    windows: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Optional token capacities by window name (e.g. five_hour, seven_day)",
+    )
+    note: Optional[str] = Field(
+        default=None,
+        description="Optional human-readable note shown on the Usage card",
+    )
+
+
 class ProviderConfig(BaseModel):
     """Configuration for LLM providers."""
-    name: str
+
+    name: str = ""
     base_url: str
     api_key_env: Optional[str] = None
     api_key: Optional[str] = None
@@ -52,6 +102,10 @@ class ProviderConfig(BaseModel):
             "The models.dev provider id whose prices apply to this provider's models "
             "(web_chat.prices); found by base_url when omitted"
         ),
+    )
+    usage: ProviderUsageConfig = Field(
+        default_factory=ProviderUsageConfig,
+        description="How this provider's usage and limits are reported on the Usage page",
     )
 
 
@@ -622,6 +676,14 @@ class GridConfig(BaseModel):
     settings: Settings = Field(default_factory=Settings)
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
     compact: "CompactConfig" = Field(default_factory=lambda: CompactConfig())
+    providers_file: Optional[Union[str, List[str]]] = Field(
+        default=None,
+        description="Path or list of paths to external YAML provider registries (relative to this config)",
+    )
+    models_file: Optional[Union[str, List[str]]] = Field(
+        default=None,
+        description="Path or list of paths to external YAML model registries (relative to this config)",
+    )
     providers: Dict[str, ProviderConfig] = Field(default_factory=dict)
     models: Dict[str, ModelConfig] = Field(default_factory=dict)
     tools: Dict[str, ToolConfig] = Field(default_factory=dict)
@@ -661,6 +723,36 @@ class GridConfig(BaseModel):
         default="new", pattern=_NAME, description="The plan of a user who has none assigned"
     )
     pricing: PricingPolicy = Field(default_factory=PricingPolicy)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _guard_unexpanded_registry_directives(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        for section_name in ("providers", "models"):
+            section = data.get(section_name)
+            if isinstance(section, dict) and ("use" in section or "refine" in section):
+                raise ValueError(
+                    f"'{section_name}' contains registry directives ('use'/'refine'); "
+                    "expand the document with core.model_registry.resolve_document before GridConfig"
+                )
+        providers = data.get("providers")
+        if isinstance(providers, dict):
+            normalized_providers: Dict[str, Any] = {}
+            for key, spec in providers.items():
+                if isinstance(spec, dict) and not spec.get("name"):
+                    spec = {**spec, "name": str(key)}
+                normalized_providers[key] = spec
+            data = {**data, "providers": normalized_providers}
+        return data
+
+    @field_validator("providers")
+    @classmethod
+    def _fill_provider_names(cls, v: Dict[str, ProviderConfig]) -> Dict[str, ProviderConfig]:
+        for key, provider in v.items():
+            if not provider.name:
+                provider.name = str(key)
+        return v
     
     @field_validator('agents')
     @classmethod
@@ -781,6 +873,9 @@ class AgentExecution(BaseModel):
     input_message: str
     start_time: float
     context_id: Optional[str] = None
+    #: The turn this run belongs to, when the caller named one. Stored with the
+    #: record so a run and its assistant message share one explicit join key.
+    turn_id: Optional[str] = None
     end_time: Optional[float] = None
     output: Optional[str] = None
     error: Optional[str] = None

@@ -1,0 +1,54 @@
+# Canonical LLM provider registry for Grid.
+#
+# Referenced from routing catalogs and system configs via `providers_file`.
+# Each entry defines the endpoint, credential source (`api_key_env` or `auth`)
+# and how the Usage page reports consumption and limits (`usage`).
+
+version: 1
+
+providers:
+  kimi-code:
+    name: kimi-code
+    base_url: https://api.kimi.ai/coding/v1
+    api_key_env: KIMI_CODE_API_KEY
+    timeout: 300
+    max_retries: 1
+    usage:
+      mode: metered
+      show_server_usage: true
+      note: "Kimi Code (Kimi Plus membership). Usage is tracked from metered model responses."
+
+  opencode:
+    name: opencode
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: OPENCODE_API_KEY
+    default_headers:
+      User-Agent: grid-agent-system/1.0
+      x-opencode-session: grid-coder
+    timeout: 300
+    max_retries: 3
+    usage:
+      mode: metered
+      show_server_usage: true
+      note: "OpenCode Go. Usage is tracked from metered model responses."
+
+  openrouter:
+    name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    timeout: 300
+    max_retries: 3
+    usage:
+      mode: openrouter_key
+      show_server_usage: true
+
+  chatgpt:
+    name: chatgpt
+    base_url: https://api.openai.com/v1
+    auth: chatgpt
+    price_source: openai
+    timeout: 300
+    max_retries: 2
+    usage:
+      mode: chatgpt_wham
+      show_server_usage: true

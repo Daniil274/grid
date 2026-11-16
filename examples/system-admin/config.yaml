@@ -60,38 +60,28 @@ compact:
       - grid_systems_catalog
       - grid_check_system
 
+providers_file: ../../catalog/providers.yaml
+models_file: ../../catalog/models.yaml
+
 providers:
-  openrouter:
-    name: openrouter
-    base_url: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    timeout: 300
-    max_retries: 3
+  use: [openrouter]
 
 models:
-  glm-latest:
-    name: "~z-ai/glm-latest"
-    provider: openrouter
-    temperature: 0.2
-    max_tokens: 128000
-    context_window: 262144
-    description: "Latest GLM via OpenRouter"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
-  
-  gpt-6-sol:
-    name: "openai/gpt-6-sol"
-    provider: openrouter
-    temperature: 0.2
-    max_tokens: 128000
-    context_window: 1050000
-    description: "GPT-6 SOL via OpenRouter"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
+  use: [glm-latest, gpt-6-sol]
+  refine:
+    glm-latest:
+      name: "~z-ai/glm-latest"
+      provider: openrouter
+      max_tokens: 128000
+      context_window: 262144
+      description: "Latest GLM via OpenRouter"
+    gpt-6-sol:
+      name: "openai/gpt-6-sol"
+      temperature: 0.2
+      description: "GPT-6 SOL via OpenRouter"
+      preserve_reasoning_content: true
+      reasoning:
+        effort: "high"
 
 tools:
   # ── Grid catalog (read-only) ────────────────────────────────────

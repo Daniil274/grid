@@ -213,3 +213,11 @@ def test_a_boolean_is_not_mistaken_for_a_number() -> None:
 def test_an_unchanged_file_is_written_back_as_it_was(catalog: Path) -> None:
     assert merge_yaml(SYSTEM, yaml.safe_load(SYSTEM)) == SYSTEM
     assert merge_yaml(CATALOG, yaml.safe_load(CATALOG)) == CATALOG
+
+
+def test_atomic_config_write_rejects_concurrent_changes(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("newer: true\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="changed since it was loaded"):
+        Deployment._atomic_config_write(path, "replacement: true\n", expected="old: true\n")
+    assert path.read_text(encoding="utf-8") == "newer: true\n"

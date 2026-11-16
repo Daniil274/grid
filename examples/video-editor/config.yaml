@@ -69,43 +69,14 @@ compact:
       - video_build_cutlist
       - video_export_review_report
 
+providers_file: ../../catalog/providers.yaml
+models_file: ../../catalog/models.yaml
+
 providers:
-  opencode:
-    name: "opencode"
-    base_url: "https://opencode.ai/zen/go/v1"
-    api_key_env: "OPENCODE_API_KEY"
-    default_headers:
-      User-Agent: "grid-agent-system/1.0"
-      x-opencode-session: "grid-coder"
-    timeout: 300
-    max_retries: 3
-  openrouter:
-    name: "openrouter"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
-    timeout: 300
-    max_retries: 3
+  use: [opencode, openrouter]
 
 models:
-  video-pro:
-    name: minimax/minimax-m3
-    provider: openrouter
-    temperature: 0.2
-    max_tokens: 65536
-    context_window: 262144
-    description: "Primary planning model for video workflow coordination"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-
-  video-fast:
-    name: glm-5.3-flash
-    provider: opencode
-    temperature: 0.2
-    max_tokens: 131072
-    context_window: 1000000
-    description: "Fast worker model for bounded video subtasks"
-    streaming_enabled: true
-    preserve_reasoning_content: true
+  use: [video-pro, video-fast]
 
 tools:
   orchestrate:

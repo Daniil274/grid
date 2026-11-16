@@ -121,6 +121,7 @@ class SystemRegistry:
         build_factory_for_key: Optional[Callable[[Config, str], Any]] = None,
         catalog: Optional[Config] = None,
         working_directory: Optional[str] = None,
+        workspace_binding: Optional[str] = None,
         customize: Optional[Callable[[str, Config], set[str]]] = None,
         confined: bool = False,
         credentials: Optional[Callable[[], Any]] = None,
@@ -136,7 +137,9 @@ class SystemRegistry:
         ``extras()`` lists the systems of this space only (:class:`ExtraSystem`);
         it is asked again by :meth:`refresh_extras`. ``admin`` False hides the
         catalog's ``admins_only`` systems: they are not listed, pinned or routed
-        to."""
+        to. ``workspace_binding`` is the directory a server binds every system
+        of this space to - the space's own workspace; None means "not bound",
+        and the base config's own binding, if it has one, is inherited."""
         self._base_config = base_config
         self._build_factory = build_factory
         self._build_factory_for_key = build_factory_for_key
@@ -146,9 +149,22 @@ class SystemRegistry:
         # The configs customized so far, by system key.
         self._customized: Dict[str, Config] = {}
         self._catalog = catalog
+        # One binding for everything this registry loads: the base config, the
+        # catalog's systems and the space's extras (a system built privately
+        # arrives loaded as a plain override). Explicit wins; else the base
+        # config's own binding, so a space that bound its config need not
+        # repeat it. Unbound (a CLI session) leaves every loader as it was.
+        self._workspace_binding = (
+            workspace_binding if workspace_binding is not None else base_config.workspace_binding
+        )
+        self._bind(base_config)
         # With a catalog the router picks between systems; without one it can
         # still pick between the agents of the single loaded system.
-        self._router = AutoRouter.from_config(catalog or base_config, working_directory=working_directory)
+        self._router = AutoRouter.from_config(
+            catalog or base_config,
+            working_directory=working_directory,
+            workspace_binding=self._workspace_binding,
+        )
         self._factories: Dict[str, Any] = {}
         self._issues: Dict[str, Tuple[float, List[ToolIssue]]] = {}
         self._base_key = _key_for(base_config.config_path)
@@ -170,6 +186,17 @@ class SystemRegistry:
         )
 
     # -- the space's own systems ---------------------------------------------
+    @property
+    def workspace_binding(self) -> Optional[str]:
+        """The directory this registry binds every system config to, if any."""
+        return self._workspace_binding
+
+    def _bind(self, config: Config) -> Config:
+        """Keep *config* inside the registry's binding - it never leaves it."""
+        if self._workspace_binding is not None:
+            config.bind_workspace(self._workspace_binding)
+        return config
+
     def refresh_extras(self) -> None:
         """Ask again for the space's own systems; what they built is dropped.
 
@@ -268,7 +295,10 @@ class SystemRegistry:
         extra = self._extras.get(system_key)
         if extra is not None:
             if system_key not in self._extra_configs:
-                self._extra_configs[system_key] = extra.load()
+                # An extra's loader may build its config however it likes (a
+                # private system's ``UserSystems.build`` loads a plain base
+                # config); the space's binding is applied here, once.
+                self._extra_configs[system_key] = self._bind(extra.load())
             return self._extra_configs[system_key]
         routed = self.has_catalog and system_key in self._router.systems()
         config = self._router.system_config(system_key) if routed else self._base_config

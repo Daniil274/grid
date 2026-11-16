@@ -27,7 +27,7 @@ from core.config import Config
 from core.pricing import Price, PriceBook
 from core.system_store import SystemStore
 from web_chat.entitlements import Plans
-from schemas.schemas import PersonalAgentsPolicy, PricingPolicy, ReviewPolicy, UploadsPolicy, UserLimitsPolicy
+from schemas.schemas import PersonalAgentsPolicy, PricingPolicy, ProviderUsageConfig, ReviewPolicy, UploadsPolicy, UserLimitsPolicy
 
 logger = logging.getLogger("grid.web_chat.deployment")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +36,8 @@ DEFAULT_CONFIG = "config.yaml"
 DEFAULT_ROUTING = "routing.yaml"
 #: The target that names the routing catalog among the editable config files.
 CATALOG_TARGET = "__catalog__"
+MODELS_TARGET = "__models__"
+PROVIDERS_TARGET = "__providers__"
 
 
 @dataclass(frozen=True)
@@ -234,6 +236,11 @@ class Deployment:
         files: List[ConfigFile] = []
         if self.catalog is not None and self.routing_path is not None:
             files.append(ConfigFile(CATALOG_TARGET, "Routing", "catalog", self.routing_path))
+        registry = self.model_registry()
+        if len(registry.model_files) == 1:
+            files.append(ConfigFile(MODELS_TARGET, "Models", "models", registry.model_files[0]))
+        if len(registry.provider_files) == 1:
+            files.append(ConfigFile(PROVIDERS_TARGET, "Providers", "providers", registry.provider_files[0]))
         seen: set[Path] = set()
         for key, path in self._system_paths().items():
             if path not in seen:
@@ -261,9 +268,13 @@ class Deployment:
         file that names a model or a provider wins. Only the fields the page
         reads are kept, and a file is re-read only after it changes.
         """
-        base = (self.catalog or self.config).config
+        base_config = self.catalog or self.config
+        base = base_config.config
         models: Dict[str, Any] = dict(getattr(base, "models", {}) or {})
         providers: Dict[str, Any] = dict(getattr(base, "providers", {}) or {})
+        found_models, found_providers = self._models_and_providers(Path(base_config.config_path))
+        models.update(found_models)
+        providers.update(found_providers)
         for file in self.config_files():
             if file.kind != "system":
                 continue
@@ -286,23 +297,47 @@ class Deployment:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError):
             return {}, {}
+        if not isinstance(raw, dict):
+            return {}, {}
+        external = any(raw.get(field) is not None for field in ("providers_file", "models_file")) or any(
+            isinstance(raw.get(section), dict) and {"use", "refine"}.intersection(raw[section])
+            for section in ("providers", "models")
+        )
+        try:
+            from core.model_registry import resolve_document
+
+            raw = resolve_document(raw, path)
+        except Exception:  # noqa: BLE001 - a broken system file must not break the Usage page
+            logger.warning("Cannot read provider usage config from %s", path, exc_info=True)
+            return {}, {}
         models = {
             str(key): SimpleNamespace(name=str(spec.get("name") or key), provider=spec.get("provider"))
             for key, spec in (raw.get("models") or {}).items()
             if isinstance(spec, dict)
         }
-        providers = {
-            str(key): SimpleNamespace(
+        providers = {}
+        for key, spec in (raw.get("providers") or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            raw_usage = spec.get("usage")
+            try:
+                usage_cfg = ProviderUsageConfig(**raw_usage) if isinstance(raw_usage, dict) else ProviderUsageConfig()
+            except Exception:  # noqa: BLE001
+                usage_cfg = ProviderUsageConfig()
+            providers[str(key)] = SimpleNamespace(
                 name=str(spec.get("name") or key),
                 auth=spec.get("auth") or "api_key",
                 base_url=spec.get("base_url") or "",
                 api_key_env=spec.get("api_key_env"),
+                api_key=spec.get("api_key"),
                 claude_binary=spec.get("claude_binary"),
+                usage=usage_cfg,
             )
-            for key, spec in (raw.get("providers") or {}).items()
-            if isinstance(spec, dict)
-        }
-        self._usage_files[path] = (stamp, models, providers)
+        # External registries can change while the system YAML stays the same.
+        # Their loader caches parsed files by mtime; only inline configs can use
+        # this cache keyed solely by the system file's timestamp.
+        if not external:
+            self._usage_files[path] = (stamp, models, providers)
         return models, providers
 
     def _system_paths(self) -> Dict[str, Path]:
@@ -346,7 +381,31 @@ class Deployment:
                 return file
         raise KeyError(f"No config file '{target}'")
 
+    def model_registry(self):
+        """The deployment-owned registry, not a system's selected subset."""
+        from core.model_registry import ModelRegistry, default_registry, load_registry_entries
+
+        anchor = self.routing_path if self.catalog is not None else self.config_path
+        raw = yaml.safe_load(anchor.read_text(encoding="utf-8")) or {}
+        default = default_registry(anchor)
+
+        def paths(kind):
+            reference = raw.get(f"{kind}_file")
+            if reference is None:
+                return getattr(default, f"{kind[:-1]}_files")
+            references = [reference] if isinstance(reference, str) else reference
+            return tuple((anchor.parent / value).resolve() for value in references)
+
+        provider_files, model_files = paths("providers"), paths("models")
+        return ModelRegistry(load_registry_entries(provider_files, "providers"),
+                             load_registry_entries(model_files, "models"), provider_files, model_files)
+
     def config_dict(self, target: Optional[str] = None) -> Dict[str, Any]:
+        if target in (MODELS_TARGET, PROVIDERS_TARGET):
+            self.config_file(target)
+            registry = self.model_registry()
+            field = "models" if target == MODELS_TARGET else "providers"
+            return {field: getattr(registry, field)}
         return yaml.safe_load(self.config_file(target).path.read_text(encoding="utf-8")) or {}
 
     def config_yaml(self, target: Optional[str] = None) -> str:
@@ -358,20 +417,107 @@ class Deployment:
         The edit is merged into the file as it stands, so its comments, key
         order and the layout of what did not change survive.
         """
+        from core.model_registry import resolve_document
         from schemas import GridConfig
 
-        GridConfig(**payload)
-        path = self.config_file(target).path
-        path.write_text(merge_yaml(path.read_text(encoding="utf-8"), payload), encoding="utf-8")
+        file = self.config_file(target)
+        path = file.path
+        original = path.read_text(encoding="utf-8")
+        if file.kind in ("models", "providers"):
+            from schemas.schemas import ModelConfig, ProviderConfig
+            field = file.kind
+            registry = self.model_registry()
+            if set(payload) != {field} or not isinstance(payload[field], dict):
+                raise ValueError(f"Expected only a '{field}' mapping")
+            entries = payload[field]
+            schema = ModelConfig if field == "models" else ProviderConfig
+            for key, spec in entries.items():
+                if not isinstance(key, str) or key in {"use", "refine"} or not isinstance(spec, dict):
+                    raise ValueError("Registry entries must be named objects, not selection directives")
+                schema(**spec)
+            models = entries if field == "models" else registry.models
+            providers = entries if field == "providers" else registry.providers
+            for key, spec in models.items():
+                if spec.get("provider") not in providers:
+                    raise ValueError(f"Model '{key}' references unknown provider '{spec.get('provider')}'")
+            # Validate all affected files against the prospective registry in memory.
+            # No temporary write is visible to an executing agent.
+            for dependent in self.config_files():
+                if dependent.kind not in {"catalog", "system"}:
+                    continue
+                document = yaml.safe_load(dependent.path.read_text(encoding="utf-8")) or {}
+                GridConfig(**resolve_document(document, dependent.path, registry_overrides={path.resolve(): entries}))
+            current = yaml.safe_load(original) or {}
+            updated = {**current, field: entries} if field in current else entries
+            self._atomic_config_write(path, merge_yaml(original, updated), expected=original)
+            self.load()
+            return
+        self._validate_selection_edit(yaml.safe_load(original) or {}, payload)
+        GridConfig(**resolve_document(payload, path))
+        self._atomic_config_write(path, merge_yaml(original, payload), expected=original)
         self.load()
 
     def save_yaml_config(self, yaml_content: str, target: Optional[str] = None) -> None:
         """Validate and write a config as given; the caller rebuilds the spaces."""
+        from core.model_registry import resolve_document
         from schemas import GridConfig
 
-        GridConfig(**(yaml.safe_load(yaml_content) or {}))
-        self.config_file(target).path.write_text(yaml_content, encoding="utf-8")
+        file = self.config_file(target)
+        path = file.path
+        original = path.read_text(encoding="utf-8")
+        if file.kind in ("models", "providers"):
+            try:
+                parsed = yaml.safe_load(yaml_content) or {}
+            except yaml.YAMLError as exc:
+                raise ValueError(str(exc)) from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("Registry YAML must be a mapping")
+            field = file.kind
+            self.save_structured_config({field: parsed.get(field, parsed)}, target)
+            return
+        document = yaml.safe_load(yaml_content) or {}
+        self._validate_selection_edit(yaml.safe_load(original) or {}, document)
+        GridConfig(**resolve_document(document, path))
+        self._atomic_config_write(path, yaml_content, expected=original)
         self.load()
+
+    @staticmethod
+    def _validate_selection_edit(original: Dict[str, Any], candidate: Dict[str, Any]) -> None:
+        """Keep legacy declarations usable, but edit definitions only in the registry."""
+        if not isinstance(candidate, dict):
+            raise ValueError("Configuration must be a mapping")
+        for kind in ("models", "providers"):
+            before, after = original.get(kind) or {}, candidate.get(kind) or {}
+            if not isinstance(before, dict) or not isinstance(after, dict):
+                raise ValueError(f"'{kind}' must be a mapping")
+            definitions = lambda section: {key: value for key, value in section.items() if key != "use"}
+            if definitions(before) != definitions(after):
+                raise ValueError(f"Edit {kind} in the global catalog; systems may only select entries")
+            if original.get(f"{kind}_file") != candidate.get(f"{kind}_file"):
+                raise ValueError("Registry sources are deployment settings, not system settings")
+
+    @staticmethod
+    def _atomic_config_write(path: Path, content: str, *, expected: str) -> None:
+        """Replace a config atomically, refusing to overwrite concurrent edits."""
+        import os
+        import tempfile
+
+        if path.read_text(encoding="utf-8") != expected:
+            raise RuntimeError("Configuration changed since it was loaded; reload before saving.")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            # Recheck immediately before replace to avoid clobbering an editor's newer contents.
+            if path.read_text(encoding="utf-8") != expected:
+                raise RuntimeError("Configuration changed since it was loaded; reload before saving.")
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 def _round_trip() -> Any:

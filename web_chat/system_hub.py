@@ -241,13 +241,18 @@ def _dump(document: Any) -> str:
     return buffer.getvalue()
 
 
-def _validate(text: str) -> None:
+def _validate(text: str, config_path: Optional[Path] = None) -> None:
+    from core.model_registry import resolve_document
     from schemas import GridConfig
+    from utils.exceptions import ConfigError
 
     document = yaml.safe_load(text) or {}
     if not isinstance(document, dict):
         raise StoreError("A config is a YAML mapping.")
-    GridConfig(**document)
+    try:
+        GridConfig(**resolve_document(document, config_path))
+    except ConfigError as exc:
+        raise StoreError(str(exc)) from exc
 
 
 def copy_config(source_path: Path, target_dir: Path, agents: Optional[List[str]]) -> str:
@@ -288,7 +293,10 @@ def copy_config(source_path: Path, target_dir: Path, agents: Optional[List[str]]
 
 def blank_config(base: Config) -> str:
     """A connected coordinator, worker and reviewer using the base model."""
+    from core.model_registry import resolve_document
+
     raw = yaml.safe_load(Path(base.config_path).read_text(encoding="utf-8")) or {}
+    raw = resolve_document(raw, base.config_path)
     models = raw.get("models") or {}
     model = base.config.agents[base.get_default_agent()].primary_model
     used = models[model]
@@ -818,7 +826,7 @@ class SystemHub:
                 text = copy_config(source_path, store.directory(key), body.agents)
             else:
                 text = blank_config(self.deployment.config)
-            _validate(text)
+            _validate(text, store.config_path(key))
             manifest = store.create(
                 SystemManifest(
                     key=key,
@@ -864,7 +872,7 @@ class SystemHub:
         if manifest.status == "published":
             raise HTTPException(status_code=400, detail="Prepare a new draft with builder_fork, or withdraw this system before editing it.")
         try:
-            _validate(body.yaml)
+            _validate(body.yaml, store.config_path(key))
             manifest = store.write_config(key, body.yaml)
         except (StoreError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -1102,7 +1110,7 @@ class SystemHub:
             base = _loading(lambda: self._fresh(snapshot.base))
             check_spec(snapshot, base, self.deployment.personal_agents_policy)
             text = export_user_system(snapshot, base, store.directory(key))
-            _validate(text)
+            _validate(text, store.config_path(key))
             manifest = store.create(
                 SystemManifest(
                     key=key,
@@ -1147,7 +1155,7 @@ class SystemHub:
             inspection = inspect_system(lambda: _loading(lambda: Config(str(source / "config.yaml"))), confined=True)
             if not inspection["loaded"] or inspection["config"]:
                 raise ValueError("The submitted config no longer passes private-system checks.")
-            _validate(text)
+            _validate(text, store.config_path(key))
             manifest = store.create(
                 SystemManifest(
                     key=key, name=name or record.system.name,

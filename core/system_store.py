@@ -237,7 +237,7 @@ class SystemStore:
         _write(self.directory(manifest.key) / MANIFEST_FILE, text)
 
 
-def canonicalize_config(text: str) -> str:
+def canonicalize_config(text: str, config_path: Optional[Path] = None) -> str:
     """A config's one canonical form: validated, without comments and redundant fields.
 
     The text is parsed and checked against the schema, then dumped anew, so YAML
@@ -250,7 +250,13 @@ def canonicalize_config(text: str) -> str:
     document = yaml.safe_load(text) or {}
     if not isinstance(document, dict):
         raise ValueError("A config is a YAML mapping.")
-    GridConfig(**document)
+    from core.model_registry import resolve_document
+    from utils.exceptions import ConfigError
+
+    try:
+        GridConfig(**resolve_document(document, config_path))
+    except ConfigError as exc:
+        raise StoreError(str(exc)) from exc
     tools = document.get("tools")
     if isinstance(tools, dict):
         from tools.function_tools import AVAILABLE_TOOLS, TOOL_ALIASES
@@ -295,6 +301,13 @@ def relocate_config(document: Dict[str, Any], source_dir: Path, target_dir: Path
         if not isinstance(value, str) or not value or os.path.isabs(value):
             return value
         return Path(os.path.relpath(source_dir / value, target_dir)).as_posix()
+
+    for field in ("providers_file", "models_file"):
+        value = document.get(field)
+        if isinstance(value, list):
+            document[field] = [moved(item) for item in value]
+        elif isinstance(value, str):
+            document[field] = moved(value)
 
     settings = document.get("settings")
     if isinstance(settings, dict):
@@ -452,7 +465,10 @@ class BuilderAccess:
         return found
 
     def providers(self) -> Dict[str, Any]:
+        from core.model_registry import resolve_document
+
         document = yaml.safe_load(Path(self.base_config.config_path).read_text(encoding="utf-8")) or {}
+        document = resolve_document(document, self.base_config.config_path)
         return self.redact_providers(document.get("providers") or {})
 
     @staticmethod
@@ -460,7 +476,12 @@ class BuilderAccess:
         import copy
 
         providers = copy.deepcopy(providers)
-        for provider in providers.values():
+        for name, provider in providers.items():
+            if name == "refine" and isinstance(provider, dict):
+                providers[name] = BuilderAccess.redact_providers(provider)
+                continue
+            if not isinstance(provider, dict):
+                continue
             if provider.get("api_key"):
                 provider["api_key"] = "<hidden: use api_key_env>"
             for name in provider.get("default_headers", {}):
@@ -475,9 +496,18 @@ class BuilderAccess:
         document = yaml.safe_load(text) or {}
         if not isinstance(document, dict):
             raise StoreError("A config is a YAML mapping.")
-        config = GridConfig(**document)
         if self.shared:
+            from core.model_registry import resolve_document
+            from utils.exceptions import ConfigError
+
+            try:
+                GridConfig(**resolve_document(document, self.store.config_path(key)))
+            except ConfigError as exc:
+                raise StoreError(str(exc)) from exc
             return
+        if document.get("providers_file") or document.get("models_file"):
+            raise StoreError("Private systems copy providers and models from builder_catalog; registry file references are not allowed.")
+        config = GridConfig(**document)
         settings = config.settings
         if settings.project_tools is not None and settings.project_tools.enabled:
             raise StoreError("Private systems use shared tools or tool packages; project_tools imports are not allowed.")

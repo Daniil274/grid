@@ -1,0 +1,217 @@
+# Canonical LLM model registry for Grid.
+#
+# Referenced from routing catalogs and system configs via `models_file`.
+# Systems select the models they use with `models: {use: [...]}` and may
+# adjust per-system parameters under `refine:`.
+
+version: 1
+
+models:
+  router:
+    name: typesafe/jev-1.13
+    provider: openrouter
+    description: Decisions model that picks the system and the agent
+
+  policy:
+    name: typesafe/jev-1.13
+    provider: openrouter
+    description: Decisions model that judges agent actions for the policy gate
+    request_timeout: 10
+
+  policy-validator-jev:
+    name: typesafe/jev-1.13
+    provider: openrouter
+    temperature: 0
+    max_tokens: 1024
+    context_window: 32000
+    description: Decisions model for action-policy checks
+    request_timeout: 6
+
+  policy-validator-mercury:
+    name: inception/mercury-decide:free
+    provider: openrouter
+    temperature: 0
+    max_tokens: 1024
+    context_window: 32768
+    description: Decisions model for action-policy checks
+    request_timeout: 6
+
+  glm-latest:
+    name: ~z-ai/glm-latest
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 131072
+    context_window: 1000000
+    description: Latest GLM via OpenRouter (currently GLM-5.3)
+    preserve_reasoning_content: true
+    reasoning:
+      effort: high
+
+  # The same gateway model as glm-latest, with less thinking: the default
+  # executor model of orchestrate. Most of an executor's output tokens are
+  # reasoning, so a medium effort there cuts the cost without touching the
+  # coordinator, which keeps glm-latest (effort: high).
+  glm-latest-medium:
+    name: ~z-ai/glm-latest
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 131072
+    context_window: 1000000
+    description: Latest GLM via OpenRouter (currently GLM-5.3), medium reasoning effort — orchestrate's default executor
+    preserve_reasoning_content: true
+    reasoning:
+      effort: medium
+
+  glm-flash:
+    name: glm-5.3-flash
+    provider: opencode
+    temperature: 0.2
+    max_tokens: 131072
+    context_window: 1000000
+    description: GLM 5.3 Flash via OpenCode Go
+    preserve_reasoning_content: true
+    reasoning:
+      effort: medium
+
+  deepseek-flash-latest:
+    name: deepseek-v4.1-flash
+    provider: opencode
+    temperature: 0.2
+    max_tokens: 384000
+    context_window: 1000000
+    description: DeepSeek V4.1 Flash via OpenCode Go
+    preserve_reasoning_content: true
+    reasoning:
+      effort: low
+
+  glm-5.3-flash:
+    name: deepseek-v4.1-flash
+    provider: opencode
+    temperature: 0.2
+    max_tokens: 384000
+    context_window: 1000000
+    description: DeepSeek V4 Flash Vision via OpenCode Go
+    use_responses_api: false
+
+  kimi-k3.1-pro:
+    name: k3.1-pro
+    provider: kimi-code
+    preserve_reasoning_content: true
+    max_tokens: 64000
+    context_window: 262144
+    description: Kimi K3.1 Pro through Kimi Code (Kimi Plus membership)
+
+  # Kimi K2.6 via OpenRouter. models.dev has no OpenRouter entry for Kimi, so the
+  # price is stated here (dollars per million tokens, as core/pricing.py reads it)
+  # instead of being looked up - otherwise the cost would be estimated.
+  kimi-k2.6:
+    name: moonshotai/kimi-k2.6
+    provider: openrouter
+    max_tokens: 64000
+    context_window: 262144
+    description: Kimi K2.6 via OpenRouter
+    preserve_reasoning_content: true
+    price:
+      input: 0.65
+      output: 3.41
+      cache_read: 0.15
+
+  grok-4.7:
+    name: x-ai/grok-4.7
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 128000
+    context_window: 500000
+    description: Grok 4.7 via OpenRouter
+    preserve_reasoning_content: true
+    reasoning:
+      effort: medium
+
+  mercury-3:
+    name: inception/mercury-3
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 131072
+    context_window: 1000000
+    description: Mercury 3 (Inception) via OpenRouter - diffusion model, fast text-only answers
+    input_modalities: [text]
+    preserve_reasoning_content: true
+    price:
+      input: 0.1
+      output: 0.35
+      cache_read: 0.01
+
+  deepseek-v4-pro:
+    name: "~deepseek/deepseek-pro-latest"
+    provider: openrouter
+    temperature: 0.5
+    max_tokens: 32000
+    context_window: 258000
+    request_timeout: 300
+
+  gemini-4-argon:
+    name: google/gemini-4-argon
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 64000
+    context_window: 180000
+
+  muse-spark-1.3-contributor:
+    name: muse-spark-1.3-contributor
+    provider: opencode
+    temperature: 0.5
+    max_tokens: 131072
+    context_window: 1048576
+    preserve_reasoning_content: false
+    use_responses_api: true
+    request_timeout: 300
+
+  gpt-6-luna:
+    name: gpt-6-luna
+    provider: chatgpt
+    max_tokens: 128000
+    context_window: 1050000
+    use_responses_api: true
+    request_timeout: 300
+
+  gpt-6.1-sol:
+    name: gpt-6.1-sol
+    provider: chatgpt
+    max_tokens: 128000
+    context_window: 1050000
+    use_responses_api: true
+    request_timeout: 300
+
+  gpt-6-astra:
+    name: gpt-6-astra
+    provider: chatgpt
+    max_tokens: 128000
+    context_window: 1050000
+    use_responses_api: true
+    request_timeout: 300
+
+  gpt-6-sol:
+    name: openai/gpt-6.1-sol
+    provider: openrouter
+    use_responses_api: false
+    temperature: 0.5
+    max_tokens: 128000
+    context_window: 1050000
+
+  video-pro:
+    name: minimax/minimax-m3
+    provider: openrouter
+    temperature: 0.2
+    max_tokens: 65536
+    context_window: 262144
+    description: Primary planning model for video workflow coordination
+    preserve_reasoning_content: true
+
+  video-fast:
+    name: glm-5.3-flash
+    provider: opencode
+    temperature: 0.2
+    max_tokens: 131072
+    context_window: 1000000
+    description: Fast worker model for bounded video subtasks
+    preserve_reasoning_content: true

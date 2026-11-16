@@ -34,84 +34,27 @@ compact:
       - builder_tool_set
       - builder_read
       - builder_check
+providers_file: ../../catalog/providers.yaml
+models_file: ../../catalog/models.yaml
+
 providers:
-  # Kimi Code: the route a Kimi Plus membership pays for (the Open Platform at
-  # api.moonshot.ai is a separate balance). Key from kimi.com/code/console.
-  kimi-code:
-    name: kimi-code
-    base_url: https://api.kimi.ai/coding/v1
-    api_key_env: KIMI_CODE_API_KEY
-    timeout: 300
-    max_retries: 1
-  opencode:
-    name: opencode
-    base_url: https://opencode.ai/zen/go/v1
-    api_key_env: OPENCODE_API_KEY
-    default_headers:
-      User-Agent: grid-agent-system/1.0
-      x-opencode-session: grid-coder
-    timeout: 300
-    max_retries: 3
-  openrouter:
-    name: openrouter
-    base_url: 'https://openrouter.ai/api/v1'
-    api_key_env: OPENROUTER_API_KEY
-    timeout: 300
-    max_retries: 2
+  use: [kimi-code, opencode, openrouter]
+  refine:
+    openrouter:
+      max_retries: 2
+
 models:
-  glm-flash:
-    name: glm-5.3-flash
-    provider: opencode
-    temperature: 0.2
-    max_tokens: 131072
-    context_window: 1000000
-    description: GLM 5.3 Flash via OpenCode Go
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: medium
-  deepseek-flash-latest:
-    name: deepseek-v4.1-flash
-    provider: opencode
-    temperature: 0.2
-    max_tokens: 384000
-    context_window: 1000000
-    description: DeepSeek V4.1 Flash via OpenCode Go
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: low
-  kimi-k3.1-pro:
-    # The Kimi Code API takes the short id; a mistyped id falls back silently.
-    name: k3.1-pro
-    provider: kimi-code
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    # 1M is a higher-tier window; the Plus window is declared instead.
-    max_tokens: 64000
-    context_window: 262144
-    reasoning:
-      effort: high
-  muse-spark-1.3-contributor:
-    name: muse-spark-1.3-contributor
-    provider: opencode
-    temperature: 0.5
-    max_tokens: 131072
-    context_window: 1048576
-    preserve_reasoning_content: false
-    use_responses_api: true
-    request_timeout: 300
-  glm-latest:
-    name: "glm-5.3"
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 131072
-    context_window: 1000000
-    description: "Latest GLM via OpenCode (currently GLM-5.3)"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
+  use:
+    - deepseek-flash-latest
+    - muse-spark-1.3-contributor
+    - glm-latest
+    - gpt-6.1-sol
+    - deepseek-v4-pro
+  refine:
+    kimi-k3.1-pro:
+      reasoning:
+        effort: high
+
 tools:
   builder_compare:
     type: function
@@ -142,7 +85,9 @@ tools:
 agents:
   builder:
     name: System builder
-    model: [glm-latest, glm-flash, kimi-k3.1-pro]
+    model:
+      - gpt-6.1-sol
+      - deepseek-v4-pro
     description: >-
       Creates new Grid systems for this server from a description of what they
       should do: designs their agents, writes their configs, prompts and skills,

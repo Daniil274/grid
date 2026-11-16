@@ -67,7 +67,7 @@ def _validate_config(text: str, root: Optional[Path] = None) -> str:
     from core.system_store import canonicalize_config
 
     try:
-        canonical = canonicalize_config(text)
+        canonical = canonicalize_config(text, root / "config.yaml" if root is not None else None)
     except ValueError as exc:
         raise _Refused(str(exc)) from None
     document = yaml.safe_load(canonical) or {}
@@ -354,8 +354,8 @@ def builder_create(context: RunContextWrapper, key: str, name: str, description:
             raise _Refused(f"The key '{key}' is taken.")
         if access.max_systems is not None and len(access.store.list()) + access.count_other() >= access.max_systems:
             raise _Refused(f"At most {access.max_systems} systems of your own are allowed.")
-        config_yaml = _validate_config(config_yaml)
         access.validate(config_yaml, key)
+        config_yaml = _validate_config(config_yaml, access.store.directory(key))
         access.store.create(
             SystemManifest(
                 key=key,
@@ -385,8 +385,8 @@ def _prepare(access: BuilderAccess, system: str, root: Path, path: str, content:
     if len(content.encode("utf-8")) > MAX_FILE_BYTES:
         raise _Refused(f"{relative}: over {MAX_FILE_BYTES} bytes")
     if relative == "config.yaml":
-        content = _validate_config(content, root)
         access.validate(content, system)
+        content = _validate_config(content, root)
     if relative == "quality.yaml":
         from core.system_quality import QualityContract
         QualityContract.model_validate(yaml.safe_load(content))

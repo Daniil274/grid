@@ -19,6 +19,7 @@ import { toast } from "../ui/toast.js";
 import { CollectionEditor } from "./collection.js";
 import { SchemaKit, blankOf, child, rootSlot } from "./schema-form.js";
 import { TelegramPanel } from "./telegram.js";
+import { selectedModelKeys, setModelSelected } from "./model-selection.js";
 
 /** Settings shown on the General tab; the rest of `settings` is on Advanced. */
 const GENERAL_SETTINGS = [
@@ -75,7 +76,7 @@ export class SettingsDrawer {
     this.target = payload.target;
     this.config = structuredClone(payload.config ?? {});
     this.snapshot = JSON.stringify(this.config);
-    this.kit = new SchemaKit(payload.schema, this._refs());
+    this.kit = payload.schema ? new SchemaKit(payload.schema, this._refs()) : null;
     this._renderFiles();
     this._renderTabs();
     // A server started before config files could be chosen sends neither the
@@ -111,7 +112,8 @@ export class SettingsDrawer {
   _renderFiles() {
     const { files = [], target } = this.payload;
     const current = files.find((file) => file.key === target);
-    this.nodes.title.textContent = current?.kind === "catalog" ? "Routing and shared settings" : `System · ${current?.name ?? ""}`;
+    const global = ["catalog", "models", "providers"].includes(current?.kind);
+    this.nodes.title.textContent = global ? (current?.kind === "models" ? "Global models" : current?.kind === "providers" ? "Global providers" : "Routing and shared settings") : `System · ${current?.name ?? ""}`;
     this.nodes.subtitle.textContent = current?.path ?? "";
     replace(
       this.nodes.files,
@@ -124,7 +126,7 @@ export class SettingsDrawer {
             title: file.path,
             on: { click: () => this._switchFile(file.key) },
           },
-          h("span.fileTab__kind", { text: file.kind === "catalog" ? "Catalog" : "System" }),
+          h("span.fileTab__kind", { text: ({ catalog: "Catalog", models: "Global models", providers: "Global providers" })[file.kind] ?? "System" }),
           h("span.fileTab__name", { text: file.name }),
         ),
       ),
@@ -143,11 +145,14 @@ export class SettingsDrawer {
   }
 
   _tabs() {
+    if (["models", "providers"].includes(this.payload.kind)) {
+      const section = this.payload.kind;
+      return [[section, capitalize(section), () => this._collectionPane(section, section === "models" ? "ModelConfig" : "ProviderConfig", section.slice(0, -1))], ["yaml", "YAML", () => this._yamlPane()]];
+    }
     if (this.payload.kind === "catalog") {
       return [
         ["routing", "Systems", () => this._routingPane()],
-        ["models", "Models", () => this._collectionPane("models", "ModelConfig", "model")],
-        ["providers", "Providers", () => this._collectionPane("providers", "ProviderConfig", "provider")],
+        ["models", "Models", () => this._modelSelectionPane()],
         ["policy", "Policy", () => this._sectionsPane([["settings", "Settings", { only: ["action_policy", "proxy", "debug"] }], ["compact", "Context compaction"]])],
         ["users", "Users", () => this._sectionsPane([["user_limits", "User limits"], ["personal_agents", "Personal agents"], ["review", "Answer reviews"]])],
         ["voice", "Voice", () => this._sectionsPane([["voice", "Voice"]])],
@@ -159,8 +164,7 @@ export class SettingsDrawer {
       ["general", "General", () => this._generalPane()],
       ["agents", "Agents", () => this._collectionPane("agents", "AgentConfig", "agent")],
       ["tools", "Tools", () => this._collectionPane("tools", "ToolConfig", "tool")],
-      ["models", "Models", () => this._collectionPane("models", "ModelConfig", "model")],
-      ["providers", "Providers", () => this._collectionPane("providers", "ProviderConfig", "provider")],
+      ["models", "Models", () => this._modelSelectionPane()],
       ["prompts", "Prompts", () => this._promptsPane()],
       [
         "advanced",
@@ -210,8 +214,8 @@ export class SettingsDrawer {
       this._status("Saving…");
       const payload =
         this.activeTab === "yaml"
-          ? await api.saveYaml(this.yamlArea.value, this.target)
-          : await api.saveSettings(this.config, this.target);
+          ? await api.saveYaml(this.yamlArea.value, this.target, this.payload.revision)
+          : await api.saveSettings(this.config, this.target, this.payload.revision);
       this._accept(payload);
       this._status("Saved and validated.", "ok");
       toast("Configuration saved", { tone: "success" });
@@ -225,7 +229,7 @@ export class SettingsDrawer {
   // -- references between keys of the file ----------------------------------
   _refs() {
     const keys = (section) => () => Object.keys(this.config?.[section] ?? {});
-    const models = keys("models");
+    const models = () => selectedModelKeys(this.config, this.payload?.model_catalog);
     return {
       "settings.default_agent": { kind: "select", options: keys("agents") },
       "settings.allowed_models": { kind: "multi", options: models },
@@ -234,7 +238,7 @@ export class SettingsDrawer {
       "agents.*.tools": { kind: "multi", options: keys("tools") },
       "agents.*.base_prompt": { kind: "select", options: () => [...new Set(["base", ...keys("prompt_templates")()])] },
       "tools.*.target_agent": { kind: "select", options: keys("agents") },
-      "models.*.provider": { kind: "select", options: keys("providers") },
+      "models.*.provider": { kind: "select", options: () => Object.keys(this.payload?.provider_catalog ?? this.config?.providers ?? {}) },
       "compact.summary_model": { kind: "select", options: models },
       "routing.model": { kind: "select", options: models },
       "routing.default_system": { kind: "select", options: () => Object.keys(this.config?.routing?.systems ?? {}) },
@@ -295,6 +299,22 @@ export class SettingsDrawer {
       "The systems the chat routes between, and the model that picks one for each message. Each system's own agents, tools and models are in its tab above.",
       form,
     );
+  }
+
+  _modelSelectionPane() {
+    const catalog = this.payload?.registry_models ?? {};
+    const selected = selectedModelKeys(this.config, catalog);
+    const controls = Object.keys(catalog).map((key) => {
+      const locked = key in (this.config.models?.refine ?? {}) || key in (this.config.models ?? {});
+      const input = h("input", { type: "checkbox", checked: selected.includes(key), disabled: locked });
+      input.addEventListener("change", () => {
+        setModelSelected(this.config, catalog, key, input.checked);
+      });
+      return h("label.field", {}, input, ` ${key}`);
+    });
+    const legacy = Object.entries(this.config.models ?? {}).filter(([key, value]) => !["use", "refine"].includes(key) && value && typeof value === "object");
+    const note = legacy.length ? h("p.card__hint", { text: `Legacy inline model definitions are preserved unchanged and are read-only here: ${legacy.map(([key]) => key).join(", ")}.` }) : null;
+    return this._card("Models available to this system", "Choose global models; selected keys are added to models.use.", h("div", {}, ...controls, note));
   }
 
   _sectionsPane(sections) {

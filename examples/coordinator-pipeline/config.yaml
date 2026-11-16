@@ -91,142 +91,50 @@ compact:
       - beads_log_read
       - todo_list
 
+providers_file: ../../catalog/providers.yaml
+models_file: ../../catalog/models.yaml
+
 providers:
-  # Kimi Code: the route a Kimi Plus membership pays for (the Open Platform at
-  # api.moonshot.ai is a separate balance). Key from kimi.com/code/console.
-  kimi-code:
-    name: "kimi-code"
-    base_url: "https://api.kimi.ai/coding/v1"
-    api_key_env: "KIMI_CODE_API_KEY"
-    timeout: 300
-    max_retries: 1
-  opencode:
-    name: "opencode"
-    base_url: "https://opencode.ai/zen/go/v1"
-    api_key_env: "OPENCODE_API_KEY"
-    default_headers:
-      User-Agent: "grid-agent-system/1.0"
-      x-opencode-session: "grid-coder"
-    timeout: 300
-    max_retries: 3
-  openrouter:
-    name: openrouter
-    base_url: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    timeout: 300
-    max_retries: 3
-  chatgpt:
-    name: chatgpt
-    base_url: https://api.openai.com/v1
-    auth: chatgpt
-    price_source: openai
-    timeout: 300
-    max_retries: 2
+  use: [kimi-code, opencode, openrouter, chatgpt]
 
 models:
   # response_timeout: seconds one answer of a model may take, first byte to
   # last event. A model that keeps generating never trips the provider's
   # timeout (a pause between chunks), so this is what ends a runaway answer.
-  glm-latest:
-    name: "glm-5.3"
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 131072
-    context_window: 512000
-    description: "Latest GLM via OpenCode (currently GLM-5.3)"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "high"
-  deepseek-flash-latest:
-    name: "deepseek-v4.1-flash"
-    response_timeout: 600
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 384000
-    context_window: 1000000
-    description: "DeepSeek V4.1 Flash via OpenCode Go"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "low"
-  glm-flash:
-    name: "glm-5.3-flash"
-    response_timeout: 600
-    provider: "opencode"
-    temperature: 0.2
-    max_tokens: 131072
-    context_window: 1000000
-    description: "GLM 5.3 Flash via OpenCode Go"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    reasoning:
-      effort: "medium"
-  grok-4.7:
-    name: x-ai/grok-4.7
-    provider: openrouter
-    temperature: 0.2
-    max_tokens: 128000
-    context_window: 500000
-    description: "Grok 4.7"
-    streaming_enabled: true
-    preserve_reasoning_content: true
-  gpt-6-sol:
-    name: openai/gpt-6.1-sol
-    provider: openrouter
-    use_responses_api: false
-    max_tokens: 128000
-    context_window: 1050000
-    temperature: 0.5
-  kimi-k3.1-pro:
-    # The Kimi Code API takes the short id; a mistyped id falls back silently.
-    name: k3.1-pro
-    provider: kimi-code
-    streaming_enabled: true
-    preserve_reasoning_content: true
-    # 1M is a higher-tier window; the Plus window is declared instead, so that
-    # compaction starts near 190k: 262144 - 64000 answer - 8000 reserves.
-    max_tokens: 64000
-    context_window: 262144
-    description: "Kimi K3.1 Pro through Kimi Code (Kimi Plus membership)"
-  muse-spark-1.3-contributor:
-    name: muse-spark-1.3-contributor
-    provider: opencode
-    temperature: 0.5
-    max_tokens: 131072
-    context_window: 1048576
-    preserve_reasoning_content: false
-    use_responses_api: true
-    request_timeout: 300
-  gpt-6-luna:
-    name: gpt-6-luna
-    response_timeout: 600
-    provider: chatgpt
-    max_tokens: 128000
-    context_window: 1050000
-    use_responses_api: true
-    request_timeout: 300
-  gpt-6.1-sol:
-    name: gpt-6.1-sol
-    response_timeout: 600
-    provider: chatgpt
-    max_tokens: 128000
-    context_window: 1050000
-    request_timeout: 300
-    use_responses_api: true
-  gpt-6-astra:
-    name: gpt-6-astra
-    provider: chatgpt
-    max_tokens: 128000
-    context_window: 1050000
-    use_responses_api: true
-    request_timeout: 300
-  gemini-4-argon:
-    name: google/gemini-4-argon
-    provider: openrouter
-    temperature: 0.2
-    max_tokens: 64000
-    context_window: 256000
+  use:
+    - glm-latest
+    - glm-latest-medium
+    - kimi-k2.6
+    - deepseek-flash-latest
+    - glm-flash
+    - grok-4.7
+    - gpt-6-sol
+    - kimi-k3.1-pro
+    - muse-spark-1.3-contributor
+    - gpt-6-luna
+    - gpt-6.1-sol
+    - gpt-6-astra
+    - gemini-4-argon
+  refine:
+    glm-latest:
+      context_window: 512000
+    glm-latest-medium:
+      context_window: 512000
+    deepseek-flash-latest:
+      response_timeout: 600
+      # The chain's answer budget is the largest cap in it, reserved apart
+      # from the narrowest window (compact.auto): the raw 384k cap of this
+      # model does not fit kimi-k2.6's 262k window, and drove the coordinator's
+      # auto-compact threshold negative - every request compacted. 131k
+      # matches the strong tier's cap; a longer answer than that is not an
+      # answer this chat waits for.
+      max_tokens: 131072
+    glm-flash:
+      response_timeout: 600
+    gpt-6-luna:
+      response_timeout: 600
+    gpt-6.1-sol:
+      response_timeout: 600
 tools:
   beads_init:
     type: function
@@ -276,17 +184,19 @@ tools:
     name: "orchestrate"
     description: "Поручает подзадачу новому агенту и возвращает его отчёт."
     # Модели исполнителя по порядку: первая доступная, при сбое запроса — следующая.
+    # glm-latest-medium — та же модель шлюза с effort: medium: исполнитель по
+    # умолчанию. glm-latest (effort: high) — запасной вариант, deepseek — резерв
+    # другого провайдера.
     models:
+      - glm-latest-medium
+      - glm-latest
       - deepseek-flash-latest
-      - kimi-k3.1-pro
-      - gpt-6.1-sol
     model_choice: true
     tiers:
       fast:
         - deepseek-flash-latest
       strong:
-        - kimi-k3.1-pro
-        - gpt-6.1-sol
+        - glm-latest
     min_timeout_seconds: 600
     max_timeout_seconds: 3600
     # Продолженный по context_id исполнитель с историей длиннее этого продолжает со сжатой.
@@ -518,9 +428,13 @@ agents:
     timeout: 0  # No agent timeout: the coordinator must not be cut off mid-orchestration.
     max_turns: 0  # No turn limit for the same reason.
     model:
-      - gpt-6-astra
-      - kimi-k3.1-pro
+      # Kimi K2.6 on OpenRouter (262k window), with glm-latest behind it through
+      # the FallbackModel mechanism. deepseek-flash-latest (OpenCode plan, a
+      # different provider) is the last link: a paid OpenRouter route is never
+      # the only way out.
       - gemini-4-argon
+      - glm-latest
+      - deepseek-flash-latest
     description: "Coordinator for large multi-stage projects: decomposes the goal into tracked tasks, runs researcher, executor and verifier agents and delivers a verified result. Use for big features or subsystems, not for quick fixes."
     tools:
       - beads_init

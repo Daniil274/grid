@@ -27,7 +27,8 @@ def parts(tmp_path):
     login = ChatGPTLogin("urn:uuid:host", transport=httpx.MockTransport(openai), clock=lambda: NOW)
     vault = local_vault(tmp_path, oauth={"chatgpt": login})
     server = WebChatServer(
-        Deployment(), SpacePool(FakeSpace), vault=vault, chatgpt=login, usage=UsageStore(), warm_user=None
+        Deployment(), SpacePool(FakeSpace), vault=vault, chatgpt=login, usage=UsageStore(), warm_user=None,
+        trusted_hosts=("chat.example.com",),
     )
     return openai, login, vault, server
 

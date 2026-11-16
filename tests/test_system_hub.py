@@ -368,6 +368,7 @@ def client_for(deployment, tmp_path):
         warm_user=None,
         activity=activity,
         submissions_dir=tmp_path / "submissions",
+        trusted_hosts=("testserver",),
     )
     return TestClient(server.app, headers=SAME_SITE)
 
