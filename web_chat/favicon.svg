@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080" role="img" aria-label="GRID">
+  <title>GRID</title>
+  <defs>
+    <linearGradient id="mark" x1="210" y1="240" x2="890" y2="820" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00eee4"/><stop offset=".45" stop-color="#00d8ed"/><stop offset="1" stop-color="#073cff"/>
+    </linearGradient>
+    <radialGradient id="bg"><stop stop-color="#041020"/><stop offset="1" stop-color="#020819"/></radialGradient>
+  </defs>
+  <rect x="2" y="2" width="1076" height="1076" rx="230" fill="url(#bg)" stroke="#101d36" stroke-width="4"/>
+  <g fill="url(#mark)">
+    <path d="M240 197H354Q410 197 410 251V350Q410 359 400 363Q361 382 339 415Q336 419 329 419H240Q184 419 184 363V253Q184 197 240 197Z"/>
+    <path d="M486 197H594Q648 197 648 251V347Q648 358 637 358H443Q432 358 432 347V251Q432 197 486 197Z"/>
+    <rect x="671" y="197" width="223" height="222" rx="55"/>
+    <path d="M240 441H320Q330 441 329 452Q326 547 330 651Q331 663 320 663H240Q184 663 184 607V497Q184 441 240 441Z"/>
+    <path d="M476 437Q417 437 417 496V603Q417 663 477 663H637Q648 663 648 652V592H529Q518 592 518 581V530Q518 518 530 518H722Q734 518 734 531V651Q734 663 745 663H837Q894 663 894 605V496Q894 438 837 438Z"/>
+    <path d="M240 684H329Q337 684 342 691Q367 722 400 735Q410 739 410 749V844Q410 900 354 900H240Q184 900 184 844V740Q184 684 240 684Z"/>
+    <path d="M443 739H637Q648 739 648 750V844Q648 900 593 900H487Q432 900 432 844V750Q432 739 443 739Z"/>
+    <path d="M745 683H838Q894 683 894 739V844Q894 900 838 900H727Q671 900 671 844V749Q671 740 681 736Q718 721 732 692Q735 683 745 683Z"/>
+  </g>
+</svg>
